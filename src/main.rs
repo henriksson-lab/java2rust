@@ -1444,15 +1444,18 @@ fn append_facade_structured_method_abi_fact(
         return;
     };
     let arg_count = effect.arg_count.unwrap_or(abi.params.len());
+    if facts
+        .facade_abi_for_external_method(receiver_type, &effect.method_name, arg_count)
+        .is_some()
+    {
+        return;
+    }
     let key = new_java2rust::facts::CallableKey::method(
         receiver_type.to_string(),
         effect.method_name.clone(),
         new_java2rust::facts::Staticness::Unknown,
         arg_count,
     );
-    if facts.facade_abi_for_key(&key).is_some() {
-        return;
-    }
 
     let Some(return_type) = abi.return_type.as_deref() else {
         return;
@@ -1680,7 +1683,7 @@ fn java_types_for_facade_owner(mappings: &[(String, String)], rust_type: &str) -
 }
 
 fn facade_owner_name(abi: &FacadeAbi, java_simple_name: &str) -> String {
-    let owner = new_java2rust::java_naming::rust_name_for_java_named_type(java_simple_name);
+    let owner = java_simple_name.to_string();
     abi.aliases.get(&owner).cloned().unwrap_or(owner)
 }
 
@@ -1937,16 +1940,16 @@ fn split_top_level(s: &str, sep: char) -> Vec<&str> {
 }
 
 fn rust_type_is_result(ty: &str) -> bool {
-    new_java2rust::types::raw_rust_type_is_result(ty)
+    new_java2rust::types::rendered_rust_type_is_result(ty)
 }
 
 fn rust_return_payload_is_optional(ty: &str) -> bool {
-    new_java2rust::types::raw_rust_option_inner(&rust_return_payload_type(ty)).is_some()
+    new_java2rust::types::rendered_rust_option_inner(&rust_return_payload_type(ty)).is_some()
 }
 
 fn rust_return_payload_type(ty: &str) -> String {
     let ty = ty.trim().trim_end_matches(';').trim();
-    if let Some(args) = new_java2rust::types::raw_rust_result_args(ty) {
+    if let Some(args) = new_java2rust::types::rendered_rust_result_args(ty) {
         return args
             .first()
             .map(|payload| (*payload).to_string())
@@ -1957,7 +1960,7 @@ fn rust_return_payload_type(ty: &str) -> String {
 
 fn rust_type_accepts_none(ty: &str, abi: &FacadeFnAbi) -> bool {
     let ty = ty.trim();
-    new_java2rust::types::raw_rust_type_is_option(ty)
+    new_java2rust::types::rendered_rust_type_is_option(ty)
         || (abi.generic_params.iter().any(|param| param == ty)
             && !abi.generic_bounds.contains_key(ty))
 }
@@ -2027,7 +2030,7 @@ fn java_type_for_rust_param(
 
 fn rust_param_payload_type(ty: &str) -> String {
     let mut ty = ty.trim();
-    if let Some(inner) = new_java2rust::types::raw_rust_option_inner(ty) {
+    if let Some(inner) = new_java2rust::types::rendered_rust_option_inner(ty) {
         ty = inner.trim();
     }
     ty.trim_start_matches("&mut ")

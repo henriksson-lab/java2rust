@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::binding_id::BindingId;
 use crate::facts::{ExceptionKind, FactSet, NullabilityState, TrivialAccessorKind};
 use crate::java_ir::{
-    Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Program,
+    Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Param, Program,
     ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
@@ -12,46 +12,76 @@ use crate::types::TypeEnv;
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageFacts {
-    pub methods: HashMap<UsageMethodKey, MethodUsageFacts>,
-    pub(crate) methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>,
-    pub methods_by_java_key: HashMap<JavaCallableKey, MethodUsageFacts>,
-    pub constructors: HashMap<UsageConstructorKey, MethodUsageFacts>,
+    methods: HashMap<UsageMethodKey, MethodUsageFacts>,
+    methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>,
+    methods_by_java_key: HashMap<JavaCallableKey, MethodUsageFacts>,
+    constructors: HashMap<UsageConstructorKey, MethodUsageFacts>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallGraph {
-    pub nodes: HashSet<CallableKey>,
-    pub edges: Vec<CallGraphEdge>,
+    nodes: HashSet<CallableKey>,
+    edges: Vec<CallGraphEdge>,
+}
+
+impl CallGraph {
+    pub fn nodes(&self) -> &HashSet<CallableKey> {
+        &self.nodes
+    }
+
+    pub fn edges(&self) -> &[CallGraphEdge] {
+        &self.edges
+    }
+
+    pub fn from_edges(edges: Vec<CallGraphEdge>) -> Self {
+        Self {
+            nodes: edges
+                .iter()
+                .flat_map(|edge| [edge.caller.clone(), edge.callee.clone()])
+                .collect(),
+            edges,
+        }
+    }
+
+    pub fn from_nodes(nodes: impl IntoIterator<Item = CallableKey>) -> Self {
+        Self {
+            nodes: nodes.into_iter().collect(),
+            edges: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum CallableKey {
+    #[non_exhaustive]
     Method {
         type_name: String,
         method_name: String,
     },
+    #[non_exhaustive]
     Constructor {
         type_name: String,
         rust_name: String,
     },
+    #[non_exhaustive]
     Lambda {
         owner: Box<CallableKey>,
         ordinal: usize,
     },
+    #[non_exhaustive]
     AnonymousMethod {
         owner: Box<CallableKey>,
         ordinal: usize,
         method_name: String,
     },
+    #[non_exhaustive]
     ExternalMethod {
         receiver_type: Option<String>,
         method_name: String,
         arg_count: usize,
     },
-    ExternalConstructor {
-        type_name: String,
-        arg_count: usize,
-    },
+    #[non_exhaustive]
+    ExternalConstructor { type_name: String, arg_count: usize },
 }
 
 impl CallableKey {
@@ -70,7 +100,14 @@ impl CallableKey {
     /// [0009](../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md)'s
     /// defect; this constructor makes that particular instance of it
     /// unrepresentable.
-    pub fn source_method(
+    pub(crate) fn source_method_for_type(
+        ty: &crate::java_ir::TypeDecl,
+        method: &crate::java_ir::MethodDecl,
+    ) -> Self {
+        Self::source_method(ty.name.clone(), method)
+    }
+
+    pub(crate) fn source_method(
         type_name: impl Into<String>,
         method: &crate::java_ir::MethodDecl,
     ) -> Self {
@@ -80,7 +117,14 @@ impl CallableKey {
         }
     }
 
-    pub fn source_constructor(
+    pub(crate) fn source_constructor_for_type(
+        ty: &crate::java_ir::TypeDecl,
+        constructor: &crate::java_ir::ConstructorDecl,
+    ) -> Self {
+        Self::source_constructor(ty.name.clone(), constructor)
+    }
+
+    pub(crate) fn source_constructor(
         type_name: impl Into<String>,
         constructor: &crate::java_ir::ConstructorDecl,
     ) -> Self {
@@ -92,13 +136,168 @@ impl CallableKey {
                 .unwrap_or_else(|| "new".to_string()),
         }
     }
+
+    pub fn resolved_method(resolved: &ResolvedCall) -> Self {
+        Self::method_identity(resolved.declaring_type.clone(), resolved.rust_name.clone())
+    }
+
+    pub fn method_identity(type_name: impl Into<String>, method_name: impl Into<String>) -> Self {
+        CallableKey::Method {
+            type_name: type_name.into(),
+            method_name: method_name.into(),
+        }
+    }
+
+    pub fn resolved_constructor(resolved: &ResolvedConstructor) -> Self {
+        Self::constructor_identity(resolved.declaring_type.clone(), resolved.rust_name.clone())
+    }
+
+    pub fn constructor_identity(
+        type_name: impl Into<String>,
+        rust_name: impl Into<String>,
+    ) -> Self {
+        CallableKey::Constructor {
+            type_name: type_name.into(),
+            rust_name: rust_name.into(),
+        }
+    }
+
+    pub fn external_method(
+        receiver_type: Option<impl Into<String>>,
+        method_name: impl Into<String>,
+        arg_count: usize,
+    ) -> Self {
+        CallableKey::ExternalMethod {
+            receiver_type: receiver_type.map(Into::into),
+            method_name: method_name.into(),
+            arg_count,
+        }
+    }
+
+    pub fn external_constructor(type_name: impl Into<String>, arg_count: usize) -> Self {
+        CallableKey::ExternalConstructor {
+            type_name: type_name.into(),
+            arg_count,
+        }
+    }
+
+    pub fn method_identity_parts(&self) -> Option<(&str, &str)> {
+        match self {
+            CallableKey::Method {
+                type_name,
+                method_name,
+            } => Some((type_name, method_name)),
+            _ => None,
+        }
+    }
+
+    pub fn constructor_identity_parts(&self) -> Option<(&str, &str)> {
+        match self {
+            CallableKey::Constructor {
+                type_name,
+                rust_name,
+            } => Some((type_name, rust_name)),
+            _ => None,
+        }
+    }
+
+    pub fn external_method_parts(&self) -> Option<(Option<&str>, &str, usize)> {
+        match self {
+            CallableKey::ExternalMethod {
+                receiver_type,
+                method_name,
+                arg_count,
+            } => Some((receiver_type.as_deref(), method_name, *arg_count)),
+            _ => None,
+        }
+    }
+
+    pub fn external_constructor_parts(&self) -> Option<(&str, usize)> {
+        match self {
+            CallableKey::ExternalConstructor {
+                type_name,
+                arg_count,
+            } => Some((type_name, *arg_count)),
+            _ => None,
+        }
+    }
+
+    pub fn is_lambda(&self) -> bool {
+        matches!(self, CallableKey::Lambda { .. })
+    }
+
+    pub fn anonymous_method_parts(&self) -> Option<(usize, &str)> {
+        match self {
+            CallableKey::AnonymousMethod {
+                ordinal,
+                method_name,
+                ..
+            } => Some((*ordinal, method_name)),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn diagnostic_label(&self) -> String {
+        match self {
+            CallableKey::Method {
+                type_name,
+                method_name,
+            } => format!("{type_name}::{method_name}"),
+            CallableKey::Constructor {
+                type_name,
+                rust_name,
+            } => format!("{type_name}::{rust_name}"),
+            CallableKey::Lambda { owner, ordinal } => {
+                format!("{}#lambda{ordinal}", owner.diagnostic_label())
+            }
+            CallableKey::AnonymousMethod {
+                owner,
+                ordinal,
+                method_name,
+            } => format!("{}#anon{ordinal}::{method_name}", owner.diagnostic_label()),
+            CallableKey::ExternalMethod {
+                receiver_type,
+                method_name,
+                ..
+            } => match receiver_type {
+                Some(receiver_type) => format!("{receiver_type}::{method_name}"),
+                None => method_name.clone(),
+            },
+            CallableKey::ExternalConstructor {
+                type_name,
+                arg_count,
+            } => format!("{type_name}::new/{arg_count}"),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallGraphEdge {
-    pub caller: CallableKey,
-    pub callee: CallableKey,
-    pub kind: CallGraphEdgeKind,
+    caller: CallableKey,
+    callee: CallableKey,
+    kind: CallGraphEdgeKind,
+}
+
+impl CallGraphEdge {
+    pub fn new(caller: CallableKey, callee: CallableKey, kind: CallGraphEdgeKind) -> Self {
+        Self {
+            caller,
+            callee,
+            kind,
+        }
+    }
+
+    pub fn caller(&self) -> &CallableKey {
+        &self.caller
+    }
+
+    pub fn callee(&self) -> &CallableKey {
+        &self.callee
+    }
+
+    pub fn kind(&self) -> CallGraphEdgeKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -117,28 +316,190 @@ pub enum CallGraphEdgeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageMethodKey {
-    pub type_name: String,
-    pub method_name: String,
+    type_name: String,
+    method_name: String,
+}
+
+impl UsageMethodKey {
+    pub(crate) fn source_method(ty: &TypeDecl, method: &crate::java_ir::MethodDecl) -> Self {
+        Self {
+            type_name: ty.name.clone(),
+            method_name: source_method_rust_name(method),
+        }
+    }
+
+    pub(crate) fn legacy_java_name_source_method(
+        ty: &TypeDecl,
+        method: &crate::java_ir::MethodDecl,
+    ) -> Self {
+        Self {
+            type_name: ty.name.clone(),
+            method_name: method.name.clone(),
+        }
+    }
+
+    pub(crate) fn current_rust_method_name(
+        type_name: impl Into<String>,
+        method_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            type_name: type_name.into(),
+            method_name: method_name.into(),
+        }
+    }
+
+    pub(crate) fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub(crate) fn method_name(&self) -> &str {
+        &self.method_name
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageConstructorKey {
-    pub type_name: String,
-    pub rust_name: String,
+    type_name: String,
+    rust_name: String,
+}
+
+impl UsageConstructorKey {
+    pub(crate) fn source_constructor(
+        ty: &TypeDecl,
+        ctor: &crate::java_ir::ConstructorDecl,
+    ) -> Self {
+        Self {
+            type_name: ty.name.clone(),
+            rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
+        }
+    }
+
+    pub(crate) fn current_rust_constructor_name(
+        type_name: impl Into<String>,
+        rust_name: impl Into<String>,
+    ) -> Self {
+        Self {
+            type_name: type_name.into(),
+            rust_name: rust_name.into(),
+        }
+    }
+
+    pub(crate) fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub(crate) fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MethodUsageFacts {
-    pub(crate) bindings: HashMap<String, BindingUseFacts>,
-    pub(crate) bindings_by_id: HashMap<BindingId, BindingUseFacts>,
-    pub call_sites: Vec<CallSiteUse>,
-    pub constructor_call_sites: Vec<ConstructorCallSiteUse>,
-    pub returned_call_results: Vec<ReturnedCallResultUse>,
-    pub field_uses: Vec<FieldUse>,
-    pub mutates_self: bool,
+    bindings: HashMap<String, BindingUseFacts>,
+    bindings_by_id: HashMap<BindingId, BindingUseFacts>,
+    call_sites: Vec<CallSiteUse>,
+    constructor_call_sites: Vec<ConstructorCallSiteUse>,
+    returned_call_results: Vec<ReturnedCallResultUse>,
+    field_uses: Vec<FieldUse>,
+    mutates_self: bool,
 }
 
 impl UsageFacts {
+    pub(crate) fn method_usage_by_key(&self, key: &UsageMethodKey) -> Option<&MethodUsageFacts> {
+        self.methods.get(key)
+    }
+
+    pub(crate) fn constructor_usage_by_key(
+        &self,
+        key: &UsageConstructorKey,
+    ) -> Option<&MethodUsageFacts> {
+        self.constructors.get(key)
+    }
+
+    pub fn method_usage_by_current_rust_name(
+        &self,
+        type_name: impl AsRef<str>,
+        method_name: impl AsRef<str>,
+    ) -> Option<&MethodUsageFacts> {
+        self.method_usage_by_key(&UsageMethodKey::current_rust_method_name(
+            type_name.as_ref(),
+            method_name.as_ref(),
+        ))
+    }
+
+    pub fn constructor_usage_by_current_rust_name(
+        &self,
+        type_name: impl AsRef<str>,
+        rust_name: impl AsRef<str>,
+    ) -> Option<&MethodUsageFacts> {
+        self.constructor_usage_by_key(&UsageConstructorKey::current_rust_constructor_name(
+            type_name.as_ref(),
+            rust_name.as_ref(),
+        ))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_method_usage(&mut self, key: UsageMethodKey, usage: MethodUsageFacts) {
+        self.methods.insert(key, usage);
+    }
+
+    pub fn insert_method_usage_for_current_rust_name(
+        &mut self,
+        type_name: impl Into<String>,
+        method_name: impl Into<String>,
+        usage: MethodUsageFacts,
+    ) {
+        self.methods.insert(
+            UsageMethodKey::current_rust_method_name(type_name, method_name),
+            usage,
+        );
+    }
+
+    pub fn insert_constructor_usage_for_current_rust_name(
+        &mut self,
+        type_name: impl Into<String>,
+        rust_name: impl Into<String>,
+        usage: MethodUsageFacts,
+    ) {
+        self.constructors.insert(
+            UsageConstructorKey::current_rust_constructor_name(type_name, rust_name),
+            usage,
+        );
+    }
+
+    pub(crate) fn method_entries(
+        &self,
+    ) -> impl Iterator<Item = (&UsageMethodKey, &MethodUsageFacts)> {
+        self.methods.iter()
+    }
+
+    pub(crate) fn constructor_entries(
+        &self,
+    ) -> impl Iterator<Item = (&UsageConstructorKey, &MethodUsageFacts)> {
+        self.constructors.iter()
+    }
+
+    pub(crate) fn method_usages(&self) -> impl Iterator<Item = &MethodUsageFacts> {
+        self.methods.values()
+    }
+
+    pub(crate) fn constructor_usages(&self) -> impl Iterator<Item = &MethodUsageFacts> {
+        self.constructors.values()
+    }
+
+    pub(crate) fn rust_name_method_entries(
+        &self,
+    ) -> impl Iterator<Item = (&UsageMethodKey, &MethodUsageFacts)> {
+        self.methods_by_rust_name.iter()
+    }
+
+    pub(crate) fn source_method_usage_by_java_key(
+        &self,
+        key: &JavaCallableKey,
+    ) -> Option<&MethodUsageFacts> {
+        self.methods_by_java_key.get(key)
+    }
+
     pub fn source_method_usage(
         &self,
         ty: &TypeDecl,
@@ -152,13 +513,130 @@ impl UsageFacts {
         owner: JavaOwnerKey,
         method: &crate::java_ir::MethodDecl,
     ) -> Option<&MethodUsageFacts> {
-        self.methods_by_java_key
-            .get(&JavaCallableKey::source_method_for_owner(owner, method))
+        self.source_method_usage_by_java_key(&JavaCallableKey::source_method_for_owner(
+            owner, method,
+        ))
+    }
+
+    pub(crate) fn resolved_source_method_usage(
+        &self,
+        resolved: &ResolvedCall,
+        source_name: &str,
+    ) -> Option<&MethodUsageFacts> {
+        self.source_method_usage_by_java_key(&resolved_source_method_key(resolved, source_name))
+    }
+
+    pub(crate) fn source_constructor_usage(
+        &self,
+        ty: &TypeDecl,
+        ctor: &crate::java_ir::ConstructorDecl,
+    ) -> Option<&MethodUsageFacts> {
+        self.constructor_usage_by_key(&UsageConstructorKey::source_constructor(ty, ctor))
     }
 }
 
+#[cfg(test)]
+impl UsageFacts {
+    pub(crate) fn insert_source_method_usage(
+        &mut self,
+        ty: &TypeDecl,
+        method: &crate::java_ir::MethodDecl,
+        usage: MethodUsageFacts,
+    ) {
+        self.methods_by_java_key
+            .insert(JavaCallableKey::source_method_for_type(ty, method), usage);
+    }
+
+    pub(crate) fn source_method_usage_java_keys(&self) -> impl Iterator<Item = &JavaCallableKey> {
+        self.methods_by_java_key.keys()
+    }
+
+    pub(crate) fn insert_rust_name_method_usage(
+        &mut self,
+        key: UsageMethodKey,
+        usage: MethodUsageFacts,
+    ) {
+        self.methods_by_rust_name.insert(key, usage);
+    }
+}
+
+fn resolved_source_method_key(resolved: &ResolvedCall, source_name: &str) -> JavaCallableKey {
+    JavaCallableKey::resolved_source_method(
+        JavaOwnerKey::resolved_source(resolved.declaring_type.clone()),
+        source_name,
+        &resolved.arg_target_types,
+        resolved.kind,
+    )
+}
+
+fn contains_resolved_source_method_key(
+    methods: &HashSet<JavaCallableKey>,
+    resolved: &ResolvedCall,
+    source_name: &str,
+) -> bool {
+    methods.contains(&resolved_source_method_key(resolved, source_name))
+}
+
 impl MethodUsageFacts {
-    pub fn from_binding_facts(bindings: impl IntoIterator<Item = BindingUseFacts>) -> Self {
+    pub fn call_sites(&self) -> &[CallSiteUse] {
+        &self.call_sites
+    }
+
+    pub fn constructor_call_sites(&self) -> &[ConstructorCallSiteUse] {
+        &self.constructor_call_sites
+    }
+
+    pub fn returned_call_results(&self) -> &[ReturnedCallResultUse] {
+        &self.returned_call_results
+    }
+
+    pub fn field_uses(&self) -> &[FieldUse] {
+        &self.field_uses
+    }
+
+    pub fn mutates_self(&self) -> bool {
+        self.mutates_self
+    }
+
+    pub fn from_field_uses(field_uses: impl IntoIterator<Item = FieldUse>) -> Self {
+        Self {
+            field_uses: field_uses.into_iter().collect(),
+            ..Self::default()
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn mark_mutates_self_for_test(&mut self) {
+        self.mutates_self = true;
+    }
+
+    pub fn from_exact_binding_facts(bindings: impl IntoIterator<Item = BindingUseFacts>) -> Self {
+        let mut facts = Self::default();
+        for binding in bindings {
+            if let Some(binding_id) = binding.binding.clone() {
+                facts.bindings_by_id.insert(binding_id, binding);
+            }
+        }
+        facts
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_idless_compatibility_facts(
+        bindings: impl IntoIterator<Item = BindingUseFacts>,
+    ) -> Self {
+        let mut facts = Self::default();
+        for binding in bindings {
+            if binding.binding.is_none() {
+                facts.bindings.insert(binding.name.clone(), binding);
+            }
+        }
+        facts
+    }
+
+    #[cfg(test)]
+    fn from_visible_binding_fixture_facts(
+        bindings: impl IntoIterator<Item = BindingUseFacts>,
+    ) -> Self {
         let mut facts = Self::default();
         for binding in bindings {
             if let Some(binding_id) = binding.binding.clone() {
@@ -169,53 +647,56 @@ impl MethodUsageFacts {
         facts
     }
 
-    pub fn binding_facts_for_name(&self, name: &str) -> Option<&BindingUseFacts> {
-        self.bindings
-            .get(name)
-            .filter(|binding| self.binding_use_facts_are_current(name, binding))
+    #[cfg(test)]
+    pub(crate) fn insert_binding_id_test_fact(
+        &mut self,
+        binding: BindingId,
+        facts: BindingUseFacts,
+    ) {
+        self.bindings_by_id.insert(binding, facts);
     }
 
-    pub fn unique_binding_facts_for_name(&self, name: &str) -> Option<&BindingUseFacts> {
-        let mut matches = self
-            .all_binding_facts()
-            .into_iter()
-            .filter(|binding| binding.name == name);
-        let binding = matches.next()?;
-        if matches.next().is_some() {
+    #[cfg(test)]
+    pub(crate) fn insert_idless_compatibility_test_fact(
+        &mut self,
+        name: impl Into<String>,
+        facts: BindingUseFacts,
+    ) {
+        self.bindings.insert(name.into(), facts);
+    }
+
+    pub(crate) fn binding_facts_for_declaration_id(
+        &self,
+        binding: &BindingId,
+    ) -> Option<&BindingUseFacts> {
+        self.bindings_by_id
+            .get(binding)
+            .filter(|facts| binding_id_facts_are_current(binding, facts))
+    }
+
+    fn idless_compatibility_binding_facts_for_source_name(
+        &self,
+        name: &str,
+    ) -> Option<&BindingUseFacts> {
+        let name_binding = self.bindings.get(name)?;
+        if !self.binding_use_facts_are_current(name, name_binding) {
             return None;
         }
-        Some(binding)
+        if let Some(id) = &name_binding.binding {
+            return self.binding_facts_for_declaration_id(id);
+        }
+        Some(name_binding)
     }
 
-    pub(crate) fn binding_for_declaration_with_name_fallback(
-        &self,
-        binding: Option<&BindingId>,
-        name: &str,
-        allow_name_fallback: bool,
-    ) -> Option<&BindingUseFacts> {
-        match binding {
-            Some(binding) => self
-                .bindings_by_id
-                .get(binding)
-                .filter(|facts| binding_id_facts_are_current(binding, facts)),
-            None if allow_name_fallback => {
-                let name_binding = self.bindings.get(name)?;
-                if !self.binding_use_facts_are_current(name, name_binding) {
-                    return None;
-                }
-                if let Some(id) = &name_binding.binding {
-                    return self
-                        .bindings_by_id
-                        .get(id)
-                        .filter(|facts| binding_id_facts_are_current(id, facts));
-                }
-                Some(name_binding)
-            }
-            None => None,
+    pub(crate) fn binding_facts_for_param(&self, param: &Param) -> Option<&BindingUseFacts> {
+        if let Some(binding) = &param.binding {
+            self.binding_facts_for_declaration_id(binding)
+        } else {
+            self.idless_compatibility_binding_facts_for_source_name(&param.source_name)
         }
     }
 
-    pub(crate) fn visible_binding_id_for_name(&self, name: &str) -> Option<BindingId> {
+    fn visible_binding_id_for_name(&self, name: &str) -> Option<BindingId> {
         let binding = self.bindings.get(name)?;
         if !self.binding_use_facts_are_current(name, binding) {
             return None;
@@ -234,45 +715,33 @@ impl MethodUsageFacts {
             .map(|binding| &binding.java_ty)
     }
 
-    pub fn binding_facts_for_id(&self, binding_id: &BindingId) -> Option<&BindingUseFacts> {
+    pub(crate) fn binding_facts_for_id(&self, binding_id: &BindingId) -> Option<&BindingUseFacts> {
         self.bindings_by_id
             .get(binding_id)
             .filter(|facts| binding_id_facts_are_current(binding_id, facts))
     }
 
-    pub fn contains_binding_id(&self, binding_id: &BindingId) -> bool {
-        self.binding_facts_for_id(binding_id).is_some()
-    }
-
-    pub fn contains_binding_name(&self, name: &str) -> bool {
-        self.binding_facts_for_name(name).is_some()
-    }
-
-    pub(crate) fn name_binding_is_current(&self, name: &str) -> bool {
+    fn name_binding_is_current(&self, name: &str) -> bool {
         let Some(binding) = self.bindings.get(name) else {
             return false;
         };
         self.binding_use_facts_are_current(name, binding)
     }
 
-    pub(crate) fn snapshot_visible_binding_for_scope(&self, name: &str) -> Option<BindingUseFacts> {
+    fn snapshot_visible_binding_for_scope(&self, name: &str) -> Option<BindingUseFacts> {
         self.bindings
             .get(name)
             .filter(|binding| self.binding_use_facts_are_current(name, binding))
             .cloned()
     }
 
-    pub(crate) fn hide_visible_binding_for_scope(&mut self, name: &str) -> Option<BindingUseFacts> {
+    fn hide_visible_binding_for_scope(&mut self, name: &str) -> Option<BindingUseFacts> {
         let saved = self.snapshot_visible_binding_for_scope(name);
         self.bindings.remove(name);
         saved
     }
 
-    pub(crate) fn restore_visible_binding_for_scope(
-        &mut self,
-        name: String,
-        saved: Option<BindingUseFacts>,
-    ) {
+    fn restore_visible_binding_for_scope(&mut self, name: String, saved: Option<BindingUseFacts>) {
         self.bindings.remove(&name);
         if let Some(saved) = saved {
             let restored = if let Some(binding) = saved.binding.as_ref() {
@@ -295,7 +764,7 @@ impl MethodUsageFacts {
         }
     }
 
-    pub(crate) fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
+    fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
         if let Some(binding_id) = self.visible_binding_id_for_name(name) {
             if let Some(binding) = self.bindings_by_id.get_mut(&binding_id) {
                 binding.uses.push(usage);
@@ -307,7 +776,7 @@ impl MethodUsageFacts {
         }
     }
 
-    pub(crate) fn record_declared_binding_use(
+    fn record_declared_binding_use(
         &mut self,
         name: &str,
         binding_id: Option<&BindingId>,
@@ -333,7 +802,7 @@ impl MethodUsageFacts {
         }
     }
 
-    pub(crate) fn all_binding_facts(&self) -> Vec<&BindingUseFacts> {
+    pub fn all_binding_facts(&self) -> Vec<&BindingUseFacts> {
         let mut facts = Vec::new();
         let mut seen_bindings = HashSet::new();
         for (binding_id, binding) in &self.bindings_by_id {
@@ -551,7 +1020,7 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
             |(key, usage)| {
                 usage
                     .mutates_self
-                    .then(|| (key.owner.clone(), key.java_name.clone()))
+                    .then(|| (key.owner().to_string(), key.java_name().to_string()))
             },
         ));
         let mut changed = false;
@@ -571,13 +1040,11 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                     return false;
                 }
                 if let Some(resolved) = &call_site.resolved {
-                    let key = JavaCallableKey::resolved_source_method(
-                        JavaOwnerKey::resolved_source(resolved.declaring_type.clone()),
-                        call_site.name.clone(),
-                        &resolved.arg_target_types,
-                        resolved.kind,
+                    return contains_resolved_source_method_key(
+                        &mutating_source_methods,
+                        resolved,
+                        &call_site.name,
                     );
-                    return mutating_source_methods.contains(&key);
                 }
                 if call_site
                     .receiver_type
@@ -608,7 +1075,7 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
             mark(&key.type_name, usage);
         }
         for (key, usage) in facts.methods_by_java_key.iter_mut() {
-            mark(&key.owner, usage);
+            mark(key.owner(), usage);
         }
         if !changed {
             break;
@@ -661,22 +1128,12 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                         );
                     }
                 }
-                let rust_method_name = source_method_rust_name(method);
-                let rust_key = UsageMethodKey {
-                    type_name: ty.name.clone(),
-                    method_name: rust_method_name,
-                };
-                let java_key = UsageMethodKey {
-                    type_name: ty.name.clone(),
-                    method_name: method.name.clone(),
-                };
+                let rust_key = UsageMethodKey::source_method(ty, method);
+                let java_key = UsageMethodKey::legacy_java_name_source_method(ty, method);
                 facts
                     .methods_by_rust_name
                     .insert(rust_key, method_facts.clone());
-                let rust_key = UsageMethodKey {
-                    type_name: ty.name.clone(),
-                    method_name: source_method_rust_name(method),
-                };
+                let rust_key = UsageMethodKey::source_method(ty, method);
                 facts.methods.insert(rust_key, method_facts.clone());
                 facts.methods_by_java_key.insert(
                     JavaCallableKey::source_method_for_type(ty, method),
@@ -711,10 +1168,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                     }
                 }
                 facts.constructors.insert(
-                    UsageConstructorKey {
-                        type_name: ty.name.clone(),
-                        rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-                    },
+                    UsageConstructorKey::source_constructor(ty, ctor),
                     ctor_facts,
                 );
             }
@@ -752,10 +1206,7 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph, facts: &FactSet) 
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                let caller = CallableKey::Method {
-                    type_name: ty.name.clone(),
-                    method_name: source_method_rust_name(method),
-                };
+                let caller = CallableKey::source_method_for_type(ty, method);
                 graph.nodes.insert(caller.clone());
                 if let Some(body) = &method.body {
                     let mut context = CallGraphBuildContext::new(
@@ -767,10 +1218,7 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph, facts: &FactSet) 
                 }
             }
             Member::Constructor(ctor) => {
-                let caller = CallableKey::Constructor {
-                    type_name: ty.name.clone(),
-                    rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
-                };
+                let caller = CallableKey::source_constructor_for_type(ty, ctor);
                 graph.nodes.insert(caller.clone());
                 if let Some(body) = &ctor.body {
                     let mut context = CallGraphBuildContext::new(
@@ -982,21 +1430,17 @@ fn collect_call_graph_edges_from_stmt(
                 ConstructorInvocationKind::This => (
                     resolved
                         .as_ref()
-                        .map(constructor_key_from_resolved)
-                        .unwrap_or_else(|| CallableKey::Constructor {
-                            type_name: context.current_type.clone(),
-                            rust_name: "new".to_string(),
+                        .map(CallableKey::resolved_constructor)
+                        .unwrap_or_else(|| {
+                            CallableKey::constructor_identity(context.current_type.clone(), "new")
                         }),
                     CallGraphEdgeKind::ConstructorDelegationThis,
                 ),
                 ConstructorInvocationKind::Super => (
                     resolved
                         .as_ref()
-                        .map(constructor_key_from_resolved)
-                        .unwrap_or_else(|| CallableKey::ExternalConstructor {
-                            type_name: "super".to_string(),
-                            arg_count: args.len(),
-                        }),
+                        .map(CallableKey::resolved_constructor)
+                        .unwrap_or_else(|| CallableKey::external_constructor("super", args.len())),
                     CallGraphEdgeKind::ConstructorDelegationSuper,
                 ),
             };
@@ -1043,10 +1487,9 @@ fn collect_call_graph_edges_from_expr(
         } => {
             let callee = resolved
                 .as_ref()
-                .map(constructor_key_from_resolved)
-                .unwrap_or_else(|| CallableKey::ExternalConstructor {
-                    type_name: java_type_call_graph_name(ty),
-                    arg_count: args.len(),
+                .map(CallableKey::resolved_constructor)
+                .unwrap_or_else(|| {
+                    CallableKey::external_constructor(java_type_call_graph_name(ty), args.len())
                 });
             let edge_kind = if body.is_some() {
                 CallGraphEdgeKind::AnonymousClassConstructor
@@ -1170,20 +1613,13 @@ fn call_graph_method_target(
 ) -> (CallableKey, CallGraphEdgeKind) {
     if matches!(receiver, Some(Expr::Super)) {
         return (
-            CallableKey::ExternalMethod {
-                receiver_type: Some("super".to_string()),
-                method_name: name.to_string(),
-                arg_count,
-            },
+            CallableKey::external_method(Some("super"), name, arg_count),
             CallGraphEdgeKind::UnresolvedExternalMethodCall,
         );
     }
     if let Some(resolved) = resolved {
         return (
-            CallableKey::Method {
-                type_name: resolved.declaring_type.clone(),
-                method_name: resolved.rust_name.clone(),
-            },
+            CallableKey::resolved_method(resolved),
             CallGraphEdgeKind::DirectMethodCall,
         );
     }
@@ -1191,19 +1627,16 @@ fn call_graph_method_target(
         && receiver.is_none_or(|receiver| matches!(receiver, Expr::This))
     {
         return (
-            CallableKey::Method {
-                type_name: context.current_type.clone(),
-                method_name: name.to_string(),
-            },
+            CallableKey::method_identity(context.current_type.clone(), name),
             CallGraphEdgeKind::DirectMethodCall,
         );
     }
     (
-        CallableKey::ExternalMethod {
-            receiver_type: receiver.and_then(expr_call_graph_type_name),
-            method_name: name.to_string(),
+        CallableKey::external_method(
+            receiver.and_then(expr_call_graph_type_name),
+            name,
             arg_count,
-        },
+        ),
         CallGraphEdgeKind::UnresolvedExternalMethodCall,
     )
 }
@@ -1393,13 +1826,6 @@ fn java_type_name_for_usage(java_ty: &JavaType) -> Option<&str> {
         JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
             None
         }
-    }
-}
-
-fn constructor_key_from_resolved(resolved: &ResolvedConstructor) -> CallableKey {
-    CallableKey::Constructor {
-        type_name: resolved.declaring_type.clone(),
-        rust_name: resolved.rust_name.clone(),
     }
 }
 
@@ -2712,7 +3138,11 @@ fn analyze_expr_with_context(
                     Some(ty.clone()),
                     args.len(),
                     arg_index,
-                    constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
+                    constructor_argument_boundary_policy(
+                        resolved.as_ref(),
+                        current_type,
+                        arg_index,
+                    ),
                 );
                 analyze_nested_argument_expr(
                     arg,
@@ -2997,10 +3427,8 @@ fn call_mut_borrow_arg_targets_self_field(
     facts
         .facade_abi_facts
         .iter()
-        .filter(|abi| abi.key.member.0 == name && abi.key.arity == args.len())
-        .filter(|abi| {
-            facade_abi_matches_call_receiver(abi.key.owner.type_name.as_str(), receiver, usage)
-        })
+        .filter(|abi| abi.key.member_name() == name && abi.key.arity() == args.len())
+        .filter(|abi| facade_abi_matches_call_receiver(abi.key.owner_type(), receiver, usage))
         .any(|abi| {
             abi.args.iter().enumerate().any(|(index, slot)| {
                 slot.contains_mut_borrow()
@@ -3058,11 +3486,16 @@ fn agreed_binding_java_type(facts: &MethodUsageFacts, name: &str) -> Option<Java
     facts
         .visible_binding_java_type_for_name(name)
         .cloned()
-        .or_else(|| {
-            facts
-                .binding_for_declaration_with_name_fallback(None, name, true)
-                .map(|binding| binding.java_ty.clone())
-        })
+        .or_else(|| idless_compatibility_binding_java_type_for_name(facts, name))
+}
+
+fn idless_compatibility_binding_java_type_for_name(
+    facts: &MethodUsageFacts,
+    name: &str,
+) -> Option<JavaType> {
+    facts
+        .idless_compatibility_binding_facts_for_source_name(name)
+        .map(|binding| binding.java_ty.clone())
 }
 
 fn usage_java_type_name(java_ty: &JavaType) -> Option<&str> {
@@ -3136,12 +3569,12 @@ fn record_trivial_accessor_call_use(
     match &accessor.kind {
         TrivialAccessorKind::Getter { field } if args.is_empty() && result_returned => {
             facts.field_uses.push(FieldUse::Returned {
-                field_name: field.field_name.clone(),
+                field_name: field.field_name().to_string(),
             });
         }
         TrivialAccessorKind::Setter { field, .. } if args.len() == 1 => {
             facts.mutates_self = true;
-            analyze_stored_expr(&args[0], facts, &field.field_name);
+            analyze_stored_expr(&args[0], facts, field.field_name());
         }
         _ => {}
     }
@@ -3172,7 +3605,7 @@ fn trivial_getter_self_field(
         semantic_facts,
     )?;
     match &accessor.kind {
-        TrivialAccessorKind::Getter { field } => Some(field.field_name.clone()),
+        TrivialAccessorKind::Getter { field } => Some(field.field_name().to_string()),
         TrivialAccessorKind::Setter { .. } => None,
     }
 }
@@ -3394,9 +3827,11 @@ fn constructor_result_boundary_policy(
 
 fn constructor_argument_boundary_policy(
     resolved: Option<&ResolvedConstructor>,
+    current_type: &str,
     arg_index: usize,
 ) -> CallArgumentBoundary {
     if resolved
+        .filter(|resolved| resolved.declaring_type == current_type)
         .and_then(|resolved| resolved.params.get(arg_index))
         .is_some()
     {
@@ -3590,6 +4025,58 @@ mod tests {
     }
 
     #[test]
+    fn usage_source_key_constructors_name_canonical_and_legacy_paths() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class KeyOwner {
+    KeyOwner(int value) {}
+
+    void camelCase() {}
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let ty = &resolved.program.types[0];
+        let constructor = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(constructor) => Some(constructor),
+                _ => None,
+            })
+            .expect("constructor");
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "camelCase" => Some(method),
+                _ => None,
+            })
+            .expect("method");
+
+        assert_eq!(
+            UsageMethodKey::source_method(ty, method),
+            UsageMethodKey::current_rust_method_name("KeyOwner", "camel_case")
+        );
+        assert_eq!(
+            UsageMethodKey::legacy_java_name_source_method(ty, method),
+            UsageMethodKey::current_rust_method_name("KeyOwner", "camelCase")
+        );
+        assert_eq!(
+            UsageMethodKey::current_rust_method_name("KeyOwner", "camel_case"),
+            UsageMethodKey::current_rust_method_name("KeyOwner", "camel_case")
+        );
+        assert_eq!(
+            UsageConstructorKey::source_constructor(ty, constructor),
+            UsageConstructorKey::current_rust_constructor_name("KeyOwner", "new")
+        );
+        assert_eq!(
+            UsageConstructorKey::current_rust_constructor_name("KeyOwner", "new"),
+            UsageConstructorKey::current_rust_constructor_name("KeyOwner", "new")
+        );
+    }
+
+    #[test]
     fn receiver_static_type_match_fails_closed_for_package_qualified_simple_name() {
         assert!(receiver_static_type_matches_declaring_type(
             Some(&JavaType::Named {
@@ -3663,7 +4150,7 @@ mod tests {
             .map(|binding| {
                 (
                     binding.name.clone(),
-                    binding.binding.as_ref().map(|binding| binding.occurrence),
+                    binding.binding.as_ref().map(|binding| binding.occurrence()),
                 )
             })
             .collect::<Vec<_>>();
@@ -3677,6 +4164,36 @@ mod tests {
                 ("value".to_string(), Some(1)),
             ]
         );
+    }
+
+    #[test]
+    fn binding_fact_constructors_separate_exact_and_idless_surfaces() {
+        let binding = BindingId::new(BindingKind::Local, "value", 0);
+        let bound = binding_fact("value", Some(binding.clone()));
+        let idless = binding_fact("legacy", None);
+
+        let exact = MethodUsageFacts::from_exact_binding_facts([bound.clone(), idless.clone()]);
+        assert!(exact.binding_facts_for_id(&binding).is_some());
+        assert!(
+            exact
+                .idless_compatibility_binding_facts_for_source_name("legacy")
+                .is_none()
+        );
+        assert!(exact.visible_binding_id_for_name("value").is_none());
+
+        let compatibility =
+            MethodUsageFacts::from_idless_compatibility_facts([bound.clone(), idless.clone()]);
+        assert!(compatibility.binding_facts_for_id(&binding).is_none());
+        assert!(
+            compatibility
+                .idless_compatibility_binding_facts_for_source_name("legacy")
+                .is_some()
+        );
+        assert!(compatibility.visible_binding_id_for_name("value").is_none());
+
+        let visible = MethodUsageFacts::from_visible_binding_fixture_facts([bound]);
+        assert!(visible.binding_facts_for_id(&binding).is_some());
+        assert_eq!(visible.visible_binding_id_for_name("value"), Some(binding));
     }
 
     #[test]
@@ -3705,7 +4222,7 @@ mod tests {
     }
 
     #[test]
-    fn binding_for_declaration_does_not_fall_back_by_name_when_id_is_known() {
+    fn binding_facts_for_declaration_id_does_not_fall_back_by_name() {
         let first = BindingId::new(BindingKind::Local, "value", 0);
         let second = BindingId::new(BindingKind::Local, "value", 1);
         let mut facts = MethodUsageFacts::default();
@@ -3718,14 +4235,12 @@ mod tests {
         );
 
         assert!(
-            facts
-                .binding_for_declaration_with_name_fallback(Some(&second), "value", false)
-                .is_none(),
+            facts.binding_facts_for_declaration_id(&second).is_none(),
             "a resolver-assigned declaration id must not silently rejoin by name"
         );
         assert!(
             facts
-                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .idless_compatibility_binding_facts_for_source_name("value")
                 .is_none(),
             "id-less compatibility callers must reject stale name facts that point at a missing binding id"
         );
@@ -3753,7 +4268,7 @@ mod tests {
 
         assert!(
             facts
-                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .idless_compatibility_binding_facts_for_source_name("value")
                 .is_none(),
             "id-less fallback cannot prove which same-name declaration it represents"
         );
@@ -3840,7 +4355,7 @@ mod tests {
         assert!(!facts.name_binding_is_current("value"));
         assert!(
             facts
-                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .idless_compatibility_binding_facts_for_source_name("value")
                 .is_none()
         );
         assert!(facts.all_binding_facts().is_empty());
@@ -3868,11 +4383,72 @@ mod tests {
         );
 
         let selected = facts
-            .binding_for_declaration_with_name_fallback(None, "value", true)
+            .idless_compatibility_binding_facts_for_source_name("value")
             .expect("live binding-id fallback should resolve through bindings_by_id");
 
         assert_eq!(selected.java_ty, JavaType::String);
         assert_eq!(selected.uses, vec![BindingUse::Returned]);
+    }
+
+    #[test]
+    fn binding_facts_for_param_uses_source_name_and_binding_id() {
+        let bound = BindingId::new(BindingKind::Local, "type", 1);
+        let shadow = BindingId::new(BindingKind::Local, "type", 2);
+        let mut facts = MethodUsageFacts::default();
+        facts.bindings_by_id.insert(
+            bound.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::String,
+                uses: vec![BindingUse::Returned],
+                ..binding_fact("type", Some(bound.clone()))
+            },
+        );
+        facts.bindings_by_id.insert(
+            shadow.clone(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Int),
+                uses: Vec::new(),
+                ..binding_fact("type", Some(shadow.clone()))
+            },
+        );
+        facts.bindings.insert(
+            "type".to_string(),
+            BindingUseFacts {
+                java_ty: JavaType::Primitive(PrimitiveType::Long),
+                uses: Vec::new(),
+                ..binding_fact("type", Some(shadow))
+            },
+        );
+
+        let bound_param = Param {
+            name: "type_".to_string(),
+            source_name: "type".to_string(),
+            ty: JavaType::String,
+            is_varargs: false,
+            binding: Some(bound),
+        };
+        let idless_param = Param {
+            name: "type_".to_string(),
+            source_name: "type".to_string(),
+            ty: JavaType::Primitive(PrimitiveType::Long),
+            is_varargs: false,
+            binding: None,
+        };
+
+        assert_eq!(
+            facts
+                .binding_facts_for_param(&bound_param)
+                .map(|binding| (&binding.java_ty, &binding.uses)),
+            Some((&JavaType::String, &vec![BindingUse::Returned])),
+            "bound parameters must use the resolver binding id instead of the legacy name slot"
+        );
+        assert_eq!(
+            facts
+                .binding_facts_for_param(&idless_param)
+                .map(|binding| &binding.java_ty),
+            Some(&JavaType::Primitive(PrimitiveType::Int)),
+            "id-less compatibility parameters fall back through the source-name policy"
+        );
     }
 
     #[test]
@@ -3970,7 +4546,7 @@ mod tests {
         assert!(!facts.name_binding_is_current("value"));
         assert!(
             facts
-                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .idless_compatibility_binding_facts_for_source_name("value")
                 .is_none(),
             "name-map compatibility must not rejoin value to an unrelated live binding id"
         );
@@ -3996,7 +4572,7 @@ mod tests {
         assert!(!facts.name_binding_is_current("value"));
         assert!(
             facts
-                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .idless_compatibility_binding_facts_for_source_name("value")
                 .is_none(),
             "id-less compatibility must not accept a stale payload stored under another name"
         );
@@ -4040,7 +4616,7 @@ mod tests {
         assert_eq!(facts.visible_binding_id_for_name("value"), None);
         assert!(
             facts
-                .binding_for_declaration_with_name_fallback(None, "value", true)
+                .idless_compatibility_binding_facts_for_source_name("value")
                 .is_none(),
             "binding-id recovery must ignore a name-map payload whose stored name drifted"
         );
@@ -4080,9 +4656,7 @@ mod tests {
 
         assert_eq!(facts.visible_binding_id_for_name("value"), None);
         assert!(
-            facts
-                .binding_for_declaration_with_name_fallback(Some(&binding), "value", false)
-                .is_none(),
+            facts.binding_facts_for_declaration_id(&binding).is_none(),
             "binding-id lookup must reject a payload whose stored name drifted"
         );
         assert!(
@@ -4245,7 +4819,7 @@ mod tests {
     fn usage_scope_shadowing_goes_through_visible_binding_helpers() {
         let source = include_str!("usage.rs");
         let production_source = source
-            .split("#[cfg(test)]")
+            .split("\n#[cfg(test)]\nmod tests")
             .next()
             .expect("production usage source should be discoverable");
         let analyze_stmt_source = production_source
@@ -4306,14 +4880,14 @@ class ScopedFieldReturn {
         let usage = analyze_usage(&resolved.program);
         let method_usage = usage
             .methods
-            .get(&UsageMethodKey {
-                type_name: "ScopedFieldReturn".to_string(),
-                method_name: "f".to_string(),
-            })
+            .get(&UsageMethodKey::current_rust_method_name(
+                "ScopedFieldReturn",
+                "f",
+            ))
             .expect("method usage should be recorded");
 
         assert!(
-            method_usage.field_uses.iter().any(|use_fact| matches!(
+            method_usage.field_uses().iter().any(|use_fact| matches!(
                 use_fact,
                 FieldUse::Returned { field_name } if field_name == "value"
             )),
@@ -4346,10 +4920,10 @@ class ContentReadReceiverUse {
         let usage = analyze_usage(&resolved.program);
         let method_usage = usage
             .methods
-            .get(&UsageMethodKey {
-                type_name: "ContentReadReceiverUse".to_string(),
-                method_name: "f".to_string(),
-            })
+            .get(&UsageMethodKey::current_rust_method_name(
+                "ContentReadReceiverUse",
+                "f",
+            ))
             .expect("method usage should be recorded");
         let value = method_usage
             .all_binding_facts()
@@ -4389,10 +4963,10 @@ class LambdaKeywordParamScope {
         let usage = analyze_usage(&resolved.program);
         let method_usage = usage
             .methods
-            .get(&UsageMethodKey {
-                type_name: "LambdaKeywordParamScope".to_string(),
-                method_name: "f".to_string(),
-            })
+            .get(&UsageMethodKey::current_rust_method_name(
+                "LambdaKeywordParamScope",
+                "f",
+            ))
             .expect("method usage should be recorded");
         let method_param = method_usage
             .all_binding_facts()

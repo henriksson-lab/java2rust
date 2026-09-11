@@ -1665,6 +1665,7 @@ pub fn emit_type(ty: &RustType) -> String {
         RustType::F64 => "f64".to_string(),
         RustType::Char => "char".to_string(),
         RustType::String => "String".to_string(),
+        RustType::Str => "str".to_string(),
         RustType::Vec(inner) => format!("Vec<{}>", emit_type(inner)),
         RustType::Array2(inner) => format!("ndarray::Array2<{}>", emit_type(inner)),
         RustType::Slice(inner) => format!("[{}]", emit_type(inner)),

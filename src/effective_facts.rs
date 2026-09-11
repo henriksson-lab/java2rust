@@ -74,6 +74,14 @@ impl<'a> EffectiveFacts<'a> {
         self.facts.external_library_pack_for_type(type_name)
     }
 
+    pub fn external_rust_crate_mapping_pack_for_type(
+        &self,
+        type_name: &str,
+    ) -> Option<&'a ExternalLibraryPackFact> {
+        self.facts
+            .external_rust_crate_mapping_pack_for_type(type_name)
+    }
+
     pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&'a str> {
         self.facts.external_crate_rust_type_name_for(type_name)
     }

@@ -23,6 +23,12 @@ The audit remains open for the remaining silent collision class: Java names that
 must be renamed (`self`, `crate`, `Self`, `super`) can still collide with an
 already-present suffixed spelling unless allocation is done with scope context.
 
+Codex follow-up 2026-09-10: `parser::to_snake_case`,
+`parser::to_snake_case_unescaped`, and the centralized `java_naming`
+keyword-policy helpers are crate-local. They remain shared internal
+compatibility/name-normalization primitives, but are no longer exported as
+standalone public API.
+
 Codex follow-up 2026-08-22, second pass: the non-rawable keyword fallback now
 uses a double-underscore spelling (`self__`, `crate__`, etc.) through
 `java_naming::rename_non_rawable_rust_keyword`, and

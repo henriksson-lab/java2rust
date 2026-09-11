@@ -17,10 +17,16 @@ lowering are landed; the mutable handle tiers and shared receivers are not.
 
 ## What one decision buys
 
+This table is the original design framing. Current status: `SharedImmutable`
+handles and [0028](done/0028-reference-equality-lowered-as-structural-equality.md)
+identity lowering have landed; diagnosed mutable-alias cases are loud instead
+of invisibly copied, while `SharedLocal`, `SharedSync`, and shared receivers
+remain open.
+
 | issue | today | under this design |
 |---|---|---|
 | 0002 | `Node b = a` copies; writes through `a` are invisible through `b` | `Rc::clone` — one object, two handles |
-| 0028 | `a == b` is structural equality, violating the stated project decision | `Rc::ptr_eq` — *exactly* Java's reference identity |
+| 0028 | **landed for the SharedImmutable scope** | `Rc::ptr_eq` — *exactly* Java's reference identity |
 | 0023 | ordinary outer-method inner construction still calls the panic fallback until a shared outer receiver can be passed to the existing companions | `__outer` stops being a one-off; it becomes the general receiver case |
 | 0006 | clone/borrow recovery is the largest rule cluster in `lower.rs` | for shared types the answer is always `Rc::clone`, and the cluster does not apply |
 | concurrency | `synchronized` erased; nothing to lock | `Arc<Mutex<T>>` gives `synchronized (o)` an object to lock |
@@ -185,12 +191,17 @@ expensive part starts.
   is a genuinely open analysis. For a transpiler whose output is run rather than
   audited for memory, leaking is the right first answer, but it should be
   *stated* rather than discovered.
-- **Which `PartialEq`.** With `Rc::ptr_eq` for `==`, Java's `.equals()` needs a
-  separate path. That is 0028's other half and is not designed here.
+- **Which `PartialEq`.** With `Rc::ptr_eq` for `==`, Java's `.equals()` needed a
+  separate path. That was resolved by the 0028 landing; it remains background
+  for why identity and `.equals()` must stay distinct.
 - **Whether `SharedImmutable` needs interior mutability for lazy fields**
   (`hashCode` caching is the classic case). Probably yes, probably `Cell`.
 
 ## Recommendation
+
+Historical note: this recommendation was superseded by the 2026-08-03 update
+below. Steps 1 and 2 are done; the remaining implementation question is the
+mutable shared placement/receiver policy for `SharedLocal` and `SharedSync`.
 
 Do steps 1 and 2 next. They are small, they cannot regress anything, and they
 convert "we do not know how big 0002b is" into a number. Everything after that
@@ -333,14 +344,16 @@ several of this round's fixes touch `usage`, which feeds the `mutated` and
 alias inputs. Attributing that delta would need the old tree re-measured, which
 has not been done. It is recorded here as drift, not as an effect.
 
-### Consequence for sequencing
+### Historical consequence for sequencing
 
-Unchanged. `SharedSync` is still empty, so step 5 has no population. Step 3
-(`SharedImmutable`) is now **13 types** — still the right next step for the
-reason the design gives: no `borrow()`, no panic risk, so it isolates "did the
-handle plumbing work" from "did the borrow discipline work".
+At this checkpoint, `SharedSync` was still empty, so step 5 had no population.
+Step 3 (`SharedImmutable`) had **13 types** and was still the right next step for
+the reason the design gives: no `borrow()`, no panic risk, so it isolates "did
+the handle plumbing work" from "did the borrow discipline work".
 
-Lowering still does not consult the plan; this remains step 2, a report.
+At that point lowering still did not consult the plan; this was still step 2, a
+report. Later sections supersede this: `SharedImmutable` and 0028 have since
+landed.
 
 ---
 
@@ -358,7 +371,8 @@ after sharing**. If it is never mutated, a copy and a shared handle are
 indistinguishable — that is what "immutable" means. So changing the
 representation of those 13 types changes no program output at all.
 
-Measured rather than argued. `tests/differential/known-gaps/Identity.java`:
+Measured rather than argued. At the time this section was written,
+`tests/differential/known-gaps/Identity.java`:
 
 ```java
 Key a = new Key(5);
@@ -388,8 +402,8 @@ So the revised sequencing is:
 
 > **Step 3 lands together with 0028's identity lowering**, not before it.
 > `Rc::ptr_eq` for `==` is what gives the tier a test, and
-> `known-gaps/Identity.java` is that test: it fails today on two of four cases
-> and passes when both land.
+> `known-gaps/Identity.java` was that test: it failed on two of four cases
+> before both landed.
 
 This is not extra work bolted on. It is the same work in the order that makes it
 verifiable: 0028 is *unimplementable* without the representation, and the
@@ -499,10 +513,11 @@ program first, because the plan is keyed by qualified nested type names.
 
 ## Update 2026-08-05 (fourth) — step 3 attempted; the blocker is not where this document says
 
-Status: **step 3 not landed.** Attempted, measured, and reverted. What follows
-replaces "it is wiring plus a lowering rewrite, not new analysis" with a number
-and a specific obstacle, because that sentence is true and materially
-understates the wiring.
+Status at this checkpoint: **step 3 not landed.** Attempted, measured, and
+reverted. This historical update is superseded by the later landed
+`SharedImmutable` updates below; what follows replaces "it is wiring plus a
+lowering rewrite, not new analysis" with a number and a specific obstacle,
+because that sentence is true and materially understates the wiring.
 
 ### What was tried
 
@@ -517,8 +532,8 @@ borrow discipline to get wrong.
 
 ### The result, and what it proves
 
-`scripts/gate.sh --all`: **zero deltas.** Not "no regressions" — the hook had no
-effect at all. `known-gaps/Identity.java` still emitted
+At this checkpoint, `scripts/gate.sh --all` had **zero deltas**. Not "no
+regressions" — the hook had no effect at all. `known-gaps/Identity.java` still emitted
 `let a: IdentityKey = IdentityKey::new(5);`, unwrapped.
 
 That is the finding: **the Rust type of a source class is never rendered through
@@ -558,19 +573,20 @@ behaviour changes.
 
 ### The order that makes it verifiable
 
-This document's own step 1 discipline applies, one level down:
+This document's own step 1 discipline applied, one level down:
 
 1. **Thread the plan through all 49 sites without consulting it.** A pure
    signature change; the gate must show zero deltas. Large, mechanical, and
    provably inert.
 2. **Then flip the switch for `SharedImmutable` only** — 19 types — together
-   with 0028's identity lowering, since (per the previous update) the tier has
-   no observable behaviour without it and `known-gaps/Identity.java` is the
+   with 0028's identity lowering, since (per the previous update) the tier had
+   no observable behaviour without it and `known-gaps/Identity.java` was the
    acceptance test.
 3. `SharedLocal` is **4 types** and can wait, or be reconsidered entirely.
 
-Step 1 is the honest next unit of work. It is not small, but it is safe, and
-until it exists nothing about step 3 can be tested.
+Step 1 was the honest next unit of work at this point. Later sections supersede
+this path; the representation-aware type/value paths needed for `SharedImmutable`
+and 0028 are now landed.
 
 ### Reverted
 
@@ -598,9 +614,9 @@ std::rc::Rc::ptr_eq(&a, &b)   // true
 std::rc::Rc::ptr_eq(&a, &c)   // false
 ```
 
-`tests/differential/known-gaps/Identity.java` — the acceptance test this design
-defined two updates ago — **passes against the Java oracle**: both toolchains
-print `5,true,false,false`. That is 0002's aliasing, 0028's `==`, and 0028's
+`tests/differential/Identity.java` — promoted from the known-gap directory after
+0028 landed — **passes against the Java oracle**: both toolchains print
+`5,true,false,false`. That is 0002's aliasing, 0028's `==`, and 0028's
 `.equals()` half, all satisfied for the `SharedImmutable` tier.
 
 Four pieces, each small: the plan on `FactSet`; a wrap in
@@ -743,14 +759,13 @@ for *cloning* (`Rc::clone`), and opaque for every **conversion** —
 sites the change actually has to teach, and there are four of them, not
 seventeen.
 
-### And eleven stale expectations
+### And eleven stale expectations (historical)
 
-The remaining eleven assert the old spelling and would simply be updated —
+The remaining eleven asserted the old spelling and were later updated —
 including `source_self_referential_instance_fields_use_boxed_optional_storage`,
-which asserts `Option<Box<Node>>`. That one *should* change: with a shared
-handle the `Box` is redundant, giving `Option<Box<Rc<T>>>`, an indirection
-through an indirection. Suppressing it is a two-line change (verified), and this
-document already predicts it.
+which asserted `Option<Box<Node>>`. That one changed as predicted: with a shared
+handle the `Box` is redundant, because `Option<Box<Rc<T>>>` is an indirection
+through an indirection.
 
 ### Revised cost, and the revised order
 
@@ -809,17 +824,19 @@ Measured over the corpus: **zero** types need `Arc`. All 15 shared types are
 correctness rather than for use. That is the argument for the hierarchy over
 "just use `Arc`".
 
-The type form and the value form are derived together — `wrap` gives
-`Rc<RefCell<T>>`, `wrap_construction` gives `Rc::new(RefCell::new(v))` — after a
+The type form and the value form are derived from the same placement axes:
+`wrap` gives `Rc<RefCell<T>>`, while `slot_render::storage_placement_construction_expr`
+builds `Rc::new(RefCell::new(v))` as structured `RustExpr` calls after a
 hand-written construction string got the nesting wrong. A law test asserts they
 nest identically, alongside the lattice laws (commutative, associative,
 idempotent, extensive) checked exhaustively over the 8-element domain.
 
 ### The acceptance test passes
 
-`tests/differential/known-gaps/Identity.java`, against the Java oracle: both
-toolchains print `5,true,false,false`. Aliasing, `==` and the inherited
-`.equals()` half, all satisfied for the shared tier.
+`tests/differential/Identity.java`, against the Java oracle: both toolchains
+print `5,true,false,false`. Aliasing, `==` and the inherited `.equals()` half,
+all satisfied for the shared tier. This fixture was promoted when 0028 landed;
+older references to `known-gaps/Identity.java` below are historical.
 
 ### The residual, and where it now sits
 
@@ -875,8 +892,8 @@ right home for the ones that *do* plan, and is kept and inert.
 
 ### Kept, and independently useful
 
-- `StoragePlacement`, its three axes, `wrap`/`wrap_construction`, and the law
-  tests.
+- `StoragePlacement`, its three axes, structured construction via
+  `slot_render::storage_placement_construction_expr`, and the law tests.
 - The `Rc`/`Arc` hierarchy and static-reachability.
 - `FactSet::storage_placement_for` — the plan visible to every renderer.
 - `mutation_provably_absent`, the classes-only restriction, and the
@@ -1240,6 +1257,11 @@ merits: **a construction path that is a rendered type is a bug with or without
 
 ### Landing checklist, all of it now specific
 
+Historical note: this reverted-pass checklist was superseded by the third pass
+and the 2026-08-06 landing notes below. The constructor-path defect named here
+was found and fixed; the remaining live work is no longer this four-item
+checklist.
+
 1. Find and fix the `{rendered_type}::new()` construction path above.
 2. Add `cargo_check_generated_modules` to
    `implicit_source_super_constructor_initializes_inherited_fields` so it cannot
@@ -1475,8 +1497,8 @@ it is not the cheaper side.
    bounded by.
 2. *Store bare values in the erased carrier*, accepting that identity is lost
    through erasure. Uniform and much smaller, but it gives up part of 0028 —
-   the part `known-gaps/Identity.java` does not cover, since that fixture never
-   erases.
+   the part the original identity fixture did not cover, since that fixture
+   never erases.
 
 Option 2 is the smaller move and keeps `SharedImmutable` landable; option 1 is
 the one that finishes 0028 properly. This is a decision about scope, not a
@@ -1888,10 +1910,10 @@ pub fn get_instance() -> std::sync::Arc<Config>;                 // Arc: static-
 ```
 
 What made it land, after eight reverts, was the generated-crate checking added in
-[0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md). Every
-earlier pass converged against assertion text and kept finding new unwrapped
-paths; with 101 `slot_shape_design` tests and 323 `idiom_gaps` tests compiling
-their output, each pass named a *type error* instead, and the list ran dry.
+[0041](done/0041-slot-shape-design-had-no-generated-crate-checks.md). At that
+landing checkpoint, 101 `slot_shape_design` tests and 323 `idiom_gaps` tests
+compiled their output; each pass named a *type error* instead of only assertion
+text, and the list ran dry.
 
 ### The wrap, in one place
 
@@ -1956,9 +1978,9 @@ fresh local initializers by rendering the inner value and returning one raw
 `Rc::new(...)` or `Arc::new(...)` string.
 
 For the implemented `SharedImmutable` tier, the helper now returns a structured
-`RustExpr::Call` with the original expression as its argument. The raw
-`wrap_construction` fallback remains for future cell placements, where
-`RefCell::new`/`Mutex::new` nesting is not implemented yet.
+`RustExpr::Call` with the original expression as its argument. The later
+`wrap_construction` string fallback has since been deleted; value construction
+now goes through `slot_render::storage_placement_construction_expr`.
 
 ### Codex follow-up 2026-08-12 — optional element handle construction reuses the structured wrapper
 
@@ -1970,8 +1992,8 @@ string before the `Some` plan saw it.
 
 Both optional-construction entry points now use the shared structured placement
 helper, so implemented `SharedImmutable` elements keep the nested
-`Some(Rc::new(value))` call shape. The raw fallback remains centralized for the
-unimplemented cell placements.
+`Some(Rc::new(value))` call shape. That structured helper is now the only
+production construction route.
 
 ### Codex follow-up 2026-08-12 — subtype/erasure fresh-constructor wraps use the shared helper
 
@@ -2084,3 +2106,60 @@ underscore, and fallible string-concat lowering wraps the source call in
 `Result<String, JavaException>`. The generated call still passes the solved
 owned `Rc<Alignment>` parameter without borrowing, and the row was removed from
 the idiom-gaps failure baseline after a focused generated-crate check.
+
+## Update 2026-09-09 (Codex follow-up) — construction strings are no longer a storage API
+
+`StoragePlacement::wrap_construction` has been deleted. Production value wrapping
+already went through `slot_render::storage_placement_construction_expr`, which
+builds structured `RustExpr::Call` nodes and recovers parseable raw leaves only
+at the compatibility boundary. The placement law test now renders that
+structured helper to keep the type/value nesting invariant without preserving a
+public raw construction-string API.
+
+## Update 2026-09-09 (Codex follow-up) — `SharedLocal` is blocked at the receiver boundary
+
+The type and value renderers already know how to spell the mutable shared
+placements structurally: `storage_placement_type` builds
+`Rc<RefCell<T>>`/`Arc<Mutex<T>>`, and
+`storage_placement_construction_expr` builds the matching nested constructor
+calls. The remaining switch is `StoragePlacement::is_implemented`, which still
+returns false for `interior_mutable`.
+
+That gate should not be flipped by itself. Field reads/writes, method receivers,
+identity comparisons, erased conversions, optional slots, and captured inner
+construction all need a coordinated `borrow()`/`borrow_mut()` policy with the
+documented "do not hold a borrow across a call" rule. The narrow boundary tests
+that currently pin this are:
+`inner_class_capture::tests::outer_this_construction_needs_an_implemented_mutable_shared_placement`
+and
+`storage_strategy::placement_law_tests::the_type_and_construction_forms_nest_the_same_way`.
+
+## Update 2026-09-10 (Codex follow-up) — the implementation gate is pinned directly
+
+`storage_strategy::storage_placement_implementation_gate_stays_explicit` now
+checks the four active placement rungs without going through a Java fixture:
+inline values and immutable shared `Rc`/`Arc` placements are implemented, while
+`SharedLocal`/`SharedSync` remain off. This is a tripwire against accidentally
+enabling `Rc<RefCell<T>>` or `Arc<Mutex<T>>` by weakening
+`StoragePlacement::is_implemented`; it does not implement the mutable shared
+receiver and field-access policy.
+
+## Update 2026-09-10 (Codex follow-up) — inner capture is pinned to `SharedLocal` end-to-end
+
+`output_markers::inner_capture_gap_reports_mutable_shared_storage_work_queue`
+now translates `tests/differential/known-gaps/InnerCapture.java` and requires the
+same output to contain the inner-construction runtime handoff, the
+`inner_class_construction_panics` diagnostic, and a
+`storage_strategy_disagreement` message saying `InnerCapture needs SharedLocal`.
+That keeps 0023's ordinary inner-constructor failure attached to this audit's
+remaining mutable shared receiver/borrow-policy gate.
+
+## Update 2026-09-10 (Codex follow-up) — mutable aliasing is pinned to `SharedLocal` too
+
+`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` now requires
+`tests/differential/known-gaps/Aliasing.java` to report
+`storage_strategy_disagreement` messages for `Aliasing.Node needs SharedLocal`
+and `Aliasing.Counter needs SharedLocal`, in addition to the error-level
+`observable_alias` diagnostic. The fixture still stays in known gaps until the
+mutable shared receiver/field-access policy exists, but it now proves the
+primary 0002 repro feeds this audit's remaining implementation queue.

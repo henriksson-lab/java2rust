@@ -1,12 +1,15 @@
 # 0064 — The Java→Rust name map is a pure, non-injective function of one string
 
-Status: **open, mostly mitigated** — the 7 historical repros were validated
-with `javac`/`java` oracles and `rustc` output, but most concrete collision
-paths now have local fixes. The remaining defect is the broader identity model:
-package/type ownership is still not first-class across the analysis keys.
-Severity: high — three of the seven produce a *silently wrong program*
-(wrong class constructed, wrong package's constant read, `unimplemented!` for a
-class the translator is itself translating); the rest are `E0428`/`E0592`
+Status: **open, model-level** — the 7 historical repros were validated with
+`javac`/`java` oracles and `rustc` output, but the current tree has local fixes
+or ambiguity guards for the concrete paths named below. The remaining defect is
+the broader identity model: package/type ownership is still not first-class
+across the analysis keys.
+Severity: medium-high while mitigated — the original repros included three
+*silently wrong programs* (wrong class constructed, wrong package's constant
+read, `unimplemented!` for a class the translator is itself translating), but
+the live risk is recurrence at remaining string-owner surfaces rather than a
+known still-failing repro in this file.
 Kind: identity modelling — the same failure family as
 [0009](../../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md),
 one level below it
@@ -23,6 +26,22 @@ Current tree update:
   does not solve package-aware identity, but it removes a duplicate public
   string-only type-name projection surface. Regression:
   `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+* Follow-up 2026-09-10: `java_accessor_method_reference_fallback_name` is
+  crate-local. Method-reference shape inference still uses the centralized
+  Java-naming policy for accessor fallback compatibility, but that predicate is
+  no longer part of the public crate API.
+  Follow-up cleanup also narrowed the Java getter/alias helpers
+  (`java_getter_method_name`, `java_getter_field_name`, and
+  `java_method_name_aliases`) to crate-local callers. These remain compatibility
+  helpers over non-injective Java/Rust spelling, but external crate users cannot
+  treat them as an identity API.
+  `parser::to_snake_case` and `parser::to_snake_case_unescaped` are crate-local
+  now too, as are the centralized `java_naming` keyword-policy helpers; they
+  remain internal compatibility primitives while the first-class name-allocation
+  model remains open.
+  Follow-up cleanup narrowed
+  `object_model::rust_enum_variant_name_from_parsed_constant` to crate-local as
+  well; direct enum-constant spelling assertions now live beside `object_model`.
 * Follow-up 2026-09-07: lowerer's remaining legacy Rust-name usage fallback now
   routes through `CallableAnalysis` instead of iterating
   `UsageFacts.methods_by_rust_name` directly. The compatibility lookup still
@@ -34,6 +53,324 @@ Current tree update:
   code cannot bypass the shell and reach the legacy maps directly. The
   Rust-name-family accessors are crate-local, and the unused stored `call_graph`
   field was deleted rather than kept as a dead public handle.
+* Follow-up 2026-09-10: `UsageFacts.methods_by_java_key` is now private to
+  the usage module.
+  Non-owner code reads it through `source_method_usage_by_java_key`, and the
+  same-simple-name package-peer regression now asserts usage identity through
+  that query boundary instead of directly iterating the backing map. This does
+  not replace owner strings with a first-class key, but it removes one more
+  direct Java-key table access outside the owning module. Regression:
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`
+  and `batch_analysis_keys_keep_same_simple_name_package_peers_distinct`.
+  Follow-up cleanup moved that package-peer regression's usage assertion through
+  `CallableAnalysis::method_usage_by_java_key`, so the test no longer bypasses
+  the shell to reach `UsageFacts::source_method_usage_by_java_key` directly.
+  That Java-key usage shell method is test-only/crate-local now; production
+  callers use declaration/resolved-owner helpers instead of exposing a broad
+  non-injective usage lookup.
+  `CallableAnalysis` no longer stores `SignaturePlan` either; the only
+  remaining package-peer signature assertion now queries the signature plan
+  directly, and the callable shell is limited to usage, exception, and
+  fallibility questions.
+  The broad `method_usage` and `constructor_usage` key wrappers are private
+  implementation details now; callers outside the shell use the named
+  current/source usage questions instead of reaching for arbitrary usage keys.
+  The remaining result/exception `CallableAnalysis` questions are crate-local
+  too, matching their actual lowerer-only caller set instead of making the shell
+  a public API.
+  Test-only usage seeding now goes through
+  `UsageFacts::insert_source_method_usage` instead of mutating the backing map
+  from `signature.rs` and `slot_policy.rs`.
+  The fallibility-invariant test helper also now uses
+  `CallableKey::method_identity` instead of a direct `CallableKey::Method`
+  literal, and the raw-key guard covers that test module while still allowing
+  legitimate production pattern matches.
+* Follow-up 2026-09-10: the same-simple-name package-peer regression now also
+  asserts emitted source-item cardinality for the distinct `AItem` and `BItem`
+  owners. This closes the test-surface hole where the fixture proved the names
+  appeared and compiled together but did not explicitly prove that each peer was
+  emitted exactly once under its own owner-derived Rust name. Regression:
+  `batch_translation::package_qualified_source_type_references_keep_package_identity`.
+* Follow-up 2026-09-10: `JavaCallableKey` and its ownerless
+  `JavaCallableSlotKey` projection no longer expose raw identity fields
+  publicly. Construction still goes through `source_method_for_type`,
+  `source_method_for_owner`, `slot()`, and resolved-source helpers; current
+  internal readers use read-only `owner()`/`java_name()` accessors where they
+  still need compatibility owner/name pairs. This is not the full first-class
+  owner-key migration, but it closes the public raw-field bypass that could
+  recreate source callable identity from arbitrary strings.
+  Follow-up cleanup narrowed `JavaCallableKey::source_method_for_type` to
+  crate-local as well; external callers no longer get a public constructor for
+  source callable keys.
+  Guard:
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  Follow-up cleanup narrowed `facts::CallableKey::with_owner_type` to
+  crate-local too. It remains available to builtin external-pack alias expansion
+  but is no longer a public owner-rewriting API over raw strings.
+* Follow-up 2026-09-10: `resolve::ConstantDeclaration` no longer exposes its
+  package-qualified owner, package, or field payload publicly. Constant folding
+  still constructs declarations centrally from `TypeDecl` traversal and keeps
+  the owner/package distinction needed for nested types, but downstream callers
+  cannot fabricate or mutate constant owner facts by assigning raw strings into
+  the declaration record. Guard:
+  `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+* Follow-up 2026-09-10: `signature::MethodKey`,
+  `signature::ConstructorKey`, and `signature::FieldKey` now have named
+  constructors and read-only accessors, and their raw owner/name strings are
+  private. Source field collection uses the declaration-aware constructor when
+  it has `TypeDecl`/`FieldDecl` context, while compatibility lookups use the
+  explicit Rust-identity constructor. This fences the signature tables without
+  claiming the broader first-class owner key migration is complete. Guard:
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  Codex follow-up 2026-09-10 narrowed `signature::FieldKey::type_name()` to
+  crate-local and deleted the unused field-name accessor because field-key
+  owner/name inspection has no public graph API caller. `signature::MethodKey`
+  and `signature::ConstructorKey` accessors remain public for the public
+  signature-dependency graph node surface; replacing that graph-facing string
+  inspection needs a separate API pass.
+* Follow-up 2026-09-10: `usage::UsageMethodKey` and
+  `usage::UsageConstructorKey` now have the same fence: named constructors plus
+  read-only accessors, with raw owner/name fields private. The remaining
+  signature bridge reads these keys through accessors instead of depending on
+  public struct payloads. This still preserves the existing string identity, but
+  prevents non-owner code from fabricating usage keys through field assignment.
+  Guard:
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  Follow-up cleanup made the primary `UsageFacts.methods` and
+  `UsageFacts.constructors` maps private as well. Solver code that still needs
+  full traversal now uses owner-provided entry/value iterators, direct lookups go
+  through key query methods, and fixture seeding goes through
+  `insert_method_usage` instead of replacing the backing map.
+  The legacy Rust-name compatibility map is private too; `callable_analysis`
+  reads it through `UsageFacts::rust_name_method_entries` for the remaining
+  family lookup.
+  Follow-up cleanup narrowed the current-Rust-name usage-key constructors to
+  crate-local and added `UsageFacts` owner-level lookup/insert helpers for the
+  compatibility cases that still seed or query by emitted Rust names. Integration
+  tests no longer construct those raw compatibility keys directly.
+  Codex follow-up 2026-09-10 narrowed the read-only
+  `UsageMethodKey`/`UsageConstructorKey` string accessors to crate-local as
+  well, so external tests and downstream users cannot treat those compatibility
+  strings as public semantic identity. Guard:
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+* Follow-up 2026-09-09: usage collection and signature planning no longer build
+  declaration-backed source method/constructor keys with local struct literals.
+  The canonical source-method key, source-constructor key, and legacy Java-name
+  compatibility method key now have named constructors on
+  `UsageMethodKey`/`UsageConstructorKey` and `signature::MethodKey`/
+  `signature::ConstructorKey`, so the Java-name compatibility insertion is
+  visible at the API boundary instead of looking like another ordinary usage
+  key. Lowerer's declaration-less current-method/current-constructor fallback
+  now goes through `CallableAnalysis::current_rust_method_usage` and
+  `CallableAnalysis::current_rust_constructor_usage`; those helpers use
+  explicitly named Rust-name constructors instead of local struct literals.
+  Follow-up cleanup moved source-constructor usage lookups behind
+  `UsageFacts::source_constructor_usage`, matching the existing source-method
+  lookup surface so callers with a real constructor declaration do not reach
+  into the constructor map. Guards/tests:
+  `usage::tests::usage_source_key_constructors_name_canonical_and_legacy_paths`,
+  `signature::tests::signature_source_key_constructors_use_resolved_rust_names`,
+  and `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  Follow-up cleanup added `UsageFacts::resolved_source_method_usage` and a
+  shared resolved-source key helper, so aliasing no longer rebuilds
+  `JavaCallableKey::resolved_source_method` or reads `methods_by_java_key`
+  directly to decide receiver mutation; the self-mutability propagation fixpoint
+  uses the same helper for membership checks.
+* Follow-up 2026-09-09: signature dependency construction no longer lets a
+  Java-name `UsageMethodKey` pick the first planned overload whose Rust name has
+  the same prefix. `method_key_for_usage` still accepts an exact match and a
+  unique legacy prefix match, but multiple overload-prefix matches now fail
+  closed instead of depending on `HashMap` iteration order. Regression:
+  `signature::tests::usage_method_key_prefix_fallback_requires_unique_planned_method`.
+* Follow-up 2026-09-09: lowerer's source-context static signature fallbacks by
+  Rust name and by base name/argument types now fail closed when both owner
+  candidates match. The compatibility paths still support a single
+  current/source owner match, but no longer choose the first string owner
+  candidate when both expose the matching static method. Regressions:
+  `lower::tests::source_context_static_signature_by_rust_name_refuses_ambiguous_context_owner`
+  and
+  `lower::tests::source_context_static_signature_by_name_and_args_refuses_ambiguous_context_owner`.
+* Follow-up 2026-09-09: emitted-source argument planning no longer lets
+  `method_signature_for_owner_aliases` choose the first canonical/Rust-projected
+  owner alias when the exact owner key misses. Exact owner lookup still wins,
+  but fallback aliases must identify one unique owner signature. Regression:
+  `lower::tests::method_signature_for_owner_aliases_refuses_ambiguous_fallback_owner_alias`.
+* Follow-up 2026-09-09: receiver-method signature fallbacks now keep
+  compatibility aliases only when they resolve to one unique `(owner, method)`
+  target. Duplicate spellings of the same resolved owner are ignored, but a
+  second distinct owner makes the fallback fail closed. Source-context receiver
+  fallback also pairs argument shapes with the overload selected by argument
+  types instead of borrowing `matching_methods[0]`. Regression:
+  `lower::tests::source_context_receiver_fallback_pairs_selected_signature_with_selected_overload`.
+  The same pass removed two sorted-owner fallbacks that could erase resolver
+  priority: optional current-method display shape lookup and returned-field
+  accessor shape lookup now try the resolved declaring owner before the
+  receiver/current owner. Regressions:
+  `lower::tests::optional_current_method_display_shape_refuses_ambiguous_current_owner`
+  and
+  `lower::tests::source_trivial_accessor_returned_field_shape_prefers_resolved_owner`.
+  Follow-up cleanup: the immediate receiver fallback candidate helper now keeps
+  `SourceContextOwnerKey` values through lookup callers instead of downgrading
+  to plain `String` at the API boundary. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_typed_until_lookup`.
+* Follow-up 2026-09-09: fact-level method and constructor keys now have named
+  constructors. Parsed-source semantic/resolve facts use
+  `facts::MethodKey::source_method`, external/user override facts use
+  `facts::MethodKey::named`, and constructor recursion facts use
+  `facts::ConstructorKey::named`. This preserves the existing stored strings but
+  removes another set of local owner/name struct literals from fact
+  construction.
+* Codex follow-up 2026-09-10: the remaining direct `field: FieldKey { ... }`
+  test and signature dependency literals were migrated to `FieldKey::named(...)`.
+  This is still string-keyed compatibility, not a first-class owner model, but
+  it removes another raw owner/name construction spelling from the graph and
+  external-pack test surfaces. Guard:
+  `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+  Follow-up accessor pass: `facts::FieldKey` now has read accessors, and
+  `inherited_members.rs`, `member_access_plan.rs`, `external_packs.rs`,
+  `resolver_benchmark.rs`, and the external-field facade/static-constant helpers
+  in `stdlib.rs` use them instead of reaching into `.field.type_name` /
+  `.field.field_name` directly. The `facts::FieldKey` payload fields are now
+  private, so non-owner code and integration tests must use the named
+  constructors/accessors while the broader model migration remains open.
+  Follow-up cleanup applied the same fence to fact-level `MethodKey` and
+  `ConstructorKey`: their stored owner/member strings are private, call sites
+  use accessors, and the one intentional method-name rewrite goes through
+  `MethodKey::with_method_name(...)` instead of mutating a raw field.
+* Follow-up 2026-09-09: signature dependency and propagation code no longer
+  open-codes `MethodKey`/`ConstructorKey` bridges for resolved calls,
+  resolved constructors, or usage constructor/method keys. These now use
+  `MethodKey::resolved_call`, `MethodKey::from_usage_key`,
+	  `ConstructorKey::resolved_constructor`, and `ConstructorKey::from_usage_key`,
+	  making the declaring-owner plus resolved Rust-name policy explicit at the key
+	  boundary instead of repeating the two-field copy throughout the solver.
+	  Follow-up cleanup added `SignaturePlan::resolved_source_method_signature`
+	  and moved the resolved-source `JavaCallableKey` construction out of call
+	  argument planning; `call_plan` now asks the signature table by semantic
+	  question instead of rebuilding owner/name/argument keys locally.
+	  `SignaturePlan::resolved_source_method_return_shape` applies the same
+	  boundary to expression-shape return recovery. The old unused public
+	  `SignaturePlan::method_return_shape_by_java_key` shortcut was deleted, so
+	  resolved return-shape callers use the semantic resolved-source helper
+	  instead of a broad Java-key accessor.
+	  Follow-up cleanup moved lowerer's declaration-scoped binding and signature
+	  lookups off local `JavaCallableKey::source_method_for_*` construction:
+	  current-method binding usage now goes through
+	  `CallableAnalysis::source_method_usage_for_resolved_owner`, and emitted
+	  source method signatures use `SignaturePlan::method_signature` with the
+	  resolved `TypeDecl`/`MethodDecl`.
+	  The remaining exact Java-key signature lookup is test-only/crate-local too;
+	  internal regression checks can still assert the table contents without
+	  leaving it as public crate API or normal production surface.
+* Follow-up 2026-09-09: call-graph/fallibility `CallableKey` construction now
+  has the same named boundary for resolved source calls and constructors.
+  `CallableKey::resolved_method`, `CallableKey::resolved_constructor`,
+  `CallableKey::method_identity`, and `CallableKey::constructor_identity`
+  replaced the remaining production `CallableKey::Method`/`Constructor` struct
+  literals in `usage.rs` and lowerer's callable-result queries; direct enum
+  variants remain only in the helper definitions and pattern matches.
+  Codex follow-up 2026-09-10: the public `usage::CallableKey` variants are
+  `#[non_exhaustive]`. Internal analysis can still pattern-match the current
+  enum while the real opaque-key model remains open, but downstream crates can
+  no longer construct raw `CallableKey::Method { type_name, method_name }` or
+  sibling struct-like variants directly. Public construction must go through
+  the named constructor surface. Guard:
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  Follow-up cleanup added public read-only query methods for call-graph
+  assertions (`method_identity_parts`, `constructor_identity_parts`,
+  `external_method_parts`, `external_constructor_parts`, `is_lambda`, and
+  `anonymous_method_parts`) and moved the slot-shape integration tests off raw
+  `new_java2rust::usage::CallableKey::* { ... }` field patterns. The same
+  layering guard now rejects reintroducing those public raw enum-field reads in
+  that integration-test surface.
+  Follow-up cleanup also moved fallibility-invariant diagnostic rendering behind
+  `CallableKey::diagnostic_label`, so that module no longer pattern-matches the
+  public callable enum just to recover owner/name strings. The existing layering
+  guard now covers that production module as well as its test fixtures.
+  The same local fallibility surface now keeps `FallibilityViolation` caller and
+  callee keys private-backed with read-only accessors, so downstream callers
+  cannot construct or mutate violation identity by assigning raw key fields.
+  Follow-up cleanup also made `usage::CallGraph`'s backing `nodes` and `edges`
+  collections private. Read-only callers use `nodes()` / `edges()`, and tests
+  that need synthetic graphs use `from_edges(...)` or `from_nodes(...)` instead
+  of constructing the graph by assigning its raw collections.
+  Follow-up cleanup extended that fence to `usage::CallGraphEdge`: caller,
+  callee, and edge-kind payloads are private-backed, public callers use
+  `caller()` / `callee()` / `kind()`, and synthetic tests construct edges with
+  `CallGraphEdge::new(...)` instead of field literals.
+  The same accessor fence now covers `signature::SignatureDependencyGraph`:
+  public callers can inspect `nodes()` / `edges()`, but cannot mutate or
+  fabricate the dependency graph by assigning its backing collections directly.
+  `SignatureDependencyEdge` now has the matching private-backed payload:
+  callers inspect `from()` / `to()` / `kind()` or construct via `new(...)`,
+  rather than assigning graph endpoint fields directly.
+  `SignatureDependencySccAnalysis` now follows that pattern too: components,
+  successor indexes, node-to-component lookup, and stats are private backing
+  state with read-only accessors instead of public mutable graph internals.
+  `SignatureSolverPassPlan` now also exposes component order, cyclic/mutable
+  component sets, and stats through read-only accessors rather than public
+  mutable fields.
+  `SignatureConstraintState` now follows the same fence for method,
+  constructor, and field constraint maps: public callers can read through
+  `methods()` / `constructors()` / `fields()` and build synthetic states through
+  explicit insertion helpers, but cannot mutate or replace the backing maps by
+  assigning raw key-indexed fields.
+  `SignatureFixpointResult` also keeps that constraint state private-backed now;
+  callers inspect it through `constraints()` instead of mutating the solved
+  key-indexed tables through the result object.
+  The result's dependency SCC analysis and solver pass plan are private-backed
+  too, preserving their existing read-only accessors instead of exposing
+  replaceable graph/planning internals.
+* Follow-up 2026-09-09: fact-table callable keys also gained resolved-source
+  helpers. `facts::CallableKey::resolved_method` now replaces the resolved-call
+  owner/Rust-name reconstruction in call argument/facade planning, while
+  `facts::CallableKey::resolved_constructor` is available as the constructor
+  counterpart. External facade lookup keys still use the generic method factory
+  because those inputs are external owner spellings, not resolver identities.
+  Follow-up cleanup added `FactSet::facade_abi_for_external_method` and
+  `FactSet::facade_abi_for_external_call` so straightforward external
+  owner/name/arity facade lookups in call planning, method-reference shape
+  planning, CLI facade extraction, and lowerer static-owner probes no longer
+  rebuild temporary `CallableKey::method` values at each lookup site. Sites that
+  still need a local key for source-name compatibility or primitive-fallback
+  matching keep the explicit key for now.
+  Method-reference lowering now also returns facade ABI candidates directly via
+  `method_reference_facade_abi_candidates`, preserving candidate order while
+  removing the temporary callable-key candidate list from the production helper.
+  Follow-up cleanup moved storage-strategy implementor receiver-mutability
+  checks from local `JavaOwnerKey::source_type(implementor)` construction to
+  `UsageFacts::source_method_usage(implementor, method)`, so callers with a real
+  source declaration use the owner-derived API boundary instead of rebuilding
+  the Java owner key.
+* Follow-up 2026-09-09: the remaining signature usage-constructor bridges and
+  already-Rust-name lookups now use named constructors too.
+  `ConstructorKey::from_usage_key` covers all constructor usage-key bridges in
+  the solver, while `MethodKey::rust_identity` and
+  `ConstructorKey::rust_identity` make by-Rust-name lookup and inherited method
+  registration explicit instead of building local key literals.
+* Follow-up 2026-09-09 test-surface cleanup: the remaining non-`usage.rs`
+  `UsageMethodKey { ... }` fixture/setup literals now use
+  `UsageMethodKey::current_rust_method_name(...)` when they intentionally seed
+  Rust-name compatibility keys. `tests/layering.rs` now rejects
+  `UsageMethodKey`/`UsageConstructorKey` struct literals in the lowerer,
+  signature, slot-policy, callable-analysis, object-model module, and the
+  integration-test files that had fixture literals, leaving raw key construction
+  inside the key owner module only. Follow-up cleanup also removed direct
+  `signature::MethodKey`, `signature::ConstructorKey`, and `facts::MethodKey`
+  struct literals from the object-model, semantic-facts, and slot-shape
+  integration-test surfaces. Those tests now use `rust_identity(...)`,
+  `facts::MethodKey::named(...)`, or `facts::MethodKey::source_method(...)`, and
+  the same layering test rejects reintroducing those raw literals. The
+  signature module's own unit tests were also moved to those named constructors,
+  leaving direct key literals in `src/signature.rs` only at the key definitions.
+  A later pass did the same for direct `usage::CallableKey::Method` construction
+  in the slot-shape integration tests; those call-graph/fallibility fixtures now
+  use `CallableKey::method_identity(...)`, and the layering guard rejects direct
+  method-key literals on that integration-test surface. A follow-up pass moved
+  `src/usage.rs`'s own source-key constructor regression off raw
+  `UsageMethodKey { ... }` / `UsageConstructorKey { ... }` expected values too;
+  it now compares constructor output to the named `current_*` constructors, so
+  direct usage-key literals remain only inside the key constructors themselves.
 * Follow-up 2026-09-07: ownerless callable-slot construction is crate-local.
   `JavaCallableSlotKey::source_method` still supports internal inherited-method
   and trait-slot comparisons, but external callers stay on owner-bearing
@@ -259,6 +596,18 @@ Current tree update:
   remain available to lowering but are no longer public APIs; their overload
   boundary behavior moved to a `call_plan` unit test and a layering guard pins
   the boundary.
+  Follow-up cleanup also narrowed `external_call_receiver_type_key` to
+  crate-local; its callers are semantic-analysis internals, and public users
+  should not depend on a rendered external receiver-key recovery helper.
+  The adjacent `external_call_returns_rust_result_for_receiver` wrapper is
+  crate-local too; lowering can ask the question internally without exporting
+  another string receiver-key API.
+  `external_constructor_returns_rust_result` is likewise crate-local because
+  its only caller is constructor lowering.
+  The overload-modeled probes `external_receiver_overload_is_modeled` and
+  `external_constructor_is_modeled` are crate-local too; they remain available
+  to lowering without exporting exact receiver/type-name modeling probes as
+  public API.
 * Static-storage accessor spellings no longer re-derive a snake-case name after
   the static field allocator has selected an emitted Rust field name. The
   accessor projection now treats its input as the already allocated member name,
@@ -406,34 +755,37 @@ taken. Injectivity is not something such a function can have.
 | local binding | `java_naming::source_binding_rust_names` → `allocate_rust_ident` | all names in scope, **occupancy set** | **yes** |
 | instance field | `java_naming::source_instance_field_rust_names` | all fields of the type, **occupancy set** | **yes** (within a type) |
 | static field | `java_naming::source_static_field_rust_names` | all static fields of the type, **occupancy set** | **yes** (within a type) |
-| method | `parser::to_snake_case` + `parser::type_suffix` suffix (`resolve::resolve_method`) | one name string; param type *spellings* | **no** (§3, §4) |
-| type | `java_naming::rust_name_for_java_named_type` | one dotted string, **package excluded** | **no** (§2, §5) |
+| method | `parser::to_snake_case` + `parser::type_suffix` suffix, then `resolve::allocate_unique_declared_method_rust_names` | declaring type namespace and occupancy set for declared methods; string-owner compatibility elsewhere | **locally guarded, not first-class** (§3, §4) |
+| type | `java_naming::rust_name_for_java_named_type` plus duplicate/source-context pre-passes and ambiguity guards | dotted spelling plus local context in many lookups; no typed owner key | **locally guarded, not first-class** (§2, §5) |
 
-The two entity kinds that already have a collision-avoiding allocator are exactly
-the two that never collide in practice. The two that carry the program's
-structure — types and methods — are the pure functions.
+The first version of this audit found that only fields and locals used a
+collision-avoiding allocator. The current tree has since added a local method
+allocator and many package-ambiguity guards, but the type/method identity model
+is still expressed through strings at many boundaries instead of one resolved
+entity map.
 
-`allocate_rust_ident` (`src/java_naming.rs:69`) is already the right primitive:
-it takes a base name and an occupancy set and appends `_` until free. It is
-called only from the field/local paths.
+`allocate_rust_ident` (`src/java_naming.rs`) remains the right primitive: it
+takes a base name and an occupancy set and appends `_` until free. The remaining
+gap is where that allocation result is not yet the only source of truth.
 
 ### The key that would fix it exists, and is not the key anything is stored under
 
 `src/java_signature.rs` defines `JavaCallableKey { owner, java_name,
-erased_param_types, kind, staticness }`. Meanwhile the two maps that lowering
-actually indexes are:
+erased_param_types, kind, staticness }`. Meanwhile the maps that lowering
+actually indexes are still string-keyed:
 
 ```rust
-// src/facts.rs:922
+// src/facts.rs
 pub struct MethodKey { pub type_name: String, pub method_name: String }   // Java name
-// src/signature.rs:57
-pub struct MethodKey { pub type_name: String, pub rust_name: String }     // Rust name
+// src/signature.rs / src/usage.rs
+// Method keys now hide their fields behind constructors/accessors, but still
+// carry owner/name strings rather than one first-class owner key.
 ```
 
-Both key on a **bare `type_name` string with no package**, and they disagree with
-each other about which spelling of the method name they hold. `usage::CallableKey::Method`
-(`src/usage.rs:27`) is a third, with `type_name` + `method_name`. `src/lower.rs`
-still has 23 `.name ==` comparisons.
+The live state is better fenced than the original, but it still keys owner
+identity on type-name strings in multiple surfaces. `src/lower.rs` also still
+has many direct `.name ==` comparisons. Some are harmless syntax checks, but the
+type system cannot distinguish them.
 
 ---
 
@@ -612,8 +964,8 @@ resolution sees the assigned names through `ProgramSymbols`.
 ## 5. The overload suffix is built from *type spelling*, and is also non-injective
 
 ```rust
-// src/parser.rs:3436
-pub fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
+// src/parser.rs
+pub(crate) fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
     match ty {
         JavaType::Array(inner) => format!("{}_array", type_suffix(inner, false)),
         JavaType::Named { name, .. } => to_snake_case(&java_type_suffix_name(name)),
@@ -621,6 +973,9 @@ pub fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
 ```
 
 so `int[]` → `int_array` and a class named `IntArray` → `int_array`.
+Follow-up 2026-09-10: `type_suffix` is crate-local now. The overload suffix
+model remains non-injective until names are allocated from resolved identities,
+but external callers can no longer treat the spelling helper as public API.
 
 ```java
 class IntArray { int n = 9; }
@@ -793,10 +1148,12 @@ instance of the same fix being applied per-symptom — 0013 fixed `downcast::<T>
   not to naming. [0018](../../claude_audits/done/0018-the-compile-error-metric-cannot-see-silent-failures.md)
   and [0053](../../claude_audits/done/0053-the-gate-compares-counts-not-names.md)
   already make this argument.
-* **No test asserts injectivity.** There is no check anywhere that the set of
-  emitted item names in a module has the same cardinality as the set of Java
-  entities that produced it. Such a check is cheap and would have caught §2, §4
-  and §5 mechanically, without anyone having to think of the collision.
+* **Only some tests assert injectivity.** The package-peer batch fixture now
+  asserts emitted `AItem`/`BItem` source-item cardinality and cross-owner
+  absence, which covers the concrete same-simple-name source collision. The
+  broader generated-module invariant is still not first-class: most tests do
+  not compare the full set of emitted item identities with the Java entities
+  that produced them.
 * **The right key was built and not adopted.** 0009 built
   `JavaCallableKey`; the surrounding type identity was never given the same
   treatment, so the key's `owner: String` is itself a package-free simple name.
@@ -860,9 +1217,10 @@ adjacent nested type path boundaries are preserved, declared method names are
 allocated against occupied constructor/method names, descendant aliases are
 qualified for nested type references, and the boxed dyn-trait nested-name route
 uses `normalize_emitted_java_type_name`. A 2026-08-25 follow-up also pinned the
-batch analysis maps directly: `batch_analysis_keys_keep_same_simple_name_package_peers_distinct`
-asserts that `UsageFacts::methods_by_java_key` and `SignaturePlan` both keep
-`a.Item::who` and `b.Item::who` under Java-owner keys, not `Item` or emitted
+batch analysis identity boundary:
+`batch_analysis_keys_keep_same_simple_name_package_peers_distinct` asserts
+through `UsageFacts::source_method_usage_by_java_key` and `SignaturePlan` that
+`a.Item::who` and `b.Item::who` stay under Java-owner keys, not `Item` or emitted
 `AItem`/`BItem`. The remaining live problem is broader: there is still no
 first-class package-aware Java type identity object carried through the whole
 pipeline.
@@ -1054,12 +1412,12 @@ so `a.Mapper::tag`, `b.Mapper::tag`, `K.AB::tag`, and `K.A.B::tag` stay distinct
 at the plan boundary. Regression:
 `method_reference_plan::tests::method_reference_owner_preserves_package_and_nested_identity`.
 
-Follow-up 2026-08-25: `SignaturePlan`'s boolean source-method presence probe now
-uses the same unique-match path as the lookup helpers. The direct lookup helpers
-already failed closed when a bare owner such as `Item` matched both `a.Item` and
-`b.Item`, but `has_method_signature_by_base_name_accepting_arity` still used
-`.any(...)` and could report that a method existed for the ambiguous simple
-owner. Exact package-qualified owners still resolve. Regression:
+Follow-up 2026-08-25, updated 2026-09-10: `SignaturePlan`'s boolean
+source-method presence probe now uses the same unique-match path as the lookup
+helpers. The direct lookup helpers already failed closed when a bare owner such
+as `Item` matched both `a.Item` and `b.Item`; the former `.any(...)` presence
+probe defect is fixed too, so ambiguous simple owners no longer report a
+method. Exact package-qualified owners still resolve. Regression:
 `signature::tests::method_signature_presence_fails_closed_for_ambiguous_simple_package_owner`.
 
 Follow-up 2026-08-25: batch erased-object display support no longer leaks
@@ -1475,9 +1833,10 @@ path. Regression:
 
 Follow-up 2026-08-29: declaration-scoped usage lookups moved another step away
 from `UsageMethodKey { type_name, method_name }` string reconstruction.
-`UsageFacts` now exposes `source_method_usage_for_owner(JavaOwnerKey, method)`;
-`storage_strategy`, `semantic_analysis`, and `signature` use Java-callable keys
-when they already have `TypeDecl`/`MethodDecl` context. `aliasing` now uses
+`UsageFacts` now has a crate-local
+`source_method_usage_for_owner(JavaOwnerKey, method)` query; `storage_strategy`,
+`semantic_analysis`, and `signature` use Java-callable keys when they already
+have `TypeDecl`/`MethodDecl` context. `aliasing` now uses
 `JavaCallableKey::resolved_source_method` for resolved receiver-mutating calls,
 so overload identity, erased argument types, and staticness decide whether the
 call mutates its receiver. This fixes the live case where a read-only overload
@@ -1780,6 +2139,21 @@ planning, so all four `summary_source` slot-shape tests pass. Regressions:
 `slot_shape_design::summary_source_overloads_get_one_rust_name_from_every_path`,
 and `slot_shape_design::a_summary_source_type_gets_no_unmodelled_import_stub`.
 
+Follow-up 2026-09-09: the resolved source-summary static fallback now accepts
+package-qualified receiver syntax such as `dep.Util.make()` through the same
+`SourceContextOwnerKey` candidate path used by unresolved source calls, while
+preserving the local/field shadowing guard. This closes another small owner-key
+split without changing the broader string-owner model. Regressions:
+`lower::tests::resolved_static_fallback_accepts_package_qualified_receiver_owner`
+and
+`lower::tests::resolved_static_fallback_rejects_shadowed_package_qualified_receiver_owner`.
+The unresolved source-summary static fallback now uses that same candidate
+builder too, so package-qualified receiver syntax is no longer a second
+bare-variable-only owner path. Regressions:
+`lower::tests::source_context_static_fallback_accepts_package_qualified_receiver_owner`
+and
+`lower::tests::source_context_static_fallback_rejects_shadowed_package_qualified_receiver_owner`.
+
 Follow-up 2026-09-07:
 `source_overloads_with_colliding_type_suffixes_get_distinct_rust_names` and
 `source_generic_class_preserves_type_params_and_interface_bounds` were stale
@@ -1793,11 +2167,22 @@ centralize same-crate fallback owner spelling, but callers outside the crate can
 no longer rebuild static owner identity from arbitrary string text through this
 API.
 
-Follow-up 2026-09-07: the raw source-owner key construction surface is
-crate-local too. `JavaOwnerKey`, `source_method_for_owner`, and
-`resolved_source_method` remain available to internal resolver/lowering paths,
-while the public callable-key constructor stays on `source_method_for_type`,
-which derives owner identity from a `TypeDecl`.
+Follow-up 2026-09-07, updated 2026-09-10: the raw source-owner key construction
+surface is crate-local too. `JavaOwnerKey`, `source_method_for_owner`, and
+`resolved_source_method` remain available to internal resolver/lowering paths.
+The source callable-key constructors that derive owner identity from `TypeDecl`
+are crate-local as well, so arbitrary external callers cannot construct source
+callable identity from either owner strings or declarations.
+
+Follow-up 2026-09-10: `SignaturePlan::has_method_signature_by_base_name_accepting_arity`
+and `SignaturePlan::method_signature_by_base_name_accepting_arity` are
+crate-local. Lowering can still use the unique base-name compatibility probes,
+but the non-injective Rust-name/base-name lookup is no longer public API.
+Follow-up cleanup narrowed the remaining base-name overload-family probes
+(`method_signature_by_base_name_and_arity`,
+`method_signature_by_base_name_and_arg_types`, and
+`method_signature_by_base_name_and_arg_types_with_facts`) to crate-local too;
+`slot_shape_design` no longer calls those compatibility probes directly.
 
 Follow-up 2026-09-07: source method Rust-name helpers are crate-local too.
 Usage, exception, inheritance, and lowering still share `source_method_rust_name`
@@ -1822,11 +2207,26 @@ regressions:
 `slot_shape_design::cotranslated_same_simple_name_package_peers_keep_package_identity`,
 and `slot_shape_design::context_static_string_constant_owner_stays_sibling_source_type`.
 
-Follow-up 2026-09-07: the legacy Rust-name usage-family map is crate-local.
-`UsageFacts::methods_by_rust_name` is still maintained for internal
-compatibility scans and the `CallableAnalysis` shell, but integration tests and
-external callers must use Java-keyed source-method accessors instead of
-depending on the non-injective map directly.
+Follow-up 2026-09-07, updated 2026-09-10: the legacy Rust-name usage-family map
+is private to `usage.rs`. `UsageFacts::methods_by_rust_name` is still
+maintained for internal compatibility scans, but `CallableAnalysis` reaches it
+through `UsageFacts::rust_name_method_entries`, and integration tests/external
+callers must use Java-keyed source-method accessors instead of depending on the
+non-injective map directly.
+
+Follow-up 2026-09-10: `call_plan::external_call_has_thrown_effect_for_receiver`
+is crate-local. The exact rust-name-mapped external-pack predicate is tested
+beside `call_plan`; integration coverage stays on the public fallibility
+fixpoint instead of reaching into the compatibility probe.
+
+Follow-up 2026-09-10: `call_plan::external_call_returns_rust_result` is
+crate-local. The direct facade-ABI fallibility assertions moved beside
+`call_plan`; integration coverage now checks argument shaping, target planning,
+and the public program-fallibility fixpoint instead of calling the wrapper.
+
+Follow-up 2026-09-10: `stdlib::external_facade_receiver_call_is_noop_method` is
+crate-local. Call planning still uses the facade no-op predicate internally, but
+it no longer exposes another public string-keyed method classification surface.
 
 Follow-up 2026-09-07: method-reference planning now resolves imported source
 owner aliases before rendering the Rust owner path. `Mapper::tag` with
@@ -1854,5 +2254,140 @@ can still use `method_signature_by_rust_name`,
 `constructor_signature_by_rust_name`, `method_arg_shape_by_rust_name`,
 `constructor_arg_shape_by_rust_name`, and `method_return_shape_by_rust_name`,
 but external integration tests now use source declarations or public base-name
-queries. The public exact identity surface remains `method_signature_by_java_key`
-and `method_return_shape_by_java_key`.
+queries. The former public exact Java-key signature surface is now
+test-only/crate-local; resolved return-shape recovery uses the crate-local
+`resolved_source_method_return_shape` helper.
+
+Follow-up 2026-09-09: the `slot_render::rust_name_for_java_named_type`
+compatibility wrapper is deleted. `slot_render` still uses the canonical
+projection internally, but imports it from `java_naming`; other modules now call
+`java_naming::rust_name_for_java_named_type` directly instead of routing
+Java-name identity through a slot-rendering facade. The layering guard rejects
+reintroducing the wrapper.
+
+Follow-up 2026-09-09: `java_naming::rust_name_for_java_named_type` is now
+crate-local. The last external caller was CLI facade-owner alias lookup, and
+that path already passes the final simple Java segment; it now uses that simple
+owner directly before checking manifest aliases instead of keeping the generic
+string-only type projection public. This still does not replace the internal
+model with a first-class Java type key, but it removes one more public way to
+recompute type identity from arbitrary text.
+Follow-up cleanup also narrowed the source binding and source field Rust-name
+allocators in `java_naming` to crate-local, keeping source-name collision policy
+centralized without exporting those string-projection helpers as crate API.
+
+Follow-up 2026-09-09: context type-key lookup no longer keeps parallel
+type-only and type-plus-program collector trees. Ordinary and emitted context
+lookups now collect `(TypeDecl, Program)` matches once and derive type-only
+answers from that result, so exact/alias/simple ambiguity handling has one
+owner-aware implementation per matching policy.
+
+Follow-up 2026-09-09: call-graph/fallibility source callable keys now use
+`CallableKey::source_method_for_type` and
+`CallableKey::source_constructor_for_type`. Callers that already hold a
+`TypeDecl` no longer rebuild the owner string with `ty.name.clone()` before
+asking for callable identity. The older string-owner constructors remain for
+inherited/compatibility paths that only have a resolved owner spelling.
+Follow-up cleanup narrowed those source callable constructors to crate-local:
+they remain the internal way to avoid ad hoc source owner strings, but external
+callers no longer get public constructors for source callable identity.
+
+Follow-up 2026-09-09: the package-qualified static-constant batch regression now
+also asserts that `Main.java` does not receive either historical ambiguous alias
+spelling (`pub type Item = AItem;` or `pub type Item = BItem;`). The ambiguity
+filter already suppressed those aliases; the test now pins the actual old failure
+shape rather than only checking for a stray `pub struct Item;`.
+
+Follow-up 2026-09-09: `ProgramExceptionPlan::method_plan` no longer falls back
+from the canonical source-method key to `(ty.name, method.name)`. The plan's only
+producer stores `(ty.name, source_method_rust_name(method))`, so the Java-name
+fallback was stale and could silently select a wrong entry for renamed or
+overloaded methods. Regression:
+`exception_plan::tests::method_plan_uses_only_canonical_source_method_key`.
+
+Codex follow-up 2026-09-10: `JavaCallableKey`, `JavaCallableSlotKey`, their
+method/slot owner/name accessors, and the method-only callable kind/staticness
+enums are crate-local now. `UsageFacts::method_usage_by_key` and
+`UsageFacts::constructor_usage_by_key` were narrowed to crate-local as well, so
+external users can no longer treat arbitrary string-key lookup as public usage
+identity. The internal migration shell still uses these exact lookups where it
+owns the key. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+Codex follow-up cleanup also narrowed `UsageFacts::method_entries`,
+`constructor_entries`, `method_usages`, and `constructor_usages` to crate-local.
+The last integration test that used method traversal now asks for the specific
+source declaration via `source_method_usage(ty, method)`, matching the
+declaration-aware boundary instead of scanning all usage records.
+Codex follow-up cleanup added `facts::FieldKey::named` and
+`facts::FieldKey::source_field`. Source-derived trivial-accessor field facts,
+field-nullability facts, parsed-source field declaration facts, folded source
+constant facts, external-coverage inferred field facts, and builtin JDK field
+facts now construct field identity through that named boundary instead of local
+two-string `FieldKey` literals. Later cleanup moved the remaining integration
+fixtures through `FieldKey::named(...)` as well, and private `FieldKey` payload
+fields now enforce that boundary.
+Follow-up cleanup extended that same boundary to external facts and production
+external-pack expansion: unsupported-field rows, trivial accessor rows, field
+rows, field-nullability rows, modeled pack fields, modeled field values,
+unsupported modeled fields, and builtin pack field-nullability seeds now all
+use `FieldKey::named(...)` instead of local field-key literals. Test fixtures
+now use named constructors even when the fact payload is the subject under test.
+Follow-up cleanup added `facts::TypeKey::named` plus
+`TypePattern::exact`/`TypePattern::erased`. Production type-pattern construction
+in external API facts and JDK facade ABI seeds no longer builds local
+`TypeKey { type_name: ... }` literals; the remaining literal type keys are
+test/fixture payloads or inside the owner constructors themselves.
+Follow-up cleanup added `facts::MemberName::named` and moved the internal
+`facts::CallableKey` constructors through `TypeKey::named` and
+`MemberName::named`. The callable-key constructors still preserve the existing
+string payloads, but the owner/member literal construction is centralized at the
+same boundary as field and type-pattern keys.
+Follow-up cleanup added read accessors for `facts::TypeKey`,
+`facts::MemberName`, and `facts::CallableKey`, then migrated production fact
+lookups, facade ABI matching, and builtin external-pack key matching away from
+direct `.owner.type_name`, `.member.0`, and callable-parameter reads. The
+layering guard now rejects those read patterns in the migrated production
+modules. A follow-up replaced the remaining external-pack alias-expansion owner
+mutation with `CallableKey::with_owner_type`, so the migrated modules no longer
+reach into callable-key owner/member/type-pattern payloads for lookup or alias
+rewrites.
+Follow-up cleanup made `facts::TypeKey.type_name`, `facts::CallableKey`'s raw
+owner/member/kind/staticness/arity/parameter fields, and the `MemberName` tuple
+payload private. Callers still construct and query callable keys through the
+named factories/accessors, and construct type patterns through
+`TypePattern::exact`/`erased`, but cannot fabricate fact-table callable/type
+identity by assigning the raw fields directly.
+Follow-up cleanup fixed the arity-only call-target fallback for normalized
+static utility owners. Lowercase recovered owners such as `math.pow(...)`,
+`double.isInfinite(...)`, and `system.arraycopy(...)` now render through the
+canonical owner key (`Math`, `Double`, `System`) when no local/field binding
+shadows them, while `foo.toString()` remains an instance fallback instead of
+being promoted to a fabricated static `Foo::to_string` call. Native static
+rendering remains enabled when the loaded stdlib facts know the native owner
+family, so ABI-backed `Math.pow` still uses `NativeJavaStatic`. Guard:
+`slot_shape_design::call_plan_recovers_normalized_static_utility_owner_receivers`.
+Follow-up cleanup moved lower.rs source-method result/fallibility identity
+queries behind `CallableAnalysis::source_method_identity_returns_result`.
+Lowering no longer constructs `CallableKey::method_identity(...)` directly for
+raw `(type_name, method_name)` pairs; the remaining bridge is centralized in
+`CallableAnalysis` while the broader string-key identity model remains open.
+Guard: `layering::callable_analysis_shell_reaches_lowering_context`.
+Follow-up cleanup also moved the resolved-source super-call fallibility query
+behind `CallableAnalysis::resolved_source_method_returns_result`. Lowering no
+longer fabricates `CallableKey::resolved_method(...)` directly; resolved owner
+identity still flows through the existing key model, but the lowerer now asks
+the callable-analysis shell instead of constructing that key itself. Guard:
+`layering::callable_analysis_shell_reaches_lowering_context`.
+Follow-up cleanup moved constructor fallibility queries behind
+`CallableAnalysis` too. Source constructor emission now asks
+`source_constructor_returns_result`, and constructor expressions ask
+`constructor_expr_returns_result` for either a resolved source constructor or an
+external constructor boundary. `lower.rs` no longer constructs
+`CallableKey::source_constructor_for_type`, `CallableKey::resolved_constructor`,
+or `CallableKey::ExternalConstructor` directly.
+Follow-up cleanup added named `usage::CallableKey::external_method` and
+`external_constructor` constructors, then moved call-graph construction,
+callable-analysis fallibility queries, and the external fallibility integration
+fixture off raw external callable enum literals. Pattern matches that inspect
+existing graph nodes still destructure the enum; key creation now has a named
+boundary for the external-callable string fields.

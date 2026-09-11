@@ -4138,7 +4138,10 @@ class JavaArraysStreamRangeCatchUse {
     assert!(
         translation
             .rust
-            .contains("Err(JavaException::new(\"IllegalArgumentException\"")
+            .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
+            && !translation
+                .rust
+                .contains("Err(JavaException::new(\"IllegalArgumentException\"")
             && translation
                 .rust
                 .contains("Err(JavaException::new(\"ArrayIndexOutOfBoundsException\"")
@@ -4147,7 +4150,7 @@ class JavaArraysStreamRangeCatchUse {
                 .contains("Ok(&__java_arrays_source[__java_arrays_from..__java_arrays_to]) }?.iter()")
             && !translation
                 .rust
-                .contains("panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"IllegalArgumentException\", \"fromIndex > toIndex\""),
+                .contains("panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"ArrayIndexOutOfBoundsException\", \"fromIndex > toIndex\""),
         "{}",
         translation.rust
     );
@@ -12349,6 +12352,106 @@ class QueuePutUse {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn array_blocking_queue_add_requires_bounded_queue_support() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.ArrayBlockingQueue;
+
+class ArrayBlockingQueueAddUse {
+    static boolean send(ArrayBlockingQueue<String> queue, String value) {
+        return queue.add(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"Java ArrayBlockingQueue.add(value) requires bounded-capacity queue support\")"
+        ) && !translation.rust.contains("queue.push(value);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "array_blocking_queue_add_requires_bounded_queue_support",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "Java ArrayBlockingQueue.add(value) requires bounded-capacity queue support",
+    );
+}
+
+#[test]
+fn array_blocking_queue_offer_requires_bounded_queue_support() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.ArrayBlockingQueue;
+
+class ArrayBlockingQueueOfferUse {
+    static boolean send(ArrayBlockingQueue<String> queue, String value) {
+        return queue.offer(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"Java ArrayBlockingQueue.offer(value) requires bounded-capacity queue support\")"
+        ) && !translation.rust.contains("queue.push(value);"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "array_blocking_queue_offer_requires_bounded_queue_support",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "Java ArrayBlockingQueue.offer(value) requires bounded-capacity queue support",
+    );
+}
+
+#[test]
+fn priority_queue_comparator_constructor_requires_comparator_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueComparatorUse {
+    static PriorityQueue<Integer> queue(Comparator<Integer> comparator) {
+        return new PriorityQueue<Integer>(comparator);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"Java PriorityQueue(Comparator) requires comparator-backed priority-queue support\")"
+        ) && !translation.rust.contains("return comparator;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "priority_queue_comparator_constructor_requires_comparator_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
     );
 }
 
@@ -20783,7 +20886,7 @@ class BaseFormat {
 }
 
 #[test]
-fn source_subclass_constructor_flows_to_flattened_superclass_slot() {
+fn source_subclass_constructor_to_superclass_slot_is_loud_not_flattened() {
     let translation = translate_source(
         r#"
 class BaseOutputFormat {
@@ -20829,7 +20932,7 @@ class UsesOutputFormat {
         translation.rust
     );
     cargo_check_generated_modules_fails_with(
-        "source_subclass_constructor_flows_to_flattened_superclass_slot",
+        "source_subclass_constructor_to_superclass_slot_is_loud_not_flattened",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -23392,10 +23495,7 @@ fn pattern_erased_display_uses_pattern_text() {
 fn display_capable_external_enum_constant_does_not_emit_placeholder_display() {
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "ExternalEnum".to_string(),
-            field_name: "A".to_string(),
-        },
+        field: FieldKey::named("ExternalEnum", "A"),
         field_type: Some(JavaType::Named {
             name: "ExternalEnum".to_string(),
             args: Vec::new(),
@@ -29571,6 +29671,15 @@ class ResourceInputStreamReadClose {
             && translation.rust.contains("buffer.as_mut_slice()")
             && translation.rust.contains(".close()")
             && translation.rust.contains("pub fn read_3")
+            && translation
+                .rust
+                .contains("let __java_buffer_len = _arg0.len() as i32;")
+            && translation
+                .rust
+                .contains("_arg2 > __java_buffer_len - _arg1")
+            && translation
+                .rust
+                .contains("JavaException::new(\"IndexOutOfBoundsException\"")
             && translation.rust.contains("pub fn close")
             && !translation.rust.contains("no method named `read`")
             && !translation.rust.contains("no method named `close`"),
@@ -34591,7 +34700,7 @@ fn documents_external_indexed_accessors_gap() {
 }
 
 #[test]
-fn documents_exception_subclass_catch_order_gap() {
+fn exception_subclass_catch_order_uses_hierarchy_guards() {
     let translation = translate_source(&idiom_gap("ExceptionSubclassCatchOrder.java"));
 
     assert!(
@@ -34624,7 +34733,7 @@ fn documents_exception_subclass_catch_order_gap() {
 }
 
 #[test]
-fn documents_exception_base_catch_covers_subclass_gap() {
+fn exception_base_catch_covers_subclass_with_hierarchy_guard() {
     let translation = translate_source(&idiom_gap("ExceptionBaseCatchCoversSubclass.java"));
 
     assert!(
@@ -34652,7 +34761,7 @@ fn documents_exception_base_catch_covers_subclass_gap() {
 }
 
 #[test]
-fn documents_exception_cause_chaining_gap() {
+fn exception_cause_chaining_uses_java_exception_cause() {
     let translation = translate_source(&idiom_gap("ExceptionCauseChaining.java"));
 
     assert!(
@@ -34895,7 +35004,7 @@ class UncheckedThrowOnly {
 }
 
 #[test]
-fn documents_exception_rethrow_specific_gap() {
+fn exception_rethrow_specific_preserves_java_exception() {
     let translation = translate_source(&idiom_gap("ExceptionRethrowSpecific.java"));
 
     assert!(
@@ -35102,10 +35211,7 @@ fn external_throwing_call_in_try_uses_external_effect_facts() {
 fn external_field_throwing_call_in_try_uses_external_field_facts() {
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "Registry".to_string(),
-            field_name: "DEFAULT_VALIDATOR".to_string(),
-        },
+        field: FieldKey::named("Registry", "DEFAULT_VALIDATOR"),
         field_type: Some(JavaType::Named {
             name: "Validator".to_string(),
             args: Vec::new(),
@@ -35116,10 +35222,7 @@ fn external_field_throwing_call_in_try_uses_external_field_facts() {
     facts
         .external_field_value_facts
         .push(ExternalFieldValueFact {
-            field: FieldKey {
-                type_name: "Registry".to_string(),
-                field_name: "DEFAULT_VALIDATOR".to_string(),
-            },
+            field: FieldKey::named("Registry", "DEFAULT_VALIDATOR"),
             rust_value: "Validator".to_string(),
             provenance: FactProvenance::UserOverride,
         });
@@ -35577,7 +35680,7 @@ class GuardedNullableCopyConstructorCatch {
 }
 
 #[test]
-fn documents_exception_runtime_checked_hierarchy_gap() {
+fn exception_runtime_checked_hierarchy_uses_hierarchy_guards() {
     let translation = translate_source(&idiom_gap("ExceptionRuntimeCheckedHierarchy.java"));
 
     assert!(
@@ -36557,10 +36660,7 @@ class UsesInheritedExternalStaticConstant {
 "#;
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "ExternalBaseWriter".to_string(),
-            field_name: "DEFAULT_QUEUE_SIZE".to_string(),
-        },
+        field: FieldKey::named("ExternalBaseWriter", "DEFAULT_QUEUE_SIZE"),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,

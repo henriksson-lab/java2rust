@@ -18,6 +18,11 @@ The project has real inference machinery:
 - `src/usage.rs` — a real call graph (`CallGraph`, `CallableKey`,
   `CallGraphEdge`) with usage facts.
 
+Follow-up 2026-09-10: the shared SCC utility in `src/graph.rs`
+(`StronglyConnectedComponents` and `strongly_connected_components`) is
+crate-local. It remains live in `signature.rs` and `semantic_analysis.rs`, but
+is no longer exported as public crate API.
+
 None of `lattice`, `fact_saturation`, or `graph` is referenced from
 `src/lower.rs`:
 
@@ -220,6 +225,18 @@ Two of the hardcoded library predicates are moved: the JDK exception-supertype
 set and the `java.io` input-stream facade set now live in `src/javalibs.rs` as
 named constants with one query and one test each, and `lower.rs` asks the
 library module instead of embedding the names.
+Follow-up 2026-09-10: the Broad IOUtils program detector is crate-local too;
+its direct import/qualified-use assertions live beside `javalibs.rs`, while
+integration coverage stays on the public platform-facade support item and
+generated output.
+Follow-up 2026-09-10: five remaining `javalibs` helper queries used only by
+crate internals are crate-local as well:
+`facade_sequence_element_type`,
+`generic_facade_interface_erases_to_named_rust_type`,
+`native_java_static_owner_alias`, `preferred_static_owner_alias`, and
+`wildcard_import_static_type_aliases`. The live callers remain in
+type/slot/signature lowering, call planning, stdlib, and import handling; none
+needs these helpers as public crate API.
 
 The rest of the list in this file needs re-reading, because it conflates two
 different things:

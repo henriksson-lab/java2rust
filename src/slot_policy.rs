@@ -11,7 +11,7 @@ use crate::shape_projection::{
     value_shape_for_java_type,
 };
 use crate::slot_shape::RustSlotShape;
-use crate::usage::{BindingUse, MethodUsageFacts, UsageConstructorKey, UsageFacts};
+use crate::usage::{BindingUse, MethodUsageFacts, UsageFacts};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BorrowedContentKind {
@@ -125,11 +125,7 @@ pub fn constructor_param_borrowed_content_policy_with_effective_facts(
     {
         return None;
     }
-    let rust_name = ctor.rust_name.clone().unwrap_or_else(|| "new".to_string());
-    let ctor_usage = usage.constructors.get(&UsageConstructorKey {
-        type_name: ty.name.clone(),
-        rust_name,
-    })?;
+    let ctor_usage = usage.source_constructor_usage(ty, ctor)?;
     if usage_allows_borrowed_content(ctor_usage, param) {
         borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
     } else {
@@ -283,11 +279,7 @@ fn method_return_allows_borrowed_param_content(
     let Some(method_usage) = usage.source_method_usage(ty, method) else {
         return false;
     };
-    let Some(binding) = method_usage.binding_for_declaration_with_name_fallback(
-        param.binding.as_ref(),
-        &param.source_name,
-        param.binding.is_none(),
-    ) else {
+    let Some(binding) = method_usage.binding_facts_for_param(param) else {
         return false;
     };
     if param.binding.is_some() {
@@ -580,11 +572,7 @@ fn collect_exact_returned_var_names_from_stmts<'a>(
 }
 
 fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param: &Param) -> bool {
-    let Some(binding) = usage.binding_for_declaration_with_name_fallback(
-        param.binding.as_ref(),
-        &param.source_name,
-        param.binding.is_none(),
-    ) else {
+    let Some(binding) = usage.binding_facts_for_param(param) else {
         return false;
     };
     !binding.uses.is_empty()
@@ -709,27 +697,17 @@ mod tests {
 
     fn usage_with_param_facts(binding: BindingId, uses: Vec<BindingUse>) -> UsageFacts {
         let mut usage = UsageFacts::default();
-        let mut method_usage = MethodUsageFacts::default();
         let ty = owner_type();
         let method = private_static_returning_param_method(string_param(binding.clone()));
-        method_usage.bindings_by_id.insert(
-            binding.clone(),
-            BindingUseFacts {
-                name: "value".to_string(),
-                binding: Some(binding),
-                java_ty: JavaType::String,
-                uses,
-            },
-        );
-        let legacy_key = UsageMethodKey {
-            type_name: "Owner".to_string(),
-            method_name: "borrow".to_string(),
-        };
-        usage.methods.insert(legacy_key, method_usage.clone());
-        usage.methods_by_java_key.insert(
-            crate::java_signature::JavaCallableKey::source_method_for_type(&ty, &method),
-            method_usage,
-        );
+        let method_usage = MethodUsageFacts::from_exact_binding_facts([BindingUseFacts {
+            name: "value".to_string(),
+            binding: Some(binding),
+            java_ty: JavaType::String,
+            uses,
+        }]);
+        let legacy_key = UsageMethodKey::current_rust_method_name("Owner", "borrow");
+        usage.insert_method_usage(legacy_key, method_usage.clone());
+        usage.insert_source_method_usage(&ty, &method, method_usage);
         usage
     }
 
@@ -738,51 +716,31 @@ mod tests {
         uses: Vec<BindingUse>,
     ) -> UsageFacts {
         let mut usage = UsageFacts::default();
-        let mut method_usage = MethodUsageFacts::default();
-        method_usage.bindings.insert(
-            "type".to_string(),
-            BindingUseFacts {
-                name: "type".to_string(),
-                binding: None,
-                java_ty: JavaType::String,
-                uses,
-            },
-        );
+        let method_usage = MethodUsageFacts::from_idless_compatibility_facts([BindingUseFacts {
+            name: "type".to_string(),
+            binding: None,
+            java_ty: JavaType::String,
+            uses,
+        }]);
         let ty = owner_type();
-        let legacy_key = UsageMethodKey {
-            type_name: "Owner".to_string(),
-            method_name: "borrow".to_string(),
-        };
-        usage.methods.insert(legacy_key, method_usage.clone());
-        usage.methods_by_java_key.insert(
-            crate::java_signature::JavaCallableKey::source_method_for_type(&ty, method),
-            method_usage,
-        );
+        let legacy_key = UsageMethodKey::current_rust_method_name("Owner", "borrow");
+        usage.insert_method_usage(legacy_key, method_usage.clone());
+        usage.insert_source_method_usage(&ty, method, method_usage);
         usage
     }
 
     fn idless_usage_with_name_facts(method: &MethodDecl, uses: Vec<BindingUse>) -> UsageFacts {
         let mut usage = UsageFacts::default();
-        let mut method_usage = MethodUsageFacts::default();
-        method_usage.bindings.insert(
-            "value".to_string(),
-            BindingUseFacts {
-                name: "value".to_string(),
-                binding: None,
-                java_ty: JavaType::String,
-                uses,
-            },
-        );
+        let method_usage = MethodUsageFacts::from_idless_compatibility_facts([BindingUseFacts {
+            name: "value".to_string(),
+            binding: None,
+            java_ty: JavaType::String,
+            uses,
+        }]);
         let ty = owner_type();
-        let legacy_key = UsageMethodKey {
-            type_name: "Owner".to_string(),
-            method_name: "borrow".to_string(),
-        };
-        usage.methods.insert(legacy_key, method_usage.clone());
-        usage.methods_by_java_key.insert(
-            crate::java_signature::JavaCallableKey::source_method_for_type(&ty, method),
-            method_usage,
-        );
+        let legacy_key = UsageMethodKey::current_rust_method_name("Owner", "borrow");
+        usage.insert_method_usage(legacy_key, method_usage.clone());
+        usage.insert_source_method_usage(&ty, method, method_usage);
         usage
     }
 

@@ -81,7 +81,9 @@ a metric that a silent drop would score better.
 `claude_audits/done/`. Re-run the corpora; those files' real errors were
 previously invisible, so the biojava total in section 1 is now understated.
 
-Then three things that distort the signal:
+The following list is historical. The parse-error and unmodelled-library items
+now point at `done/` audits above; keep it as background for why the gate was
+changed, not as the current work queue.
 
 1. **Fix the two parse errors** ([0012](done/0012-unsupported-diagnostics-emit-invalid-rust.md),
    [0013](done/0013-nested-type-names-unmangled-in-downcast.md)). A file that fails to

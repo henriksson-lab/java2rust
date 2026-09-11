@@ -686,10 +686,7 @@ pub fn parse_external_facts(source: &str) -> ExternalFactsParse {
                     .unsupported_external_field_facts
                     .push(UnsupportedExternalFieldFact {
                         pack_name: (*pack_name).to_string(),
-                        field: FieldKey {
-                            type_name: (*type_name).to_string(),
-                            field_name: (*field_name).to_string(),
-                        },
+                        field: FieldKey::named(*type_name, *field_name),
                         reason: reason.join(" "),
                         provenance: FactProvenance::UserOverride,
                     });
@@ -1075,15 +1072,9 @@ fn push_trivial_getter_fact(
         return;
     };
     facts.trivial_accessor_facts.push(TrivialAccessorFact {
-        method: MethodKey {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        },
+        method: MethodKey::named(type_name, method_name),
         kind: TrivialAccessorKind::Getter {
-            field: FieldKey {
-                type_name: type_name.to_string(),
-                field_name: field_name.to_string(),
-            },
+            field: FieldKey::named(type_name, field_name),
         },
         inline_policy: metadata.inline_policy,
         provenance: FactProvenance::UserOverride,
@@ -1104,15 +1095,9 @@ fn push_trivial_setter_fact(
         return;
     };
     facts.trivial_accessor_facts.push(TrivialAccessorFact {
-        method: MethodKey {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        },
+        method: MethodKey::named(type_name, method_name),
         kind: TrivialAccessorKind::Setter {
-            field: FieldKey {
-                type_name: type_name.to_string(),
-                field_name: field_name.to_string(),
-            },
+            field: FieldKey::named(type_name, field_name),
             param_name: param_name.to_string(),
             fluent: metadata.fluent,
         },
@@ -1174,10 +1159,7 @@ fn push_method_effect_fact(
     }
 
     facts.method_effect_facts.push(MethodEffectFact {
-        method: MethodKey {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        },
+        method: MethodKey::named(type_name, method_name),
         receiver_mutability,
         return_nullability,
         thrown,
@@ -1200,14 +1182,8 @@ fn push_recursion_fact(
         return;
     };
     facts.recursion_facts.push(RecursionFact {
-        method: MethodKey {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        },
-        calls: MethodKey {
-            type_name: calls_type.to_string(),
-            method_name: calls_method.to_string(),
-        },
+        method: MethodKey::named(type_name, method_name),
+        calls: MethodKey::named(calls_type, calls_method),
         kind,
         provenance: FactProvenance::UserOverride,
     });
@@ -1226,10 +1202,7 @@ fn push_control_flow_fact(
         return;
     };
     facts.control_flow_facts.push(ControlFlowFact {
-        method: MethodKey {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        },
+        method: MethodKey::named(type_name, method_name),
         kind,
         provenance: FactProvenance::UserOverride,
     });
@@ -1288,10 +1261,7 @@ fn push_catch_fact(
     }
 
     facts.catch_facts.push(CatchFact {
-        method: MethodKey {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        },
+        method: MethodKey::named(type_name, method_name),
         clause_index,
         types,
         assignable_from,
@@ -1478,6 +1448,7 @@ fn push_external_crate_constructor_mapping_fact(
     facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
+            pack_name: None,
             type_name: type_name.to_string(),
             arg_count,
             rust_type_name: parse_optional_name(rust_type_name),
@@ -1681,10 +1652,7 @@ fn push_external_field_fact(
     field_type: &str,
 ) {
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: type_name.to_string(),
-            field_name: field_name.to_string(),
-        },
+        field: FieldKey::named(type_name, field_name),
         field_type: Some(parse_type(field_type)),
         field_kind: ExternalFieldKind::Unknown,
         provenance: FactProvenance::UserOverride,
@@ -1704,10 +1672,7 @@ fn push_field_nullability_fact(
         return;
     };
     facts.field_nullability_facts.push(FieldNullabilityFact {
-        field: FieldKey {
-            type_name: type_name.to_string(),
-            field_name: field_name.to_string(),
-        },
+        field: FieldKey::named(type_name, field_name),
         state,
         provenance: FieldNullabilityProvenance::ExternalOverride,
     });

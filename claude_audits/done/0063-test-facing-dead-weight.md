@@ -315,8 +315,9 @@ its enums. It cannot fail except by editing the constant and the assertion out o
 step, in the same file, in the same commit.
 
 The last 15 lines of it (`field_nullability_join` cases) *are* real — that function
-is on the hot path in `signature.rs` and `semantic_analysis.rs`. Keep those,
-delete the other 64 with the descriptors they check.
+is on the hot path in `signature.rs` and `semantic_analysis.rs`. Follow-up
+2026-09-10 moved those direct cases beside `lattice.rs` and narrowed the helper
+to crate-local; the integration descriptor checks remain deleted.
 
 ---
 
@@ -412,6 +413,19 @@ and `external_api_support_passes_share_missing_return_surface_policy`.
 Two of those had stale source-string expectations that were still listed as
 `slot_shape_design` expected failures; the assertions now match the current
 implementation and pass under `tests/layering.rs`.
+The mixed unsupported-lowering test was split in the same direction:
+`unsupported_lowering_policy_owns_compile_error_placeholders` keeps the
+behavioral compile-error policy assertions in `slot_shape_design.rs`, while the
+pure source-layout guard now lives in
+`layering::unsupported_lowering_policy_stays_planned_before_lowering`.
+The neighboring pure source-layout guard
+`unsupported_compile_error_literals_are_centralized` moved wholesale to
+`tests/layering.rs`.
+`object_representation_policy_is_the_dyn_fallback_entrypoint` was split as
+well: the boxed-dyn dispatch behavior remains in `slot_shape_design.rs` as
+`dispatch_requirement_projection_policy_boxes_dyn_storage_requirements`, while
+the object-model/representation source-boundary inventory moved to
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`.
 
 Current conservative scanner result:
 

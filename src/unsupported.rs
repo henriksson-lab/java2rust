@@ -122,7 +122,7 @@ pub fn unsupported_expression_expr(kind: UnsupportedExpressionLowering) -> RustE
     unsupported_expression_message_policy(kind).compile_error_expr()
 }
 
-pub fn plan_unsupported_expression(expr: &Expr) -> Option<UnsupportedExpressionLowering> {
+pub(crate) fn plan_unsupported_expression(expr: &Expr) -> Option<UnsupportedExpressionLowering> {
     match expr {
         Expr::Lambda { .. } => Some(UnsupportedExpressionLowering::Lambda),
         Expr::MethodReference { .. } => Some(UnsupportedExpressionLowering::MethodReference),
@@ -133,7 +133,7 @@ pub fn plan_unsupported_expression(expr: &Expr) -> Option<UnsupportedExpressionL
     }
 }
 
-pub fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLowering> {
+pub(crate) fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLowering> {
     match stmt {
         Stmt::Try {
             resources,
@@ -171,7 +171,7 @@ pub fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedStatementLow
     }
 }
 
-pub fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemberLowering> {
+pub(crate) fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemberLowering> {
     match member {
         Member::Unsupported { reason, .. } => {
             Some(UnsupportedMemberLowering::ParserUnsupported(reason.clone()))
@@ -265,5 +265,76 @@ fn expression_message(kind: UnsupportedExpressionLowering) -> String {
         UnsupportedExpressionLowering::ParserUnsupported(reason) => {
             format!("unsupported Java expression: {reason}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java_ir::{ConstructorInvocationKind, TypeDecl, TypeKind};
+    use crate::parser::parse_expr;
+
+    #[test]
+    fn unsupported_planners_classify_only_unsupported_nodes() {
+        assert_eq!(
+            plan_unsupported_expression(&parse_expr("String::valueOf")),
+            Some(UnsupportedExpressionLowering::MethodReference)
+        );
+        assert_eq!(
+            plan_unsupported_expression(&parse_expr("String.class")),
+            None
+        );
+        assert_eq!(plan_unsupported_expression(&parse_expr("value")), None);
+
+        assert_eq!(
+            plan_unsupported_statement(&Stmt::Try {
+                resources: Vec::new(),
+                body: Default::default(),
+                catches: Vec::new(),
+                finally_block: None,
+            }),
+            Some(UnsupportedStatementLowering::TryCatchFinally)
+        );
+        assert_eq!(
+            plan_unsupported_statement(&Stmt::ConstructorInvocation {
+                kind: ConstructorInvocationKind::This,
+                args: Vec::new(),
+                resolved: None,
+            }),
+            Some(UnsupportedStatementLowering::ConstructorDelegation)
+        );
+        assert_eq!(
+            plan_unsupported_statement(&Stmt::Unsupported("raw parser node".to_string())),
+            Some(UnsupportedStatementLowering::ParserUnsupported(
+                "raw parser node".to_string()
+            ))
+        );
+        assert_eq!(plan_unsupported_statement(&Stmt::Break(None)), None);
+
+        assert_eq!(
+            plan_unsupported_member(&Member::Unsupported {
+                reason: "record component".to_string(),
+                span: Default::default(),
+            }),
+            Some(UnsupportedMemberLowering::ParserUnsupported(
+                "record component".to_string()
+            ))
+        );
+        assert_eq!(
+            plan_unsupported_member(&Member::Type(TypeDecl {
+                static_init_blocks: Vec::new(),
+                kind: TypeKind::Class,
+                name: "Nested".to_string(),
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                modifiers: Vec::new(),
+                extends: None,
+                implements: Vec::new(),
+                permits: Vec::new(),
+                members: Vec::new(),
+                span: Default::default(),
+            })),
+            None
+        );
     }
 }

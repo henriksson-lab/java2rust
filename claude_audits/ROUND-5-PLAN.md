@@ -16,7 +16,7 @@ say, and one is *less* closed than `NEXT-BATCH.md` records.
 | **0002** | aliasing → clone | 0002a done; `src/aliasing.rs` reports `observable_alias` (1 hit / 196 files) | nothing to *repair* — needs 0002b |
 | **0002b** | design | storage strategy and `storage_strategy::Escape` now exist; the old unused `EscapeLatticeValue` descriptor was deleted under 0062 | remaining shared-representation steps |
 | **0006** | 5 approximations | closed on soundness; `statement_suffix_*` = 0; queries are binding-keyed | 2 `HashSet<String>` overrides on `LowerCtx` (lines 259–260), load-bearing for **expression-bodied lambdas only** |
-| **0007** | 58% `Raw` | `Shaped` exists, 4 families migrated. **600 `Raw` / 1038**, 12 `Shaped`, 52 round trips (39 in `coercion.rs`), 56 distinct fragments | `OptionalProjected`/`MutBorrowed`; remaining clone producers; delete the comment-matching arm; the lint |
+| **0007** | 58% `Raw` | `Shaped` exists, 4 families migrated. **600 `Raw` / 1038**, 12 `Shaped`, 52 round trips (39 in `coercion.rs`), 56 distinct fragments | `OptionalProjected`/`MutBorrowed`; reduce generic rendered clone-recovery fallback; the lint |
 | **0008** | machinery unreachable | steps 1–3 done. `lower.rs` **158** `fn … -> bool`, `stdlib.rs` **195**, `lattice` refs in `lower.rs` still 0 (deliberate) | step 4 — the hardcoded library predicates. The mass is in `stdlib.rs`, not `lower.rs` |
 | **0009** | identity = Rust name | `JavaCallableKey`/`JavaCallableSlotKey` exist in `src/java_signature.rs` and are consumed by **exactly one file** (`inherited_members.rs`) | adopt it as *the* identity: `usage::CallableKey::Method` still carries a Rust name, and `lower.rs` still has 20 `.name ==` comparisons |
 | **0010** | 3 disagreeing deciders | fixpoint exists and is primary | **three residual writers**: `exception_plan.rs:424` (`plan_method_exceptions`), `representation_lowering.rs:1528` (`\|=` over trait implementors), `call_plan.rs:1549–1567,2237` (direct `method_has_thrown_exceptions`). No `?`-site invariant |
@@ -47,13 +47,22 @@ leaking through the same hole. `g` emits `o.is::<String>() && s.is_empty()`.
 Both are `E0425`, confirmed by `rustc`. The rule that landed is "an `instanceof`
 that *is* an `if` condition"; everything else drops the binding.
 
+Follow-up 2026-09-09: this residual is stale for valid expression-scoped
+patterns. Ternary and `&&` value positions now lower through
+`downcast_ref::<T>()` with the pattern variable scoped inside `match`/closure
+arms, and `tests/differential/InstanceofPatternExpression.java` pins the Java
+oracle. The `boolean ok = o instanceof String s; return ok ? s.length() : 0;`
+example is rejected by `javac`; the pattern variable does not escape the
+initializer expression in Java either.
+
 Also probed, and both correctly **loud** (no action needed this round): record
 deconstruction patterns and `case X when` guards emit `compile_error!`.
 
-> **Out of scope but worth filing.** `record Pt(int x, int y)` translates to a
-> constructor that takes `x`/`y` and returns `Pat2Pt { x: 0, y: 0 }`, with
-> accessors that are `unimplemented!`. The constructor is a **silent** wrong
-> answer. Not one of the ten; file it.
+Follow-up 2026-09-09: the adjacent record-component silent wrong answer is fixed.
+`record_component_members` now synthesizes accessors that return `this.component`,
+and the canonical record constructor appends `this.component = component`
+assignments, including after a compact constructor body. Pinned by
+`tests/differential/RecordCanonicalConstructor.java`.
 
 ---
 
@@ -144,6 +153,9 @@ and the grammar-coverage diff in `AUDIT-BACKLOG.md` shows the type-level kinds
 handled.
 
 ### 1-b. 0021: bind the pattern variable in expression positions
+
+Status 2026-09-09: stale for the valid ternary/`&&` cases; now pinned by
+`tests/differential/InstanceofPatternExpression.java`.
 
 **Where.** the `instanceof` lowering path (`conversion_lowering::apply_instanceof`
 and its callers in `lower.rs`).
@@ -307,10 +319,11 @@ so a producer can be tagged without auditing its consumers.
 1. **`OptionalProjected` / `MutBorrowed`** — the `.as_ref()` / `.as_mut()` /
    `.as_deref()` / `.as_deref_mut()` adapters. Last big untagged family, and
    the one Tier 5 (optional carriers) will need.
-2. **Tag the remaining clone producers, then delete** the
-   `.clone()/* TODO(translation): validate added clone */.into()` arm of
-   `rendered_expr_has_clone_recovery`. That comment is currently load-bearing
-   syntax; deleting the arm is the concrete, checkable end state.
+2. **Keep reducing generic rendered clone recovery.** The exact
+   `.clone()/* TODO(translation): validate added clone */.into()` wording is no
+   longer load-bearing; current code strips trailing block comments before
+   checking recovered clone structure. The remaining work is to tag or structure
+   more producers so the compatibility fallback can shrink further.
 3. **Retire round trips by inversion** — each surviving `rendered.ends_with(…)`
    is a shape its producer knew. 39 of the 52 are in `coercion.rs`.
 4. **Then** the anti-regression lint. Not before: added earlier it just forces
@@ -476,9 +489,10 @@ the thing the plan said to instrument.
 - **0007** — the `OptionalProjected` / `MutBorrowed` family, then the lint.
 - **0008** — decide what the external-pack manifest grammar must gain before
   budgeting the rest of step 4.
-- **New, found this round**: `record Pt(int x, int y)` emits a constructor that
-  takes its arguments and returns `Pt { x: 0, y: 0 }`, discarding them. A silent
-  wrong answer; deserves its own issue.
+- **New, found this round**: `record Pt(int x, int y)` emitted a constructor
+  that discarded its arguments and accessors that were `unimplemented!`; fixed
+  2026-09-09 by synthetic accessor/canonical-constructor bodies and pinned by
+  `RecordCanonicalConstructor`.
 
 ## One more correction, found in final verification
 

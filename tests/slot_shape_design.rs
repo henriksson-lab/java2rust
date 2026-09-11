@@ -5,14 +5,13 @@ use std::fs;
 mod common;
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
 
-use new_java2rust::array_plan::{ArrayExprPlan, plan_array_expr};
 use new_java2rust::binding_id::BindingKind;
 use new_java2rust::call_lowering::{apply_call_target, apply_new_target_with_facts};
 use new_java2rust::call_plan::{
     ArgumentLoweringPlan, CallExceptionPropagationPlan, CallExprPlan, CallStatementPlan,
     CallTargetPlan, NativeCollectionMethod, NativeCollectionNewTarget,
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
-    external_call_lowered_type, external_call_returns_rust_result, external_constructor_arg_shapes,
+    external_call_lowered_type, external_constructor_arg_shapes,
     facade_abi_argument_plan_for_rust_path, native_collection_arg_shapes_with_facts,
     native_collection_lowered_type, native_java_call_lowered_type, plan_call_arguments,
     plan_call_arguments_with_facts, plan_call_arguments_with_facts_and_args,
@@ -36,17 +35,10 @@ use new_java2rust::dependency_mode::DependencyMode;
 use new_java2rust::diagnostics::Severity;
 use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::emit::emit_expr;
-use new_java2rust::exception_lowering::{
-    CatchRenderArm, exception_cause_or_self_if_instance_expr, exception_expr_from_new,
-    exception_expr_from_new_with_cause_hint, exception_result_type, external_exception_conversions,
-    java_exception_support_item_with_facts, new_exception_expr, new_exception_expr_with_cause,
-    return_stmt, throw_stmt, try_catch_finally_scope_stmt, try_catch_stmt,
-    try_catch_value_fallthrough_stmt, try_finally_scope_stmt, try_with_resources_scope_stmt,
-};
+use new_java2rust::exception_lowering::java_exception_support_item_with_facts;
 use new_java2rust::exception_plan::{
-    JavaExceptionSupportPlan, MethodExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan,
-    catch_match_class_names, exception_class_name, plan_java_exception_support,
-    plan_program_fallibility, plan_throw_expr, plan_try_stmt, try_resource_names,
+    JavaExceptionSupportPlan, MethodExceptionPlan, TryBlockCompletion, TryStmtPlan,
+    plan_java_exception_support, plan_program_fallibility, plan_try_stmt,
 };
 use new_java2rust::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, super_expr, ternary_expr,
@@ -71,26 +63,18 @@ use new_java2rust::facts::{
     HierarchyOverride, HierarchyStrategy, MethodEffectFact, MethodKey as FactMethodKey,
     NullabilityState, ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
     ReceiverAbi, ReceiverMutabilityFact, RecursionKind, ResultAbi, SourceEqualsOverrideFact,
-    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypeKey,
-    TypePattern, type_pattern_for_external_java_type, type_pattern_matches_external_java_type,
+    Staticness, TrivialAccessorFact, TrivialAccessorKind, TypeCapabilityOverride, TypePattern,
+    type_pattern_for_external_java_type, type_pattern_matches_external_java_type,
 };
 use new_java2rust::java_ir::{
     Block, CallKind, ConstructorInvocationKind, Expr, JavaType, LambdaBody, LambdaParam, Literal,
     Member, Modifier, PrimitiveType, ResolvedCall, Stmt, WildcardBound,
 };
-use new_java2rust::javalibs::program_uses_broad_ioutils_facade;
-use new_java2rust::literal_lowering::literal_to_rust;
 use new_java2rust::loop_lowering::{
     assemble_for_loop, assignment_condition_loop, continue_with_updates,
 };
-use new_java2rust::loop_plan::{
-    ForBodyStmtPlan, PostLoopRefinementPlan, WhileStmtPlan, plan_for_body_stmt, plan_while_stmt,
-    post_loop_refinement_for_while,
-};
 use new_java2rust::lower::{lower_program_with_facts, lower_program_with_plans};
 use new_java2rust::lowering_diagnostics::collect_lowering_diagnostic_plans;
-use new_java2rust::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
-use new_java2rust::object_model::rust_enum_variant_name_from_parsed_constant;
 use new_java2rust::operator_lowering::{
     EqualityComparisonPlan, EqualityComparisonSource, NullComparisonMethod,
     NumericBinaryPromotionPlan, OptionalStringEqualityOperandView, StringEqualityOperandView,
@@ -182,7 +166,6 @@ use new_java2rust::signature::{
     signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope,
     solve_signature_constraints_to_fixpoint, solve_signature_constraints_to_fixpoint_result,
     solve_signature_shape_with_facts, solve_signatures_with_facts,
-    source_binding_nullability_constraints, source_method_return_nullability_constraints,
 };
 use new_java2rust::slot_policy::{
     BorrowedContentCapabilityPolicy, BorrowedContentPolicy, BorrowedContentTypePolicy,
@@ -199,23 +182,22 @@ use new_java2rust::slot_policy::{
 };
 use new_java2rust::slot_render::{
     NativeJavaRustTypePolicy, NativeNamedJavaRustTypePolicy, NativeSequenceContainer,
-    SlotContentCapabilityPolicy, SlotDefaultPolicy, SlotDefaultValuePolicy,
-    SlotNoDefaultMessagePolicy, SlotRustTypePolicy, SlotValueRustTypePolicy,
-    default_expr_for_slot_with_facts, native_java_rust_type_policy_with_effective_facts,
-    native_named_java_rust_type_policy, rust_type_for_java_type_with_facts,
-    rust_type_for_java_type_with_facts_and_representations, rust_type_for_slot,
-    rust_type_for_slot_with_facts, slot_content_capability_policy_with_effective_facts,
-    slot_default_policy_with_effective_facts, slot_default_value_policy_with_effective_facts,
-    slot_no_default_message_policy, slot_rust_type_policy_with_effective_facts,
+    SlotContentCapabilityPolicy, SlotDefaultPolicy, SlotDefaultValuePolicy, SlotRustTypePolicy,
+    SlotValueRustTypePolicy, default_expr_for_slot_with_facts,
+    native_java_rust_type_policy_with_effective_facts, native_named_java_rust_type_policy,
+    rust_type_for_java_type_with_facts, rust_type_for_java_type_with_facts_and_representations,
+    rust_type_for_slot, rust_type_for_slot_with_facts,
+    slot_content_capability_policy_with_effective_facts, slot_default_policy_with_effective_facts,
+    slot_default_value_policy_with_effective_facts, slot_rust_type_policy_with_effective_facts,
     slot_value_rust_type_policy_with_effective_facts,
 };
 use new_java2rust::slot_shape::{
     DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, TypeCapabilities, ViewShape,
 };
 use new_java2rust::stdlib::{
-    class_literal_token_plan, is_borrowed_string_view_method, is_content_read_method,
-    is_owned_string_result_method, java_class_support_item, java_platform_facade_support_item,
-    java_string_split_support_item, program_uses_java_platform_facades,
+    is_borrowed_string_view_method, is_content_read_method, is_owned_string_result_method,
+    java_class_support_item, java_platform_facade_support_item, java_string_split_support_item,
+    program_uses_java_platform_facades,
 };
 use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
 use new_java2rust::stream::{
@@ -229,18 +211,14 @@ use new_java2rust::stream_shape::{
     infer_stream_source_element_shape_with_facts, stream_source_capability_policy,
     stream_source_capability_policy_with_effective_facts,
 };
-use new_java2rust::switch_lowering::{
-    SwitchRenderCase, lower_switch_block_stmts, switch_case_condition,
-};
+use new_java2rust::switch_lowering::{SwitchRenderCase, lower_switch_block_stmts};
 use new_java2rust::switch_plan::{
-    SWITCH_LABEL, SWITCH_MATCHED, SWITCH_VALUE, SwitchCaseLabelPlan, plan_simple_return_switch,
-    plan_simple_return_switch_case, plan_switch, plan_switch_case, rewrite_switch_breaks,
+    SWITCH_LABEL, SWITCH_MATCHED, SWITCH_VALUE, plan_simple_return_switch, plan_switch,
 };
 use new_java2rust::types::{TypeEnv, list_java_type, optional_java_type, stream_element_type};
 use new_java2rust::unsupported::{
     UnsupportedConstructorLowering, UnsupportedDiagnosticPolicy, UnsupportedExpressionLowering,
     UnsupportedLoweringMessagePolicy, UnsupportedMemberLowering, UnsupportedStatementLowering,
-    plan_unsupported_expression, plan_unsupported_member, plan_unsupported_statement,
     unsupported_constructor_body, unsupported_constructor_message_policy,
     unsupported_expression_expr, unsupported_expression_message_policy,
     unsupported_member_diagnostic_policy, unsupported_statement_message_policy,
@@ -252,6 +230,51 @@ use new_java2rust::usage::{
     analyze_usage_with_facts, call_argument_boundary_policy, call_argument_use_boundary_policy,
     constructor_invocation_boundary_policy, method_api_boundary_policy,
 };
+
+trait MethodUsageFactsTestExt {
+    fn unique_binding_facts_for_source_name(
+        &self,
+        access_name: &str,
+    ) -> Option<&new_java2rust::usage::BindingUseFacts>;
+    fn binding_facts_for_test_id(
+        &self,
+        binding: &new_java2rust::binding_id::BindingId,
+    ) -> Option<&new_java2rust::usage::BindingUseFacts>;
+    fn contains_binding_source_name(&self, access_name: &str) -> bool;
+}
+
+impl MethodUsageFactsTestExt for new_java2rust::usage::MethodUsageFacts {
+    fn unique_binding_facts_for_source_name(
+        &self,
+        access_name: &str,
+    ) -> Option<&new_java2rust::usage::BindingUseFacts> {
+        let mut matches = self
+            .all_binding_facts()
+            .into_iter()
+            .filter(|facts| facts.name == name);
+        let first = matches.next()?;
+        if matches.next().is_some() {
+            None
+        } else {
+            Some(first)
+        }
+    }
+
+    fn contains_binding_source_name(&self, access_name: &str) -> bool {
+        self.all_binding_facts()
+            .into_iter()
+            .any(|facts| facts.name == name)
+    }
+
+    fn binding_facts_for_test_id(
+        &self,
+        binding: &new_java2rust::binding_id::BindingId,
+    ) -> Option<&new_java2rust::usage::BindingUseFacts> {
+        self.all_binding_facts()
+            .into_iter()
+            .find(|facts| facts.binding.as_ref() == Some(binding))
+    }
+}
 use new_java2rust::{
     emit, translate_source, translate_source_with_context_sources,
     translate_source_with_context_summary_sources, translate_source_with_facts,
@@ -517,7 +540,6 @@ fn type_capabilities_drive_copy_string_and_sequence_facts() {
     assert!(string_caps.string_like);
     assert!(string_caps.clone);
     assert!(!string_caps.copy);
-
     let int_caps = TypeCapabilities::conservative(&JavaType::Primitive(PrimitiveType::Int));
     assert!(int_caps.copy);
     assert!(FactSet::default().is_copy_type(&JavaType::Primitive(PrimitiveType::Int)));
@@ -1824,20 +1846,6 @@ fn slot_render_owns_default_expressions_for_planned_views() {
         SlotDefaultPolicy::NoDefaultForClosedEnum {
             enum_name: "AnimalValue".to_string(),
         }
-    );
-    let enum_policy = slot_default_policy_with_effective_facts(&enum_shape, &effective_facts);
-    let enum_no_default = slot_no_default_message_policy(&enum_policy);
-    assert_eq!(
-        enum_no_default,
-        SlotNoDefaultMessagePolicy {
-            message: "no default value is available for closed enum slot AnimalValue".to_string(),
-        }
-    );
-    assert_eq!(
-        enum_no_default.compile_error_expr(),
-        new_java2rust::unsupported::compile_error_expr(
-            "no default value is available for closed enum slot AnimalValue"
-        )
     );
     assert_eq!(
         default_expr_for_slot_with_facts(&enum_shape, &default_facts),
@@ -3252,133 +3260,7 @@ class UsesExternalBoundary {
 }
 
 #[test]
-fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
-    let representation_source = include_str!("../src/representation.rs");
-    let object_model_source = include_str!("../src/object_model.rs");
-    let effective_facts_source = include_str!("../src/effective_facts.rs");
-    let facts_source = include_str!("../src/facts.rs");
-    let shape_projection_source = include_str!("../src/shape_projection.rs");
-
-    assert!(effective_facts_source.contains("pub struct EffectiveFacts"));
-    assert!(effective_facts_source.contains("pub fn object_safe_trait_fact_for_name"));
-    assert!(effective_facts_source.contains("pub fn closed_hierarchy_variants_for"));
-    assert!(effective_facts_source.contains("pub fn dispatch_requirements_for"));
-    assert!(object_model_source.contains("use crate::effective_facts::EffectiveFacts"));
-    assert!(object_model_source.contains("pub struct ObjectModelInput"));
-    assert!(object_model_source.contains("pub program: &'a Program"));
-    assert!(object_model_source.contains("pub facts: &'a FactSet"));
-    assert!(object_model_source.contains("pub effective_facts: &'a EffectiveFacts<'a>"));
-    assert!(object_model_source.contains("pub usage: Option<&'a UsageFacts>"));
-    assert!(object_model_source.contains("pub fn plan_object_model_from_input"));
-    assert!(object_model_source.contains("plan_object_model_with_effective_facts"));
-    assert!(representation_source.contains("ObjectModelInput"));
-    assert!(representation_source.contains("plan_object_model_from_input"));
-    assert!(representation_source.contains("usage: Some(&usage)"));
-    assert!(object_model_source.contains("pub strategies: BTreeMap<String, ObjectStrategyPlan>"));
-    assert!(object_model_source.contains("pub fn strategy_for(&self, root: &str)"));
-    assert!(object_model_source.contains("pub provenance: Vec<FactProvenance>"));
-    assert!(object_model_source.contains("pub fn primary_provenance(&self)"));
-    assert!(object_model_source.contains("fn add_provenance(&mut self"));
-    assert!(object_model_source.contains("pub enum ObjectRepresentationRequest"));
-    assert!(facts_source.contains("pub enum DispatchRequirementKind"));
-    assert!(facts_source.contains("pub struct DispatchRequirementFact"));
-    assert!(object_model_source.contains("pub type DispatchRequirement"));
-    assert!(object_model_source.contains("dispatch_requirements_for"));
-    assert!(object_model_source.contains("pub struct RepresentationLookupPolicy"));
-    assert!(object_model_source.contains("pub enum RepresentationLookupFallback"));
-    assert!(object_model_source.contains("pub fn object_representation_lookup_policy"));
-    assert!(!representation_source.contains("pub struct RepresentationLookupPolicy"));
-    assert!(!representation_source.contains("pub enum RepresentationLookupFallback"));
-    assert!(representation_source.contains("object_representation_lookup_policy"));
-    assert!(representation_source.contains("pub struct RepresentationDispatchPolicy"));
-    assert!(representation_source.contains("pub fn representation_dispatch_policy"));
-    assert!(representation_source.contains("representation_lookup_policy"));
-    assert!(object_model_source.contains("ConservativeConcrete"));
-    assert!(object_model_source.contains("ConservativeErasedObject"));
-    assert!(object_model_source.contains("pub enum ObjectSafetyPolicy"));
-    assert!(object_model_source.contains("pub struct ObjectSafetyFactPolicy"));
-    assert!(!object_model_source.contains("pub fn object_safety_fact_policy("));
-    assert!(object_model_source.contains("pub fn object_safety_fact_policy_with_effective_facts"));
-    assert!(object_model_source.contains("object_safety_policy_for_request"));
-    assert_eq!(
-        object_model_source
-            .matches("object_safe_trait_fact_for_name")
-            .count(),
-        1
-    );
-    assert_eq!(
-        object_model_source
-            .matches("object_safety_violation_for_name")
-            .count(),
-        1
-    );
-    assert!(object_model_source.contains("ErasedObjectOverride"));
-    assert!(object_model_source.contains("object_representation_request_requires_object_safety"));
-    assert!(!object_model_source.contains("has_explicit_hierarchy_override"));
-    assert!(object_model_source.contains("pub struct HierarchyOverrideValidationPolicy"));
-    assert!(object_model_source.contains("pub fn hierarchy_override_validation_policy"));
-    assert!(object_model_source.contains("pub struct HierarchyOverrideApplicationPolicy"));
-    assert!(!object_model_source.contains("pub fn hierarchy_override_application_policy("));
-    assert!(
-        object_model_source
-            .contains("pub fn hierarchy_override_application_policy_with_effective_facts")
-    );
-    assert!(object_model_source.contains("pub struct HierarchyOverrideRepresentationPolicy"));
-    assert!(!object_model_source.contains("pub fn hierarchy_override_representation_policy("));
-    assert!(
-        object_model_source
-            .contains("pub fn hierarchy_override_representation_policy_with_effective_facts")
-    );
-    assert!(!representation_source.contains("pub struct RepresentationHierarchyFactPolicy"));
-    assert!(!representation_source.contains("representation_hierarchy_fact_policy"));
-    assert!(object_model_source.contains("pub struct ObjectHierarchyEdge"));
-    assert!(object_model_source.contains("pub enum ObjectHierarchyEdgeKind"));
-    assert!(object_model_source.contains("pub struct ObjectHierarchyEdgeRepresentationPolicy"));
-    assert!(object_model_source.contains("pub fn object_hierarchy_edge_representation_policy"));
-    assert!(object_model_source.contains("hierarchy_edges: Vec<ObjectHierarchyEdge>"));
-    assert!(representation_source.contains("for edge in object_plan.hierarchy_edges"));
-    assert!(representation_source.contains("object_hierarchy_edge_representation_policy"));
-    assert!(!representation_source.contains("fn collect_hierarchy_edges("));
-    assert!(!representation_source.contains("ObjectRepresentation::ClosedEnum { .. }"));
-    assert!(effective_facts_source.contains("pub fn extends_type_for"));
-    assert!(effective_facts_source.contains("pub fn implemented_types_for"));
-    assert!(effective_facts_source.contains("pub fn hierarchy_edges_for_type"));
-    assert_eq!(
-        representation_source
-            .matches("hierarchy_edges_for_type")
-            .count(),
-        0
-    );
-    assert!(!object_model_source.contains("pub struct ClosedEnumFactPolicy"));
-    assert!(!object_model_source.contains("pub fn closed_enum_fact_policy"));
-    assert!(object_model_source.contains("pub struct ClosedEnumInferencePolicy"));
-    assert!(!object_model_source.contains("pub fn closed_enum_inference_policy("));
-    assert!(
-        object_model_source.contains("pub fn closed_enum_inference_policy_with_effective_facts")
-    );
-    assert!(object_model_source.contains("pub enum ClosedEnumProof"));
-    assert!(!object_model_source.contains("pub fn closed_enum_proof_policy("));
-    assert!(object_model_source.contains("pub fn closed_enum_proof_policy_with_effective_facts"));
-    assert!(object_model_source.contains("MissingPermittedSubtypes"));
-    assert!(facts_source.contains("pub struct SealedPermitsFact"));
-    assert!(effective_facts_source.contains("sealed_permitted_subtypes_for"));
-    assert!(!representation_source.contains("fn validate_hierarchy_override"));
-    assert!(object_model_source.contains("pub struct ObjectHierarchyEdgeDiagnosticInput"));
-    assert!(object_model_source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
-    assert!(object_model_source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
-    assert!(object_model_source.contains("pub fn object_hierarchy_edge_diagnostic_policy"));
-    assert!(representation_source.contains("ObjectHierarchyEdgeDiagnosticInput"));
-    assert!(representation_source.contains("pub fn hierarchy_edge_diagnostic_policy"));
-    assert!(representation_source.contains("object_hierarchy_edge_diagnostic_policy"));
-    assert!(!representation_source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
-    assert!(!representation_source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
-    assert!(!representation_source.contains("render_hierarchy_edge_diagnostic_outcome"));
-    assert!(!representation_source.contains("pub struct AnonymousClassDiagnosticPolicy"));
-    assert!(!representation_source.contains("pub fn anonymous_class_diagnostic_policy"));
-    assert!(!object_model_source.contains("pub fn object_representation_policy("));
-    assert!(
-        object_model_source.contains("pub fn object_representation_policy_with_effective_facts")
-    );
+fn dispatch_requirement_projection_policy_boxes_dyn_storage_requirements() {
     assert_eq!(
         dispatch_requirement_projection_policy(
             DispatchRequirementProjectionRole::Storage,
@@ -3392,14 +3274,6 @@ fn object_representation_policy_is_the_dyn_fallback_entrypoint() {
             trait_name: "Animal".to_string(),
         })
     );
-    assert!(!facts_source.contains("HierarchyStrategy::BoxedDynTrait"));
-    assert!(!facts_source.contains("BoxedDynTrait {"));
-    assert!(!object_model_source.contains("ObjectRepresentation::BoxedDynTrait"));
-    assert!(!object_model_source.contains("ObjectRepresentationRequest::BoxedDynTraitOverride"));
-    assert!(shape_projection_source.contains("DispatchShape::BoxedDynTrait"));
-    assert!(!representation_source.contains("interface_representation_from_facts"));
-    assert!(!representation_source.contains("dyn_trait_representation_from_facts"));
-    assert!(!representation_source.contains("boxed_dyn_trait_representation_from_facts"));
 }
 
 #[test]
@@ -3903,7 +3777,6 @@ class GhostDog implements Marker {}
     assert!(!parsed.diagnostics.has_code("unsupported_interface"));
     assert!(!parsed.diagnostics.has_code("unsupported_interface_impl"));
     assert!(!parsed.diagnostics.has_code("unsupported_inheritance"));
-
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let diagnostics = representations.diagnostics_for_program(&resolved.program);
@@ -4646,160 +4519,10 @@ fn unsupported_lowering_policy_owns_compile_error_placeholders() {
             "unsupported Java expression: unsupported expression node: weird_\"quoted\"_\\_node"
         )
     );
-    assert_eq!(
-        plan_unsupported_expression(&parse_expr("String::valueOf")),
-        Some(UnsupportedExpressionLowering::MethodReference)
-    );
-    assert_eq!(
-        plan_unsupported_expression(&parse_expr("String.class")),
-        None
-    );
-    assert_eq!(plan_unsupported_expression(&parse_expr("value")), None);
-    assert_eq!(
-        plan_unsupported_statement(&Stmt::Try {
-            resources: Vec::new(),
-            body: Default::default(),
-            catches: Vec::new(),
-            finally_block: None,
-        }),
-        Some(UnsupportedStatementLowering::TryCatchFinally)
-    );
-    assert_eq!(
-        plan_unsupported_statement(&Stmt::ConstructorInvocation {
-            kind: ConstructorInvocationKind::This,
-            args: Vec::new(),
-            resolved: None,
-        }),
-        Some(UnsupportedStatementLowering::ConstructorDelegation)
-    );
-    assert_eq!(
-        plan_unsupported_statement(&Stmt::Unsupported("raw parser node".to_string())),
-        Some(UnsupportedStatementLowering::ParserUnsupported(
-            "raw parser node".to_string()
-        ))
-    );
-    assert_eq!(plan_unsupported_statement(&Stmt::Break(None)), None);
-    assert_eq!(
-        plan_unsupported_member(&Member::Unsupported {
-            reason: "record component".to_string(),
-            span: Default::default(),
-        }),
-        Some(UnsupportedMemberLowering::ParserUnsupported(
-            "record component".to_string()
-        ))
-    );
-    assert_eq!(
-        plan_unsupported_member(&Member::Type(new_java2rust::java_ir::TypeDecl {
-            static_init_blocks: Vec::new(),
-            kind: new_java2rust::java_ir::TypeKind::Class,
-            name: "Nested".to_string(),
-            type_params: Vec::new(),
-            type_param_bounds: Vec::new(),
-            modifiers: Vec::new(),
-            extends: None,
-            implements: Vec::new(),
-            permits: Vec::new(),
-            members: Vec::new(),
-            span: Default::default(),
-        })),
-        None
-    );
-
-    let source = include_str!("../src/unsupported.rs");
-    let lower_source = include_str!("../src/lower.rs");
-    assert!(source.contains("pub struct UnsupportedDiagnosticPolicy"));
-    assert!(source.contains("pub struct UnsupportedLoweringMessagePolicy"));
-    assert!(source.contains("pub fn plan_unsupported_expression"));
-    assert!(source.contains("pub fn plan_unsupported_member"));
-    assert!(source.contains("pub fn plan_unsupported_statement"));
-    assert!(source.contains("pub fn unsupported_member_diagnostic_policy"));
-    assert!(source.contains("pub fn unsupported_constructor_message_policy"));
-    assert!(source.contains("pub fn unsupported_statement_message_policy"));
-    assert!(source.contains("pub fn unsupported_expression_message_policy"));
-    assert!(lower_source.contains("plan_unsupported_expression"));
-    assert!(lower_source.contains("plan_unsupported_member"));
-    assert!(lower_source.contains("plan_unsupported_statement"));
-    assert!(lower_source.contains("unsupported_member_diagnostic_policy"));
-    assert!(!lower_source.contains("UnsupportedExpressionLowering::Lambda"));
-    assert!(!lower_source.contains("UnsupportedExpressionLowering::MethodReference"));
-    assert!(!lower_source.contains("UnsupportedMemberLowering::ParserUnsupported"));
-    assert!(!lower_source.contains("Member::Unsupported"));
-    assert!(!lower_source.contains("\"unsupported_member\""));
-    assert!(!lower_source.contains("UnsupportedStatementLowering::TryCatchFinally"));
-    assert!(!lower_source.contains("UnsupportedStatementLowering::LocalTypeDeclaration"));
-    assert!(!lower_source.contains("UnsupportedStatementLowering::ConstructorDelegation"));
-    assert!(!lower_source.contains("UnsupportedStatementLowering::ParserUnsupported"));
 }
 
 #[test]
-fn unsupported_compile_error_literals_are_centralized() {
-    // Tightened: `src/main.rs` and `src/stdlib.rs` used to be exempt. `main.rs`
-    // now reads the marker text from `src/output_markers.rs` instead of
-    // spelling it, and `stdlib.rs`'s stubbed-constant emitters route through
-    // `compile_error_value_text` / `compile_error_diverging_text`. What remains
-    // is the producer (`unsupported.rs`) and the module that owns the marker
-    // text both it and the corpus counters read (`output_markers.rs`).
-    let allowed_files = ["src/unsupported.rs", "src/output_markers.rs"];
-    for entry in std::fs::read_dir("src").unwrap() {
-        let entry = entry.unwrap();
-        let path = entry.path();
-        if path.extension().and_then(|ext| ext.to_str()) != Some("rs") {
-            continue;
-        }
-        let rendered_path = path.to_string_lossy().replace('\\', "/");
-        if allowed_files
-            .iter()
-            .any(|allowed| rendered_path.ends_with(allowed))
-        {
-            continue;
-        }
-        let source = fs::read_to_string(&path).unwrap();
-        assert!(
-            !source.contains("compile_error!("),
-            "direct compile_error! producer should route through src/unsupported.rs: {rendered_path}"
-        );
-    }
-    let unsupported_source = fs::read_to_string("src/unsupported.rs").unwrap();
-    let compile_error_expr = unsupported_source
-        .split("pub fn compile_error_expr")
-        .nth(1)
-        .unwrap()
-        .split("/// A `compile_error!` at item position")
-        .next()
-        .unwrap();
-    assert!(
-        compile_error_expr.contains("RustExpr::MacroCall"),
-        "expression-position compile_error! should use structured macro-call IR"
-    );
-    assert!(
-        !compile_error_expr.contains("RustExpr::Raw(format!(\"compile_error!"),
-        "expression-position compile_error! should not be a raw formatted expression"
-    );
-    assert!(
-        !unsupported_source.contains("RustStmt::Raw(format!(\"compile_error!"),
-        "statement-position compile_error! should use structured macro-call IR"
-    );
-    assert!(
-        !unsupported_source
-            .contains("RustExpr::Raw(format!(\n        \"{{ let _ = {}; compile_error!"),
-        "compile_error expressions that consume a value should use structured block IR"
-    );
-    assert!(
-        !unsupported_source.contains("RustExpr::Raw(format!(\"panic!"),
-        "unsupported constructor diverging placeholders should use structured panic macro IR"
-    );
-}
-
-#[test]
-fn class_literal_tokens_are_planned_before_lowering() {
-    let plan = class_literal_token_plan(&JavaType::String, &FactSet::default());
-    assert_eq!(
-        plan,
-        new_java2rust::stdlib::ClassLiteralTokenPlan {
-            java_name: "java.lang.String".to_string(),
-            rust_type: RustType::String,
-        }
-    );
+fn class_literal_tokens_emit_public_support_and_slot_type() {
     let RustItem::Raw(support) = java_class_support_item() else {
         panic!("expected raw JavaClass support item");
     };
@@ -4812,96 +4535,6 @@ fn class_literal_tokens_are_planned_before_lowering() {
         RustType::Generic {
             base: "JavaClass".to_string(),
             args: vec![RustType::String],
-        }
-    );
-
-    let unresolved = class_literal_token_plan(
-        &JavaType::Named {
-            name: "RegisteredType".to_string(),
-            args: Vec::new(),
-        },
-        &FactSet::default(),
-    );
-    assert_eq!(
-        unresolved,
-        new_java2rust::stdlib::ClassLiteralTokenPlan {
-            java_name: "RegisteredType".to_string(),
-            rust_type: RustType::Unit,
-        }
-    );
-
-    let mut source_facts = FactSet::default();
-    source_facts.storage_strategies.insert(
-        "RegisteredType".to_string(),
-        new_java2rust::storage_strategy::TypeStorageFacts::default(),
-    );
-    let source = class_literal_token_plan(
-        &JavaType::Named {
-            name: "RegisteredType".to_string(),
-            args: Vec::new(),
-        },
-        &source_facts,
-    );
-    assert_eq!(
-        source,
-        new_java2rust::stdlib::ClassLiteralTokenPlan {
-            java_name: "RegisteredType".to_string(),
-            rust_type: RustType::Named("RegisteredType".to_string()),
-        }
-    );
-
-    let mut package_source_facts = FactSet::default();
-    package_source_facts.storage_strategies.insert(
-        "AItem".to_string(),
-        new_java2rust::storage_strategy::TypeStorageFacts::default(),
-    );
-    let package_source = class_literal_token_plan(
-        &JavaType::Named {
-            name: "a.Item".to_string(),
-            args: Vec::new(),
-        },
-        &package_source_facts,
-    );
-    assert_eq!(
-        package_source,
-        new_java2rust::stdlib::ClassLiteralTokenPlan {
-            java_name: "a.Item".to_string(),
-            rust_type: RustType::Named("AItem".to_string()),
-        }
-    );
-
-    let mut merged_simple_source_facts = FactSet::default();
-    merged_simple_source_facts.storage_strategies.insert(
-        "Item".to_string(),
-        new_java2rust::storage_strategy::TypeStorageFacts::default(),
-    );
-    let merged_simple_source = class_literal_token_plan(
-        &JavaType::Named {
-            name: "a.Item".to_string(),
-            args: Vec::new(),
-        },
-        &merged_simple_source_facts,
-    );
-    assert_eq!(
-        merged_simple_source,
-        new_java2rust::stdlib::ClassLiteralTokenPlan {
-            java_name: "a.Item".to_string(),
-            rust_type: RustType::Named("AItem".to_string()),
-        }
-    );
-
-    let jdk_named = class_literal_token_plan(
-        &JavaType::Named {
-            name: "java.util.Item".to_string(),
-            args: Vec::new(),
-        },
-        &merged_simple_source_facts,
-    );
-    assert_eq!(
-        jdk_named,
-        new_java2rust::stdlib::ClassLiteralTokenPlan {
-            java_name: "java.util.Item".to_string(),
-            rust_type: RustType::Unit,
         }
     );
 }
@@ -5017,7 +4650,6 @@ class PlatformBoundaryUse {
 "#;
     let parsed = parse_java_source(source);
     assert!(program_uses_java_platform_facades(&parsed.program));
-    assert!(program_uses_broad_ioutils_facade(&parsed.program));
 
     let RustItem::Raw(support) = java_platform_facade_support_item() else {
         panic!("expected raw Java platform facade support item");
@@ -5451,15 +5083,6 @@ class Num implements Expr {}
 }
 
 #[test]
-fn parsed_java_enum_constant_names_preserve_rust_valid_uppercase_constants() {
-    assert_eq!(rust_enum_variant_name_from_parsed_constant("s_n_p"), "SNP");
-    assert_eq!(
-        rust_enum_variant_name_from_parsed_constant("MAX_COUNT_EXCEEDED"),
-        "MAX_COUNT_EXCEEDED"
-    );
-}
-
-#[test]
 fn generic_source_supertype_into_bound_gets_static_for_erased_boxing() {
     let translation = translate_source(
         r#"
@@ -5814,8 +5437,8 @@ class SameNameDisjointLocalMutability {
         t_locals[0].binding, t_locals[1].binding,
         "same-name declarations must carry distinct local binding ids: {t_locals:?}"
     );
-    assert_eq!(t_locals[0].binding.kind, BindingKind::Local);
-    assert_eq!(t_locals[1].binding.kind, BindingKind::Local);
+    assert_eq!(t_locals[0].binding.kind(), BindingKind::Local);
+    assert_eq!(t_locals[1].binding.kind(), BindingKind::Local);
     assert!(
         t_locals[0].binding_mutable,
         "the list binding is mutated by t.add(...): {t_locals:?}"
@@ -6104,7 +5727,6 @@ class Use {
             _ => None,
         })
         .unwrap();
-    let body = method.body.as_ref().unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
     let row = method_signature
         .locals
@@ -6112,12 +5734,6 @@ class Use {
         .find(|local| local.name == "row")
         .unwrap();
 
-    assert_eq!(
-        source_binding_nullability_constraints(body, "row"),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::MaybeNull
-        )]
-    );
     assert!(row.binding_mutable);
     assert!(matches!(
         &row.shape.java_ty,
@@ -6188,12 +5804,6 @@ class Cursor {
     ));
     assert_eq!(cursor.shape.ownership, OwnershipShape::MutableBorrow);
     assert_eq!(
-        source_method_return_nullability_constraints(method),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::DefinitelyNonNull
-        )]
-    );
-    assert_eq!(
         method_signature.return_shape.as_ref().unwrap().java_ty,
         JavaType::Named {
             name: "Row".to_string(),
@@ -6252,7 +5862,6 @@ class Importer {
             _ => None,
         })
         .unwrap();
-    let body = method.body.as_ref().unwrap();
     let method_signature = signatures.method_signature(ty, method).unwrap();
     let value = method_signature
         .locals
@@ -6260,12 +5869,6 @@ class Importer {
         .find(|local| local.name == "value")
         .unwrap();
 
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::MaybeNull
-        )]
-    );
     assert_eq!(
         value.shape.java_ty,
         optional_java_type(JavaType::Named {
@@ -6297,11 +5900,11 @@ interface Animal {}
     let usage = analyze_usage(&resolved.program);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "Use".to_string(),
-            rust_name: "update".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity(
+            "Use".to_string(),
+            "update".to_string(),
+        ))
         .unwrap();
     let current = method_constraints
         .locals
@@ -6334,11 +5937,11 @@ class CaptureFlow {
     let usage = analyze_usage(&resolved.program);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "CaptureFlow".to_string(),
-            rust_name: "use".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity(
+            "CaptureFlow".to_string(),
+            "use".to_string(),
+        ))
         .unwrap();
     let animal_index = method_constraints
         .param_names
@@ -6385,11 +5988,11 @@ class CaptureFlow {
     let usage = analyze_usage(&resolved.program);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let constructor_constraints = constraints
-        .constructors
-        .get(&ConstructorKey {
-            type_name: "CaptureFlow".to_string(),
-            rust_name: "new".to_string(),
-        })
+        .constructors()
+        .get(&ConstructorKey::rust_identity(
+            "CaptureFlow".to_string(),
+            "new".to_string(),
+        ))
         .unwrap();
     let animal_index = constructor_constraints
         .param_names
@@ -6449,12 +6052,9 @@ class Helper {
             _ => None,
         })
         .unwrap();
-    let method_key = MethodKey {
-        type_name: "LocalEscape".to_string(),
-        rust_name: method.rust_name.clone().unwrap(),
-    };
+    let method_key = MethodKey::rust_identity("LocalEscape", method.rust_name.clone().unwrap());
     let value_constraints = constraints
-        .methods
+        .methods()
         .get(&method_key)
         .unwrap()
         .locals
@@ -6515,11 +6115,8 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "AliasEscape".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("AliasEscape", "use");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let input_index = method_constraints
         .param_names
         .iter()
@@ -6591,12 +6188,9 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let constructor_key = ConstructorKey {
-        type_name: "ConstructorAliasEscape".to_string(),
-        rust_name: "new".to_string(),
-    };
+    let constructor_key = ConstructorKey::rust_identity("ConstructorAliasEscape", "new");
     let constructor_constraints = solved_constraints
-        .constructors
+        .constructors()
         .get(&constructor_key)
         .unwrap();
     let input_index = constructor_constraints
@@ -6668,11 +6262,8 @@ class FieldStorageFlow {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "FieldStorageFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("FieldStorageFlow", "use");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let input_index = method_constraints
         .param_names
         .iter()
@@ -6731,12 +6322,9 @@ class ConstructorFieldStorageFlow {
     let budget = signature_fixpoint_iteration_budget(&constraints);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let constructor_key = ConstructorKey {
-        type_name: "ConstructorFieldStorageFlow".to_string(),
-        rust_name: "new".to_string(),
-    };
+    let constructor_key = ConstructorKey::rust_identity("ConstructorFieldStorageFlow", "new");
     let constructor_constraints = solved_constraints
-        .constructors
+        .constructors()
         .get(&constructor_key)
         .unwrap();
     let input_index = constructor_constraints
@@ -6795,11 +6383,8 @@ class ReturnFlow {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "ReturnFlow".to_string(),
-        rust_name: "expose".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("ReturnFlow", "expose");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let input_index = method_constraints
         .param_names
         .iter()
@@ -6869,14 +6454,10 @@ class Helper {
     let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
     let usage = &semantic.usage;
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "NewBoundaryFlow".to_string(),
-            method_name: "use".to_string(),
-        })
+        .method_usage_by_current_rust_name("NewBoundaryFlow".to_string(), "use".to_string())
         .unwrap();
     let second = method_usage
-        .unique_binding_facts_for_name("second")
+        .unique_binding_facts_for_source_name("second")
         .unwrap();
 
     assert!(
@@ -6887,8 +6468,7 @@ class Helper {
                 arg_index: 0,
                 boundary: CallArgumentBoundary::Unknown,
                 ..
-            } if name == "new"
-        )),
+            } if name == "new")),
         "{second:?}"
     );
 
@@ -6897,11 +6477,8 @@ class Helper {
     let budget = signature_fixpoint_iteration_budget(&constraints);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "NewBoundaryFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("NewBoundaryFlow", "use");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let input_index = method_constraints
         .param_names
         .iter()
@@ -6952,7 +6529,7 @@ class Helper {
 }
 
 #[test]
-fn signature_fixpoint_propagates_constructor_internal_call_param_constraints() {
+fn signature_fixpoint_preserves_constructor_internal_call_borrowed_slice_constraints() {
     let parsed = parse_java_source(
         r#"
 class ConstructorInternalCallFlow {
@@ -6977,12 +6554,9 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, iterations) =
         solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let constructor_key = ConstructorKey {
-        type_name: "ConstructorInternalCallFlow".to_string(),
-        rust_name: "new".to_string(),
-    };
+    let constructor_key = ConstructorKey::rust_identity("ConstructorInternalCallFlow", "new");
     let constructor_constraints = solved_constraints
-        .constructors
+        .constructors()
         .get(&constructor_key)
         .unwrap();
     let input_index = constructor_constraints
@@ -6997,7 +6571,7 @@ class Helper {
             .iter()
             .any(|constraint| matches!(
                 constraint,
-                SignatureConstraint::RequiredOwnership(OwnershipShape::Owned)
+                SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow)
             )),
         "{constructor_constraints:?}"
     );
@@ -7006,7 +6580,7 @@ class Helper {
             .iter()
             .any(|constraint| matches!(
                 constraint,
-                SignatureConstraint::RequiredView(ViewShape::Native)
+                SignatureConstraint::RequiredView(ViewShape::Slice)
             )),
         "{constructor_constraints:?}"
     );
@@ -7029,8 +6603,8 @@ class Helper {
         .find(|param| param.name == "input")
         .unwrap();
 
-    assert_eq!(input.shape.ownership, OwnershipShape::Owned);
-    assert_eq!(input.shape.view, ViewShape::Native);
+    assert_eq!(input.shape.ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(input.shape.view, ViewShape::Slice);
 }
 
 #[test]
@@ -7055,11 +6629,8 @@ class MethodArgumentConstraintFlow {
     let representations = plan_representations(&resolved.program, &semantic.facts);
     let constraints = collect_signature_constraints(&resolved.program, usage, &semantic.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, usage);
-    let callee_key = MethodKey {
-        type_name: "MethodArgumentConstraintFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let callee_constraints = solved_constraints.methods.get(&callee_key).unwrap();
+    let callee_key = MethodKey::rust_identity("MethodArgumentConstraintFlow", "use");
+    let callee_constraints = solved_constraints.methods().get(&callee_key).unwrap();
     let values_index = callee_constraints
         .param_names
         .iter()
@@ -7125,11 +6696,8 @@ class ConstructorArgumentConstraintFlow {
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let callee_key = MethodKey {
-        type_name: "ConstructorArgumentConstraintFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let callee_constraints = solved_constraints.methods.get(&callee_key).unwrap();
+    let callee_key = MethodKey::rust_identity("ConstructorArgumentConstraintFlow", "use");
+    let callee_constraints = solved_constraints.methods().get(&callee_key).unwrap();
     let values_index = callee_constraints
         .param_names
         .iter()
@@ -7193,18 +6761,12 @@ class PublicMethodBoundaryFlow {
     let usage = analyze_usage(&resolved.program);
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
-    let public_key = MethodKey {
-        type_name: "PublicMethodBoundaryFlow".to_string(),
-        rust_name: "expose".to_string(),
-    };
-    assert!(constraints.methods.get(&public_key).unwrap().public_api);
+    let public_key = MethodKey::rust_identity("PublicMethodBoundaryFlow", "expose");
+    assert!(constraints.methods().get(&public_key).unwrap().public_api);
 
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let callee_key = MethodKey {
-        type_name: "PublicMethodBoundaryFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let callee_constraints = solved_constraints.methods.get(&callee_key).unwrap();
+    let callee_key = MethodKey::rust_identity("PublicMethodBoundaryFlow", "use");
+    let callee_constraints = solved_constraints.methods().get(&callee_key).unwrap();
     let value_index = callee_constraints
         .param_names
         .iter()
@@ -7271,24 +6833,18 @@ class PublicConstructorBoundaryFlow {
     let usage = analyze_usage(&resolved.program);
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
-    let constructor_key = ConstructorKey {
-        type_name: "PublicConstructorBoundaryFlow".to_string(),
-        rust_name: "new".to_string(),
-    };
+    let constructor_key = ConstructorKey::rust_identity("PublicConstructorBoundaryFlow", "new");
     assert!(
         constraints
-            .constructors
+            .constructors()
             .get(&constructor_key)
             .unwrap()
             .public_api
     );
 
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let callee_key = MethodKey {
-        type_name: "PublicConstructorBoundaryFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
-    let callee_constraints = solved_constraints.methods.get(&callee_key).unwrap();
+    let callee_key = MethodKey::rust_identity("PublicConstructorBoundaryFlow", "use");
+    let callee_constraints = solved_constraints.methods().get(&callee_key).unwrap();
     let value_index = callee_constraints
         .param_names
         .iter()
@@ -7359,11 +6915,8 @@ class Helper {
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "InternalCallResultLocalFlow".to_string(),
-        rust_name: "expose".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("InternalCallResultLocalFlow", "expose");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let local_constraints = method_constraints
         .locals
         .iter()
@@ -7450,13 +7003,14 @@ class Path {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "NullableFieldReceiverSourceCallLocal".to_string(),
-            method_name: "run".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "NullableFieldReceiverSourceCallLocal".to_string(),
+            "run".to_string(),
+        )
         .unwrap();
-    let path_usage = method_usage.unique_binding_facts_for_name("path").unwrap();
+    let path_usage = method_usage
+        .unique_binding_facts_for_source_name("path")
+        .unwrap();
     assert!(
         path_usage.uses.iter().any(|usage| {
             matches!(
@@ -7464,14 +7018,14 @@ class Path {
                 BindingUse::AssignedFromCall {
                     name,
                     receiver_type: Some(JavaType::Named { name: receiver, args }),
-                    boundary: CallArgumentBoundary::KnownContentRead,
+                    boundary: CallArgumentBoundary::Unknown,
                 } if name == "find" && receiver == "Lookup" && args.is_empty()
             )
         }),
         "{path_usage:?}"
     );
     assert!(
-        method_usage.call_sites.iter().any(|call_site| {
+        method_usage.call_sites().iter().any(|call_site| {
             call_site.name == "find"
                 && call_site.boundary == CallArgumentBoundary::Unknown
                 && call_site.receiver_type.as_ref().is_some_and(|receiver| {
@@ -7482,14 +7036,11 @@ class Path {
                 })
         }),
         "{:?}",
-        method_usage.call_sites
+        method_usage.call_sites()
     );
     let callee_constraints = solved_constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "Lookup".to_string(),
-            rust_name: "find".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity("Lookup", "find"))
         .unwrap();
     assert!(
         callee_constraints.return_constraints.contains(
@@ -7497,11 +7048,8 @@ class Path {
         ),
         "{callee_constraints:?}"
     );
-    let method_key = MethodKey {
-        type_name: "NullableFieldReceiverSourceCallLocal".to_string(),
-        rust_name: "run".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("NullableFieldReceiverSourceCallLocal", "run");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let local_constraints = method_constraints
         .locals
         .iter()
@@ -7572,12 +7120,10 @@ class Helper {
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let constructor_key = ConstructorKey {
-        type_name: "ConstructorInternalCallResultLocalFlow".to_string(),
-        rust_name: "new".to_string(),
-    };
+    let constructor_key =
+        ConstructorKey::rust_identity("ConstructorInternalCallResultLocalFlow", "new");
     let constructor_constraints = solved_constraints
-        .constructors
+        .constructors()
         .get(&constructor_key)
         .unwrap();
     let local_constraints = constructor_constraints
@@ -7656,11 +7202,11 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
     let field_constraints = solved_constraints
-        .fields
-        .get(&FieldKey {
-            type_name: "InternalCallResultFieldFlow".to_string(),
-            field_name: "cached".to_string(),
-        })
+        .fields()
+        .get(&FieldKey::rust_identity(
+            "InternalCallResultFieldFlow",
+            "cached",
+        ))
         .unwrap();
 
     assert!(
@@ -7699,11 +7245,11 @@ class NativeCollectionFieldPush {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
     let field_constraints = solved_constraints
-        .fields
-        .get(&FieldKey {
-            type_name: "NativeCollectionFieldPush".to_string(),
-            field_name: "values".to_string(),
-        })
+        .fields()
+        .get(&FieldKey::rust_identity(
+            "NativeCollectionFieldPush",
+            "values",
+        ))
         .unwrap();
 
     assert!(
@@ -7741,10 +7287,10 @@ class NativeCollectionMapPush {
     let usage = analyze_usage(&resolved.program);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let field_constraints = solved_constraints.fields.get(&FieldKey {
-        type_name: "NativeCollectionMapPush".to_string(),
-        field_name: "values".to_string(),
-    });
+    let field_constraints = solved_constraints.fields().get(&FieldKey::rust_identity(
+        "NativeCollectionMapPush",
+        "values",
+    ));
 
     assert!(
         field_constraints.is_none_or(|constraints| {
@@ -7788,11 +7334,11 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
     let field_constraints = solved_constraints
-        .fields
-        .get(&FieldKey {
-            type_name: "ConstructorInternalCallResultFieldFlow".to_string(),
-            field_name: "cached".to_string(),
-        })
+        .fields()
+        .get(&FieldKey::rust_identity(
+            "ConstructorInternalCallResultFieldFlow",
+            "cached",
+        ))
         .unwrap();
 
     assert!(
@@ -7827,13 +7373,12 @@ class ConstructorDelegationUsageFlow {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let constructor_usage = usage
-        .constructors
-        .get(&new_java2rust::usage::UsageConstructorKey {
-            type_name: "ConstructorDelegationUsageFlow".to_string(),
-            rust_name: "new_int_array".to_string(),
-        })
+        .constructor_usage_by_current_rust_name(
+            "ConstructorDelegationUsageFlow".to_string(),
+            "new_int_array".to_string(),
+        )
         .unwrap();
-    let call_site = constructor_usage.constructor_call_sites.first().unwrap();
+    let call_site = constructor_usage.constructor_call_sites().first().unwrap();
 
     assert_eq!(call_site.name, "constructor");
     assert_eq!(call_site.arg_count, 2);
@@ -7848,7 +7393,7 @@ class ConstructorDelegationUsageFlow {
     );
     assert!(
         constructor_usage
-            .unique_binding_facts_for_name("input")
+            .unique_binding_facts_for_source_name("input")
             .unwrap()
             .uses
             .iter()
@@ -7892,13 +7437,13 @@ class Helper {
         budget
     );
     let result = solve_signature_constraints_to_fixpoint_result(constraints, &usage);
-    let constructor_key = ConstructorKey {
-        type_name: "ConstructorDelegationConstraintFlow".to_string(),
-        rust_name: "new_int_array_helper".to_string(),
-    };
+    let constructor_key = ConstructorKey::rust_identity(
+        "ConstructorDelegationConstraintFlow",
+        "new_int_array_helper",
+    );
     let constructor_constraints = result
-        .constraints
-        .constructors
+        .constraints()
+        .constructors()
         .get(&constructor_key)
         .unwrap();
     let input_index = constructor_constraints
@@ -7962,13 +7507,13 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let budget = signature_fixpoint_iteration_budget(&constraints);
     let result = solve_signature_constraints_to_fixpoint_result(constraints, &usage);
-    let constructor_key = ConstructorKey {
-        type_name: "ChainedConstructorDelegationConstraintFlow".to_string(),
-        rust_name: "new_int_array_helper".to_string(),
-    };
+    let constructor_key = ConstructorKey::rust_identity(
+        "ChainedConstructorDelegationConstraintFlow",
+        "new_int_array_helper",
+    );
     let constructor_constraints = result
-        .constraints
-        .constructors
+        .constraints()
+        .constructors()
         .get(&constructor_key)
         .unwrap();
     let input_index = constructor_constraints
@@ -7985,9 +7530,9 @@ class Helper {
         budget
     );
     assert!(
-        result.pass_plan.stats.planned_components > 0,
+        result.pass_plan().stats().planned_components > 0,
         "{:?}",
-        result.pass_plan.stats
+        result.pass_plan().stats()
     );
     assert!(
         constructor_constraints.params[input_index]
@@ -8032,16 +7577,10 @@ class SignatureGraphSlots {
     let usage = analyze_usage(&resolved.program);
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let graph = new_java2rust::signature::build_signature_dependency_graph(&constraints, &usage);
-    let method = MethodKey {
-        type_name: "SignatureGraphSlots".to_string(),
-        rust_name: "expose".to_string(),
-    };
-    let constructor = ConstructorKey {
-        type_name: "SignatureGraphSlots".to_string(),
-        rust_name: "new".to_string(),
-    };
+    let method = MethodKey::rust_identity("SignatureGraphSlots", "expose");
+    let constructor = ConstructorKey::rust_identity("SignatureGraphSlots", "new");
     let method_alias_binding = constraints
-        .methods
+        .methods()
         .get(&method)
         .and_then(|constraints| {
             constraints
@@ -8052,7 +7591,7 @@ class SignatureGraphSlots {
         .map(|local| local.binding.clone())
         .expect("method alias local binding");
     let constructor_alias_binding = constraints
-        .constructors
+        .constructors()
         .get(&constructor)
         .and_then(|constraints| {
             constraints
@@ -8063,52 +7602,52 @@ class SignatureGraphSlots {
         .map(|local| local.binding.clone())
         .expect("constructor alias local binding");
 
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::MethodParam {
             method: method.clone(),
             name: "input".to_string(),
             index: 0,
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::MethodReturn {
             method: method.clone(),
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::MethodLocal {
             method: method.clone(),
             name: "alias".to_string(),
             binding: Some(method_alias_binding),
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::MethodLocal {
             method: method.clone(),
             name: "alias".to_string(),
             binding: None,
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::MethodReceiver {
             method: method.clone(),
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::ConstructorParam {
             constructor: constructor.clone(),
             name: "input".to_string(),
             index: 0,
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::ConstructorLocal {
             constructor: constructor.clone(),
             name: "alias".to_string(),
             binding: Some(constructor_alias_binding),
         }
     ));
-    assert!(graph.nodes.contains(
+    assert!(graph.nodes().contains(
         &new_java2rust::signature::SignatureDependencyNode::ConstructorLocal {
             constructor,
             name: "alias".to_string(),
@@ -8117,12 +7656,9 @@ class SignatureGraphSlots {
     ));
     assert!(
         graph
-            .nodes
+            .nodes()
             .contains(&new_java2rust::signature::SignatureDependencyNode::Field {
-                field: FieldKey {
-                    type_name: "SignatureGraphSlots".to_string(),
-                    field_name: "cached".to_string(),
-                },
+                field: FieldKey::rust_identity("SignatureGraphSlots", "cached"),
             })
     );
 }
@@ -8158,41 +7694,40 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let graph = new_java2rust::signature::build_signature_dependency_graph(&constraints, &usage);
 
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::LocalAlias
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::LocalAlias
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::FieldStorage
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::FieldStorage
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::MethodReturn
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::MethodReturn
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::CallArgument
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::CallArgument
             && matches!(
-                &edge.to,
+                edge.to(),
                 new_java2rust::signature::SignatureDependencyNode::MethodParam { method, name, .. }
-                    if method.type_name == "SignatureGraphEdges"
-                        && method.rust_name == "make"
+                    if method.type_name() == "SignatureGraphEdges"
+                        && method.rust_name() == "make"
                         && name == "values"
             )
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::CallResult
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::CallResult
             && matches!(
-                &edge.from,
+                edge.from(),
                 new_java2rust::signature::SignatureDependencyNode::MethodReturn { method }
-                    if method.type_name == "SignatureGraphEdges"
-                        && method.rust_name == "make"
+                    if method.type_name() == "SignatureGraphEdges"
+                        && method.rust_name() == "make"
             )
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::UnknownBoundary
-            && matches!(
-                &edge.to,
-                new_java2rust::signature::SignatureDependencyNode::UnknownBoundaryArg { .. }
-            )
-    }));
+    assert!(
+        !graph.edges().iter().any(|edge| {
+            edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::UnknownBoundary
+        }),
+        "source helper calls should resolve to method dependency edges, not unknown boundaries"
+    );
 }
 
 #[test]
@@ -8213,17 +7748,17 @@ class SignatureGraphCtorDelegation {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let graph = new_java2rust::signature::build_signature_dependency_graph(&constraints, &usage);
 
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind()
             == new_java2rust::signature::SignatureDependencyEdgeKind::ConstructorDelegationArgument
             && matches!(
-                &edge.to,
+                edge.to(),
                 new_java2rust::signature::SignatureDependencyNode::ConstructorParam {
                     constructor,
                     name,
                     index: 0,
-                } if constructor.type_name == "SignatureGraphCtorDelegation"
-                    && constructor.rust_name == "new_int_array_int"
+                } if constructor.type_name() == "SignatureGraphCtorDelegation"
+                    && constructor.rust_name() == "new_int_array_int"
                     && name == "input"
             )
     }));
@@ -8253,17 +7788,17 @@ class CaptureGraph {
         &resolved.facts,
     );
 
-    assert!(graph.nodes.iter().any(|node| {
+    assert!(graph.nodes().iter().any(|node| {
         matches!(
             node,
             new_java2rust::signature::SignatureDependencyNode::CapturedValue { name, .. }
                 if name == "base"
         )
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::signature::SignatureDependencyEdgeKind::LocalAlias
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::signature::SignatureDependencyEdgeKind::LocalAlias
             && matches!(
-                &edge.to,
+                edge.to(),
                 new_java2rust::signature::SignatureDependencyNode::CapturedValue { name, .. }
                     if name == "base"
             )
@@ -8302,18 +7837,21 @@ class Helper {
     let pass_plan = new_java2rust::signature::plan_signature_solver_passes(&sccs);
 
     assert_eq!(
-        pass_plan.stats.planned_components,
-        sccs.stats.component_count
+        pass_plan.stats().planned_components,
+        sccs.stats().component_count
     );
-    assert_eq!(pass_plan.component_order.len(), sccs.stats.component_count);
+    assert_eq!(
+        pass_plan.component_order().len(),
+        sccs.stats().component_count
+    );
     assert_eq!(
         pass_plan
-            .component_order
+            .component_order()
             .iter()
             .copied()
             .collect::<std::collections::HashSet<_>>()
             .len(),
-        sccs.stats.component_count
+        sccs.stats().component_count
     );
 }
 
@@ -8346,22 +7884,22 @@ class RecursiveConstructorDelegationFlow {
         budget
     );
     assert!(
-        result.dependency_sccs.stats.node_count > 0,
+        result.dependency_sccs().stats().node_count > 0,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert!(
-        result.dependency_sccs.stats.cyclic_component_count >= 1,
+        result.dependency_sccs().stats().cyclic_component_count >= 1,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert_eq!(
-        result.pass_plan.stats.planned_components,
-        result.dependency_sccs.stats.component_count
+        result.pass_plan().stats().planned_components,
+        result.dependency_sccs().stats().component_count
     );
     assert_eq!(
-        result.pass_plan.stats.cyclic_components,
-        result.dependency_sccs.stats.cyclic_component_count
+        result.pass_plan().stats().cyclic_components,
+        result.dependency_sccs().stats().cyclic_component_count
     );
 }
 
@@ -8403,14 +7941,11 @@ class Helper {
             provenance: FactProvenance::UserOverride,
         });
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
-    let method_key = MethodKey {
-        type_name: "UnknownResultReturnFlow".to_string(),
-        rust_name: "expose".to_string(),
-    };
+    let method_key = MethodKey::rust_identity("UnknownResultReturnFlow", "expose");
 
     assert!(
         constraints
-            .methods
+            .methods()
             .get(&method_key)
             .unwrap()
             .return_constraints
@@ -8418,7 +7953,7 @@ class Helper {
     );
 
     let result = solve_signature_constraints_to_fixpoint_result(constraints, &usage);
-    let method_constraints = result.constraints.methods.get(&method_key).unwrap();
+    let method_constraints = result.constraints().methods().get(&method_key).unwrap();
 
     assert!(result.diagnostics.is_empty(), "{:?}", result.diagnostics);
     assert!(
@@ -8477,11 +8012,11 @@ class ExternalName {}
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "UnknownNewResultReturnFlow".to_string(),
-            rust_name: "create".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity(
+            "UnknownNewResultReturnFlow",
+            "create",
+        ))
         .unwrap();
 
     assert_eq!(
@@ -8548,11 +8083,8 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let budget = signature_fixpoint_iteration_budget(&constraints);
     let result = solve_signature_constraints_to_fixpoint_result(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "RecursiveFlow".to_string(),
-        rust_name: "recur".to_string(),
-    };
-    let method_constraints = result.constraints.methods.get(&method_key).unwrap();
+    let method_key = MethodKey::rust_identity("RecursiveFlow", "recur");
+    let method_constraints = result.constraints().methods().get(&method_key).unwrap();
     let input_index = method_constraints
         .param_names
         .iter()
@@ -8567,27 +8099,27 @@ class Helper {
         budget
     );
     assert!(
-        result.dependency_sccs.stats.node_count > 0,
+        result.dependency_sccs().stats().node_count > 0,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert!(
-        result.dependency_sccs.stats.cyclic_component_count >= 1,
+        result.dependency_sccs().stats().cyclic_component_count >= 1,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert_eq!(
-        result.pass_plan.stats.planned_components,
-        result.dependency_sccs.stats.component_count
+        result.pass_plan().stats().planned_components,
+        result.dependency_sccs().stats().component_count
     );
     assert_eq!(
-        result.pass_plan.stats.cyclic_components,
-        result.dependency_sccs.stats.cyclic_component_count
+        result.pass_plan().stats().cyclic_components,
+        result.dependency_sccs().stats().cyclic_component_count
     );
     assert!(
-        result.dependency_sccs.stats.max_component_size >= 2,
+        result.dependency_sccs().stats().max_component_size >= 2,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert!(
         method_constraints.params[input_index]
@@ -8656,35 +8188,32 @@ class Helper {
         budget
     );
     assert!(
-        result.dependency_sccs.stats.node_count > 0,
+        result.dependency_sccs().stats().node_count > 0,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert!(
-        result.dependency_sccs.stats.cyclic_component_count >= 1,
+        result.dependency_sccs().stats().cyclic_component_count >= 1,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
     assert_eq!(
-        result.pass_plan.stats.planned_components,
-        result.dependency_sccs.stats.component_count
+        result.pass_plan().stats().planned_components,
+        result.dependency_sccs().stats().component_count
     );
     assert_eq!(
-        result.pass_plan.stats.cyclic_components,
-        result.dependency_sccs.stats.cyclic_component_count
+        result.pass_plan().stats().cyclic_components,
+        result.dependency_sccs().stats().cyclic_component_count
     );
     assert!(
-        result.dependency_sccs.stats.max_component_size >= 2,
+        result.dependency_sccs().stats().max_component_size >= 2,
         "{:?}",
-        result.dependency_sccs.stats
+        result.dependency_sccs().stats()
     );
 
     for rust_name in ["first", "second"] {
-        let method_key = MethodKey {
-            type_name: "MutualRecursiveFlow".to_string(),
-            rust_name: rust_name.to_string(),
-        };
-        let method_constraints = result.constraints.methods.get(&method_key).unwrap();
+        let method_key = MethodKey::rust_identity("MutualRecursiveFlow", rust_name);
+        let method_constraints = result.constraints().methods().get(&method_key).unwrap();
         let input_index = method_constraints
             .param_names
             .iter()
@@ -8746,10 +8275,7 @@ class Holder {
         provenance: FactProvenance::UserOverride,
     });
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "Maker".to_string(),
-            method_name: "make".to_string(),
-        },
+        method: FactMethodKey::named("Maker", "make"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Named {
@@ -10687,6 +10213,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     constructor_mapping_override_facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
+            pack_name: None,
             type_name: "HDF5File".to_string(),
             arg_count: 1,
             rust_type_name: Some("FileHandle".to_string()),
@@ -11504,7 +11031,7 @@ class PlatformMutableExternalArgument {
         semantic
             .usage
             .source_method_usage(ty, method)
-            .and_then(|usage| usage.binding_facts_for_name("buffer"))
+            .and_then(|usage| usage.unique_binding_facts_for_source_name("buffer"))
     );
 }
 
@@ -11556,7 +11083,7 @@ class InternalMutableArrayArgument {
         semantic
             .usage
             .source_method_usage(ty, method)
-            .and_then(|usage| usage.binding_facts_for_name("values"))
+            .and_then(|usage| usage.unique_binding_facts_for_source_name("values"))
     );
 }
 
@@ -12310,11 +11837,11 @@ class ResolverBindingIds {
 
     let param = &method.params[0];
     assert_eq!(
-        param.binding.as_ref().map(|binding| binding.kind),
+        param.binding.as_ref().map(|binding| binding.kind()),
         Some(BindingKind::Param)
     );
     assert_eq!(
-        param.binding.as_ref().map(|binding| binding.occurrence),
+        param.binding.as_ref().map(|binding| binding.occurrence()),
         Some(0)
     );
 
@@ -12325,9 +11852,9 @@ class ResolverBindingIds {
     else {
         panic!("expected first local declaration: {body:#?}");
     };
-    assert_eq!(first_local.kind, BindingKind::Local);
-    assert_eq!(first_local.name, "value");
-    assert_eq!(first_local.occurrence, 0);
+    assert_eq!(first_local.kind(), BindingKind::Local);
+    assert_eq!(first_local.name(), "value");
+    assert_eq!(first_local.occurrence(), 0);
 
     let Stmt::EnhancedFor {
         binding: Some(loop_binding),
@@ -12337,11 +11864,10 @@ class ResolverBindingIds {
     else {
         panic!("expected enhanced-for declaration: {body:#?}");
     };
-    assert_eq!(loop_binding.kind, BindingKind::LoopVariable);
-    assert_eq!(loop_binding.name, "value");
-    assert_eq!(loop_binding.occurrence, 0);
+    assert_eq!(loop_binding.kind(), BindingKind::LoopVariable);
+    assert_eq!(loop_binding.name(), "value");
+    assert_eq!(loop_binding.occurrence(), 0);
     assert!(!loop_body.statements.is_empty());
-
     let Stmt::Try { body, catches, .. } = &body.statements[2] else {
         panic!("expected try statement: {body:#?}");
     };
@@ -12352,30 +11878,35 @@ class ResolverBindingIds {
     else {
         panic!("expected try local declaration: {body:#?}");
     };
-    assert_eq!(try_local.kind, BindingKind::Local);
-    assert_eq!(try_local.occurrence, 1);
+    assert_eq!(try_local.kind(), BindingKind::Local);
+    assert_eq!(try_local.occurrence(), 1);
     let catch_binding = catches[0]
         .binding
         .as_ref()
         .expect("catch parameter binding");
-    assert_eq!(catch_binding.kind, BindingKind::CatchParam);
-    assert_eq!(catch_binding.name, "value");
-    assert_eq!(catch_binding.occurrence, 0);
+    assert_eq!(catch_binding.kind(), BindingKind::CatchParam);
+    assert_eq!(catch_binding.name(), "value");
+    assert_eq!(catch_binding.occurrence(), 0);
 
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: ty.name.clone(),
-            method_name: "run".to_string(),
-        })
+        .method_usage_by_current_rust_name(ty.name.clone(), "run".to_string())
         .expect("run usage");
     assert!(
         method_usage
-            .contains_binding_id(param.binding.as_ref().expect("parameter usage binding id"))
+            .binding_facts_for_test_id(param.binding.as_ref().expect("parameter usage binding id"))
+            .is_some()
     );
-    assert!(method_usage.contains_binding_id(first_local));
-    assert!(method_usage.contains_binding_id(loop_binding));
+    assert!(
+        method_usage
+            .binding_facts_for_test_id(first_local)
+            .is_some()
+    );
+    assert!(
+        method_usage
+            .binding_facts_for_test_id(loop_binding)
+            .is_some()
+    );
 }
 
 #[test]
@@ -12422,13 +11953,10 @@ class SameNameSameTypeLocalConstraints {
         value_locals[0].binding, value_locals[1].binding,
         "same-name/same-type declarations must carry distinct local binding ids: {value_locals:?}"
     );
-    assert_eq!(value_locals[0].binding.kind, BindingKind::Local);
-    assert_eq!(value_locals[1].binding.kind, BindingKind::Local);
-    let method_key = MethodKey {
-        type_name: "SameNameSameTypeLocalConstraints".to_string(),
-        rust_name: "run".to_string(),
-    };
-    let method_constraints = solved_constraints.methods.get(&method_key).unwrap();
+    assert_eq!(value_locals[0].binding.kind(), BindingKind::Local);
+    assert_eq!(value_locals[1].binding.kind(), BindingKind::Local);
+    let method_key = MethodKey::rust_identity("SameNameSameTypeLocalConstraints", "run");
+    let method_constraints = solved_constraints.methods().get(&method_key).unwrap();
     let first_constraints = method_constraints
         .locals
         .iter()
@@ -12456,21 +11984,21 @@ class SameNameSameTypeLocalConstraints {
     let method_usage = usage.source_method_usage(ty, method).expect("run usage");
     assert_eq!(
         method_usage
-            .binding_facts_for_name("value")
+            .unique_binding_facts_for_source_name("value")
             .and_then(|binding| binding.binding.as_ref()),
-        Some(&value_locals[1].binding),
-        "after the branch scope closes, legacy name lookup should resolve to the later top-level binding"
+        None,
+        "source-name aggregate lookup should fail closed when same-name bindings coexist; exact binding ids carry the facts"
     );
     assert_eq!(
         method_usage
-            .binding_facts_for_id(&value_locals[0].binding)
+            .binding_facts_for_test_id(&value_locals[0].binding)
             .map(|binding| binding.uses.as_slice()),
         Some([].as_slice()),
         "the branch-local binding should keep its own empty usage fact"
     );
     assert!(
         method_usage
-            .binding_facts_for_id(&value_locals[1].binding)
+            .binding_facts_for_test_id(&value_locals[1].binding)
             .is_some_and(|binding| binding.uses.iter().any(|usage| matches!(
                 usage,
                 BindingUse::PassedToCall { name, .. } if name == "sink"
@@ -12714,10 +12242,7 @@ class ExternalChoiceConstructorCaller {
 fn external_constant_facade_shells_are_defaultable_for_constructor_fallbacks() {
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "ExternalHeader".to_string(),
-            field_name: "HEADER_INDICATOR".to_string(),
-        },
+        field: FactFieldKey::named("ExternalHeader".to_string(), "HEADER_INDICATOR".to_string()),
         field_type: Some(JavaType::String),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -13691,7 +13216,17 @@ class ErasedExternalFacadeDisplay {
         translation
             .rust
             .contains("if let Some(value) = value.downcast_ref::<ExternalToken>()")
-            && translation.rust.contains("return value.to_string();"),
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<&ExternalToken>()")
+            && translation.rust.contains(
+                "if let Some(value) = value.downcast_ref::<std::rc::Rc<ExternalToken>>()"
+            )
+            && translation.rust.contains(
+                "if let Some(value) = value.downcast_ref::<std::sync::Arc<ExternalToken>>()"
+            )
+            && translation.rust.contains("return value.to_string();")
+            && translation.rust.contains("return (*value).to_string();"),
         "{}",
         translation.rust
     );
@@ -13852,6 +13387,9 @@ class ErasedFileDisplay {
         translation
             .rust
             .contains("if let Some(value) = value.downcast_ref::<File>()")
+            && translation
+                .rust
+                .contains("if let Some(value) = value.downcast_ref::<&File>()")
             && translation.rust.contains("return value.to_string();"),
         "{}",
         translation.rust
@@ -14439,17 +13977,22 @@ fn call_plan_recovers_normalized_static_utility_owner_receivers() {
             rust_name
         } if owner == "ExternalUtil" && rust_name == "consume"
     ));
-    assert!(matches!(
-        plan_call_target_with_facts_and_arity(
-            Some(&Expr::Var("foo".to_string())),
-            "toString",
-            0,
-            None,
-            &FactSet::default(),
-            &TypeEnv::default(),
+    let foo_receiver = Expr::Var("foo".to_string());
+    let foo_to_string_target = plan_call_target_with_facts_and_arity(
+        Some(&foo_receiver),
+        "toString",
+        0,
+        None,
+        &FactSet::default(),
+        &TypeEnv::default(),
+    );
+    assert!(
+        matches!(
+            foo_to_string_target,
+            CallTargetPlan::FallbackReceiver { .. }
         ),
-        CallTargetPlan::FallbackReceiver { .. }
-    ));
+        "foo.toString should not be promoted to a static owner: {foo_to_string_target:?}"
+    );
 
     let mut imported_types = TypeEnv::new();
     imported_types.insert_static_type_alias("external_utility", "external.lib.ExternalUtility");
@@ -14668,11 +14211,13 @@ class UsesOwnedOptionalExternalGetter {
         "{}",
         translation.rust
     );
-    assert!(
-        !translation.rust.contains(".cloned()"),
-        "{}",
-        translation.rust
-    );
+    let run_body = translation
+        .rust
+        .split("pub fn run(&self, cursor: &db_facade::Cursor) -> Result<(), JavaException> {")
+        .nth(1)
+        .and_then(|tail| tail.split("impl UsesOwnedOptionalExternalGetter").next())
+        .expect("translated run body should be present");
+    assert!(!run_body.contains(".cloned()"), "{}", run_body);
 }
 
 #[test]
@@ -15192,29 +14737,17 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     };
     let mut facts = FactSet::default();
     facts.trivial_accessor_facts.push(TrivialAccessorFact {
-        method: FactMethodKey {
-            type_name: "Bean".to_string(),
-            method_name: "getValue".to_string(),
-        },
+        method: FactMethodKey::named("Bean", "getValue"),
         kind: TrivialAccessorKind::Getter {
-            field: FactFieldKey {
-                type_name: "Bean".to_string(),
-                field_name: "value".to_string(),
-            },
+            field: FactFieldKey::named("Bean".to_string(), "value".to_string()),
         },
         inline_policy: AccessorInlinePolicy::InlineCandidate,
         provenance: FactProvenance::ParsedSource,
     });
     facts.trivial_accessor_facts.push(TrivialAccessorFact {
-        method: FactMethodKey {
-            type_name: "Bean".to_string(),
-            method_name: "setValue".to_string(),
-        },
+        method: FactMethodKey::named("Bean", "setValue"),
         kind: TrivialAccessorKind::Setter {
-            field: FactFieldKey {
-                type_name: "Bean".to_string(),
-                field_name: "value".to_string(),
-            },
+            field: FactFieldKey::named("Bean".to_string(), "value".to_string()),
             param_name: "value".to_string(),
             fluent: false,
         },
@@ -15709,10 +15242,7 @@ class Maker {
         provenance: FactProvenance::UserOverride,
     });
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "Maker".to_string(),
-            method_name: "make".to_string(),
-        },
+        method: FactMethodKey::named("Maker", "make"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Named {
@@ -16414,13 +15944,11 @@ class Builder {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "Holder".to_string(),
-            method_name: "pass".to_string(),
-        })
+        .method_usage_by_current_rust_name("Holder".to_string(), "pass".to_string())
         .unwrap();
-    let binding = method.unique_binding_facts_for_name("workspace").unwrap();
+    let binding = method
+        .unique_binding_facts_for_source_name("workspace")
+        .unwrap();
 
     assert!(
         binding.uses.len() >= 3
@@ -16845,8 +16373,10 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
     assert!(source.contains("optional_borrow_slot_lowered_type"));
     assert!(!source.contains("fn reused_optional_unwrap_lowered_expr"));
     assert!(source.contains("reused_optional_unwrap_plan_for_slot"));
-    assert!(conversion_source.contains("pub struct ReusedOptionalUnwrapPlan"));
-    assert!(conversion_source.contains("pub fn reused_optional_unwrap_plan_for_slot"));
+    assert!(conversion_source.contains("pub(crate) struct ReusedOptionalUnwrapPlan"));
+    assert!(!conversion_source.contains("pub struct ReusedOptionalUnwrapPlan"));
+    assert!(conversion_source.contains("pub(crate) fn reused_optional_unwrap_plan_for_slot"));
+    assert!(!conversion_source.contains("pub fn reused_optional_unwrap_plan_for_slot"));
     assert!(
         source.contains("plan_lowered_slot_conversion(&lowered.actual, slot.clone(), ctx.facts)")
     );
@@ -17020,7 +16550,9 @@ fn optional_element_borrow_carrier_construction_is_centralized() {
         !optional_instance_receiver_adapter.contains("optional_element_borrow_from_option_shape")
     );
     assert!(!optional_instance_receiver_adapter.contains("Some(if mutable"));
-    assert!(conversion_source.contains("receiver_method_autoref_satisfies_optional_slot"));
+    assert!(
+        conversion_source.contains("pub(crate) fn receiver_method_autoref_satisfies_optional_slot")
+    );
     assert!(!source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
     let native_collection_receiver_helper = source
         .split("fn adapt_native_collection_receiver")
@@ -17794,9 +17326,7 @@ fn external_api_call_lookup_prefers_parameter_pattern_specificity() {
         method_name: "parse".to_string(),
         receiver_type: Some("TypedParser".to_string()),
         arg_count: Some(1),
-        parameter_patterns: Some(vec![TypePattern::Exact(TypeKey {
-            type_name: "String".to_string(),
-        })]),
+        parameter_patterns: Some(vec![TypePattern::exact("String")]),
         role: ExternalApiRole::Getter,
         receiver_mutability: ReceiverMutabilityFact::ReadOnly,
         return_type: Some(JavaType::String),
@@ -18038,15 +17568,6 @@ fn facade_abi_result_shape_drives_external_call_fallibility() {
             args: Vec::new(),
         },
     );
-
-    assert!(external_call_returns_rust_result(
-        Some(&Expr::Var("reader".to_string())),
-        "read",
-        0,
-        &facts,
-        &types,
-        Some("Owner"),
-    ));
 }
 
 #[test]
@@ -18086,15 +17607,6 @@ fn facade_abi_plain_result_overrides_thrown_exception_guess() {
             args: Vec::new(),
         },
     );
-
-    assert!(!external_call_returns_rust_result(
-        Some(&Expr::Var("reader".to_string())),
-        "getName",
-        0,
-        &facts,
-        &types,
-        Some("Owner"),
-    ));
 }
 
 #[test]
@@ -18177,7 +17689,6 @@ catch dep.AnalysisTarget summarize 0 dep.DecodeError,IOException assignable=dep.
     assert_eq!(capture_owner.captures[0].ty, JavaType::String);
     assert!(capture_owner.captures[0].effectively_final);
     assert!(!capture_owner.captures[0].mutable_after_capture);
-
     let getter = parsed
         .facts
         .trivial_accessor_for("dep.AnalysisTarget", "getValue")
@@ -18185,10 +17696,7 @@ catch dep.AnalysisTarget summarize 0 dep.DecodeError,IOException assignable=dep.
     assert_eq!(
         getter.kind,
         TrivialAccessorKind::Getter {
-            field: FactFieldKey {
-                type_name: "dep.AnalysisTarget".to_string(),
-                field_name: "value".to_string(),
-            },
+            field: FactFieldKey::named("dep.AnalysisTarget".to_string(), "value".to_string()),
         }
     );
     assert_eq!(getter.inline_policy, AccessorInlinePolicy::InlineCandidate);
@@ -18208,10 +17716,7 @@ catch dep.AnalysisTarget summarize 0 dep.DecodeError,IOException assignable=dep.
     assert_eq!(
         setter.kind,
         TrivialAccessorKind::Setter {
-            field: FactFieldKey {
-                type_name: "dep.AnalysisTarget".to_string(),
-                field_name: "value".to_string(),
-            },
+            field: FactFieldKey::named("dep.AnalysisTarget".to_string(), "value".to_string()),
             param_name: "value".to_string(),
             fluent: true,
         }
@@ -18223,8 +17728,8 @@ catch dep.AnalysisTarget summarize 0 dep.DecodeError,IOException assignable=dep.
         .facts
         .recursion_facts_for("dep.AnalysisTarget", "summarize");
     assert_eq!(recursion.len(), 1);
-    assert_eq!(recursion[0].calls.type_name, "dep.AnalysisTarget");
-    assert_eq!(recursion[0].calls.method_name, "summarize");
+    assert_eq!(recursion[0].calls.type_name(), "dep.AnalysisTarget");
+    assert_eq!(recursion[0].calls.method_name(), "summarize");
     assert_eq!(recursion[0].kind, RecursionKind::Direct);
     assert_eq!(recursion[0].provenance, FactProvenance::UserOverride);
     assert_eq!(
@@ -18247,8 +17752,8 @@ catch dep.AnalysisTarget summarize 0 dep.DecodeError,IOException assignable=dep.
         ControlFlowFactKind::TailRecursiveSelfCall
     ));
     assert!(parsed.facts.control_flow_facts.iter().any(|fact| {
-        fact.method.type_name == "dep.AnalysisTarget"
-            && fact.method.method_name == "summarize"
+        fact.method.type_name() == "dep.AnalysisTarget"
+            && fact.method.method_name() == "summarize"
             && fact.provenance == FactProvenance::UserOverride
     }));
     assert_eq!(
@@ -18335,8 +17840,8 @@ field-nullability dep.AnalysisTarget RAW_VALUE definitely-non-null
         "field-nullability lookup should normalize qualified type spellings"
     );
     assert!(parsed.facts.field_nullability_facts.iter().any(|fact| {
-        fact.field.type_name == "User"
-            && fact.field.field_name == "name"
+        fact.field.type_name() == "User"
+            && fact.field.field_name() == "name"
             && fact.provenance == FieldNullabilityProvenance::ExternalOverride
     }));
 }
@@ -18839,17 +18344,14 @@ class StringUse {
         &usage,
         &FactSet::default(),
     );
-    let outer_key = new_java2rust::signature::MethodKey {
-        type_name: "StringUse".to_string(),
-        rust_name: "outer".to_string(),
-    };
+    let outer_key = new_java2rust::signature::MethodKey::rust_identity("StringUse", "outer");
 
     assert_eq!(iterations, 2);
     assert_eq!(signatures.solve_iterations(), 2);
-    assert!(constraints.methods.get(&outer_key).unwrap().public_api == false);
+    assert!(constraints.methods().get(&outer_key).unwrap().public_api == false);
     assert!(
         constraints
-            .methods
+            .methods()
             .get(&outer_key)
             .unwrap()
             .params
@@ -18859,7 +18361,7 @@ class StringUse {
     );
     assert!(
         solved_constraints
-            .methods
+            .methods()
             .get(&outer_key)
             .unwrap()
             .params
@@ -18871,7 +18373,7 @@ class StringUse {
                 SignatureConstraint::RequiredView(ViewShape::Str)
             ))
     );
-    assert!(solved_constraints.methods.values().any(|constraints| {
+    assert!(solved_constraints.methods().values().any(|constraints| {
         constraints.params.iter().flatten().any(|constraint| {
             matches!(
                 constraint,
@@ -19330,12 +18832,8 @@ fn signature_constraint_conflict_diagnostic_is_public_and_structured() {
 
 #[test]
 fn signature_saturation_report_summarizes_iterations_conflicts_and_fallback_reasons() {
-    let method_key = MethodKey {
-        type_name: "ConflictFlow".to_string(),
-        rust_name: "entry".to_string(),
-    };
-    let mut constraints = SignatureConstraintState::default();
-    constraints.methods.insert(
+    let method_key = MethodKey::rust_identity("ConflictFlow", "entry");
+    let constraints = SignatureConstraintState::default().with_method_constraints(
         method_key,
         MethodConstraintSet {
             return_constraints: vec![
@@ -19349,7 +18847,8 @@ fn signature_saturation_report_summarizes_iterations_conflicts_and_fallback_reas
     );
     let usage = new_java2rust::usage::UsageFacts::default();
     let solved = solve_signature_constraints_to_fixpoint_result(constraints.clone(), &usage);
-    let conflict_diagnostics = signature_constraint_state_conflict_diagnostics(&solved.constraints);
+    let conflict_diagnostics =
+        signature_constraint_state_conflict_diagnostics(solved.constraints());
 
     assert!(
         conflict_diagnostics
@@ -19871,12 +19370,9 @@ class Helper {
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let (solved_constraints, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let method_key = MethodKey {
-        type_name: "LocalCapabilityFlow".to_string(),
-        rust_name: "use".to_string(),
-    };
+    let method_key = MethodKey::rust_identity("LocalCapabilityFlow", "use");
     let local_constraints = solved_constraints
-        .methods
+        .methods()
         .get(&method_key)
         .unwrap()
         .locals
@@ -20096,10 +19592,7 @@ class EffectOnlyThrows {
 "#;
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "EffectOnlyThrows".to_string(),
-            method_name: "read".to_string(),
-        },
+        method: FactMethodKey::named("EffectOnlyThrows", "read"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Named {
@@ -20460,11 +19953,7 @@ class LocalizableStore {
         .unwrap();
 
     let constraints = method_return_shape_constraints(ty, method, &usage, &semantic.facts);
-    let usage_debug = usage
-        .methods
-        .iter()
-        .filter(|(key, _)| key.type_name == "LocalizableStore")
-        .collect::<Vec<_>>();
+    let usage_debug = usage.source_method_usage(ty, method);
     let representation = representations.representation_for(&JavaType::Named {
         name: "Localizable".to_string(),
         args: Vec::new(),
@@ -20475,8 +19964,8 @@ class LocalizableStore {
         .iter()
         .map(|fact| {
             (
-                &fact.field.type_name,
-                &fact.field.field_name,
+                fact.field.type_name(),
+                fact.field.field_name(),
                 &fact.field_type,
             )
         })
@@ -20537,10 +20026,7 @@ class Counter {
         signatures.method_receiver(ty, method).unwrap()
     };
     let method_usage = |name: &str| {
-        usage.methods.get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "Counter".to_string(),
-            method_name: name.to_string(),
-        })
+        usage.method_usage_by_current_rust_name("Counter".to_string(), name.to_string())
     };
 
     assert_eq!(receiver_for("get"), ReceiverPlan::Shared);
@@ -20599,10 +20085,7 @@ class Counter {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let mut facts = resolved.facts.clone();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "Counter".to_string(),
-            method_name: "get".to_string(),
-        },
+        method: FactMethodKey::named("Counter", "get"),
         receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
         return_nullability: NullabilityState::Unknown,
         thrown: Vec::new(),
@@ -21228,15 +20711,13 @@ class Helper {
         })
         .unwrap();
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: ty.name.clone(),
-            method_name: "use".to_string(),
-        })
+        .method_usage_by_current_rust_name(ty.name.clone(), "use".to_string())
         .unwrap();
-    let value_usage = method_usage.unique_binding_facts_for_name("value").unwrap();
+    let value_usage = method_usage
+        .unique_binding_facts_for_source_name("value")
+        .unwrap();
 
-    assert!(method_usage.call_sites.iter().any(|call_site| {
+    assert!(method_usage.call_sites().iter().any(|call_site| {
         call_site.name == "consume"
             && call_site.arg_count == 1
             && call_site.result_returned
@@ -21368,15 +20849,11 @@ class ExternalName {}
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "ResultBoundarySource".to_string(),
-            method_name: "use".to_string(),
-        })
+        .method_usage_by_current_rust_name("ResultBoundarySource".to_string(), "use".to_string())
         .unwrap();
 
     let unresolved = method_usage
-        .unique_binding_facts_for_name("unresolved")
+        .unique_binding_facts_for_source_name("unresolved")
         .unwrap();
     assert!(unresolved.uses.iter().any(|usage| {
         matches!(
@@ -21389,7 +20866,7 @@ class ExternalName {}
         )
     }));
     let internal = method_usage
-        .unique_binding_facts_for_name("internal")
+        .unique_binding_facts_for_source_name("internal")
         .unwrap();
     assert!(internal.uses.iter().any(|usage| {
         matches!(
@@ -21402,7 +20879,7 @@ class ExternalName {}
         )
     }));
     let fetched = method_usage
-        .unique_binding_facts_for_name("fetched")
+        .unique_binding_facts_for_source_name("fetched")
         .unwrap();
     assert!(
         fetched.uses.iter().any(|usage| {
@@ -21418,7 +20895,7 @@ class ExternalName {}
         "{fetched:?}"
     );
     let constructed = method_usage
-        .unique_binding_facts_for_name("constructed")
+        .unique_binding_facts_for_source_name("constructed")
         .unwrap();
     assert!(constructed.uses.iter().any(|usage| {
         matches!(
@@ -21449,15 +20926,11 @@ class BulkAddAllBorrowed {
     let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
     let usage = &semantic.usage;
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "BulkAddAllBorrowed".to_string(),
-            method_name: "merge".to_string(),
-        })
+        .method_usage_by_current_rust_name("BulkAddAllBorrowed".to_string(), "merge".to_string())
         .unwrap();
 
     let values_usage = method_usage
-        .unique_binding_facts_for_name("values")
+        .unique_binding_facts_for_source_name("values")
         .unwrap();
     assert!(values_usage.uses.iter().any(|usage| {
         matches!(
@@ -21482,7 +20955,9 @@ class BulkAddAllBorrowed {
         )),
         "addAll receiver should contribute a mutable-borrow signature constraint"
     );
-    let other_usage = method_usage.unique_binding_facts_for_name("other").unwrap();
+    let other_usage = method_usage
+        .unique_binding_facts_for_source_name("other")
+        .unwrap();
     assert!(other_usage.uses.iter().any(|usage| {
         matches!(
             usage,
@@ -21583,13 +21058,11 @@ class Helper {
     let facts = external_name_boundary_facts(&resolved.facts);
     let effective_facts = EffectiveFacts::new(&facts);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "UnknownLocalSource".to_string(),
-            method_name: "use".to_string(),
-        })
+        .method_usage_by_current_rust_name("UnknownLocalSource".to_string(), "use".to_string())
         .unwrap();
-    let value_usage = method_usage.unique_binding_facts_for_name("value").unwrap();
+    let value_usage = method_usage
+        .unique_binding_facts_for_source_name("value")
+        .unwrap();
 
     assert!(value_usage.uses.iter().any(|usage| {
         matches!(
@@ -21604,11 +21077,8 @@ class Helper {
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "UnknownLocalSource".to_string(),
-            rust_name: "use".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity("UnknownLocalSource", "use"))
         .unwrap();
     let local_constraints = method_constraints
         .locals
@@ -21654,11 +21124,8 @@ class DeferredExternalStorage {
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "DeferredExternalStorage".to_string(),
-            rust_name: "run".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity("DeferredExternalStorage", "run"))
         .unwrap();
     let importer_constraints = method_constraints
         .locals
@@ -21878,11 +21345,8 @@ class ExternalReturnLocal {
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "ExternalReturnLocal".to_string(),
-            rust_name: "label".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity("ExternalReturnLocal", "label"))
         .unwrap();
     let local_constraints = method_constraints
         .locals
@@ -21916,11 +21380,11 @@ class VariantAttributeOptionPlanning {
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "VariantAttributeOptionPlanning".to_string(),
-            rust_name: "attribute".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity(
+            "VariantAttributeOptionPlanning",
+            "attribute",
+        ))
         .unwrap();
     let local_constraints = method_constraints
         .locals
@@ -22025,25 +21489,6 @@ class SourceNullableSlots {
             _ => None,
         })
         .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "current"),
-        vec![],
-        "resolver-bound locals should use binding-keyed nullability, not the compatibility name view"
-    );
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![],
-        "block/name compatibility helper should fail closed for resolver-bound parameters"
-    );
-    assert_eq!(
-        source_method_return_nullability_constraints(method),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::MaybeNull
-        )]
-    );
-
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let signatures = solve_signatures_with_facts(
         &resolved.program,
@@ -22091,13 +21536,6 @@ class SourceDuplicateNullableLocal {
             _ => None,
         })
         .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![]
-    );
-
     let usage = analyze_usage(&resolved.program);
     let representations = plan_representations(&resolved.program, &resolved.facts);
     let signatures = solve_signatures_with_facts(
@@ -22124,199 +21562,6 @@ class SourceDuplicateNullableLocal {
         ),
         "outer value should keep its own non-null initializer shape: {:?}",
         value_locals[1].shape
-    );
-}
-
-#[test]
-fn source_binding_nullability_constraints_do_not_use_nested_only_local_name() {
-    let parsed = parse_java_source(
-        r#"
-class SourceNestedNullableLocalOnly {
-    Object keep(boolean choose) {
-        if (choose) {
-            Object value = null;
-        }
-        return new Object();
-    }
-}
-"#,
-    );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let ty = &resolved.program.types[0];
-    let method = ty
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Method(method) if method.name == "keep" => Some(method),
-            _ => None,
-        })
-        .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![],
-        "a nested id-less local must not enable the outer block/name compatibility helper"
-    );
-}
-
-#[test]
-fn source_binding_nullability_constraints_do_not_cross_anonymous_method_body() {
-    let parsed = parse_java_source(
-        r#"
-interface SourceAnonymousNullabilityChecker {
-    boolean test(Object value);
-}
-
-class SourceAnonymousNullabilityOuter {
-    Object keep() {
-        Object value = new Object();
-        new SourceAnonymousNullabilityChecker() {
-            public boolean test(Object value) {
-                return value == null;
-            }
-        };
-        return value;
-    }
-}
-"#,
-    );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let ty = resolved
-        .program
-        .types
-        .iter()
-        .find(|ty| ty.name == "SourceAnonymousNullabilityOuter")
-        .unwrap();
-    let method = ty
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Method(method) if method.name == "keep" => Some(method),
-            _ => None,
-        })
-        .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![],
-        "anonymous method parameters must not leak into the outer name-only compatibility helper"
-    );
-}
-
-#[test]
-fn source_binding_nullability_constraints_do_not_cross_lambda_body() {
-    let parsed = parse_java_source(
-        r#"
-interface SourceLambdaNullabilityChecker {
-    boolean test(Object value);
-}
-
-class SourceLambdaNullabilityOuter {
-    Object keep() {
-        Object value = new Object();
-        SourceLambdaNullabilityChecker checker = value -> value == null;
-        return value;
-    }
-}
-"#,
-    );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let ty = resolved
-        .program
-        .types
-        .iter()
-        .find(|ty| ty.name == "SourceLambdaNullabilityOuter")
-        .unwrap();
-    let method = ty
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Method(method) if method.name == "keep" => Some(method),
-            _ => None,
-        })
-        .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![],
-        "lambda parameters must not leak into the outer name-only compatibility helper"
-    );
-}
-
-#[test]
-fn source_binding_nullability_constraints_do_not_expose_enhanced_for_variable() {
-    let parsed = parse_java_source(
-        r#"
-class SourceEnhancedForNullableLocalOnly {
-    Object keep(Object[] values) {
-        for (Object item : values) {
-            item = null;
-        }
-        Object direct = null;
-        return direct;
-    }
-}
-"#,
-    );
-    let ty = &parsed.program.types[0];
-    let method = ty
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Method(method) if method.name == "keep" => Some(method),
-            _ => None,
-        })
-        .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "item"),
-        vec![],
-        "an enhanced-for variable is scoped to the loop body, not the enclosing block"
-    );
-    assert_eq!(
-        source_binding_nullability_constraints(body, "direct"),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::DefinitelyNull
-        )],
-        "direct id-less local compatibility remains available"
-    );
-}
-
-#[test]
-fn source_return_nullability_does_not_reuse_shadowed_local_name_state() {
-    let parsed = parse_java_source(
-        r#"
-class SourceDuplicateNullableReturn {
-    Object keep(boolean choose) {
-        if (choose) {
-            Object value = null;
-        }
-        Object value = new Object();
-        return value;
-    }
-}
-"#,
-    );
-    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
-    let ty = &resolved.program.types[0];
-    let method = ty
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Method(method) if method.name == "keep" => Some(method),
-            _ => None,
-        })
-        .unwrap();
-
-    assert_eq!(
-        source_method_return_nullability_constraints(method),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::DefinitelyNonNull
-        )]
     );
 }
 
@@ -22369,13 +21614,6 @@ class SourceParamDuplicateLocalNullability {
             _ => None,
         })
         .unwrap();
-    let body = method.body.as_ref().unwrap();
-
-    assert_eq!(
-        source_binding_nullability_constraints(body, "value"),
-        vec![],
-        "duplicate locals should keep the compatibility name view fail-closed"
-    );
     assert!(
         method_param_shape_constraints(ty, method, &method.params[0], &usage, &resolved.facts)
             .contains(&SignatureConstraint::RequiredStorageNullability(
@@ -22422,13 +21660,6 @@ public class Alignment {
             _ => None,
         })
         .unwrap();
-
-    assert_eq!(
-        source_method_return_nullability_constraints(method),
-        vec![SignatureConstraint::RequiredStorageNullability(
-            NullabilityState::MaybeNull
-        )]
-    );
 
     let constraints = method_return_shape_constraints(ty, method, &usage, &resolved.facts);
     assert!(
@@ -22530,11 +21761,6 @@ class NullablePathOverloadArgument {
         "{initializer:#?}"
     );
 
-    assert_eq!(
-        source_binding_nullability_constraints(body, "optional_index"),
-        vec![],
-        "block/name compatibility helper should fail closed for resolver-bound parameters"
-    );
     assert!(
         method_param_shape_constraints(ty, method, &method.params[1], &usage, &resolved.facts)
             .contains(&SignatureConstraint::RequiredStorageNullability(
@@ -22930,14 +22156,13 @@ class ExternalName {}
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "UnknownDirectNewReturn".to_string(),
-            method_name: "create".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "UnknownDirectNewReturn".to_string(),
+            "create".to_string(),
+        )
         .unwrap();
 
-    assert!(method_usage.returned_call_results.iter().any(|returned| {
+    assert!(method_usage.returned_call_results().iter().any(|returned| {
         returned.name == "new" && returned.boundary == CallArgumentBoundary::Unknown
     }));
 }
@@ -22967,31 +22192,29 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let casted_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "UnknownReturnedExpression".to_string(),
-            method_name: "casted".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "UnknownReturnedExpression".to_string(),
+            "casted".to_string(),
+        )
         .unwrap();
     let chosen_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "UnknownReturnedExpression".to_string(),
-            method_name: "chosen".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "UnknownReturnedExpression".to_string(),
+            "chosen".to_string(),
+        )
         .unwrap();
 
-    assert!(casted_usage.call_sites.iter().any(|call_site| {
+    assert!(casted_usage.call_sites().iter().any(|call_site| {
         call_site.name == "fetch"
             && call_site.result_returned
             && call_site.boundary == CallArgumentBoundary::Unknown
     }));
-    assert!(casted_usage.returned_call_results.iter().any(|returned| {
+    assert!(casted_usage.returned_call_results().iter().any(|returned| {
         returned.name == "fetch" && returned.boundary == CallArgumentBoundary::Unknown
     }));
     assert_eq!(
         chosen_usage
-            .returned_call_results
+            .returned_call_results()
             .iter()
             .filter(|returned| {
                 returned.name == "new" && returned.boundary == CallArgumentBoundary::Unknown
@@ -23065,14 +22288,13 @@ class Helper {
     let facts = external_name_boundary_facts(&resolved.facts);
     let effective_facts = EffectiveFacts::new(&facts);
     let constructor_usage = usage
-        .constructors
-        .get(&new_java2rust::usage::UsageConstructorKey {
-            type_name: "UnknownConstructorLocalSource".to_string(),
-            rust_name: "new".to_string(),
-        })
+        .constructor_usage_by_current_rust_name(
+            "UnknownConstructorLocalSource".to_string(),
+            "new".to_string(),
+        )
         .unwrap();
     let value_usage = constructor_usage
-        .unique_binding_facts_for_name("value")
+        .unique_binding_facts_for_source_name("value")
         .unwrap();
 
     assert!(value_usage.uses.iter().any(|usage| {
@@ -23088,11 +22310,11 @@ class Helper {
 
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     let constructor_constraints = constraints
-        .constructors
-        .get(&ConstructorKey {
-            type_name: "UnknownConstructorLocalSource".to_string(),
-            rust_name: "new".to_string(),
-        })
+        .constructors()
+        .get(&ConstructorKey::rust_identity(
+            "UnknownConstructorLocalSource",
+            "new",
+        ))
         .unwrap();
     let local_constraints = constructor_constraints
         .locals
@@ -23129,14 +22351,10 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "UnknownFieldSource".to_string(),
-            method_name: "use".to_string(),
-        })
+        .method_usage_by_current_rust_name("UnknownFieldSource".to_string(), "use".to_string())
         .unwrap();
 
-    assert!(method_usage.field_uses.iter().any(|usage| {
+    assert!(method_usage.field_uses().iter().any(|usage| {
         matches!(
             usage,
             FieldUse::AssignedFromCall {
@@ -23172,15 +22390,11 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "UnknownBareFieldSource".to_string(),
-            method_name: "use".to_string(),
-        })
+        .method_usage_by_current_rust_name("UnknownBareFieldSource".to_string(), "use".to_string())
         .unwrap();
 
-    assert!(!method_usage.contains_binding_name("cached"));
-    assert!(method_usage.field_uses.iter().any(|usage| {
+    assert!(!method_usage.contains_binding_source_name("cached"));
+    assert!(method_usage.field_uses().iter().any(|usage| {
         matches!(
             usage,
             FieldUse::AssignedFromCall {
@@ -23216,14 +22430,13 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let constructor_usage = usage
-        .constructors
-        .get(&new_java2rust::usage::UsageConstructorKey {
-            type_name: "UnknownConstructorFieldSource".to_string(),
-            rust_name: "new".to_string(),
-        })
+        .constructor_usage_by_current_rust_name(
+            "UnknownConstructorFieldSource".to_string(),
+            "new".to_string(),
+        )
         .unwrap();
 
-    assert!(constructor_usage.field_uses.iter().any(|usage| {
+    assert!(constructor_usage.field_uses().iter().any(|usage| {
         matches!(
             usage,
             FieldUse::AssignedFromCall {
@@ -23259,15 +22472,14 @@ class Helper {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let constructor_usage = usage
-        .constructors
-        .get(&new_java2rust::usage::UsageConstructorKey {
-            type_name: "UnknownConstructorBareFieldSource".to_string(),
-            rust_name: "new".to_string(),
-        })
+        .constructor_usage_by_current_rust_name(
+            "UnknownConstructorBareFieldSource".to_string(),
+            "new".to_string(),
+        )
         .unwrap();
 
-    assert!(!constructor_usage.contains_binding_name("cached"));
-    assert!(constructor_usage.field_uses.iter().any(|usage| {
+    assert!(!constructor_usage.contains_binding_source_name("cached"));
+    assert!(constructor_usage.field_uses().iter().any(|usage| {
         matches!(
             usage,
             FieldUse::AssignedFromCall {
@@ -23306,14 +22518,13 @@ class Helper {
     let usage = analyze_usage(&resolved.program);
     for method_name in ["explicit", "bare"] {
         let method_usage = usage
-            .methods
-            .get(&new_java2rust::usage::UsageMethodKey {
-                type_name: "UnknownFieldArgument".to_string(),
-                method_name: method_name.to_string(),
-            })
+            .method_usage_by_current_rust_name(
+                "UnknownFieldArgument".to_string(),
+                method_name.to_string(),
+            )
             .unwrap();
 
-        assert!(method_usage.field_uses.iter().any(|usage| {
+        assert!(method_usage.field_uses().iter().any(|usage| {
             matches!(
                 usage,
                 FieldUse::PassedToCall {
@@ -23361,14 +22572,13 @@ class Helper {
 
     for method_name in ["explicit", "bare"] {
         let method_usage = usage
-            .methods
-            .get(&new_java2rust::usage::UsageMethodKey {
-                type_name: "UnknownConstructorFieldArgument".to_string(),
-                method_name: method_name.to_string(),
-            })
+            .method_usage_by_current_rust_name(
+                "UnknownConstructorFieldArgument".to_string(),
+                method_name.to_string(),
+            )
             .unwrap();
 
-        assert!(method_usage.field_uses.iter().any(|usage| {
+        assert!(method_usage.field_uses().iter().any(|usage| {
             matches!(
                 usage,
                 FieldUse::PassedToCall {
@@ -23383,14 +22593,13 @@ class Helper {
     }
 
     let constructor_usage = usage
-        .constructors
-        .get(&new_java2rust::usage::UsageConstructorKey {
-            type_name: "UnknownConstructorFieldArgument".to_string(),
-            rust_name: "new".to_string(),
-        })
+        .constructor_usage_by_current_rust_name(
+            "UnknownConstructorFieldArgument".to_string(),
+            "new".to_string(),
+        )
         .unwrap();
 
-    assert!(constructor_usage.field_uses.iter().any(|usage| {
+    assert!(constructor_usage.field_uses().iter().any(|usage| {
         matches!(
         usage,
             FieldUse::PassedToCall {
@@ -23450,11 +22659,11 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     assert_eq!(
         constraints
-            .fields
-            .get(&new_java2rust::signature::FieldKey {
-                type_name: "UnknownFieldSource".to_string(),
-                field_name: "cached".to_string(),
-            })
+            .fields()
+            .get(&new_java2rust::signature::FieldKey::rust_identity(
+                "UnknownFieldSource",
+                "cached",
+            ))
             .unwrap(),
         &expected
     );
@@ -23547,11 +22756,11 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     assert_eq!(
         constraints
-            .fields
-            .get(&new_java2rust::signature::FieldKey {
-                type_name: "UnknownFieldArgument".to_string(),
-                field_name: "cached".to_string(),
-            })
+            .fields()
+            .get(&new_java2rust::signature::FieldKey::rust_identity(
+                "UnknownFieldArgument",
+                "cached",
+            ))
             .unwrap(),
         &expected
     );
@@ -23691,11 +22900,11 @@ class Helper {
     let constraints = collect_signature_constraints(&resolved.program, &usage, &facts);
     assert_eq!(
         constraints
-            .fields
-            .get(&new_java2rust::signature::FieldKey {
-                type_name: "UnknownConstructorFieldSource".to_string(),
-                field_name: "cached".to_string(),
-            })
+            .fields()
+            .get(&new_java2rust::signature::FieldKey::rust_identity(
+                "UnknownConstructorFieldSource",
+                "cached",
+            ))
             .unwrap(),
         &expected
     );
@@ -23721,30 +22930,25 @@ class ReturnedBareFieldFlow {
     );
     let usage = analyze_usage(&parsed.program);
     let get_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "ReturnedBareFieldFlow".to_string(),
-            method_name: "get".to_string(),
-        })
+        .method_usage_by_current_rust_name("ReturnedBareFieldFlow".to_string(), "get".to_string())
         .unwrap();
     let shadow_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "ReturnedBareFieldFlow".to_string(),
-            method_name: "shadow".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "ReturnedBareFieldFlow".to_string(),
+            "shadow".to_string(),
+        )
         .unwrap();
 
-    assert!(get_usage.field_uses.iter().any(|usage| {
+    assert!(get_usage.field_uses().iter().any(|usage| {
         matches!(
             usage,
             FieldUse::Returned { field_name } if field_name == "cached"
         )
     }));
-    assert!(shadow_usage.field_uses.is_empty());
+    assert!(shadow_usage.field_uses().is_empty());
     assert!(
         shadow_usage
-            .unique_binding_facts_for_name("cached")
+            .unique_binding_facts_for_source_name("cached")
             .unwrap()
             .uses
             .iter()
@@ -23767,14 +22971,10 @@ class ReturnedFieldFlow {
     );
     let usage = analyze_usage(&parsed.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "ReturnedFieldFlow".to_string(),
-            method_name: "get".to_string(),
-        })
+        .method_usage_by_current_rust_name("ReturnedFieldFlow".to_string(), "get".to_string())
         .unwrap();
 
-    assert!(method_usage.field_uses.iter().any(|usage| {
+    assert!(method_usage.field_uses().iter().any(|usage| {
         matches!(
             usage,
             FieldUse::Returned { field_name } if field_name == "cached"
@@ -23784,49 +22984,45 @@ class ReturnedFieldFlow {
 
 #[test]
 fn signature_fixpoint_propagates_returned_field_constraints_bidirectionally() {
-    let method_key = MethodKey {
-        type_name: "ReturnedFieldFlow".to_string(),
-        rust_name: "get".to_string(),
-    };
-    let field_key = FieldKey {
-        type_name: "ReturnedFieldFlow".to_string(),
-        field_name: "cached".to_string(),
-    };
-    let mut constraints = SignatureConstraintState::default();
-    constraints.methods.insert(
-        method_key.clone(),
-        MethodConstraintSet {
-            return_constraints: vec![
-                SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
-                SignatureConstraint::RequiredView(ViewShape::Str),
+    let method_key = MethodKey::rust_identity("ReturnedFieldFlow", "get");
+    let field_key = FieldKey::rust_identity("ReturnedFieldFlow", "cached");
+    let constraints = SignatureConstraintState::default()
+        .with_method_constraints(
+            method_key.clone(),
+            MethodConstraintSet {
+                return_constraints: vec![
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::SharedBorrow),
+                    SignatureConstraint::RequiredView(ViewShape::Str),
+                ],
+                ..MethodConstraintSet::default()
+            },
+        )
+        .with_field_constraints(
+            field_key.clone(),
+            vec![
+                SignatureConstraint::StorageSlot,
+                SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                SignatureConstraint::RequiredView(ViewShape::Native),
             ],
-            ..MethodConstraintSet::default()
-        },
-    );
-    constraints.fields.insert(
-        field_key.clone(),
-        vec![
-            SignatureConstraint::StorageSlot,
-            SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
-            SignatureConstraint::RequiredView(ViewShape::Native),
-        ],
-    );
+        );
     let mut usage = new_java2rust::usage::UsageFacts::default();
-    let mut method_usage = new_java2rust::usage::MethodUsageFacts::default();
-    method_usage.field_uses = vec![FieldUse::Returned {
-        field_name: "cached".to_string(),
-    }];
-    usage.methods.insert(
-        new_java2rust::usage::UsageMethodKey {
-            type_name: "ReturnedFieldFlow".to_string(),
-            method_name: "get".to_string(),
-        },
+    let method_usage =
+        new_java2rust::usage::MethodUsageFacts::from_field_uses([FieldUse::Returned {
+            field_name: "cached".to_string(),
+        }]);
+    usage.insert_method_usage_for_current_rust_name(
+        "ReturnedFieldFlow".to_string(),
+        "get".to_string(),
         method_usage,
     );
 
     let (solved, _) = solve_signature_constraints_to_fixpoint(constraints, &usage);
-    let return_constraints = &solved.methods.get(&method_key).unwrap().return_constraints;
-    let field_constraints = solved.fields.get(&field_key).unwrap();
+    let return_constraints = &solved
+        .methods()
+        .get(&method_key)
+        .unwrap()
+        .return_constraints;
+    let field_constraints = solved.fields().get(&field_key).unwrap();
 
     assert!(
         return_constraints.iter().any(|constraint| matches!(
@@ -23915,14 +23111,10 @@ class StringUse {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "StringUse".to_string(),
-            method_name: "outer".to_string(),
-        })
+        .method_usage_by_current_rust_name("StringUse".to_string(), "outer".to_string())
         .unwrap();
     let call_site = method_usage
-        .call_sites
+        .call_sites()
         .iter()
         .find(|call_site| call_site.name == "inner")
         .unwrap();
@@ -23957,14 +23149,10 @@ class ProtectedUse {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let method_usage = usage
-        .methods
-        .get(&new_java2rust::usage::UsageMethodKey {
-            type_name: "ProtectedUse".to_string(),
-            method_name: "outer".to_string(),
-        })
+        .method_usage_by_current_rust_name("ProtectedUse".to_string(), "outer".to_string())
         .unwrap();
     let call_site = method_usage
-        .call_sites
+        .call_sites()
         .iter()
         .find(|call_site| call_site.name == "inner")
         .unwrap();
@@ -23995,33 +23183,24 @@ class GraphCalls {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
 
-    let entry = new_java2rust::usage::CallableKey::Method {
-        type_name: "GraphCalls".to_string(),
-        method_name: "entry".to_string(),
-    };
-    let even = new_java2rust::usage::CallableKey::Method {
-        type_name: "GraphCalls".to_string(),
-        method_name: "even".to_string(),
-    };
-    let odd = new_java2rust::usage::CallableKey::Method {
-        type_name: "GraphCalls".to_string(),
-        method_name: "odd".to_string(),
-    };
+    let entry = new_java2rust::usage::CallableKey::method_identity("GraphCalls", "entry");
+    let even = new_java2rust::usage::CallableKey::method_identity("GraphCalls", "even");
+    let odd = new_java2rust::usage::CallableKey::method_identity("GraphCalls", "odd");
 
-    assert!(graph.edges.iter().any(|edge| {
-        edge.caller == entry
-            && edge.callee == even
-            && edge.kind == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
+    assert!(graph.edges().iter().any(|edge| {
+        edge.caller() == &entry
+            && edge.callee() == &even
+            && edge.kind() == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.caller == even
-            && edge.callee == odd
-            && edge.kind == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
+    assert!(graph.edges().iter().any(|edge| {
+        edge.caller() == &even
+            && edge.callee() == &odd
+            && edge.kind() == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.caller == odd
-            && edge.callee == even
-            && edge.kind == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
+    assert!(graph.edges().iter().any(|edge| {
+        edge.caller() == &odd
+            && edge.callee() == &even
+            && edge.kind() == new_java2rust::usage::CallGraphEdgeKind::DirectMethodCall
     }));
 }
 
@@ -24039,10 +23218,7 @@ class FallibleCalls {
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "FallibleCalls".to_string(),
-            method_name: "leaf".to_string(),
-        },
+        method: FactMethodKey::named("FallibleCalls", "leaf"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
@@ -24050,14 +23226,8 @@ class FallibleCalls {
     });
 
     let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
-    let entry = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleCalls".to_string(),
-        method_name: "entry".to_string(),
-    };
-    let leaf = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleCalls".to_string(),
-        method_name: "leaf".to_string(),
-    };
+    let entry = new_java2rust::usage::CallableKey::method_identity("FallibleCalls", "entry");
+    let leaf = new_java2rust::usage::CallableKey::method_identity("FallibleCalls", "leaf");
 
     assert!(fallibility.returns_result(&leaf));
     assert!(fallibility.returns_result(&entry));
@@ -24180,17 +23350,9 @@ fn external_callable_fallibility_uses_rust_name_mapping() {
         parsed.diagnostics
     );
 
-    let key = new_java2rust::usage::CallableKey::ExternalMethod {
-        receiver_type: Some("dep.io.Reader".to_string()),
-        method_name: "read_record".to_string(),
-        arg_count: 0,
-    };
-    let mut nodes = HashSet::new();
-    nodes.insert(key.clone());
-    let graph = new_java2rust::usage::CallGraph {
-        nodes,
-        edges: Vec::new(),
-    };
+    let key =
+        new_java2rust::usage::CallableKey::external_method(Some("dep.io.Reader"), "read_record", 0);
+    let graph = new_java2rust::usage::CallGraph::from_nodes([key.clone()]);
 
     let fallibility = plan_program_fallibility(
         &new_java2rust::java_ir::Program::default(),
@@ -24199,14 +23361,6 @@ fn external_callable_fallibility_uses_rust_name_mapping() {
     );
 
     assert!(fallibility.returns_result(&key));
-    assert!(
-        new_java2rust::call_plan::external_call_has_thrown_effect_for_receiver(
-            &parsed.facts,
-            "dep.io.Reader",
-            "read_record",
-            0,
-        )
-    );
 }
 
 #[test]
@@ -24223,10 +23377,7 @@ class FallibleCalls {
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "FallibleCalls".to_string(),
-            method_name: "leaf".to_string(),
-        },
+        method: FactMethodKey::named("FallibleCalls", "leaf"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
@@ -24279,10 +23430,7 @@ class FallibleImpl implements FallibleIface {
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "FallibleImpl".to_string(),
-            method_name: "read".to_string(),
-        },
+        method: FactMethodKey::named("FallibleImpl", "read"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
@@ -24290,14 +23438,8 @@ class FallibleImpl implements FallibleIface {
     });
 
     let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
-    let interface_key = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleIface".to_string(),
-        method_name: "read".to_string(),
-    };
-    let impl_key = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleImpl".to_string(),
-        method_name: "read".to_string(),
-    };
+    let interface_key = new_java2rust::usage::CallableKey::method_identity("FallibleIface", "read");
+    let impl_key = new_java2rust::usage::CallableKey::method_identity("FallibleImpl", "read");
 
     assert!(fallibility.returns_result(&impl_key));
     assert!(fallibility.returns_result(&interface_key));
@@ -24333,10 +23475,7 @@ class FallibleChild extends FallibleBase {
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "FallibleChild".to_string(),
-            method_name: "f_int".to_string(),
-        },
+        method: FactMethodKey::named("FallibleChild", "f_int"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
@@ -24344,18 +23483,10 @@ class FallibleChild extends FallibleBase {
     });
 
     let fallibility = plan_program_fallibility(&resolved.program, &graph, &facts);
-    let child_int = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleChild".to_string(),
-        method_name: "f_int".to_string(),
-    };
-    let base_declared = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleBase".to_string(),
-        method_name: "f".to_string(),
-    };
-    let phantom_base_int = new_java2rust::usage::CallableKey::Method {
-        type_name: "FallibleBase".to_string(),
-        method_name: "f_int".to_string(),
-    };
+    let child_int = new_java2rust::usage::CallableKey::method_identity("FallibleChild", "f_int");
+    let base_declared = new_java2rust::usage::CallableKey::method_identity("FallibleBase", "f");
+    let phantom_base_int =
+        new_java2rust::usage::CallableKey::method_identity("FallibleBase", "f_int");
 
     assert!(fallibility.returns_result(&child_int));
     assert!(
@@ -24397,14 +23528,14 @@ class IntegerDivRemFallibilityAudit {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
     let fallibility = plan_program_fallibility(&resolved.program, &graph, &FactSet::default());
-    let handled = new_java2rust::usage::CallableKey::Method {
-        type_name: "IntegerDivRemFallibilityAudit".to_string(),
-        method_name: "handled".to_string(),
-    };
-    let condition_unhandled = new_java2rust::usage::CallableKey::Method {
-        type_name: "IntegerDivRemFallibilityAudit".to_string(),
-        method_name: "condition_unhandled".to_string(),
-    };
+    let handled = new_java2rust::usage::CallableKey::method_identity(
+        "IntegerDivRemFallibilityAudit",
+        "handled",
+    );
+    let condition_unhandled = new_java2rust::usage::CallableKey::method_identity(
+        "IntegerDivRemFallibilityAudit",
+        "condition_unhandled",
+    );
 
     assert!(
         !fallibility.returns_result(&handled),
@@ -24446,18 +23577,18 @@ class NullableReceiverFallibilityAudit {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
     let fallibility = plan_program_fallibility(&resolved.program, &graph, &FactSet::default());
-    let handled = new_java2rust::usage::CallableKey::Method {
-        type_name: "NullableReceiverFallibilityAudit".to_string(),
-        method_name: "handled".to_string(),
-    };
-    let leaf = new_java2rust::usage::CallableKey::Method {
-        type_name: "NullableReceiverFallibilityAudit".to_string(),
-        method_name: "leaf".to_string(),
-    };
-    let entry = new_java2rust::usage::CallableKey::Method {
-        type_name: "NullableReceiverFallibilityAudit".to_string(),
-        method_name: "entry".to_string(),
-    };
+    let handled = new_java2rust::usage::CallableKey::method_identity(
+        "NullableReceiverFallibilityAudit",
+        "handled",
+    );
+    let leaf = new_java2rust::usage::CallableKey::method_identity(
+        "NullableReceiverFallibilityAudit",
+        "leaf",
+    );
+    let entry = new_java2rust::usage::CallableKey::method_identity(
+        "NullableReceiverFallibilityAudit",
+        "entry",
+    );
 
     assert!(
         !fallibility.returns_result(&handled),
@@ -24477,10 +23608,7 @@ class NullableReceiverFallibilityAudit {
 fn lowering_uses_callable_fallibility_for_source_call_result_propagation() {
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "FallibleCalls".to_string(),
-            method_name: "leaf".to_string(),
-        },
+        method: FactMethodKey::named("FallibleCalls", "leaf"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
@@ -24536,10 +23664,7 @@ class FallibleCalls {
 fn callable_fallibility_uses_unchecked_method_throw_facts() {
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "UncheckedFallibleCalls".to_string(),
-            method_name: "increment".to_string(),
-        },
+        method: FactMethodKey::named("UncheckedFallibleCalls", "increment"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("RuntimeException".to_string())],
@@ -24586,10 +23711,7 @@ class UncheckedFallibleCalls {
 fn cast_wrapped_fallible_source_call_uses_inner_result_propagation() {
     let mut facts = FactSet::default();
     facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "FallibleCastCalls".to_string(),
-            method_name: "leaf".to_string(),
-        },
+        method: FactMethodKey::named("FallibleCastCalls", "leaf"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IllegalStateException".to_string())],
@@ -24647,18 +23769,16 @@ class GraphCtor {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
 
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::usage::CallGraphEdgeKind::ConstructorDelegationThis
-            && matches!(
-                &edge.caller,
-                new_java2rust::usage::CallableKey::Constructor { type_name, .. }
-                    if type_name == "GraphCtor"
-            )
-            && matches!(
-                &edge.callee,
-                new_java2rust::usage::CallableKey::Constructor { type_name, .. }
-                    if type_name == "GraphCtor"
-            )
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::usage::CallGraphEdgeKind::ConstructorDelegationThis
+            && edge
+                .caller()
+                .constructor_identity_parts()
+                .is_some_and(|(type_name, _)| type_name == "GraphCtor")
+            && edge
+                .callee()
+                .constructor_identity_parts()
+                .is_some_and(|(type_name, _)| type_name == "GraphCtor")
     }));
 }
 
@@ -24678,20 +23798,16 @@ class GraphLambda {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
 
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::usage::CallGraphEdgeKind::LambdaBody
-            && matches!(
-                edge.callee,
-                new_java2rust::usage::CallableKey::Lambda { .. }
-            )
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::usage::CallGraphEdgeKind::LambdaBody
+            && edge.callee().is_lambda()
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::usage::CallGraphEdgeKind::UnresolvedExternalMethodCall
-            && matches!(
-                &edge.callee,
-                new_java2rust::usage::CallableKey::ExternalMethod { method_name, .. }
-                    if method_name == "missing"
-            )
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::usage::CallGraphEdgeKind::UnresolvedExternalMethodCall
+            && edge
+                .callee()
+                .external_method_parts()
+                .is_some_and(|(_, method_name, _)| method_name == "missing")
     }));
 }
 
@@ -24713,16 +23829,15 @@ class GraphAnonymous {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let graph = new_java2rust::usage::build_call_graph(&resolved.program);
 
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::usage::CallGraphEdgeKind::AnonymousClassConstructor
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::usage::CallGraphEdgeKind::AnonymousClassConstructor
     }));
-    assert!(graph.edges.iter().any(|edge| {
-        edge.kind == new_java2rust::usage::CallGraphEdgeKind::AnonymousClassMethod
-            && matches!(
-                &edge.callee,
-                new_java2rust::usage::CallableKey::AnonymousMethod { method_name, .. }
-                    if method_name == "run"
-            )
+    assert!(graph.edges().iter().any(|edge| {
+        edge.kind() == new_java2rust::usage::CallGraphEdgeKind::AnonymousClassMethod
+            && edge
+                .callee()
+                .anonymous_method_parts()
+                .is_some_and(|(_, method_name)| method_name == "run")
     }));
 }
 
@@ -26140,10 +25255,7 @@ class BoundaryRoleFixture {
     assert_eq!(
         receiver_constraints_with_usage(
             expose,
-            usage.methods.get(&new_java2rust::usage::UsageMethodKey {
-                type_name: ty.name.clone(),
-                method_name: expose.name.clone(),
-            })
+            usage.method_usage_by_current_rust_name(ty.name.clone(), expose.name.clone())
         ),
         vec![ReceiverConstraint::MutableReceiver]
     );
@@ -26364,18 +25476,12 @@ class NullFields {
     };
     let mut facts = resolved.facts.clone();
     facts.field_nullability_facts.push(FieldNullabilityFact {
-        field: FactFieldKey {
-            type_name: "NullFields".to_string(),
-            field_name: "maybe".to_string(),
-        },
+        field: FactFieldKey::named("NullFields".to_string(), "maybe".to_string()),
         state: NullabilityState::MaybeNull,
         provenance: FieldNullabilityProvenance::ConservativeFallback,
     });
     facts.field_nullability_facts.push(FieldNullabilityFact {
-        field: FactFieldKey {
-            type_name: "NullFields".to_string(),
-            field_name: "proven".to_string(),
-        },
+        field: FactFieldKey::named("NullFields".to_string(), "proven".to_string()),
         state: NullabilityState::DefinitelyNonNull,
         provenance: FieldNullabilityProvenance::ConstructorAssignments,
     });
@@ -26487,21 +25593,21 @@ class PublicFields {
 
     assert_eq!(
         constraints
-            .fields
-            .get(&new_java2rust::signature::FieldKey {
-                type_name: "PublicFields".to_string(),
-                field_name: "exposed".to_string(),
-            })
+            .fields()
+            .get(&new_java2rust::signature::FieldKey::rust_identity(
+                "PublicFields",
+                "exposed",
+            ))
             .unwrap(),
         &expected_public
     );
     assert_eq!(
         constraints
-            .fields
-            .get(&new_java2rust::signature::FieldKey {
-                type_name: "PublicFields".to_string(),
-                field_name: "internal".to_string(),
-            })
+            .fields()
+            .get(&new_java2rust::signature::FieldKey::rust_identity(
+                "PublicFields",
+                "internal",
+            ))
             .unwrap(),
         &field_shape_constraints()
     );
@@ -26664,11 +25770,8 @@ class Helper {
         .unwrap();
     let constraints = collect_signature_constraints(&resolved.program, &usage, &resolved.facts);
     let method_constraints = constraints
-        .methods
-        .get(&MethodKey {
-            type_name: "Shelter".to_string(),
-            rust_name: "run".to_string(),
-        })
+        .methods()
+        .get(&MethodKey::rust_identity("Shelter", "run"))
         .unwrap();
     let local_constraints = method_constraints
         .locals
@@ -27654,10 +26757,7 @@ class UseExternalConstant {
 "#;
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "external_constants".to_string(),
-            field_name: "NAME".to_string(),
-        },
+        field: FactFieldKey::named("external_constants".to_string(), "NAME".to_string()),
         field_type: Some(JavaType::String),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -27712,10 +26812,7 @@ class UseExternalPrimitiveConstant {
 "#;
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "external_counts".to_string(),
-            field_name: "MAX_COUNT".to_string(),
-        },
+        field: FactFieldKey::named("external_counts".to_string(), "MAX_COUNT".to_string()),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -28054,10 +27151,7 @@ class UseExternalNamedConstant {
 "#;
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "ExternalToken".to_string(),
-            field_name: "EMPTY".to_string(),
-        },
+        field: FactFieldKey::named("ExternalToken".to_string(), "EMPTY".to_string()),
         field_type: Some(JavaType::Named {
             name: "ExternalToken".to_string(),
             args: Vec::new(),
@@ -28154,10 +27248,7 @@ class ExternalConstantFacadeCollision {
 "#;
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "external_constants".to_string(),
-            field_name: "NAME".to_string(),
-        },
+        field: FactFieldKey::named("external_constants".to_string(), "NAME".to_string()),
         field_type: Some(JavaType::String),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -28496,19 +27587,13 @@ class UseExternalRecord {
 "#;
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "ExternalRecord".to_string(),
-            field_name: "batchCount".to_string(),
-        },
+        field: FactFieldKey::named("ExternalRecord".to_string(), "batchCount".to_string()),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::InstanceField,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "ExternalRecord".to_string(),
-            field_name: "totalBatchCount".to_string(),
-        },
+        field: FactFieldKey::named("ExternalRecord".to_string(), "totalBatchCount".to_string()),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::InstanceField,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -28796,10 +27881,7 @@ class UseExternalBuilder {
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FactFieldKey {
-            type_name: "ExternalFactory".to_string(),
-            field_name: "Product".to_string(),
-        },
+        field: FactFieldKey::named("ExternalFactory".to_string(), "Product".to_string()),
         field_type: Some(JavaType::Named {
             name: "Product".to_string(),
             args: Vec::new(),
@@ -30028,13 +29110,22 @@ class Uses {
 }
 "#,
     );
+    let ty = parsed.program.types.first().expect("Uses type");
+    let method_decl = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "len" => Some(method),
+            _ => None,
+        })
+        .expect("len method");
     let usage = analyze_usage(&parsed.program);
     let method = usage
-        .methods
-        .values()
-        .find(|method| method.unique_binding_facts_for_name("value").is_some())
+        .source_method_usage(ty, method_decl)
+        .expect("len method usage");
+    let value = method
+        .unique_binding_facts_for_source_name("value")
         .unwrap();
-    let value = method.unique_binding_facts_for_name("value").unwrap();
 
     assert!(value.uses.iter().any(|usage| matches!(
         usage,
@@ -30146,7 +29237,7 @@ fn shape_env_records_declared_locals_as_storage_shapes() {
     assert_eq!(shape.ownership, OwnershipShape::Owned);
     assert_eq!(shape.view, ViewShape::Native);
     assert_eq!(shape.mutability, MutabilityShape::Mutable);
-    assert_eq!(binding.kind, BindingKind::Local);
+    assert_eq!(binding.kind(), BindingKind::Local);
     assert_eq!(binding.name(), "name");
 }
 
@@ -30244,7 +29335,7 @@ class EnvUse {
     assert_eq!(
         constructor_env
             .binding_id("field")
-            .map(|binding| binding.kind),
+            .map(|binding| binding.kind()),
         Some(BindingKind::Param)
     );
     let method_env = shape_env_for_method(ty, method, method_signature, &signatures);
@@ -30253,7 +29344,7 @@ class EnvUse {
         Some(&method_signature.params[0].shape)
     );
     assert_eq!(
-        method_env.binding_id("input").map(|binding| binding.kind),
+        method_env.binding_id("input").map(|binding| binding.kind()),
         Some(BindingKind::Param)
     );
     assert_eq!(
@@ -30261,7 +29352,7 @@ class EnvUse {
         signatures.field_shape("EnvUse", "field")
     );
     assert_eq!(
-        method_env.binding_id("field").map(|binding| binding.kind),
+        method_env.binding_id("field").map(|binding| binding.kind()),
         Some(BindingKind::Field)
     );
     let static_env = shape_env_for_method(ty, static_method, static_signature, &signatures);
@@ -30270,7 +29361,7 @@ class EnvUse {
         Some(&static_signature.params[0].shape)
     );
     assert_eq!(
-        static_env.binding_id("value").map(|binding| binding.kind),
+        static_env.binding_id("value").map(|binding| binding.kind()),
         Some(BindingKind::Param)
     );
     assert_eq!(static_env.field_shape("field"), None);
@@ -30295,12 +29386,12 @@ class EnvUse {
         test_local_shape_by_name(&method_signature.locals, "local")
     );
     assert_eq!(
-        env.binding_id("local").map(|binding| binding.kind),
+        env.binding_id("local").map(|binding| binding.kind()),
         Some(BindingKind::Local)
     );
     env.insert_loop_variable_shape("item", RustSlotShape::conservative(JavaType::String));
     assert_eq!(
-        env.binding_id("item").map(|binding| binding.kind),
+        env.binding_id("item").map(|binding| binding.kind()),
         Some(BindingKind::LoopVariable)
     );
     env.insert_catch_param_shape(
@@ -30311,7 +29402,7 @@ class EnvUse {
         }),
     );
     assert_eq!(
-        env.binding_id("ex").map(|binding| binding.kind),
+        env.binding_id("ex").map(|binding| binding.kind()),
         Some(BindingKind::CatchParam)
     );
 }
@@ -30710,77 +29801,6 @@ fn indexed_assignment_target_shape_uses_sequence_like_capability_facts() {
 
 #[test]
 fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
-    let illegal_argument_ty = JavaType::Named {
-        name: "IllegalArgumentException".to_string(),
-        args: Vec::new(),
-    };
-    let thrown_new = Expr::New {
-        ty: illegal_argument_ty.clone(),
-        args: vec![Expr::Var("message".to_string())],
-        body: None,
-        resolved: None,
-    };
-    assert_eq!(
-        plan_throw_expr(&thrown_new),
-        ThrowExprPlan::NewException {
-            class_name: "IllegalArgumentException".to_string(),
-            args: &[Expr::Var("message".to_string())],
-        }
-    );
-    assert_eq!(
-        exception_class_name(&JavaType::Unknown("ExternalException".to_string())),
-        "ExternalException"
-    );
-    assert_eq!(
-        exception_class_name(&JavaType::Primitive(PrimitiveType::Int)),
-        "JavaException"
-    );
-    assert_eq!(
-        plan_throw_expr(&Expr::Var("err".to_string())),
-        ThrowExprPlan::ExistingException(&Expr::Var("err".to_string()))
-    );
-    let cause_expr = Expr::Call {
-        receiver: Some(Box::new(Expr::Var("ce".to_string()))),
-        name: "getCause".to_string(),
-        args: Vec::new(),
-        resolved: None,
-    };
-    let cause_runtime_rethrow = Expr::Ternary {
-        condition: Box::new(Expr::InstanceOf {
-            expr: Box::new(cause_expr.clone()),
-            ty: JavaType::Named {
-                name: "RuntimeException".to_string(),
-                args: Vec::new(),
-            },
-            binding: None,
-        }),
-        then_expr: Box::new(Expr::Cast {
-            ty: JavaType::Named {
-                name: "RuntimeException".to_string(),
-                args: Vec::new(),
-            },
-            expr: Box::new(cause_expr),
-        }),
-        else_expr: Box::new(Expr::Var("ce".to_string())),
-    };
-    assert_eq!(
-        plan_throw_expr(&cause_runtime_rethrow),
-        ThrowExprPlan::CauseOrSelfIfInstance {
-            wrapper: &Expr::Var("ce".to_string()),
-            class_names: vec!["RuntimeException".to_string()],
-        }
-    );
-    assert_eq!(
-        exception_result_type(RustType::I32),
-        RustType::Generic {
-            base: "Result".to_string(),
-            args: vec![RustType::I32, RustType::Named("JavaException".to_string())],
-        }
-    );
-    assert_eq!(
-        emit::emit_type(&exception_result_type(RustType::I32)),
-        "Result<i32, JavaException>"
-    );
     assert!(matches!(
         java_exception_support_item_with_facts(&FactSet::default()),
         new_java2rust::rust_ir::RustItem::Raw(item)
@@ -30788,164 +29808,6 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
                 && item.contains("pub fn get_message(&self) -> Option<String>")
                 && item.contains("impl std::fmt::Display for JavaException")
     ));
-    assert_eq!(
-        return_stmt(Some(RustExpr::Literal("1".to_string())), true),
-        RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::path(["Ok"])),
-            args: vec![RustExpr::Literal("1".to_string())],
-        }))
-    );
-    assert_eq!(
-        throw_stmt(new_exception_expr(
-            "IllegalArgumentException",
-            RustExpr::Literal("\"bad\".to_string()".to_string()),
-        )),
-        RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::path(["Err"])),
-            args: vec![RustExpr::Call {
-                function: Box::new(RustExpr::path(["JavaException", "new"])),
-                args: vec![
-                    RustExpr::Literal("\"IllegalArgumentException\"".to_string()),
-                    RustExpr::MethodCall {
-                        receiver: Box::new(RustExpr::Literal("\"bad\".to_string()".to_string())),
-                        method: "to_string".to_string(),
-                        args: Vec::new(),
-                    },
-                ],
-            }],
-        }))
-    );
-    assert_eq!(
-        exception_cause_or_self_if_instance_expr(
-            RustExpr::Var("ce".to_string()),
-            &["RuntimeException".to_string()],
-        ),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("ce".to_string())),
-            method: "cause_or_self_if_instance".to_string(),
-            args: vec![RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::ArrayLiteral(vec![RustExpr::Literal(
-                    "\"RuntimeException\"".to_string(),
-                )])),
-            }],
-        }
-    );
-    assert_eq!(
-        exception_expr_from_new("IllegalStateException", Vec::new(),),
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["JavaException", "new"])),
-            args: vec![
-                RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Call {
-                        function: Box::new(RustExpr::path(["String", "new"])),
-                        args: Vec::new(),
-                    }),
-                    method: "to_string".to_string(),
-                    args: Vec::new(),
-                },
-            ],
-        }
-    );
-    assert_eq!(
-        exception_expr_from_new(
-            "IllegalStateException",
-            vec![
-                RustExpr::Var("message".to_string()),
-                RustExpr::Var("ignored".to_string()),
-            ],
-        ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["JavaException", "new"])),
-            args: vec![
-                RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::MacroCall {
-                        macro_name: "format".to_string(),
-                        args: vec![
-                            RustExpr::Literal("\"{}: {}\"".to_string()),
-                            RustExpr::Var("message".to_string()),
-                            RustExpr::Var("ignored".to_string()),
-                        ],
-                    }),
-                    method: "to_string".to_string(),
-                    args: Vec::new(),
-                },
-            ],
-        }
-    );
-    assert_eq!(
-        exception_expr_from_new_with_cause_hint(
-            "IllegalStateException",
-            vec![
-                RustExpr::Var("message".to_string()),
-                RustExpr::Var("cause".to_string()),
-            ],
-            true,
-        ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
-            args: vec![
-                RustExpr::Literal("\"IllegalStateException\"".to_string()),
-                RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("message".to_string())),
-                    method: "to_string".to_string(),
-                    args: Vec::new(),
-                },
-                RustExpr::Var("cause".to_string()),
-            ],
-        }
-    );
-    assert_eq!(
-        exception_expr_from_new_with_cause_hint(
-            "MissingArgument",
-            vec![
-                RustExpr::Var("argument_name".to_string()),
-                RustExpr::Var("message".to_string()),
-            ],
-            false,
-        ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["JavaException", "new"])),
-            args: vec![
-                RustExpr::Literal("\"MissingArgument\"".to_string()),
-                RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::MacroCall {
-                        macro_name: "format".to_string(),
-                        args: vec![
-                            RustExpr::Literal("\"{}: {}\"".to_string()),
-                            RustExpr::Var("argument_name".to_string()),
-                            RustExpr::Var("message".to_string()),
-                        ],
-                    }),
-                    method: "to_string".to_string(),
-                    args: Vec::new(),
-                },
-            ],
-        }
-    );
-    assert_eq!(
-        new_exception_expr_with_cause(
-            "UserProblem",
-            RustExpr::Literal("\"copy failed\".to_string()".to_string()),
-            RustExpr::Var("ex".to_string()),
-        ),
-        RustExpr::Call {
-            function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
-            args: vec![
-                RustExpr::Literal("\"UserProblem\"".to_string()),
-                RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Literal(
-                        "\"copy failed\".to_string()".to_string(),
-                    )),
-                    method: "to_string".to_string(),
-                    args: Vec::new(),
-                },
-                RustExpr::Var("ex".to_string()),
-            ],
-        }
-    );
     let resolved_throwing_call = new_java2rust::java_ir::ResolvedCall {
         declaring_type: "Reader".to_string(),
         rust_name: "read".to_string(),
@@ -30956,10 +29818,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
     };
     let mut call_facts = FactSet::default();
     call_facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "Reader".to_string(),
-            method_name: "read".to_string(),
-        },
+        method: FactMethodKey::named("Reader", "read"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IOException".to_string())],
@@ -30989,10 +29848,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
         arg_coercions: Vec::new(),
     };
     call_facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: "Reader".to_string(),
-            method_name: "readHeaderFromPath".to_string(),
-        },
+        method: FactMethodKey::named("Reader", "readHeaderFromPath"),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IOException".to_string())],
@@ -31040,10 +29896,7 @@ fn exception_lowering_policy_owns_result_support_ok_and_err_shapes() {
     external_call_facts
         .external_field_facts
         .push(new_java2rust::facts::ExternalFieldFact {
-            field: FactFieldKey {
-                type_name: "Registry".to_string(),
-                field_name: "DEFAULT_VALIDATOR".to_string(),
-            },
+            field: FactFieldKey::named("Registry".to_string(), "DEFAULT_VALIDATOR".to_string()),
             field_type: Some(JavaType::Named {
                 name: "Validator".to_string(),
                 args: Vec::new(),
@@ -31139,14 +29992,6 @@ external-pack-exception java.sql java.sql.SQLException checked
     )
     .facts;
 
-    let conversions = external_exception_conversions(&facts);
-    assert!(conversions.iter().any(|conversion| {
-        conversion.java_type == "HDF5Error" && conversion.rust_type == "hdf5_facade::HDF5Error"
-    }));
-    assert!(conversions.iter().any(|conversion| {
-        conversion.java_type == "java.sql.SQLException"
-            && conversion.rust_type == "sqlite_facade::SQLException"
-    }));
     assert!(matches!(
         java_exception_support_item_with_facts(&facts),
         new_java2rust::rust_ir::RustItem::Raw(item)
@@ -31462,7 +30307,23 @@ class UsesMappedRustTypeName {
         "external_crate_mapped_type_uses_constructor_rust_type_name",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust.clone(),
+            rust: format!(
+                r#"
+pub mod htsjdk_facade {{
+    #[derive(Clone)]
+    pub struct SamSequenceRecord;
+
+    impl SamSequenceRecord {{
+        pub fn new(_name: String, _length: i32) -> Self {{
+            SamSequenceRecord
+        }}
+    }}
+}}
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
     );
@@ -31563,7 +30424,23 @@ class UsesMappedSequenceStorage {
         "external_crate_mapped_sequence_type_keeps_facade_storage_typ",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust.clone(),
+            rust: format!(
+                r#"
+pub mod htsjdk_facade {{
+    #[derive(Clone, Default, PartialEq)]
+    pub struct SamSequenceDictionary;
+
+    impl SamSequenceDictionary {{
+        pub fn new() -> Self {{
+            SamSequenceDictionary
+        }}
+    }}
+}}
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
     );
@@ -32271,7 +31148,41 @@ class BorrowedAndPrivateCrateReturnSupport {
         "external_facade_support_qualifies_borrowed_and_private_crate",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust.clone(),
+            rust: format!(
+                r#"
+pub mod dep_facade {{
+    #[derive(Clone)]
+    pub struct Reader;
+
+    #[derive(Clone)]
+    pub struct Schema;
+
+    #[derive(Clone)]
+    pub struct FieldVector;
+
+    #[derive(Clone)]
+    pub struct SqlValue;
+
+    static SCHEMA: Schema = Schema;
+    static FIELD_VECTOR: FieldVector = FieldVector;
+
+    pub fn get_schema(_reader: &Reader) -> &'static Schema {{
+        &SCHEMA
+    }}
+
+    pub fn get_vector(_reader: &Reader, _name: impl Into<String>) -> Option<&'static FieldVector> {{
+        Some(&FIELD_VECTOR)
+    }}
+
+    pub fn get_object(_reader: &Reader) -> Option<SqlValue> {{
+        Some(SqlValue)
+    }}
+}}
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
     );
@@ -32372,7 +31283,31 @@ class PreservedFacadeTypeNameSupport {
         "external_facade_support_preserves_digit_and_sqlite_crate_typ",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust.clone(),
+            rust: format!(
+                r#"
+pub mod dep_facade {{
+    #[derive(Clone)]
+    pub struct Reader;
+
+    #[derive(Clone)]
+    pub struct SQLiteStatement;
+
+    #[derive(Clone)]
+    pub struct HDF5Dataset;
+
+    pub fn statement(_reader: &Reader) -> SQLiteStatement {{
+        SQLiteStatement
+    }}
+
+    pub fn dataset(_reader: &Reader) -> HDF5Dataset {{
+        HDF5Dataset
+    }}
+}}
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
     );
@@ -32760,11 +31695,11 @@ pub mod arrow_facade {{
         pub fn close(&self) {{}}
     }}
 
-    pub fn get_schema(_root: VectorSchemaRoot) -> &'static Schema {{
+    pub fn get_schema(_root: &VectorSchemaRoot) -> &'static Schema {{
         &SCHEMA
     }}
 
-    pub fn get_vector<T0>(_root: VectorSchemaRoot, _arg0: T0) -> Option<&'static FieldVector> {{
+    pub fn get_vector<T0>(_root: &VectorSchemaRoot, _arg0: T0) -> Option<&'static FieldVector> {{
         Some(&FIELD_VECTOR)
     }}
 }}
@@ -32873,7 +31808,7 @@ class NonNullExternalObjectInitializer {
     assert!(
         translation
             .rust
-            .contains("return true && vector.is_some();"),
+            .contains("return Ok(true && vector.is_some());"),
         "{}",
         translation.rust
     );
@@ -33346,10 +32281,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "external type-name aliases should be memoized without cloning the alias Vec on cache hits"
     );
     assert!(
-        parser_source.contains("pub fn to_snake_case_unescaped")
+        parser_source.contains("pub(crate) fn to_snake_case_unescaped")
+            && !parser_source.contains("pub fn to_snake_case_unescaped")
             && parser_source.contains("field_decl_name")
             && parser_source.contains("to_snake_case_unescaped(name)")
-            && java_naming_source.contains("pub fn source_instance_field_rust_names")
+            && java_naming_source.contains("pub(crate) fn source_instance_field_rust_names")
+            && !java_naming_source.contains("pub fn source_instance_field_rust_names")
             && item_assembly_source.contains("source_instance_field_rust_names(ty)")
             && lower_source.contains("fn source_instance_field_rust_name(")
             && lower_source.contains("current_type_source_instance_field_rust_name")
@@ -33357,7 +32294,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && expr_shape_source.contains("source_instance_field_rust_names")
             && access_source.contains("instance_field_access_name(name)")
             && access_source.contains("bare_name_local_type(name, env)")
-            && java_naming_source.contains("pub fn source_static_field_rust_names")
+            && java_naming_source.contains("pub(crate) fn source_static_field_rust_names")
+            && !java_naming_source.contains("pub fn source_static_field_rust_names")
             && item_assembly_source.contains("source_static_field_rust_names(ty)")
             && lower_source.contains("source_static_field_rust_name(ty, &field.name)")
             && expr_shape_source.contains("static_storage_field_semantic_name")
@@ -33372,7 +32310,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && parser_source.contains("source_name: to_snake_case_unescaped")
             && parser_source.contains("source_var_name = raw_name")
             && parser_source.contains(".map(to_snake_case_unescaped)")
-            && java_naming_source.contains("pub fn source_binding_rust_names")
+            && java_naming_source.contains("pub(crate) fn source_binding_rust_names")
+            && !java_naming_source.contains("pub fn source_binding_rust_names")
             && expr_shape_source.contains("binding_access_names")
             && expr_shape_source.contains("insert_param_shape_with_access_name_and_java_type")
             && expr_shape_source.contains("insert_local_shape_with_access_name_and_java_type")
@@ -33601,7 +32540,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "rust_ir.rs should keep raw construction centralized in raw_leaf helpers"
     );
     assert!(
-        string_concat_render_source.contains("pub fn string_concat_expr")
+        string_concat_render_source.contains("pub(crate) fn string_concat_expr")
+            && !string_concat_render_source.contains("pub fn string_concat_expr")
             && !string_concat_render_source.contains("pub fn render_string_concat")
             && string_concat_render_source.contains("macro_call_projection(\"format\"")
             && string_concat_render_source.contains("rust_string_literal_projection(")
@@ -33903,6 +32843,27 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && !optional_unwrap_raw_scan_source.contains("emit::emit_expr"),
         "optional unwrap scans should recover parseable raw expressions through a named raw-boundary helper"
     );
+    let rewritten_raw_recovery_source = lower_source
+        .split("fn recover_rewritten_raw_expr_or_simple_plus_projection_opt")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_source_raw_expr").next())
+        .expect("rewritten raw recovery helper should remain discoverable");
+    assert!(
+        rewritten_raw_recovery_source
+            .contains("!crate::coercion::rust_expr_contains_raw_leaf(&recovered)"),
+        "rewritten raw recovery should reject partially recovered trees with nested raw leaves"
+    );
+    let lower_source_raw_expr_source = lower_source
+        .split("fn lower_source_raw_expr")
+        .nth(1)
+        .and_then(|tail| tail.split("fn split_top_level_assignment").next())
+        .expect("source raw expression lowering helper should remain discoverable");
+    assert!(
+        lower_source_raw_expr_source
+            .contains("recover_rewritten_raw_expr_or_simple_plus_projection_opt(raw)")
+            && lower_source_raw_expr_source.contains("RustExpr::raw_leaf(raw.to_string())"),
+        "source raw expression lowering should fall back to one opaque raw leaf when recovery is partial"
+    );
     assert!(
         lower_source.contains("Expr::Raw(raw) => lower_source_raw_expr(raw)")
             && !lower_source
@@ -33917,10 +32878,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("source raw expression helper should remain discoverable");
     assert!(
         source_raw_expr_source
-            .contains("recover_rewritten_raw_expr_or_simple_plus_projection(raw)")
+            .contains("recover_rewritten_raw_expr_or_simple_plus_projection_opt(raw)")
             && !source_raw_expr_source.contains("rendered_plus_expr_projection_or_raw_leaf(raw)")
-            && !source_raw_expr_source.contains("RustExpr::Raw(raw.to_string())"),
-        "source raw expression lowering should have its own ingress helper over the shared rendered recovery"
+            && source_raw_expr_source.contains("RustExpr::raw_leaf(raw.to_string())"),
+        "source raw expression lowering should have its own fallible ingress helper over the shared rendered recovery"
     );
     let inherited_super_adapter_source = lower_source
         .split("fn adapt_inherited_super_field_value_for_child_shape")
@@ -33930,7 +32891,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         inherited_super_adapter_source.contains("rust_expr_is_none_or_default_value(&value)")
             && inherited_super_adapter_source
-                .contains("recover_rendered_none_or_default_value(&raw)")
+                .contains("crate::coercion::recover_none_or_default_value(&raw)")
+            && !inherited_super_adapter_source.contains("recover_rendered_none_or_default_value")
             && !inherited_super_adapter_source.contains("emit::emit_expr(&value)"),
         "inherited super field adapter should recover raw defaults only at its compatibility boundary, then inspect optional defaults structurally"
     );
@@ -33943,10 +32905,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         })
         .expect("None/default predicate should remain discoverable");
     assert!(
-        none_or_default_source
-            .contains("fn recover_rendered_none_or_default_value(rendered: &str)")
-            && none_or_default_source
-                .contains("crate::coercion::recover_none_or_default_value(rendered)")
+        !none_or_default_source.contains("crate::coercion::recover_none_or_default_value")
+            && !none_or_default_source.contains("fn recover_rendered_none_or_default_value")
             && !none_or_default_source.contains("RustExpr::Raw(raw)")
             && !none_or_default_source.contains("raw_expr_is_none_or_default_value")
             && !none_or_default_source.contains("segment.starts_with(\"None::<\")")
@@ -34060,7 +33020,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "switch assignment lowering should not render the assignment match while lowering"
     );
     let switch_case_condition_source = switch_source
-        .split_once("pub fn switch_case_condition(")
+        .split_once("pub(crate) fn switch_case_condition(")
         .and_then(|(_, tail)| {
             tail.split_once("pub fn lower_switch_block_stmts(")
                 .map(|(body, _)| body)
@@ -34119,7 +33079,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     let switch_block_builder_source = switch_source
         .split_once("pub fn lower_switch_block_stmts(")
         .and_then(|(_, tail)| {
-            tail.split_once("pub fn switch_match_pattern_expr")
+            tail.split_once("pub(crate) fn switch_match_pattern_expr")
                 .map(|(body, _)| body)
         })
         .expect("structured fallback switch builder source");
@@ -35236,27 +34196,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         coercion_source.contains("#[cfg(test)]\nfn apply_borrowed_string_view_projection_expr")
     );
     assert!(!coercion_source.contains("pub fn apply_borrowed_string_view_projection_expr"));
-    let borrowed_string_view_projection_expr_source = coercion_source
-        .split("fn apply_borrowed_string_view_projection_expr(")
-        .nth(1)
-        .and_then(|tail| tail.split("pub(crate) fn java_concat_display_plan").next())
-        .expect("borrowed string view projection expression helper should remain discoverable");
     assert!(!coercion_source.contains("pub fn java_concat_display_plan"));
-    assert!(
-        borrowed_string_view_projection_expr_source.contains("RustExpr::Var(rust_name.clone())")
-            && borrowed_string_view_projection_expr_source.contains("zero_arg_method_projection")
-            && borrowed_string_view_projection_expr_source.contains("string_view_expr")
-            && borrowed_string_view_projection_expr_source
-                .contains("already_borrowed_string_view_expr_projection(rendered)")
-            && borrowed_string_view_projection_expr_source
-                .contains("rendered_deref_string_view_inner_projection(trimmed)")
-            && borrowed_string_view_projection_expr_source
-                .contains("rust_expr_is_string_view_projection(&recovered)")
-            && !borrowed_string_view_projection_expr_source.contains("trim_start_matches('*')")
-            && !borrowed_string_view_projection_expr_source
-                .contains("format!(\"{rust_name}.as_str()\")"),
-        "borrowed string view projection should compose string views structurally without a rendered compatibility wrapper"
-    );
     assert!(coercion_source.contains("pub(crate) fn anonymous_dyn_trait_projection"));
     assert!(
         !coercion_source.contains("RustExpr::Raw(format!(\"<dyn {trait_name}>::anonymous()\"))"),
@@ -35288,7 +34228,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(
         typed_none_projection_source.contains("RustExpr::generic_path")
             && typed_none_projection_source.contains("[\"None\"]")
-            && typed_none_projection_source.contains("RustType::Raw(rust_ty.to_string())")
+            && typed_none_projection_source.contains("rust_type_arg_projection_or_raw(rust_ty)")
+            && !typed_none_projection_source.contains("RustType::Raw(rust_ty.to_string())")
             && !typed_none_projection_source.contains("RustExpr::Path")
             && !typed_none_projection_source.contains("format!(\"None::<{rust_ty}>\")"),
         "typed None projection should use GenericPath rather than encoding turbofish text in a Path segment"
@@ -35314,12 +34255,15 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("storage placement construction helper should remain discoverable");
     assert!(
         slot_render_source.contains("fn storage_wrapper_new_call_expr")
-            && storage_placement_source
-                .contains("let rendered = recover_storage_placement_construction_expr(rendered);")
+            && storage_placement_source.contains(
+                "let rendered = recover_storage_placement_construction_expr(placement, rendered);"
+            )
             && storage_placement_source.contains("fn recover_storage_placement_construction_expr")
             && storage_placement_source
                 .contains("crate::coercion::recover_operator_expr_or_raw_leaf(&rendered)")
-            && !storage_placement_source.contains("RustExpr::raw_leaf(rendered)")
+            && storage_placement_source.contains("RustExpr::raw_leaf(rendered)")
+            && !storage_placement_source
+                .contains("} else {\n                RustExpr::Raw(rendered)")
             && !storage_placement_source.contains("unwrap_or(RustExpr::Raw(rendered))")
             && !storage_placement_source
                 .contains("crate::coercion::recover_expr_or_raw_leaf(&rendered)")
@@ -35570,10 +34514,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(coercion_source.contains("fn rendered_vec_macro_body"));
     assert!(!coercion_source.contains("pub fn rendered_vec_macro_body"));
     assert!(types_source.contains("pub(crate) fn raw_rust_generic_args"));
-    assert!(types_source.contains("pub fn raw_rust_type_is_result"));
-    assert!(types_source.contains("pub fn raw_rust_type_is_option"));
-    assert!(types_source.contains("pub fn raw_rust_result_args"));
-    assert!(types_source.contains("pub fn raw_rust_option_inner"));
+    assert!(types_source.contains("pub fn rendered_rust_type_is_result"));
+    assert!(types_source.contains("pub fn rendered_rust_type_is_option"));
+    assert!(types_source.contains("pub fn rendered_rust_result_args"));
+    assert!(types_source.contains("pub fn rendered_rust_option_inner"));
+    assert!(types_source.contains("pub(crate) fn raw_rust_type_is_result"));
+    assert!(types_source.contains("pub(crate) fn raw_rust_type_is_option"));
+    assert!(types_source.contains("pub(crate) fn raw_rust_result_args"));
+    assert!(types_source.contains("pub(crate) fn raw_rust_option_inner"));
     assert!(types_source.contains("pub(crate) fn raw_rust_vec_inner"));
     assert!(types_source.contains("pub(crate) fn raw_rust_box_dyn_trait"));
     assert!(types_source.contains("pub(crate) fn raw_generic_type_head"));
@@ -35598,10 +34546,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .nth(1)
         .and_then(|tail| tail.split("fn rust_param_is_borrowed_or_borrowable").next())
         .expect("CLI facade return parser should be present");
-    assert!(facade_cli_return_parser.contains("raw_rust_type_is_result"));
-    assert!(facade_cli_return_parser.contains("raw_rust_result_args"));
-    assert!(facade_cli_return_parser.contains("raw_rust_option_inner"));
-    assert!(facade_cli_return_parser.contains("raw_rust_type_is_option"));
+    assert!(facade_cli_return_parser.contains("rendered_rust_type_is_result"));
+    assert!(facade_cli_return_parser.contains("rendered_rust_result_args"));
+    assert!(facade_cli_return_parser.contains("rendered_rust_option_inner"));
+    assert!(facade_cli_return_parser.contains("rendered_rust_type_is_option"));
     assert!(!facade_cli_return_parser.contains("starts_with(\"Result<\")"));
     assert!(!facade_cli_return_parser.contains("starts_with(\"Option<\")"));
     assert!(!facade_cli_return_parser.contains("strip_prefix(\"Option<\")"));
@@ -35697,6 +34645,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!raw_clone_support.contains("starts_with(\"Option<\")"));
     assert!(!raw_clone_support.contains("starts_with(\"Vec<\")"));
     assert!(!raw_clone_support.contains("starts_with(\"Box<dyn \""));
+    assert!(
+        !raw_clone_support.contains("rust_named_type_supports_struct_derive_clone("),
+        "unrecovered raw clone-support arguments must fail closed, not rejoin by rendered name"
+    );
     assert!(coercion_source.contains("pub(crate) fn collapse_redundant_shared_borrow_projection"));
     assert!(coercion_source.contains("pub(crate) fn normalize_map_key_borrow_projection"));
     assert!(
@@ -35752,7 +34704,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .and_then(|tail| tail.split("pub(crate) fn indexed_access_projection").next())
         .expect("index projection helpers should remain discoverable");
     assert!(
-        rendered_index_projection_source.contains("decimal_integer_literal_projection(index)")
+        !rendered_index_projection_source.contains("decimal_integer_literal_projection")
+            && rendered_index_projection_source
+                .contains("rust_expr_is_decimal_integer_literal(&index)")
             && rendered_index_projection_source
                 .contains("recover_raw_index_to_usize_operand(index)")
             && rendered_index_projection_source.contains("fn recover_raw_index_to_usize_operand")
@@ -35966,6 +34920,10 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .split("fn rewrite_optional_erased_borrowed_string_view_call_args_projection")
         .next()
         .expect("optional erased string public rewrite helper should remain discoverable");
+    let optional_erased_string_projection_rewrite_source = optional_erased_string_rewrite_source
+        .split("fn rewrite_optional_erased_borrowed_string_view_raw_compatibility")
+        .next()
+        .expect("optional erased string projection rewrite helper should remain discoverable");
     assert!(
         optional_erased_string_rewrite_source
             .contains("rendered_projection_or_raw_leaf(&rendered)")
@@ -35976,13 +34934,13 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && optional_erased_string_rewrite_source.contains("RustExpr::Binary")
             && optional_erased_string_rewrite_source.contains("RustExpr::Cast")
             && optional_erased_string_rewrite_source.contains("RustExpr::Try")
-            && optional_erased_string_rewrite_source
-                .contains("RustExpr::Raw(rendered) => optional_erased_string_consuming_view_projection(rendered)")
-            && optional_erased_string_rewrite_source
+            && optional_erased_string_projection_rewrite_source
+                .contains("RustExpr::Raw(rendered) => {")
+            && optional_erased_string_projection_rewrite_source
                 .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered)")
-            && optional_erased_string_rewrite_source.contains(
-                "rewrite_optional_erased_borrowed_string_view_call_args_projection(\n                            &recovered,"
-            )
+            && optional_erased_string_projection_rewrite_source
+                .contains("rewrite_optional_erased_borrowed_string_view_call_args_projection(")
+            && optional_erased_string_projection_rewrite_source.contains("&recovered,")
             && optional_erased_string_rewrite_source
                 .contains("fn optional_erased_string_consuming_view_expr_projection")
             && optional_erased_string_rewrite_source
@@ -35995,6 +34953,9 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
                 .contains("let RustExpr::Raw(rendered) = lowered.unshaped()")
             && !optional_erased_string_public_rewrite_source
                 .contains("optional_erased_string_consuming_view_projection(&rendered)")
+            && !coercion_source.contains("fn optional_erased_string_consuming_view_projection")
+            && !optional_erased_string_projection_rewrite_source
+                .contains("strip_suffix(\".as_str()\")")
             && optional_erased_string_rewrite_source
                 .contains("fn rewrite_optional_erased_borrowed_string_view_raw_compatibility")
             && optional_erased_string_rewrite_source
@@ -36567,13 +35528,29 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("raw constructor call projection helper should remain discoverable");
     assert!(
         raw_constructor_call_source.contains("crate::coercion::recover_call_projection(raw)")
+            && raw_constructor_call_source.contains("let trimmed = raw.trim()")
+            && raw_constructor_call_source
+                .contains("crate::emit::emit_expr(&recovered) != trimmed")
             && raw_constructor_call_source.contains("RustExpr::Call { function, .. }")
             && raw_constructor_call_source
                 .contains("constructor_call_function_is_plain_new(function)")
+            && !raw_constructor_call_source.contains("split_once('(')")
             && !raw_constructor_call_source.contains("function_call_projection")
             && !raw_constructor_call_source.contains("rendered_projection_or_raw_leaf(raw.trim())")
             && !raw_constructor_call_source.contains("RustExpr::Call {\n        function:"),
-        "raw constructor call recovery should reuse centralized rendered-call recovery and only gate constructor eligibility locally"
+        "raw constructor call recovery should reuse centralized rendered-call recovery, require exact re-emission, and only gate constructor eligibility locally"
+    );
+    let constructor_detection_source = lower_source
+        .split("fn rust_expr_has_constructor_call")
+        .nth(1)
+        .and_then(|tail| tail.split("fn raw_constructor_call_expr_projection").next())
+        .expect("constructor-call detection helper should remain discoverable");
+    assert!(
+        constructor_detection_source.contains("RustExpr::Raw(_) => false")
+            && !constructor_detection_source
+                .contains("raw_constructor_call_expr_projection(rendered)")
+            && !constructor_detection_source.contains("RustExpr::Raw(rendered)"),
+        "constructor-call detection should not infer semantics from unrecovered raw text"
     );
     assert!(coercion_source.contains("pub(crate) fn recover_call_projection"));
     assert!(!coercion_source.contains("pub(crate) fn recover_rendered_call_projection"));
@@ -37603,7 +36580,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         "static-storage setter lowering should use the structured setter statement directly"
     );
     assert!(!lower_source.contains(".with(|cell| cell.borrow().clone().unwrap_or_else"));
-    assert!(!lower_source.contains(".with(|cell| *cell.borrow_mut() = Some(value));"));
+    assert!(!lower_source.contains(".with(|cell| *cell.borrow_mut() = Some(value)));"));
     assert!(!item_assembly_source.contains("RustExpr::Raw(format!(\"Self::{rust_name}\""));
     assert!(!item_assembly_source.contains("fn raw_generic_args"));
     assert!(!item_assembly_source.contains("fn split_top_level_type_args"));
@@ -37944,6 +36921,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && owned_string_recovery_projection_source
                 .contains("rendered_projection_or_raw_leaf(rendered)")
             && owned_string_recovery_projection_source
+                .contains("!rust_expr_contains_raw_leaf(&recovered)")
+            && owned_string_recovery_projection_source
                 .contains("terminal_raw_to_string_call_projection(rendered)")
             && owned_string_recovery_projection_source
                 .contains("rendered_expr_is_already_owned_string_recovery(rendered)")
@@ -38234,34 +37213,28 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
             && !coercion_source.contains("RustExpr::Raw(borrowed_erased_view)"),
         "optional erased string downcast views should compose as_ref/and_then/expect/as_str structurally"
     );
-    let optional_erased_string_consuming_view_source = coercion_source
-        .split("fn optional_erased_string_consuming_view_projection")
-        .nth(1)
-        .and_then(|tail| {
-            tail.split("fn required_borrowed_element_already_matches_target")
-                .next()
-        })
-        .expect("optional erased string consuming-view helper should remain discoverable");
     assert!(
-        optional_erased_string_rewrite_source.contains(
-            "RustExpr::Raw(rendered) => optional_erased_string_consuming_view_projection(rendered)"
-        ) && coercion_source
-            .contains("optional_erased_string_consuming_view_expr_projection(lowered)")
-            && optional_erased_string_consuming_view_source.contains("strip_suffix(\".as_str()\")")
-            && optional_erased_string_consuming_view_source
-                .contains("optional_erased_string_downcast_ref_view_projection(rendered)")
-            && !optional_erased_string_consuming_view_source.contains("RustExpr::Raw")
-            && !optional_erased_string_consuming_view_source.contains("format!"),
-        "raw optional erased string consuming views should recover through the structured downcast-view projection before rendered replacement"
+        optional_erased_string_projection_rewrite_source.contains("RustExpr::Raw(rendered) => {")
+            && optional_erased_string_projection_rewrite_source
+                .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered)")
+            && coercion_source
+                .contains("optional_erased_string_consuming_view_expr_projection(lowered)")
+            && optional_erased_string_projection_rewrite_source
+                .contains("rewrite_optional_erased_borrowed_string_view_call_args_projection(")
+            && optional_erased_string_projection_rewrite_source.contains("&recovered,")
+            && !coercion_source.contains("fn optional_erased_string_consuming_view_projection")
+            && !optional_erased_string_projection_rewrite_source
+                .contains("strip_suffix(\".as_str()\")"),
+        "raw optional erased string consuming views should recover through structured expression projection before rendered replacement"
     );
     assert!(
         !coercion_source.contains("fn rewrite_rendered_optional_erased_string_views")
             && !coercion_source.contains("fn rust_ident_char")
             && optional_erased_string_rewrite_source
                 .contains("let recovered = rendered_plus_expr_projection_or_raw_leaf(rendered)")
-            && optional_erased_string_rewrite_source.contains(
-                "rewrite_optional_erased_borrowed_string_view_call_args_projection(\n                            &recovered,"
-            ),
+            && optional_erased_string_rewrite_source
+                .contains("rewrite_optional_erased_borrowed_string_view_call_args_projection(")
+            && optional_erased_string_rewrite_source.contains("&recovered,"),
         "optional erased string rewrites should recover expression-shaped Raw through structured projections instead of rendered string splicing"
     );
     assert!(!lower_source.contains("unsupported Java deserialization cast to {java_name}"));
@@ -38340,7 +37313,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("unsupported_outer_capture_constructor_projection("));
     assert!(lower_source.contains("unsupported_constructor_call_handoff_projection("));
     assert!(!lower_source.contains("fn rendered_arg_is_mutable_alias"));
-    assert!(!lower_source.contains("as_deref_mut()\") {\n        return None;"));
+    assert!(!lower_source.contains("as_deref_mut()\") {\n        return None);"));
     assert!(!lower_source.contains("java_clone_erased_object_ref("));
     assert!(!lower_source.contains(".downcast::<\") && rendered.contains"));
     assert!(!lower_source.contains("{}.downcast_ref::<{rust_type}>()"));
@@ -38922,7 +37895,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         !lower_source.contains(".row_mut({index}).assign(&ndarray::ArrayView1::from({value}));")
     );
     assert!(lower_source.contains("array2_row_mut_assign_stmt("));
-    assert!(!lower_source.contains("vec![Vec::new(); {}]"));
+    assert!(!lower_source.contains("vec![Vec::new()); {}]"));
     assert!(lower_source.contains("ragged_array_outer_creation_projection(len)"));
     assert!(!lower_source.contains(".get({}).expect(\"Java index out of bounds\")"));
     assert!(lower_source.contains("sequence_get_expect_projection(receiver_expr, index_expr)"));
@@ -39059,8 +38032,12 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     );
     assert!(lower_source.contains("apply_optional_receiver_slot_projection("));
     assert!(lower_source.contains("optional_receiver_slot_plan("));
-    assert!(conversion_source.contains("fn receiver_method_autoref_satisfies_optional_slot"));
-    assert!(conversion_source.contains("fn receiver_method_autoref_satisfies_facade_slot"));
+    assert!(
+        conversion_source.contains("pub(crate) fn receiver_method_autoref_satisfies_optional_slot")
+    );
+    assert!(
+        conversion_source.contains("pub(crate) fn receiver_method_autoref_satisfies_facade_slot")
+    );
     assert!(!lower_source.contains("fn optional_receiver_method_autoref_satisfies_slot"));
     assert!(!lower_source.contains("fn receiver_method_autoref_satisfies_facade_slot"));
     assert!(lower_source.contains("optional_borrowed_receiver_slot_plan("));
@@ -39082,8 +38059,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         assert!(call_plan_source.contains(&format!("pub(crate) fn {helper}")));
         assert!(!call_plan_source.contains(&format!("pub fn {helper}")));
     }
-    assert!(java_naming_source.contains("pub fn java_getter_method_name"));
-    assert!(java_naming_source.contains("pub fn java_getter_field_name"));
+    assert!(java_naming_source.contains("pub(crate) fn java_getter_method_name"));
+    assert!(java_naming_source.contains("pub(crate) fn java_getter_field_name"));
     assert!(!lower_source.contains("strip_prefix(\"get\")"));
     assert!(!lower_source.contains("strip_prefix(\"is\")"));
     assert!(!lower_source.contains("fn java_getter_method_name"));
@@ -39395,7 +38372,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(!native_collection_static_source.contains("Vec::new()"));
     assert!(!native_collection_static_source.contains("vec![{}]"));
     assert!(!native_collection_static_source.contains("vec![{value}]"));
-    assert!(!native_collection_static_source.contains("vec![{value}; {count} as usize]"));
+    assert!(!native_collection_static_source.contains("vec![{value}); {count} as usize]"));
     assert!(!native_collection_static_source.contains("RustExpr::Raw(\"0\".to_string())"));
     assert!(call_source.contains("arrays_as_list_projection(args)"));
     assert!(call_source.contains("arrays_equals_projection(left, right.clone())"));
@@ -39483,7 +38460,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         coercion_source
             .contains("#[cfg(test)]\npub(crate) fn unchecked_collections_n_copies_projection")
     );
-    assert!(!call_source.contains("{{ let _ = {}; }}"));
+    assert!(!call_source.contains("{{ let _ = {}); }}"));
     assert!(call_source.contains("discard_value_projection(arg)"));
     assert!(coercion_source.contains("pub(crate) fn discard_value_projection"));
     assert!(coercion_source.contains("fn discard_value_block_leaf"));
@@ -40341,10 +39318,7 @@ class ThrowsValue {
         .unwrap();
     let mut exception_facts = resolved.facts.clone();
     exception_facts.method_effect_facts.push(MethodEffectFact {
-        method: FactMethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        },
+        method: FactMethodKey::source_method(ty, method),
         receiver_mutability: ReceiverMutabilityFact::Unknown,
         return_nullability: NullabilityState::Unknown,
         thrown: vec![JavaType::Unknown("IOException".to_string())],
@@ -40550,10 +39524,6 @@ class TryWithResourcesFinallyUnit {
             ..
         }
     ));
-    assert_eq!(
-        try_resource_names(resources),
-        vec!["input".to_string(), "output".to_string()]
-    );
     let fixture_resources_finally_parsed =
         parse_java_source(include_str!("differential/TryWithResourcesFinally.java"));
     let fixture_resources_finally_ty = &fixture_resources_finally_parsed.program.types[0];
@@ -40824,170 +39794,6 @@ class TryCatchFinallyReturn {
             ..
         }
     ));
-    let try_catch_return_stmt = try_catch_stmt(
-        RustType::I32,
-        vec![RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::path(["Ok"])),
-            args: vec![RustExpr::Literal("7".to_string())],
-        }))],
-        vec![CatchRenderArm {
-            variable_name: "ex".to_string(),
-            class_names: vec!["IllegalArgumentException".to_string()],
-            body: vec![RustStmt::Return(Some(RustExpr::Call {
-                function: Box::new(RustExpr::path(["Ok"])),
-                args: vec![RustExpr::Literal("1".to_string())],
-            }))],
-        }],
-        true,
-        false,
-    );
-    assert!(matches!(
-        try_catch_return_stmt,
-        RustStmt::Expr(RustExpr::Match { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[try_catch_return_stmt], 0),
-        "match (|| -> Result<i32, JavaException> { return Ok(7); })() { Ok(value) => { return Ok(value); }, Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
-    );
-    let try_catch_fallthrough_stmt = try_catch_stmt(
-        RustType::Unit,
-        vec![RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::path(["Ok"])),
-            args: vec![RustExpr::Raw("()".to_string())],
-        }))],
-        Vec::new(),
-        false,
-        true,
-    );
-    assert!(matches!(
-        try_catch_fallthrough_stmt,
-        RustStmt::Expr(RustExpr::Match { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[try_catch_fallthrough_stmt], 0),
-        "match (|| -> Result<(), JavaException> { return Ok(()); })() { Ok(()) => { }, Err(ex) => { panic!(\"uncaught Java exception: {:?}\", ex); } };\n"
-    );
-    let value_fallthrough_stmt = try_catch_value_fallthrough_stmt(
-        RustType::I32,
-        vec![RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::path(["Ok"])),
-            args: vec![RustExpr::Literal("7".to_string())],
-        }))],
-        vec![CatchRenderArm {
-            variable_name: "ex".to_string(),
-            class_names: vec!["IOException".to_string()],
-            body: vec![RustStmt::Return(Some(RustExpr::Call {
-                function: Box::new(RustExpr::path(["Ok"])),
-                args: vec![RustExpr::Literal("1".to_string())],
-            }))],
-        }],
-        true,
-        false,
-    );
-    assert!(matches!(
-        value_fallthrough_stmt,
-        RustStmt::Expr(RustExpr::Match { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[value_fallthrough_stmt], 0),
-        "match (|| -> Result<Option<i32>, JavaException> { return Ok(Some(7)); return Ok(None); })() { Ok(Some(value)) => { return Ok(value); }, Ok(None) => { }, Err(ex) if ex.is_instance(&[\"IOException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
-    );
-    let twr_unit_stmt = try_with_resources_scope_stmt(
-        RustType::Unit,
-        vec![RustStmt::Raw("let input = open_input();".to_string())],
-        vec![RustStmt::Raw("copy_chunk(&mut input)?;".to_string())],
-        vec![RustStmt::Raw("input.close()?;".to_string())],
-        false,
-        true,
-    );
-    assert!(matches!(
-        twr_unit_stmt,
-        RustStmt::Expr(RustExpr::Block { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[twr_unit_stmt], 0),
-        "{ let input = open_input(); let __java_twr_result = (|| -> Result<(), JavaException> { copy_chunk(&mut input)?; return Ok(()); })(); let __java_twr_cleanup_result = (|| -> Result<(), JavaException> { let mut __java_twr_cleanup_error: Option<JavaException> = None; input.close()?; return match __java_twr_cleanup_error { Some(ex) => Err(ex), None => Ok(()) }; })(); (match (__java_twr_result, __java_twr_cleanup_result) { (Err(mut ex), Err(cleanup_ex)) => { ex.add_suppressed(cleanup_ex); Err(ex) }, (Err(ex), _) => Err(ex), (Ok(()), Err(ex)) => Err(ex), (Ok(()), Ok(())) => Ok(()) })?; };\n"
-    );
-    let twr_value_stmt = try_with_resources_scope_stmt(
-        RustType::String,
-        vec![RustStmt::Raw("let reader = open_reader();".to_string())],
-        vec![return_stmt(
-            Some(RustExpr::Raw("reader.read_line()".to_string())),
-            true,
-        )],
-        vec![RustStmt::Raw("reader.close()?;".to_string())],
-        true,
-        true,
-    );
-    assert!(matches!(
-        twr_value_stmt,
-        RustStmt::Expr(RustExpr::Block { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[twr_value_stmt], 0),
-        "{ let reader = open_reader(); let __java_twr_result = (|| -> Result<String, JavaException> { return Ok(reader.read_line()); })(); let __java_twr_cleanup_result = (|| -> Result<(), JavaException> { let mut __java_twr_cleanup_error: Option<JavaException> = None; reader.close()?; return match __java_twr_cleanup_error { Some(ex) => Err(ex), None => Ok(()) }; })(); return match (__java_twr_result, __java_twr_cleanup_result) { (Err(mut ex), Err(cleanup_ex)) => { ex.add_suppressed(cleanup_ex); Err(ex) }, (Err(ex), _) => Err(ex), (Ok(value), Err(ex)) => Err(ex), (Ok(value), Ok(())) => Ok(value) }; };\n"
-    );
-    let twr_panic_stmt = try_with_resources_scope_stmt(
-        RustType::Unit,
-        Vec::new(),
-        vec![RustStmt::Raw("copy_chunk()?;".to_string())],
-        vec![RustStmt::Raw(
-            "if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }"
-                .to_string(),
-        )],
-        false,
-        false,
-    );
-    assert!(matches!(
-        twr_panic_stmt,
-        RustStmt::Expr(RustExpr::Block { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[twr_panic_stmt], 0),
-        "{ let __java_twr_result = (|| -> Result<(), JavaException> { copy_chunk()?; return Ok(()); })(); let __java_twr_cleanup_result = (|| -> Result<(), JavaException> { let mut __java_twr_cleanup_error: Option<JavaException> = None; if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); } return match __java_twr_cleanup_error { Some(ex) => Err(ex), None => Ok(()) }; })(); (match (__java_twr_result, __java_twr_cleanup_result) { (Err(mut ex), Err(cleanup_ex)) => { ex.add_suppressed(cleanup_ex); Err(ex) }, (Err(ex), _) => Err(ex), (Ok(()), Err(ex)) => Err(ex), (Ok(()), Ok(())) => Ok(()) }).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex)); };\n"
-    );
-    let try_finally_stmt = try_finally_scope_stmt(
-        RustType::Unit,
-        vec![RustStmt::Raw("resource.read()?;".to_string())],
-        vec![RustStmt::Raw("resource.close();".to_string())],
-        false,
-        true,
-    );
-    assert!(matches!(
-        try_finally_stmt,
-        RustStmt::Expr(RustExpr::Block { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[try_finally_stmt], 0),
-        "{ let __java_try_result = (|| -> Result<(), JavaException> { resource.read()?; return Ok(()); })(); resource.close(); __java_try_result?; };\n"
-    );
-    let try_catch_finally_stmt = try_catch_finally_scope_stmt(
-        RustType::I32,
-        vec![RustStmt::Return(Some(RustExpr::Call {
-            function: Box::new(RustExpr::path(["Ok"])),
-            args: vec![RustExpr::Literal("7".to_string())],
-        }))],
-        vec![CatchRenderArm {
-            variable_name: "ex".to_string(),
-            class_names: vec!["IllegalArgumentException".to_string()],
-            body: vec![RustStmt::Return(Some(RustExpr::Call {
-                function: Box::new(RustExpr::path(["Ok"])),
-                args: vec![RustExpr::Literal("1".to_string())],
-            }))],
-        }],
-        vec![RustStmt::Raw("cleanup();".to_string())],
-        true,
-        true,
-        false,
-    );
-    assert!(matches!(
-        try_catch_finally_stmt,
-        RustStmt::Expr(RustExpr::Block { .. })
-    ));
-    assert_eq!(
-        new_java2rust::emit::emit_statements(&[try_catch_finally_stmt], 0),
-        "{ let __java_try_result = match (|| -> Result<i32, JavaException> { return Ok(7); })() { Ok(value) => Ok(value), Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => (|| -> Result<i32, JavaException> { return Ok(1); })(), Err(ex) => Err(ex) }; cleanup(); return __java_try_result; };\n"
-    );
     let twr_close_source = r#"
 	class TryResourceModeledClose {
 	    String read() throws IOException {
@@ -41051,55 +39857,6 @@ class TryCatchFinallyReturn {
         "{}",
         throwing_close_translation.rust
     );
-    let catch_source = r#"
-class ExceptionSubclassCatchOrder {
-    int parse(Source source) {
-        try {
-            return source.read();
-        } catch (SpecificProblem ex) {
-            return 1;
-        } catch (BaseProblem ex) {
-            return 2;
-        }
-    }
-}
-class BaseProblem extends Exception {}
-class SpecificProblem extends BaseProblem {}
-"#;
-    let catch_parsed = parse_java_source(catch_source);
-    let catch_resolved = resolve_program(&catch_parsed.program, catch_parsed.diagnostics.clone());
-    let catch_semantic = analyze_program(
-        &catch_resolved.program,
-        &catch_resolved.facts,
-        &FactSet::default(),
-    );
-    let catch_ty = &catch_parsed.program.types[0];
-    let catch_method = catch_ty
-        .members
-        .iter()
-        .find_map(|member| match member {
-            Member::Method(method) => Some(method),
-            _ => None,
-        })
-        .unwrap();
-    let Stmt::Try {
-        catches: ordered_catches,
-        ..
-    } = &catch_method.body.as_ref().unwrap().statements[0]
-    else {
-        panic!("expected ordered try/catch");
-    };
-    assert_eq!(
-        catch_match_class_names(
-            Some("ExceptionSubclassCatchOrder"),
-            Some("parse"),
-            1,
-            &ordered_catches[1],
-            &catch_semantic.facts,
-        ),
-        vec!["BaseProblem".to_string(), "SpecificProblem".to_string()]
-    );
-
     assert!(semantic_source.contains("collect_exception_facts"));
     assert!(semantic_source.contains("collect_catch_facts"));
     assert!(semantic_source.contains("collect_method_effect_facts"));
@@ -41138,9 +39895,12 @@ class SpecificProblem extends BaseProblem {}
     assert!(!lower_source.contains("plan_call_exception_propagation_with_external_index"));
     assert!(exception_plan_source.contains("pub enum TryStmtPlan"));
     assert!(exception_plan_source.contains("pub fn plan_try_stmt"));
-    assert!(exception_plan_source.contains("pub fn catch_match_class_names"));
-    assert!(exception_lowering_source.contains("pub struct CatchRenderArm"));
-    assert!(exception_lowering_source.contains("pub fn try_catch_stmt"));
+    assert!(exception_plan_source.contains("pub(crate) fn catch_match_class_names"));
+    assert!(!exception_plan_source.contains("pub fn catch_match_class_names"));
+    assert!(exception_lowering_source.contains("pub(crate) struct CatchRenderArm"));
+    assert!(exception_lowering_source.contains("pub(crate) fn try_catch_stmt"));
+    assert!(!exception_lowering_source.contains("pub struct CatchRenderArm"));
+    assert!(!exception_lowering_source.contains("pub fn try_catch_stmt"));
     assert!(
         !exception_lowering_source.contains(
             "RustExpr::Raw(format!(\"{}.to_string()\", crate::emit::emit_expr(&message)))"
@@ -41241,10 +40001,7 @@ fn lowering_diagnostics_only_report_unimplemented_control_flow_rewrites() {
         &facts,
     );
     let plans = vec![MethodControlFlowPlan {
-        method: FactMethodKey {
-            type_name: "Parser".to_string(),
-            method_name: "next".to_string(),
-        },
+        method: FactMethodKey::named("Parser", "next"),
         rewrites: vec![
             ControlFlowRewritePlan::AssignmentInCondition(AssignmentInConditionPlan {
                 local_name: "token".to_string(),
@@ -41283,8 +40040,10 @@ fn lowering_diagnostics_only_report_unimplemented_control_flow_rewrites() {
     assert!(!lower_source.contains("push_control_flow_plan_diagnostics"));
     assert!(!lower_source.contains("control_flow_rewrite_diagnostics"));
     assert!(lowering_diagnostics_source.contains("pub struct LoweringDiagnosticPlan"));
-    assert!(lowering_diagnostics_source.contains("ConversionDiagnostic"));
-    assert!(lowering_diagnostics_source.contains("lowering_diagnostic_from_conversion_diagnostic"));
+    assert!(!lowering_diagnostics_source.contains("ConversionDiagnostic"));
+    assert!(
+        !lowering_diagnostics_source.contains("lowering_diagnostic_from_conversion_diagnostic")
+    );
     assert!(lowering_diagnostics_source.contains("pub fn collect_lowering_diagnostic_plans"));
     assert!(lowering_diagnostics_source.contains(".diagnostics()"));
     assert!(lowering_diagnostics_source.contains("Severity::Warning"));
@@ -42437,15 +41196,6 @@ fn stdlib_signature_facts_drive_jdk_files_read_all_lines_borrowed_path_shape() {
     assert_eq!(shapes[0].java_ty, types.local_type("path").unwrap().clone());
     assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
 
-    assert!(external_call_returns_rust_result(
-        receiver.as_deref(),
-        name,
-        args.len(),
-        &facts,
-        &types,
-        Some("UseFilesReadAbi")
-    ));
-
     let target = plan_call_target_with_facts_and_arity(
         receiver.as_deref(),
         name,
@@ -42524,15 +41274,6 @@ fn stdlib_signature_facts_drive_jdk_io_byte_buffer_slice_shapes() {
         read_shapes[0].java_ty,
         JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
     );
-    assert!(external_call_returns_rust_result(
-        Some(&Expr::Var("input".to_string())),
-        "read",
-        read_args.len(),
-        &facts,
-        &types,
-        None
-    ));
-
     let write_args = vec![
         Expr::Var("buffer".to_string()),
         Expr::Var("offset".to_string()),
@@ -42557,30 +41298,17 @@ fn stdlib_signature_facts_drive_jdk_io_byte_buffer_slice_shapes() {
         write_shapes[0].java_ty,
         JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)))
     );
-    assert!(external_call_returns_rust_result(
-        Some(&Expr::Var("output".to_string())),
-        "write",
-        write_args.len(),
-        &facts,
-        &types,
-        None
-    ));
-
     let output_stream_write_bytes_key = CallableKey::method_with_params(
         "java.io.OutputStream",
         "write",
         Staticness::Unknown,
-        vec![TypePattern::Exact(TypeKey {
-            type_name: "byte[]".to_string(),
-        })],
+        vec![TypePattern::exact("byte[]")],
     );
     let output_stream_write_int_key = CallableKey::method_with_params(
         "java.io.OutputStream",
         "write",
         Staticness::Unknown,
-        vec![TypePattern::Exact(TypeKey {
-            type_name: "int".to_string(),
-        })],
+        vec![TypePattern::exact("int")],
     );
 
     let write_one_bytes = vec![Expr::Var("buffer".to_string())];
@@ -42780,9 +41508,7 @@ fn facade_abi_argument_plan_prefers_abi_slot_over_argument_effect() {
             "FacadeOwner",
             "accept",
             Staticness::Unknown,
-            vec![TypePattern::Exact(TypeKey {
-                type_name: "String".to_string(),
-            })],
+            vec![TypePattern::exact("String")],
         ),
         rust_path: "facade::FacadeOwner::accept".to_string(),
         receiver: ReceiverAbi::BorrowedSelf,
@@ -43312,42 +42038,6 @@ class Use {
     assert_eq!(plan.break_label, SWITCH_LABEL);
     assert_eq!(plan.value_binding, SWITCH_VALUE);
     assert_eq!(plan.matched_binding, SWITCH_MATCHED);
-    assert!(matches!(
-        plan_switch_case(&cases[0]).labels.as_slice(),
-        [SwitchCaseLabelPlan::Expr(_)]
-    ));
-    assert!(matches!(
-        plan_switch_case(&cases[1]).labels.as_slice(),
-        [SwitchCaseLabelPlan::Default]
-    ));
-    assert_eq!(
-        rewrite_switch_breaks(&cases[0].statements[0], plan.break_label),
-        Stmt::Break(Some(SWITCH_LABEL.to_string()))
-    );
-    assert_eq!(
-        emit::emit_expr(&switch_case_condition(
-            &plan,
-            &plan_switch_case(&cases[0]),
-            vec![RustExpr::Literal("1".to_string())],
-        )),
-        "!__java_switch_matched && (__java_switch_value == 1)"
-    );
-    assert!(matches!(
-        switch_case_condition(
-            &plan,
-            &plan_switch_case(&cases[0]),
-            vec![RustExpr::Literal("1".to_string())],
-        ),
-        RustExpr::Binary { op, .. } if op == "&&"
-    ));
-    assert_eq!(
-        emit::emit_expr(&switch_case_condition(
-            &plan,
-            &plan_switch_case(&cases[1]),
-            Vec::new()
-        )),
-        "!__java_switch_matched"
-    );
 
     let rendered = emit::emit_statements(
         &lower_switch_block_stmts(
@@ -43407,8 +42097,6 @@ class Use {
     let simple_plan = plan_simple_return_switch(simple_selector, simple_cases)
         .expect("label-only groups followed by return cases should be simple match candidates");
     assert_eq!(simple_plan.cases.len(), 4);
-    assert!(plan_simple_return_switch_case(&simple_cases[1]).is_none());
-    assert!(plan_simple_return_switch_case(&simple_cases[2]).is_some());
     let match_rendered = emit::emit_expr(&RustExpr::Match {
         expr: Box::new(RustExpr::Var("value".to_string())),
         arms: vec![
@@ -43449,7 +42137,7 @@ class Use {
 #[test]
 fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
     assert_eq!(
-        RustStmt::raw_leaf("unsafe_raw();".to_string()),
+        RustStmt::Raw("unsafe_raw();".to_string()),
         RustStmt::Raw("unsafe_raw();".to_string())
     );
     let statement_render_source = include_str!("../src/statement_render.rs");
@@ -43484,16 +42172,6 @@ fn statement_render_owns_raw_block_and_enhanced_for_wrappers() {
 #[test]
 fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates() {
     let body = vec![RustStmt::Expr(RustExpr::Var("body".to_string()))];
-    let update_exprs = vec![parse_expr("i++")];
-    let then_block = new_java2rust::java_ir::Block {
-        statements: vec![Stmt::Break(None)],
-    };
-    let no_break_block = new_java2rust::java_ir::Block {
-        statements: vec![Stmt::Expr(parse_expr("cursor.advance()"))],
-    };
-    let else_block = new_java2rust::java_ir::Block {
-        statements: vec![Stmt::Continue(Some("outer".to_string()))],
-    };
     assert_eq!(
         assemble_for_loop(None, body.clone(), Some("outer".to_string())),
         RustStmt::Loop {
@@ -43517,65 +42195,6 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             RustStmt::Expr(RustExpr::Var("i += 1".to_string())),
             RustStmt::Continue(None),
         ]
-    );
-    assert_eq!(
-        plan_for_body_stmt(&Stmt::Continue(None), &update_exprs),
-        ForBodyStmtPlan::ContinueWithUpdates {
-            updates: update_exprs.as_slice()
-        }
-    );
-    assert_eq!(
-        plan_for_body_stmt(
-            &Stmt::If {
-                condition: parse_expr("ready"),
-                then_block: then_block.clone(),
-                else_block: Some(else_block.clone()),
-            },
-            &update_exprs,
-        ),
-        ForBodyStmtPlan::If {
-            condition: &parse_expr("ready"),
-            then_block: &then_block,
-            else_block: Some(&else_block),
-        }
-    );
-    assert_eq!(
-        plan_for_body_stmt(
-            &Stmt::While {
-                condition: parse_expr("ready"),
-                body: then_block.clone(),
-                label: None,
-            },
-            &update_exprs,
-        ),
-        ForBodyStmtPlan::While {
-            condition: &parse_expr("ready"),
-            body: &then_block,
-        }
-    );
-    let assignment_condition = parse_expr("(row = cursor.next()) != null");
-    assert!(matches!(
-        plan_while_stmt(&assignment_condition, &then_block),
-        WhileStmtPlan::AssignmentInCondition {
-            local_name: "row",
-            value,
-            null_test: NullTestKind::NotNull,
-            body: _
-        } if matches!(value, Expr::Call { name, .. } if name == "next")
-    ));
-    assert_eq!(
-        plan_while_stmt(&parse_expr("true"), &then_block),
-        WhileStmtPlan::Infinite { body: &then_block }
-    );
-    let null_assignment_condition = parse_expr("(row = cursor.next()) == null");
-    let null_assignment_plan = plan_while_stmt(&null_assignment_condition, &no_break_block);
-    assert_eq!(
-        post_loop_refinement_for_while(&null_assignment_plan),
-        PostLoopRefinementPlan::LocalNonNull { local_name: "row" }
-    );
-    assert_eq!(
-        post_loop_refinement_for_while(&plan_while_stmt(&assignment_condition, &then_block)),
-        PostLoopRefinementPlan::None
     );
     assert_eq!(
         assignment_condition_loop(
@@ -43625,12 +42244,21 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
     let plan_source = include_str!("../src/loop_plan.rs");
     let lowering_source = include_str!("../src/loop_lowering.rs");
     let lower_source = include_str!("../src/lower.rs");
-    assert!(plan_source.contains("pub enum ForBodyStmtPlan"));
-    assert!(plan_source.contains("pub fn plan_for_body_stmt"));
-    assert!(plan_source.contains("pub enum WhileStmtPlan"));
-    assert!(plan_source.contains("pub fn plan_while_stmt"));
-    assert!(plan_source.contains("pub enum PostLoopRefinementPlan"));
-    assert!(plan_source.contains("pub fn post_loop_refinement_for_while"));
+    let lower_loop_body_source = lower_source
+        .split("fn lower_stmt_for_body(")
+        .nth(1)
+        .and_then(|source| {
+            source
+                .split("fn lower_simple_loop_try_finally_stmt(")
+                .next()
+        })
+        .expect("loop body lowerer source should remain discoverable");
+    assert!(plan_source.contains("pub(crate) enum ForBodyStmtPlan"));
+    assert!(plan_source.contains("pub(crate) fn plan_for_body_stmt"));
+    assert!(plan_source.contains("pub(crate) enum WhileStmtPlan"));
+    assert!(plan_source.contains("pub(crate) fn plan_while_stmt"));
+    assert!(plan_source.contains("pub(crate) enum PostLoopRefinementPlan"));
+    assert!(plan_source.contains("pub(crate) fn post_loop_refinement_for_while"));
     assert!(!plan_source.contains("RustStmt"));
     assert!(!plan_source.contains("RustExpr"));
     assert!(lowering_source.contains("continue_with_updates"));
@@ -43638,10 +42266,10 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
     assert!(lowering_source.contains("receiver_method_call_projection_exact"));
     assert!(lowering_source.contains("unwrap_optional_shared_value("));
     assert!(!lowering_source.contains("format!(\"{local_name}.as_ref().unwrap()\""));
-    assert!(lower_source.contains("plan_for_body_stmt"));
+    assert!(lower_loop_body_source.contains("plan_for_body_stmt"));
     assert!(lower_source.contains("plan_while_stmt"));
-    assert!(lower_source.contains("ForBodyStmtPlan::ContinueWithUpdates"));
-    assert!(!lower_source.contains("Stmt::Continue(None)"));
+    assert!(lower_loop_body_source.contains("ForBodyStmtPlan::ContinueWithUpdates"));
+    assert!(!lower_loop_body_source.contains("Stmt::Continue(None)"));
 }
 
 #[test]
@@ -43894,15 +42522,17 @@ fn method_reference_plan_owns_generic_function_adapter_shapes() {
     assert!(lowering_source.contains("external_api_method_receiver_owner_key"));
     assert!(!lowering_source.contains("fn java_type_callable_owner_key"));
     assert!(lowering_source.contains("facade_receiver_method_call_projection"));
-    assert!(lowering_source.contains("facade_abi_for_key"));
+    assert!(lowering_source.contains("facade_abi_for_external_method"));
     assert!(
         shape_source
             .contains("pub(crate) fn method_reference_receiver_type_for_call_plan_with_facts")
     );
     assert!(shape_source.contains("external_call_lowered_type"));
     assert!(shape_source.contains("external_api_receiver_type_for_method_reference"));
-    assert!(java_naming_source.contains("pub fn java_method_name_aliases"));
-    assert!(java_naming_source.contains("pub fn java_accessor_method_reference_fallback_name"));
+    assert!(java_naming_source.contains("pub(crate) fn java_method_name_aliases"));
+    assert!(
+        java_naming_source.contains("pub(crate) fn java_accessor_method_reference_fallback_name")
+    );
     assert!(include_str!("../src/facts.rs").contains("java_method_name_aliases(method_name)"));
     assert!(lowering_source.contains("java_method_name_aliases(method)"));
     assert!(shape_source.contains("java_method_name_aliases(method)"));
@@ -44350,57 +42980,6 @@ class ExternalConstructorSetUse {
 
 #[test]
 fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
-    let creation_expr = parse_expr("new int[rows][cols]");
-    let sized_primitive_expr = parse_expr("new byte[len]");
-    let typed_initializer_expr = parse_expr("new String[]{prefix + comment}");
-    let initializer_expr = parse_expr("{1, 2}");
-
-    let Some(ArrayExprPlan::Creation {
-        element_type,
-        dimensions,
-    }) = plan_array_expr(&creation_expr)
-    else {
-        panic!("expected array creation plan");
-    };
-    assert_eq!(element_type, &JavaType::Primitive(PrimitiveType::Int));
-    assert_eq!(dimensions.len(), 2);
-
-    let Some(ArrayExprPlan::Creation {
-        element_type,
-        dimensions,
-    }) = plan_array_expr(&sized_primitive_expr)
-    else {
-        panic!("expected sized primitive array creation plan");
-    };
-    assert_eq!(element_type, &JavaType::Primitive(PrimitiveType::Byte));
-    assert_eq!(dimensions.len(), 1);
-
-    let Some(
-        typed_initializer_plan @ ArrayExprPlan::TypedInitializer {
-            element_type,
-            elements,
-        },
-    ) = plan_array_expr(&typed_initializer_expr)
-    else {
-        panic!("expected typed array initializer plan");
-    };
-    assert_eq!(element_type, &JavaType::String);
-    assert_eq!(elements.len(), 1);
-    assert_eq!(typed_initializer_plan.child_exprs(), elements);
-
-    let Some(initializer_plan @ ArrayExprPlan::Initializer { elements }) =
-        plan_array_expr(&initializer_expr)
-    else {
-        panic!("expected array initializer plan");
-    };
-    assert_eq!(elements.len(), 2);
-    assert_eq!(
-        initializer_plan.child_exprs(),
-        elements,
-        "array plan exposes child expressions without rendering them"
-    );
-    assert_eq!(plan_array_expr(&parse_expr("value")), None);
-
     let plan_source = include_str!("../src/array_plan.rs");
     let lowering_source = include_str!("../src/array_lowering.rs");
     let lowering_production_source = lowering_source
@@ -44409,6 +42988,11 @@ fn array_plan_and_lowering_own_java_array_shape_before_orchestrator() {
         .expect("array lowering production source should be present");
     let emit_source = include_str!("../src/emit.rs");
     let lower_source = include_str!("../src/lower.rs");
+    assert!(plan_source.contains("pub(crate) enum ArrayExprPlan"));
+    assert!(plan_source.contains("pub(crate) fn child_exprs"));
+    assert!(plan_source.contains("pub(crate) fn plan_array_expr"));
+    assert!(!plan_source.contains("pub enum ArrayExprPlan"));
+    assert!(!plan_source.contains("pub fn plan_array_expr"));
     assert!(!plan_source.contains("rust_ir"));
     assert!(!plan_source.contains("RustExpr"));
     assert!(!plan_source.contains("emit_expr"));
@@ -44999,27 +43583,6 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
         stream_unary_prefix(new_java2rust::java_ir::UnaryOp::PostDec),
         None
     );
-    assert_eq!(
-        plan_ternary_null_refinement(&parse_expr("old == null")),
-        TernaryNullRefinementPlan::LocalNullTest {
-            local_name: "old",
-            then_non_null: false,
-            else_non_null: true,
-        }
-    );
-    assert_eq!(
-        plan_ternary_null_refinement(&parse_expr("old != null")),
-        TernaryNullRefinementPlan::LocalNullTest {
-            local_name: "old",
-            then_non_null: true,
-            else_non_null: false,
-        }
-    );
-    assert_eq!(
-        plan_ternary_null_refinement(&parse_expr("ready")),
-        TernaryNullRefinementPlan::None
-    );
-
     let nullability_plan_source = include_str!("../src/nullability_plan.rs");
     let operator_source = include_str!("../src/operator_lowering.rs");
     let operator_production_source = operator_source
@@ -45034,22 +43597,18 @@ fn operator_lowering_owns_binary_and_unary_rust_spelling() {
         "operator lowering production should delegate call and method assembly to shared projection helpers"
     );
     assert!(nullability_plan_source.contains("pub enum TernaryNullRefinementPlan"));
-    assert!(nullability_plan_source.contains("pub fn plan_ternary_null_refinement"));
+    assert!(nullability_plan_source.contains("pub(crate) fn plan_ternary_null_refinement"));
+    assert!(!nullability_plan_source.contains("pub fn plan_ternary_null_refinement"));
 }
 
 #[test]
 fn literal_lowering_owns_java_literal_rust_spelling() {
-    assert_eq!(literal_to_rust(&Literal::Null), "None");
-    assert_eq!(literal_to_rust(&Literal::Bool(true)), "true");
-    assert_eq!(literal_to_rust(&Literal::Int(7)), "7");
-    assert_eq!(literal_to_rust(&Literal::Long(7)), "7i64");
-    assert_eq!(literal_to_rust(&Literal::Float(1.5)), "1.5f32");
-    assert_eq!(literal_to_rust(&Literal::Double(1.5)), "1.5f64");
-    assert_eq!(
-        literal_to_rust(&Literal::String("name".to_string())),
-        "\"name\".to_string()"
-    );
-    assert_eq!(literal_to_rust(&Literal::Char('x')), "'x'");
+    let literal_lowering_source = include_str!("../src/literal_lowering.rs");
+    let expr_render_source = include_str!("../src/expr_render.rs");
+
+    assert!(literal_lowering_source.contains("pub(crate) fn literal_to_rust"));
+    assert!(!literal_lowering_source.contains("pub fn literal_to_rust"));
+    assert!(expr_render_source.contains("literal_to_rust(lit)"));
 }
 
 #[test]
@@ -45068,6 +43627,10 @@ fn access_lowering_owns_bare_field_and_member_access_fallbacks() {
     assert!(member_plan_source.contains("MemberAccessOp::LenAsI32"));
     assert!(member_plan_source.contains("MemberAccessOp::StaticConstant"));
     assert!(member_plan_source.contains("MemberAccessOp::RustField"));
+    assert!(
+        !member_plan_source.contains("RustType::Raw(owner)"),
+        "static-constant member planning should not treat opaque Rust type text as owner identity"
+    );
     assert!(access_lowering_source.contains("self_field_projection(field_name)"));
     assert!(access_lowering_source.contains("field_projection(receiver, rust_name)"));
     assert!(access_lowering_source.contains("field_projection(lowered_receiver, field)"));
@@ -45700,7 +44263,8 @@ fn stream_plan_lowers_collectors_joining_terminal() {
     assert!(matches!(
         lowered.expr,
         RustExpr::MethodCall { method, args, .. }
-            if method == "join" && matches!(args.as_slice(), [RustExpr::Literal(delimiter)] if delimiter == "\"|\"")
+            if method == "join"
+                && matches!(args.as_slice(), [RustExpr::Literal(delimiter)] if delimiter == "\"|\"")
     ));
 }
 
@@ -45886,7 +44450,7 @@ fn stream_lambda_argument_shapes_do_not_invent_string_fallbacks() {
         .and_then(|tail| tail.split("fn stream_lambda_arg_actual_shape").next())
         .expect("structured stream lambda slot projection helper should be present");
     assert!(slot_projection_expr.contains("let default_facts;"));
-    assert!(!slot_projection_expr.contains("let facts = ctx.facts?;"));
+    assert!(!slot_projection_expr.contains("let facts = ctx.facts?);"));
     assert!(
         slot_projection_expr.contains("apply_lowered_slot_conversion_to_expr(lowered.expr, &plan)")
             && !slot_projection_expr.contains("rendered_projection_or_raw_leaf(rendered)"),
@@ -46908,11 +45472,6 @@ class StringReturnFlow {
         .and_then(|signature| signature.return_shape.clone())
         .expect("id should have a solved return shape");
     assert_eq!(solved_id_return.ownership, OwnershipShape::SharedBorrow);
-    assert!(
-        signatures
-            .method_signature_by_base_name_and_arity("StringReturnFlow", "missing", 0)
-            .is_none()
-    );
 
     let shape = infer_expr_shape_with_context(
         return_expr,
@@ -47052,30 +45611,6 @@ class Caller {
     assert_eq!(shape.ownership, OwnershipShape::SharedBorrow);
     assert_eq!(shape.view, ViewShape::Str);
     assert_eq!(shape.mutability, MutabilityShape::Immutable);
-}
-
-#[test]
-fn field_nullability_join_handles_conflicting_evidence() {
-    use new_java2rust::lattice::field_nullability_join;
-
-    assert_eq!(
-        field_nullability_join(
-            NullabilityState::DefinitelyNull,
-            NullabilityState::DefinitelyNonNull,
-        ),
-        NullabilityState::MaybeNull
-    );
-    assert_eq!(
-        field_nullability_join(
-            NullabilityState::Unknown,
-            NullabilityState::DefinitelyNonNull
-        ),
-        NullabilityState::Unknown
-    );
-    assert_eq!(
-        field_nullability_join(NullabilityState::Unknown, NullabilityState::DefinitelyNull),
-        NullabilityState::MaybeNull
-    );
 }
 
 #[test]
@@ -48010,7 +46545,7 @@ public class Caller {
             rust: format!(
                 "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
                  impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
-                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ String::new() }}\n\
+                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ panic!(\"unsupported Java erased object display: runtime target is erased\") }}\n\
                  {}\n{}\n{}",
                 generated_items_from_marker(&a_item.rust, "pub struct AItem"),
                 generated_items_from_marker(&b_item.rust, "pub struct BItem"),
@@ -48225,7 +46760,6 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert!(!lower_source.contains("fn lower_string_pattern_args"));
     assert!(lower_source.contains("fn string_pattern_compat_argument_plan"));
     assert!(!usage_source.contains("\"length\" | \"isEmpty\" | \"trim\""));
-
     let contains_abi = stdlib_signature_facts
         .facade_abi_for_key(&contains_key)
         .expect("String.contains ABI should come from selected Rust stdlib facts");

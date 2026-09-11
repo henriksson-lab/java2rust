@@ -11,16 +11,16 @@ use crate::rust_ir::{
 use crate::slot_shape::RustSlotShape;
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct CatchRenderArm {
-    pub variable_name: String,
-    pub class_names: Vec<String>,
-    pub body: Vec<RustStmt>,
+pub(crate) struct CatchRenderArm {
+    pub(crate) variable_name: String,
+    pub(crate) class_names: Vec<String>,
+    pub(crate) body: Vec<RustStmt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct ExternalExceptionConversion {
-    pub java_type: String,
-    pub rust_type: String,
+pub(crate) struct ExternalExceptionConversion {
+    pub(crate) java_type: String,
+    pub(crate) rust_type: String,
 }
 
 pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
@@ -97,32 +97,34 @@ impl JavaException {
 }
 
 fn java_exception_parent(class_name: &str) -> Option<&'static str> {
-    match class_name.rsplit('.').next().unwrap_or(class_name) {
-        "ArrayIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
-        "ArrayStoreException" => Some("RuntimeException"),
-        "ArithmeticException" => Some("RuntimeException"),
-        "ClassCastException" => Some("RuntimeException"),
-        "ConcurrentModificationException" => Some("RuntimeException"),
-        "IllegalArgumentException" => Some("RuntimeException"),
-        "IllegalMonitorStateException" => Some("RuntimeException"),
-        "IllegalStateException" => Some("RuntimeException"),
-        "IndexOutOfBoundsException" => Some("RuntimeException"),
-        "InputMismatchException" => Some("NoSuchElementException"),
-        "NegativeArraySizeException" => Some("RuntimeException"),
-        "NoSuchElementException" => Some("RuntimeException"),
-        "NullPointerException" => Some("RuntimeException"),
-        "NumberFormatException" => Some("IllegalArgumentException"),
-        "StringIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
-        "UncheckedIOException" => Some("RuntimeException"),
-        "UnsupportedOperationException" => Some("RuntimeException"),
-        "RuntimeException" => Some("Exception"),
-        _ => None,
+    match class_name {
+__SOURCE_EXCEPTION_PARENT_ARMS__        _ => match class_name.rsplit('.').next().unwrap_or(class_name) {
+            "ArrayIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
+            "ArrayStoreException" => Some("RuntimeException"),
+            "ArithmeticException" => Some("RuntimeException"),
+            "ClassCastException" => Some("RuntimeException"),
+            "ConcurrentModificationException" => Some("RuntimeException"),
+            "IllegalArgumentException" => Some("RuntimeException"),
+            "IllegalMonitorStateException" => Some("RuntimeException"),
+            "IllegalStateException" => Some("RuntimeException"),
+            "IndexOutOfBoundsException" => Some("RuntimeException"),
+            "InputMismatchException" => Some("NoSuchElementException"),
+            "NegativeArraySizeException" => Some("RuntimeException"),
+            "NoSuchElementException" => Some("RuntimeException"),
+            "NullPointerException" => Some("RuntimeException"),
+            "NumberFormatException" => Some("IllegalArgumentException"),
+            "StringIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
+            "UncheckedIOException" => Some("RuntimeException"),
+            "UnsupportedOperationException" => Some("RuntimeException"),
+            "RuntimeException" => Some("Exception"),
+            _ => None,
+        },
     }
 }
 
 fn java_exception_is_subtype(actual: &str, target: &str) -> bool {
-    let target = target.rsplit('.').next().unwrap_or(target);
-    let mut current = actual.rsplit('.').next().unwrap_or(actual);
+    let target = target;
+    let mut current = actual;
     for _ in 0..32 {
         let Some(parent) = java_exception_parent(current) else {
             return false;
@@ -144,13 +146,13 @@ impl InputStream {
         Ok(0)
     }
 
-    pub fn read_3<T0: ?Sized>(
-        &self,
-        _arg0: &T0,
-        _arg1: i32,
-        _arg2: i32,
-    ) -> Result<i32, JavaException> {
-        Ok(0)
+    pub fn read_3(&self, _arg0: &[i8], _arg1: i32, _arg2: i32) -> Result<i32, JavaException> {
+        let __java_buffer_len = _arg0.len() as i32;
+        if _arg1 < 0 || _arg2 < 0 || _arg1 > __java_buffer_len || _arg2 > __java_buffer_len - _arg1 {
+            Err(JavaException::new("IndexOutOfBoundsException", "InputStream read range out of bounds".to_string()))
+        } else {
+            Ok(-1)
+        }
     }
 
     pub fn close(&self) -> Result<(), JavaException> {
@@ -164,14 +166,7 @@ impl std::fmt::Display for JavaException {
     }
 }"#
     .to_string();
-    if !source_parent_arms.is_empty() {
-        item = item.replace(
-            "        \"RuntimeException\" => Some(\"Exception\"),\n        _ => None,",
-            &format!(
-                "        \"RuntimeException\" => Some(\"Exception\"),\n{source_parent_arms}        _ => None,"
-            ),
-        );
-    }
+    item = item.replace("__SOURCE_EXCEPTION_PARENT_ARMS__", &source_parent_arms);
     for conversion in conversions {
         item.push_str("\n\n");
         item.push_str(&format!(
@@ -203,31 +198,53 @@ fn source_exception_parent_match_arms(facts: &FactSet) -> String {
         "UnsupportedOperationException",
         "RuntimeException",
     ]);
+    let exception_edges = facts
+        .exception_facts
+        .iter()
+        .filter_map(|exception| {
+            let parent_name = facts.extends_type_name_for(&exception.type_name)?;
+            Some((exception.type_name.as_str(), parent_name))
+        })
+        .collect::<Vec<_>>();
+    let simple_child_counts =
+        exception_edges
+            .iter()
+            .fold(Vec::<(&str, usize)>::new(), |mut counts, (child, _)| {
+                let simple = child.rsplit('.').next().unwrap_or(child);
+                if let Some((_, count)) = counts.iter_mut().find(|(name, _)| *name == simple) {
+                    *count += 1;
+                } else {
+                    counts.push((simple, 1));
+                }
+                counts
+            });
     let mut arms = BTreeSet::new();
-    for exception in &facts.exception_facts {
-        let sub_name = exception
-            .type_name
-            .rsplit('.')
-            .next()
-            .unwrap_or(&exception.type_name);
-        if built_in_children.contains(sub_name) {
+    for (child_name, parent_name) in exception_edges {
+        let child_simple = child_name.rsplit('.').next().unwrap_or(child_name);
+        if built_in_children.contains(child_simple) {
             continue;
         }
-        let Some(parent_name) = facts.extends_type_name_for(&exception.type_name) else {
-            continue;
-        };
         let parent_simple = parent_name.rsplit('.').next().unwrap_or(&parent_name);
-        if parent_simple == sub_name || parent_simple.is_empty() {
+        if parent_name == child_name || parent_name.is_empty() {
             continue;
         }
         arms.insert(format!(
-            "        {sub_name:?} => Some({parent_simple:?}),\n"
+            "        {child_name:?} => Some({parent_name:?}),\n"
         ));
+        let child_simple_is_unique = simple_child_counts
+            .iter()
+            .find(|(name, _)| *name == child_simple)
+            .is_some_and(|(_, count)| *count == 1);
+        if child_simple_is_unique && parent_simple != child_simple && !parent_simple.is_empty() {
+            arms.insert(format!(
+                "        {child_simple:?} => Some({parent_simple:?}),\n"
+            ));
+        }
     }
     arms.into_iter().collect()
 }
 
-pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionConversion> {
+pub(crate) fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionConversion> {
     let mut conversions = BTreeSet::new();
     for exception in &facts.exception_facts {
         let Some(pack) = facts.external_library_pack_for_type(&exception.type_name) else {
@@ -255,14 +272,14 @@ pub fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExceptionC
     conversions.into_iter().collect()
 }
 
-pub fn exception_result_type(ok_type: RustType) -> RustType {
+pub(crate) fn exception_result_type(ok_type: RustType) -> RustType {
     crate::slot_render::rust_generic_type(
         "Result",
         vec![ok_type, RustType::Named("JavaException".to_string())],
     )
 }
 
-pub fn exception_try_ok_type(
+pub(crate) fn exception_try_ok_type(
     return_shape: Option<&RustSlotShape>,
     facts: &crate::facts::FactSet,
 ) -> RustType {
@@ -271,7 +288,7 @@ pub fn exception_try_ok_type(
         .unwrap_or(RustType::Unit)
 }
 
-pub fn return_stmt(value: Option<RustExpr>, wrap_in_ok: bool) -> RustStmt {
+pub(crate) fn return_stmt(value: Option<RustExpr>, wrap_in_ok: bool) -> RustStmt {
     if wrap_in_ok {
         RustStmt::Return(Some(ok_expr(value.unwrap_or_else(unit_expr))))
     } else {
@@ -279,7 +296,8 @@ pub fn return_stmt(value: Option<RustExpr>, wrap_in_ok: bool) -> RustStmt {
     }
 }
 
-pub fn throw_stmt(exception: RustExpr) -> RustStmt {
+#[allow(dead_code)]
+fn throw_stmt(exception: RustExpr) -> RustStmt {
     throw_stmt_with_result_policy(exception, true)
 }
 
@@ -307,7 +325,7 @@ fn uncaught_java_exception_panic_expr(exception: RustExpr) -> RustExpr {
     }
 }
 
-pub fn try_catch_stmt(
+pub(crate) fn try_catch_stmt(
     ok_type: RustType,
     try_body: Vec<RustStmt>,
     catches: Vec<CatchRenderArm>,
@@ -373,7 +391,7 @@ pub fn try_catch_stmt(
     })
 }
 
-pub fn try_catch_value_fallthrough_stmt(
+pub(crate) fn try_catch_value_fallthrough_stmt(
     ok_type: RustType,
     try_body: Vec<RustStmt>,
     catches: Vec<CatchRenderArm>,
@@ -711,7 +729,7 @@ fn result_scope_call_expr(result_type: RustType, body: Vec<RustStmt>) -> RustExp
     }
 }
 
-pub fn try_with_resources_scope_stmt(
+pub(crate) fn try_with_resources_scope_stmt(
     ok_type: RustType,
     resource_initializers: Vec<RustStmt>,
     body: Vec<RustStmt>,
@@ -782,7 +800,7 @@ pub fn try_with_resources_scope_stmt(
     })
 }
 
-pub fn try_with_resources_finally_scope_stmt(
+pub(crate) fn try_with_resources_finally_scope_stmt(
     ok_type: RustType,
     resource_initializers: Vec<RustStmt>,
     body: Vec<RustStmt>,
@@ -942,7 +960,7 @@ fn try_resource_cleanup_result_expr(stmt: &RustStmt) -> Option<RustExpr> {
     }
 }
 
-pub fn try_finally_scope_stmt(
+pub(crate) fn try_finally_scope_stmt(
     ok_type: RustType,
     body: Vec<RustStmt>,
     finally_body: Vec<RustStmt>,
@@ -983,7 +1001,7 @@ pub fn try_finally_scope_stmt(
     })
 }
 
-pub fn try_catch_finally_scope_stmt(
+pub(crate) fn try_catch_finally_scope_stmt(
     ok_type: RustType,
     try_body: Vec<RustStmt>,
     catches: Vec<CatchRenderArm>,
@@ -1071,11 +1089,11 @@ fn rust_stmts_definitely_terminate(stmts: &[RustStmt]) -> bool {
     )
 }
 
-pub fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {
+pub(crate) fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {
     java_exception_new_projection(class_name, exception_message_expr(message))
 }
 
-pub fn new_exception_expr_with_cause(
+pub(crate) fn new_exception_expr_with_cause(
     class_name: &str,
     message: RustExpr,
     cause: RustExpr,
@@ -1120,7 +1138,7 @@ fn fallback_exception_message_expr(value: RustExpr) -> RustExpr {
     )
 }
 
-pub fn exception_cause_or_self_if_instance_expr(
+pub(crate) fn exception_cause_or_self_if_instance_expr(
     wrapper: RustExpr,
     class_names: &[String],
 ) -> RustExpr {
@@ -1138,11 +1156,12 @@ pub fn exception_cause_or_self_if_instance_expr(
     }
 }
 
-pub fn exception_expr_from_new(class_name: &str, args: Vec<RustExpr>) -> RustExpr {
+#[allow(dead_code)]
+fn exception_expr_from_new(class_name: &str, args: Vec<RustExpr>) -> RustExpr {
     exception_expr_from_new_with_cause_hint(class_name, args, false)
 }
 
-pub fn exception_expr_from_new_with_cause_hint(
+pub(crate) fn exception_expr_from_new_with_cause_hint(
     class_name: &str,
     args: Vec<RustExpr>,
     second_arg_is_cause: bool,
@@ -1204,6 +1223,203 @@ mod tests {
     use crate::java_ir::JavaType;
 
     #[test]
+    fn external_exception_conversion_records_stay_inside_exception_lowering() {
+        let facts = crate::external_packs::parse_external_pack_manifest(
+            r#"
+            external-pack hdf5 HDF5Error rust-crate-mapping mapped target=hdf5_facade
+            external-pack java.sql java.sql.SQLException rust-crate-mapping mapped target=sqlite_facade
+            external-pack-exception hdf5 HDF5Error checked
+            external-pack-exception java.sql java.sql.SQLException checked
+            "#,
+        )
+        .facts;
+
+        let conversions = external_exception_conversions(&facts);
+        assert!(conversions.iter().any(|conversion| {
+            conversion.java_type == "HDF5Error" && conversion.rust_type == "hdf5_facade::HDF5Error"
+        }));
+        assert!(conversions.iter().any(|conversion| {
+            conversion.java_type == "java.sql.SQLException"
+                && conversion.rust_type == "sqlite_facade::SQLException"
+        }));
+    }
+
+    #[test]
+    fn exception_construction_helpers_stay_inside_exception_lowering() {
+        assert_eq!(
+            exception_result_type(RustType::I32),
+            RustType::Generic {
+                base: "Result".to_string(),
+                args: vec![RustType::I32, RustType::Named("JavaException".to_string())],
+            }
+        );
+        assert_eq!(
+            crate::emit::emit_type(&exception_result_type(RustType::I32)),
+            "Result<i32, JavaException>"
+        );
+        assert_eq!(
+            return_stmt(Some(RustExpr::Literal("1".to_string())), true),
+            RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Literal("1".to_string())],
+            }))
+        );
+        assert_eq!(
+            throw_stmt(new_exception_expr(
+                "IllegalArgumentException",
+                RustExpr::Literal("\"bad\".to_string()".to_string()),
+            )),
+            RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Err"])),
+                args: vec![RustExpr::Call {
+                    function: Box::new(RustExpr::path(["JavaException", "new"])),
+                    args: vec![
+                        RustExpr::Literal("\"IllegalArgumentException\"".to_string()),
+                        RustExpr::MethodCall {
+                            receiver: Box::new(RustExpr::Literal(
+                                "\"bad\".to_string()".to_string(),
+                            )),
+                            method: "to_string".to_string(),
+                            args: Vec::new(),
+                        },
+                    ],
+                }],
+            }))
+        );
+        assert_eq!(
+            exception_cause_or_self_if_instance_expr(
+                RustExpr::Var("ce".to_string()),
+                &["RuntimeException".to_string()],
+            ),
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("ce".to_string())),
+                method: "cause_or_self_if_instance".to_string(),
+                args: vec![RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(RustExpr::ArrayLiteral(vec![RustExpr::Literal(
+                        "\"RuntimeException\"".to_string(),
+                    )])),
+                }],
+            }
+        );
+        assert_eq!(
+            exception_expr_from_new("IllegalStateException", Vec::new()),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "new"])),
+                args: vec![
+                    RustExpr::Literal("\"IllegalStateException\"".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Call {
+                            function: Box::new(RustExpr::path(["String", "new"])),
+                            args: Vec::new(),
+                        }),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            exception_expr_from_new(
+                "IllegalStateException",
+                vec![
+                    RustExpr::Var("message".to_string()),
+                    RustExpr::Var("ignored".to_string()),
+                ],
+            ),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "new"])),
+                args: vec![
+                    RustExpr::Literal("\"IllegalStateException\"".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::MacroCall {
+                            macro_name: "format".to_string(),
+                            args: vec![
+                                RustExpr::Literal("\"{}: {}\"".to_string()),
+                                RustExpr::Var("message".to_string()),
+                                RustExpr::Var("ignored".to_string()),
+                            ],
+                        }),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            exception_expr_from_new_with_cause_hint(
+                "IllegalStateException",
+                vec![
+                    RustExpr::Var("message".to_string()),
+                    RustExpr::Var("cause".to_string()),
+                ],
+                true,
+            ),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
+                args: vec![
+                    RustExpr::Literal("\"IllegalStateException\"".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("message".to_string())),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
+                    RustExpr::Var("cause".to_string()),
+                ],
+            }
+        );
+        assert_eq!(
+            exception_expr_from_new_with_cause_hint(
+                "MissingArgument",
+                vec![
+                    RustExpr::Var("argument_name".to_string()),
+                    RustExpr::Var("message".to_string()),
+                ],
+                false,
+            ),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "new"])),
+                args: vec![
+                    RustExpr::Literal("\"MissingArgument\"".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::MacroCall {
+                            macro_name: "format".to_string(),
+                            args: vec![
+                                RustExpr::Literal("\"{}: {}\"".to_string()),
+                                RustExpr::Var("argument_name".to_string()),
+                                RustExpr::Var("message".to_string()),
+                            ],
+                        }),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
+                ],
+            }
+        );
+        assert_eq!(
+            new_exception_expr_with_cause(
+                "UserProblem",
+                RustExpr::Literal("\"copy failed\".to_string()".to_string()),
+                RustExpr::Var("ex".to_string()),
+            ),
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["JavaException", "with_cause"])),
+                args: vec![
+                    RustExpr::Literal("\"UserProblem\"".to_string()),
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Literal(
+                            "\"copy failed\".to_string()".to_string(),
+                        )),
+                        method: "to_string".to_string(),
+                        args: Vec::new(),
+                    },
+                    RustExpr::Var("ex".to_string()),
+                ],
+            }
+        );
+    }
+
+    #[test]
     fn plain_return_catch_rewrites_returned_err_to_panic() {
         let rewritten = plain_return_catch_body(vec![RustStmt::Return(Some(RustExpr::Call {
             function: Box::new(RustExpr::path(["Err"])),
@@ -1224,7 +1440,7 @@ mod tests {
         ));
 
         let rendered = try_catch_stmt(
-            RustType::Raw("i32".to_string()),
+            RustType::I32,
             vec![RustStmt::Return(Some(RustExpr::Call {
                 function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Raw("1".to_string())],
@@ -1249,6 +1465,143 @@ mod tests {
                 "panic!(\"uncaught Java exception: {:?}\", JavaException::new(\"WrappedProblem\", e.to_string()));"
             ) && !rendered.contains("return Err(JavaException::new(\"WrappedProblem\""),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn try_catch_scope_rendering_stays_inside_exception_lowering() {
+        let try_catch_return_stmt = try_catch_stmt(
+            RustType::I32,
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Literal("7".to_string())],
+            }))],
+            vec![CatchRenderArm {
+                variable_name: "ex".to_string(),
+                class_names: vec!["IllegalArgumentException".to_string()],
+                body: vec![RustStmt::Return(Some(RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Ok"])),
+                    args: vec![RustExpr::Literal("1".to_string())],
+                }))],
+            }],
+            true,
+            false,
+        );
+        assert!(matches!(
+            try_catch_return_stmt,
+            RustStmt::Expr(RustExpr::Match { .. })
+        ));
+        assert_eq!(
+            crate::emit::emit_statements(&[try_catch_return_stmt], 0),
+            "match (|| -> Result<i32, JavaException> { return Ok(7); })() { Ok(value) => { return Ok(value); }, Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
+        );
+
+        let try_catch_fallthrough_stmt = try_catch_stmt(
+            RustType::Unit,
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![unit_expr()],
+            }))],
+            Vec::new(),
+            false,
+            true,
+        );
+        assert!(matches!(
+            try_catch_fallthrough_stmt,
+            RustStmt::Expr(RustExpr::Match { .. })
+        ));
+        assert_eq!(
+            crate::emit::emit_statements(&[try_catch_fallthrough_stmt], 0),
+            "match (|| -> Result<(), JavaException> { return Ok(()); })() { Ok(()) => { }, Err(ex) => { panic!(\"uncaught Java exception: {:?}\", ex); } };\n"
+        );
+    }
+
+    #[test]
+    fn try_catch_value_fallthrough_rendering_stays_inside_exception_lowering() {
+        let value_fallthrough_stmt = try_catch_value_fallthrough_stmt(
+            RustType::I32,
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Literal("7".to_string())],
+            }))],
+            vec![CatchRenderArm {
+                variable_name: "ex".to_string(),
+                class_names: vec!["IOException".to_string()],
+                body: vec![RustStmt::Return(Some(RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Ok"])),
+                    args: vec![RustExpr::Literal("1".to_string())],
+                }))],
+            }],
+            true,
+            false,
+        );
+        assert!(matches!(
+            value_fallthrough_stmt,
+            RustStmt::Expr(RustExpr::Match { .. })
+        ));
+        assert_eq!(
+            crate::emit::emit_statements(&[value_fallthrough_stmt], 0),
+            "match (|| -> Result<Option<i32>, JavaException> { return Ok(Some(7)); return Ok(None); })() { Ok(Some(value)) => { return Ok(value); }, Ok(None) => { }, Err(ex) if ex.is_instance(&[\"IOException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
+        );
+    }
+
+    #[test]
+    fn try_with_resources_scope_rendering_stays_inside_exception_lowering() {
+        let twr_unit_stmt = try_with_resources_scope_stmt(
+            RustType::Unit,
+            vec![RustStmt::Raw("let input = open_input();".to_string())],
+            vec![RustStmt::Raw("copy_chunk(&mut input)?;".to_string())],
+            vec![RustStmt::Raw("input.close()?;".to_string())],
+            false,
+            true,
+        );
+        assert!(matches!(
+            twr_unit_stmt,
+            RustStmt::Expr(RustExpr::Block { .. })
+        ));
+        assert_eq!(
+            crate::emit::emit_statements(&[twr_unit_stmt], 0),
+            "{ let input = open_input(); let __java_twr_result = (|| -> Result<(), JavaException> { copy_chunk(&mut input)?; return Ok(()); })(); let __java_twr_cleanup_result = (|| -> Result<(), JavaException> { let mut __java_twr_cleanup_error: Option<JavaException> = None; input.close()?; return match __java_twr_cleanup_error { Some(ex) => Err(ex), None => Ok(()) }; })(); (match (__java_twr_result, __java_twr_cleanup_result) { (Err(mut ex), Err(cleanup_ex)) => { ex.add_suppressed(cleanup_ex); Err(ex) }, (Err(ex), _) => Err(ex), (Ok(()), Err(ex)) => Err(ex), (Ok(()), Ok(())) => Ok(()) })?; };\n"
+        );
+
+        let twr_value_stmt = try_with_resources_scope_stmt(
+            RustType::String,
+            vec![RustStmt::Raw("let reader = open_reader();".to_string())],
+            vec![return_stmt(
+                Some(RustExpr::Raw("reader.read_line()".to_string())),
+                true,
+            )],
+            vec![RustStmt::Raw("reader.close()?;".to_string())],
+            true,
+            true,
+        );
+        assert!(matches!(
+            twr_value_stmt,
+            RustStmt::Expr(RustExpr::Block { .. })
+        ));
+        assert_eq!(
+            crate::emit::emit_statements(&[twr_value_stmt], 0),
+            "{ let reader = open_reader(); let __java_twr_result = (|| -> Result<String, JavaException> { return Ok(reader.read_line()); })(); let __java_twr_cleanup_result = (|| -> Result<(), JavaException> { let mut __java_twr_cleanup_error: Option<JavaException> = None; reader.close()?; return match __java_twr_cleanup_error { Some(ex) => Err(ex), None => Ok(()) }; })(); return match (__java_twr_result, __java_twr_cleanup_result) { (Err(mut ex), Err(cleanup_ex)) => { ex.add_suppressed(cleanup_ex); Err(ex) }, (Err(ex), _) => Err(ex), (Ok(value), Err(ex)) => Err(ex), (Ok(value), Ok(())) => Ok(value) }; };\n"
+        );
+
+        let twr_panic_stmt = try_with_resources_scope_stmt(
+            RustType::Unit,
+            Vec::new(),
+            vec![RustStmt::Raw("copy_chunk()?;".to_string())],
+            vec![RustStmt::Raw(
+                "if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); }"
+                    .to_string(),
+            )],
+            false,
+            false,
+        );
+        assert!(matches!(
+            twr_panic_stmt,
+            RustStmt::Expr(RustExpr::Block { .. })
+        ));
+        assert_eq!(
+            crate::emit::emit_statements(&[twr_panic_stmt], 0),
+            "{ let __java_twr_result = (|| -> Result<(), JavaException> { copy_chunk()?; return Ok(()); })(); let __java_twr_cleanup_result = (|| -> Result<(), JavaException> { let mut __java_twr_cleanup_error: Option<JavaException> = None; if let Err(ex) = input.close() { panic!(\"uncaught Java exception: {:?}\", ex); } return match __java_twr_cleanup_error { Some(ex) => Err(ex), None => Ok(()) }; })(); (match (__java_twr_result, __java_twr_cleanup_result) { (Err(mut ex), Err(cleanup_ex)) => { ex.add_suppressed(cleanup_ex); Err(ex) }, (Err(ex), _) => Err(ex), (Ok(()), Err(ex)) => Err(ex), (Ok(()), Ok(())) => Ok(()) }).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex)); };\n"
         );
     }
 
@@ -1308,6 +1661,47 @@ mod tests {
             rendered.contains("\"BaseProblem\" => Some(\"Exception\")")
                 && rendered.contains("\"SpecificProblem\" => Some(\"BaseProblem\")"),
             "{rendered}"
+        );
+        assert!(!rendered.contains("__SOURCE_EXCEPTION_PARENT_ARMS__"));
+    }
+
+    #[test]
+    fn java_exception_support_keeps_package_qualified_source_exception_parent_edges() {
+        let mut facts = FactSet::default();
+        for type_name in ["a.Problem", "b.Problem"] {
+            facts.exception_facts.push(ExceptionFact {
+                type_name: type_name.to_string(),
+                kind: ExceptionKind::Checked,
+                provenance: FactProvenance::ParsedSource,
+            });
+            facts
+                .type_capability_overrides
+                .push(TypeCapabilityOverride {
+                    type_name: type_name.to_string(),
+                    copy: None,
+                    clone: None,
+                    string_like: None,
+                    sequence_like: None,
+                    implements: Vec::new(),
+                    extends: Some(JavaType::Named {
+                        name: "Exception".to_string(),
+                        args: Vec::new(),
+                    }),
+                    final_type: None,
+                    object_safe_trait: None,
+                    provenance: FactProvenance::ParsedSource,
+                });
+        }
+
+        let RustItem::Raw(rendered) = java_exception_support_item_with_facts(&facts) else {
+            panic!("Java exception support should render as a raw support item");
+        };
+
+        assert!(rendered.contains("\"a.Problem\" => Some(\"Exception\")"));
+        assert!(rendered.contains("\"b.Problem\" => Some(\"Exception\")"));
+        assert!(
+            !rendered.contains("\"Problem\" => Some(\"Exception\")"),
+            "same-simple package-qualified source exceptions must not share a simple-name parent arm: {rendered}"
         );
     }
 
@@ -1424,6 +1818,52 @@ mod tests {
         assert!(
             !rendered.contains("return __java_try_result;"),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn try_finally_scope_rendering_stays_inside_exception_lowering() {
+        let stmt = try_finally_scope_stmt(
+            RustType::Unit,
+            vec![RustStmt::Raw("resource.read()?;".to_string())],
+            vec![RustStmt::Raw("resource.close();".to_string())],
+            false,
+            true,
+        );
+
+        assert!(matches!(stmt, RustStmt::Expr(RustExpr::Block { .. })));
+        assert_eq!(
+            crate::emit::emit_statements(&[stmt], 0),
+            "{ let __java_try_result = (|| -> Result<(), JavaException> { resource.read()?; return Ok(()); })(); resource.close(); __java_try_result?; };\n"
+        );
+    }
+
+    #[test]
+    fn try_catch_finally_scope_rendering_stays_inside_exception_lowering() {
+        let stmt = try_catch_finally_scope_stmt(
+            RustType::I32,
+            vec![RustStmt::Return(Some(RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Literal("7".to_string())],
+            }))],
+            vec![CatchRenderArm {
+                variable_name: "ex".to_string(),
+                class_names: vec!["IllegalArgumentException".to_string()],
+                body: vec![RustStmt::Return(Some(RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Ok"])),
+                    args: vec![RustExpr::Literal("1".to_string())],
+                }))],
+            }],
+            vec![RustStmt::Raw("cleanup();".to_string())],
+            true,
+            true,
+            false,
+        );
+
+        assert!(matches!(stmt, RustStmt::Expr(RustExpr::Block { .. })));
+        assert_eq!(
+            crate::emit::emit_statements(&[stmt], 0),
+            "{ let __java_try_result = match (|| -> Result<i32, JavaException> { return Ok(7); })() { Ok(value) => Ok(value), Err(ex) if ex.is_instance(&[\"IllegalArgumentException\"]) => (|| -> Result<i32, JavaException> { return Ok(1); })(), Err(ex) => Err(ex) }; cleanup(); return __java_try_result; };\n"
         );
     }
 

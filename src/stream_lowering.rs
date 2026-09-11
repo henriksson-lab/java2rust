@@ -1496,7 +1496,7 @@ fn render_tuple_like_stream_lambda_param_type(
         return None;
     }
     if matches!(simple, "Tuple2" | "Tuple3" | "Tuple4") {
-        return Some(crate::slot_render::rust_name_for_java_named_type(simple));
+        return Some(crate::java_naming::rust_name_for_java_named_type(simple));
     }
     let rendered_args = args
         .iter()
@@ -1514,7 +1514,7 @@ fn render_tuple_like_stream_lambda_param_type(
         .collect::<Vec<_>>();
     Some(format!(
         "{}<{}>",
-        crate::slot_render::rust_name_for_java_named_type(simple),
+        crate::java_naming::rust_name_for_java_named_type(simple),
         rendered_args.join(", ")
     ))
 }
@@ -3359,7 +3359,7 @@ fn stream_static_constant_owner_name(
 
 fn stream_static_owner_segment_name(owner: &str) -> String {
     if owner.contains('.') {
-        return crate::slot_render::rust_name_for_java_named_type(owner);
+        return crate::java_naming::rust_name_for_java_named_type(owner);
     }
     let mut out = String::new();
     let mut uppercase_next = true;

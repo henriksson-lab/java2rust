@@ -29,7 +29,9 @@ use new_java2rust::output_markers::{
     count_unimplemented_facade_methods, count_unmodelled_upcast_conversions,
 };
 use new_java2rust::rust_ir::RustExpr;
-use new_java2rust::{translate_source, translate_source_with_facts};
+use new_java2rust::{
+    translate_source, translate_source_with_context_summary_sources, translate_source_with_facts,
+};
 
 /// A Java source that must make its marker appear, and the counter that must
 /// see it.
@@ -75,17 +77,12 @@ const FIXTURES: &[MarkerFixture] = &[
     MarkerFixture {
         marker: "unsupported_inner_class_outer_capture",
         // A non-static inner class: its constructor cannot obtain a shared
-        // handle to the enclosing instance, so it is emitted as `compile_error!`.
+        // handle to the enclosing instance, so it remains runtime-loud and
+        // carries a translator diagnostic.
         // The mutate-after-construction step is the semantic reason a copy
         // would not be a valid repair: Java must observe base = 20 here.
         java: "public class MarkerInnerCapture { private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); base = 20; return a.add(1); } }",
         counters: &["invalid_patterns"],
-    },
-    MarkerFixture {
-        marker: "untranslated_source_summary_method",
-        // Record accessors are emitted as source-summary surfaces with no body.
-        java: "public class MarkerSummary { record Pt(int x, int y) {} public int m(Pt p) { return p.x(); } }",
-        counters: &["unimplemented_facade_methods"],
     },
     MarkerFixture {
         marker: "unimplemented",
@@ -112,6 +109,10 @@ const COVERED_BY_DEDICATED_TEST: &[(&str, &str)] = &[
     (
         "noop_facade_call_site",
         "noop_facade_method_call_sites_are_marked_at_lowering_time",
+    ),
+    (
+        "untranslated_source_summary_method",
+        "source_summary_method_marker_uses_source_summary_emitter",
     ),
 ];
 
@@ -204,6 +205,29 @@ fn each_fixture_moves_its_counter() {
 }
 
 #[test]
+fn source_summary_method_marker_uses_source_summary_emitter() {
+    let rust = translate_source_with_context_summary_sources(
+        "public class MarkerSummaryUser { int m(MarkerSummaryDep dep) { return dep.value(); } }",
+        &["public class MarkerSummaryDep { int value() { return 7; } }".to_string()],
+        &FactSet::default(),
+    )
+    .rust;
+    let marker = output_markers::marker_by_name("untranslated_source_summary_method")
+        .expect("registered source-summary marker");
+
+    assert!(
+        rust.contains(marker.text),
+        "source-summary dependency should emit {:?} through the real summary \
+         facade path.\n{rust}",
+        marker.text
+    );
+    assert!(
+        count_unimplemented_facade_methods(&rust) > 0,
+        "source-summary marker should move the unimplemented facade counter.\n{rust}"
+    );
+}
+
+#[test]
 fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() {
     let fixture = FIXTURES
         .iter()
@@ -217,6 +241,46 @@ fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() 
             .has_code("inner_class_construction_panics"),
         "inner-class construction should be reported by the translator, not only \
          left as a runtime panic marker:\n{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("unsupported Java inner-class outer capture construction"),
+        "{}",
+        translation.rust
+    );
+    assert!(translation.rust.contains("panic!("), "{}", translation.rust);
+    assert!(
+        !translation
+            .rust
+            .contains("compile_error!(\"unsupported Java inner-class outer capture construction"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn inner_capture_gap_reports_mutable_shared_storage_work_queue() {
+    let translation = translate_source(include_str!("differential/known-gaps/InnerCapture.java"));
+
+    assert!(
+        translation
+            .diagnostics
+            .has_code("inner_class_construction_panics"),
+        "inner-class construction should stay explicitly reported until outer \
+         receiver handles are implemented:\n{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "storage_strategy_disagreement"
+                && diagnostic
+                    .message
+                    .contains("InnerCapture needs SharedLocal")
+        }),
+        "inner capture should also name the unimplemented SharedLocal storage \
+         tier that blocks the repair:\n{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
     assert!(
@@ -285,10 +349,7 @@ fn unmodelled_static_constant_is_counted() {
     // Java source: a declared external constant with no modelled value.
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "MarkerRegistry".to_string(),
-            field_name: "UNMODELLED_LIMIT".to_string(),
-        },
+        field: FieldKey::named("MarkerRegistry", "UNMODELLED_LIMIT"),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,

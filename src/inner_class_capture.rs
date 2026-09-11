@@ -28,15 +28,25 @@ use std::collections::HashSet;
 
 /// A non-static inner class whose constructor cannot produce its outer handle.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct UnconstructableInnerClass {
+pub(crate) struct UnconstructableInnerClass {
     /// The inner class, as written in Java.
-    pub inner_type: String,
+    pub(crate) inner_type: String,
     /// The enclosing type it captures.
-    pub outer_type: String,
+    pub(crate) outer_type: String,
 }
 
 /// Every inner class in `program` whose construction cannot produce an outer handle.
-pub fn unconstructable_inner_classes(
+pub(crate) fn unconstructable_inner_classes(
+    program: &Program,
+    facts: &FactSet,
+) -> Vec<UnconstructableInnerClass> {
+    constructed_outer_this_inner_classes(program, facts)
+        .into_iter()
+        .filter(|inner| !outer_this_constructor_handle_is_implemented(&inner.outer_type, facts))
+        .collect()
+}
+
+pub(crate) fn constructed_outer_this_inner_classes(
     program: &Program,
     facts: &FactSet,
 ) -> Vec<UnconstructableInnerClass> {
@@ -53,7 +63,7 @@ pub fn unconstructable_inner_classes(
 /// A warning accompanies the generated unsupported-feature handoff so corpus
 /// diagnostics can still count the feature gap even when callers do not execute
 /// the unsupported path.
-pub fn report_unconstructable_inner_classes(
+pub(crate) fn report_unconstructable_inner_classes(
     program: &Program,
     facts: &FactSet,
     into: &mut DiagnosticBag,
@@ -78,9 +88,7 @@ fn collect_in_type(
     found: &mut Vec<UnconstructableInnerClass>,
 ) {
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
-        if constructed_type_names_include(constructed, &ty.name)
-            && !outer_this_constructor_handle_is_implemented(outer_type, facts)
-        {
+        if constructed_type_names_include(constructed, &ty.name) {
             found.push(UnconstructableInnerClass {
                 inner_type: ty.name.clone(),
                 outer_type: outer_type.to_string(),
@@ -366,8 +374,12 @@ fn outer_this_constructor_handle_is_implemented(outer_type: &str, facts: &FactSe
 
 #[cfg(test)]
 mod tests {
-    use super::outer_this_constructor_handle_is_implemented;
+    use super::{
+        constructed_outer_this_inner_classes, outer_this_constructor_handle_is_implemented,
+    };
     use crate::facts::FactSet;
+    use crate::parser::parse_java_source;
+    use crate::resolve::resolve_program;
     use crate::storage_strategy::{Escape, TypeStorageFacts};
 
     #[test]
@@ -396,13 +408,54 @@ mod tests {
             TypeStorageFacts {
                 escape: Escape::Stored,
                 mutated: true,
-                mutation_provably_absent: true,
+                mutation_provably_absent: false,
                 ..TypeStorageFacts::default()
             },
         );
         assert!(
             !outer_this_constructor_handle_is_implemented("Outer", &facts),
             "SharedLocal is the right shape, but the RefCell tier is not implemented yet"
+        );
+    }
+
+    #[test]
+    fn qualified_inner_construction_is_reported_as_unconstructable() {
+        let parsed = parse_java_source(
+            r#"
+class Outer {
+    int base = 1;
+    class Inner {
+        int value() { return base; }
+    }
+    Inner make(Outer other) {
+        return other.new Inner();
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+        assert!(
+            resolved
+                .facts
+                .captures
+                .outer_this_type_for_type("Outer.Inner")
+                .is_some()
+                || resolved
+                    .facts
+                    .captures
+                    .outer_this_type_for_type("Inner")
+                    .is_some(),
+            "{:#?}",
+            resolved.facts.captures
+        );
+
+        assert_eq!(
+            constructed_outer_this_inner_classes(&resolved.program, &resolved.facts),
+            vec![super::UnconstructableInnerClass {
+                inner_type: "Outer.Inner".to_string(),
+                outer_type: "Outer".to_string(),
+            }]
         );
     }
 }

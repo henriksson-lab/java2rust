@@ -3,11 +3,55 @@
 Recorded 2026-08-23.
 Status: **open**.
 
+Current checkpoint 2026-09-09: checked-in release `idiom_gaps` baseline is
+`816 passed; 0 failed`, and the focused exception/finally oracle loops cover
+the promoted exception, collection-exception, parse-exception, and completion
+fixtures named in this file. The audit remains open for the general completion
+carrier and remaining panic-only Java exception surfaces, not for the
+already-promoted fixture set.
+
+Follow-up 2026-09-09 source-exception parent pass: generated `JavaException`
+parent lookup now keeps exact package-qualified source exception edges before
+simple-name compatibility. The source parent table emits full child/parent names
+and only emits a simple child alias when that simple source exception name is
+unambiguous, so `a.Problem` and `b.Problem` no longer collapse into one
+`"Problem"` parent arm. Regression:
+`exception_lowering::tests::java_exception_support_keeps_package_qualified_source_exception_parent_edges`.
+
 Follow-up 2026-09-07 `List.subList` exception-class pass: catchable
 `List.subList(from, to)` lowering now preserves Java's split exception contract.
 `from > to` raises `IllegalArgumentException`, while negative/out-of-size bounds
 continue to raise `IndexOutOfBoundsException`. Regression:
 `idiom_gaps::list_sub_list_invalid_range_is_catchable_as_illegal_argument`.
+
+Follow-up 2026-09-08 `BitSet.clear`/`flip` exception pass: the modeled
+`java.util.BitSet` facade now carries mutating, result-returning ABI/effect
+facts for `clear(int)` and `flip(int)`, and the runtime facade preserves Java's
+negative-index `IndexOutOfBoundsException` contract. Differential fixture:
+`tests/differential/BitSetClearFlipCatch.java` (`true,true:clear,flip`).
+
+Follow-up 2026-09-09 `ArrayDeque` head-operation alias pass: zero-argument
+`getFirst()` now lowers through the same catchable head-read path as
+`element()`, while `removeFirst()` and `pop()` lower through the same catchable
+head-removal path as `remove()`. The shared native collection method
+classification now covers dispatch plus argument-shape and ABI argument-type
+planning. Differential fixture:
+`tests/differential/ArrayDequeFirstPopCatch.java` (`aab:caught`).
+
+Follow-up 2026-09-09 `LinkedList` queue-head alias pass: the call planner now
+treats `LinkedList` as a queue receiver in the same places as the stdlib/native
+type facts, so `element()`, `remove()`, `getFirst()`, `removeFirst()`, and
+`pop()` use the existing catchable head-read/head-removal projections.
+Differential fixture: `tests/differential/LinkedListQueueHeadCatch.java`
+(`true,true:aabb:caught`).
+
+Follow-up 2026-09-10 focused oracle expansion: the cheap exception loop now
+also covers the promoted comparator-throw, exception hierarchy/custom, and
+null-argument catch fixtures. The cheap finally loop now also covers the
+promoted catch/finally break-continue, return-override, labeled-continue,
+ordinary finally path, and try/catch/finally completion fixtures. This is
+coverage hygiene for already-promoted fixtures; the general completion carrier
+remains open.
 
 Follow-up 2026-09-07: the exception-support predicate is crate-local. Integration
 tests now assert the public `plan_java_exception_support` result instead of
@@ -75,6 +119,85 @@ initializer arguments at the mutation site. Regressions:
 `lower::tests::aliased_arrays_as_list_add_throws_unsupported_operation_exception`,
 and
 `lower::tests::collection_view_var_decl_facts_feed_later_mutation_lowering`.
+Follow-up 2026-09-09: direct and aliased unmodifiable/fixed-size list mutation
+is also pinned by the Java/Rust oracle, including the allowed
+`Arrays.asList(...).set(i, value)` path, direct/aliased unmodifiable `clear()`,
+unmodifiable `Collection.remove`, unmodifiable `Set.remove`, unmodifiable
+`Map.put`, immutable factory structural mutations from `empty*`, `singleton*`,
+and `nCopies`, and fixed-size `Arrays.asList(...).clear()`. The immutable
+factory handling preserves Java's empty-view `clear()` no-op while still
+throwing for actual structural changes. Differential fixture:
+`tests/differential/UnmodifiableCollectionMutationCatch.java`
+(`direct,collectionRemove,alias,aliasClear,setRemove,setClear,mapPut,mapClear,emptyList,emptySet,singleton,copies,fixed,clear:y:Y`).
+
+Follow-up 2026-09-09 focused exception oracle expansion: the dedicated
+`list_exception_fixtures_match_java_output` loop now includes already-promoted
+exception fixtures for `Arrays.copyOf`, `BitSet` constructors/get/set,
+iterators, map-entry iterators, `Math.toIntExact`, optional factories,
+StringBuilder/StringBuffer bounds and capacity, string byte-range constructors,
+StringTokenizer exhaustion, and TreeMap first/last-key emptiness. This is a
+measurement-floor change only; the fixtures already existed in the broad
+differential suite.
+Follow-up 2026-09-09 second oracle expansion: the same focused loop now also
+covers existing array checked read/write fixtures, catch hierarchy/order
+fixtures, `Collections.nCopies`, nullable receiver/value exceptions, map-get
+arithmetic null, `Math.floorDiv`/`floorMod`, queue empty head operations,
+general `String` bounds, `StringBuilder.delete`/`insert`, and `Thread.sleep`
+argument checks. Verified with
+`cargo test --test differential list_exception_fixtures_match_java_output -- --nocapture`.
+
+Follow-up 2026-09-10 focused exception/finally oracle expansion: the same
+exception loop now also includes already-promoted parse-null/radix fixtures
+(`IntegerParseNull`, `LongParseNull`, `NarrowParseNull`, `FloatingParseNull`,
+and `IntegralParseRadix`) and map-view unsupported-operation fixtures
+(`MapKeySetAddUnsupported`, `MapKeySetAddAllUnsupported`,
+`MapValuesAddUnsupported`, `MapEntrySetAddUnsupported`, and
+`MapEntrySetAddAllUnsupported`). The finally-focused loop now includes the
+suppressed-exception try-with-resources fixtures
+`TryWithResourcesMultipleCloseSuppressed` and
+`TryWithResourcesSuppressedPrimary`. This is coverage hygiene for already
+promoted fixtures; the general completion carrier remains open.
+
+Follow-up 2026-09-09 negative array-size oracle: direct array construction with
+a negative runtime length is now pinned by the Java/Rust oracle rather than only
+by generated-crate assertions. `tests/differential/ArrayNegativeSizeCatch.java`
+checks both the catchable `NegativeArraySizeException` path and the ordinary
+positive-length path (`caught,len:2`).
+
+Follow-up 2026-09-09 ragged negative array-size oracle: `new int[n][]` is now
+also promoted from an inline generated-crate assertion to the Java/Rust oracle.
+`tests/differential/RaggedArrayNegativeSizeCatch.java` checks the catchable
+negative row-count path and the ordinary ragged row assignment/read path
+(`caught,rows:2,cols:2`).
+
+Follow-up 2026-09-09 Arrays range oracle: `Arrays.copyOfRange` and ranged
+`Arrays.binarySearch` catchability are now pinned by Java/Rust differential
+fixtures rather than only generated-crate assertions.
+`tests/differential/ArraysCopyOfRangeCatch.java` checks order, bounds, and
+ordinary padded-copy behavior (`order,bounds,ok:3:2:0`);
+`tests/differential/ArraysBinarySearchRangeCatch.java` checks order, bounds,
+and successful ranged search (`order,bounds,2`).
+
+Follow-up 2026-09-09 Arrays compare/mismatch oracle: ranged `Arrays.equals`,
+`Arrays.compare`, and `Arrays.mismatch` exception paths are now promoted from an
+inline generated-crate assertion to `tests/differential/
+ArraysCompareMismatchRangeCatch.java`. The fixture checks order errors, bounds
+errors, and the ordinary successful range result
+(`equals-order,equals-bounds,compare-order,compare-bounds,mismatch-order,mismatch-bounds,false:-1:1`).
+
+Follow-up 2026-09-09 Arrays sort/fill range oracle: ranged `Arrays.sort` and
+`Arrays.fill` catchability is now promoted from generated-crate compile checks
+to `tests/differential/ArraysRangeCatch.java`, covering `fromIndex > toIndex`
+and negative range bounds (`sort-order,fill-bounds`).
+
+Follow-up 2026-09-09 Arrays stream range oracle/fix: ranged
+`Arrays.stream(...).sum` catchability is now promoted from a generated-crate
+compile check to `tests/differential/ArraysStreamRangeCatch.java`. The oracle
+exposed that Java reports `fromIndex > toIndex` as
+`ArrayIndexOutOfBoundsException` for `Arrays.stream`, unlike `Arrays.sort` and
+`Arrays.fill`; stream range lowering now uses a stream-specific guard and the
+fixture covers normal sum, reversed bounds, negative start, and end past length
+(`5,-2,-2,-2`).
 
 Follow-up 2026-08-30 layering cleanup: exception-support lowering no longer
 imports or constructs `JavaType` while building source exception parent arms.
@@ -859,10 +982,11 @@ not close the broader nested/labeled completion-carrier work.
    cross call boundaries still need the same catchable carrier as arithmetic,
    parse, and fallible array-read paths.
 3. Keep promoting repro-only "correct" cases into `tests/differential/` one at a
-   time. The current suite gates 108 fixtures, including `IntegralParseRadix.java`,
-   `FinallyReturnOverride.java`, and `CatchFinallyReturnOverride.java`; the
-   repro inventory remains useful, but it should not be treated as a gate until
-   each file is promoted.
+   time. At this checkpoint the suite gated 108 fixtures, including
+   `IntegralParseRadix.java`, `FinallyReturnOverride.java`, and
+   `CatchFinallyReturnOverride.java`; later follow-ups in this file supersede
+   that count. The repro inventory remains useful, but it should not be treated
+   as a gate until each file is promoted.
 
 ## Codex parallel audit 2026-08-25
 
@@ -886,6 +1010,18 @@ What remains is not a low-risk local patch:
   `try_catch_finally_scope_stmt` still use a `Result` closure carrier. That
   cannot generally represent Java's competing abrupt completions:
   `return`, `throw`, plain/labeled `break`, and plain/labeled `continue`.
+  `try_with_resources_finally_scope_stmt`, `try_finally_scope_stmt`, and
+  `try_catch_finally_scope_stmt` use the same carrier family but are crate-local
+  now; their exact emitted compatibility-shape assertions live beside
+  `exception_lowering` instead of keeping those helpers public.
+  The try-with-resources resource-name/declaration helpers are crate-local too;
+  their direct assertions live beside `exception_plan`, while integration tests
+  exercise them through `plan_try_stmt` and lowering.
+  Follow-up cleanup applied the same boundary to `try_catch_stmt`,
+  `try_catch_value_fallthrough_stmt`, and `try_with_resources_scope_stmt`. Their
+  exact rendering assertions now live beside `exception_lowering`; integration
+  tests keep exercising the planner/lowering behavior instead of importing these
+  rendering helpers as public crate API.
 - `lower::lower_simple_loop_try_finally_stmt` is intentionally a narrow fast
   path. It now handles nested no-catch/no-resource `try/finally` statements that
   fall through and simple loop-abrupt `finally` bodies, but nested loops,
@@ -1273,7 +1409,9 @@ propagating contexts it emits `...?`, so a surrounding Java catch can observe
 uncaught Java-exception panic adapter. Focused checks:
 `call_lowering::tests::string_char_at_native_fallback_uses_uncaught_java_exception_adapter`,
 `idiom_gaps::java_string_tokenizer_uses_facade_signature_facts`, and
-`tests/differential/StringTokenizerCharAtBoundsCatch.java`.
+`tests/differential/StringTokenizerCharAtBoundsCatch.java`; follow-up
+2026-09-09 added that fixture to the focused exception oracle loop, so this
+composition is checked outside the broad differential sweep.
 
 Follow-up 2026-08-26: the bounded no-catch try-with-resources/finally shape now
 lowers instead of tripping the stale unsupported pre-pass. `TryStmtPlan` has a
@@ -1763,3 +1901,91 @@ promoted block/do-while/throwing-finally cases and the promoted
 try-with-resources+finally cases. The recheck remains intentionally bounded to
 currently supported completion shapes; the broader nested/labeled completion
 carrier is still open.
+
+Follow-up 2026-09-09 focused finally/TWR oracle: the same loop now includes
+`tests/differential/TryWithResourcesCatchFinallyBreak.java`, promoting the
+previous inline generated-crate check for catch-body `break` plus cleanup plus
+`finally` into a Java/Rust behavioural oracle (`trcfd`).
+
+Follow-up 2026-09-09 focused finally/TWR oracle: the sibling
+`finally { continue; }` override shape for try-with-resources/catch/finally is
+now also promoted from the inline generated-crate check to the Java/Rust oracle.
+`tests/differential/TryWithResourcesFinallyContinueOverridesCatchReturn.java`
+pins cleanup-before-finally and classic-for update replay before the overriding
+continue (`trcftrcfd`).
+
+Follow-up 2026-09-09 focused finally/TWR oracle: the body-abrupt siblings that
+were still only inline generated-crate checks are now promoted too.
+`tests/differential/TryWithResourcesCatchFinallyBodyBreak.java` pins
+cleanup-before-finally before a body `break` exits the loop (`trfd`), and
+`tests/differential/TryWithResourcesCatchFinallyBodyContinue.java` pins the
+body `continue` path including classic-for update replay (`trftrftrfd`).
+
+Follow-up 2026-09-10 cleanup: `exception_lowering::CatchRenderArm` is
+crate-local, and stale integration/layering assertions now check the
+`pub(crate)` try/catch rendering boundary instead of expecting public helper
+symbols. This does not change the broader Java completion-carrier gap.
+
+Follow-up 2026-09-10 cleanup: `exception_lowering::ExternalExceptionConversion`
+and `external_exception_conversions` are crate-local too. Exact conversion-record
+coverage moved beside `exception_lowering`; integration coverage remains on the
+public `java_exception_support_item_with_facts` output.
+
+Follow-up 2026-09-10 cleanup: exception construction/rendering helpers
+(`exception_result_type`, `exception_try_ok_type`, `return_stmt`, `throw_stmt`,
+`new_exception_expr*`, `exception_cause_or_self_if_instance_expr`, and
+`exception_expr_from_new*`) are crate-local. Exact helper assertions moved into
+`exception_lowering` unit tests; integration coverage stays on the public
+exception-support item and planning behavior. The Java completion-carrier gap
+remains open.
+
+Follow-up 2026-09-10 cleanup: `exception_plan::exception_class_name` is
+crate-local. Direct carrier-name assertions live beside `exception_plan`;
+integration coverage stays on throw/catch planning rather than importing the
+helper as public API.
+
+Follow-up 2026-09-10 cleanup: `ThrowExprPlan`, `plan_throw_expr`, and
+`plan_block_exception_completion` are crate-local. Direct throw-expression shape
+assertions live beside `exception_plan`; integration coverage stays on public
+exception support and try/catch planning.
+
+Follow-up 2026-09-10 cleanup: `catch_match_class_names` is crate-local too. The
+semantic assignability regression moved beside `exception_plan`, while
+integration coverage keeps checking the public try/catch plan and generated
+exception-support behavior.
+
+Follow-up 2026-09-10 cleanup: the unused conversion-diagnostic adapter
+`lowering_diagnostic_from_conversion_diagnostic` is deleted. Integration
+coverage stays on the public `collect_lowering_diagnostic_plans` boundary and
+generated diagnostic codes.
+
+Follow-up 2026-09-10 exception contract: generated `InputStream::read_3`
+facades now check Java's `read(byte[], off, len)` range preconditions before
+returning the placeholder EOF value. Negative `off`, negative `len`, and
+`off + len` beyond the buffer length now return a catchable
+`IndexOutOfBoundsException` instead of silently returning `Ok(-1)`. Regression:
+`tests/differential/InputStreamReadBoundsCatch.java`; focused generated-Rust
+coverage lives in
+`idiom_gaps::resource_input_stream_read_and_close_have_typed_facade_support`.
+
+Follow-up 2026-09-10 known-gap oracle: `FinallySwitchBreak.java` now lives in
+`tests/differential/known-gaps/` and is checked by
+`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode`. Java prints
+`zfofdf`; generated Rust is expected to fail loudly at rustc with `E0267`
+(`break` inside the general finally closure carrier). This does not fix the
+completion-carrier design gap, but it makes the remaining switch+finally+break
+shape executable and non-vacuous.
+
+Follow-up 2026-09-10 focused finally/TWR oracle: the matching
+try-with-resources/catch/finally `finally { break; }` override shape is now
+promoted from an inline generated-crate check to the Java/Rust differential
+oracle. `tests/differential/TryWithResourcesFinallyBreakOverridesCatchReturn.java`
+pins cleanup-before-finally and the final break overriding the catch return
+(`trcfd`).
+
+Follow-up 2026-09-10 known-gap harness guard: `FinallySwitchBreak.java` now pins
+more than the Java oracle and rustc `E0267`. Its known-gap expectation also
+requires generated Rust fragments for the general finally closure carrier
+(`|| -> Result`) and the crossing `break;`, so the fixture cannot drift into an
+unrelated rustc failure while still satisfying the broad error-code check. The
+completion-carrier model remains open.

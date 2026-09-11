@@ -25,6 +25,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::diagnostics::DiagnosticBag;
+use crate::facts::FactSet;
 use crate::java_ir::{
     Block, Expr, JavaType, Member, Modifier, Program, Stmt, TypeDecl, TypeKind, WildcardBound,
 };
@@ -336,24 +337,6 @@ impl StoragePlacement {
         }
     }
 
-    /// The *construction* expression, composed the same way `wrap` composes the
-    /// type.
-    ///
-    /// `wrap` gives `Rc<RefCell<T>>`; this gives `Rc::new(RefCell::new(v))`.
-    /// They are the type and value forms of one decision, derived from the same
-    /// axes so they cannot nest differently — which is what a hand-written
-    /// construction string got wrong before this existed.
-    pub fn wrap_construction(self, inner: String) -> String {
-        let celled = match self.cell_path() {
-            Some(cell) => format!("{cell}::new({inner})"),
-            None => inner,
-        };
-        match self.handle_path() {
-            Some(handle) => format!("{handle}::new({celled})"),
-            None => celled,
-        }
-    }
-
     /// Whether lowering can emit this placement today.
     ///
     /// The cell rungs need the never-hold-a-borrow-across-a-call guarantee and
@@ -438,6 +421,23 @@ impl StoragePlan {
 
 /// Compute the plan for a program.
 pub fn plan_storage_strategies(program: &Program, usage: &UsageFacts) -> StoragePlan {
+    plan_storage_strategies_with_facts(program, usage, None)
+}
+
+/// Compute the plan with semantic/capture facts that are not present in usage.
+pub fn plan_storage_strategies_from_facts(
+    program: &Program,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> StoragePlan {
+    plan_storage_strategies_with_facts(program, usage, Some(facts))
+}
+
+fn plan_storage_strategies_with_facts(
+    program: &Program,
+    usage: &UsageFacts,
+    facts: Option<&FactSet>,
+) -> StoragePlan {
     let mut types = BTreeMap::new();
     let mut declared = BTreeSet::new();
     for ty in &program.types {
@@ -467,6 +467,9 @@ pub fn plan_storage_strategies(program: &Program, usage: &UsageFacts) -> Storage
     for ty in &program.types {
         collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
     }
+    if let Some(facts) = facts {
+        collect_inner_outer_capture_storage_requirements(program, facts, &declared, &mut types);
+    }
     for (name, facts) in types.iter_mut() {
         facts.static_reachable = static_reachable.contains(name);
         facts.surface_forwardable =
@@ -485,9 +488,10 @@ pub fn plan_storage_strategies(program: &Program, usage: &UsageFacts) -> Storage
 pub fn report_storage_disagreements(
     program: &Program,
     usage: &UsageFacts,
+    facts: &FactSet,
     into: &mut DiagnosticBag,
 ) {
-    let plan = plan_storage_strategies(program, usage);
+    let plan = plan_storage_strategies_from_facts(program, usage, facts);
     for (name, strategy) in plan.shared_types() {
         let facts = plan.facts(name).expect("shared type has facts");
         // "needs sharing" and "is still lowered by value" stopped being the same
@@ -569,7 +573,7 @@ pub fn interface_surface_is_handle_forwardable(
         let mutates = class.members.iter().any(|member| match member {
             Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => usage
                 .source_method_usage(class, method)
-                .is_some_and(|facts| facts.mutates_self),
+                .is_some_and(|facts| facts.mutates_self()),
             _ => false,
         });
         if mutates {
@@ -603,11 +607,8 @@ pub fn interface_surface_is_handle_forwardable(
                     .iter()
                     .any(|name| name == interface_name)
                     && usage
-                        .source_method_usage_for_owner(
-                            crate::java_signature::JavaOwnerKey::source_type(implementor),
-                            method,
-                        )
-                        .is_some_and(|facts| facts.mutates_self)
+                        .source_method_usage(implementor, method)
+                        .is_some_and(|facts| facts.mutates_self())
             })
         })
     })
@@ -648,6 +649,22 @@ fn collect_declared_types(ty: &TypeDecl, into: &mut BTreeSet<String>) {
     for member in &ty.members {
         if let Member::Type(nested) = member {
             collect_declared_types(nested, into);
+        }
+    }
+}
+
+fn collect_inner_outer_capture_storage_requirements(
+    program: &Program,
+    facts: &FactSet,
+    declared: &BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    for inner in crate::inner_class_capture::constructed_outer_this_inner_classes(program, facts) {
+        if let Some(outer_type) = declared_type_name_from_name(&inner.outer_type, declared)
+            && let Some(storage) = into.get_mut(&outer_type)
+        {
+            storage.escape = storage.escape.max(Escape::Stored);
+            storage.mutated = true;
         }
     }
 }
@@ -787,7 +804,7 @@ fn collect_type_facts(
                 // fixpoint over self-calls, so a method that mutates only by
                 // delegating counts.
                 if let Some(method_usage) = usage.source_method_usage(ty, method) {
-                    if method_usage.mutates_self
+                    if method_usage.mutates_self()
                         && let Some(facts) = into.get_mut(&ty.name)
                     {
                         facts.mutated = true;
@@ -854,7 +871,7 @@ fn collect_unknown_boundary_escapes(
             }
         }
     }
-    for field_use in &method_usage.field_uses {
+    for field_use in method_usage.field_uses() {
         let crate::usage::FieldUse::PassedToCall {
             field_name,
             boundary: CallArgumentBoundary::Unknown,
@@ -1274,6 +1291,18 @@ fn declared_type_name(
     if same_package_matches.len() == 1 {
         return Some((*same_package_matches[0]).clone());
     }
+    let simple_matches = declared
+        .iter()
+        .filter(|declared_name| simple_name(declared_name) == simple)
+        .collect::<Vec<_>>();
+    (simple_matches.len() == 1).then(|| (*simple_matches[0]).clone())
+}
+
+fn declared_type_name_from_name(name: &str, declared: &BTreeSet<String>) -> Option<String> {
+    if declared.contains(name) {
+        return Some(name.to_string());
+    }
+    let simple = simple_name(name);
     let simple_matches = declared
         .iter()
         .filter(|declared_name| simple_name(declared_name) == simple)
@@ -1750,6 +1779,89 @@ public class Outer {
     }
 
     #[test]
+    fn constructed_inner_class_outer_capture_forces_mutable_shared_outer_plan() {
+        let parsed = parse_java_source(
+            r#"
+public class Outer {
+    int base = 10;
+    class Inner {
+        int get() { return base; }
+    }
+    int run() {
+        Inner inner = new Inner();
+        base = 20;
+        return inner.get();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+
+        assert_eq!(
+            plan_storage_strategies(&resolved.program, &usage).strategy("Outer"),
+            StorageStrategy::Value,
+            "usage alone cannot see the outer-this handle required by constructed inner classes"
+        );
+
+        let plan = plan_storage_strategies_from_facts(&resolved.program, &usage, &resolved.facts);
+        let facts = plan.facts("Outer").expect("Outer storage facts");
+        assert_eq!(facts.escape, Escape::Stored);
+        assert!(facts.mutated);
+        assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+        assert!(
+            !facts.placement().is_implemented(),
+            "0023 remains blocked until the SharedLocal receiver/RefCell tier is implemented"
+        );
+    }
+
+    #[test]
+    fn storage_placement_implementation_gate_stays_explicit() {
+        assert!(
+            StoragePlacement {
+                shared: false,
+                interior_mutable: false,
+                sync: false,
+            }
+            .is_implemented()
+        );
+        assert!(
+            StoragePlacement {
+                shared: true,
+                interior_mutable: false,
+                sync: false,
+            }
+            .is_implemented()
+        );
+        assert!(
+            StoragePlacement {
+                shared: true,
+                interior_mutable: false,
+                sync: true,
+            }
+            .is_implemented()
+        );
+        assert!(
+            !StoragePlacement {
+                shared: true,
+                interior_mutable: true,
+                sync: false,
+            }
+            .is_implemented(),
+            "SharedLocal remains blocked until Rc<RefCell<T>> lowering is implemented"
+        );
+        assert!(
+            !StoragePlacement {
+                shared: true,
+                interior_mutable: true,
+                sync: true,
+            }
+            .is_implemented(),
+            "SharedSync remains blocked until Arc<Mutex<T>> lowering is implemented"
+        );
+    }
+
+    #[test]
     fn field_storage_sees_wildcard_generic_bound_types() {
         let strategy = strategy_of(
             r#"
@@ -2021,7 +2133,11 @@ mod placement_law_tests {
     fn the_type_and_construction_forms_nest_the_same_way() {
         for placement in all_placements() {
             let ty = placement.wrap("T".to_string());
-            let value = placement.wrap_construction("v".to_string());
+            let value =
+                crate::emit::emit_expr(&crate::slot_render::storage_placement_construction_expr(
+                    placement,
+                    crate::rust_ir::RustExpr::Var("v".to_string()),
+                ));
             for path in [placement.handle_path(), placement.cell_path()]
                 .into_iter()
                 .flatten()

@@ -169,7 +169,7 @@ fn static_constant_owner(receiver: &Expr, member: &str, env: &TypeEnv) -> Option
         Expr::Var(owner) => owner,
         Expr::FieldAccess(_, _) => {
             let owner = static_receiver_java_name(receiver)?;
-            return Some(crate::slot_render::rust_name_for_java_named_type(&owner));
+            return Some(crate::java_naming::rust_name_for_java_named_type(&owner));
         }
         _ => return None,
     };
@@ -181,15 +181,15 @@ fn static_constant_owner(receiver: &Expr, member: &str, env: &TypeEnv) -> Option
         return None;
     }
     if let Some(alias) = env.static_type_alias(owner) {
-        Some(crate::slot_render::rust_name_for_java_named_type(alias))
+        Some(crate::java_naming::rust_name_for_java_named_type(alias))
     } else if source_type_static_field_exists(owner, member, env) {
-        Some(crate::slot_render::rust_name_for_java_named_type(owner))
+        Some(crate::java_naming::rust_name_for_java_named_type(owner))
     } else if known_builtin_static_constant_owner(owner) {
-        Some(crate::slot_render::rust_name_for_java_named_type(owner))
+        Some(crate::java_naming::rust_name_for_java_named_type(owner))
     } else if owner.contains('_') || owner.chars().all(|ch| ch.is_ascii_lowercase()) {
         let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
         (canonical != owner.as_str() || known_builtin_static_constant_owner(&canonical))
-            .then(|| crate::slot_render::rust_name_for_java_named_type(&canonical))
+            .then(|| crate::java_naming::rust_name_for_java_named_type(&canonical))
     } else {
         None
     }
@@ -258,11 +258,11 @@ fn external_static_constant_rust_owner(
     let receiver_name = static_receiver_java_name(receiver)?;
     if let Some(owner) =
         external_field_fact_for_owner(&receiver_name, member, facts).and_then(|fact| {
-            external_crate_mapped_type_owner(&fact.field.type_name, facts).or_else(|| {
+            external_crate_mapped_type_owner(fact.field.type_name(), facts).or_else(|| {
                 if facts.disable_builtin_external_packs {
                     return None;
                 }
-                builtin_external_crate_mapped_type_owner(&fact.field.type_name)
+                builtin_external_crate_mapped_type_owner(fact.field.type_name())
             })
         })
     {
@@ -271,14 +271,15 @@ fn external_static_constant_rust_owner(
     if external_type_is_rust_crate_mapped(&receiver_name, facts)
         || java_type_is_rust_crate_mapped(field_ty, facts)
     {
-        return match crate::slot_render::rust_type_for_java_type_with_facts(field_ty, facts) {
-            RustType::Raw(owner) | RustType::Named(owner) => Some(owner),
-            _ => None,
-        };
+        if let RustType::Named(owner) =
+            crate::slot_render::rust_type_for_java_type_with_facts(field_ty, facts)
+        {
+            return Some(owner);
+        }
     }
     if let Some(fact) = external_field_fact_for_owner(&receiver_name, member, facts) {
         return static_constant_rust_owner_from_name(
-            &crate::slot_render::rust_name_for_java_named_type(&fact.field.type_name),
+            &crate::java_naming::rust_name_for_java_named_type(fact.field.type_name()),
         );
     }
     if external_field_type_for_owner(&receiver_name, member, facts).is_some() {
@@ -346,7 +347,7 @@ fn external_crate_mapped_type_owner_from_pack(
     }
     let crate_name = rust_target?;
     let rust_type_name = rust_type_name.map(str::to_string).unwrap_or_else(|| {
-        crate::slot_render::rust_name_for_java_named_type(
+        crate::java_naming::rust_name_for_java_named_type(
             type_name.rsplit('.').next().unwrap_or(type_name),
         )
     });

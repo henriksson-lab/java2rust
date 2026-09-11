@@ -3,7 +3,6 @@ use std::collections::{HashMap, HashSet};
 use crate::binding_id::{BindingId, BindingKind};
 use crate::facts::FactSet;
 use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Param, Stmt, TypeDecl};
-use crate::java_signature::{JavaCallableKey, JavaOwnerKey};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     borrowed_string_content_shape, indexed_assignment_shape_with_facts,
@@ -16,6 +15,12 @@ use crate::signature::{
 };
 use crate::slot_shape::RustSlotShape;
 use crate::types::{TypeEnv, infer_expr_type};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ImmutableCollectionViewMutationProfile {
+    Empty,
+    NonEmpty,
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct ShapeEnv {
@@ -51,6 +56,9 @@ pub struct ShapeEnv {
     map_entry_value_receivers_by_binding: HashMap<BindingId, Expr>,
     unmodifiable_collection_view_sources: HashMap<String, Expr>,
     unmodifiable_collection_view_sources_by_binding: HashMap<BindingId, Expr>,
+    immutable_collection_view_locals: HashMap<String, ImmutableCollectionViewMutationProfile>,
+    immutable_collection_view_locals_by_binding:
+        HashMap<BindingId, ImmutableCollectionViewMutationProfile>,
     fixed_size_list_view_args: HashMap<String, Vec<Expr>>,
     fixed_size_list_view_args_by_binding: HashMap<BindingId, Vec<Expr>>,
     simple_map_entry_values: HashMap<String, (Expr, Expr)>,
@@ -139,6 +147,19 @@ impl ShapeEnv {
         }
     }
 
+    pub(crate) fn insert_immutable_collection_view_local(
+        &mut self,
+        name: impl Into<String>,
+        profile: ImmutableCollectionViewMutationProfile,
+    ) {
+        let name = name.into();
+        if let Some(binding) = self.binding_ids.get(&name).cloned() {
+            self.immutable_collection_view_locals_by_binding
+                .insert(binding, profile);
+        }
+        self.immutable_collection_view_locals.insert(name, profile);
+    }
+
     pub fn insert_simple_map_entry_value(
         &mut self,
         name: impl Into<String>,
@@ -214,6 +235,8 @@ impl ShapeEnv {
             self.map_entry_value_receivers_by_binding.remove(binding);
             self.unmodifiable_collection_view_sources_by_binding
                 .remove(binding);
+            self.immutable_collection_view_locals_by_binding
+                .remove(binding);
             self.fixed_size_list_view_args_by_binding.remove(binding);
             self.simple_map_entry_values_by_binding.remove(binding);
             self.simple_immutable_map_entry_locals_by_binding
@@ -225,6 +248,7 @@ impl ShapeEnv {
         self.map_entry_set_view_receivers.remove(name);
         self.map_entry_value_receivers.remove(name);
         self.unmodifiable_collection_view_sources.remove(name);
+        self.immutable_collection_view_locals.remove(name);
         self.fixed_size_list_view_args.remove(name);
         self.simple_map_entry_values.remove(name);
         self.simple_immutable_map_entry_locals.remove(name);
@@ -276,6 +300,19 @@ impl ShapeEnv {
                 .map(Vec::as_slice);
         }
         self.fixed_size_list_view_args.get(name).map(Vec::as_slice)
+    }
+
+    pub(crate) fn immutable_collection_view_local(
+        &self,
+        name: &str,
+    ) -> Option<ImmutableCollectionViewMutationProfile> {
+        if let Some(binding) = self.binding_ids.get(name) {
+            return self
+                .immutable_collection_view_locals_by_binding
+                .get(binding)
+                .copied();
+        }
+        self.immutable_collection_view_locals.get(name).copied()
     }
 
     pub fn simple_map_entry_value(&self, name: &str) -> Option<(&Expr, &Expr)> {
@@ -908,7 +945,7 @@ impl ShapeEnv {
         {
             return None;
         }
-        Some(crate::slot_render::rust_name_for_java_named_type(owner))
+        Some(crate::java_naming::rust_name_for_java_named_type(owner))
     }
 
     pub fn insert_static_storage_field_shape_with_access_name_and_java_type(
@@ -1092,7 +1129,9 @@ fn unique_local_plan_for_declared_type<'a>(
 ) -> Option<&'a LocalPlan> {
     let exact_matches = locals
         .iter()
-        .filter(|local| local.name == name && local_plan_matches_declared_type(local, declared_ty))
+        .filter(|local| {
+            local.source_name() == name && local_plan_matches_declared_type(local, declared_ty)
+        })
         .collect::<Vec<_>>();
     if exact_matches.is_empty() {
         return None;
@@ -1242,12 +1281,7 @@ fn resolved_call_return_shape_by_java_key(
     if call.arg_target_types.len() != arg_count {
         return None;
     }
-    signatures.method_return_shape_by_java_key(&JavaCallableKey::resolved_source_method(
-        JavaOwnerKey::resolved_source(&call.declaring_type),
-        source_name,
-        &call.arg_target_types,
-        call.kind,
-    ))
+    signatures.resolved_source_method_return_shape(call, source_name)
 }
 
 fn native_java_call_expr_shape(
@@ -2376,6 +2410,10 @@ mod tests {
         );
         env.insert_unmodifiable_collection_view_source("view", Expr::Var("values".to_string()));
         env.insert_fixed_size_list_view_args("view", vec![Expr::Var("value".to_string())]);
+        env.insert_immutable_collection_view_local(
+            "view",
+            ImmutableCollectionViewMutationProfile::Empty,
+        );
         assert_eq!(
             env.unmodifiable_collection_view_source("view"),
             Some(&Expr::Var("values".to_string()))
@@ -2383,6 +2421,10 @@ mod tests {
         assert_eq!(
             env.fixed_size_list_view_args("view"),
             Some(&[Expr::Var("value".to_string())][..])
+        );
+        assert_eq!(
+            env.immutable_collection_view_local("view"),
+            Some(ImmutableCollectionViewMutationProfile::Empty)
         );
 
         env.insert_local_shape_with_java_type_and_binding(
@@ -2394,6 +2436,7 @@ mod tests {
 
         assert_eq!(env.unmodifiable_collection_view_source("view"), None);
         assert_eq!(env.fixed_size_list_view_args("view"), None);
+        assert_eq!(env.immutable_collection_view_local("view"), None);
     }
 
     #[test]

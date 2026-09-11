@@ -2,10 +2,38 @@
 
 Recorded 2026-08-23.
 Status: **open, partially mitigated**.
-Severity: **critical** — several everyday null-bearing Java shapes still fail
-to compile or panic instead of reaching translated control flow, and unknown
-erased-object display still has no dynamic Java `toString` recovery.
+Severity: **medium-high, narrowed** — the original everyday null-bearing shapes
+are mostly fixture-backed as explicit nullable carriers, catchable
+`NullPointerException`s, or loud unsupported paths. The remaining live risk is
+unknown erased-object display without source/platform/external `toString`
+evidence, plus broader nullable representation work outside the already-pinned
+fixtures.
 Kind: semantics / lowering.
+
+Follow-up 2026-09-09 focused triage: rechecked this audit together with
+0059. The smallest remaining live surface is still not a safe table-arm patch:
+`src/stdlib.rs::java_erased_any_to_string` only recovers carriers for values
+whose concrete runtime type is known through source downcast generation,
+`PLATFORM_ERASED_DISPLAY_TYPES`, or an explicit non-null external
+`toString(): String` fact. The guarding fixtures deliberately pin the loud path
+for missing evidence:
+`tests/idiom_gaps.rs::external_object_to_string_fallback_is_loud_not_empty` and
+`tests/slot_shape_design.rs::erased_external_object_display_without_modeled_to_string_stays_loud`.
+Adding more unconditional downcast arms would not solve arbitrary external
+`Object` display; the next valid fix needs a typed-erasure/display-capability
+model that records which erased values can dynamically dispatch Java
+`toString()`.
+
+Follow-up 2026-09-09 compile-harness cleanup: the generated-crate harness stubs
+used by three package-identity compile checks no longer implement
+`java_erased_object_to_string` as `String::new()`. They now panic with the same
+loud unknown-erased-display message used by runtime support, so compile-only
+tests do not preserve the old silent-empty behaviour in their local scaffolding.
+
+Follow-up 2026-09-10 compile-harness cleanup: the same loud erased-display stub
+was applied to the co-translated same-simple-name package-peer slot-shape
+compile harness. This was a stale test scaffold only; runtime support already
+panicked loudly for unknown erased display.
 
 Follow-up 2026-09-07 `String.join` null delimiter pass: the delimiter argument
 now keeps Java's required non-null contract instead of flowing through borrowed
@@ -1094,8 +1122,9 @@ and the compile-backed idiom test above.
 ## Why nothing noticed
 
 This section was true when the audit was filed, but is now historical. The
-differential suite is at 101 fixtures, and promoted null fixtures cover null
-concat, bare null concat, nullable string arguments, null default returns,
+differential suite is at 268 fixtures in the current worktree, and promoted
+null fixtures cover null concat, bare null concat, nullable string arguments,
+null default returns,
 `Map.get` misses, nullable constructor arguments stored in fields, nullable
 `List` elements, nullable reference-array elements, source `Object.toString()`
 recovery, catchable nullable source-parameter receiver dereference, and
@@ -1104,6 +1133,20 @@ the `Integer.parseInt(null)` `NumberFormatException` contract. The former silent
 `x == null` fold for unrepresented reference operands is now a
 `compile_error!`, and erased object display is loud rather than blank for
 unknown targets.
+
+Follow-up 2026-09-09 focused null-loop coverage pass: the cheap
+`null_representation_fixtures_match_java_output` oracle now includes the
+already-promoted null fixtures that were previously covered only by the broad
+differential run: `NullArgLiteral`, `NullDefaultReturn`,
+`NullFieldCtorOverload`, `NullInList`, `NullInstanceof`,
+`NullableArrayLengthCatch`, and `NullableFieldReceiverCatch`.
+
+Follow-up 2026-09-09 erased-display fallback guard: the generated
+`java_erased_any_to_string` support item now has a direct unit guard for the
+remaining unknown-runtime-target path. It must panic with
+`unsupported Java erased object display: runtime target is erased` and must not
+regress to the historical empty/default string fallback. This does not solve
+unknown external dynamic display; it pins the current loud behavior.
 
 ---
 
@@ -1168,8 +1211,10 @@ In priority order:
    `JavaException::new("NullPointerException", ...)` instead of panicking
    through `.copied().expect("Java null receiver")`. Covered by
    `tests/differential/MapGetArithmeticNullCatch.java` (`npe`).
-2. **Handle nullable constructor/method parameters explicitly** instead of
-   forcing `.expect` when a call site passes `null`.
+2. **Keep nullable constructor/method parameter coverage explicit.**
+   Constructor and source-method `null` arguments are now fixture-backed by
+   `NullCtorArg`, `NullArgCatch`, and `NullCallArgCatch`; the remaining
+   parameter-side risk is external/unknown APIs with no nullable slot evidence.
 3. **Finish unknown/external erased object display capabilities.**
    Source `Object o = new Point(3); "a" + o` is covered. Opaque external
    facades now delegate both direct `Display` and erased-object runtime display
@@ -1178,7 +1223,7 @@ In priority order:
    its existing facade `Display` implementation. The remaining gap is
    erased/unknown runtime values where no source downcast arm or explicit
    external API fact identifies a Java `toString()` surface.
-5. Promote each remaining repro as it becomes loud-or-correct. Do not add a
+4. Promote each remaining repro as it becomes loud-or-correct. Do not add a
    passing assertion that only checks rendered Rust text.
 
 Follow-up 2026-08-28: `String.join` now keeps explicit null elements
@@ -1533,7 +1578,7 @@ context.
 | `return cur.value + 1;` | **double**, `E0599` |
 | `t += cur.value;` | **double**, `E0599` |
 
-Cause: `apply_optional_receiver_slot_projection` (`conversion_lowering.rs:89`)
+Cause: `apply_optional_receiver_slot_projection` (`src/conversion_lowering.rs:89`)
 projects the receiver, discharging the optionality, and then applies a conversion
 that discharges it *again*. A slot-directed lowering took a different route and
 so stayed correct, which is why the defect looked context-sensitive.
@@ -1544,6 +1589,17 @@ three had no guard. Rather than adding it at the remaining three, it now runs
 **inside** `apply_optional_receiver_slot_projection`, so no caller can forget it:
 the same one-question-many-answers shape 0042/0044/0046 describe, closed by moving
 the answer to where the question is asked.
+
+Follow-up 2026-09-09: a cleanup attempt to delete the two remaining
+non-fallible lower-side wrappers around `apply_optional_receiver_slot_projection`
+was rejected by measurement. The
+`slot_shape_design::optional_receiver_field_element_recovery_does_not_borrow_returned_call_result`
+generated-crate check exposed a signature bug instead: a method that directly
+returned another call result was inferred as `&str` while the call necessarily
+returned an owned `String`. `signature.rs` now refuses the borrowed string-view
+return for direct returned call results; the wrappers remain load-bearing until
+the projection/conversion helper records enough shape to make the final strip
+local to the helper.
 
 Two hypotheses tried and **rejected by measurement**, recorded so they are not
 retried: feeding the conversion the element shape instead of its own `actual`
@@ -1667,3 +1723,28 @@ hygiene for already-modeled carriers; unknown erased display remains open.
 Follow-up 2026-09-07 focused erased-display loop: the same cheap oracle now
 also includes `ErasedPlatformDisplay`, so the broad platform-display fixture is
 covered by the targeted recheck instead of only by the full differential sweep.
+
+Follow-up 2026-09-10 focused erased-display note refresh: the cheap oracle now
+also covers nullable list display and map-entry display carriers, including
+`ErasedNullableArrayListDisplay`, `ErasedNullableBooleanArrayListDisplay`,
+`ErasedNullableByteArrayListDisplay`,
+`ErasedNullableCharacterArrayListDisplay`,
+`ErasedNullableDoubleArrayListDisplay`,
+`ErasedNullableFloatArrayListDisplay`, `ErasedNullableIntegerArrayListDisplay`,
+`ErasedNullableLongArrayListDisplay`, `ErasedNullableShortArrayListDisplay`,
+`ErasedMapEntryDisplay`, and `ErasedSimpleImmutableEntryDisplay`. Unknown
+erased display remains open; this only records the current promoted-fixture
+coverage.
+
+Follow-up 2026-09-10 cleanup: the erased-display downcast collectors in
+`stdlib` are pinned as private helpers, and the platform erased-display
+capability predicate is pinned crate-local. This is boundary hygiene only; it
+does not add a fallback for unknown erased display without type/capability
+evidence.
+
+Follow-up 2026-09-10 erased-display carrier arm cleanup: the platform,
+external, and source erased-display downcast collectors now share one private
+`erased_display_to_string_downcast_arms` template for `T`, `&T`, `Rc<T>`, and
+`Arc<T>`. This removes a duplicated policy table while preserving the same loud
+unknown-runtime-target fallback. Guard:
+`layering::stdlib_erased_display_downcast_collectors_stay_internal`.

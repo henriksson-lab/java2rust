@@ -1,4 +1,4 @@
-use crate::facts::{CallableKey, ExternalApiRole, FactSet, ReceiverAbi, Staticness};
+use crate::facts::{ExternalApiRole, FactSet, ReceiverAbi};
 use crate::java_ir::{Expr, JavaType, PrimitiveType};
 use crate::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use crate::slot_shape::RustSlotShape;
@@ -145,9 +145,8 @@ fn facade_abi_receiver_type_for_method_reference(
     crate::java_naming::java_method_name_aliases(method)
         .into_iter()
         .find_map(|method| {
-            let key = CallableKey::method(owner.clone(), method, Staticness::Unknown, 0);
             facts
-                .facade_abi_for_key(&key)
+                .facade_abi_for_external_method(&owner, &method, 0)
                 .filter(|abi| {
                     matches!(
                         abi.receiver,
@@ -256,8 +255,8 @@ fn infer_unbound_accessor_method_reference_fallback_shape(
 mod tests {
     use super::*;
     use crate::facts::{
-        ExternalApiEffectFact, FacadeAbiFact, FacadeSlot, FactProvenance, NullabilityState,
-        ReceiverMutabilityFact, ResultAbi,
+        CallableKey, ExternalApiEffectFact, FacadeAbiFact, FacadeSlot, FactProvenance,
+        NullabilityState, ReceiverMutabilityFact, ResultAbi, Staticness,
     };
 
     #[test]

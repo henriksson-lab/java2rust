@@ -3,12 +3,15 @@ use crate::string_concat::analyze_string_concat;
 use crate::types::TypeEnv;
 
 #[derive(Debug, Clone)]
-pub struct StringConcatPlan<'a> {
-    pub format_string: String,
-    pub args: Vec<&'a Expr>,
+pub(crate) struct StringConcatPlan<'a> {
+    pub(crate) format_string: String,
+    pub(crate) args: Vec<&'a Expr>,
 }
 
-pub fn build_string_concat_plan<'a>(expr: &'a Expr, env: &TypeEnv) -> Option<StringConcatPlan<'a>> {
+pub(crate) fn build_string_concat_plan<'a>(
+    expr: &'a Expr,
+    env: &TypeEnv,
+) -> Option<StringConcatPlan<'a>> {
     let parts = analyze_string_concat(expr, env)?;
     let format_string = parts
         .parts
@@ -27,4 +30,24 @@ pub fn build_string_concat_plan<'a>(expr: &'a Expr, env: &TypeEnv) -> Option<Str
         format_string,
         args,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java_ir::{JavaType, PrimitiveType};
+    use crate::parser::parse_expr;
+
+    #[test]
+    fn string_concat_plan_extracts_format_string_and_dynamic_args() {
+        let mut env = TypeEnv::new();
+        env.insert_local("name", JavaType::String);
+        env.insert_local("count", JavaType::Primitive(PrimitiveType::Int));
+
+        let expr = parse_expr("\"name=\" + name + count");
+        let plan = build_string_concat_plan(&expr, &env).unwrap();
+
+        assert_eq!(plan.format_string, "name={}{}");
+        assert_eq!(plan.args.len(), 2);
+    }
 }

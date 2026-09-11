@@ -1,5 +1,6 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::BTreeSet;
 
+use new_java2rust::binding_id::{BindingId, BindingKind};
 use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, FactProvenance, HierarchyOverride,
@@ -21,13 +22,23 @@ use new_java2rust::shape_projection::{
     DispatchRequirementProjectionRole, dispatch_requirement_projection_policy,
 };
 use new_java2rust::usage::{
-    BindingUse, BindingUseFacts, CallArgumentBoundary, MethodUsageFacts, UsageFacts, UsageMethodKey,
+    BindingUse, BindingUseFacts, CallArgumentBoundary, MethodUsageFacts, UsageFacts,
 };
 use new_java2rust::usage::{analyze_usage, analyze_usage_with_facts};
 use new_java2rust::{
     facts::{FactSet, TypeCapabilityOverride},
     slot_shape::DispatchShape,
 };
+
+fn test_binding_facts_for_id<'a>(
+    usage: &'a MethodUsageFacts,
+    binding: &BindingId,
+) -> Option<&'a BindingUseFacts> {
+    usage
+        .all_binding_facts()
+        .into_iter()
+        .find(|facts| facts.binding.as_ref() == Some(binding))
+}
 
 fn plan_object_model_for_test(
     program: &new_java2rust::java_ir::Program,
@@ -297,16 +308,27 @@ class Use {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let effective_facts = EffectiveFacts::new(&resolved.facts);
     let usage = analyze_usage(&resolved.program);
-    let method_usage = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "Use".to_string(),
-            method_name: "isInfo".to_string(),
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Use")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "isInfo" => {
+                Some(method)
+            }
+            _ => None,
         })
+        .unwrap();
+    let method_usage = usage
+        .method_usage_by_current_rust_name("Use".to_string(), "isInfo".to_string())
         .expect("usage should include Use.isInfo");
     assert!(
-        method_usage
-            .unique_binding_facts_for_name("line")
+        test_binding_facts_for_id(method_usage, method.params[0].binding.as_ref().unwrap())
             .expect("line binding should be tracked")
             .uses
             .iter()
@@ -349,16 +371,36 @@ class Use {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let effective_facts = EffectiveFacts::new(&resolved.facts);
     let usage = analyze_usage(&resolved.program);
-    let method_usage = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "Use".to_string(),
-            method_name: "repairAll".to_string(),
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Use")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "repairAll" => {
+                Some(method)
+            }
+            _ => None,
         })
+        .unwrap();
+    let loop_binding = method
+        .body
+        .as_ref()
+        .and_then(|body| body.statements.first())
+        .and_then(|stmt| match stmt {
+            new_java2rust::java_ir::Stmt::EnhancedFor { binding, .. } => binding.as_ref(),
+            _ => None,
+        })
+        .expect("enhanced-for binding should be assigned");
+    let method_usage = usage
+        .method_usage_by_current_rust_name("Use".to_string(), "repairAll".to_string())
         .expect("usage should include Use.repairAll");
     assert!(
-        method_usage
-            .unique_binding_facts_for_name("line")
+        test_binding_facts_for_id(method_usage, loop_binding)
             .expect("enhanced-for line binding should be tracked")
             .uses
             .iter()
@@ -628,15 +670,13 @@ interface RejectedReceiver {}
     let facts = FactSet::default();
     let effective_facts = EffectiveFacts::new(&facts);
     let mut usage = UsageFacts::default();
-    usage.methods = HashMap::from([(
-        UsageMethodKey {
-            type_name: "Use".to_string(),
-            method_name: "run".to_string(),
-        },
-        MethodUsageFacts::from_binding_facts([
+    usage.insert_method_usage_for_current_rust_name(
+        "Use".to_string(),
+        "run".to_string(),
+        MethodUsageFacts::from_exact_binding_facts([
             BindingUseFacts {
                 name: "stored".to_string(),
-                binding: None,
+                binding: Some(BindingId::new(BindingKind::Local, "stored", 0)),
                 java_ty: JavaType::Named {
                     name: "Stored".to_string(),
                     args: Vec::new(),
@@ -647,7 +687,7 @@ interface RejectedReceiver {}
             },
             BindingUseFacts {
                 name: "borrowed".to_string(),
-                binding: None,
+                binding: Some(BindingId::new(BindingKind::Local, "borrowed", 0)),
                 java_ty: JavaType::Named {
                     name: "Borrowed".to_string(),
                     args: Vec::new(),
@@ -662,7 +702,7 @@ interface RejectedReceiver {}
             },
             BindingUseFacts {
                 name: "unknown".to_string(),
-                binding: None,
+                binding: Some(BindingId::new(BindingKind::Local, "unknown", 0)),
                 java_ty: JavaType::Named {
                     name: "UnknownArg".to_string(),
                     args: Vec::new(),
@@ -677,7 +717,7 @@ interface RejectedReceiver {}
             },
             BindingUseFacts {
                 name: "receiver".to_string(),
-                binding: None,
+                binding: Some(BindingId::new(BindingKind::Local, "receiver", 0)),
                 java_ty: JavaType::Named {
                     name: "RejectedReceiver".to_string(),
                     args: Vec::new(),
@@ -690,7 +730,7 @@ interface RejectedReceiver {}
                 }],
             },
         ]),
-    )]);
+    );
 
     let usage_requirements = dispatch_requirements_from_usage(&usage);
     assert_eq!(
@@ -1223,18 +1263,14 @@ class ConcreteDistribution extends AbstractDistribution {
     let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
 
     let sample_usage = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "RandomSampler".to_string(),
-            method_name: "sample".to_string(),
-        })
+        .method_usage_by_current_rust_name("RandomSampler".to_string(), "sample".to_string())
         .expect("sample usage should be recorded");
     assert!(
-        sample_usage.call_sites.iter().any(|call| {
+        sample_usage.call_sites().iter().any(|call| {
             call.name == "value" && call.boundary == CallArgumentBoundary::KnownContentRead
         }),
         "interface receiver calls should be treated as source content reads: {:?}",
-        sample_usage.call_sites
+        sample_usage.call_sites()
     );
 
     let object_plan = plan_object_model_from_input(ObjectModelInput {

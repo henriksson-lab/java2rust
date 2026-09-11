@@ -82,8 +82,8 @@ pub fn method_has_tail_recursive_loop_rewrite(
     method_name: &str,
 ) -> bool {
     control_flow_plans.iter().any(|plan| {
-        plan.method.type_name == type_name
-            && plan.method.method_name == method_name
+        plan.method.type_name() == type_name
+            && plan.method.method_name() == method_name
             && plan.rewrites.iter().any(|rewrite| {
                 matches!(
                     rewrite,
@@ -106,11 +106,13 @@ fn control_flow_rewrite_diagnostic(
         message: match rewrite {
             ControlFlowRewritePlan::AssignmentInCondition(_) => format!(
                 "{}::{} requires assignment-in-condition normalization before idiomatic lowering",
-                plan.method.type_name, plan.method.method_name
+                plan.method.type_name(),
+                plan.method.method_name()
             ),
             ControlFlowRewritePlan::TailRecursiveLoop(_) => format!(
                 "{}::{} requires tail-recursive loop normalization before idiomatic lowering",
-                plan.method.type_name, plan.method.method_name
+                plan.method.type_name(),
+                plan.method.method_name()
             ),
         },
     }

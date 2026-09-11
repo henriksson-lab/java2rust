@@ -1,6 +1,6 @@
 # 0021 — `instanceof` pattern variables are never bound
 
-Status: **validated** (rustc-confirmed)
+Status: **done for the audited `instanceof` pattern scopes**.
 Severity: medium-high — always a compile error when the pattern variable is used
 Kind: missing pattern model
 
@@ -158,7 +158,22 @@ form as the hard case and that one already worked.
 ### Related pattern constructs, re-probed
 
 `record_pattern` and `case … when` guards emit `compile_error!` — loud, which is
-the required behaviour, so no action. **But** `record Pt(int x, int y)`
-translates to a constructor that takes `x`/`y` and returns `Pt { x: 0, y: 0 }`,
-discarding its arguments, with accessors that are `unimplemented!`. The
-constructor is a *silent* wrong answer and deserves its own issue.
+the required behaviour, so no action. The adjacent record-component lowering bug
+found during this probe is fixed as of 2026-09-09: component accessors now return
+their backing fields, and canonical constructors assign the component parameters
+after any compact-constructor body. `RecordCanonicalConstructor` pins the Java
+oracle.
+
+### Follow-up 2026-09-09 — guarded ternary true-branch scope
+
+The value-position ternary repair handled `(o instanceof String s) ? a(s) : b`,
+but not `(o instanceof String s && guard(s)) ? a(s) : b`. The ordinary ternary
+path lowered the condition as `is_some_and(|s| guard(s))` and then lowered the
+true arm without the pattern binding, producing `s::...` in generated Rust.
+
+Both the value and slot-aware pattern ternary paths now split the condition into
+the binding pattern and an optional `&&` guard. The true arm lowers with `s` in
+scope, and the guard is checked inside the `Some(s)` arm without re-evaluating
+the original `instanceof` receiver. Regression:
+`tests/differential/InstanceofPatternExpression.java`
+(`4,-1,true,false,bcd,no`).

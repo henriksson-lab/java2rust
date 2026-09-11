@@ -96,14 +96,14 @@ To construct `InnerCaptureAdder`, `run` must hand it an
 outer object is represented **by value**, and there is no way to obtain a shared
 handle to it.
 
-That is exactly the gap in
-[0002](0002-object-aliasing-has-no-representation.md): `ObjectRepresentation`
-(`src/object_model.rs:151`) has `ConcreteStruct | DynTrait | JavaEnum |
-ClosedEnum | ErasedObject` and **no shared variant**. The `Rc<RefCell<…>>` used
-for `__outer` (`src/item_assembly.rs:525`) is hand-written for this one field —
-noted in 0002 as "a one-off, not a representation the planner can choose". This
-issue is what that one-off costs: the field type can be written, but no
-representation can produce a value for it.
+That is exactly the remaining mutable shared-receiver side of
+[0002](0002-object-aliasing-has-no-representation.md). `SharedImmutable`
+storage now exists for immutable aliasing, but ordinary captured-inner
+construction needs a mutable outer handle that method receivers can actually
+provide. The `Rc<RefCell<…>>` used for `__outer` is still hand-written for this
+one field, not a representation the planner can choose end to end. This issue is
+what that one-off costs: the field type can be written, but the ordinary outer
+method path cannot produce a value for it.
 
 So 0002 is not only an aliasing-correctness issue. It **blocks completion of a
 language feature**. That materially raises its priority: `SUGGESTIONS.md`
@@ -113,32 +113,28 @@ compile-error counts (it compiles; it panics).
 
 ## Fix direction
 
-The remaining work requires the shared receiver side of 0002b. Once a type can
-be planned and called as `Rc<RefCell<T>>`:
+The remaining work requires the shared receiver side of 0002b. Storage planning
+already marks constructed non-static inner-class outer types as `SharedLocal`;
+what is still missing is implementing that placement and routing calls through
+it.
 
-1. Mark any class that is the outer type of a non-static inner class as
-   requiring a shared representation.
+1. Implement the `SharedLocal`/`Rc<RefCell<T>>` placement and borrow policy for
+   source receivers.
 2. Complete the remaining instance-method routes that start from shared
    receivers. The captured-inner route with an existing `self.__outer` handle is
    implemented; ordinary outer methods still need a receiver representation that
    can produce the enclosing handle.
-3. `outer.new Inner()` (qualified creation from outside) uses the same path.
+3. Route qualified object creation such as `outer.new Inner()` through the same
+   shared-handle path. The parser/capture identity half is now covered by the
+   2026-09-10 follow-up below; the remaining work is the mutable shared receiver
+   representation needed to pass the enclosing handle.
 
-A narrower interim option, if 0002b is far off: restrict the shared
-representation to *only* those classes that are outer types of inner classes.
-That is a much smaller blast radius than the general aliasing analysis and would
-unblock this feature on its own — worth considering as the first concrete
-consumer of the new representation, since it has a clear, checkable success
-criterion.
+The old narrower interim option — mark only outer classes as shared — is
+superseded by the current storage planner. The planner already selects
+`SharedLocal`; the blocker is that mutable shared placement is still deliberately
+unimplemented.
 
-## Interim requirement
-
-Until then, this should be a **translator diagnostic**, not a runtime `panic!`
-embedded in generated code. As written, a corpus reports zero compile errors for
-a program guaranteed to abort. Same principle as
-[0018](done/0018-the-compile-error-metric-cannot-see-silent-failures.md).
-
-## Regression tests worth adding
+## Current guardrail
 
 ```java
 class Outer { int base = 10; class In { int get(){ return base; } }
@@ -147,6 +143,8 @@ class Outer { int base = 10; class In { int get(){ return base; } }
 
 The mutate-after-construction step is the point: it distinguishes by-reference
 capture from a copy, and a copy-based implementation would return 10.
+This shape is now covered by `tests/differential/known-gaps/InnerCapture.java`
+and the known-gap harness. Promote that fixture when shared outer receivers land.
 
 ---
 
@@ -557,3 +555,67 @@ instance method still lowers the missing captured receiver to a `panic!`
 expression while reporting `inner_class_construction_panics`. The
 `LoudRuntimePanic` expectation remains the accurate current harness mode until
 ordinary inner construction can route through a shared outer handle.
+
+### Codex follow-up 2026-09-09 — storage planning now sees the outer-handle requirement
+
+The remaining construction failure is now visible in the storage plan, not only
+in `inner_class_capture`. `plan_representations` and lowering diagnostics call a
+fact-aware storage planner; when capture facts say a constructed non-static inner
+captures `Outer.this`, the planner marks `Outer` as stored and mutated, which
+selects `SharedLocal`.
+
+That still does not implement ordinary `new Inner()` from an outer method:
+`SharedLocal` remains an unimplemented placement, so the known-gap fixture keeps
+the same loud runtime handoff and `inner_class_construction_panics` diagnostic.
+The improvement is that 0023's direct consumer now feeds the same 0002b work
+queue as other mutable shared-representation requirements. Regression:
+`storage_strategy::constructor_mutation_tests::constructed_inner_class_outer_capture_forces_mutable_shared_outer_plan`.
+
+Follow-up cleanup: `inner_class_capture::UnconstructableInnerClass`,
+`unconstructable_inner_classes`, and `report_unconstructable_inner_classes` are
+crate-local. The translator still reports the same
+`inner_class_construction_panics` diagnostic, but the helper surface is no
+longer public crate API while the real SharedLocal/outer-handle construction
+work remains open.
+
+Follow-up 2026-09-10: attempted to promote a qualified `outer.new Inner()`
+known-gap fixture, but the current parser/lowering path does not report
+`inner_class_construction_panics` for that shape. It reaches the storage-plan
+disagreement warnings for `SharedLocal` instead, then lowers through an erased
+constructor fallback. Do not add it to the known-gap harness until qualified
+object creation preserves enough inner-constructor identity to share the same
+diagnostic contract as ordinary `new Inner()`.
+
+Codex follow-up 2026-09-10: the qualified-construction diagnostic gap above is
+closed. `parse_object_creation_type_node` now treats an object-creation prefix
+of the form `other.new Inner(` as constructing `Inner` rather than the bogus
+type `new`; resolver recovery then records the full constructed type
+`Outer.Inner`, and `inner_class_capture` reports it through the same
+`inner_class_construction_panics` path as ordinary `new Inner()`. Regression:
+`parser_gaps::parses_qualified_inner_constructor_type_after_object_prefix` and
+`inner_class_capture::tests::qualified_inner_construction_is_reported_as_unconstructable`.
+
+Codex follow-up 2026-09-10: the executable known-gap suite now covers the
+qualified construction shape too. `QualifiedInnerCapture.java` exercises
+`other.new Inner()` with a Java oracle of `21`, and the harness requires the
+same loud runtime handoff and `inner_class_construction_panics` diagnostic as
+ordinary `InnerCapture.java`. This is still coverage only; ordinary construction
+remains blocked on the unimplemented `SharedLocal` outer-handle carrier.
+
+Codex follow-up 2026-09-10: the ordinary `InnerCapture.java` fixture now has a
+full-translation marker guard tying this gap to the mutable shared-storage work
+queue. `output_markers::inner_capture_gap_reports_mutable_shared_storage_work_queue`
+requires the generated Rust to keep the loud unsupported outer-capture handoff,
+requires `inner_class_construction_panics`, and also requires the paired
+`storage_strategy_disagreement` message to name `InnerCapture needs SharedLocal`.
+The test is deliberately evidence only; it prevents the inner-constructor
+runtime gap from drifting away from the 0002b receiver/borrow-policy blocker.
+
+Codex follow-up 2026-09-10: that full marker sweep also caught a regression in
+the construction detector. The detector kept a global simple-name fallback, so
+a top-level `new B()` could satisfy nested `Outer.B` when exactly one captured
+inner class had the same simple name. `inner_class_capture` now relies on exact
+constructed type names, including resolver-provided `Outer.B` names, rather
+than rejoining by simple name. Regression:
+`output_markers::top_level_constructor_does_not_report_same_simple_inner_capture_panic`
+and the full `output_markers` suite.

@@ -10,13 +10,13 @@ external_packs	169	0
 fixtures	54	0
 idiom_gaps	816	0
 idiom_sweep_script	48	0
-layering	66	0
+layering	76	0
 object_model	28	0
 output_markers	23	0
 parser_gaps	33	0
 parser_tree_sitter	47	0
 resolve_calls	291	0
 semantic_facts	174	0
-slot_shape_design	480	99
+slot_shape_design	501	76
 type_coercion	128	0
---lib	693	0
+--lib	797	0

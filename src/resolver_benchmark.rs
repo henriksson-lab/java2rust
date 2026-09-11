@@ -1798,7 +1798,7 @@ fn configured_pack_mode_for_member_type(
             && external_type_name_matches(&fact.type_name, type_name)
     }) || facts.external_field_facts.iter().any(|fact| {
         fact.provenance == FactProvenance::ExternalLibraryPack
-            && external_type_name_matches(&fact.field.type_name, type_name)
+            && external_type_name_matches(fact.field.type_name(), type_name)
     }) || facts.unsupported_external_api_facts.iter().any(|fact| {
         fact.provenance == FactProvenance::ExternalLibraryPack
             && external_type_name_matches(&fact.receiver_type, type_name)
@@ -1809,7 +1809,7 @@ fn configured_pack_mode_for_member_type(
         },
     ) || facts.unsupported_external_field_facts.iter().any(|fact| {
         fact.provenance == FactProvenance::ExternalLibraryPack
-            && external_type_name_matches(&fact.field.type_name, type_name)
+            && external_type_name_matches(fact.field.type_name(), type_name)
     });
     if !mentioned_by_pack_member {
         return None;
@@ -2165,21 +2165,23 @@ fn benchmark_parsed_java_file(
         .iter()
         .filter(|fact| fact.provenance == FactProvenance::ConservativeFallback)
     {
-        match field_guess_ownership.ownership_for(&fact.field.type_name) {
+        let field_owner = fact.field.type_name();
+        let field_name = fact.field.field_name();
+        match field_guess_ownership.ownership_for(field_owner) {
             FieldGuessOwner::Source => {
                 report.source_field_guesses += 1;
                 push_source_summary_recommendation(
                     &mut report.top_source_summary_recommendations,
                     source_index,
                     &resolved.program,
-                    &fact.field.type_name,
+                    field_owner,
                     SourceSummaryRecommendationReason::Field,
                     file_label,
                 );
                 push_external_field_guess_summary(
                     &mut report.top_source_field_guess_targets,
-                    &fact.field.type_name,
-                    &fact.field.field_name,
+                    field_owner,
+                    field_name,
                     None,
                 );
             }
@@ -2189,14 +2191,14 @@ fn benchmark_parsed_java_file(
                     &mut report.top_source_summary_recommendations,
                     source_index,
                     &resolved.program,
-                    &fact.field.type_name,
+                    field_owner,
                     SourceSummaryRecommendationReason::Field,
                     file_label,
                 );
                 push_external_field_guess_summary(
                     &mut report.top_project_field_guess_targets,
-                    &fact.field.type_name,
-                    &fact.field.field_name,
+                    field_owner,
+                    field_name,
                     None,
                 );
             }
@@ -2204,8 +2206,8 @@ fn benchmark_parsed_java_file(
                 report.external_field_guesses += 1;
                 push_external_field_guess_summary(
                     &mut report.top_external_field_guess_targets,
-                    &fact.field.type_name,
-                    &fact.field.field_name,
+                    field_owner,
+                    field_name,
                     None,
                 );
             }
@@ -4721,7 +4723,7 @@ fn collect_expr_resolved_external_pack_field_access_counts(
                     context.enclosing_member.to_string(),
                 );
                 if !unresolved_fields.contains(&key) {
-                    let fact_receiver_type = field.field.type_name.clone();
+                    let fact_receiver_type = field.field.type_name().to_string();
                     let mode = external_pack_mode_for_type(semantic_facts, &fact_receiver_type);
                     report.external_api_explained_field_accesses += 1;
                     push_external_field_guess_summary(
@@ -7042,15 +7044,11 @@ impl FieldGuessOwnership {
         let mut ownership = Self::default();
 
         for fact in &conservative_fields {
-            if is_source_type_reference(
-                source_type_names,
-                source_index,
-                program,
-                &fact.field.type_name,
-            ) {
-                ownership.insert_source_receiver(&fact.field.type_name);
-            } else if is_project_type_reference(source_index, program, &fact.field.type_name) {
-                ownership.insert_project_receiver(&fact.field.type_name);
+            let field_owner = fact.field.type_name();
+            if is_source_type_reference(source_type_names, source_index, program, field_owner) {
+                ownership.insert_source_receiver(field_owner);
+            } else if is_project_type_reference(source_index, program, field_owner) {
+                ownership.insert_project_receiver(field_owner);
             }
         }
 
@@ -7058,13 +7056,15 @@ impl FieldGuessOwnership {
         while changed {
             changed = false;
             for fact in &conservative_fields {
-                if !is_type_like_static_field_name(&fact.field.field_name) {
+                let field_owner = fact.field.type_name();
+                let field_name = fact.field.field_name();
+                if !is_type_like_static_field_name(field_name) {
                     continue;
                 }
-                if ownership.is_source_receiver(&fact.field.type_name) {
-                    changed |= ownership.insert_source_receiver(&fact.field.field_name);
-                } else if ownership.is_project_receiver(&fact.field.type_name) {
-                    changed |= ownership.insert_project_receiver(&fact.field.field_name);
+                if ownership.is_source_receiver(field_owner) {
+                    changed |= ownership.insert_source_receiver(field_name);
+                } else if ownership.is_project_receiver(field_owner) {
+                    changed |= ownership.insert_project_receiver(field_name);
                 }
             }
         }

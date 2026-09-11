@@ -2,13 +2,13 @@ use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StronglyConnectedComponents<N>
+pub(crate) struct StronglyConnectedComponents<N>
 where
     N: Eq + Hash,
 {
-    pub components: Vec<Vec<N>>,
-    pub component_by_node: HashMap<N, usize>,
-    pub component_successors: Vec<Vec<usize>>,
+    pub(crate) components: Vec<Vec<N>>,
+    pub(crate) component_by_node: HashMap<N, usize>,
+    pub(crate) component_successors: Vec<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -21,7 +21,7 @@ struct TarjanState<N> {
     components: Vec<Vec<N>>,
 }
 
-pub fn strongly_connected_components<N>(
+pub(crate) fn strongly_connected_components<N>(
     nodes: impl IntoIterator<Item = N>,
     successors: impl Fn(&N) -> Vec<N>,
 ) -> StronglyConnectedComponents<N>

@@ -1,8 +1,8 @@
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct BindingId {
-    pub kind: BindingKind,
-    pub name: String,
-    pub occurrence: usize,
+    kind: BindingKind,
+    name: String,
+    occurrence: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -24,11 +24,19 @@ impl BindingId {
         }
     }
 
-    pub fn compatibility_local(name: impl Into<String>) -> Self {
+    pub(crate) fn compatibility_local(name: impl Into<String>) -> Self {
         Self::new(BindingKind::Local, name, 0)
     }
 
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn kind(&self) -> BindingKind {
+        self.kind
+    }
+
+    pub fn occurrence(&self) -> usize {
+        self.occurrence
     }
 }

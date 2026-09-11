@@ -34,7 +34,7 @@ public class Shared {
 
 Java result: `5`. (`a` and `b` are the same object.)
 
-## Emitted Rust (verified)
+## Historical emitted Rust (verified when filed)
 
 ```rust
 pub struct SharedNode {          // note: no #[derive(Clone)]
@@ -65,8 +65,9 @@ Two independent defects in one line:
 2. **Compile**: the clone-insertion path does not require or record that the
    cloned type is `Clone`, so no derive is added.
 
-The `/* TODO(translation): validate added clone */` marker is emitted from 21
-distinct sites in `src/lower.rs` — the fallback is load-bearing, not rare.
+Clone recovery remains load-bearing, but the marker rendering is no longer a
+21-site `lower.rs` mechanism; the audited clone-recovery spelling is centralized
+in `coercion.rs`, with lowering calling through structured recovery helpers.
 
 ## Root cause
 
@@ -90,9 +91,10 @@ repro: no general `Rc<RefCell<T>>`/`Arc<Mutex<T>>` receiver and field lowering,
 so Java's mutable reference semantics remain missing for aliased objects that
 are written after sharing.
 
-The only `Rc<RefCell<…>>` in the whole emitter is the `__outer` field for
-inner-class captures (`src/item_assembly.rs:525`). It is a one-off, not a
-representation the planner can choose.
+General `Rc<RefCell<T>>` and `Arc<Mutex<T>>` storage/render helpers now exist,
+but mutable shared receiver and field lowering are still not implemented.
+`__outer` remains the concrete inner-capture use rather than a placement the
+planner can safely enable for mutable aliases.
 
 For the mutable aliasing tier, every place that needs a second handle to a
 mutable object must still either move it, copy it, or emit a loud unsupported
@@ -113,7 +115,12 @@ not a local rule. The old unused `EscapeLatticeValue` descriptor in
 `src/lattice.rs` has since been deleted as part of 0062; the live domain is
 `storage_strategy::Escape`, which is computed by the storage-strategy planner.
 
-## Proposed machinery
+## Historical proposed machinery
+
+The concrete names below predate the current `StorageStrategy` /
+`StoragePlacement` split. The live version of this work is tracked in 0002b:
+`SharedImmutable` has landed, while mutable shared placements remain disabled
+until the receiver/field borrow policy for `SharedLocal`/`SharedSync` exists.
 
 1. Extend `ObjectRepresentation` with at least a shared case, e.g.
    `SharedMutable { cell: Rc<RefCell<_>> }` (and later `SharedImmutable(Rc<_>)`
@@ -148,8 +155,11 @@ strictly worse for detection.
 
 ## Update 2026-08-03 — 0002a done, detection added, 0002b still open
 
-Status: **still open**. The semantics are unchanged; what changed is that the
-divergence is now reported instead of shipped silently.
+Status at this checkpoint: **still open**. The mutable-alias semantics were
+unchanged; what changed is that the divergence was now reported instead of
+shipped silently. Later 0002b work landed `SharedImmutable` handles and
+reference identity for the immutable tier, but this mutable-alias repro still
+requires `SharedLocal`.
 
 ### 0002a is done (and confirmed the warning above)
 
@@ -217,26 +227,32 @@ All three fail in the same direction: a missed report, never a false one.
 the analysis can only name the defect. The two-part split above stands: 0002b is
 the representation work, unchanged.
 
-`tests/differential/known-gaps/Aliasing.java` reproduces four cases against the
-Java oracle (`5|7|3|9` vs `0|0|0|0`). The
+`tests/differential/known-gaps/Aliasing.java` reproduces eight mutable-alias
+cases against the Java oracle (`5|7|3|9|11|13|17|19`). The
 `known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` test now
-verifies that this fixture is still live: Java must print `5|7|3|9`, the current
-translation must print `0|0|0|0`, and the translator must report
-`observable_alias`. The original implementation detected three; the
-array-element case is lifted below.
+verifies that this fixture is still live: Java must print
+`5|7|3|9|11|13|17|19`, and the translator must report `observable_alias`
+instead of silently translating mutable sharing without a `SharedLocal`
+representation. The original implementation detected three; the later
+array-element, field-storage, block-action, and stored-runnable cases are lifted
+below.
 
 
 ---
 
 ## Update 2026-08-03 — the size of the repair is now a number
 
-Still open — the semantics are unchanged and `ObjectRepresentation` still has no
-shared case. What is new is that the *scope* is measured rather than guessed.
+Status at this checkpoint: still open — the semantics were unchanged and
+`ObjectRepresentation` still had no shared case. What was new is that the
+*scope* was measured rather than guessed. Later 0002b work consumes the storage
+placement for implemented `SharedImmutable`; mutable `SharedLocal`/`SharedSync`
+placements remain open.
 
 `src/storage_strategy.rs` implements steps 1–2 of
 [0002b](0002b-shared-representation-design.md): the decision rule runs, lowering
 is untouched, and every type the plan says needs sharing while lowering holds it
-by value is reported as `storage_strategy_disagreement`. Over 248 files:
+by value is reported as `storage_strategy_disagreement`. In the original
+2026-08-03 measurement over 248 files:
 
 | tier | distinct types |
 |---|---|
@@ -342,3 +358,22 @@ emits `observable_alias` as `Severity::Error` instead of a warning, so the CLI
 fails the translation rather than shipping the copied-value program. The
 known-gap harness classifies `Aliasing.java` as `LoudDiagnostic` and checks that
 the diagnostic code is an error.
+
+## Update 2026-09-10 — known-gap oracle covers field storage too
+
+`tests/differential/known-gaps/Aliasing.java` now includes the field-storage
+alias shapes already covered by `src/aliasing.rs` unit tests: storing an alias
+through another object's field and through a `this` field, alongside the
+block-action and stored-runnable callback cases. The known-gap harness expects
+Java output `5|7|3|9|11|13|17|19` and the same `observable_alias` error. This
+does not implement `SharedLocal`; it makes the remaining mutable-alias
+representation gap executable at the Java-oracle level.
+
+## Update 2026-09-10 — aliasing known gap is tied to the `SharedLocal` queue
+
+The `Aliasing.java` known-gap row now requires more than the error-level
+`observable_alias` diagnostic. It also requires `storage_strategy_disagreement`
+warnings naming `Aliasing.Node needs SharedLocal` and
+`Aliasing.Counter needs SharedLocal`, so the core mutable-alias fixture proves
+that the same source program lands in the 0002b mutable shared-representation
+work queue.

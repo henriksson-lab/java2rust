@@ -18,36 +18,35 @@ impl JavaOwnerKey {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct JavaCallableKey {
-    pub owner: String,
-    pub java_name: String,
-    pub erased_param_types: Vec<String>,
-    pub kind: JavaCallableKind,
-    pub staticness: JavaCallableStaticness,
+pub(crate) struct JavaCallableKey {
+    owner: String,
+    java_name: String,
+    erased_param_types: Vec<String>,
+    kind: JavaCallableKind,
+    staticness: JavaCallableStaticness,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct JavaCallableSlotKey {
-    pub java_name: String,
-    pub erased_param_types: Vec<String>,
-    pub kind: JavaCallableKind,
-    pub staticness: JavaCallableStaticness,
+pub(crate) struct JavaCallableSlotKey {
+    java_name: String,
+    erased_param_types: Vec<String>,
+    kind: JavaCallableKind,
+    staticness: JavaCallableStaticness,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum JavaCallableKind {
+pub(crate) enum JavaCallableKind {
     Method,
-    Constructor,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum JavaCallableStaticness {
+pub(crate) enum JavaCallableStaticness {
     Static,
     Instance,
 }
 
 impl JavaCallableKey {
-    pub fn source_method_for_type(ty: &TypeDecl, method: &MethodDecl) -> Self {
+    pub(crate) fn source_method_for_type(ty: &TypeDecl, method: &MethodDecl) -> Self {
         Self::source_method_for_owner(JavaOwnerKey::source_type(ty), method)
     }
 
@@ -86,13 +85,21 @@ impl JavaCallableKey {
         }
     }
 
-    pub fn slot(&self) -> JavaCallableSlotKey {
+    pub(crate) fn slot(&self) -> JavaCallableSlotKey {
         JavaCallableSlotKey {
             java_name: self.java_name.clone(),
             erased_param_types: self.erased_param_types.clone(),
             kind: self.kind,
             staticness: self.staticness,
         }
+    }
+
+    pub(crate) fn owner(&self) -> &str {
+        &self.owner
+    }
+
+    pub(crate) fn java_name(&self) -> &str {
+        &self.java_name
     }
 }
 

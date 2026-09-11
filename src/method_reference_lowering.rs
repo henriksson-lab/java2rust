@@ -5,7 +5,7 @@ use crate::coercion::{
     typed_single_input_callback_expr, unbound_method_call_projection,
     unbound_method_reference_projection,
 };
-use crate::facts::{CallableKey, FacadeSlot, FactSet, ReceiverAbi, ResultAbi, Staticness};
+use crate::facts::{FacadeSlot, FactSet, ReceiverAbi, ResultAbi};
 use crate::method_reference_plan::{BoundMethodReferenceReceiver, MethodReferencePlan};
 use crate::method_reference_shape::method_reference_receiver_type_for_call_plan_with_facts;
 use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr};
@@ -262,10 +262,10 @@ fn method_reference_facade_abi<'a>(
     input_shape: &RustSlotShape,
     facts: &'a FactSet,
 ) -> Option<&'a crate::facts::FacadeAbiFact> {
-    method_reference_callable_key_candidates(owner, method, input_shape, facts)
+    method_reference_facade_abi_candidates(owner, method, input_shape, facts)
         .into_iter()
-        .find_map(|key| facts.facade_abi_for_key(&key))
         .filter(|abi| method_reference_facade_abi_is_supported(abi, input_shape))
+        .next()
 }
 
 fn method_reference_facade_abi_is_supported(
@@ -288,32 +288,25 @@ fn method_reference_facade_abi_is_supported(
     }
 }
 
-fn method_reference_callable_key_candidates(
+fn method_reference_facade_abi_candidates<'a>(
     owner: &str,
     method: &str,
     input_shape: &RustSlotShape,
-    facts: &FactSet,
-) -> Vec<CallableKey> {
-    let mut keys = Vec::new();
+    facts: &'a FactSet,
+) -> Vec<&'a crate::facts::FacadeAbiFact> {
+    let mut candidates = Vec::new();
     for method in crate::java_naming::java_method_name_aliases(method) {
-        keys.push(CallableKey::method(
-            owner.to_string(),
-            method.clone(),
-            Staticness::Unknown,
-            1,
-        ));
+        if let Some(abi) = facts.facade_abi_for_external_method(owner, &method, 1) {
+            candidates.push(abi);
+        }
         if let Some(receiver_owner) =
             method_reference_receiver_owner_key(owner, &method, input_shape, facts)
+            && let Some(abi) = facts.facade_abi_for_external_method(&receiver_owner, &method, 0)
         {
-            keys.push(CallableKey::method(
-                receiver_owner,
-                method,
-                Staticness::Unknown,
-                0,
-            ));
+            candidates.push(abi);
         }
     }
-    keys
+    candidates
 }
 
 fn method_reference_receiver_owner_key(
@@ -340,8 +333,8 @@ mod tests {
     use super::*;
     use crate::emit::emit_expr;
     use crate::facts::{
-        ExternalApiEffectFact, ExternalApiRole, FacadeAbiFact, FactProvenance, NullabilityState,
-        ReceiverMutabilityFact,
+        CallableKey, ExternalApiEffectFact, ExternalApiRole, FacadeAbiFact, FactProvenance,
+        NullabilityState, ReceiverMutabilityFact, Staticness,
     };
     use crate::java_ir::JavaType;
     use crate::method_reference_plan::plan_method_reference;

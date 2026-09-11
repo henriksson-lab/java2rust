@@ -2,7 +2,7 @@ use crate::java_ir::{BinaryOp, Block, Expr, Literal, Stmt};
 use crate::rewrite::NullTestKind;
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ForBodyStmtPlan<'a> {
+pub(crate) enum ForBodyStmtPlan<'a> {
     ContinueWithUpdates {
         updates: &'a [Expr],
     },
@@ -21,7 +21,7 @@ pub enum ForBodyStmtPlan<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum WhileStmtPlan<'a> {
+pub(crate) enum WhileStmtPlan<'a> {
     AssignmentInCondition {
         local_name: &'a str,
         value: &'a Expr,
@@ -38,12 +38,12 @@ pub enum WhileStmtPlan<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum PostLoopRefinementPlan<'a> {
+pub(crate) enum PostLoopRefinementPlan<'a> {
     LocalNonNull { local_name: &'a str },
     None,
 }
 
-pub fn plan_for_body_stmt<'a>(stmt: &'a Stmt, updates: &'a [Expr]) -> ForBodyStmtPlan<'a> {
+pub(crate) fn plan_for_body_stmt<'a>(stmt: &'a Stmt, updates: &'a [Expr]) -> ForBodyStmtPlan<'a> {
     match stmt {
         Stmt::Continue(None) => ForBodyStmtPlan::ContinueWithUpdates { updates },
         Stmt::If {
@@ -62,7 +62,7 @@ pub fn plan_for_body_stmt<'a>(stmt: &'a Stmt, updates: &'a [Expr]) -> ForBodyStm
     }
 }
 
-pub fn plan_while_stmt<'a>(condition: &'a Expr, body: &'a Block) -> WhileStmtPlan<'a> {
+pub(crate) fn plan_while_stmt<'a>(condition: &'a Expr, body: &'a Block) -> WhileStmtPlan<'a> {
     if let Some((local_name, value, null_test)) = assignment_in_null_test(condition) {
         WhileStmtPlan::AssignmentInCondition {
             local_name,
@@ -77,7 +77,7 @@ pub fn plan_while_stmt<'a>(condition: &'a Expr, body: &'a Block) -> WhileStmtPla
     }
 }
 
-pub fn post_loop_refinement_for_while<'a>(
+pub(crate) fn post_loop_refinement_for_while<'a>(
     plan: &'a WhileStmtPlan<'a>,
 ) -> PostLoopRefinementPlan<'a> {
     match plan {
@@ -90,6 +90,93 @@ pub fn post_loop_refinement_for_while<'a>(
             PostLoopRefinementPlan::LocalNonNull { local_name }
         }
         _ => PostLoopRefinementPlan::None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_expr;
+
+    #[test]
+    fn for_body_stmt_plans_continue_if_and_nested_while() {
+        let update_exprs = vec![parse_expr("i++")];
+        let then_block = Block {
+            statements: vec![Stmt::Break(None)],
+        };
+        let else_block = Block {
+            statements: vec![Stmt::Continue(Some("outer".to_string()))],
+        };
+
+        assert_eq!(
+            plan_for_body_stmt(&Stmt::Continue(None), &update_exprs),
+            ForBodyStmtPlan::ContinueWithUpdates {
+                updates: update_exprs.as_slice()
+            }
+        );
+
+        let if_stmt = Stmt::If {
+            condition: parse_expr("ready"),
+            then_block: then_block.clone(),
+            else_block: Some(else_block.clone()),
+        };
+        assert_eq!(
+            plan_for_body_stmt(&if_stmt, &update_exprs),
+            ForBodyStmtPlan::If {
+                condition: &parse_expr("ready"),
+                then_block: &then_block,
+                else_block: Some(&else_block),
+            }
+        );
+
+        let while_stmt = Stmt::While {
+            condition: parse_expr("ready"),
+            body: then_block.clone(),
+            label: None,
+        };
+        assert_eq!(
+            plan_for_body_stmt(&while_stmt, &update_exprs),
+            ForBodyStmtPlan::While {
+                condition: &parse_expr("ready"),
+                body: &then_block,
+            }
+        );
+    }
+
+    #[test]
+    fn while_stmt_plans_assignment_in_condition_infinite_and_refinement() {
+        let then_block = Block {
+            statements: vec![Stmt::Break(None)],
+        };
+        let no_break_block = Block {
+            statements: vec![Stmt::Expr(parse_expr("cursor.advance()"))],
+        };
+        let assignment_condition = parse_expr("(row = cursor.next()) != null");
+
+        assert!(matches!(
+            plan_while_stmt(&assignment_condition, &then_block),
+            WhileStmtPlan::AssignmentInCondition {
+                local_name: "row",
+                value,
+                null_test: NullTestKind::NotNull,
+                body: _
+            } if matches!(value, Expr::Call { name, .. } if name == "next")
+        ));
+        assert_eq!(
+            plan_while_stmt(&parse_expr("true"), &then_block),
+            WhileStmtPlan::Infinite { body: &then_block }
+        );
+
+        let null_assignment_condition = parse_expr("(row = cursor.next()) == null");
+        let null_assignment_plan = plan_while_stmt(&null_assignment_condition, &no_break_block);
+        assert_eq!(
+            post_loop_refinement_for_while(&null_assignment_plan),
+            PostLoopRefinementPlan::LocalNonNull { local_name: "row" }
+        );
+        assert_eq!(
+            post_loop_refinement_for_while(&plan_while_stmt(&assignment_condition, &then_block)),
+            PostLoopRefinementPlan::None
+        );
     }
 }
 

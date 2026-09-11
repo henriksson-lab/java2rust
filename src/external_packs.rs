@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::OnceLock;
 
 use crate::diagnostics::DiagnosticBag;
@@ -377,7 +377,7 @@ impl ExternalPackManifest {
             if self.mode == ExternalLibraryMode::RustCrateMapping {
                 facts
                     .external_crate_constructor_mapping_facts
-                    .push(constructor.as_external_crate_constructor_mapping_fact());
+                    .push(constructor.as_external_crate_constructor_mapping_fact(self.pack_name));
             }
         }
         for field in self.modeled_fields {
@@ -388,10 +388,7 @@ impl ExternalPackManifest {
                 continue;
             }
             facts.external_field_facts.push(ExternalFieldFact {
-                field: FieldKey {
-                    type_name: field.type_name.to_string(),
-                    field_name: field.field_name.to_string(),
-                },
+                field: FieldKey::named(field.type_name, field.field_name),
                 field_type: field
                     .field_type
                     .map(|field_type| parse_external_pack_field_type(field_type, field.field_kind))
@@ -405,10 +402,7 @@ impl ExternalPackManifest {
                 facts
                     .external_field_value_facts
                     .push(ExternalFieldValueFact {
-                        field: FieldKey {
-                            type_name: field.type_name.to_string(),
-                            field_name: field.field_name.to_string(),
-                        },
+                        field: FieldKey::named(field.type_name, field.field_name),
                         rust_value: value.to_string(),
                         provenance: FactProvenance::ExternalLibraryPack,
                     });
@@ -800,7 +794,9 @@ pub fn audit_external_pack_manifest_coverage(
         }
         match manifest.modeled_constructor(&mapping.type_name, mapping.arg_count) {
             Some(modeled) if modeled.coverage != ExternalApiCoverage::Unsupported => {
-                if modeled.as_external_crate_constructor_mapping_fact() != *mapping {
+                if modeled.as_external_crate_constructor_mapping_fact(manifest.pack_name)
+                    != *mapping
+                {
                     diagnostics.warning(
                         "external_pack_manifest_crate_constructor_mapping_mismatch",
                         format!(
@@ -809,7 +805,7 @@ pub fn audit_external_pack_manifest_coverage(
                             mapping.arg_count,
                             manifest.pack_name,
                             mapping,
-                            modeled.as_external_crate_constructor_mapping_fact()
+                            modeled.as_external_crate_constructor_mapping_fact(manifest.pack_name)
                         ),
                     );
                 }
@@ -836,20 +832,22 @@ pub fn audit_external_pack_manifest_coverage(
         .iter()
         .filter(|field| field.provenance == FactProvenance::ExternalLibraryPack)
     {
-        match manifest.modeled_field(&field.field.type_name, &field.field.field_name) {
+        let field_owner = field.field.type_name();
+        let field_name = field.field.field_name();
+        match manifest.modeled_field(field_owner, field_name) {
             Some(modeled) if modeled.coverage != ExternalApiCoverage::Unsupported => {}
             Some(_) => diagnostics.warning(
                 "external_pack_manifest_unsupported_field_emitted",
                 format!(
                     "{}.{} in {} is marked unsupported but has an emitted field fact",
-                    field.field.type_name, field.field.field_name, manifest.pack_name
+                    field_owner, field_name, manifest.pack_name
                 ),
             ),
             None => diagnostics.warning(
                 "external_pack_manifest_missing_field_coverage",
                 format!(
                     "{}.{} in {} has a pack-owned field fact but no manifest coverage entry",
-                    field.field.type_name, field.field.field_name, manifest.pack_name
+                    field_owner, field_name, manifest.pack_name
                 ),
             ),
         }
@@ -944,15 +942,17 @@ pub fn audit_external_pack_manifest_coverage(
                 && unsupported.pack_name == manifest.pack_name
         })
     {
-        match manifest.modeled_field(&unsupported.field.type_name, &unsupported.field.field_name) {
+        let field_owner = unsupported.field.type_name();
+        let field_name = unsupported.field.field_name();
+        match manifest.modeled_field(field_owner, field_name) {
             Some(modeled) if modeled.coverage == ExternalApiCoverage::Unsupported => {
                 if modeled.as_unsupported_external_field_fact(manifest.pack_name) != *unsupported {
                     diagnostics.warning(
                         "external_pack_manifest_unsupported_field_mismatch",
                         format!(
                             "{}.{} in {} has unsupported field fact {:?} but manifest declares {:?}",
-                            unsupported.field.type_name,
-                            unsupported.field.field_name,
+                            field_owner,
+                            field_name,
                             manifest.pack_name,
                             unsupported,
                             modeled.as_unsupported_external_field_fact(manifest.pack_name)
@@ -964,8 +964,8 @@ pub fn audit_external_pack_manifest_coverage(
                 "external_pack_manifest_missing_unsupported_field_coverage",
                 format!(
                     "{}.{} in {} has an unsupported field fact but no unsupported manifest coverage entry",
-                    unsupported.field.type_name,
-                    unsupported.field.field_name,
+                    field_owner,
+                    field_name,
                     manifest.pack_name
                 ),
             ),
@@ -1084,17 +1084,19 @@ pub fn audit_external_pack_manifest_coverage(
         .iter()
         .filter(|field| field.provenance == FieldNullabilityProvenance::ExternalLibraryPack)
     {
+        let field_owner = field.field.type_name();
+        let field_name = field.field.field_name();
         match manifest.field_nullability.iter().find(|modeled| {
-            modeled.type_name == field.field.type_name
-                && modeled.field_name == field.field.field_name
+            modeled.type_name == field_owner
+                && modeled.field_name == field_name
         }) {
             Some(modeled) if modeled.state == field.state => {}
             Some(modeled) => diagnostics.warning(
                 "external_pack_manifest_field_nullability_mismatch",
                 format!(
                     "{}.{} in {} has field nullability {:?} but manifest declares {:?}",
-                    field.field.type_name,
-                    field.field.field_name,
+                    field_owner,
+                    field_name,
                     manifest.pack_name,
                     field.state,
                     modeled.state
@@ -1104,7 +1106,7 @@ pub fn audit_external_pack_manifest_coverage(
                 "external_pack_manifest_missing_field_nullability_coverage",
                 format!(
                     "{}.{} in {} has a pack-owned field-nullability fact but no manifest field-nullability entry",
-                    field.field.type_name, field.field.field_name, manifest.pack_name
+                    field_owner, field_name, manifest.pack_name
                 ),
             ),
         }
@@ -1253,12 +1255,14 @@ pub fn audit_external_pack_fact_boundaries(facts: &FactSet) -> DiagnosticBag {
         .iter()
         .filter(|field| field.provenance == FactProvenance::ExternalLibraryPack)
     {
-        if !fact_set_owns_type(facts, &field.field.type_name) {
+        let field_owner = field.field.type_name();
+        let field_name = field.field.field_name();
+        if !fact_set_owns_type(facts, field_owner) {
             diagnostics.warning(
                 "external_pack_manifest_unowned_field_fact",
                 format!(
                     "{}.{} has an external-pack field fact but no declared pack owns type {}",
-                    field.field.type_name, field.field.field_name, field.field.type_name
+                    field_owner, field_name, field_owner
                 ),
             );
         }
@@ -1307,15 +1311,14 @@ pub fn audit_external_pack_fact_boundaries(facts: &FactSet) -> DiagnosticBag {
         .iter()
         .filter(|unsupported| unsupported.provenance == FactProvenance::ExternalLibraryPack)
     {
-        if !pack_named_owns_type(facts, &unsupported.pack_name, &unsupported.field.type_name) {
+        let field_owner = unsupported.field.type_name();
+        let field_name = unsupported.field.field_name();
+        if !pack_named_owns_type(facts, &unsupported.pack_name, field_owner) {
             diagnostics.warning(
                 "external_pack_manifest_unowned_unsupported_field_fact",
                 format!(
                     "{}.{} is declared unsupported in pack {} but that pack does not own type {}",
-                    unsupported.field.type_name,
-                    unsupported.field.field_name,
-                    unsupported.pack_name,
-                    unsupported.field.type_name
+                    field_owner, field_name, unsupported.pack_name, field_owner
                 ),
             );
         }
@@ -1406,12 +1409,14 @@ pub fn audit_external_pack_fact_boundaries(facts: &FactSet) -> DiagnosticBag {
         .iter()
         .filter(|field| field.provenance == FieldNullabilityProvenance::ExternalLibraryPack)
     {
-        if !fact_set_owns_type(facts, &field.field.type_name) {
+        let field_owner = field.field.type_name();
+        let field_name = field.field.field_name();
+        if !fact_set_owns_type(facts, field_owner) {
             diagnostics.warning(
                 "external_pack_manifest_unowned_field_nullability_fact",
                 format!(
                     "{}.{} has an external-pack field-nullability fact but no declared pack owns type {}",
-                    field.field.type_name, field.field.field_name, field.field.type_name
+                    field_owner, field_name, field_owner
                 ),
             );
         }
@@ -1437,7 +1442,10 @@ pub fn audit_external_pack_fact_boundaries(facts: &FactSet) -> DiagnosticBag {
 }
 
 fn fact_set_owns_type(facts: &FactSet, type_name: &str) -> bool {
-    facts.external_library_pack_for_type(type_name).is_some()
+    facts
+        .external_library_packs
+        .iter()
+        .any(|pack| pack_named_owns_type(facts, &pack.pack_name, type_name))
         || builtin_external_pack_boundary_audit_matchers()
             .iter()
             .any(|matcher| {
@@ -1501,10 +1509,7 @@ impl ExternalPackArgumentEffect {
 impl ExternalPackFieldNullability {
     fn as_field_nullability_fact(&self) -> FieldNullabilityFact {
         FieldNullabilityFact {
-            field: FieldKey {
-                type_name: self.type_name.to_string(),
-                field_name: self.field_name.to_string(),
-            },
+            field: FieldKey::named(self.type_name, self.field_name),
             state: self.state,
             provenance: FieldNullabilityProvenance::ExternalLibraryPack,
         }
@@ -1559,8 +1564,12 @@ impl ExternalPackApiEffect {
 }
 
 impl ExternalPackModeledConstructor {
-    fn as_external_crate_constructor_mapping_fact(&self) -> ExternalCrateConstructorMappingFact {
+    fn as_external_crate_constructor_mapping_fact(
+        &self,
+        pack_name: &str,
+    ) -> ExternalCrateConstructorMappingFact {
         ExternalCrateConstructorMappingFact {
+            pack_name: Some(pack_name.to_string()),
             type_name: self.type_name.to_string(),
             arg_count: self.arg_count,
             rust_type_name: self.rust_type_name.map(str::to_string),
@@ -1587,10 +1596,7 @@ impl ExternalPackModeledField {
     fn as_unsupported_external_field_fact(&self, pack_name: &str) -> UnsupportedExternalFieldFact {
         UnsupportedExternalFieldFact {
             pack_name: pack_name.to_string(),
-            field: FieldKey {
-                type_name: self.type_name.to_string(),
-                field_name: self.field_name.to_string(),
-            },
+            field: FieldKey::named(self.type_name, self.field_name),
             reason: "declared unsupported by external pack manifest".to_string(),
             provenance: FactProvenance::ExternalLibraryPack,
         }
@@ -2217,6 +2223,7 @@ fn push_external_pack_constructor_fact(
         facts
             .external_crate_constructor_mapping_facts
             .push(ExternalCrateConstructorMappingFact {
+                pack_name: Some(pack_name.to_string()),
                 type_name: type_name.to_string(),
                 arg_count,
                 rust_type_name: parsed_metadata.rust_type_name,
@@ -2258,20 +2265,14 @@ fn push_external_pack_field_fact(
             .unsupported_external_field_facts
             .push(UnsupportedExternalFieldFact {
                 pack_name: pack_name.to_string(),
-                field: FieldKey {
-                    type_name: type_name.to_string(),
-                    field_name: field_name.to_string(),
-                },
+                field: FieldKey::named(type_name, field_name),
                 reason: "declared unsupported by external pack manifest".to_string(),
                 provenance: FactProvenance::ExternalLibraryPack,
             });
         return;
     }
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: type_name.to_string(),
-            field_name: field_name.to_string(),
-        },
+        field: FieldKey::named(type_name, field_name),
         field_type: parsed_metadata
             .field_type
             .map(|field_type| {
@@ -2285,10 +2286,7 @@ fn push_external_pack_field_fact(
         facts
             .external_field_value_facts
             .push(ExternalFieldValueFact {
-                field: FieldKey {
-                    type_name: type_name.to_string(),
-                    field_name: field_name.to_string(),
-                },
+                field: FieldKey::named(type_name, field_name),
                 rust_value: value,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
@@ -2385,10 +2383,7 @@ fn push_external_pack_field_nullability_fact(
         return;
     };
     facts.field_nullability_facts.push(FieldNullabilityFact {
-        field: FieldKey {
-            type_name: type_name.to_string(),
-            field_name: field_name.to_string(),
-        },
+        field: FieldKey::named(type_name, field_name),
         state,
         provenance: FieldNullabilityProvenance::ExternalLibraryPack,
     });
@@ -28851,10 +28846,7 @@ fn java_platform_field_fact_set() -> FactSet {
         ),
     ] {
         facts.external_field_facts.push(ExternalFieldFact {
-            field: FieldKey {
-                type_name: type_name.to_string(),
-                field_name: field_name.to_string(),
-            },
+            field: FieldKey::named(type_name, field_name),
             field_type: Some(JavaType::Named {
                 name: field_type.to_string(),
                 args: Vec::new(),
@@ -28863,10 +28855,7 @@ fn java_platform_field_fact_set() -> FactSet {
             provenance: FactProvenance::BuiltinExternalModel,
         });
         facts.field_nullability_facts.push(FieldNullabilityFact {
-            field: FieldKey {
-                type_name: type_name.to_string(),
-                field_name: field_name.to_string(),
-            },
+            field: FieldKey::named(type_name, field_name),
             state: nullability,
             provenance: FieldNullabilityProvenance::ExternalLibraryPack,
         });
@@ -28932,8 +28921,8 @@ fn builtin_field_nullability_fact_for(
         .find(|fact| {
             (!external_override_only
                 || fact.provenance == FieldNullabilityProvenance::ExternalOverride)
-                && external_type_name_matches(&fact.field.type_name, type_name)
-                && external_field_name_lookup_aliases(&fact.field.field_name)
+                && external_type_name_matches(fact.field.type_name(), type_name)
+                && external_field_name_lookup_aliases(fact.field.field_name())
                     .iter()
                     .any(|alias| {
                         external_field_name_lookup_aliases(field_name)
@@ -29333,6 +29322,7 @@ struct BuiltinExternalPackLookupIndex {
     api_effects_by_key: HashMap<CallableKey, ExternalApiEffectFact>,
     api_effects: HashMap<(String, String, Option<usize>), ExternalApiEffectFact>,
     api_effect_arities: HashMap<(String, String), BTreeSet<usize>>,
+    modeled_apis: HashSet<(String, String)>,
     api_argument_effects:
         HashMap<(String, String, Option<usize>, usize), ExternalApiArgumentEffectFact>,
     unsupported_apis: HashMap<(String, String), UnsupportedExternalApiFact>,
@@ -29353,6 +29343,17 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
     static INDEX: OnceLock<BuiltinExternalPackLookupIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
         let mut index = BuiltinExternalPackLookupIndex::default();
+        for manifest in builtin_external_pack_manifests() {
+            for api in manifest.modeled_apis {
+                for receiver_alias in external_receiver_lookup_aliases(api.receiver_type) {
+                    for method_alias in external_method_name_lookup_aliases(api.method_name) {
+                        index
+                            .modeled_apis
+                            .insert((receiver_alias.clone(), method_alias));
+                    }
+                }
+            }
+        }
         for (_, facts) in builtin_external_pack_fact_sets() {
             for fact in facts.external_api_effect_facts.iter().rev() {
                 if let Some(receiver_type) = &fact.receiver_type {
@@ -29421,8 +29422,7 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
             }
             for fact in facts.external_constructor_facts.iter().rev() {
                 for type_alias in external_receiver_lookup_aliases(&fact.type_name) {
-                    let mut key = fact.callable_key();
-                    key.owner.type_name = type_alias.clone();
+                    let key = fact.callable_key().with_owner_type(type_alias.clone());
                     index
                         .constructors_by_key
                         .entry(key)
@@ -29447,8 +29447,8 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                 }
             }
             for fact in facts.external_field_facts.iter().rev() {
-                for type_alias in external_field_type_lookup_aliases(&fact.field.type_name) {
-                    for field_alias in external_field_name_lookup_aliases(&fact.field.field_name) {
+                for type_alias in external_field_type_lookup_aliases(fact.field.type_name()) {
+                    for field_alias in external_field_name_lookup_aliases(fact.field.field_name()) {
                         let (kind, staticness) = external_field_fact_key_shape(fact);
                         index
                             .fields_by_key
@@ -29467,8 +29467,8 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                 }
             }
             for fact in facts.external_field_value_facts.iter().rev() {
-                for type_alias in external_field_type_lookup_aliases(&fact.field.type_name) {
-                    for field_alias in external_field_name_lookup_aliases(&fact.field.field_name) {
+                for type_alias in external_field_type_lookup_aliases(fact.field.type_name()) {
+                    for field_alias in external_field_name_lookup_aliases(fact.field.field_name()) {
                         index
                             .field_values
                             .entry((type_alias.clone(), field_alias))
@@ -29477,8 +29477,8 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                 }
             }
             for fact in facts.unsupported_external_field_facts.iter().rev() {
-                for type_alias in external_field_type_lookup_aliases(&fact.field.type_name) {
-                    for field_alias in external_field_name_lookup_aliases(&fact.field.field_name) {
+                for type_alias in external_field_type_lookup_aliases(fact.field.type_name()) {
+                    for field_alias in external_field_name_lookup_aliases(fact.field.field_name()) {
                         index
                             .unsupported_fields
                             .entry((type_alias.clone(), field_alias))
@@ -29645,15 +29645,14 @@ pub fn external_api_effect_for_receiver(
 }
 
 pub fn builtin_external_pack_models_api(receiver_type: &str, method_name: &str) -> bool {
-    for manifest in builtin_external_pack_manifests() {
-        for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
-            for method_alias in external_method_name_lookup_aliases(method_name) {
-                if manifest
-                    .modeled_api(&receiver_alias, &method_alias)
-                    .is_some()
-                {
-                    return true;
-                }
+    let index = builtin_external_pack_lookup_index();
+    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+        for method_alias in external_method_name_lookup_aliases(method_name) {
+            if index
+                .modeled_apis
+                .contains(&(receiver_alias.clone(), method_alias))
+            {
+                return true;
             }
         }
     }
@@ -29755,14 +29754,14 @@ pub fn external_api_effect_for_call(
         if !external_api_key_header_matches(key, &query_key) {
             continue;
         }
-        if !crate::facts::type_patterns_match_external_java_types(&key.params, arg_types) {
+        if !crate::facts::type_patterns_match_external_java_types(key.params(), arg_types) {
             saw_parameter_facts |= key
-                .params
+                .params()
                 .iter()
                 .any(|pattern| !matches!(pattern, TypePattern::Any));
             continue;
         }
-        let specificity = crate::facts::callable_type_patterns_specificity(&key.params);
+        let specificity = crate::facts::callable_type_patterns_specificity(key.params());
         saw_parameter_facts |= specificity > 0;
         if best
             .as_ref()
@@ -29813,13 +29812,13 @@ pub fn external_api_effect_for_call(
 }
 
 fn external_api_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
-    external_receiver_lookup_aliases_match(&fact.owner.type_name, &query.owner.type_name)
-        && fact.member == query.member
-        && fact.kind == query.kind
-        && (fact.staticness == query.staticness
-            || fact.staticness == crate::facts::Staticness::Unknown
-            || query.staticness == crate::facts::Staticness::Unknown)
-        && fact.arity == query.arity
+    external_receiver_lookup_aliases_match(fact.owner_type(), query.owner_type())
+        && fact.member_name() == query.member_name()
+        && fact.kind() == query.kind()
+        && (fact.staticness() == query.staticness()
+            || fact.staticness() == crate::facts::Staticness::Unknown
+            || query.staticness() == crate::facts::Staticness::Unknown)
+        && fact.arity() == query.arity()
 }
 
 fn builtin_external_api_parameter_match(
@@ -30044,7 +30043,7 @@ fn java_platform_api_effects_for_method_arity(
 }
 
 pub fn external_api_effect_for_key(key: &CallableKey) -> Option<ExternalApiEffectFact> {
-    if key.kind != CallableKind::Method {
+    if key.kind() != CallableKind::Method {
         return None;
     }
     if let Some(effect) = builtin_external_pack_lookup_index()
@@ -30055,9 +30054,9 @@ pub fn external_api_effect_for_key(key: &CallableKey) -> Option<ExternalApiEffec
         return Some(effect);
     }
     external_api_effect_for_receiver_with_arity(
-        Some(&key.owner.type_name),
-        &key.member.0,
-        Some(key.arity),
+        Some(key.owner_type()),
+        key.member_name(),
+        Some(key.arity()),
     )
 }
 
@@ -31357,7 +31356,7 @@ pub fn external_constructor_for(
 }
 
 pub fn external_constructor_for_key(key: &CallableKey) -> Option<ExternalConstructorFact> {
-    if key.kind != CallableKind::Constructor {
+    if key.kind() != CallableKind::Constructor {
         return None;
     }
     if let Some(constructor) = builtin_external_pack_lookup_index()
@@ -31367,8 +31366,8 @@ pub fn external_constructor_for_key(key: &CallableKey) -> Option<ExternalConstru
     {
         return Some(constructor);
     }
-    let arg_types = vec![JavaType::Unknown("_".to_string()); key.arity];
-    external_constructor_for(&key.owner.type_name, &arg_types)
+    let arg_types = vec![JavaType::Unknown("_".to_string()); key.arity()];
+    external_constructor_for(key.owner_type(), &arg_types)
 }
 
 pub fn external_field_for(type_name: &str, field_name: &str) -> Option<ExternalFieldFact> {
@@ -31420,7 +31419,7 @@ pub fn external_field_value_for(
 
 pub fn external_field_for_key(key: &CallableKey) -> Option<ExternalFieldFact> {
     if !matches!(
-        key.kind,
+        key.kind(),
         CallableKind::StaticField | CallableKind::InstanceField
     ) {
         return None;
@@ -31432,7 +31431,7 @@ pub fn external_field_for_key(key: &CallableKey) -> Option<ExternalFieldFact> {
     {
         return Some(field);
     }
-    external_field_for(&key.owner.type_name, &key.member.0)
+    external_field_for(key.owner_type(), key.member_name())
 }
 
 pub fn unsupported_external_constructor_for(

@@ -9,7 +9,7 @@ use crate::java_signature::{JavaCallableSlotKey, source_method_rust_name};
 use crate::usage::{CallGraph, CallableKey};
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum ThrowExprPlan<'a> {
+pub(crate) enum ThrowExprPlan<'a> {
     NewException {
         class_name: String,
         args: &'a [Expr],
@@ -120,7 +120,6 @@ impl ProgramExceptionPlan {
     pub fn method_plan(&self, ty: &TypeDecl, method: &MethodDecl) -> MethodExceptionPlan {
         self.methods
             .get(&method_exception_key(ty, method))
-            .or_else(|| self.methods.get(&(ty.name.clone(), method.name.clone())))
             .copied()
             .unwrap_or(MethodExceptionPlan {
                 wrap_returns_in_result: false,
@@ -499,7 +498,7 @@ pub fn plan_program_fallibility(
     facts: &FactSet,
 ) -> ProgramFallibilityPlan {
     let mut callables = call_graph
-        .nodes
+        .nodes()
         .iter()
         .cloned()
         .map(|key| {
@@ -554,17 +553,17 @@ pub fn plan_program_fallibility(
     loop {
         solve_iterations += 1;
         let mut changed = false;
-        for edge in &call_graph.edges {
-            if edge.kind == crate::usage::CallGraphEdgeKind::HandledExceptionBoundary {
+        for edge in call_graph.edges() {
+            if edge.kind() == crate::usage::CallGraphEdgeKind::HandledExceptionBoundary {
                 continue;
             }
             let callee_returns_result = callables
-                .get(&edge.callee)
+                .get(edge.callee())
                 .is_some_and(|fallibility| fallibility.returns_result);
             if !callee_returns_result {
                 continue;
             }
-            let caller = callables.entry(edge.caller.clone()).or_default();
+            let caller = callables.entry(edge.caller().clone()).or_default();
             if !caller.returns_result {
                 caller.returns_result = true;
                 caller.reasons.push(FallibilityReason::PropagatedFromCallee);
@@ -620,7 +619,7 @@ fn declared_throw_callables(program: &Program, facts: &FactSet) -> Vec<(Callable
             if facts.method_has_thrown_exceptions(&ty.name, &rust_name)
                 || facts.method_has_thrown_exceptions(&ty.name, &method.name)
             {
-                keys.push((CallableKey::source_method(ty.name.clone(), method), ()));
+                keys.push((CallableKey::source_method_for_type(ty, method), ()));
             }
         }
     }
@@ -746,7 +745,7 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
                         .as_ref()
                         .is_some_and(block_has_unhandled_integer_div_rem)
                     {
-                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                        keys.push(CallableKey::source_method_for_type(ty, method));
                     }
                 }
                 Member::Constructor(constructor) => {
@@ -755,10 +754,7 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
                         .as_ref()
                         .is_some_and(block_has_unhandled_integer_div_rem)
                     {
-                        keys.push(CallableKey::source_constructor(
-                            ty.name.clone(),
-                            constructor,
-                        ));
+                        keys.push(CallableKey::source_constructor_for_type(ty, constructor));
                     }
                 }
                 _ => {}
@@ -783,7 +779,7 @@ fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
                         .as_ref()
                         .is_some_and(block_has_unhandled_math_to_int_exact)
                     {
-                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                        keys.push(CallableKey::source_method_for_type(ty, method));
                     }
                 }
                 Member::Constructor(constructor) => {
@@ -792,10 +788,7 @@ fn math_to_int_exact_callables(program: &Program) -> Vec<CallableKey> {
                         .as_ref()
                         .is_some_and(block_has_unhandled_math_to_int_exact)
                     {
-                        keys.push(CallableKey::source_constructor(
-                            ty.name.clone(),
-                            constructor,
-                        ));
+                        keys.push(CallableKey::source_constructor_for_type(ty, constructor));
                     }
                 }
                 _ => {}
@@ -1029,7 +1022,7 @@ fn nullable_receiver_throw_callables(program: &Program) -> Vec<CallableKey> {
                             block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
                         })
                     {
-                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                        keys.push(CallableKey::source_method_for_type(ty, method));
                     }
                 }
                 Member::Constructor(constructor) => {
@@ -1039,10 +1032,7 @@ fn nullable_receiver_throw_callables(program: &Program) -> Vec<CallableKey> {
                             block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
                         })
                     {
-                        keys.push(CallableKey::source_constructor(
-                            ty.name.clone(),
-                            constructor,
-                        ));
+                        keys.push(CallableKey::source_constructor_for_type(ty, constructor));
                     }
                 }
                 _ => {}
@@ -1067,7 +1057,7 @@ fn direct_throw_callables(program: &Program, facts: &FactSet) -> Vec<CallableKey
                         .as_ref()
                         .is_some_and(|body| block_has_unhandled_direct_throw(body, facts, &[]))
                     {
-                        keys.push(CallableKey::source_method(ty.name.clone(), method));
+                        keys.push(CallableKey::source_method_for_type(ty, method));
                     }
                 }
                 Member::Constructor(constructor) => {
@@ -1076,10 +1066,7 @@ fn direct_throw_callables(program: &Program, facts: &FactSet) -> Vec<CallableKey
                         .as_ref()
                         .is_some_and(|body| block_has_unhandled_direct_throw(body, facts, &[]))
                     {
-                        keys.push(CallableKey::source_constructor(
-                            ty.name.clone(),
-                            constructor,
-                        ));
+                        keys.push(CallableKey::source_constructor_for_type(ty, constructor));
                     }
                 }
                 _ => {}
@@ -1622,7 +1609,7 @@ fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
                 if !entry.contains(&declaring) {
                     entry.push(declaring);
                 }
-                let implementing = CallableKey::source_method(ty.name.clone(), method);
+                let implementing = CallableKey::source_method_for_type(ty, method);
                 if !entry.contains(&implementing) {
                     entry.push(implementing);
                 }
@@ -1909,7 +1896,7 @@ fn finally_completion_allows_try_finally(completion: TryBlockCompletion) -> bool
     )
 }
 
-pub fn try_resource_names(resources: &[Stmt]) -> Vec<String> {
+pub(crate) fn try_resource_names(resources: &[Stmt]) -> Vec<String> {
     resources
         .iter()
         .filter_map(|resource| match resource {
@@ -1919,7 +1906,7 @@ pub fn try_resource_names(resources: &[Stmt]) -> Vec<String> {
         .collect()
 }
 
-pub fn try_resources_are_declarations(resources: &[Stmt]) -> bool {
+pub(crate) fn try_resources_are_declarations(resources: &[Stmt]) -> bool {
     resources.iter().all(stmt_is_resource_declaration)
 }
 
@@ -1933,7 +1920,7 @@ fn stmt_is_resource_declaration(stmt: &Stmt) -> bool {
     )
 }
 
-pub fn catch_match_class_names(
+pub(crate) fn catch_match_class_names(
     current_type: Option<&str>,
     current_method: Option<&str>,
     clause_index: usize,
@@ -2047,7 +2034,7 @@ fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
     }
 }
 
-pub fn plan_block_exception_completion(block: &Block) -> TryBlockCompletion {
+pub(crate) fn plan_block_exception_completion(block: &Block) -> TryBlockCompletion {
     if block_terminates_with_exception_boundary(block) {
         return TryBlockCompletion::Terminates;
     }
@@ -2067,7 +2054,7 @@ fn collect_method_exception_plans_for_type(
                 // `throws` facts that the deleted second producer re-derived.
                 let plan = MethodExceptionPlan {
                     wrap_returns_in_result: fallibility
-                        .returns_result(&CallableKey::source_method(ty.name.clone(), method)),
+                        .returns_result(&CallableKey::source_method_for_type(ty, method)),
                 };
                 methods.insert(method_exception_key(ty, method), plan);
             }
@@ -2083,7 +2070,7 @@ fn method_exception_key(ty: &TypeDecl, method: &MethodDecl) -> (String, String) 
     (ty.name.clone(), source_method_rust_name(method))
 }
 
-pub fn plan_throw_expr(expr: &Expr) -> ThrowExprPlan<'_> {
+pub(crate) fn plan_throw_expr(expr: &Expr) -> ThrowExprPlan<'_> {
     match expr {
         Expr::New { ty, args, .. } => ThrowExprPlan::NewException {
             class_name: exception_class_name(ty),
@@ -2142,10 +2129,230 @@ fn exception_cause_receiver(expr: &Expr) -> Option<&Expr> {
     (args.is_empty() && name == "getCause").then_some(receiver.as_ref())
 }
 
-pub fn exception_class_name(class_ty: &JavaType) -> String {
+pub(crate) fn exception_class_name(class_ty: &JavaType) -> String {
     match class_ty {
         JavaType::Named { name, .. } => name.clone(),
         JavaType::Unknown(raw) => raw.clone(),
         _ => "JavaException".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::Span;
+    use crate::java_ir::{Literal, Modifier, PrimitiveType, TypeKind};
+    use crate::parser::parse_java_source;
+    use crate::resolve::resolve_program;
+    use crate::semantic_analysis::analyze_program;
+
+    fn test_type(name: &str) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
+
+    fn test_method(java_name: &str, rust_name: Option<&str>) -> MethodDecl {
+        MethodDecl {
+            name: java_name.to_string(),
+            rust_name: rust_name.map(str::to_string),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: vec![Modifier::Public],
+            body: None,
+            span: Span::default(),
+        }
+    }
+
+    #[test]
+    fn method_plan_uses_only_canonical_source_method_key() {
+        let ty = test_type("Owner");
+        let method = test_method("camelCase", Some("camel_case"));
+        let mut plan = ProgramExceptionPlan::default();
+        plan.methods.insert(
+            ("Owner".to_string(), "camelCase".to_string()),
+            MethodExceptionPlan {
+                wrap_returns_in_result: true,
+            },
+        );
+
+        assert_eq!(
+            plan.method_plan(&ty, &method),
+            MethodExceptionPlan {
+                wrap_returns_in_result: false,
+            }
+        );
+
+        plan.methods.insert(
+            method_exception_key(&ty, &method),
+            MethodExceptionPlan {
+                wrap_returns_in_result: true,
+            },
+        );
+        assert_eq!(
+            plan.method_plan(&ty, &method),
+            MethodExceptionPlan {
+                wrap_returns_in_result: true,
+            }
+        );
+    }
+
+    #[test]
+    fn exception_class_name_preserves_unknown_throw_carriers() {
+        assert_eq!(
+            exception_class_name(&JavaType::Unknown("ExternalException".to_string())),
+            "ExternalException"
+        );
+        assert_eq!(
+            exception_class_name(&JavaType::Primitive(PrimitiveType::Int)),
+            "JavaException"
+        );
+    }
+
+    #[test]
+    fn throw_expr_plan_preserves_new_existing_and_cause_or_self_shapes() {
+        let thrown_new = Expr::New {
+            ty: JavaType::Named {
+                name: "IllegalArgumentException".to_string(),
+                args: Vec::new(),
+            },
+            args: vec![Expr::Var("message".to_string())],
+            body: None,
+            resolved: None,
+        };
+        assert_eq!(
+            plan_throw_expr(&thrown_new),
+            ThrowExprPlan::NewException {
+                class_name: "IllegalArgumentException".to_string(),
+                args: &[Expr::Var("message".to_string())],
+            }
+        );
+        assert_eq!(
+            plan_throw_expr(&Expr::Var("err".to_string())),
+            ThrowExprPlan::ExistingException(&Expr::Var("err".to_string()))
+        );
+
+        let cause_expr = Expr::Call {
+            receiver: Some(Box::new(Expr::Var("ce".to_string()))),
+            name: "getCause".to_string(),
+            args: Vec::new(),
+            resolved: None,
+        };
+        let cause_runtime_rethrow = Expr::Ternary {
+            condition: Box::new(Expr::InstanceOf {
+                expr: Box::new(cause_expr.clone()),
+                ty: JavaType::Named {
+                    name: "RuntimeException".to_string(),
+                    args: Vec::new(),
+                },
+                binding: None,
+            }),
+            then_expr: Box::new(Expr::Cast {
+                ty: JavaType::Named {
+                    name: "RuntimeException".to_string(),
+                    args: Vec::new(),
+                },
+                expr: Box::new(cause_expr),
+            }),
+            else_expr: Box::new(Expr::Var("ce".to_string())),
+        };
+        assert_eq!(
+            plan_throw_expr(&cause_runtime_rethrow),
+            ThrowExprPlan::CauseOrSelfIfInstance {
+                wrapper: &Expr::Var("ce".to_string()),
+                class_names: vec!["RuntimeException".to_string()],
+            }
+        );
+    }
+
+    #[test]
+    fn catch_match_class_names_uses_semantic_assignable_catch_facts() {
+        let source = r#"
+class ExceptionSubclassCatchOrder {
+    int parse(Source source) {
+        try {
+            return source.read();
+        } catch (SpecificProblem ex) {
+            return 1;
+        } catch (BaseProblem ex) {
+            return 2;
+        }
+    }
+}
+class BaseProblem extends Exception {}
+class SpecificProblem extends BaseProblem {}
+"#;
+        let parsed = parse_java_source(source);
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics.clone());
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let ty = &parsed.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("expected parse method");
+        let Stmt::Try {
+            catches: ordered_catches,
+            ..
+        } = &method.body.as_ref().unwrap().statements[0]
+        else {
+            panic!("expected ordered try/catch");
+        };
+
+        assert_eq!(
+            catch_match_class_names(
+                Some("ExceptionSubclassCatchOrder"),
+                Some("parse"),
+                1,
+                &ordered_catches[1],
+                &semantic.facts,
+            ),
+            vec!["BaseProblem".to_string(), "SpecificProblem".to_string()]
+        );
+    }
+
+    #[test]
+    fn try_resource_helpers_stay_inside_exception_plan() {
+        let resources = vec![
+            Stmt::VarDecl {
+                ty: JavaType::Unknown("AutoCloseable".to_string()),
+                name: "input".to_string(),
+                source_name: "input".to_string(),
+                initializer: Some(Expr::Literal(Literal::Null)),
+                binding: None,
+            },
+            Stmt::VarDecl {
+                ty: JavaType::Unknown("AutoCloseable".to_string()),
+                name: "output".to_string(),
+                source_name: "output".to_string(),
+                initializer: Some(Expr::Literal(Literal::Null)),
+                binding: None,
+            },
+        ];
+
+        assert!(try_resources_are_declarations(&resources));
+        assert_eq!(
+            try_resource_names(&resources),
+            vec!["input".to_string(), "output".to_string()]
+        );
+        assert!(!try_resources_are_declarations(&[Stmt::Expr(
+            Expr::Literal(Literal::Null)
+        )]));
     }
 }

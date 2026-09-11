@@ -720,7 +720,7 @@ constructor projection and enter the normal source constructor/slot conversion
 path. This fixes VCF-style `Set<VCFHeaderLine>.add(new VCFHeaderLine(...))`
 emitting `Box<dyn Any>` for a concrete `HashSet<VCFHeaderLine>`. Focused
 coverage: `typed_set_add_source_constructor_keeps_concrete_element_slot`,
-`source_subclass_constructor_flows_to_flattened_superclass_slot`,
+`source_subclass_constructor_to_superclass_slot_is_loud_not_flattened`,
 `source_value_struct_with_java_hash_equality_derives_eq_and_hash`, plus
 `cargo fmt --check`, `cargo check --quiet`, and `git diff --check`.
 
@@ -3955,7 +3955,7 @@ Current status:
   `get_class(&self) -> JavaClass<Self>` fallback alongside the existing
   `to_string` fallback, and optional ternaries now wrap only the concrete branch
   when the other branch is already `Option<T>`. Verified with
-  `source_subclass_constructor_flows_to_flattened_superclass_slot`,
+  `source_subclass_constructor_to_superclass_slot_is_loud_not_flattened`,
   `no_arg_super_constructor_with_inherited_setter_trailing_call_lowers`,
   `source_object_get_class_name_uses_inherent_java_class_fallback`,
   `cargo test --test idiom_gaps ternary --quiet`, `cargo fmt --check`,
@@ -4145,7 +4145,7 @@ Current status:
   same `.into()` upcast when source hierarchy reachability is proven from that
   context. Verified with
   `emitted_context_source_subclass_constructor_flows_to_superclass_slot`,
-  `source_subclass_constructor_flows_to_flattened_superclass_slot`,
+  `source_subclass_constructor_to_superclass_slot_is_loud_not_flattened`,
   `cargo fmt --check`, `cargo check --quiet`, `cargo build --release`, and
   focused JAligner rerun
   `.tmp/corpus-sweep-20260724-jaligner-after-source-context-upcast-r1`.
@@ -4165,7 +4165,7 @@ Current status:
   `string_buffer_append_ternary_argument_stays_owned_value`,
   `private_static_singleton_with_hashmap_field_derives_clone_when_value_is_cloneable`,
   `emitted_context_source_subclass_constructor_flows_to_superclass_slot`,
-  `source_subclass_constructor_flows_to_flattened_superclass_slot`,
+  `source_subclass_constructor_to_superclass_slot_is_loud_not_flattened`,
   `cargo fmt --check`, `cargo check --quiet`, `cargo build --release`, and
   focused JAligner rerun
   `.tmp/corpus-sweep-20260724-jaligner-after-upcast-field-visibility-r1`.
@@ -5441,7 +5441,7 @@ Focused guards green: `signature_constraints_make_public_api_fallback_explicit`,
 `signature_baseline_constraints_use_copy_capability_facts_for_all_slots`,
 `signature_plan_uses_boxed_dyn_for_interface_fields`,
 `signature_public_interface_boundaries_preserve_representation_shapes`,
-`optional_receiver_field_element_recovery_uses_borrowed_carrier_plan`, and
+`optional_receiver_field_element_recovery_does_not_borrow_returned_call_result`, and
 `lowering_borrows_boxed_dyn_field_for_interface_arguments`.
 Signature/representation drift cleanup checkpoint: representation lookup now
 has a unique simple-name fallback for source-nested object-safety facts,

@@ -12,16 +12,16 @@ use crate::java_ir::{
     BinaryOp, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
 };
+use crate::java_naming::rust_name_for_java_named_type;
 use crate::representation::RepresentationPlan;
 use crate::rust_ir::{
     RustAssociatedConst, RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam,
-    RustReceiver, RustStmt, RustStruct, RustType,
+    RustReceiver, RustStmt, RustStruct, RustType, rust_type_arg_projection_or_raw,
 };
 use crate::signature::{ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
-    default_expr_for_slot_with_facts, rust_name_for_java_named_type,
-    rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
-    rust_type_for_slot_with_facts_and_representations,
+    default_expr_for_slot_with_facts, rust_type_for_java_type_with_facts,
+    rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
 };
 use crate::slot_shape::{OwnershipShape, RustSlotShape};
 use crate::types::{
@@ -1378,7 +1378,7 @@ class ExternalLabel {}
             RustType::Ref {
                 mutable: false,
                 lifetime: None,
-                inner: Box::new(RustType::Raw("str".to_string())),
+                inner: Box::new(RustType::Str),
             }
         );
     }
@@ -1653,6 +1653,9 @@ class Holder {
             "std::sync::Arc<Unmodelled",
             "Vec<std::rc::Rc<Unmodelled>",
             "std::rc::Rc<Left, Right>",
+            "Rc<Left, Right>",
+            "std::sync::Arc<Left, Right>",
+            "Arc<Left, Right>",
         ] {
             assert!(
                 !rust_type_supports_struct_derive_clone(
@@ -1666,6 +1669,49 @@ class Holder {
                 "malformed shared handle text should fail closed: {raw}"
             );
         }
+    }
+
+    #[test]
+    fn raw_clone_support_recovers_simple_type_atoms_before_string_parsing() {
+        let support = Program::default();
+        let mut type_params = HashSet::new();
+        type_params.insert("T".to_string());
+        let signatures = SignaturePlan::default();
+        let facts = FactSet::default();
+
+        for raw in ["String", "i32", "T", "Vec<Option<T>>"] {
+            assert!(
+                rust_type_supports_struct_derive_clone(
+                    &RustType::Raw(raw.to_string()),
+                    &type_params,
+                    &signatures,
+                    &facts,
+                    &support,
+                    &mut HashSet::new(),
+                ),
+                "simple raw clone support should match structured RustType handling: {raw}"
+            );
+        }
+    }
+
+    #[test]
+    fn raw_clone_support_fails_closed_for_unrecovered_type_args() {
+        let support = Program::default();
+        let type_params = HashSet::new();
+        let signatures = SignaturePlan::default();
+        let facts = FactSet::default();
+
+        assert!(
+            !rust_type_supports_struct_derive_clone(
+                &RustType::Raw("Vec<dyn Fn(i32)>".to_string()),
+                &type_params,
+                &signatures,
+                &facts,
+                &support,
+                &mut HashSet::new(),
+            ),
+            "unrecovered raw generic args must not be treated as semantic type names"
+        );
     }
 
     #[test]
@@ -1980,12 +2026,12 @@ fn method_return_type_with_facts(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Option<RustType> {
+    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
+        return Some(ty);
+    }
     let return_shape = method_return_shape(ty, method, signatures);
     if let Some(shape) = return_shape.as_ref() {
         return Some(rust_type_for_slot_with_facts(shape, facts));
-    }
-    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
-        return Some(ty);
     }
     if rust_crate_mapped_external_java_type(&method.return_type, facts) {
         return Some(rust_type_for_java_type_with_facts(
@@ -1996,7 +2042,10 @@ fn method_return_type_with_facts(
     None
 }
 
-fn rust_crate_mapped_external_rust_type(java_ty: &JavaType, facts: &FactSet) -> Option<RustType> {
+pub(crate) fn rust_crate_mapped_external_rust_type(
+    java_ty: &JavaType,
+    facts: &FactSet,
+) -> Option<RustType> {
     let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = java_ty else {
         return None;
     };
@@ -2384,12 +2433,15 @@ fn rust_type_supports_struct_derive_clone(
                 visiting,
             )
         }
-        RustType::Generic { base, .. }
+        RustType::Generic { base, args }
             if base == "std::rc::Rc"
+                || base == "Rc"
+                || base == "std::sync::Arc"
+                || base == "Arc"
                 || base == "std::marker::PhantomData"
                 || base == "PhantomData" =>
         {
-            true
+            args.len() == 1
         }
         RustType::Tuple(items) => items.iter().all(|item| {
             rust_type_supports_struct_derive_clone(
@@ -2460,6 +2512,7 @@ fn rust_type_supports_struct_derive_clone(
         | RustType::ImplTrait(_)
         | RustType::Slice(_)
         | RustType::Ref { .. }
+        | RustType::Str
         | RustType::Raw(_) => false,
     }
 }
@@ -2473,8 +2526,15 @@ fn raw_rust_type_supports_derive_clone(
     visiting: &mut HashSet<String>,
 ) -> bool {
     let raw = raw.trim();
-    if type_params.contains(raw) {
-        return true;
+    if let Some(supports_clone) = simple_raw_rust_type_supports_derive_clone(
+        raw,
+        type_params,
+        signatures,
+        facts,
+        support_program,
+        visiting,
+    ) {
+        return supports_clone;
     }
     if raw_rust_generic_args(raw, "std::marker::PhantomData")
         .or_else(|| raw_rust_generic_args(raw, "PhantomData"))
@@ -2555,8 +2615,15 @@ fn raw_type_arg_supports_derive_clone(
     visiting: &mut HashSet<String>,
 ) -> bool {
     let raw = arg.trim();
-    if type_params.contains(raw) {
-        return true;
+    if let Some(supports_clone) = simple_raw_rust_type_supports_derive_clone(
+        raw,
+        type_params,
+        signatures,
+        facts,
+        support_program,
+        visiting,
+    ) {
+        return supports_clone;
     }
     // A shared handle is `Clone` whatever it points at -- cloning it bumps a
     // refcount. The top-level arm already knows this; a handle nested inside a
@@ -2564,12 +2631,6 @@ fn raw_type_arg_supports_derive_clone(
     // `HashSet<Rc<T>>` field silently cost its struct the `Clone` derive
     // (claude_audits/0002b).
     if raw_rust_shared_handle_type_inner(raw).is_some() {
-        return true;
-    }
-    if matches!(
-        raw,
-        "String" | "bool" | "char" | "i8" | "i16" | "i32" | "i64" | "f32" | "f64"
-    ) {
         return true;
     }
     if let Some(inner) = raw_rust_option_inner(raw) {
@@ -2615,14 +2676,28 @@ fn raw_type_arg_supports_derive_clone(
             visiting,
         );
     }
-    rust_named_type_supports_struct_derive_clone(
-        raw,
-        type_params,
-        signatures,
-        facts,
-        support_program,
-        visiting,
-    )
+    false
+}
+
+fn simple_raw_rust_type_supports_derive_clone(
+    raw: &str,
+    type_params: &HashSet<String>,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+    visiting: &mut HashSet<String>,
+) -> Option<bool> {
+    match rust_type_arg_projection_or_raw(raw) {
+        RustType::Raw(_) => None,
+        ty => Some(rust_type_supports_struct_derive_clone(
+            &ty,
+            type_params,
+            signatures,
+            facts,
+            support_program,
+            visiting,
+        )),
+    }
 }
 
 fn raw_rust_shared_handle_type_inner(raw: &str) -> Option<&str> {
@@ -2703,6 +2778,7 @@ fn rust_type_supports_struct_derive_default(
         | RustType::ImplTrait(_)
         | RustType::Slice(_)
         | RustType::Ref { .. }
+        | RustType::Str
         | RustType::Raw(_) => false,
     }
 }
@@ -2868,7 +2944,7 @@ fn rust_type_supports_struct_derive_partial_eq(ty: &RustType) -> bool {
         | RustType::DynTrait(_)
         | RustType::ImplTrait(_)
         | RustType::Named(_) => false,
-        RustType::Slice(_) | RustType::Ref { .. } | RustType::Raw(_) => false,
+        RustType::Slice(_) | RustType::Ref { .. } | RustType::Str | RustType::Raw(_) => false,
     }
 }
 
@@ -2896,6 +2972,7 @@ fn rust_type_supports_struct_derive_eq_hash(ty: &RustType) -> bool {
         | RustType::Named(_)
         | RustType::Slice(_)
         | RustType::Ref { .. }
+        | RustType::Str
         | RustType::Raw(_) => false,
     }
 }
@@ -3084,7 +3161,7 @@ fn const_rust_type_for_java_type(ty: &JavaType) -> Option<RustType> {
         JavaType::String => Some(RustType::Ref {
             mutable: false,
             lifetime: Some("'static".to_string()),
-            inner: Box::new(RustType::Raw("str".to_string())),
+            inner: Box::new(RustType::Str),
         }),
         JavaType::Primitive(PrimitiveType::Boolean) => Some(RustType::Bool),
         JavaType::Primitive(PrimitiveType::Byte) => Some(RustType::I8),
@@ -4589,6 +4666,7 @@ fn rust_type_contains_ref(ty: &RustType) -> bool {
         | RustType::F64
         | RustType::Char
         | RustType::String
+        | RustType::Str
         | RustType::DynTrait(_)
         | RustType::ImplTrait(_)
         | RustType::Named(_)

@@ -33,11 +33,14 @@ pub(crate) fn apply_instanceof(expr: RustExpr, plan: &InstanceOfPlan) -> RustExp
     crate::coercion::instanceof_check_projection(expr, &plan.check)
 }
 
-pub fn apply_slot_expr_conversion(expr: RustExpr, plan: &SlotExprConversionPlan) -> RustExpr {
+pub(crate) fn apply_slot_expr_conversion(
+    expr: RustExpr,
+    plan: &SlotExprConversionPlan,
+) -> RustExpr {
     apply_slot_conversion_plan(expr, &plan.conversion)
 }
 
-pub fn apply_lowered_slot_expr_conversion(
+pub(crate) fn apply_lowered_slot_expr_conversion(
     lowered: LoweredExpr,
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
@@ -63,6 +66,12 @@ fn normalize_lowered_expr_for_conversion(
     {
         return expr;
     }
+    if matches!(
+        conversion,
+        SlotConversionPlan::OptionalRustBorrowedFacadeReturn(_)
+    ) {
+        return expr;
+    }
     let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
         return expr;
     };
@@ -73,7 +82,7 @@ fn normalize_lowered_expr_for_conversion(
     .unwrap_or(expr)
 }
 
-pub fn apply_lowered_slot_conversion_to_expr(
+pub(crate) fn apply_lowered_slot_conversion_to_expr(
     expr: RustExpr,
     plan: &LoweredSlotExprConversionPlan,
 ) -> RustExpr {
@@ -245,9 +254,12 @@ mod tests {
     use super::*;
     use crate::conversion_plan::{
         InstanceOfCheck, SlotExprConversionPlan, java_cast_semantics_policy_with_facts,
-        optional_slot_construction_plan_for_actual, preconverted_optional_slot_construction_plan,
+        optional_slot_construction_plan_for_actual, plan_lowered_slot_conversion,
+        plan_slot_conversion, preconverted_optional_slot_construction_plan,
         shape_coercion_plan_with_facts,
     };
+    use crate::java_ir::{JavaType, PrimitiveType};
+    use crate::slot_shape::OwnershipShape;
     use crate::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
     use crate::types::optional_java_type;
 
@@ -360,6 +372,125 @@ mod tests {
         assert_eq!(
             crate::emit::emit_expr(&instanceof_expr),
             "matches!(animal, AnimalValue::Dog(_))"
+        );
+    }
+
+    #[test]
+    fn slot_conversion_application_stays_structured_inside_lowering_module() {
+        let byte_array = JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte)));
+        let target = RustSlotShape::conservative(byte_array.clone());
+        let lowered = LoweredType::rust_unsigned_byte_array_return(byte_array.clone(), false);
+        let plan = plan_lowered_slot_conversion(
+            &lowered,
+            Slot::Return(target),
+            &crate::facts::FactSet::default(),
+        );
+        let converted = apply_lowered_slot_expr_conversion(
+            LoweredExpr {
+                expr: RustExpr::Raw("left + right".to_string()),
+                actual: lowered,
+            },
+            &plan,
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&converted),
+            "(left + right).into_iter().map(|byte| byte as i8).collect::<Vec<_>>()"
+        );
+        assert!(matches!(
+            converted,
+            RustExpr::MethodCall { method, .. } if method == "collect::<Vec<_>>"
+        ));
+
+        let optional_target = RustSlotShape::conservative(optional_java_type(byte_array.clone()));
+        let optional_lowered = LoweredType::rust_unsigned_byte_array_return(byte_array, true);
+        let optional_plan = plan_lowered_slot_conversion(
+            &optional_lowered,
+            Slot::Return(optional_target),
+            &crate::facts::FactSet::default(),
+        );
+        let optional_converted = apply_lowered_slot_expr_conversion(
+            LoweredExpr {
+                expr: RustExpr::Raw("maybe_bytes()".to_string()),
+                actual: optional_lowered,
+            },
+            &optional_plan,
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&optional_converted),
+            "maybe_bytes().map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
+        );
+        assert!(matches!(
+            optional_converted,
+            RustExpr::MethodCall { method, .. } if method == "map"
+        ));
+
+        let int_shape = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
+        let slot_plan =
+            plan_slot_conversion(int_shape, Slot::Index, &crate::facts::FactSet::default());
+        assert_eq!(
+            apply_slot_expr_conversion(RustExpr::Var("i".to_string()), &slot_plan),
+            RustExpr::Cast {
+                expr: Box::new(RustExpr::Var("i".to_string())),
+                ty: "usize".to_string(),
+            }
+        );
+
+        let lowered_plan = plan_lowered_slot_conversion(
+            &LoweredType::optional_element_borrow(JavaType::String),
+            Slot::Index,
+            &crate::facts::FactSet::default(),
+        );
+        let mut optional_element_shape = RustSlotShape::conservative(JavaType::String);
+        optional_element_shape.ownership = OwnershipShape::SharedBorrow;
+        assert_eq!(
+            apply_lowered_slot_expr_conversion(
+                LoweredExpr {
+                    expr: RustExpr::Var("value".to_string()),
+                    actual: LoweredType::optional_element_borrow(JavaType::String),
+                },
+                &lowered_plan,
+            ),
+            RustExpr::shaped_as(
+                crate::rust_ir::RustExprShape::OptionalProjected,
+                Some(optional_element_shape),
+                RustExpr::MethodCall {
+                    receiver: Box::new(RustExpr::Var("value".to_string())),
+                    method: "as_ref".to_string(),
+                    args: Vec::new(),
+                },
+            )
+        );
+
+        let uri_type = JavaType::Named {
+            name: "URI".to_string(),
+            args: Vec::new(),
+        };
+        let option_shape = RustSlotShape::conservative(optional_java_type(uri_type.clone()));
+        let mut element_shape = RustSlotShape::conservative(uri_type);
+        element_shape.ownership = OwnershipShape::SharedBorrow;
+        let optional_display_actual = LoweredType::OptionalElementBorrow {
+            option_shape: Box::new(option_shape),
+            element_shape: Box::new(element_shape),
+            recovery: None,
+        };
+        let optional_display_plan = plan_lowered_slot_conversion(
+            &optional_display_actual,
+            Slot::StringConcatSegment,
+            &crate::facts::FactSet::default(),
+        );
+        let converted_display = apply_lowered_slot_expr_conversion(
+            LoweredExpr {
+                expr: RustExpr::Field(
+                    Box::new(RustExpr::Var("box_value".to_string())),
+                    "value".to_string(),
+                ),
+                actual: optional_display_actual,
+            },
+            &optional_display_plan,
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&converted_display),
+            "box_value.value.as_ref().map(|value| value.java_arrays_deep_to_string()).unwrap_or_else(|| \"null\".to_string())"
         );
     }
 

@@ -1,7 +1,21 @@
 # 0058 — A class upcast discards the object; `super.m()` returns `Default`; `instanceof` is exact-type
 
 Recorded 2026-08-23.
-Status: **open**.
+Status: **open, narrowed to class hierarchy carrier**.
+
+Follow-up cleanup: `representation_lowering::trait_impl_method_message_policy`
+is crate-local. The direct generated-message policy remains available to
+representation lowering and same-module tests, but it is no longer exported as a
+public crate helper. This does not change the remaining class hierarchy carrier
+work.
+Follow-up cleanup: `RepresentationTypeEmission` is crate-local too. The
+raw-item-vs-concrete-struct decision remains owned by representation lowering;
+external tests guard the boundary instead of importing the enum.
+Follow-up 2026-09-10: direct emitted `super.m()` now has Java/Rust oracle
+coverage, not only generated-crate coverage. `tests/differential/SuperMethodCall.java`
+pins `super.base() + 5` dispatching to the superclass implementation while a
+fresh `Base` call still returns `10` (`15,10`). The class-hierarchy carrier
+remains open for supertype slots and mutating super calls.
 Severity: **critical** — the original silent source-class upcast and
 source-supertype `instanceof` paths are now loud, and direct emitted
 `super.m()` calls can lower to the superclass implementation, but Java class
@@ -17,11 +31,11 @@ rather than invalid `pub type AliasMin.A = ...`. Regression:
 This only removes the parse-error wrapper around the intended loud
 class-hierarchy refusal; it is not the real hierarchy carrier.
 
-Updated 2026-09-07 (stale guardrail cleanup): the `ZipOutputStream ->
-OutputStream` external facade upcast is now modelled by the external pack and
-the generated crate compiles through `zip.into()`. The old idiom-gap row still
-expected the unsupported-upcast `compile_error!`; it has been converted to a
-positive generated-crate check and removed from the failure baseline. This does
+Updated 2026-09-07 (stale guardrail cleanup, rechecked 2026-09-10): the
+`ZipOutputStream -> OutputStream` external facade upcast is modelled by the
+external pack and the generated crate compiles through `zip.into()`. The old
+unsupported-upcast expectation is now a positive generated-crate idiom fixture,
+with `idiom_gaps` at `816/0` and the failure-name file header-only. This does
 not change the remaining source-class hierarchy carrier work.
 
 Updated 2026-08-30 current-tree triage: the original silent object-slicing
@@ -92,7 +106,8 @@ Found by differential testing along the JLS Ch. 8/9 axis: abstract classes,
 overriding, virtual dispatch through a supertype reference, `super.method()`,
 shadowed fields, `instanceof` over a chain, polymorphic collections.
 **19 shapes probed, 7 divergent.** Interfaces are correct for the probed
-top-level and nested dispatch shapes; class `extends` is almost entirely broken.
+top-level and nested dispatch shapes; class `extends` remains open where it
+needs a real source-class hierarchy carrier.
 
 Repros: `claude_audits/repro/InheritanceUpcast.java`,
 `SuperMethodCall.java`, `InstanceofSupertype.java`,
@@ -400,19 +415,25 @@ A Java class hierarchy is lowered as *n* unrelated Rust structs. There is no
 carrier that can hold "a `Base`, possibly a `Savings`", so:
 
 - **upcast** — `src/conversion_plan.rs`, the `From`/`.into()` coercion path, and
-  the generated `impl From<Sub> for Base` in `src/item_assembly.rs`. Falls back
-  to a field-copy struct rebuild (user types) or `Default::default()` (external
-  types, `Unmodelled Java upcast` comment).
-- **`super.m()`** — resolves to no target and takes the "unknown call" default,
-  `Default::default()`. Also misclassified as recursion upstream
-  (`recursion_tco_fallback` in the TCO analysis).
+  the generated `impl From<Sub> for Base` in `src/item_assembly.rs`. Historical
+  output fell back to a field-copy struct rebuild for source types and
+  `Default::default()` for external types; current source-class paths are loud,
+  and external adapters either model the conversion or panic if the adapter is
+  still unsupported.
+- **`super.m()`** — historically resolved to no target and took the "unknown
+  call" default, `Default::default()`, and was also misclassified as recursion
+  upstream (`recursion_tco_fallback` in the TCO analysis). Direct emitted
+  non-mutating `super.m()` calls now target the superclass implementation, while
+  mutating super calls remain loud until a real hierarchy carrier exists.
 - **`instanceof`** — `Box<dyn Any>` + `Any::is::<T>` is the *only* runtime type
   test available, and it is exact by construction
   (`src/conversion_plan.rs:InstanceOfFallbackPolicy`,
   `DowncastErasedObject`).
-- **diagnostic vs lowering** — `unsupported_inheritance` is raised
-  (`src/lowering_diagnostics.rs`, which keeps an `extends` map) but does not stop
-  code generation.
+- **diagnostic vs lowering** — current source-class guardrails align the two
+  for pinned upcast/cast/`instanceof` cases: `unsupported_inheritance` or the
+  source-hierarchy runtime-carrier diagnostic is emitted, and the generated Rust
+  fails loudly through `compile_error!`. This still documents the absence of a
+  real carrier rather than solving it.
 
 The interface path shows what the class path is missing: `src/item_assembly.rs`
 already emits a trait with `as_any` + `clone_box`, per-impl forwarding, default
@@ -423,24 +444,15 @@ walk).
 
 ---
 
-## Proposed direction, cheapest first
+## Proposed direction
 
-1. **Make `unsupported_inheritance` stop lowering.** Emit `compile_error!` where
-   §1 currently emits a running lie, and emit it for the *nested* case too so the
-   two agree. Costs nothing, converts the worst severity class (silent wrong) to
-   the best (diagnosed). Do this before, not after, the representation work.
-2. **Make `super.m()` loud.** `Default::default()` for an unresolved call is the
-   0016 no-op-facade pattern; a `super` call whose target is known but not
-   representable should refuse, not zero. Separately, check why the TCO analysis
-   sees `super.m()` as a self-call.
-3. **Extend the interface trait machinery to classes.** A class with subtypes
-   gets a trait carrying every method; each class gets an impl; a `Base`-typed
-   slot becomes `Box<dyn BaseTrait>`. `super.m()` becomes the base's inherent
-   method called explicitly. This is the same shape 0002b needs, and doing it
-   through the existing, *working* interface path is much cheaper than a new
-   representation.
-4. **`instanceof` against a supertype** falls out of 3 (`as_any` downcast per
-   concrete subtype). Until then it should refuse rather than answer `false`.
+The cheap loudness guardrails described in the original direction have landed:
+source-class upcasts, nested upcasts, source-supertype `instanceof`, and
+mutating `super.m()` calls now refuse rather than silently fabricating values.
+The remaining implementation work is the substantive class hierarchy carrier:
+extend the interface trait machinery to classes so a supertype slot can hold a
+subtype value with dynamic dispatch, and make subtype-aware `instanceof` fall out
+of that runtime carrier.
 
 ---
 
@@ -464,9 +476,16 @@ generated Rust and rejects the old `Default::default()` lowering.
 
 `NestedInterfaceDispatch.java` is now in `tests/differential/`.
 
-`tests/differential/` currently has **zero** fixtures using `extends`,
-`abstract`, or a supertype-typed variable. Every divergence in this file is
-invisible to the present gate.
+The main `tests/differential/` suite now contains positive concrete inheritance,
+direct `super`, and interface coverage. The source-class subtype-carrier cases
+remain explicit known gaps under `tests/differential/known-gaps/` until the
+class hierarchy carrier lands.
+
+Follow-up 2026-09-09: `PolymorphicListUpcast.java` was added beside the direct
+upcast fixtures so the collection-supertype variant is a known-gap contract too.
+`ArrayList<Account>.add(new Savings(...))` now proves the Java oracle
+`savings,105` while requiring the same loud `Savings -> Account` hierarchy
+refusal and `unsupported_inheritance` diagnostic.
 
 ## Codex follow-up 2026-08-25 — type-parameter and argument upcasts are loud
 
@@ -539,7 +558,7 @@ object-slicing expectation from re-entering the suite.
 
 Regression:
 
-- `source_subclass_constructor_flows_to_flattened_superclass_slot`
+- `source_subclass_constructor_to_superclass_slot_is_loud_not_flattened`
 
 ## Codex follow-up 2026-08-28 — optional source-supertype present values are loud
 
@@ -668,8 +687,8 @@ representation and dynamic dispatch model.
 
 Follow-up 2026-09-07:
 `optional_resource_facade_upcast_clones_wrapper_before_consuming_unwrap` is now a
-positive compile-backed check. The remaining output still uses the placeholder
-external upcast, but it compiles and no longer belongs in the idiom-gaps failure
+positive compile-backed check. The remaining output uses the adapter-backed
+external upcast and compiles, so it no longer belongs in the idiom-gaps failure
 baseline.
 
 Follow-up 2026-09-07: direct emitted `super.m()` lowering now refuses mutating
@@ -681,3 +700,34 @@ emits
 `compile_error!("unsupported Java mutating super call: ... requires class hierarchy lowering")`
 until the real source-class hierarchy carrier exists. Regression:
 `idiom_gaps::source_mutating_super_method_call_is_loud_hierarchy_gap`.
+
+Follow-up 2026-09-10: the remaining non-carrier hierarchy gap is now pinned by
+additional differential known-gap Java oracles, not only idiom assertion text.
+Added `ExplicitInheritanceUpcast.java`, `ErasedObjectSupertypeCast.java`,
+`PatternInstanceofSupertype.java`, `PatternInstanceofSupertypeTernary.java`,
+and `SuperMutatingCall.java` under `tests/differential/known-gaps/`; the known
+gap harness validates their Java outputs and the current loud failure mode.
+The lowering diagnostics pass now also reports `unsupported_inheritance` for the
+explicit source-subtype cast and
+`unsupported_cast_source_hierarchy_runtime_carrier` for erased-object casts to a
+source supertype, so the known-gap harness checks both the `compile_error!`
+surface and the diagnostic code.
+
+Follow-up 2026-09-10 cleanup: representation-lowering's dyn-trait
+implementation compatibility policy carriers
+(`TraitImplMethodFallbackPolicy`, `TraitImplMethodCompatibilityError`, and
+`TraitImplMethodMessagePolicy`) are crate-local. This only narrows the helper
+surface around current trait-impl diagnostics; it does not implement the source
+class hierarchy carrier.
+Follow-up cleanup: `TraitImplMethodMessagePolicy::compile_error_body` is private
+to `representation_lowering`, so the crate-local policy no longer exposes a
+public message-rendering method on the compatibility carrier.
+
+Follow-up 2026-09-10 known-gap harness hardening: `LoudCompileError`
+expectations can now require or forbid generated Rust fragments in addition to
+checking the `compile_error!` message and diagnostic code. The source hierarchy
+known gaps use that to reject stale slicing/exact-type shapes such as
+`Savings::new(...).into()`, copied mutating `Base::bump(&...)`, exact
+`.is::<A>()`, and exact `downcast_ref::<A>()` paths. This keeps the executable
+known-gap fixtures self-contained while the real class hierarchy carrier
+remains open.

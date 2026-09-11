@@ -405,10 +405,7 @@ fn collect_type_method_declaration_effect_facts(ty: &TypeDecl, facts: &mut FactS
                 let return_nullability = source_summary_method_return_nullability(method);
                 if return_nullability != NullabilityState::Unknown || !method.throws.is_empty() {
                     facts.method_effect_facts.push(MethodEffectFact {
-                        method: MethodKey {
-                            type_name: ty.name.clone(),
-                            method_name: method.name.clone(),
-                        },
+                        method: MethodKey::source_method(ty, method),
                         receiver_mutability: ReceiverMutabilityFact::Unknown,
                         return_nullability,
                         thrown: method.throws.clone(),
@@ -6346,10 +6343,7 @@ fn collect_field_declaration_facts_for_type(
                 let is_static_final = field.modifiers.contains(&Modifier::Static)
                     && field.modifiers.contains(&Modifier::Final);
                 facts.external_field_facts.push(ExternalFieldFact {
-                    field: FieldKey {
-                        type_name: type_name.clone(),
-                        field_name: field.name.clone(),
-                    },
+                    field: FieldKey::named(type_name.clone(), field.name.clone()),
                     field_type: Some(field.ty.clone()),
                     field_kind: if is_static_final {
                         ExternalFieldKind::StaticFinal
@@ -6416,10 +6410,10 @@ pub fn static_final_constant_declarations(program: &Program) -> Vec<ConstantDecl
 #[derive(Debug, Clone)]
 pub struct ConstantDeclaration {
     /// Package-qualified owner, e.g. `pkg1.Constants` or `pkg1.Outer.Inner`.
-    pub owner: String,
+    owner: String,
     /// The declaring file's package, if any.
-    pub package: Option<String>,
-    pub field: crate::java_ir::FieldDecl,
+    package: Option<String>,
+    field: crate::java_ir::FieldDecl,
 }
 
 /// Folds `declarations` to a fixpoint and reports the values that resolve.
@@ -6499,10 +6493,10 @@ pub fn fold_constant_declarations(
             facts
                 .external_field_value_facts
                 .push(crate::facts::ExternalFieldValueFact {
-                    field: FieldKey {
-                        type_name: declaration.owner.clone(),
-                        field_name: declaration.field.name.clone(),
-                    },
+                    field: FieldKey::named(
+                        declaration.owner.clone(),
+                        declaration.field.name.clone(),
+                    ),
                     rust_value,
                     provenance: FactProvenance::ParsedSource,
                 });

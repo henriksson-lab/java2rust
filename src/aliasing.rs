@@ -29,10 +29,9 @@ use std::collections::HashMap;
 use crate::diagnostics::{DiagnosticBag, Severity};
 use crate::facts::{FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, UnaryOp};
-use crate::java_signature::{JavaCallableKey, JavaOwnerKey};
 use crate::liveness::LivenessAnalysis;
 use crate::types::TypeEnv;
-use crate::usage::{MethodUsageFacts, UsageConstructorKey, UsageFacts};
+use crate::usage::{MethodUsageFacts, UsageFacts};
 
 /// A clone that Java would not have made, where the difference is observable.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -153,13 +152,7 @@ fn collect_in_type(
                         &constructor.type_params,
                         &constructor.type_param_bounds,
                     );
-                    let constructor_usage = usage.constructors.get(&UsageConstructorKey {
-                        type_name: ty.name.clone(),
-                        rust_name: constructor
-                            .rust_name
-                            .clone()
-                            .unwrap_or_else(|| "new".to_string()),
-                    });
+                    let constructor_usage = usage.source_constructor_usage(ty, constructor);
                     collect_in_body(
                         body,
                         &format!("{}.<init>", ty.name),
@@ -720,16 +713,9 @@ fn call_writes_through_receiver(
     type_env: &TypeEnv,
 ) -> bool {
     if let Some(resolved) = resolved
-        && let key = JavaCallableKey::resolved_source_method(
-            JavaOwnerKey::resolved_source(resolved.declaring_type.clone()),
-            name,
-            &resolved.arg_target_types,
-            resolved.kind,
-        )
         && usage
-            .methods_by_java_key
-            .get(&key)
-            .is_some_and(|facts| facts.mutates_self)
+            .resolved_source_method_usage(resolved, name)
+            .is_some_and(|facts| facts.mutates_self())
     {
         return true;
     }
@@ -1105,40 +1091,25 @@ mod tests {
             "handle".to_string(),
             1,
         );
+        let first_fact = crate::usage::BindingUseFacts {
+            name: "handle".to_string(),
+            binding: Some(first.clone()),
+            java_ty: JavaType::String,
+            uses: Vec::new(),
+        };
+        let second_fact = crate::usage::BindingUseFacts {
+            name: "handle".to_string(),
+            binding: Some(second.clone()),
+            java_ty: JavaType::Named {
+                name: "Record".to_string(),
+                args: Vec::new(),
+            },
+            uses: Vec::new(),
+        };
         let mut usage = MethodUsageFacts::default();
-        usage.bindings_by_id.insert(
-            first.clone(),
-            crate::usage::BindingUseFacts {
-                name: "handle".to_string(),
-                binding: Some(first),
-                java_ty: JavaType::String,
-                uses: Vec::new(),
-            },
-        );
-        usage.bindings_by_id.insert(
-            second.clone(),
-            crate::usage::BindingUseFacts {
-                name: "handle".to_string(),
-                binding: Some(second.clone()),
-                java_ty: JavaType::Named {
-                    name: "Record".to_string(),
-                    args: Vec::new(),
-                },
-                uses: Vec::new(),
-            },
-        );
-        usage.bindings.insert(
-            "handle".to_string(),
-            crate::usage::BindingUseFacts {
-                name: "handle".to_string(),
-                binding: Some(second.clone()),
-                java_ty: JavaType::Named {
-                    name: "Record".to_string(),
-                    args: Vec::new(),
-                },
-                uses: Vec::new(),
-            },
-        );
+        usage.insert_binding_id_test_fact(first, first_fact);
+        usage.insert_binding_id_test_fact(second, second_fact.clone());
+        usage.insert_idless_compatibility_test_fact("handle", second_fact);
 
         assert_eq!(
             receiver_java_type_for_handle("handle", Some(&usage)),

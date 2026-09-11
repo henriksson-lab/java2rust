@@ -8,7 +8,7 @@ pub fn named_constructor_expr(
     constructor_name: &str,
     args: Vec<RustExpr>,
 ) -> RustExpr {
-    let owner = crate::slot_render::rust_name_for_java_named_type(type_name);
+    let owner = crate::java_naming::rust_name_for_java_named_type(type_name);
     let function = crate::coercion::owner_associated_path_projection(&owner, constructor_name);
     crate::coercion::function_call_projection(function, args)
 }

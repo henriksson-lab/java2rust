@@ -27,7 +27,7 @@ pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
             static_member_import_owner(name, env).or_else(|| env.static_field_access_owner(name))
         {
             owner_associated_path_projection(
-                &crate::slot_render::rust_name_for_java_named_type(owner),
+                &crate::java_naming::rust_name_for_java_named_type(owner),
                 static_name,
             )
         } else {
@@ -178,7 +178,7 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
         MemberAccessOp::Array2ColsAsI32 => crate::coercion::array2_cols_i32_projection(receiver),
         MemberAccessOp::StaticConstant { owner } => {
             let owner = if owner.contains('.') {
-                crate::slot_render::rust_name_for_java_named_type(owner)
+                crate::java_naming::rust_name_for_java_named_type(owner)
             } else {
                 owner.clone()
             };

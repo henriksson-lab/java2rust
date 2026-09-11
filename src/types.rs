@@ -469,15 +469,31 @@ pub(crate) fn raw_generic_type_head(raw: &str) -> Option<&str> {
     rest.ends_with('>').then_some(head.trim())
 }
 
-pub fn raw_rust_type_is_result(raw: &str) -> bool {
+pub fn rendered_rust_type_is_result(rendered: &str) -> bool {
+    raw_rust_type_is_result(rendered)
+}
+
+pub fn rendered_rust_type_is_option(rendered: &str) -> bool {
+    raw_rust_type_is_option(rendered)
+}
+
+pub fn rendered_rust_result_args(rendered: &str) -> Option<Vec<&str>> {
+    raw_rust_result_args(rendered)
+}
+
+pub fn rendered_rust_option_inner(rendered: &str) -> Option<&str> {
+    raw_rust_option_inner(rendered)
+}
+
+pub(crate) fn raw_rust_type_is_result(raw: &str) -> bool {
     raw_rust_result_args(raw).is_some()
 }
 
-pub fn raw_rust_type_is_option(raw: &str) -> bool {
+pub(crate) fn raw_rust_type_is_option(raw: &str) -> bool {
     raw_rust_option_inner(raw).is_some()
 }
 
-pub fn raw_rust_result_args(raw: &str) -> Option<Vec<&str>> {
+pub(crate) fn raw_rust_result_args(raw: &str) -> Option<Vec<&str>> {
     let raw = raw.trim();
     let generic_start = raw.find('<')?;
     let head = raw[..generic_start].trim();
@@ -488,7 +504,7 @@ pub fn raw_rust_result_args(raw: &str) -> Option<Vec<&str>> {
     Some(split_top_level_rust_type_args(inner))
 }
 
-pub fn raw_rust_option_inner(raw: &str) -> Option<&str> {
+pub(crate) fn raw_rust_option_inner(raw: &str) -> Option<&str> {
     raw_rust_generic_args(raw, "Option")
         .or_else(|| raw_rust_generic_args(raw, "std::option::Option"))
         .and_then(|args| {

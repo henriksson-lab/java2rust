@@ -1,4 +1,3 @@
-use crate::conversion_plan::ConversionDiagnostic;
 use crate::diagnostics::Severity;
 use crate::facts::FactSet;
 use crate::java_ir::{
@@ -15,16 +14,6 @@ pub struct LoweringDiagnosticPlan {
     pub severity: Severity,
     pub code: &'static str,
     pub message: String,
-}
-
-pub fn lowering_diagnostic_from_conversion_diagnostic(
-    diagnostic: ConversionDiagnostic,
-) -> LoweringDiagnosticPlan {
-    LoweringDiagnosticPlan {
-        severity: Severity::Unsupported,
-        code: diagnostic.code,
-        message: diagnostic.message,
-    }
 }
 
 pub fn collect_lowering_diagnostic_plans(
@@ -187,6 +176,25 @@ impl SourceIdentityFacts {
         };
         let simple = simple_type_name(name);
         self.source_classes.contains(simple) && self.extends.values().any(|parent| parent == simple)
+    }
+
+    fn source_class_reaches_supertype(&self, source_name: &str, target_name: &str) -> bool {
+        let mut current = simple_type_name(source_name).to_string();
+        let target = simple_type_name(target_name);
+        if current == target || !self.source_classes.contains(&current) {
+            return false;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        while seen.insert(current.clone()) {
+            let Some(parent) = self.extends.get(&current) else {
+                return false;
+            };
+            if parent == target {
+                return true;
+            }
+            current = parent.clone();
+        }
+        false
     }
 
     fn reference_identity_equality_is_implemented(
@@ -601,6 +609,30 @@ fn collect_expr_reference_identity_equality_diagnostics(
             ),
         });
     }
+    if let Expr::Cast { ty, expr: source } = expr
+        && erased_object_cast_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
+    {
+        diagnostics.push(LoweringDiagnosticPlan {
+            severity: Severity::Unsupported,
+            code: "unsupported_cast_source_hierarchy_runtime_carrier",
+            message: format!(
+                "unsupported Java cast: target type {} has source subtypes and requires class hierarchy lowering",
+                concrete_java_type_name(ty).unwrap_or("unknown")
+            ),
+        });
+    } else if let Expr::Cast { ty, expr: source } = expr
+        && source_class_cast_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
+    {
+        diagnostics.push(LoweringDiagnosticPlan {
+            severity: Severity::Unsupported,
+            code: "unsupported_inheritance",
+            message: format!(
+                "unsupported Java class upcast: {} to {} requires class hierarchy lowering",
+                concrete_java_type_name(&infer_expr_type(source, env)).unwrap_or("unknown"),
+                concrete_java_type_name(ty).unwrap_or("unknown")
+            ),
+        });
+    }
     // `a.equals(b)` on a class that does not override `equals` is *identity* in
     // Java, not structural comparison. Same defect as `==`, and worse in effect:
     // it answers `true` where Java says `false`, so a `HashMap` or `contains`
@@ -798,6 +830,34 @@ fn source_instanceof_to_supertype_requires_hierarchy_diagnostic(
     ) && identity.source_class_has_subtype(target)
 }
 
+fn erased_object_cast_to_supertype_requires_hierarchy_diagnostic(
+    source: &Expr,
+    target: &JavaType,
+    env: &TypeEnv,
+    identity: &SourceIdentityFacts,
+) -> bool {
+    matches!(
+        infer_expr_type(source, env),
+        JavaType::Named { name, .. } if simple_type_name(&name) == "Object"
+    ) && identity.source_class_has_subtype(target)
+}
+
+fn source_class_cast_to_supertype_requires_hierarchy_diagnostic(
+    source: &Expr,
+    target: &JavaType,
+    env: &TypeEnv,
+    identity: &SourceIdentityFacts,
+) -> bool {
+    let source_ty = infer_expr_type(source, env);
+    let Some(source_name) = concrete_java_type_name(&source_ty) else {
+        return false;
+    };
+    let Some(target_name) = concrete_java_type_name(target) else {
+        return false;
+    };
+    identity.source_class_reaches_supertype(source_name, target_name)
+}
+
 fn reference_identity_equality_diagnostic_code(
     left: &JavaType,
     right: &JavaType,
@@ -821,4 +881,68 @@ fn java_type_has_reference_identity(ty: &JavaType) -> bool {
 
 fn expr_is_null_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(crate::java_ir::Literal::Null))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::translate_source;
+
+    #[test]
+    fn explicit_source_supertype_cast_reports_unsupported_inheritance() {
+        let translation = translate_source(
+            r#"
+class ExplicitInheritanceUpcast {
+    static String run() {
+        Account a = (Account) new Savings(100, 5);
+        return a.label();
+    }
+}
+class Account {
+    int amount;
+    Account(int amount) { this.amount = amount; }
+    String label() { return "account"; }
+}
+class Savings extends Account {
+    int rate;
+    Savings(int amount, int rate) { super(amount); this.rate = rate; }
+    String label() { return "savings"; }
+}
+"#,
+        );
+
+        assert!(
+            translation.diagnostics.has_code("unsupported_inheritance"),
+            "{:?}",
+            translation.diagnostics.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn erased_object_supertype_cast_reports_runtime_carrier_gap() {
+        let translation = translate_source(
+            r#"
+class ErasedObjectSupertypeCast {
+    static String run() {
+        Object o = new B();
+        A a = (A) o;
+        return a.label();
+    }
+}
+class A {
+    String label() { return "A"; }
+}
+class B extends A {
+    String label() { return "B"; }
+}
+"#,
+        );
+
+        assert!(
+            translation
+                .diagnostics
+                .has_code("unsupported_cast_source_hierarchy_runtime_carrier"),
+            "{:?}",
+            translation.diagnostics.iter().collect::<Vec<_>>()
+        );
+    }
 }

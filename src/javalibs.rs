@@ -1,6 +1,6 @@
 use crate::java_ir::{Expr, JavaType, Member, Program, Stmt, TypeDecl, WildcardBound};
 
-pub fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
+pub(crate) fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     let JavaType::Named { name, args } = java_ty else {
         return None;
     };
@@ -20,7 +20,7 @@ pub fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     }
 }
 
-pub fn generic_facade_interface_erases_to_named_rust_type(java_ty: &JavaType) -> bool {
+pub(crate) fn generic_facade_interface_erases_to_named_rust_type(java_ty: &JavaType) -> bool {
     let JavaType::Named { name, args } = java_ty else {
         return false;
     };
@@ -66,7 +66,7 @@ impl IOUtils {
     )
 }
 
-pub fn program_uses_broad_ioutils_facade(program: &Program) -> bool {
+pub(crate) fn program_uses_broad_ioutils_facade(program: &Program) -> bool {
     program.imports.iter().any(|import| {
         matches!(
             import.path.as_str(),
@@ -220,7 +220,7 @@ pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usi
     )
 }
 
-pub fn native_java_static_owner_alias(receiver_type: &str) -> Option<&'static str> {
+pub(crate) fn native_java_static_owner_alias(receiver_type: &str) -> Option<&'static str> {
     let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     match receiver.as_str() {
         "FastMath"
@@ -234,7 +234,7 @@ pub fn native_java_static_owner_alias(receiver_type: &str) -> Option<&'static st
     }
 }
 
-pub fn preferred_static_owner_alias(
+pub(crate) fn preferred_static_owner_alias(
     owner: &str,
     method: &str,
     arg_count: usize,
@@ -285,7 +285,7 @@ pub fn preferred_static_owner_alias(
     }
 }
 
-pub fn wildcard_import_static_type_aliases(
+pub(crate) fn wildcard_import_static_type_aliases(
     package: &str,
 ) -> &'static [(&'static str, &'static str)] {
     match package {
@@ -717,6 +717,7 @@ pub fn is_jdk_input_stream_facade_type(canonical_key: &str) -> bool {
 #[cfg(test)]
 mod jdk_name_set_tests {
     use super::*;
+    use crate::parser::parse_java_source;
     use crate::rust_ir::RustItem;
 
     #[test]
@@ -752,5 +753,21 @@ mod jdk_name_set_tests {
         assert!(support.contains("pub fn assert_file_is_readable<P: JavaPathArg>"));
         assert!(support.contains("pub fn assert_paths_are_readable<P: JavaPathArg>"));
         assert!(support.contains("pub fn create_temp_file<P: JavaPathArg, S: JavaPathArg>"));
+    }
+
+    #[test]
+    fn broad_ioutils_facade_detector_matches_imports() {
+        let imported = parse_java_source(
+            r#"
+import org.broadinstitute.hellbender.utils.io.IOUtils;
+
+class UseImportedBroadIoUtils {
+    String fromString(String value) {
+        return IOUtils.getPath(value).toString();
+    }
+}
+"#,
+        );
+        assert!(program_uses_broad_ioutils_facade(&imported.program));
     }
 }

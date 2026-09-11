@@ -3,11 +3,26 @@
  * translation has no shared representation to lower that into, so it copies.
  *
  * Every line below is a case where the copy is observable. Java prints
- * "5|7|3|9"; the translation prints "0|0|0|0" once each struct derives Clone.
+ * "5|7|3|9|11|13|17|19"; the translation computes stale values once each struct
+ * derives Clone.
  */
 public class Aliasing {
     static class Node {
         int v;
+    }
+
+    static class Holder {
+        Node stored;
+    }
+
+    static class HasField {
+        Node stored;
+
+        int storeAndRead(Node node) {
+            this.stored = node;
+            node.v = 13;
+            return this.stored.v;
+        }
     }
 
     static class Counter {
@@ -19,6 +34,29 @@ public class Aliasing {
 
         int get() {
             return this.v;
+        }
+    }
+
+    interface Action {
+        void run();
+    }
+
+    static class BlockLambdaOwner {
+        int apply(Action action, Node node) {
+            action.run();
+            return node.v;
+        }
+    }
+
+    static class StoredRunnable implements Action {
+        Node node;
+
+        StoredRunnable(Node node) {
+            this.node = node;
+        }
+
+        public void run() {
+            this.node.v = 19;
         }
     }
 
@@ -57,6 +95,43 @@ public class Aliasing {
         return cell[0].v;
     }
 
+    /** An alias stored through another object's field. */
+    static int writeThroughHolderField() {
+        Node a = new Node();
+        Holder holder = new Holder();
+        holder.stored = a;
+        a.v = 11;
+        return holder.stored.v;
+    }
+
+    /** The same field-storage alias through a this-field target. */
+    static int writeThroughThisField() {
+        Node a = new Node();
+        HasField owner = new HasField();
+        return owner.storeAndRead(a);
+    }
+
+    /** A block-bodied anonymous action mutates an alias captured from the outer scope. */
+    static int writeThroughBlockAction() {
+        Node a = new Node();
+        Node b = a;
+        BlockLambdaOwner owner = new BlockLambdaOwner();
+        return owner.apply(new Action() {
+            public void run() {
+                a.v = 17;
+            }
+        }, b);
+    }
+
+    /** A stored Runnable-style implementation mutates the same object through its field. */
+    static int writeThroughStoredRunnable() {
+        Node a = new Node();
+        Node b = a;
+        Action action = new StoredRunnable(a);
+        action.run();
+        return b.v;
+    }
+
     public static String run() {
         return writeThroughOriginal()
                 + "|"
@@ -64,7 +139,15 @@ public class Aliasing {
                 + "|"
                 + writeThroughMutatingCall()
                 + "|"
-                + writeThroughArrayElement();
+                + writeThroughArrayElement()
+                + "|"
+                + writeThroughHolderField()
+                + "|"
+                + writeThroughThisField()
+                + "|"
+                + writeThroughBlockAction()
+                + "|"
+                + writeThroughStoredRunnable();
     }
 
     public static void main(String[] args) {

@@ -14,8 +14,8 @@ pub struct SwitchPlan<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SwitchCasePlan {
-    pub labels: Vec<SwitchCaseLabelPlan>,
+pub(crate) struct SwitchCasePlan {
+    pub(crate) labels: Vec<SwitchCaseLabelPlan>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -25,13 +25,13 @@ pub struct SimpleReturnSwitchPlan<'a> {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct SimpleReturnSwitchCasePlan<'a> {
+pub(crate) struct SimpleReturnSwitchCasePlan<'a> {
     pub labels: Vec<SwitchCaseLabelPlan>,
     pub return_expr: &'a Expr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum SwitchCaseLabelPlan {
+pub(crate) enum SwitchCaseLabelPlan {
     Expr(Expr),
     Default,
 }
@@ -46,7 +46,7 @@ pub fn plan_switch<'a>(selector: &'a Expr, cases: &'a [SwitchCase]) -> SwitchPla
     }
 }
 
-pub fn plan_switch_case(case: &SwitchCase) -> SwitchCasePlan {
+pub(crate) fn plan_switch_case(case: &SwitchCase) -> SwitchCasePlan {
     SwitchCasePlan {
         labels: case
             .labels
@@ -89,7 +89,9 @@ pub fn plan_simple_return_switch<'a>(
     Some(SimpleReturnSwitchPlan { selector, cases })
 }
 
-pub fn plan_simple_return_switch_case(case: &SwitchCase) -> Option<SimpleReturnSwitchCasePlan<'_>> {
+pub(crate) fn plan_simple_return_switch_case(
+    case: &SwitchCase,
+) -> Option<SimpleReturnSwitchCasePlan<'_>> {
     let [Stmt::Return(Some(return_expr))] = case.statements.as_slice() else {
         return None;
     };
@@ -106,7 +108,7 @@ pub fn plan_simple_return_switch_case(case: &SwitchCase) -> Option<SimpleReturnS
 /// `break` at all, so checking first lets the caller keep the original node.
 /// Mirrors the traversal in `rewrite_switch_breaks` exactly: a `break` inside a
 /// nested loop belongs to that loop, not to the switch.
-pub fn switch_case_stmt_needs_break_rewrite(stmt: &Stmt) -> bool {
+pub(crate) fn switch_case_stmt_needs_break_rewrite(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::Break(None) => true,
         Stmt::If {
@@ -133,7 +135,7 @@ fn block_needs_switch_break_rewrite(block: &Block) -> bool {
         .any(switch_case_stmt_needs_break_rewrite)
 }
 
-pub fn rewrite_switch_breaks(stmt: &Stmt, switch_label: &str) -> Stmt {
+pub(crate) fn rewrite_switch_breaks(stmt: &Stmt, switch_label: &str) -> Stmt {
     match stmt {
         Stmt::Break(None) => Stmt::Break(Some(switch_label.to_string())),
         Stmt::If {
@@ -161,5 +163,64 @@ fn rewrite_switch_breaks_in_block(block: &Block, switch_label: &str) -> Block {
             .iter()
             .map(|stmt| rewrite_switch_breaks(stmt, switch_label))
             .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java_ir::Literal;
+
+    fn return_case(labels: Vec<SwitchLabel>, value: i32) -> SwitchCase {
+        SwitchCase {
+            labels,
+            statements: vec![Stmt::Return(Some(Expr::Literal(Literal::Int(value))))],
+        }
+    }
+
+    #[test]
+    fn simple_return_switch_case_plans_return_cases_not_label_groups() {
+        let label_group = SwitchCase {
+            labels: vec![SwitchLabel::Expr(Expr::Literal(Literal::Int(2)))],
+            statements: Vec::new(),
+        };
+        let return_group = return_case(vec![SwitchLabel::Expr(Expr::Literal(Literal::Int(3)))], 30);
+
+        assert!(plan_simple_return_switch_case(&label_group).is_none());
+
+        let planned = plan_simple_return_switch_case(&return_group).unwrap();
+        assert_eq!(
+            planned.labels,
+            vec![SwitchCaseLabelPlan::Expr(Expr::Literal(Literal::Int(3)))]
+        );
+        assert_eq!(planned.return_expr, &Expr::Literal(Literal::Int(30)));
+    }
+
+    #[test]
+    fn switch_case_plans_labels_and_rewrites_bare_breaks() {
+        let expr_case = SwitchCase {
+            labels: vec![SwitchLabel::Expr(Expr::Literal(Literal::Int(1)))],
+            statements: vec![Stmt::Break(None)],
+        };
+        let default_case = SwitchCase {
+            labels: vec![SwitchLabel::Default],
+            statements: Vec::new(),
+        };
+
+        assert!(matches!(
+            plan_switch_case(&expr_case).labels.as_slice(),
+            [SwitchCaseLabelPlan::Expr(_)]
+        ));
+        assert!(matches!(
+            plan_switch_case(&default_case).labels.as_slice(),
+            [SwitchCaseLabelPlan::Default]
+        ));
+        assert!(switch_case_stmt_needs_break_rewrite(
+            &expr_case.statements[0]
+        ));
+        assert_eq!(
+            rewrite_switch_breaks(&expr_case.statements[0], SWITCH_LABEL),
+            Stmt::Break(Some(SWITCH_LABEL.to_string()))
+        );
     }
 }

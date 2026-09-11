@@ -72,6 +72,13 @@ fenced back to crate-local visibility:
 The existing source centralization guard now expects the constructor-self helper
 to be `pub(crate)`.
 
+Updated 2026-09-10: the loop planner's direct plan-shape API is crate-local too:
+`ForBodyStmtPlan`, `WhileStmtPlan`, `PostLoopRefinementPlan`,
+`plan_for_body_stmt`, `plan_while_stmt`, and `post_loop_refinement_for_while`.
+The exact planner assertions now live in `src/loop_plan.rs`; the slot-shape
+integration test keeps the layer/source guard and the public behavior checks
+through loop lowering.
+
 Updated 2026-08-24: another test-only default wrapper was retired:
 `access_lowering::lower_field_access` had no production caller and only four
 test callers beside the live fact-aware `lower_field_access_with_facts` entry
@@ -440,6 +447,9 @@ small and live: ranked slot-shape joins are used by `signature.rs`, and
 `field_nullability_join` is used by both `signature.rs` and
 `semantic_analysis.rs`, so there is no current follow-up to delete `lattice.rs`
 or move it into one caller.
+Follow-up 2026-09-10: `field_nullability_join` itself is crate-local now, and
+its direct conflict-case assertions live beside `lattice.rs` rather than in
+`slot_shape_design`.
 
 The 8 `*_VALUES` constants are the sharpest case: they have **no reader at all**,
 not even a test. They are a hand-maintained mirror of each enum's variant list,

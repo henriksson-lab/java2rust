@@ -76,7 +76,10 @@ pub fn storage_nullability_lattice_rank(requirement: &NullabilityState) -> u8 {
     }
 }
 
-pub fn field_nullability_join(left: NullabilityState, right: NullabilityState) -> NullabilityState {
+pub(crate) fn field_nullability_join(
+    left: NullabilityState,
+    right: NullabilityState,
+) -> NullabilityState {
     use NullabilityState::{DefinitelyNonNull, DefinitelyNull, MaybeNull, Unknown};
 
     match (left, right) {
@@ -87,5 +90,21 @@ pub fn field_nullability_join(left: NullabilityState, right: NullabilityState) -
         (Unknown, _) | (_, Unknown) => Unknown,
         (DefinitelyNonNull, DefinitelyNonNull) => DefinitelyNonNull,
         (DefinitelyNull, DefinitelyNull) => DefinitelyNull,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use NullabilityState::{DefinitelyNonNull, DefinitelyNull, MaybeNull, Unknown};
+
+    #[test]
+    fn field_nullability_join_handles_conflicting_evidence() {
+        assert_eq!(
+            field_nullability_join(DefinitelyNull, DefinitelyNonNull),
+            MaybeNull
+        );
+        assert_eq!(field_nullability_join(Unknown, DefinitelyNonNull), Unknown);
+        assert_eq!(field_nullability_join(Unknown, DefinitelyNull), MaybeNull);
     }
 }

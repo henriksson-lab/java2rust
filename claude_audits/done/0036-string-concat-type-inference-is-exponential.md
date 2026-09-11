@@ -65,7 +65,9 @@ BinaryOp::Add
 ```
 
 `binary_add_operands_make_string_concat` was already the function
-`is_string_concat` bottoms out in; it is now `pub`.
+`is_string_concat` bottoms out in. Follow-up 2026-09-10 narrowed it and the
+string-concat analysis/plan/render pipeline to crate-local callers; the direct
+pipeline assertions now live beside the owning modules.
 
 **The two are equivalent for a `Binary { Add, left, right }` node.**
 `is_string_concat` is `parts.len() > 1 && binary_add_is_string_concat(expr)`,

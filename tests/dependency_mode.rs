@@ -3337,10 +3337,7 @@ class UsesSummaryConstant {
 
     let mut provider_facts = FactSet::default();
     provider_facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "SummaryConstants".to_string(),
-            field_name: "MAX_COUNT".to_string(),
-        },
+        field: FieldKey::named("SummaryConstants", "MAX_COUNT"),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,

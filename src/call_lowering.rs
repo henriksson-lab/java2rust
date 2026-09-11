@@ -1035,7 +1035,8 @@ fn apply_native_collection_static_method(
         NativeCollectionStaticMethod::CollectionsEmptySortedSet => {
             collections_empty_sorted_set_projection()
         }
-        NativeCollectionStaticMethod::CollectionsUnmodifiableList
+        NativeCollectionStaticMethod::CollectionsUnmodifiableCollection
+        | NativeCollectionStaticMethod::CollectionsUnmodifiableList
         | NativeCollectionStaticMethod::CollectionsUnmodifiableSet
         | NativeCollectionStaticMethod::CollectionsUnmodifiableMap => args
             .first()
@@ -1141,6 +1142,15 @@ fn apply_native_collection_method(
         }
         NativeCollectionMethod::ListAdd => {
             return apply_list_add(receiver, args);
+        }
+        NativeCollectionMethod::PriorityQueueAdd => {
+            return apply_priority_queue_add(receiver, args);
+        }
+        NativeCollectionMethod::ArrayBlockingQueueAddUnsupported => {
+            return apply_array_blocking_queue_add_unsupported(args);
+        }
+        NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported => {
+            return apply_array_blocking_queue_offer_unsupported(args);
         }
         NativeCollectionMethod::ListInsert => {
             return apply_list_insert(receiver, args);
@@ -1369,6 +1379,9 @@ fn native_collection_mutation_needs_erased_object_arg(
     if !matches!(
         method,
         NativeCollectionMethod::ListAdd
+            | NativeCollectionMethod::PriorityQueueAdd
+            | NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
+            | NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported
             | NativeCollectionMethod::ListInsert
             | NativeCollectionMethod::SetInsert
     ) {
@@ -1392,6 +1405,48 @@ fn apply_list_add(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
         ))],
         tail: Some(Box::new(RustExpr::Literal("true".to_string()))),
     }
+}
+
+fn apply_priority_queue_add(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call("Java PriorityQueue.add(value) requires one value argument");
+    }
+    let value = args.pop().expect("len checked");
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver.clone(),
+                "push",
+                vec![value],
+            )),
+            RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver,
+                "sort",
+                Vec::new(),
+            )),
+        ],
+        tail: Some(Box::new(RustExpr::Literal("true".to_string()))),
+    }
+}
+
+fn apply_array_blocking_queue_add_unsupported(args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.add(value) requires one value argument",
+        );
+    }
+    compile_error_call("Java ArrayBlockingQueue.add(value) requires bounded-capacity queue support")
+}
+
+fn apply_array_blocking_queue_offer_unsupported(args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.offer(value) requires one value argument",
+        );
+    }
+    compile_error_call(
+        "Java ArrayBlockingQueue.offer(value) requires bounded-capacity queue support",
+    )
 }
 
 fn apply_list_insert(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
@@ -2341,6 +2396,16 @@ fn apply_new_target_with_optional_representations(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
+    if let Some(external_crate) = &target.external_crate {
+        return function_call_projection(
+            external_crate_associated_path_projection(
+                &external_crate.crate_name,
+                &external_crate.type_name,
+                &external_crate.rust_name,
+            ),
+            args,
+        );
+    }
     if let Some(native_collection) = target.native_collection {
         return apply_native_collection_new_target(
             target,
@@ -2352,16 +2417,6 @@ fn apply_new_target_with_optional_representations(
     }
     if let Some(native_string) = target.native_string {
         return apply_native_string_new_target(native_string, args);
-    }
-    if let Some(external_crate) = &target.external_crate {
-        return function_call_projection(
-            external_crate_associated_path_projection(
-                &external_crate.crate_name,
-                &external_crate.type_name,
-                &external_crate.rust_name,
-            ),
-            args,
-        );
     }
     if target.rust_name == "new"
         && args.len() == 1
@@ -2382,6 +2437,12 @@ fn apply_new_target_with_optional_representations(
     if shape_is_erased_object_boundary(&target.owner_shape) {
         return erased_object_constructor_projection(args);
     }
+    if target.rust_name == "new"
+        && args.is_empty()
+        && let Some(sequence_like) = sequence_like_empty_native_collection_projection(target, facts)
+    {
+        return sequence_like;
+    }
     function_call_projection(
         constructor_owner_associated_path_projection(&target.owner_shape, &target.rust_name, facts),
         args,
@@ -2394,7 +2455,7 @@ fn constructor_owner_associated_path_projection(
     facts: &FactSet,
 ) -> RustExpr {
     if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &owner_shape.java_ty {
-        let owner = crate::slot_render::rust_name_for_java_named_type(name);
+        let owner = crate::java_naming::rust_name_for_java_named_type(name);
         return owner_associated_path_projection(&owner, member);
     }
     rust_type_associated_path_projection(rust_type_for_slot_with_facts(owner_shape, facts), member)
@@ -2490,12 +2551,19 @@ fn apply_native_collection_new_target(
                     crate::stdlib::JavaCollectionKind::List,
                 )
             }),
+            NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
+                priority_queue_comparator_constructor_unsupported_projection()
+            }
         };
     }
     match native_collection {
         NativeCollectionNewTarget::Empty { kind } => {
-            sequence_like_empty_native_collection_projection(target, facts)
-                .unwrap_or_else(|| native_collection_empty_new_projection(kind))
+            if matches!(kind, crate::stdlib::JavaCollectionKind::List) {
+                sequence_like_empty_native_collection_projection(target, facts)
+                    .unwrap_or_else(|| native_collection_empty_new_projection(kind))
+            } else {
+                native_collection_empty_new_projection(kind)
+            }
         }
         NativeCollectionNewTarget::WithCapacity { kind } => {
             let capacity = args
@@ -2510,7 +2578,16 @@ fn apply_native_collection_new_target(
         NativeCollectionNewTarget::FromSingleArg { kind } => args
             .pop()
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
+        NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
+            priority_queue_comparator_constructor_unsupported_projection()
+        }
     }
+}
+
+fn priority_queue_comparator_constructor_unsupported_projection() -> RustExpr {
+    compile_error_call(
+        "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
+    )
 }
 
 fn sequence_like_empty_native_collection_projection(
@@ -2535,7 +2612,8 @@ fn native_collection_new_target_kind(
         NativeCollectionNewTarget::Empty { kind }
         | NativeCollectionNewTarget::WithCapacity { kind }
         | NativeCollectionNewTarget::FromSource { kind }
-        | NativeCollectionNewTarget::FromSingleArg { kind } => kind,
+        | NativeCollectionNewTarget::FromSingleArg { kind }
+        | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind } => kind,
     }
 }
 

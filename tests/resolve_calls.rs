@@ -14141,8 +14141,8 @@ class SummaryHelper {
     );
     assert!(
         facts.external_field_facts.iter().any(|fact| {
-            fact.field.type_name == "helper.summary.SummaryHelper"
-                && fact.field.field_name == "DEFAULT_NAME"
+            fact.field.type_name() == "helper.summary.SummaryHelper"
+                && fact.field.field_name() == "DEFAULT_NAME"
                 && fact.provenance == FactProvenance::ParsedSource
         }),
         "source field declarations should still be available as parsed source field facts: {:?}",

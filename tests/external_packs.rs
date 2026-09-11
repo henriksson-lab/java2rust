@@ -15,9 +15,9 @@ use new_java2rust::external_packs::{
     broad_hellbender_utils_pack_facts, broad_http_pack_facts, builtin_external_library_pack_facts,
     builtin_external_pack_facts, builtin_external_pack_manifest,
     builtin_external_pack_manifest_for_provider_name, builtin_external_pack_manifests,
-    bwa_pack_facts, disq_write_pack_facts, external_api_arities_for_receiver,
-    external_api_effect_for_receiver_with_arity, external_constructor_arities_for,
-    external_constructor_for, external_conversion_adapter_for,
+    builtin_external_pack_models_api, bwa_pack_facts, disq_write_pack_facts,
+    external_api_arities_for_receiver, external_api_effect_for_receiver_with_arity,
+    external_constructor_arities_for, external_constructor_for, external_conversion_adapter_for,
     external_crate_api_mapping_for_receiver, external_crate_constructor_mapping_for,
     external_field_for, external_library_pack_for_type, fastutil_pack_facts, genomicsdb_pack_facts,
     google_bigquery_pack_facts, google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts,
@@ -1120,8 +1120,8 @@ fn builtin_external_pack_facts_are_generated_from_manifest_boundaries() {
                 .field_nullability_facts
                 .iter()
                 .find(|fact| {
-                    fact.field.type_name == field.type_name
-                        && fact.field.field_name == field.field_name
+                    fact.field.type_name() == field.type_name
+                        && fact.field.field_name() == field.field_name
                 })
                 .unwrap_or_else(|| {
                     panic!(
@@ -1245,8 +1245,8 @@ fn builtin_external_pack_facts_are_generated_from_manifest_boundaries() {
                 .external_field_facts
                 .iter()
                 .find(|fact| {
-                    fact.field.type_name == field.type_name
-                        && fact.field.field_name == field.field_name
+                    fact.field.type_name() == field.type_name
+                        && fact.field.field_name() == field.field_name
                 })
                 .unwrap_or_else(|| {
                     panic!(
@@ -1297,6 +1297,22 @@ fn htsjdk_util_locatable_pack_strategy_preserves_typed_facade_boundary() {
         .external_field_value_for("IOUtil", "GZIP_HEADER_READ_LENGTH")
         .expect("IOUtil.GZIP_HEADER_READ_LENGTH should have a pack-owned value");
     assert_eq!(gzip_header_read_length_value.rust_value, "8000");
+}
+
+#[test]
+fn builtin_external_pack_models_api_uses_modeled_index_not_unsupported_entries() {
+    assert!(builtin_external_pack_models_api(
+        "htsjdk.variant.variantcontext.Allele",
+        "getBaseString"
+    ));
+    assert!(builtin_external_pack_models_api(
+        "Allele",
+        "get_base_string"
+    ));
+    assert!(
+        !builtin_external_pack_models_api("java.sql.ResultSet", "getBlob"),
+        "unsupported APIs must not be reported as modeled APIs"
+    );
 }
 
 #[test]
@@ -1443,12 +1459,14 @@ fn builtin_pack_manifests_explicitly_classify_modeled_member_facts() {
             .iter()
             .filter(|field| field.provenance == FactProvenance::ExternalLibraryPack)
         {
+            let field_owner = field.field.type_name();
+            let field_name = field.field.field_name();
             let modeled = manifest
-                .modeled_field(&field.field.type_name, &field.field.field_name)
+                .modeled_field(field_owner, field_name)
                 .unwrap_or_else(|| {
                     panic!(
                         "{}.{} in {pack_name} has a pack-owned field fact but no manifest coverage entry",
-                        field.field.type_name, field.field.field_name
+                        field_owner, field_name
                     )
                 });
             assert_ne!(modeled.coverage, ExternalApiCoverage::Unsupported);
@@ -1715,10 +1733,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "dep.audit.Record".to_string(),
-            field_name: "MISSING".to_string(),
-        },
+        field: FieldKey::named("dep.audit.Record".to_string(), "MISSING".to_string()),
         field_type: None,
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -1763,10 +1778,7 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         .unsupported_external_field_facts
         .push(UnsupportedExternalFieldFact {
             pack_name: "dep.audit".to_string(),
-            field: FieldKey {
-                type_name: "dep.audit.Record".to_string(),
-                field_name: "RAW_HANDLE".to_string(),
-            },
+            field: FieldKey::named("dep.audit.Record".to_string(), "RAW_HANDLE".to_string()),
             reason: "stale reason".to_string(),
             provenance: FactProvenance::ExternalLibraryPack,
         });
@@ -1774,10 +1786,10 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
         .unsupported_external_field_facts
         .push(UnsupportedExternalFieldFact {
             pack_name: "dep.audit".to_string(),
-            field: FieldKey {
-                type_name: "dep.audit.Record".to_string(),
-                field_name: "UNMODELED_RAW_HANDLE".to_string(),
-            },
+            field: FieldKey::named(
+                "dep.audit.Record".to_string(),
+                "UNMODELED_RAW_HANDLE".to_string(),
+            ),
             reason: "native handle".to_string(),
             provenance: FactProvenance::ExternalLibraryPack,
         });
@@ -1825,10 +1837,10 @@ fn external_pack_manifest_coverage_audit_reports_unclassified_pack_facts() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts.field_nullability_facts.push(FieldNullabilityFact {
-        field: FieldKey {
-            type_name: "dep.audit.Record".to_string(),
-            field_name: "unmodeledNullability".to_string(),
-        },
+        field: FieldKey::named(
+            "dep.audit.Record".to_string(),
+            "unmodeledNullability".to_string(),
+        ),
         state: NullabilityState::DefinitelyNonNull,
         provenance: FieldNullabilityProvenance::ExternalLibraryPack,
     });
@@ -1978,6 +1990,7 @@ fn external_pack_manifest_coverage_audits_crate_mapping_facts() {
     facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
+            pack_name: None,
             type_name: "dep.crate.Reader".to_string(),
             arg_count: 0,
             rust_type_name: Some("Reader".to_string()),
@@ -1987,6 +2000,7 @@ fn external_pack_manifest_coverage_audits_crate_mapping_facts() {
     facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
+            pack_name: None,
             type_name: "dep.crate.NativeOnly".to_string(),
             arg_count: 1,
             rust_type_name: None,
@@ -1996,6 +2010,7 @@ fn external_pack_manifest_coverage_audits_crate_mapping_facts() {
     facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
+            pack_name: None,
             type_name: "dep.crate.Reader".to_string(),
             arg_count: 2,
             rust_type_name: None,
@@ -2059,10 +2074,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "other.Reader".to_string(),
-            field_name: "RAW".to_string(),
-        },
+        field: FieldKey::named("other.Reader".to_string(), "RAW".to_string()),
         field_type: None,
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -2098,10 +2110,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
             provenance: FactProvenance::ExternalLibraryPack,
         });
     facts.field_nullability_facts.push(FieldNullabilityFact {
-        field: FieldKey {
-            type_name: "other.Reader".to_string(),
-            field_name: "name".to_string(),
-        },
+        field: FieldKey::named("other.Reader".to_string(), "name".to_string()),
         state: NullabilityState::DefinitelyNonNull,
         provenance: FieldNullabilityProvenance::ExternalLibraryPack,
     });
@@ -2129,6 +2138,7 @@ fn external_pack_fact_boundary_audit_reports_unowned_manifest_members() {
     facts
         .external_crate_constructor_mapping_facts
         .push(ExternalCrateConstructorMappingFact {
+            pack_name: None,
             type_name: "other.Reader".to_string(),
             arg_count: 0,
             rust_type_name: Some("Reader".to_string()),
@@ -2565,7 +2575,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         .field_nullability_facts
         .iter()
         .find(|fact| {
-            fact.field.type_name == "dep.variant.Record" && fact.field.field_name == "TYPE"
+            fact.field.type_name() == "dep.variant.Record" && fact.field.field_name() == "TYPE"
         })
         .expect("external-pack-field-nullability should emit a field nullability fact");
     assert_eq!(type_field.state, NullabilityState::DefinitelyNonNull);
@@ -2623,9 +2633,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
             "dep.variant.Builder",
             vec![
                 new_java2rust::facts::TypePattern::Any,
-                new_java2rust::facts::TypePattern::Erased(new_java2rust::facts::TypeKey {
-                    type_name: "Options".to_string(),
-                }),
+                new_java2rust::facts::TypePattern::erased("Options"),
             ],
         ))
         .expect("constructor argument type facts should refine constructor callable keys");
@@ -2791,21 +2799,18 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
         "dep.keys.Record",
         "parse",
         Staticness::Unknown,
-        vec![new_java2rust::facts::TypePattern::Exact(
-            new_java2rust::facts::TypeKey {
-                type_name: "String".to_string(),
-            },
-        )],
+        vec![new_java2rust::facts::TypePattern::exact("String")],
     );
     let parse_method = parsed
         .facts
         .external_api_effect_for_key(&parse_key)
         .expect("typed method fact should be addressable by parameterized callable key");
     assert_eq!(parse_method.return_type, Some(JavaType::String));
-    assert!(parse_method.callable_key().is_some_and(|key| !matches!(
-        key.params.as_slice(),
-        [new_java2rust::facts::TypePattern::Any]
-    )));
+    assert!(
+        parse_method
+            .callable_key()
+            .is_some_and(|key| !matches!(key.params(), [new_java2rust::facts::TypePattern::Any]))
+    );
     let parsed_index = parsed.facts.external_lookup_index();
     let typed_call = parsed_index
         .external_api_effect_for_call(Some("dep.keys.Record"), "parse", &[JavaType::String])
@@ -2972,11 +2977,7 @@ fn facade_abi_for_call_refuses_ambiguous_simple_package_owner() {
                 owner,
                 "work",
                 Staticness::Unknown,
-                vec![new_java2rust::facts::TypePattern::Exact(
-                    new_java2rust::facts::TypeKey {
-                        type_name: "java.lang.String".to_string(),
-                    },
-                )],
+                vec![new_java2rust::facts::TypePattern::exact("java.lang.String")],
             ),
             rust_path: rust_path.to_string(),
             receiver: ReceiverAbi::BorrowedSelf,

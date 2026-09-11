@@ -7,7 +7,7 @@ pub struct SwitchRenderCase {
     pub statements: Vec<RustStmt>,
 }
 
-pub fn switch_case_condition(
+pub(crate) fn switch_case_condition(
     plan: &SwitchPlan<'_>,
     case_plan: &SwitchCasePlan,
     label_exprs: Vec<RustExpr>,
@@ -116,6 +116,55 @@ pub fn lower_switch_block_stmts(
     out
 }
 
-pub fn switch_match_pattern_expr(expr: RustExpr) -> String {
+pub(crate) fn switch_match_pattern_expr(expr: RustExpr) -> String {
     crate::emit::emit_expr(&expr)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::emit;
+    use crate::java_ir::{Expr, Literal, SwitchCase, SwitchLabel};
+    use crate::switch_plan::{SWITCH_LABEL, plan_switch, plan_switch_case};
+
+    #[test]
+    fn switch_case_condition_builds_structured_exprs() {
+        let selector = Expr::Var("value".to_string());
+        let expr_case = SwitchCase {
+            labels: vec![SwitchLabel::Expr(Expr::Literal(Literal::Int(1)))],
+            statements: Vec::new(),
+        };
+        let default_case = SwitchCase {
+            labels: vec![SwitchLabel::Default],
+            statements: Vec::new(),
+        };
+        let cases = vec![expr_case, default_case];
+        let plan = plan_switch(&selector, &cases);
+
+        assert_eq!(plan.break_label, SWITCH_LABEL);
+        assert_eq!(
+            emit::emit_expr(&switch_case_condition(
+                &plan,
+                &plan_switch_case(&cases[0]),
+                vec![RustExpr::Literal("1".to_string())],
+            )),
+            "!__java_switch_matched && (__java_switch_value == 1)"
+        );
+        assert!(matches!(
+            switch_case_condition(
+                &plan,
+                &plan_switch_case(&cases[0]),
+                vec![RustExpr::Literal("1".to_string())],
+            ),
+            RustExpr::Binary { op, .. } if op == "&&"
+        ));
+        assert_eq!(
+            emit::emit_expr(&switch_case_condition(
+                &plan,
+                &plan_switch_case(&cases[1]),
+                Vec::new(),
+            )),
+            "!__java_switch_matched"
+        );
+    }
 }

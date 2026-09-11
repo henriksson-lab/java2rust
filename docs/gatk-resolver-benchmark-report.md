@@ -37512,7 +37512,7 @@ when the Java erased identity matches and the initializer is concrete/native.
 
 Evidence:
 
-- `duplicate_local_names_use_scoped_occurrence_shape_before_map_insert_conversion`
+- `duplicate_local_names_keep_selected_concrete_shape_before_map_insert_conversion`
   proves an earlier scoped `FeatureReader<String> reader;` declaration does
   not make the later `FeatureReader<String> reader = reader();` occurrence
   downcast when inserted into a `Map<String, FeatureReader<String>>`.

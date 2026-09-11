@@ -14,6 +14,16 @@ through the usage/signature compatibility paths. Treat future fixes here as
 id-less-boundary cleanup, not as evidence that normal Java source locals are
 still rejoined by name.
 
+Follow-up 2026-09-09: `MethodUsageFacts` no longer exposes the boolean
+`binding_for_declaration_with_name_fallback` footgun. Exact binding-id lookup is
+now `binding_facts_for_declaration_id`, and the remaining legacy source-name
+path is spelled `idless_compatibility_binding_facts_for_source_name`.
+`binding_facts_for_param` remains the single parameter helper that chooses
+between those two paths based on whether resolver binding identity exists. This
+preserves current compatibility behavior while making the id-less boundary
+grep-visible. Guard:
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
 Follow-up 2026-09-07: compatibility name-map entries now have to agree on the
 stored `BindingUseFacts.name` as well as any attached `BindingId`. A stale entry
 stored under `bindings["value"]` with payload name `other` can no longer be
@@ -68,12 +78,13 @@ binding declared by that `try`, preserving any distinct same-name binding
 already present in the set. Regression:
 `liveness::tests::catch_binding_filter_preserves_distinct_same_name_bindings`.
 
-Follow-up 2026-09-06: the centralized `MethodUsageFacts` compatibility readers
-remain available to internal analysis/lowering modules, but they are no longer
-public crate APIs. `binding_for_declaration_with_name_fallback`,
-`visible_binding_id_for_name`, `visible_binding_java_type_for_name`,
-`name_binding_is_current`, and `all_binding_facts` are crate-local, keeping the
-id-less/name-map compatibility surface inside the translator.
+Follow-up 2026-09-06, updated 2026-09-10: the centralized `MethodUsageFacts`
+compatibility readers remain available to internal analysis/lowering modules,
+but the mutable maps are no longer public or crate-local APIs.
+`binding_for_declaration_with_name_fallback` is gone; the visible-name helpers
+and `name_binding_is_current` are crate-local. `all_binding_facts()` remains as
+the public read-only aggregate view for integration tests and production passes
+that need all validated facts without reaching into the legacy maps.
 `ShapeEnv::idless_compatibility_local_plan_for_declared_type` is also
 crate-local now; the only production entry remains
 `lower::idless_compatibility_local_plan_for_declaration`.
@@ -86,6 +97,91 @@ guard pins both boundaries.
 `UsageFacts::source_method_usage_for_owner` is crate-local too, keeping the
 owner-explicit Java-key lookup available to internal analysis without making it
 part of the public crate API.
+Follow-up cleanup narrowed the source binding/field Rust-name allocation helpers
+in `java_naming` to crate-local. They remain the centralized internal policy for
+escaped source names, but integration tests now guard the boundary instead of
+requiring those allocators as public crate API.
+
+Follow-up 2026-09-09: direct name-based lookup is no longer an API.
+`MethodUsageFacts::binding_facts_for_name` and the unused public name-presence
+helper `MethodUsageFacts::contains_binding_name` are gone. Follow-up cleanup
+also migrated the remaining integration tests off
+`MethodUsageFacts::unique_binding_facts_for_name` and deleted that API. The
+external regression tests now rely on declaration `BindingId`s or existing
+field-use assertions, while the layering guard rejects reintroducing any of the
+three name-based `MethodUsageFacts` lookup helpers.
+
+Follow-up 2026-09-09: the redundant public exact-id predicate
+`MethodUsageFacts::contains_binding_id` is gone too. Integration tests now call
+`binding_facts_for_id(...).is_some()` directly when they need to assert exact
+resolver binding coverage, leaving only the accessor that returns the validated
+fact payload.
+
+Follow-up 2026-09-09: the parameter binding lookup policy is now owned by
+`MethodUsageFacts::binding_facts_for_param`. Signature and slot-policy code no
+longer carry their own `binding_usage_for_param` copies; they ask the usage
+facts owner to choose between resolver `BindingId` lookup and id-less
+source-name compatibility fallback. Regression:
+`usage::tests::binding_facts_for_param_uses_source_name_and_binding_id`; layering
+guard:
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Follow-up 2026-09-10: the remaining signature unit-test fixture that needed a
+deliberately stale split between `bindings_by_id` and the id-less compatibility
+name map now builds that state through test-only `MethodUsageFacts` helpers
+instead of mutating both private maps from `signature.rs`. The slot-shape
+integration test extension also dropped the old `binding_facts_for_name`,
+`unique_binding_facts_for_name`, and `contains_binding_name` vocabulary in
+favor of explicitly named id-less source-name compatibility helpers, and its
+exact-id assertions call `binding_facts_for_id(...).is_some()` directly instead
+of keeping a local `contains_binding_id` shim. Guard:
+`layering::legacy_usage_binding_name_map_is_owned_by_usage_module`.
+Follow-up cleanup: the broad
+`MethodUsageFacts::from_visible_binding_fixture_facts` constructor is private to
+`usage.rs` tests. The one external unit test that needed a deliberately visible
+same-name split now seeds exact id facts and the compatibility visible-name row
+with the narrower test insertors instead of importing the combined constructor.
+Guard: `layering::idless_local_binding_compatibility_surface_stays_explicit`.
+Codex follow-up 2026-09-10: `MethodUsageFacts::binding_facts_for_id` is
+crate-local now. Integration tests that need exact binding-id assertions go
+through the public validated `all_binding_facts()` view with test-local helpers,
+so downstream users cannot depend on the direct exact-id compatibility reader.
+Guard: `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Follow-up 2026-09-10: the generic mixed `MethodUsageFacts::from_binding_facts`
+constructor is gone. Fixtures and internal tests now spell whether they are
+building exact resolver-bound facts (`from_exact_binding_facts`), id-less
+compatibility facts (`from_idless_compatibility_facts`), or the narrow
+test-only visible-name fixture map (`from_visible_binding_fixture_facts`). This
+removes one remaining broad construction path that silently populated the
+legacy name map from resolver-bound facts. Regression:
+`usage::tests::binding_fact_constructors_separate_exact_and_idless_surfaces`;
+the layering guard rejects reintroducing the generic constructor name.
+
+Follow-up 2026-09-10: the `MethodUsageFacts` backing maps for exact
+`BindingId` facts and id-less compatibility name facts are now private to the
+usage module. External production code was already using the owner helpers; the
+visibility fence makes direct crate-wide map reads or mutation impossible while
+preserving the remaining compatibility surface inside `usage.rs`. Guard:
+`layering::callable_analysis_shell_reaches_lowering_context`.
+Follow-up cleanup also narrowed the arbitrary `UsageFacts::insert_method_usage`
+helper to test-only crate-local visibility; external callers keep the named
+current Rust-name insertion helpers instead of constructing raw compatibility
+keys.
+
+Follow-up 2026-09-10 signature propagation cleanup: resolved constructor
+arguments are no longer all classified as `InternalSameType`; the constructor
+argument boundary now stays internal only when the resolved constructor owner is
+the current type. Cross-type construction therefore keeps the unknown-boundary
+pressure that forces aliased array parameters to owned/native when they leave
+the current class. The parameter constraint normalizer now lets such owned
+requirements replace borrowed-slice defaults instead of rejecting them after an
+alias has already supplied shared/slice constraints. Regressions:
+`slot_shape_design::signature_fixpoint_propagates_new_argument_unknown_boundaries_through_aliases`
+and `signature::tests::owned_param_constraint_replaces_borrowed_slice_default`.
+The neighboring constructor-internal-call fixture was renamed to assert the
+current read-only borrowed-slice path for a resolved source receiver call,
+rather than the old unknown-boundary expectation.
 
 Follow-up 2026-09-07 guardrail cleanup: the layering guard for legacy
 `MethodUsageFacts.bindings` access now scans every production `src/*.rs` module
@@ -96,11 +192,11 @@ analysis or storage strategy cannot reopen a name-map join without going through
 validated accessors or `all_binding_facts()`. Regression:
 `layering::legacy_usage_binding_name_map_is_owned_by_usage_module`.
 
-Follow-up 2026-09-07: the raw `MethodUsageFacts.bindings` and
-`bindings_by_id` maps are crate-local, not public crate API. Integration tests
-now use validated read helpers (`binding_facts_for_name`,
-`unique_binding_facts_for_name`, `binding_facts_for_id`, and contains helpers)
-instead of reaching into the maps. The conversion exposed one stale split:
+Follow-up 2026-09-07, updated 2026-09-10: the raw
+`MethodUsageFacts.bindings` and `bindings_by_id` maps are private to
+`usage.rs`, not public or crate-local APIs. Integration tests were moved off
+direct map access onto validated read helpers instead of reaching into the
+maps. The conversion exposed one stale split:
 `Stmt::VarDecl` initializer call-result usage was recorded through the visible
 name helper after the declaration was inserted, leaving the binding-id fact with
 a different boundary than the legacy name-map payload. Declared initializer
@@ -145,7 +241,7 @@ Partial progress:
   Regressions:
   `anonymous_external_facade_return_keeps_declared_concrete_shape_for_internal_method`
   and
-  `duplicate_local_names_use_scoped_occurrence_shape_before_map_insert_conversion`.
+  `duplicate_local_names_keep_selected_concrete_shape_before_map_insert_conversion`.
 - Signature local mutability no longer comes from the whole-method mutated-name
   set for source declarations. Local constraint collection now asks the shared
   liveness write-after relation about the specific declaration statement, while
@@ -217,13 +313,14 @@ guards both the single caller and the absence of the old cursor symbols. The
   audit remains open for the remaining compatibility surface: the legacy
   `MethodUsageFacts.bindings` map is still keyed by name, and a few id-less or
   synthetic paths still accept name fallback by explicit policy.
-- Follow-up 2026-08-26: signature's remaining local-usage helper no longer
-  reaches directly into `MethodUsageFacts.bindings` to implement the id-less
-  fallback. The policy is centralized on
-  `MethodUsageFacts::binding_for_declaration_with_name_fallback`, so bound
-  declarations, id-less compatibility callers, and duplicate-name fail-closed
-  callers all use the same gate. Focused regressions:
-  `usage::tests::binding_for_declaration_does_not_fall_back_by_name_when_id_is_known`,
+- Follow-up 2026-08-26, current names refreshed 2026-09-10: signature's
+  remaining local-usage helper no longer reaches directly into
+  `MethodUsageFacts.bindings` to implement the id-less fallback. Exact
+  declaration-id lookup is centralized on
+  `MethodUsageFacts::binding_facts_for_declaration_id`, while parameter callers
+  use `MethodUsageFacts::binding_facts_for_param` for the explicit id-less
+  source-name compatibility path. Focused regressions:
+  `usage::tests::binding_facts_for_declaration_id_does_not_fall_back_by_name`,
   `signature::tests::binding_usage_for_bound_local_does_not_fall_back_by_name`,
   `layering::idless_local_binding_compatibility_surface_stays_explicit`, and
   `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
@@ -298,6 +395,13 @@ Dimension: phase architecture / information lost between passes.
 
 ## Symptom
 
+Historical status: the concrete same-name local symptoms in this section are
+now fixed and guarded. Keep this section as origin evidence for the audit, not
+as a current failure report. The live complaint is the narrower one stated at
+the top of this file: deliberately retained id-less/synthetic compatibility
+paths can still use name fallback, while resolver-bound source declarations use
+`BindingId`-keyed plans/facts and fail closed instead of rejoining by name.
+
 The signature solver computes a `LocalPlan` (Rust slot shape + binding
 mutability) for every local declaration in a method. Lowering then has to work
 out *which* `LocalPlan` belongs to *which* declaration. Nothing in the plan
@@ -323,7 +427,7 @@ different module.
 
 ### The identity is now partial, not absent
 
-`src/signature.rs:97-103`:
+`src/signature.rs`:
 
 ```rust
 pub struct LocalPlan {
@@ -335,12 +439,12 @@ pub struct LocalPlan {
 }
 ```
 
-`src/usage.rs:117-124`:
+`src/usage.rs`:
 
 ```rust
 pub struct MethodUsageFacts {
-    pub bindings: HashMap<String, BindingUseFacts>,   // keyed by *name*
-    pub bindings_by_id: HashMap<BindingId, BindingUseFacts>,
+    bindings: HashMap<String, BindingUseFacts>,   // keyed by *name*
+    bindings_by_id: HashMap<BindingId, BindingUseFacts>,
     ...
 }
 ```
@@ -348,9 +452,11 @@ pub struct MethodUsageFacts {
 The original finding that neither type carried declaration identity is stale:
 `BindingId` is now plumbed through `java_ir`, `resolve`, `usage`, `signature`,
 `expr_shape`, and `lower`. The remaining defect is the compatibility surface:
-`LocalPlan` still carries a separate `name`, `MethodUsageFacts.bindings` remains
-as a name-keyed map, and some id-less/synthetic paths can still rejoin by
-`(name, type)` occurrence.
+`LocalPlan` still carries a separate `name`, the internal
+`MethodUsageFacts.bindings` compatibility map remains name-keyed, and some
+id-less/synthetic paths can still rejoin by `(name, type)` occurrence. The maps
+are private now; the risk is retained compatibility state, not public mutable
+evidence.
 
 The identity type is still the right primitive:
 
@@ -369,30 +475,20 @@ pub struct BindingId { pub kind: BindingKind, pub name: String, pub occurrence: 
    root data loss for local constraints, but it is not yet a complete removal
    of name-based usage.
 
-2. **`signature` detects the collision and discards the facts.**
-   `collect_duplicate_declared_local_names` (`src/signature.rs:9917-9924`)
-   counts declarations by name; `collect_local_constraint_sets_from_stmts`
-   then does, at `src/signature.rs:10004-10008` and again at `:10068-10072`:
+2. **`signature` used to detect the collision and discard the facts.**
+   This is historical now. Local signature constraints and plans are
+   binding-keyed for ordinary resolver-bound declarations, so duplicate
+   source names no longer disable all usage-derived local constraints. The
+   remaining duplicate-name check is the explicit source-nullability
+   compatibility view: `source_binding_nullability_constraints` still fails
+   closed when an id-less name lookup would be ambiguous.
 
-   ```rust
-   let usage = if duplicate_names.contains(name) { None } else { usage };
-   ```
-
-   The name is enough to disable *all* usage-derived constraints for *every*
-   local with that name — external receiver mutability, argument boundary,
-   native-collection receiver, map-get value shape, and `MutableBinding`.
-
-3. **`signature` rejoins its own two walkers by `.find()`.**
-   `collect_local_constraint_sets_from_stmts` (`:9984`) and
-   `collect_local_plans_from_stmts` (`:10248`) walk the same body in the same
-   order, but the second does not use position: for each declaration it calls
-   `local_constraints_for_declared_type` (`:10410`), which is
-   `constraints.iter().find(|c| c.name == name && c.java_ty == *ty)` with a
-   name-only `.find()` fallback (`:10399`). N locals sharing a name *and* a
-   declared type all receive the **first** one's constraint set, discarding the
-   per-declaration work done a few hundred lines earlier
-   (`local_initializer_requires_owned_storage`,
-   `initializer_proves_declared_non_null`, capture constraints).
+3. **`signature` used to rejoin its own two walkers by `.find()`.**
+   This is historical too: the old `local_constraints_for_declared_type`
+   helper is gone, and source declarations with `BindingId`s query their own
+   binding-keyed constraints. The remaining name/type matching lives in the
+   id-less compatibility surfaces documented below, not in normal local plan
+   selection.
 
 4. **Lowering now has an explicit id-less compatibility helper.**
    The original shared mutable cursor has been removed. Current
@@ -488,6 +584,13 @@ two phases.
 
 ## Root cause
 
+Historical status: this root cause no longer describes ordinary parsed Java
+source in the current tree. `Param`, `Stmt::VarDecl`, `Stmt::EnhancedFor`, and
+`CatchClause` now carry `binding: Option<BindingId>`, and the bound source path
+looks up local plans by `BindingId`. The remaining root cause is compatibility
+only: some synthetic/parser-only IR can still arrive without a resolver id, so
+those callers must stay explicitly fenced and fail closed on ambiguity.
+
 There is no `BindingId` on the IR node. A `Stmt::VarDecl`
 (`src/java_ir.rs`) carries `ty`, `name`, `source_name`, `initializer` and no
 identity, so every phase that wants to say something *about a particular
@@ -525,6 +628,12 @@ first.
   keeps it from ever firing when the invariant is actually violated.
 
 ## Concrete redesign
+
+Historical status: most of this redesign has already landed for source locals.
+The current small remaining design target is not "add identity to the IR"; it is
+to keep shrinking or deleting the explicitly named id-less compatibility
+helpers, especially callers that still cannot provide a declaration
+`BindingId`.
 
 **Give the declaration an identity in the IR and key every plan on it.**
 
@@ -604,8 +713,10 @@ The complaint is still valid, but several rows above are now mitigation history
 rather than the live failure. Current code has source-order occurrence cursors
 in the signature path, binding-scoped liveness for local mutability, loop header
 scope fixes, lvalue-root mutation fixes, and delegated-constructor occurrence
-repairs. Those changes reduce known symptoms; they do not give local
-declarations identity.
+repairs. Those changes reduce known symptoms, and ordinary resolver-bound
+declarations now carry identity. The remaining risk is the id-less compatibility
+surface that still has to bridge synthetic, unresolved, or legacy name-only
+paths.
 
 The remaining name rejoin points are:
 
@@ -637,11 +748,13 @@ The remaining name rejoin points are:
   target declaration is known, so alias propagation no longer has to write a
   source binding's constraints back through a local name.
 - Direct parameter consumers in signature and slot-policy now use the same
-  binding-id lookup. `MethodUsageFacts::binding_for_declaration` treats a known
-  resolver id as authoritative: if the id has no entry, it returns `None`
-  instead of silently falling back to the same-name compatibility map. Id-less
-  callers still keep the legacy fallback. Regression:
-  `usage::tests::binding_for_declaration_does_not_fall_back_by_name_when_id_is_known`.
+  binding-id lookup. `MethodUsageFacts::binding_facts_for_declaration_id` treats
+  a known resolver id as authoritative: if the id has no entry, it returns
+  `None` instead of silently falling back to the same-name compatibility map.
+  `MethodUsageFacts::binding_facts_for_param` remains the explicit parameter
+  helper that can use the id-less source-name compatibility path when a
+  declaration has no resolver id. Regression:
+  `usage::tests::binding_facts_for_param_uses_source_name_and_binding_id`.
 - Lowering move/clone use counts now resolve the visible name through
   `ShapeEnv::binding_id` and query `bindings_by_id`. The helper no longer
   manufactures a compatibility local id or reads `method.bindings.get(name)` /
@@ -669,9 +782,11 @@ The remaining name rejoin points are:
   shape or conservative fallback, never same-name rejoin; id-less shape learning
   likewise requires the same erased declared type identity, with erased-carrier
   locals allowed to match through their solved concrete shape.
-- `SignaturePlan` now has binding-based local plan/shape accessors, but the
-  older name-based compatibility accessors are still used by callers that do not
-  yet have declaration ids.
+- `SignaturePlan` now has binding-based local plan/shape accessors, and the
+  older local name-only accessors are no longer part of its public surface.
+  Remaining name/type matching lives in `expr_shape`/lowering id-less
+  compatibility and source-nullability compatibility views, not in normal
+  `SignaturePlan` local lookup APIs.
 - The `F.java` symptom described above is now pinned at generated-Rust level by
   `duplicate_inner_locals_do_not_change_outer_generated_mutability`: the outer
   `StringBuilder sb` in `three()` remains mutable before the inner duplicate
@@ -689,7 +804,38 @@ facade still needs a concrete declared return slot for callers. The
 `anonymous_declared_return_constraints` path now keeps those concrete
 constraints instead of rejecting every erased-object representation. Regressions:
 `anonymous_external_facade_return_keeps_declared_concrete_shape_for_internal_method`
-and `duplicate_local_names_use_scoped_occurrence_shape_before_map_insert_conversion`.
+and `duplicate_local_names_keep_selected_concrete_shape_before_map_insert_conversion`.
+
+Follow-up 2026-09-09: the remaining legacy name-set local-mutability fallback in
+signature planning is now gated at the helper boundary by `binding_id.is_none()`.
+Resolver-bound locals no longer receive `MutableBinding` from the name set just
+because a same-name declaration appears there; id-less compatibility callers
+retain the explicit fallback. The stale occurrence-worded map-insert regression
+was renamed to describe the current selected-binding behavior.
+
+Follow-up 2026-09-09: the Rust-name overload-family compatibility lookup in
+`CallableAnalysis` now also fails closed on ambiguity. The previous fact lookup
+returned the first matching `methods_by_rust_name` entry by hash iteration, while
+the use-count lookup took the maximum across matching overloads. Both now share
+one unique-or-none helper, so a repeated `Param value#0` across overloads cannot
+rejoin the current lowering context to an arbitrary family member. Regression:
+`callable_analysis::tests::rust_method_family_binding_lookup_refuses_ambiguous_overloads`.
+
+Follow-up 2026-09-09: signature local binding usage no longer hides the
+bound-vs-idless compatibility decision behind `binding_usage_for_local(...,
+allow_name_fallback: bool)`. Parameter call sites route through
+`binding_usage_for_param`, resolver-bound locals route through
+`binding_usage_for_bound_local`, and id-less compatibility callers route through
+`idless_compatibility_binding_usage_for_local`. The behavior is unchanged, but
+the remaining name fallback is now named at the helper boundary and guarded by
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+The same pass moved slot-policy's two borrowed-content parameter lookups behind
+its own `binding_usage_for_param` helper, so that module also has one named
+id-less compatibility boundary instead of two open-coded fallback calls.
+Usage receiver type recovery now similarly names its expression-name fallback as
+`idless_compatibility_binding_java_type_for_name`, keeping the visible-binding
+fast path separate from the id-less compatibility lookup guarded by
+`usage_receiver_type_fallback_does_not_scan_all_binding_history_by_name`.
 
 The method field-storage alias-chain residual is fixed:
 `signature_fixpoint_propagates_method_field_storage_constraints` now carries the
@@ -754,13 +900,13 @@ binding state for construction expressions; the same shadowed fixture now proves
 the returned outer binding as definitely non-null without pushing that
 constructor fact into local slot constraints.
 
-Follow-up 2026-08-25: method and constructor parameter nullability now use the
-same binding-keyed source-nullability map. The public
-`source_binding_nullability_constraints(block, name)` helper remains the
-explicit compatibility/name view and still fails closed when duplicate local
-names make the name ambiguous, but parameter shaping calls the declaration
-helper with the parameter's resolver `BindingId` and the callable's parameter
-scope. Regression:
+Follow-up 2026-08-25, updated 2026-09-10: method and constructor parameter
+nullability now use the same binding-keyed source-nullability map. The
+crate-local `source_binding_nullability_constraints(block, name)` helper
+remains the explicit compatibility/name view and still fails closed when
+duplicate local names make the name ambiguous, but parameter shaping calls the
+declaration helper with the parameter's resolver `BindingId` and the callable's
+parameter scope. Regression:
 `source_param_nullability_uses_binding_when_duplicate_locals_hide_name_view`
 proves both method and constructor parameters keep their nullable constraint even
 when duplicate same-name locals hide the compatibility name view.
@@ -846,7 +992,7 @@ Focused guard audit 2026-08-25:
   only production `next_local_plan_for_declared_type` call must stay behind the
   named `idless_compatibility_local_plan_for_declaration` helper, and
   `collect_duplicate_declared_local_names(block)` must remain limited to the
-  two current fail-closed/guard call sites.
+  one source-nullability fail-closed call site plus its guard.
 
 Follow-up 2026-08-25: the duplicate-name guard was removed from local signature
 constraint collection. That path always supplies a declaration binding id now,
@@ -867,7 +1013,7 @@ compatibility inputs. Regression:
 
 Follow-up 2026-08-25: internal returned-object alias constraints now make the
 same distinction. The shared-borrow return constraint is selected by iterating
-declared parameters and resolving each through `binding_for_declaration`,
+declared parameters and resolving each through `binding_facts_for_param`,
 instead of scanning `all_binding_facts()` for any same-name binding and then
 vetoing with `legacy_idless_method_assigns_to_binding(method, name)`.
 Resolver-bound params
@@ -877,10 +1023,10 @@ parameter binding still rejects through `BindingUse::Mutated`. Regression:
 
 Follow-up 2026-08-26: a stale `slot_shape_design` assertion was corrected to
 match the narrowed source-nullability compatibility surface. Resolver-bound local
-declarations are removed from the public name-only nullability view and must be
-shaped through binding-keyed signature collection; the no-params public helper
-still exposes method parameters by name because it has no parameter identity
-input. Regression:
+declarations are removed from the crate-local name-only nullability view and
+must be shaped through binding-keyed signature collection; the no-params
+crate-local helper still exposes method parameters by name because it has no
+parameter identity input. Regression:
 `slot_shape_design::source_nullability_constraints_shape_locals_params_and_returns`.
 
 Follow-up 2026-08-26: display-sink hint collection no longer walks typed lambda
@@ -935,7 +1081,7 @@ Follow-up 2026-09-06: the remaining receiver-type helper no longer repeats the
 visible-name-to-authoritative-binding lookup inline. `agreed_binding_java_type`
 now asks `MethodUsageFacts::visible_binding_java_type_for_name` first, then
 keeps the explicit id-less declaration fallback through
-`binding_for_declaration_with_name_fallback`. Focused coverage:
+`idless_compatibility_binding_facts_for_source_name`. Focused coverage:
 `usage::tests::call_receiver_type_*` and
 `layering::usage_receiver_type_fallback_does_not_scan_all_binding_history_by_name`.
 
@@ -1054,12 +1200,13 @@ the ambiguous id-less fact instead of reporting it beside the authoritative
 id-backed facts. Regression:
 `usage::tests::ambiguous_id_less_name_map_entry_is_not_current_or_aggregated`.
 
-Follow-up 2026-08-28: the public block/name signature helper is now explicitly
-local-only. `source_binding_nullability_constraints(block, name)` fails closed
-unless the block declares that local name itself, so resolver-bound parameters
-can no longer be accidentally queried through the compatibility surface with
-`params = []`. The declaration-aware helper is public for callers that have the
-actual `Binding`; focused regressions cover parameter nullability through
+Follow-up 2026-08-28, updated 2026-09-10: the block/name signature helper is
+now explicitly local-only and crate-local. `source_binding_nullability_constraints(block, name)`
+fails closed unless the block declares that local name itself, so resolver-bound
+parameters can no longer be accidentally queried through the compatibility
+surface with `params = []`. The declaration-aware helper is crate-local for
+callers that have the actual `Binding`; focused regressions cover parameter
+nullability through
 `source_binding_nullability_constraints_for_declaration` and the old helper's
 empty result for resolver-bound parameters. This is a fence, not a deletion of
 the remaining id-less compatibility surface.
@@ -1068,9 +1215,20 @@ Follow-up 2026-08-28: the local-only fence is now direct-block-only, not
 recursive. A nested `Object value = null` inside an `if`/loop/try body no longer
 enables `source_binding_nullability_constraints(outer_body, "value")` for the
 outer block/name query. The duplicate-name scanner remains recursive where it is
-used for whole-block local-plan disambiguation, but the public compatibility
+used for whole-block local-plan disambiguation, but the crate-local compatibility
 helper now uses a narrower direct declaration predicate. Regression:
 `slot_shape_design::source_binding_nullability_constraints_do_not_use_nested_only_local_name`.
+
+Follow-up 2026-09-10 cleanup: the direct block/name helper is no longer public;
+it is crate-local and its exact compatibility-scope assertions live in
+`signature.rs` unit tests. The method return nullability helper is crate-local,
+and integration tests now assert through solved signature/shape behavior instead
+of calling either compatibility helper directly.
+
+Follow-up 2026-09-10 cleanup: `stdlib::source_summary_method_return_nullability`
+is crate-local too. Source-summary and lowering paths can still share the
+fallback return-nullability rule, but external callers cannot bypass the
+signature/nullability planners through that helper.
 
 Follow-up 2026-08-28: facade ABI receiver matching now routes its id-less
 fallback through the same static-owner pseudo-receiver policy as receiver-type
@@ -1081,9 +1239,9 @@ This fences one compatibility edge without deleting the remaining static-owner
 escape hatch. Regression:
 `usage::tests::facade_abi_receiver_match_restricts_idless_fallback_to_static_owners`.
 
-Follow-up 2026-08-28: the public block/name nullability compatibility helper no
-longer treats enhanced-for variables as direct declarations of the enclosing
-block. The loop variable remains scoped to the enhanced-for body, so
+Follow-up 2026-08-28: the crate-local block/name nullability compatibility
+helper no longer treats enhanced-for variables as direct declarations of the
+enclosing block. The loop variable remains scoped to the enhanced-for body, so
 `source_binding_nullability_constraints(outer_body, "item")` cannot borrow
 nullability state from `for (Object item : values) { item = null; }`. Direct
 id-less locals in the same block remain available through the compatibility
@@ -1106,7 +1264,7 @@ Follow-up 2026-08-28: compatibility name-map entries that point at a live
 stale/manual `bindings["value"]` entry could point at an existing
 `BindingId(Local, "other", ...)` and still be treated as current because the id
 existed. `visible_binding_id_for_name`,
-`binding_for_declaration_with_name_fallback`, and
+`idless_compatibility_binding_facts_for_source_name`, and
 `binding_use_facts_are_current` now require `binding_id.name() == name`, so the
 remaining name-map compatibility path cannot rejoin one visible name to an
 unrelated live binding id. Regression:
@@ -1209,12 +1367,12 @@ resolver binding when available, and under the source/access-name spellings for
 compatibility. Regression:
 `expr_shape::tests::map_entry_shape_learning_preserves_access_name_alias`.
 
-Follow-up 2026-08-29: the broad
+Follow-up 2026-08-29, current names refreshed 2026-09-10: the broad
 `MethodUsageFacts::binding_for_declaration` compatibility wrapper is gone.
 Signature and slot-policy parameter paths now call
-`binding_for_declaration_with_name_fallback(..., param.binding.is_none())`
-directly, so resolver-bound parameters stay exact and the remaining name
-fallback is explicit at the id-less compatibility boundary. Regression:
+`MethodUsageFacts::binding_facts_for_param`, which keeps resolver-bound
+parameters exact and reserves the remaining source-name fallback for id-less
+compatibility parameters. Regression:
 `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
 
 Follow-up 2026-08-29: id-less compatibility lookups that find a live
@@ -1287,7 +1445,7 @@ visible to later `Expr::Var("self")` use recording, while the emitted name still
 appears in the `BindingUse::AssignedToLocal` payload. Regression:
 `usage::tests::keyword_renamed_bound_local_records_uses_by_source_binding`.
 
-Follow-up 2026-08-30: the remaining public block/name source-nullability
+Follow-up 2026-08-30: the remaining crate-local block/name source-nullability
 compatibility collector no longer crosses nested callable boundaries. Local type
 member bodies, anonymous-class method bodies, and lambda bodies can contain
 parameters or locals with the same source name as an outer local; those nested
@@ -1299,7 +1457,7 @@ and
 
 Follow-up 2026-08-30: declaration-aware source-nullability lookup now has one
 `SourceNullabilityMap::constraints_for_declaration` binding/name compatibility
-join. The public declaration helper plus local and enhanced-for constraint
+join. The crate-local declaration helper plus local and enhanced-for constraint
 collection all route through it instead of hand-copying the same
 `binding.map(...).unwrap_or_else(name)` fallback. Guard:
 `layering::idless_local_binding_compatibility_surface_stays_explicit`; behavior
@@ -1405,3 +1563,86 @@ the internal bridge for signature planning to use resolver-bound parameter
 identity, but integration tests now assert the public parameter/return signature
 effects instead of importing the compatibility helper directly. Regression:
 `signature::tests::declaration_nullability_constraints_use_resolver_bound_parameter_identity`.
+
+Follow-up 2026-09-10: normal test-only `MethodUsageFacts` binding fixtures
+outside `usage.rs` now use the explicit fixture constructors
+`MethodUsageFacts::from_exact_binding_facts`,
+`MethodUsageFacts::from_idless_compatibility_facts`, or narrower test insertors
+instead of manually writing both `bindings` and `bindings_by_id`. The broad
+visible-binding fixture constructor is private to `usage.rs`; the shadowed
+binding fixture in `aliasing` now spells the exact-id rows and visible-name row
+separately through owner-provided test helpers. The layering guard pins those
+fixture boundaries too.
+Follow-up cleanup moved the deliberately malformed stale-map fixture in
+`signature::binding_usage_for_bound_local_does_not_fall_back_by_name` behind
+test-only `MethodUsageFacts` helpers, so the inconsistency remains explicit
+without reopening direct map mutation outside `usage.rs`.
+
+Follow-up 2026-09-10: `MethodUsageFacts::all_binding_facts()` is now the public
+read-only aggregate view for integration tests that still need legacy
+name-oriented assertions while production code stays off the mutable
+`bindings`/`bindings_by_id` maps. `slot_shape_design.rs` uses a local test
+extension backed by that view rather than reopening production
+`binding_facts_for_name` helpers.
+Follow-up cleanup renamed that local slot-shape extension from
+`unique_idless_compatibility_binding_facts_for_source_name` to
+`unique_binding_facts_for_source_name`. The helper filters the aggregate
+`all_binding_facts()` view by source name and can see exact-id facts, so the old
+name overstated an idless-only lookup that no longer exists at that boundary.
+The stale same-name local assertion now expects this aggregate lookup to fail
+closed and checks the two exact binding ids for the real facts.
+
+Follow-up 2026-09-10 guard cleanup: the layering guard for test-only direct
+binding-map mutations now counts the actual `.bindings_by_id.insert(` operation
+instead of the inert `.bindings_by_id\n` substring. Current non-`usage.rs`
+fixture setup goes through `MethodUsageFacts` constructors or test helpers
+rather than mutating `bindings`/`bindings_by_id` directly.
+
+Follow-up 2026-09-10 API fence: `BindingId::compatibility_local` is now
+crate-local. It remains available to the internal id-less compatibility bridge
+and same-crate tests, but external callers can no longer manufacture the
+compatibility sentinel as public binding identity. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+Follow-up cleanup private-backed `BindingId`'s `kind`, `name`, and `occurrence`
+payload too. Callers still construct ids through `BindingId::new(...)` and
+inspect them through `kind()`, `name()`, and `occurrence()`, but cannot mutate
+local identity by assigning raw fields after construction.
+
+Follow-up 2026-09-10 API fence: `MethodUsageFacts::from_idless_compatibility_facts`
+is test-only crate-local too. The one integration test that used it only needed
+synthetic dispatch-requirement inputs, so it now seeds exact binding facts
+instead of keeping an external or production id-less compatibility constructor
+available. Same-crate tests continue to cover the compatibility path directly.
+Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up 2026-09-10 API fence: `MethodUsageFacts::idless_compatibility_binding_facts_for_source_name`
+is now private to `usage.rs`. Production compatibility callers in `usage.rs`
+still share the single helper, and same-module tests continue to pin stale-name
+failure cases, but `signature.rs` no longer reaches across the module boundary
+to ask id-less lookup questions directly. Guards:
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback` and
+`signature::tests::binding_usage_for_bound_local_does_not_fall_back_by_name`.
+
+Follow-up 2026-09-10 API fence: the old block/name
+`source_binding_nullability_constraints(block, name)` compatibility helper is
+test-only and private now. Production callers use the declaration-aware
+`source_binding_nullability_constraints_for_declaration` path, while same-module
+tests keep the direct stale-name/nullability assertions. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up 2026-09-10 API fence: the non-binding `MethodUsageFacts` collections
+and flags are private-backed too. Call-site, constructor-call, returned-call,
+field-use, and `mutates_self` reads now go through slice/bool accessors, and
+synthetic field-use fixtures use `MethodUsageFacts::from_field_uses` instead of
+mutating the vector directly. Guard:
+`layering::usage_owns_call_site_boundary_facts`.
+
+Follow-up 2026-09-10 API fence: `MethodUsageFacts` visible-binding scope
+maintenance is private to `usage.rs`. `snapshot_visible_binding_for_scope`,
+`hide_visible_binding_for_scope`, `restore_visible_binding_for_scope`,
+`record_visible_binding_use`, `record_declared_binding_use`,
+`visible_binding_id_for_name`, and `name_binding_is_current` no longer expose
+crate-local hooks for mutating or querying the compatibility name map directly;
+cross-module users keep the narrower typed readers. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.

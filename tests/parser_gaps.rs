@@ -236,6 +236,31 @@ class NestedQualifiedConstructor {
 }
 
 #[test]
+fn parses_qualified_inner_constructor_type_after_object_prefix() {
+    let parsed = parse_java_source(
+        r#"
+class Outer {
+    class Inner {}
+    Inner make(Outer other) {
+        return other.new Inner();
+    }
+}
+"#,
+    );
+    let body = method_body(&parsed.program.types[0], "make");
+    let Stmt::Return(Some(Expr::New { ty, .. })) = &body.statements[0] else {
+        panic!("expected qualified inner constructor return");
+    };
+    assert_eq!(
+        ty,
+        &JavaType::Named {
+            name: "Inner".to_string(),
+            args: Vec::new(),
+        }
+    );
+}
+
+#[test]
 fn preserves_explicit_java_io_stream_parameter_type_names() {
     let parsed = parse_java_source(
         r#"

@@ -64,6 +64,10 @@ pub fn analyze_string_concat<'a>(expr: &'a Expr, env: &TypeEnv) -> Option<String
 }
 ```
 
+Follow-up 2026-09-10: the string-concat analysis, plan, and render helpers are
+crate-local. Direct pipeline assertions now live beside the owning modules
+instead of being imported by integration tests as public API.
+
 `flatten_add` descends through **every** `Add` node in the tree with no regard
 for operand types, then the caller asks only whether *some* part is a `String`.
 

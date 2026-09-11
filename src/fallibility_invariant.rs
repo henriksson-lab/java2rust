@@ -27,8 +27,18 @@ use crate::usage::{CallGraph, CallGraphEdgeKind, CallableKey};
 /// A call edge whose callee is fallible but whose caller is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FallibilityViolation {
-    pub caller: CallableKey,
-    pub callee: CallableKey,
+    caller: CallableKey,
+    callee: CallableKey,
+}
+
+impl FallibilityViolation {
+    pub fn caller(&self) -> &CallableKey {
+        &self.caller
+    }
+
+    pub fn callee(&self) -> &CallableKey {
+        &self.callee
+    }
 }
 
 /// Every edge that breaks the invariant.
@@ -37,23 +47,23 @@ pub fn fallibility_violations(
     fallibility: &ProgramFallibilityPlan,
 ) -> Vec<FallibilityViolation> {
     let mut violations = Vec::new();
-    for edge in &call_graph.edges {
+    for edge in call_graph.edges() {
         // A call whose exception the caller handles does not propagate, so the
         // caller is legitimately not `Result`. This is the same edge kind the
         // solver skips, so the check and the solve agree about what an edge
         // means.
-        if edge.kind == CallGraphEdgeKind::HandledExceptionBoundary {
+        if edge.kind() == CallGraphEdgeKind::HandledExceptionBoundary {
             continue;
         }
-        if !fallibility.returns_result(&edge.callee) {
+        if !fallibility.returns_result(edge.callee()) {
             continue;
         }
-        if fallibility.returns_result(&edge.caller) {
+        if fallibility.returns_result(edge.caller()) {
             continue;
         }
         let violation = FallibilityViolation {
-            caller: edge.caller.clone(),
-            callee: edge.callee.clone(),
+            caller: edge.caller().clone(),
+            callee: edge.callee().clone(),
         };
         if !violations.contains(&violation) {
             violations.push(violation);
@@ -80,44 +90,11 @@ pub fn report_fallibility_violations(
                 "{} calls {}, which returns Result, but {} does not; \
                  a `?` at this call site cannot compile. This is an analysis \
                  disagreement, not a lowering bug.",
-                describe_callable(&violation.caller),
-                describe_callable(&violation.callee),
-                describe_callable(&violation.caller),
+                violation.caller().diagnostic_label(),
+                violation.callee().diagnostic_label(),
+                violation.caller().diagnostic_label(),
             ),
         );
-    }
-}
-
-fn describe_callable(key: &CallableKey) -> String {
-    match key {
-        CallableKey::Method {
-            type_name,
-            method_name,
-        } => format!("{type_name}::{method_name}"),
-        CallableKey::Constructor {
-            type_name,
-            rust_name,
-        } => format!("{type_name}::{rust_name}"),
-        CallableKey::Lambda { owner, ordinal } => {
-            format!("{}#lambda{ordinal}", describe_callable(owner))
-        }
-        CallableKey::AnonymousMethod {
-            owner,
-            ordinal,
-            method_name,
-        } => format!("{}#anon{ordinal}::{method_name}", describe_callable(owner)),
-        CallableKey::ExternalMethod {
-            receiver_type,
-            method_name,
-            ..
-        } => match receiver_type {
-            Some(receiver_type) => format!("{receiver_type}::{method_name}"),
-            None => method_name.clone(),
-        },
-        CallableKey::ExternalConstructor {
-            type_name,
-            arg_count,
-        } => format!("{type_name}::new/{arg_count}"),
     }
 }
 
@@ -127,10 +104,7 @@ mod tests {
     use crate::usage::CallGraphEdge;
 
     fn method(type_name: &str, method_name: &str) -> CallableKey {
-        CallableKey::Method {
-            type_name: type_name.to_string(),
-            method_name: method_name.to_string(),
-        }
+        CallableKey::method_identity(type_name, method_name)
     }
 
     fn plan(fallible: &[CallableKey]) -> ProgramFallibilityPlan {
@@ -142,13 +116,7 @@ mod tests {
     }
 
     fn graph(edges: Vec<CallGraphEdge>) -> CallGraph {
-        CallGraph {
-            nodes: edges
-                .iter()
-                .flat_map(|edge| [edge.caller.clone(), edge.callee.clone()])
-                .collect(),
-            edges,
-        }
+        CallGraph::from_edges(edges)
     }
 
     /// The check has to be able to fire, or it is another detector that reports
@@ -157,25 +125,27 @@ mod tests {
     fn a_fallible_callee_in_an_infallible_caller_is_reported() {
         let caller = method("Caller", "run");
         let callee = method("Callee", "may_throw");
-        let graph = graph(vec![CallGraphEdge {
-            caller: caller.clone(),
-            callee: callee.clone(),
-            kind: CallGraphEdgeKind::DirectMethodCall,
-        }]);
+        let graph = graph(vec![CallGraphEdge::new(
+            caller.clone(),
+            callee.clone(),
+            CallGraphEdgeKind::DirectMethodCall,
+        )]);
 
         let violations = fallibility_violations(&graph, &plan(&[callee.clone()]));
-        assert_eq!(violations, vec![FallibilityViolation { caller, callee }]);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].caller(), &caller);
+        assert_eq!(violations[0].callee(), &callee);
     }
 
     #[test]
     fn a_fallible_caller_is_not_reported() {
         let caller = method("Caller", "run");
         let callee = method("Callee", "may_throw");
-        let graph = graph(vec![CallGraphEdge {
-            caller: caller.clone(),
-            callee: callee.clone(),
-            kind: CallGraphEdgeKind::DirectMethodCall,
-        }]);
+        let graph = graph(vec![CallGraphEdge::new(
+            caller.clone(),
+            callee.clone(),
+            CallGraphEdgeKind::DirectMethodCall,
+        )]);
 
         assert!(fallibility_violations(&graph, &plan(&[caller, callee])).is_empty());
     }
@@ -187,11 +157,11 @@ mod tests {
     fn a_handled_boundary_is_not_reported() {
         let caller = method("Caller", "guarded");
         let callee = method("Callee", "may_throw");
-        let graph = graph(vec![CallGraphEdge {
+        let graph = graph(vec![CallGraphEdge::new(
             caller,
-            callee: callee.clone(),
-            kind: CallGraphEdgeKind::HandledExceptionBoundary,
-        }]);
+            callee.clone(),
+            CallGraphEdgeKind::HandledExceptionBoundary,
+        )]);
 
         assert!(fallibility_violations(&graph, &plan(&[callee])).is_empty());
     }

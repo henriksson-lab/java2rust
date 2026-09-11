@@ -270,3 +270,13 @@ have. They are *not* list drift — they are simply absent everywhere — but th
 `List.set` and `Map.computeIfAbsent` are common enough that they belong on the backlog
 regardless. Item (1) above is the natural place to add them, because adding them to the
 unified table would give them their mutability for free.
+
+## Follow-up 2026-09-09
+
+The original correctness gap had already been closed by the typed collection
+policy, but one residue remained: `lower.rs` still owned the
+`NativeCollectionMethod` receiver-mutability match. That predicate now lives on
+the enum as `NativeCollectionMethod::mutates_receiver()`, and the lowerer asks
+the method directly at optional-receiver and unmodifiable/fixed-size mutation
+sites. This is still not the full table-driven design above, but it removes the
+last local mutability list from `lower.rs`.

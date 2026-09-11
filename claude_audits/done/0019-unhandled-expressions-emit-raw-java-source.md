@@ -64,6 +64,10 @@ downstream can tell "we chose this text" from "we gave up".
    (`src/unsupported.rs:76`) so it becomes a `compile_error!` naming the
    construct. Same principle as 0014: refusing to translate is fine, silently
    emitting Java is not.
+   Follow-up 2026-09-10: the unsupported planners are crate-local lowerer
+   internals now; direct classification assertions live beside
+   `src/unsupported.rs`, while integration coverage keeps the public diagnostic
+   and message policies.
 2. Handle `switch_expression` in `parse_expr_node`. The statement path already
    parses it, so this is mostly reuse; lowering to a Rust `match` expression is
    direct.

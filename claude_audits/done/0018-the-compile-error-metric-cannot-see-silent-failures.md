@@ -488,3 +488,13 @@ analysis profiles. When `analysis-profile.tsv` exists but omits
 `missing analysis profile metric: noop_facade_call_sites` even if the idiom
 sweep reports a fallback value. Regression:
 `batch_translation::focused_package_missing_analysis_profile_metric_fails_even_with_idiom_fallback`.
+
+## Update 2026-09-10 (Codex follow-up) — source-summary marker fixture uses the real summary path
+
+The marker sweep caught another stale fixture: the
+`untranslated_source_summary_method` fixture used a primary-source record
+accessor, but record accessors now lower normally and no longer emit the source
+summary `unimplemented!` marker. The marker is now covered by a dedicated
+`translate_source_with_context_summary_sources` test, so it exercises the real
+source-summary facade emitter and still moves the `unimplemented_facade_methods`
+counter. `tests/output_markers.rs` is back to 28/28.

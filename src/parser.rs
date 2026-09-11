@@ -719,22 +719,20 @@ fn parse_record_decl(
         .iter()
         .flat_map(|component| record_component_members(component, node))
         .collect::<Vec<_>>();
-    let mut has_constructor = false;
+    let mut has_canonical_constructor = false;
 
     if let Some(body) = node.child_by_field_name("body") {
         for child in named_children(body) {
             match child.kind() {
                 "field_declaration" => members.extend(parse_field_decl(child, source)),
                 "constructor_declaration" => {
-                    has_constructor = true;
-                    members.push(Member::Constructor(parse_constructor_decl(
-                        child,
-                        source,
-                        diagnostics,
-                    )));
+                    let constructor = parse_constructor_decl(child, source, diagnostics);
+                    has_canonical_constructor |=
+                        record_constructor_is_canonical(&constructor, &components);
+                    members.push(Member::Constructor(constructor));
                 }
                 "compact_constructor_declaration" => {
-                    has_constructor = true;
+                    has_canonical_constructor = true;
                     members.push(Member::Constructor(record_canonical_constructor_decl(
                         &name,
                         &components,
@@ -781,7 +779,7 @@ fn parse_record_decl(
             }
         }
     }
-    if !has_constructor {
+    if !has_canonical_constructor {
         members.push(Member::Constructor(record_canonical_constructor_decl(
             &name,
             &components,
@@ -826,7 +824,12 @@ fn record_component_members(component: &Param, node: tree_sitter::Node) -> Vec<M
         throws: Vec::new(),
         params: Vec::new(),
         modifiers: vec![Modifier::Public],
-        body: None,
+        body: Some(Block {
+            statements: vec![Stmt::Return(Some(Expr::FieldAccess(
+                Box::new(Expr::This),
+                component.name.clone(),
+            )))],
+        }),
         span: span(node),
     });
     vec![field, accessor]
@@ -839,6 +842,12 @@ fn record_canonical_constructor_decl(
     source: &str,
     diagnostics: &mut DiagnosticBag,
 ) -> ConstructorDecl {
+    let mut body = node
+        .and_then(|node| node.child_by_field_name("body"))
+        .map(|body| parse_block_like(body, source, diagnostics))
+        .unwrap_or_default();
+    body.statements
+        .extend(record_component_assignment_stmts(components));
     ConstructorDecl {
         name: record_name.to_string(),
         rust_name: None,
@@ -855,11 +864,28 @@ fn record_canonical_constructor_decl(
         modifiers: node
             .map(|node| parse_modifiers(node, source))
             .unwrap_or_else(|| vec![Modifier::Public]),
-        body: node
-            .and_then(|node| node.child_by_field_name("body"))
-            .map(|body| parse_block_like(body, source, diagnostics)),
+        body: Some(body),
         span: node.map(span).unwrap_or_default(),
     }
+}
+
+fn record_component_assignment_stmts(components: &[Param]) -> Vec<Stmt> {
+    components
+        .iter()
+        .map(|component| Stmt::Assign {
+            target: Expr::FieldAccess(Box::new(Expr::This), component.name.clone()),
+            value: Expr::Var(component.name.clone()),
+        })
+        .collect()
+}
+
+fn record_constructor_is_canonical(ctor: &ConstructorDecl, components: &[Param]) -> bool {
+    ctor.params.len() == components.len()
+        && ctor
+            .params
+            .iter()
+            .zip(components)
+            .all(|(param, component)| param.ty == component.ty)
 }
 
 fn parse_enum_member_node(
@@ -2834,7 +2860,11 @@ fn parse_object_creation_type_node(node: tree_sitter::Node, source: &str) -> Opt
         .map(|node| parse_new_type_node(node, source));
     let args = node.child_by_field_name("arguments")?;
     let prefix = source.get(node.start_byte()..args.start_byte())?;
-    let raw = prefix.trim().strip_prefix("new")?.trim();
+    let raw_prefix = prefix.trim();
+    let raw = raw_prefix
+        .strip_prefix("new")
+        .or_else(|| raw_prefix.split_once(".new").map(|(_, ty)| ty))
+        .map(str::trim)?;
     if raw.is_empty() {
         return parsed_child;
     }
@@ -3580,7 +3610,7 @@ fn split_top_level_commas(src: &str) -> Vec<&str> {
     parts
 }
 
-pub fn to_snake_case(name: &str) -> String {
+pub(crate) fn to_snake_case(name: &str) -> String {
     let out = to_snake_case_unescaped(name);
     if crate::java_naming::rust_keyword_needs_rename(&out) {
         crate::java_naming::rename_non_rawable_rust_keyword(&out)
@@ -3589,7 +3619,7 @@ pub fn to_snake_case(name: &str) -> String {
     }
 }
 
-pub fn to_snake_case_unescaped(name: &str) -> String {
+pub(crate) fn to_snake_case_unescaped(name: &str) -> String {
     let name = name.trim().trim_start_matches("this.");
     let mut out = String::new();
     for (idx, ch) in name.chars().enumerate() {
@@ -3607,7 +3637,7 @@ pub fn to_snake_case_unescaped(name: &str) -> String {
     out
 }
 
-pub fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
+pub(crate) fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
     let mut suffix = match ty {
         JavaType::Void => "void".to_string(),
         JavaType::Primitive(p) => format!("{p:?}").to_ascii_lowercase(),

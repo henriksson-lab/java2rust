@@ -263,15 +263,9 @@ fn trivial_getter_fact(
         return None;
     }
     Some(TrivialAccessorFact {
-        method: MethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        },
+        method: MethodKey::source_method(ty, method),
         kind: TrivialAccessorKind::Getter {
-            field: FieldKey {
-                type_name: ty.name.clone(),
-                field_name: field_name.to_string(),
-            },
+            field: FieldKey::named(ty.name.clone(), field_name),
         },
         inline_policy: accessor_inline_policy(&method.modifiers),
         provenance: FactProvenance::ParsedSource,
@@ -305,15 +299,9 @@ fn trivial_setter_fact(
         return None;
     }
     Some(TrivialAccessorFact {
-        method: MethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        },
+        method: MethodKey::source_method(ty, method),
         kind: TrivialAccessorKind::Setter {
-            field: FieldKey {
-                type_name: ty.name.clone(),
-                field_name: field_name.to_string(),
-            },
+            field: FieldKey::named(ty.name.clone(), field_name),
             param_name: param.name.clone(),
             fluent,
         },
@@ -641,10 +629,7 @@ fn collect_external_field_facts(
         )
         .or_else(|| guessed_static_constant.then(|| JavaType::Unknown(fact.target_name.clone())));
         facts.external_field_facts.push(ExternalFieldFact {
-            field: FieldKey {
-                type_name: type_name.clone(),
-                field_name: fact.target_name.clone(),
-            },
+            field: FieldKey::named(type_name.clone(), fact.target_name.clone()),
             field_type,
             field_kind: if guessed_static_constant {
                 ExternalFieldKind::StaticFinal
@@ -3197,7 +3182,7 @@ fn source_equals_override_type_aliases(type_name: &str) -> Vec<String> {
     let mut aliases = vec![
         simple_type_name(type_name).to_string(),
         type_name.to_string(),
-        crate::slot_render::rust_name_for_java_named_type(type_name),
+        crate::java_naming::rust_name_for_java_named_type(type_name),
     ];
     aliases.dedup();
     aliases
@@ -3220,8 +3205,8 @@ fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) 
     let mut changed = true;
     while changed {
         changed = false;
-        for edge in &graph.edges {
-            if edge.kind != CallGraphEdgeKind::DirectMethodCall {
+        for edge in graph.edges() {
+            if edge.kind() != CallGraphEdgeKind::DirectMethodCall {
                 continue;
             }
             let (
@@ -3233,7 +3218,7 @@ fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) 
                     type_name: callee_type,
                     method_name: callee_method,
                 },
-            ) = (&edge.caller, &edge.callee)
+            ) = (edge.caller(), edge.callee())
             else {
                 continue;
             };
@@ -3263,10 +3248,7 @@ fn push_method_thrown_effects(
         .position(|fact| source_method_effect_key_matches(&fact.method, type_name, method_name))
         .unwrap_or_else(|| {
             facts.method_effect_facts.push(MethodEffectFact {
-                method: MethodKey {
-                    type_name: type_name.to_string(),
-                    method_name: method_name.to_string(),
-                },
+                method: MethodKey::named(type_name, method_name),
                 receiver_mutability: ReceiverMutabilityFact::Unknown,
                 return_nullability: NullabilityState::Unknown,
                 thrown: Vec::new(),
@@ -3286,10 +3268,10 @@ fn push_method_thrown_effects(
 }
 
 fn source_method_effect_key_matches(key: &MethodKey, type_name: &str, method_name: &str) -> bool {
-    key.type_name == type_name
-        && (key.method_name == method_name
-            || crate::parser::to_snake_case(&key.method_name) == method_name
-            || key.method_name == crate::parser::to_snake_case(method_name))
+    key.type_name() == type_name
+        && (key.method_name() == method_name
+            || crate::parser::to_snake_case(key.method_name()) == method_name
+            || key.method_name() == crate::parser::to_snake_case(method_name))
 }
 
 fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &mut FactSet) {
@@ -3313,10 +3295,7 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
                     || !thrown.is_empty()
                 {
                     let effect = MethodEffectFact {
-                        method: MethodKey {
-                            type_name: ty.name.clone(),
-                            method_name: method.name.clone(),
-                        },
+                        method: MethodKey::source_method(ty, method),
                         receiver_mutability,
                         return_nullability,
                         thrown: thrown.clone(),
@@ -3328,7 +3307,8 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
                         && rust_name != crate::parser::to_snake_case(&method.name)
                     {
                         let mut rust_name_effect = effect;
-                        rust_name_effect.method.method_name = rust_name.to_string();
+                        rust_name_effect.method =
+                            rust_name_effect.method.with_method_name(rust_name);
                         facts.method_effect_facts.push(rust_name_effect);
                     }
                 }
@@ -3549,7 +3529,7 @@ fn method_receiver_mutability_effect(
     usage
         .source_method_usage(ty, method)
         .map(|usage| {
-            if usage.mutates_self {
+            if usage.mutates_self() {
                 ReceiverMutabilityFact::MutatesReceiver
             } else {
                 ReceiverMutabilityFact::ReadOnly
@@ -4050,14 +4030,8 @@ fn collect_method_recursion_facts_for_type(
         };
         if let Some(kind) = kind {
             facts.recursion_facts.push(RecursionFact {
-                method: MethodKey {
-                    type_name: ty.name.clone(),
-                    method_name: caller,
-                },
-                calls: MethodKey {
-                    type_name: ty.name.clone(),
-                    method_name: callee,
-                },
+                method: MethodKey::named(ty.name.clone(), caller),
+                calls: MethodKey::named(ty.name.clone(), callee),
                 kind,
                 provenance: FactProvenance::ParsedSource,
             });
@@ -4116,14 +4090,8 @@ fn collect_constructor_recursion_facts_for_type(
             facts
                 .constructor_recursion_facts
                 .push(ConstructorRecursionFact {
-                    constructor: ConstructorKey {
-                        type_name: ty.name.clone(),
-                        rust_name: caller,
-                    },
-                    calls: ConstructorKey {
-                        type_name: ty.name.clone(),
-                        rust_name: callee,
-                    },
+                    constructor: ConstructorKey::named(ty.name.clone(), caller),
+                    calls: ConstructorKey::named(ty.name.clone(), callee),
                     kind,
                     provenance: FactProvenance::ParsedSource,
                 });
@@ -4136,21 +4104,21 @@ fn same_type_method_call_graph_edges(
     call_graph: &usage::CallGraph,
 ) -> HashSet<(String, String)> {
     call_graph
-        .edges
+        .edges()
         .iter()
-        .filter(|edge| edge.kind == CallGraphEdgeKind::DirectMethodCall)
+        .filter(|edge| edge.kind() == CallGraphEdgeKind::DirectMethodCall)
         .filter_map(|edge| {
             let CallableKey::Method {
                 type_name: caller_type,
                 method_name: caller_method,
-            } = &edge.caller
+            } = edge.caller()
             else {
                 return None;
             };
             let CallableKey::Method {
                 type_name: callee_type,
                 method_name: callee_method,
-            } = &edge.callee
+            } = edge.callee()
             else {
                 return None;
             };
@@ -4168,11 +4136,11 @@ fn same_type_constructor_call_graph_edges(
     call_graph: &usage::CallGraph,
 ) -> HashSet<(String, String)> {
     call_graph
-        .edges
+        .edges()
         .iter()
         .filter(|edge| {
             matches!(
-                edge.kind,
+                edge.kind(),
                 CallGraphEdgeKind::ConstructorCall | CallGraphEdgeKind::ConstructorDelegationThis
             )
         })
@@ -4180,14 +4148,14 @@ fn same_type_constructor_call_graph_edges(
             let CallableKey::Constructor {
                 type_name: caller_type,
                 rust_name: caller_constructor,
-            } = &edge.caller
+            } = edge.caller()
             else {
                 return None;
             };
             let CallableKey::Constructor {
                 type_name: callee_type,
                 rust_name: callee_constructor,
-            } = &edge.callee
+            } = edge.callee()
             else {
                 return None;
             };
@@ -4483,20 +4451,14 @@ fn collect_type_control_flow_facts(ty: &TypeDecl, facts: &mut FactSet) {
                 if let Some(body) = &method.body {
                     if block_has_assignment_in_condition(body) {
                         facts.control_flow_facts.push(ControlFlowFact {
-                            method: MethodKey {
-                                type_name: ty.name.clone(),
-                                method_name: method.name.clone(),
-                            },
+                            method: MethodKey::source_method(ty, method),
                             kind: ControlFlowFactKind::AssignmentInCondition,
                             provenance: FactProvenance::ParsedSource,
                         });
                     }
                     if block_has_tail_recursive_self_call(body, &method.name) {
                         facts.control_flow_facts.push(ControlFlowFact {
-                            method: MethodKey {
-                                type_name: ty.name.clone(),
-                                method_name: method.name.clone(),
-                            },
+                            method: MethodKey::source_method(ty, method),
                             kind: ControlFlowFactKind::TailRecursiveSelfCall,
                             provenance: FactProvenance::ParsedSource,
                         });
@@ -4529,10 +4491,7 @@ fn collect_type_control_flow_plans(ty: &TypeDecl, plans: &mut Vec<MethodControlF
                     }
                     if !rewrites.is_empty() {
                         plans.push(MethodControlFlowPlan {
-                            method: MethodKey {
-                                type_name: ty.name.clone(),
-                                method_name: method.name.clone(),
-                            },
+                            method: MethodKey::source_method(ty, method),
                             rewrites,
                         });
                     }
@@ -4649,7 +4608,7 @@ fn collect_method_recursion_fallback_diagnostics(
             &recursion
                 .iter()
                 .filter(|fact| fact.kind == RecursionKind::Mutual)
-                .map(|fact| fact.calls.method_name.as_str())
+                .map(|fact| fact.calls.method_name())
                 .collect::<HashSet<_>>(),
         )
     {
@@ -4852,8 +4811,8 @@ fn method_has_safe_tail_loop_plan(
     method_name: &str,
 ) -> bool {
     control_flow_plans.iter().any(|plan| {
-        plan.method.type_name == type_name
-            && plan.method.method_name == method_name
+        plan.method.type_name() == type_name
+            && plan.method.method_name() == method_name
             && plan.rewrites.iter().any(|rewrite| {
                 matches!(
                     rewrite,
@@ -5278,10 +5237,7 @@ fn collect_method_catch_facts(
     let mut clause_index = 0usize;
     collect_catch_facts_from_block(
         body,
-        &MethodKey {
-            type_name: ty.name.clone(),
-            method_name: method.name.clone(),
-        },
+        &MethodKey::source_method(ty, method),
         &mut clause_index,
         facts,
         hierarchy_index,
@@ -5556,10 +5512,7 @@ fn field_nullability_fact(
     helper_assignments: &HashMap<String, HashMap<String, AssignmentNullability>>,
     facts: &FactSet,
 ) -> FieldNullabilityFact {
-    let field_key = FieldKey {
-        type_name: ty.name.clone(),
-        field_name: field.name.clone(),
-    };
+    let field_key = FieldKey::source_field(ty, field);
     let initializer_non_null = field
         .initializer
         .as_ref()
@@ -5909,7 +5862,7 @@ fn collect_field_assignments_from_expr(
         } if call_receiver_is_this(receiver) => {
             if let Some(accessor) = facts.trivial_accessor_for(&ty.name, name)
                 && let TrivialAccessorKind::Setter { field, .. } = &accessor.kind
-                && field.field_name == field_name
+                && field.field_name() == field_name
                 && let Some(arg) = args.first()
             {
                 assignments.push(bare_field_assignment_nullability(arg, local_shadows));

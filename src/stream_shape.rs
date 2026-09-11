@@ -86,7 +86,9 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
     };
     let mut lambda_env;
     let env = if let Expr::Var(receiver_name) = receiver.as_ref() {
-        if env.local_type(receiver_name).is_none() {
+        if env.local_type(receiver_name).is_none()
+            && !stream_receiver_is_static_utility_owner(receiver_name, name, args.len(), facts)
+        {
             lambda_env = env.clone();
             lambda_env.insert_local(receiver_name.clone(), default.java_ty.clone());
             &lambda_env
@@ -109,6 +111,23 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
     }
     crate::call_plan::external_call_lowered_type(Some(receiver), name, args.len(), facts, env, None)
         .map(|lowered| lowered.into_slot_shape())
+}
+
+fn stream_receiver_is_static_utility_owner(
+    receiver_name: &str,
+    method_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> bool {
+    let owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    crate::stdlib::external_api_method_role(Some(&owner), method_name, arg_count)
+        != crate::facts::ExternalApiRole::Unknown
+        || facts
+            .external_api_effect_for_receiver_with_arity(Some(&owner), method_name, Some(arg_count))
+            .is_some()
+        || facts
+            .facade_abi_for_external_method(&owner, method_name, arg_count)
+            .is_some()
 }
 
 fn stream_source_element_type_with_effective_facts(

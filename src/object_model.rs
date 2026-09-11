@@ -267,7 +267,7 @@ fn plan_object_model_from_effective_facts_and_usage(
 
 pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequirements {
     let mut requirements = UsageDispatchRequirements::new();
-    for method in usage.methods.values().chain(usage.constructors.values()) {
+    for method in usage.method_usages().chain(usage.constructor_usages()) {
         for binding in method.all_binding_facts() {
             let Some(type_name) = dispatch_requirement_type_name(&binding.java_ty) else {
                 continue;
@@ -767,7 +767,7 @@ fn expr_accesses_instance_field(expr: &Expr, field_names: &HashSet<String>) -> b
     }
 }
 
-pub fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
+pub(crate) fn rust_enum_variant_name_from_parsed_constant(name: &str) -> String {
     if parsed_constant_name_is_valid_rust_variant(name) {
         return name.to_string();
     }
@@ -1250,7 +1250,7 @@ fn source_hierarchy_carrier_strategy_if_needed(
 fn source_hierarchy_carrier_variant_names(strategy: &ObjectStrategyPlan) -> Vec<String> {
     std::iter::once(strategy.root.as_str())
         .chain(strategy.direct_subtypes.iter().map(String::as_str))
-        .map(crate::slot_render::rust_name_for_java_named_type)
+        .map(crate::java_naming::rust_name_for_java_named_type)
         .collect()
 }
 
@@ -1680,7 +1680,7 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
 pub(crate) fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec<String> {
     subtypes
         .iter()
-        .map(|subtype| crate::slot_render::rust_name_for_java_named_type(subtype))
+        .map(|subtype| crate::java_naming::rust_name_for_java_named_type(subtype))
         .collect()
 }
 
@@ -1951,9 +1951,7 @@ mod tests {
     fn dispatch_requirements_include_shadowed_binding_id_facts() {
         let hidden_binding = BindingId::new(BindingKind::Local, "value", 0);
         let visible_binding = BindingId::new(BindingKind::Local, "value", 1);
-        let mut method = MethodUsageFacts::default();
-        method.bindings_by_id.insert(
-            hidden_binding.clone(),
+        let method = MethodUsageFacts::from_exact_binding_facts([
             BindingUseFacts {
                 name: "value".to_string(),
                 binding: Some(hidden_binding),
@@ -1963,27 +1961,20 @@ mod tests {
                 },
                 uses: vec![BindingUse::Returned],
             },
-        );
-        let visible = BindingUseFacts {
-            name: "value".to_string(),
-            binding: Some(visible_binding.clone()),
-            java_ty: JavaType::Named {
-                name: "Visible".to_string(),
-                args: Vec::new(),
+            BindingUseFacts {
+                name: "value".to_string(),
+                binding: Some(visible_binding),
+                java_ty: JavaType::Named {
+                    name: "Visible".to_string(),
+                    args: Vec::new(),
+                },
+                uses: Vec::new(),
             },
-            uses: Vec::new(),
-        };
-        method
-            .bindings_by_id
-            .insert(visible_binding, visible.clone());
-        method.bindings.insert("value".to_string(), visible);
+        ]);
 
         let mut usage = UsageFacts::default();
-        usage.methods.insert(
-            UsageMethodKey {
-                type_name: "Owner".to_string(),
-                method_name: "run".to_string(),
-            },
+        usage.insert_method_usage(
+            UsageMethodKey::current_rust_method_name("Owner", "run"),
             method,
         );
 
@@ -1995,6 +1986,15 @@ mod tests {
         assert!(
             !requirements.contains_key("Visible"),
             "visible binding has no dispatch-relevant use"
+        );
+    }
+
+    #[test]
+    fn parsed_java_enum_constant_names_preserve_rust_valid_uppercase_constants() {
+        assert_eq!(rust_enum_variant_name_from_parsed_constant("s_n_p"), "SNP");
+        assert_eq!(
+            rust_enum_variant_name_from_parsed_constant("MAX_COUNT_EXCEEDED"),
+            "MAX_COUNT_EXCEEDED"
         );
     }
 }

@@ -79,6 +79,7 @@ pub enum RustType {
     F64,
     Char,
     String,
+    Str,
     Vec(Box<RustType>),
     Array2(Box<RustType>),
     Slice(Box<RustType>),
@@ -356,7 +357,7 @@ pub enum RustExprShape {
 }
 
 impl RustExpr {
-    pub fn raw_leaf(rendered: impl Into<String>) -> RustExpr {
+    pub(crate) fn raw_leaf(rendered: impl Into<String>) -> RustExpr {
         RustExpr::Raw(rendered.into())
     }
 
@@ -447,8 +448,259 @@ impl RustExpr {
     }
 }
 
+pub(crate) fn rust_type_arg_projection_or_raw(rust_ty: &str) -> RustType {
+    match rust_ty.trim() {
+        "()" => RustType::Unit,
+        "bool" => RustType::Bool,
+        "i8" => RustType::I8,
+        "i16" => RustType::I16,
+        "i32" => RustType::I32,
+        "i64" => RustType::I64,
+        "f32" => RustType::F32,
+        "f64" => RustType::F64,
+        "char" => RustType::Char,
+        "String" => RustType::String,
+        "str" => RustType::Str,
+        trimmed if trimmed.starts_with('&') => rust_ref_type_projection_or_raw(trimmed),
+        trimmed if let Some(items) = rust_tuple_type_projection(trimmed) => RustType::Tuple(items),
+        trimmed if let Some(fn_pointer) = rust_fn_pointer_type_projection(trimmed) => fn_pointer,
+        trimmed if let Some(trait_name) = trimmed.strip_prefix("dyn ") => {
+            rust_trait_type_projection_or_raw("dyn", trait_name, RustType::DynTrait)
+        }
+        trimmed if let Some(trait_name) = trimmed.strip_prefix("impl ") => {
+            rust_trait_type_projection_or_raw("impl", trait_name, RustType::ImplTrait)
+        }
+        trimmed if let Some((base, args)) = split_simple_rust_generic_type(trimmed) => {
+            let args = args
+                .into_iter()
+                .map(rust_type_arg_projection_or_raw)
+                .collect::<Vec<_>>();
+            if args.iter().any(|arg| matches!(arg, RustType::Raw(_))) {
+                return RustType::Raw(trimmed.to_string());
+            }
+            match (base, args.as_slice()) {
+                ("Vec", [inner]) => RustType::Vec(Box::new(inner.clone())),
+                ("Option", [inner]) => RustType::Option(Box::new(inner.clone())),
+                ("ndarray::Array2", [inner]) => RustType::Array2(Box::new(inner.clone())),
+                _ => RustType::Generic {
+                    base: base.to_string(),
+                    args,
+                },
+            }
+        }
+        trimmed if rust_type_ident_is_plain(trimmed) => RustType::Named(trimmed.to_string()),
+        trimmed => RustType::Raw(trimmed.to_string()),
+    }
+}
+
+fn rust_trait_type_projection_or_raw(
+    prefix: &str,
+    trait_name: &str,
+    projection: impl FnOnce(String) -> RustType,
+) -> RustType {
+    let trait_name = trait_name.trim();
+    if rust_type_path_is_simple(trait_name) {
+        projection(trait_name.to_string())
+    } else {
+        RustType::Raw(format!("{prefix} {trait_name}"))
+    }
+}
+
+fn rust_ref_type_projection_or_raw(rendered: &str) -> RustType {
+    let Some(rest) = rendered.strip_prefix('&') else {
+        return RustType::Raw(rendered.to_string());
+    };
+    let mut rest = rest.trim_start();
+    let lifetime = if rest.starts_with('\'') {
+        let Some((candidate, tail)) = split_once_whitespace(rest) else {
+            return RustType::Raw(rendered.to_string());
+        };
+        if !rust_lifetime_is_simple(candidate) {
+            return RustType::Raw(rendered.to_string());
+        }
+        rest = tail.trim_start();
+        Some(candidate.to_string())
+    } else {
+        None
+    };
+    let mutable = if let Some(tail) = rest.strip_prefix("mut ") {
+        rest = tail.trim_start();
+        true
+    } else {
+        false
+    };
+    if rest.is_empty() {
+        return RustType::Raw(rendered.to_string());
+    }
+    let inner = rust_type_arg_projection_or_raw(rest);
+    if matches!(inner, RustType::Raw(_)) {
+        return RustType::Raw(rendered.to_string());
+    }
+    RustType::Ref {
+        mutable,
+        lifetime,
+        inner: Box::new(inner),
+    }
+}
+
+fn rust_fn_pointer_type_projection(rendered: &str) -> Option<RustType> {
+    let rest = rendered.strip_prefix("fn(")?;
+    let close = matching_top_level_paren(rest)?;
+    let params = &rest[..close];
+    let tail = rest[close + 1..].trim();
+    let return_type = if tail.is_empty() {
+        RustType::Unit
+    } else {
+        let return_text = tail.strip_prefix("->")?.trim();
+        if return_text.is_empty() {
+            return None;
+        }
+        rust_type_arg_projection_or_raw(return_text)
+    };
+    if matches!(return_type, RustType::Raw(_)) {
+        return None;
+    }
+    let params = if params.trim().is_empty() {
+        Vec::new()
+    } else {
+        let projected = split_top_level_type_args(params)?
+            .into_iter()
+            .map(rust_type_arg_projection_or_raw)
+            .collect::<Vec<_>>();
+        if projected
+            .iter()
+            .any(|param| matches!(param, RustType::Raw(_)))
+        {
+            return None;
+        }
+        projected
+    };
+    Some(RustType::FnPointer {
+        params,
+        return_type: Box::new(return_type),
+    })
+}
+
+fn matching_top_level_paren(rest_after_open: &str) -> Option<usize> {
+    let mut depth = 1usize;
+    for (index, ch) in rest_after_open.char_indices() {
+        match ch {
+            '(' => depth = depth.checked_add(1)?,
+            ')' => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn split_once_whitespace(value: &str) -> Option<(&str, &str)> {
+    let split = value.find(char::is_whitespace)?;
+    Some((&value[..split], &value[split..]))
+}
+
+fn rust_lifetime_is_simple(lifetime: &str) -> bool {
+    let Some(name) = lifetime.strip_prefix('\'') else {
+        return false;
+    };
+    !name.is_empty() && rust_type_ident_is_plain(name)
+}
+
+fn rust_type_ident_is_plain(segment: &str) -> bool {
+    let mut chars = segment.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    (first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
+}
+
+fn rust_type_path_is_simple(path: &str) -> bool {
+    path.split("::").all(rust_type_ident_is_plain)
+}
+
+fn split_simple_rust_generic_type(rendered: &str) -> Option<(&str, Vec<&str>)> {
+    let open = rendered.find('<')?;
+    if !rendered.ends_with('>') {
+        return None;
+    }
+    let base = rendered[..open].trim();
+    if !rust_type_path_is_simple(base) {
+        return None;
+    }
+    let inner = &rendered[open + 1..rendered.len() - 1];
+    let args = split_top_level_type_args(inner)?;
+    (!args.is_empty()).then_some((base, args))
+}
+
+fn split_top_level_type_args(rendered: &str) -> Option<Vec<&str>> {
+    let mut args = Vec::new();
+    let mut angle_depth = 0usize;
+    let mut paren_depth = 0usize;
+    let mut bracket_depth = 0usize;
+    let mut start = 0usize;
+    for (index, ch) in rendered.char_indices() {
+        match ch {
+            '<' => angle_depth = angle_depth.checked_add(1)?,
+            '>' if rendered[..index].ends_with('-') => {}
+            '>' => {
+                angle_depth = angle_depth.checked_sub(1)?;
+            }
+            '(' => paren_depth = paren_depth.checked_add(1)?,
+            ')' => {
+                paren_depth = paren_depth.checked_sub(1)?;
+            }
+            '[' => bracket_depth = bracket_depth.checked_add(1)?,
+            ']' => {
+                bracket_depth = bracket_depth.checked_sub(1)?;
+            }
+            ',' if angle_depth == 0 && paren_depth == 0 && bracket_depth == 0 => {
+                let arg = rendered[start..index].trim();
+                if arg.is_empty() {
+                    return None;
+                }
+                args.push(arg);
+                start = index + ch.len_utf8();
+            }
+            _ => {}
+        }
+    }
+    if angle_depth != 0 || paren_depth != 0 || bracket_depth != 0 {
+        return None;
+    }
+    let arg = rendered[start..].trim();
+    if arg.is_empty() {
+        return None;
+    }
+    args.push(arg);
+    Some(args)
+}
+
+fn rust_tuple_type_projection(rendered: &str) -> Option<Vec<RustType>> {
+    if !rendered.starts_with('(') || !rendered.ends_with(')') {
+        return None;
+    }
+    let inner = &rendered[1..rendered.len() - 1];
+    let items = split_top_level_type_args(inner)?;
+    if items.len() < 2 {
+        return None;
+    }
+    let projected = items
+        .into_iter()
+        .map(rust_type_arg_projection_or_raw)
+        .collect::<Vec<_>>();
+    projected
+        .iter()
+        .all(|item| !matches!(item, RustType::Raw(_)))
+        .then_some(projected)
+}
+
 impl RustStmt {
-    pub fn raw_leaf(rendered: impl Into<String>) -> RustStmt {
+    pub(crate) fn raw_leaf(rendered: impl Into<String>) -> RustStmt {
         RustStmt::Raw(rendered.into())
     }
 }
@@ -485,5 +737,145 @@ mod tests {
         let tagged = RustExpr::shaped(RustExprShape::Borrowed, var.clone());
         assert_eq!(tagged.unshaped(), &var);
         assert_eq!(tagged.into_unshaped(), var);
+    }
+
+    #[test]
+    fn raw_type_arg_projection_recovers_simple_generic_and_trait_types() {
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Box<dyn std::any::Any>"),
+            RustType::Generic {
+                base: "Box".to_string(),
+                args: vec![RustType::DynTrait("std::any::Any".to_string())],
+            }
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Vec<Option<String>>"),
+            RustType::Vec(Box::new(RustType::Option(Box::new(RustType::String))))
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("ndarray::Array2<i32>"),
+            RustType::Array2(Box::new(RustType::I32))
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("impl java::Thing"),
+            RustType::ImplTrait("java::Thing".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("&'static str"),
+            RustType::Ref {
+                mutable: false,
+                lifetime: Some("'static".to_string()),
+                inner: Box::new(RustType::Str),
+            }
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("&mut Vec<String>"),
+            RustType::Ref {
+                mutable: true,
+                lifetime: None,
+                inner: Box::new(RustType::Vec(Box::new(RustType::String))),
+            }
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("(String, i32)"),
+            RustType::Tuple(vec![RustType::String, RustType::I32])
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Vec<(String, i32)>"),
+            RustType::Vec(Box::new(RustType::Tuple(vec![
+                RustType::String,
+                RustType::I32
+            ]))),
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("fn(i32, String)"),
+            RustType::FnPointer {
+                params: vec![RustType::I32, RustType::String],
+                return_type: Box::new(RustType::Unit),
+            }
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("fn(&str, Vec<i32>) -> Option<String>"),
+            RustType::FnPointer {
+                params: vec![
+                    RustType::Ref {
+                        mutable: false,
+                        lifetime: None,
+                        inner: Box::new(RustType::Str),
+                    },
+                    RustType::Vec(Box::new(RustType::I32)),
+                ],
+                return_type: Box::new(RustType::Option(Box::new(RustType::String))),
+            }
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Option<fn(i32) -> bool>"),
+            RustType::Option(Box::new(RustType::FnPointer {
+                params: vec![RustType::I32],
+                return_type: Box::new(RustType::Bool),
+            }))
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("std::rc::Rc<std::cell::RefCell<String>>"),
+            RustType::Generic {
+                base: "std::rc::Rc".to_string(),
+                args: vec![RustType::Generic {
+                    base: "std::cell::RefCell".to_string(),
+                    args: vec![RustType::String],
+                }],
+            }
+        );
+    }
+
+    #[test]
+    fn raw_type_arg_projection_keeps_malformed_generics_raw() {
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Vec<String"),
+            RustType::Raw("Vec<String".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Vec<>"),
+            RustType::Raw("Vec<>".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Vec<dyn Fn(i32)>"),
+            RustType::Raw("Vec<dyn Fn(i32)>".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("Option<dyn Fn(i32)>"),
+            RustType::Raw("Option<dyn Fn(i32)>".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("dyn Fn(i32)"),
+            RustType::Raw("dyn Fn(i32)".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("fn(i32"),
+            RustType::Raw("fn(i32".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("fn(i32) -> dyn Fn(i32)"),
+            RustType::Raw("fn(i32) -> dyn Fn(i32)".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("&"),
+            RustType::Raw("&".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("&'bad-lifetime str"),
+            RustType::Raw("&'bad-lifetime str".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("&Vec<String"),
+            RustType::Raw("&Vec<String".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("(String)"),
+            RustType::Raw("(String)".to_string())
+        );
+        assert_eq!(
+            rust_type_arg_projection_or_raw("(String, Vec<i32>"),
+            RustType::Raw("(String, Vec<i32>".to_string())
+        );
     }
 }

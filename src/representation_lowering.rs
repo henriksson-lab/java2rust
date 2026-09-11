@@ -8,23 +8,21 @@ use crate::java_ir::{
     ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
 };
+use crate::java_naming::rust_name_for_java_named_type;
 use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::rust_ir::RustType;
 use crate::signature::{ReceiverPlan, SignaturePlan};
-use crate::slot_render::{
-    rust_name_for_java_named_type, rust_type_for_java_type_with_facts,
-    rust_type_for_slot_with_facts,
-};
+use crate::slot_render::{rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum RepresentationTypeEmission {
+pub(crate) enum RepresentationTypeEmission {
     LowerAsConcreteStruct,
     RawRustItem(String),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TraitImplMethodFallbackPolicy {
+pub(crate) enum TraitImplMethodFallbackPolicy {
     MissingImplementation,
     IncompatibleImplementation {
         error: TraitImplMethodCompatibilityError,
@@ -32,15 +30,15 @@ pub enum TraitImplMethodFallbackPolicy {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum TraitImplMethodCompatibilityError {
+pub(crate) enum TraitImplMethodCompatibilityError {
     ReturnTypeMismatch,
     ParameterCountMismatch,
     ParameterTypeMismatch,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TraitImplMethodMessagePolicy {
-    pub message: String,
+pub(crate) struct TraitImplMethodMessagePolicy {
+    message: String,
 }
 
 pub(crate) fn source_class_bound_trait_name(type_name: &str) -> String {
@@ -48,7 +46,7 @@ pub(crate) fn source_class_bound_trait_name(type_name: &str) -> String {
 }
 
 impl TraitImplMethodMessagePolicy {
-    pub fn compile_error_body(&self, signature: &str) -> String {
+    fn compile_error_body(&self, signature: &str) -> String {
         format!(
             "{} {{ panic!({:?}); }}",
             signature.trim_end_matches(';'),
@@ -1461,7 +1459,7 @@ fn trait_impl_method_compatibility_error(
     None
 }
 
-pub fn trait_impl_method_message_policy(
+pub(crate) fn trait_impl_method_message_policy(
     ty: &TypeDecl,
     interface_method: &MethodDecl,
     policy: TraitImplMethodFallbackPolicy,

@@ -4,9 +4,6 @@ use new_java2rust::coercion::{
     apply_lowered_expr_to_slot_with_facts, apply_shape_coercion_plan, apply_slot_conversion_plan,
     apply_syntax_coercion_plan, plan_coercion_with_facts, plan_shape_coercion_with_facts,
 };
-use new_java2rust::conversion_lowering::{
-    apply_lowered_slot_expr_conversion, apply_slot_expr_conversion,
-};
 use new_java2rust::conversion_plan::{
     AssignmentValuePlan, BorrowedElementAdapterPolicy, BorrowedElementCarrier,
     BorrowedElementRecoveryFallbackPolicy, BorrowedElementRecoveryPolicy,
@@ -49,9 +46,9 @@ use new_java2rust::emit::emit_expr;
 use new_java2rust::expr_shape::{ExprShapeContext, ShapeEnv, infer_expr_shape};
 use new_java2rust::external_packs::{hdf5_pack_facts, parse_external_pack_manifest};
 use new_java2rust::facts::{
-    ExternalConversionAdapterFact, ExternalConversionAdapterKind, ExternalFieldFact,
-    ExternalFieldKind, FactProvenance, FactSet, FieldKey, OwnedRecoveryCapability,
-    OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
+    ExternalApiCoverage, ExternalConversionAdapterFact, ExternalConversionAdapterKind,
+    ExternalFieldFact, ExternalFieldKind, ExternalLibraryPackFact, FactProvenance, FactSet,
+    FieldKey, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
 };
 use new_java2rust::java_ir::{
     Expr, JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType,
@@ -66,9 +63,6 @@ use new_java2rust::rust_ir::{
 };
 use new_java2rust::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
-use new_java2rust::string_concat::is_string_concat;
-use new_java2rust::string_concat_plan::build_string_concat_plan;
-use new_java2rust::string_concat_render::string_concat_expr;
 use new_java2rust::types::{
     TypeEnv, infer_expr_type, list_java_type, optional_java_type, set_java_type,
 };
@@ -850,19 +844,13 @@ fn member_access_plan_preserves_package_qualified_external_static_constant_owner
     let env = TypeEnv::new();
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "a.Item".to_string(),
-            field_name: "KIND".to_string(),
-        },
+        field: FieldKey::named("a.Item", "KIND"),
         field_type: Some(JavaType::String),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,
     });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "b.Item".to_string(),
-            field_name: "KIND".to_string(),
-        },
+        field: FieldKey::named("b.Item", "KIND"),
         field_type: Some(JavaType::String),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,
@@ -883,6 +871,39 @@ fn member_access_plan_preserves_package_qualified_external_static_constant_owner
         b_plan.op,
         MemberAccessOp::StaticConstant {
             owner: "BItem".to_string(),
+        }
+    );
+}
+
+#[test]
+fn member_access_plan_does_not_use_raw_mapped_field_type_as_static_constant_owner() {
+    let env = TypeEnv::new();
+    let mut facts = FactSet::default();
+    facts.external_library_packs.push(ExternalLibraryPackFact {
+        pack_name: "mapped".to_string(),
+        package_prefix: "mapped.Box".to_string(),
+        mode: new_java2rust::facts::ExternalLibraryMode::RustCrateMapping,
+        coverage: ExternalApiCoverage::Mapped,
+        rust_target: Some("mapped_facade".to_string()),
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FieldKey::named("MappedOwner", "VALUE"),
+        field_type: Some(JavaType::Named {
+            name: "mapped.Box".to_string(),
+            args: vec![JavaType::String],
+        }),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::UserOverride,
+    });
+
+    let plan = plan_member_access_with_facts(&parse_expr("MappedOwner"), "VALUE", &env, &facts)
+        .expect("exact external static field fact should still plan as a static constant");
+
+    assert_eq!(
+        plan.op,
+        MemberAccessOp::StaticConstant {
+            owner: "MappedOwner".to_string(),
         }
     );
 }
@@ -976,40 +997,6 @@ fn type_inference_consumes_external_pack_return_type_facts() {
                 name: "Allele".to_string(),
                 args: Vec::new(),
             }],
-        }
-    );
-}
-
-#[test]
-fn type_inference_identifies_string_concat() {
-    let mut env = TypeEnv::new();
-    env.insert_local("name", JavaType::String);
-    env.insert_local("count", JavaType::Primitive(PrimitiveType::Int));
-
-    assert!(is_string_concat(
-        &parse_expr("\"name=\" + name + count"),
-        &env
-    ));
-    let expr = parse_expr("\"name=\" + name + count");
-    let plan = build_string_concat_plan(&expr, &env).unwrap();
-
-    assert_eq!(plan.format_string, "name={}{}");
-    assert_eq!(plan.args.len(), 2);
-    assert_eq!(
-        string_concat_expr(
-            &plan,
-            vec![
-                RustExpr::Var("name".to_string()),
-                RustExpr::Var("count".to_string()),
-            ],
-        ),
-        RustExpr::MacroCall {
-            macro_name: "format".to_string(),
-            args: vec![
-                RustExpr::Literal("\"name={}{}\"".to_string()),
-                RustExpr::Var("name".to_string()),
-                RustExpr::Var("count".to_string()),
-            ],
         }
     );
 }
@@ -1427,20 +1414,9 @@ fn rust_unsigned_byte_array_return_composes_byte_conversion_pipeline() {
     let lowered = LoweredType::rust_unsigned_byte_array_return(byte_array.clone(), false);
     let plan =
         plan_lowered_slot_conversion(&lowered, Slot::Return(target.clone()), &FactSet::default());
-    let converted = apply_lowered_slot_expr_conversion(
-        LoweredExpr {
-            expr: RustExpr::Raw("left + right".to_string()),
-            actual: lowered,
-        },
-        &plan,
-    );
-    assert_eq!(
-        emit_expr(&converted),
-        "(left + right).into_iter().map(|byte| byte as i8).collect::<Vec<_>>()"
-    );
     assert!(matches!(
-        converted,
-        RustExpr::MethodCall { method, .. } if method == "collect::<Vec<_>>"
+        plan.conversion,
+        SlotConversionPlan::RustUnsignedByteArrayReturn(_)
     ));
 
     let optional_target = RustSlotShape::conservative(optional_java_type(byte_array.clone()));
@@ -1450,20 +1426,9 @@ fn rust_unsigned_byte_array_return_composes_byte_conversion_pipeline() {
         Slot::Return(optional_target),
         &FactSet::default(),
     );
-    let optional_converted = apply_lowered_slot_expr_conversion(
-        LoweredExpr {
-            expr: RustExpr::Raw("maybe_bytes()".to_string()),
-            actual: optional_lowered,
-        },
-        &optional_plan,
-    );
-    assert_eq!(
-        emit_expr(&optional_converted),
-        "maybe_bytes().map(|bytes| bytes.into_iter().map(|byte| byte as i8).collect::<Vec<_>>())"
-    );
     assert!(matches!(
-        optional_converted,
-        RustExpr::MethodCall { method, .. } if method == "map"
+        optional_plan.conversion,
+        SlotConversionPlan::RustUnsignedByteArrayReturn(_)
     ));
 }
 
@@ -1484,14 +1449,6 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
             }),
         }
     );
-    assert_eq!(
-        apply_slot_expr_conversion(RustExpr::Var("i".to_string()), &slot_plan),
-        RustExpr::Cast {
-            expr: Box::new(RustExpr::Var("i".to_string())),
-            ty: "usize".to_string(),
-        }
-    );
-
     let lowered_actual = LoweredType::optional_element_borrow(JavaType::String);
     let lowered_plan =
         plan_lowered_slot_conversion(&lowered_actual, Slot::Index, &FactSet::default());
@@ -1505,26 +1462,6 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
                 slot: Slot::Index,
             },
         }
-    );
-    let mut optional_element_shape = RustSlotShape::conservative(JavaType::String);
-    optional_element_shape.ownership = OwnershipShape::SharedBorrow;
-    assert_eq!(
-        apply_lowered_slot_expr_conversion(
-            LoweredExpr {
-                expr: RustExpr::Var("value".to_string()),
-                actual: LoweredType::optional_element_borrow(JavaType::String),
-            },
-            &lowered_plan,
-        ),
-        RustExpr::shaped_as(
-            RustExprShape::OptionalProjected,
-            Some(optional_element_shape),
-            RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Var("value".to_string())),
-                method: "as_ref".to_string(),
-                args: Vec::new(),
-            },
-        )
     );
 }
 
@@ -1667,21 +1604,13 @@ fn optional_element_borrow_display_projects_the_option_carrier() {
     let plan =
         plan_lowered_slot_conversion(&actual, Slot::StringConcatSegment, &FactSet::default());
 
-    let converted = apply_lowered_slot_expr_conversion(
-        LoweredExpr {
-            expr: RustExpr::Field(
-                Box::new(RustExpr::Var("box_value".to_string())),
-                "value".to_string(),
-            ),
-            actual,
-        },
-        &plan,
-    );
-
-    assert_eq!(
-        emit_expr(&converted),
-        "box_value.value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
-    );
+    assert!(matches!(
+        plan.conversion,
+        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
+            ..
+        })
+    ));
 }
 
 #[test]
@@ -3269,12 +3198,8 @@ fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
             policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
         })
     );
-    let converted = apply_lowered_slot_expr_conversion(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.get(key.as_str())".to_string()),
-            actual,
-        },
-        &plan_lowered_slot_conversion(
+    assert!(matches!(
+        plan_lowered_slot_conversion(
             &LoweredType::optional_element_borrow_shape(RustSlotShape::conservative(
                 JavaType::Named {
                     name: "URI".to_string(),
@@ -3283,22 +3208,12 @@ fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
             )),
             Slot::StringConcatSegment,
             &FactSet::default(),
-        ),
-    );
-    assert_eq!(
-        emit_expr(&converted),
-        "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
-    );
-    assert!(matches!(
-        converted,
-        RustExpr::MethodCall { method, receiver, .. }
-            if method == "unwrap_or_else"
-                && matches!(
-                    receiver.as_ref(),
-                    RustExpr::MethodCall { receiver, method, .. }
-                        if method == "map"
-                            && receiver.as_ref() == &values_get_key_as_str_expr()
-                )
+        )
+        .conversion,
+        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
+            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
+            ..
+        })
     ));
 }
 

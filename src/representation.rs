@@ -81,7 +81,8 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     let mut plan = RepresentationPlan::default();
     let effective_facts = EffectiveFacts::new(facts);
     let usage = crate::usage::analyze_usage_with_facts(program, facts);
-    plan.storage = crate::storage_strategy::plan_storage_strategies(program, &usage);
+    plan.storage =
+        crate::storage_strategy::plan_storage_strategies_from_facts(program, &usage, facts);
     let object_plan = plan_object_model_from_input(ObjectModelInput {
         program,
         facts,
@@ -185,7 +186,7 @@ fn source_hierarchy_carrier_variants_for_root(
     collect_source_hierarchy_carrier_variants(plan, root, &mut seen, &mut names);
     names
         .into_iter()
-        .map(|name| crate::slot_render::rust_name_for_java_named_type(&name))
+        .map(|name| crate::java_naming::rust_name_for_java_named_type(&name))
         .collect()
 }
 
@@ -286,7 +287,7 @@ impl RepresentationPlan {
             return None;
         };
         let variant = crate::object_model::rust_enum_variant_name_from_parsed_constant(label_name);
-        let rust_enum_name = crate::slot_render::rust_name_for_java_named_type(enum_name);
+        let rust_enum_name = crate::java_naming::rust_name_for_java_named_type(enum_name);
         variants
             .iter()
             .any(|known| known == &variant)
@@ -411,11 +412,11 @@ pub fn representation_dispatch_policy(
         },
         ObjectRepresentation::JavaEnum { .. } => DispatchShape::Concrete,
         ObjectRepresentation::ClosedEnum { enum_name, .. } => DispatchShape::ClosedEnum {
-            enum_name: crate::slot_render::rust_name_for_java_named_type(enum_name),
+            enum_name: crate::java_naming::rust_name_for_java_named_type(enum_name),
         },
         ObjectRepresentation::SourceHierarchyCarrier { carrier_name, .. } => {
             DispatchShape::ClosedEnum {
-                enum_name: crate::slot_render::rust_name_for_java_named_type(carrier_name),
+                enum_name: crate::java_naming::rust_name_for_java_named_type(carrier_name),
             }
         }
         ObjectRepresentation::ErasedObject => DispatchShape::ErasedObject,

@@ -613,8 +613,11 @@ fn build_batch_translation_context(
         external_facts,
         semantic_analysis_config_from_facts(external_facts),
     );
-    semantic.facts.storage_strategies =
-        storage_strategy::plan_storage_strategies(&support_program, &semantic.usage);
+    semantic.facts.storage_strategies = storage_strategy::plan_storage_strategies_from_facts(
+        &support_program,
+        &semantic.usage,
+        &resolved_context.facts,
+    );
     timings.global_semantic_ms = semantic_start.elapsed().as_millis();
     emit_batch_phase_progress(
         event_sink,
@@ -1026,8 +1029,11 @@ fn translate_parsed_source_with_context(
     // *every* place that renders a type, or a struct field and a parameter of
     // the same Java type get different Rust spellings and the output does not
     // compile. The fact set is the only thing all of them already have.
-    semantic.facts.storage_strategies =
-        storage_strategy::plan_storage_strategies(&semantic_program, &semantic.usage);
+    semantic.facts.storage_strategies = storage_strategy::plan_storage_strategies_from_facts(
+        &semantic_program,
+        &semantic.usage,
+        &resolved.facts,
+    );
     let representations = representation::plan_representations(&semantic_program, &semantic.facts);
     let resolved_support_program =
         support_program_context
@@ -1298,7 +1304,7 @@ fn report_post_lowering_translation_diagnostics(
     // change, and every type the plan says should be shared while lowering
     // holds it by value is reported. That list is the work queue for the
     // representation change and the size estimate it needs first.
-    storage_strategy::report_storage_disagreements(program, usage, diagnostics);
+    storage_strategy::report_storage_disagreements(program, usage, facts, diagnostics);
     // A non-static inner class compiles and then panics on construction. The
     // translator has to say so; a compile-error count cannot see it.
     inner_class_capture::report_unconstructable_inner_classes(program, facts, diagnostics);
@@ -2315,17 +2321,22 @@ public class Item {
                 Some(JavaCallableKey::source_method_for_type(ty, method))
             })
             .collect::<Vec<_>>();
-        keys.sort_by(|left, right| left.owner.cmp(&right.owner));
+        keys.sort_by(|left, right| left.owner().cmp(right.owner()));
 
         assert_eq!(
-            keys.iter()
-                .map(|key| key.owner.as_str())
-                .collect::<Vec<_>>(),
+            keys.iter().map(|key| key.owner()).collect::<Vec<_>>(),
             vec!["a.Item", "b.Item"]
+        );
+        let exception_plan = crate::exception_plan::ProgramExceptionPlan::default();
+        let fallibility_plan = crate::exception_plan::ProgramFallibilityPlan::default();
+        let callable_analysis = crate::callable_analysis::CallableAnalysis::new(
+            &context.semantic.usage,
+            &exception_plan,
+            &fallibility_plan,
         );
         for key in &keys {
             assert!(
-                context.semantic.usage.methods_by_java_key.contains_key(key),
+                callable_analysis.method_usage_by_java_key(key).is_some(),
                 "usage facts missing {key:?}"
             );
             assert!(
@@ -2340,20 +2351,16 @@ public class Item {
             !context
                 .semantic
                 .usage
-                .methods_by_java_key
-                .keys()
-                .any(|key| key.owner == "Item" && key.java_name == "who"),
+                .source_method_usage_java_keys()
+                .any(|key| key.owner() == "Item" && key.java_name() == "who"),
             "same-simple-name package peers must not collapse onto Item::who"
         );
         assert!(
             !context
                 .semantic
                 .usage
-                .methods_by_java_key
-                .keys()
-                .any(
-                    |key| matches!(key.owner.as_str(), "AItem" | "BItem") && key.java_name == "who"
-                ),
+                .source_method_usage_java_keys()
+                .any(|key| matches!(key.owner(), "AItem" | "BItem") && key.java_name() == "who"),
             "analysis identity should stay in Java owner space, not emitted Rust spelling"
         );
     }

@@ -66,6 +66,13 @@ the 0062 recheck cleanup. The current guardrail asserts that
 `builtin_external_library_packs` does not appear in source code, so this audit no
 longer has a live clone-returning aggregate API to preserve.
 
+Codex follow-up 2026-09-09: the residual `builtin_external_pack_models_api`
+helper now uses the existing `BuiltinExternalPackLookupIndex` instead of
+rebuilding `builtin_external_pack_manifests()` aliases on every call. The index
+stores modeled API receiver/method aliases separately from unsupported APIs, so
+the old `ExternalPackManifest::modeled_api` semantics are preserved while moving
+the last cheap manifest scan onto the cached lookup path.
+
 Severity: **high for performance** (57% of runtime on the measured input),
 **low-medium for correctness** (a gate that six sites bypass; currently
 unobservable through the CLI because the CLI flag is not wired to the gate)

@@ -62,6 +62,10 @@ fn generated_source_items_from_marker(rust: &str, marker: &str) -> String {
     rust[start..].to_string()
 }
 
+fn generated_source_item_marker_count(rust: &str, marker: &str) -> usize {
+    rust.matches(marker).count()
+}
+
 #[test]
 fn batch_parallel_emission_matches_serial_output_order() {
     let primary_sources = vec![
@@ -447,6 +451,26 @@ public class Main {
     assert!(!main.rust.contains("= Item::new()"), "{}", main.rust);
     assert!(a_item.rust.contains("pub struct AItem"), "{}", a_item.rust);
     assert!(b_item.rust.contains("pub struct BItem"), "{}", b_item.rust);
+    assert_eq!(
+        generated_source_item_marker_count(&a_item.rust, "pub struct AItem"),
+        1,
+        "{}",
+        a_item.rust
+    );
+    assert_eq!(
+        generated_source_item_marker_count(&b_item.rust, "pub struct BItem"),
+        1,
+        "{}",
+        b_item.rust
+    );
+    assert_eq!(
+        generated_source_item_marker_count(&a_item.rust, "pub struct BItem")
+            + generated_source_item_marker_count(&b_item.rust, "pub struct AItem"),
+        0,
+        "package-peer emitted items should not cross owners:\n{}\n{}",
+        a_item.rust,
+        b_item.rust
+    );
     assert!(
         !a_item.rust.contains("pub type Item = AItem;"),
         "{}",
@@ -471,7 +495,7 @@ public class Main {
             rust: format!(
                 "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
                  impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
-                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ String::new() }}\n\
+                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ panic!(\"unsupported Java erased object display: runtime target is erased\") }}\n\
                  {}\n{}\n{}",
                 generated_source_items_from_marker(&a_item.rust, "pub struct AItem"),
                 generated_source_items_from_marker(&b_item.rust, "pub struct BItem"),
@@ -551,6 +575,16 @@ public class Main {
     assert!(main.rust.contains("AItem::KIND"), "{}", main.rust);
     assert!(main.rust.contains("BItem::KIND"), "{}", main.rust);
     assert!(!main.rust.contains("pub struct Item;"), "{}", main.rust);
+    assert!(
+        !main.rust.contains("pub type Item = AItem;"),
+        "{}",
+        main.rust
+    );
+    assert!(
+        !main.rust.contains("pub type Item = BItem;"),
+        "{}",
+        main.rust
+    );
     assert!(
         !a_item.rust.contains("pub type Item = AItem;"),
         "{}",
@@ -657,7 +691,7 @@ public class Main {
             rust: format!(
                 "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
                  impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
-                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ String::new() }}\n\
+                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ panic!(\"unsupported Java erased object display: runtime target is erased\") }}\n\
                  {}\n{}\n{}",
                 generated_source_items_from_marker(&a_mode.rust, "pub enum AMode"),
                 generated_source_items_from_marker(&b_mode.rust, "pub enum BMode"),

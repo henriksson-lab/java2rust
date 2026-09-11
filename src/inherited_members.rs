@@ -233,26 +233,24 @@ fn push_external_inherited_instance_field_from_fact(
     ) {
         return;
     }
-    if !external_field_fact_matches_super_type(&fact.field.type_name, super_name, fact.provenance) {
+    let field_owner = fact.field.type_name();
+    let field_name = fact.field.field_name();
+    if !external_field_fact_matches_super_type(field_owner, super_name, fact.provenance) {
         return;
     }
-    let rust_name = rust_field_name(&fact.field.field_name);
+    let rust_name = rust_field_name(field_name);
     if !seen_fields.insert(rust_name.clone()) {
         return;
     }
     fields.push(ExternalInheritedInstanceField {
-        declaring_type: fact.field.type_name.clone(),
-        field_name: fact.field.field_name.clone(),
+        declaring_type: field_owner.to_string(),
+        field_name: field_name.to_string(),
         rust_name,
         field_type: fact
             .field_type
             .clone()
             .unwrap_or_else(|| JavaType::Unknown("Object".to_string())),
-        field_nullability: inherited_external_field_nullability(
-            facts,
-            &fact.field.type_name,
-            &fact.field.field_name,
-        ),
+        field_nullability: inherited_external_field_nullability(facts, field_owner, field_name),
     });
 }
 
@@ -310,18 +308,20 @@ fn push_external_inherited_static_final_field_from_fact(
     if fact.field_kind != ExternalFieldKind::StaticFinal {
         return;
     }
-    if !external_field_fact_matches_super_type(&fact.field.type_name, super_name, fact.provenance) {
+    let field_owner = fact.field.type_name();
+    let field_name = fact.field.field_name();
+    if !external_field_fact_matches_super_type(field_owner, super_name, fact.provenance) {
         return;
     }
-    if !seen_fields.insert(fact.field.field_name.clone()) {
+    if !seen_fields.insert(field_name.to_string()) {
         return;
     }
     let Some(field_type) = fact.field_type.clone() else {
         return;
     };
     fields.push(ExternalInheritedStaticField {
-        declaring_type: fact.field.type_name.clone(),
-        field_name: fact.field.field_name.clone(),
+        declaring_type: field_owner.to_string(),
+        field_name: field_name.to_string(),
         field_type,
     });
 }

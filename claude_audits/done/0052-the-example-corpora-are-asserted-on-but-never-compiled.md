@@ -1949,7 +1949,7 @@ Still open from this audit:
   `documents_mutual_recursion_gap`,
   `documents_tail_recursive_accumulator_gap`,
   `documents_external_getter_setter_mutability_gap`, and
-  `documents_exception_cause_chaining_gap`.
+  `exception_cause_chaining_uses_java_exception_cause`.
   `callback_called_only_inside_nested_lambda_is_not_nonescaping` is
   expected-compile-failure-backed: the rendered assertion correctly pins that the
   escaping callback is not lowered as `impl FnMut`, but the generated crate still
@@ -1958,7 +1958,7 @@ Still open from this audit:
   promoted tests. The remaining rendered-Rust-only `idiom_gaps` assertion count
   is 34.
 - Follow-up 2026-08-26: two late assertions are now generated-crate-backed.
-  `documents_exception_rethrow_specific_gap` is clean compile-backed.
+  `exception_rethrow_specific_preserves_java_exception` is clean compile-backed.
   `emitted_type_gets_external_super_static_final_constant_surface` is
   expected-compile-failure-backed, preserving the current behavior that an
   inherited external static final constant with no modeled value emits a

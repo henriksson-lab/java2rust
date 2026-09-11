@@ -37,7 +37,7 @@ use new_java2rust::stdlib::{
 };
 use new_java2rust::types::optional_java_type;
 use new_java2rust::usage::{
-    BindingUse, CallArgumentBoundary, FieldUse, UsageMethodKey, analyze_usage,
+    BindingUse, BindingUseFacts, CallArgumentBoundary, FieldUse, MethodUsageFacts, analyze_usage,
 };
 use new_java2rust::{
     emit, exception_plan, external_facts, lower, parser, representation, resolve,
@@ -53,6 +53,16 @@ fn cargo_check_translation(crate_name: &str, rust: &str) {
             tests: "",
         }],
     );
+}
+
+fn test_binding_facts_for_id<'a>(
+    usage: &'a MethodUsageFacts,
+    binding: &new_java2rust::binding_id::BindingId,
+) -> Option<&'a BindingUseFacts> {
+    usage
+        .all_binding_facts()
+        .into_iter()
+        .find(|facts| facts.binding.as_ref() == Some(binding))
 }
 
 fn idiom_gap(path: &str) -> String {
@@ -140,7 +150,7 @@ class Path {
         .facts
         .method_effect_facts
         .iter()
-        .filter(|fact| fact.method.method_name == "find")
+        .filter(|fact| fact.method.method_name() == "find")
         .collect::<Vec<_>>();
     let effect = semantic
         .facts
@@ -285,7 +295,8 @@ class OverloadedUsageKey {
 }
 "#;
     let parsed = parser::parse_java_source(source);
-    let ty = parsed
+    let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
+    let ty = resolved
         .program
         .types
         .iter()
@@ -312,7 +323,11 @@ class OverloadedUsageKey {
         .find(|method| matches!(method.params[0].ty, JavaType::String))
         .unwrap();
 
-    let semantic = analyze(source);
+    let semantic = semantic_analysis::analyze_program(
+        &resolved.program,
+        &resolved.facts,
+        &new_java2rust::facts::FactSet::default(),
+    );
     let int_usage = semantic
         .usage
         .source_method_usage(ty, int_method)
@@ -322,8 +337,14 @@ class OverloadedUsageKey {
         .source_method_usage(ty, string_method)
         .expect("string overload usage should be keyed by Java signature");
 
-    let int_value = int_usage.unique_binding_facts_for_name("value").unwrap();
-    let string_value = string_usage.unique_binding_facts_for_name("value").unwrap();
+    let int_value =
+        test_binding_facts_for_id(int_usage, int_method.params[0].binding.as_ref().unwrap())
+            .unwrap();
+    let string_value = test_binding_facts_for_id(
+        string_usage,
+        string_method.params[0].binding.as_ref().unwrap(),
+    )
+    .unwrap();
     assert!(
         int_value
             .uses
@@ -955,7 +976,7 @@ fn records_trivial_getter_and_setter_facts() {
     assert!(matches!(
         &getter.kind,
         TrivialAccessorKind::Getter { field }
-            if field.type_name == "JavaBeanGetterSetterNames" && field.field_name == "value"
+            if field.type_name() == "JavaBeanGetterSetterNames" && field.field_name() == "value"
     ));
 
     let setter = semantic
@@ -968,8 +989,8 @@ fn records_trivial_getter_and_setter_facts() {
             field,
             param_name,
             fluent: false,
-        } if field.type_name == "JavaBeanGetterSetterNames"
-            && field.field_name == "value"
+        } if field.type_name() == "JavaBeanGetterSetterNames"
+            && field.field_name() == "value"
             && param_name == "value"
     ));
 }
@@ -1057,21 +1078,20 @@ fn usage_treats_trivial_accessor_calls_as_backing_field_uses() {
     let semantic = analyze(&idiom_gap("JavaBeanGetterSetterNames.java"));
     let copy_from = semantic
         .usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "JavaBeanGetterSetterNames".to_string(),
-            method_name: "copyFrom".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "JavaBeanGetterSetterNames".to_string(),
+            "copyFrom".to_string(),
+        )
         .unwrap();
 
-    assert!(copy_from.mutates_self);
+    assert!(copy_from.mutates_self());
     assert!(
-        copy_from.field_uses.iter().any(|field_use| matches!(
+        copy_from.field_uses().iter().any(|field_use| matches!(
             field_use,
             FieldUse::Returned { field_name } if field_name == "value"
         )),
         "{:?}",
-        copy_from.field_uses
+        copy_from.field_uses()
     );
 }
 
@@ -1080,14 +1100,13 @@ fn usage_treats_native_collection_field_mutators_as_self_mutation() {
     let semantic = analyze(&idiom_gap("CollectionFieldMutator.java"));
     let put_value = semantic
         .usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "CollectionFieldMutator".to_string(),
-            method_name: "putValue".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "CollectionFieldMutator".to_string(),
+            "putValue".to_string(),
+        )
         .unwrap();
 
-    assert!(put_value.mutates_self, "{put_value:?}");
+    assert!(put_value.mutates_self(), "{put_value:?}");
 }
 
 #[test]
@@ -1109,14 +1128,13 @@ class StaticCollectionArgumentMutator {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let order = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "StaticCollectionArgumentMutator".to_string(),
-            method_name: "order".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "StaticCollectionArgumentMutator".to_string(),
+            "order".to_string(),
+        )
         .unwrap();
 
-    assert!(order.mutates_self, "{order:?}");
+    assert!(order.mutates_self(), "{order:?}");
 }
 
 #[test]
@@ -1137,14 +1155,13 @@ class CollectionReceiverMutationKind {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let usage = analyze_usage(&resolved.program);
     let push_like_list = usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "CollectionReceiverMutationKind".to_string(),
-            method_name: "pushLikeList".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "CollectionReceiverMutationKind".to_string(),
+            "pushLikeList".to_string(),
+        )
         .unwrap();
 
-    assert!(!push_like_list.mutates_self, "{push_like_list:?}");
+    assert!(!push_like_list.mutates_self(), "{push_like_list:?}");
 }
 
 #[test]
@@ -1173,14 +1190,13 @@ class SelfMutabilityPropagation {
 
     for method_name in ["outer", "middle", "inner"] {
         let method_usage = usage
-            .methods
-            .get(&new_java2rust::usage::UsageMethodKey {
-                type_name: "SelfMutabilityPropagation".to_string(),
-                method_name: method_name.to_string(),
-            })
+            .method_usage_by_current_rust_name(
+                "SelfMutabilityPropagation".to_string(),
+                method_name.to_string(),
+            )
             .unwrap();
         assert!(
-            method_usage.mutates_self,
+            method_usage.mutates_self(),
             "{method_name} should inherit mutating receiver pressure through same-receiver calls: {method_usage:?}"
         );
     }
@@ -1235,7 +1251,7 @@ class SelfMutabilityOverloadPropagation {
     };
 
     assert!(
-        !method_usage("outer", None).mutates_self,
+        !method_usage("outer", None).mutates_self(),
         "outer calls the String overload, which is read-only"
     );
     assert!(
@@ -1245,11 +1261,11 @@ class SelfMutabilityOverloadPropagation {
                 new_java2rust::java_ir::PrimitiveType::Int
             ))
         )
-        .mutates_self,
+        .mutates_self(),
         "the int overload still mutates"
     );
     assert!(
-        !method_usage("touch", Some(&JavaType::String)).mutates_self,
+        !method_usage("touch", Some(&JavaType::String)).mutates_self(),
         "the String overload must not inherit mutation from the int overload"
     );
 }
@@ -1699,19 +1715,13 @@ fn indexed_external_api_lookup_preserves_global_reverse_order_across_alias_bucke
 fn indexed_external_field_lookup_preserves_direct_then_alias_precedence() {
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "dep.Constants".to_string(),
-            field_name: "MAX_COUNT".to_string(),
-        },
+        field: FieldKey::named("dep.Constants".to_string(), "MAX_COUNT".to_string()),
         field_type: Some(JavaType::Primitive(PrimitiveType::Long)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "Constants".to_string(),
-            field_name: "MAX_COUNT".to_string(),
-        },
+        field: FieldKey::named("Constants".to_string(), "MAX_COUNT".to_string()),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::UserOverride,
@@ -1735,19 +1745,13 @@ fn indexed_external_field_lookup_preserves_direct_then_alias_precedence() {
 fn external_field_lookup_refuses_ambiguous_simple_package_owner() {
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "a.Item".to_string(),
-            field_name: "KIND".to_string(),
-        },
+        field: FieldKey::named("a.Item".to_string(), "KIND".to_string()),
         field_type: Some(JavaType::String),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
     });
     facts.external_field_facts.push(ExternalFieldFact {
-        field: FieldKey {
-            type_name: "b.Item".to_string(),
-            field_name: "KIND".to_string(),
-        },
+        field: FieldKey::named("b.Item".to_string(), "KIND".to_string()),
         field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
         field_kind: ExternalFieldKind::StaticFinal,
         provenance: FactProvenance::ExternalLibraryPack,
@@ -1778,23 +1782,14 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
         ("b.Item", NullabilityState::DefinitelyNonNull, "B_KIND"),
     ] {
         facts.field_nullability_facts.push(FieldNullabilityFact {
-            field: FieldKey {
-                type_name: owner.to_string(),
-                field_name: "kind".to_string(),
-            },
+            field: FieldKey::named(owner.to_string(), "kind".to_string()),
             state: nullability,
             provenance: FieldNullabilityProvenance::ExternalLibraryPack,
         });
         facts.trivial_accessor_facts.push(TrivialAccessorFact {
-            method: MethodKey {
-                type_name: owner.to_string(),
-                method_name: "getKind".to_string(),
-            },
+            method: MethodKey::named(owner.to_string(), "getKind".to_string()),
             kind: TrivialAccessorKind::Getter {
-                field: FieldKey {
-                    type_name: owner.to_string(),
-                    field_name: "kind".to_string(),
-                },
+                field: FieldKey::named(owner.to_string(), "kind".to_string()),
             },
             inline_policy: AccessorInlinePolicy::InlineCandidate,
             provenance: FactProvenance::ExternalLibraryPack,
@@ -1802,10 +1797,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
         facts
             .external_field_value_facts
             .push(ExternalFieldValueFact {
-                field: FieldKey {
-                    type_name: owner.to_string(),
-                    field_name: "KIND".to_string(),
-                },
+                field: FieldKey::named(owner.to_string(), "KIND".to_string()),
                 rust_value: value.to_string(),
                 provenance: FactProvenance::ExternalLibraryPack,
             });
@@ -1835,10 +1827,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
                 },
                 provenance: FactProvenance::ExternalLibraryPack,
             });
-        let method = MethodKey {
-            type_name: owner.to_string(),
-            method_name: "work".to_string(),
-        };
+        let method = MethodKey::named(owner.to_string(), "work".to_string());
         facts.method_effect_facts.push(MethodEffectFact {
             method: method.clone(),
             receiver_mutability: if owner == "a.Item" {
@@ -1983,6 +1972,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
         facts
             .external_crate_constructor_mapping_facts
             .push(ExternalCrateConstructorMappingFact {
+                pack_name: None,
                 type_name: owner.to_string(),
                 arg_count: 1,
                 rust_type_name: Some(format!("{value}CtorType")),
@@ -2060,10 +2050,7 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
             .unsupported_external_field_facts
             .push(UnsupportedExternalFieldFact {
                 pack_name: "test".to_string(),
-                field: FieldKey {
-                    type_name: owner.to_string(),
-                    field_name: "RAW".to_string(),
-                },
+                field: FieldKey::named(owner.to_string(), "RAW".to_string()),
                 reason: value.to_string(),
                 provenance: FactProvenance::ExternalLibraryPack,
             });
@@ -2082,14 +2069,14 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
     assert_eq!(
         facts
             .trivial_accessor_for("a.Item", "getKind")
-            .map(|fact| &fact.method.type_name),
-        Some(&"a.Item".to_string())
+            .map(|fact| fact.method.type_name()),
+        Some("a.Item")
     );
     assert_eq!(
         facts
             .trivial_accessor_for("b.Item", "getKind")
-            .map(|fact| &fact.method.type_name),
-        Some(&"b.Item".to_string())
+            .map(|fact| fact.method.type_name()),
+        Some("b.Item")
     );
     assert!(facts.trivial_accessor_for("Item", "getKind").is_none());
 
@@ -2529,13 +2516,13 @@ fn fact_lookup_refuses_ambiguous_simple_package_owner_aliases() {
     assert_eq!(
         facts
             .unsupported_external_field_for("a.Item", "RAW")
-            .map(|fact| fact.field.type_name.as_str()),
+            .map(|fact| fact.field.type_name()),
         Some("a.Item")
     );
     assert_eq!(
         facts
             .unsupported_external_field_for("b.Item", "RAW")
-            .map(|fact| fact.field.type_name.as_str()),
+            .map(|fact| fact.field.type_name()),
         Some("b.Item")
     );
     assert!(
@@ -4705,8 +4692,10 @@ class SourceSummaryConstantUse {
             .facts
             .external_field_facts
             .iter()
-            .filter(|fact| fact.field.type_name == "GATKConfig"
-                && fact.field.field_name == "CONFIG_FILE_VARIABLE_FILE_NAME")
+            .filter(|fact| {
+                fact.field.type_name() == "GATKConfig"
+                    && fact.field.field_name() == "CONFIG_FILE_VARIABLE_FILE_NAME"
+            })
             .count(),
         1,
         "semantic analysis should not add a conservative duplicate for parsed field facts"
@@ -8789,18 +8778,31 @@ class ReadOnlyExternalReceiverParam {
         });
     let semantic =
         semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
+    let ty = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "ReadOnlyExternalReceiverParam")
+        .unwrap();
+    let method = ty
+        .members
+        .iter()
+        .find_map(|member| match member {
+            new_java2rust::java_ir::Member::Method(method) if method.name == "read" => Some(method),
+            _ => None,
+        })
+        .unwrap();
     let method_usage = semantic
         .usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "ReadOnlyExternalReceiverParam".to_string(),
-            method_name: "read".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "ReadOnlyExternalReceiverParam".to_string(),
+            "read".to_string(),
+        )
         .expect("read usage should be recorded");
-    let handle_facts = method_usage
-        .unique_binding_facts_for_name("handle")
-        .filter(|binding| !binding.uses.is_empty())
-        .expect("handle binding should be recorded");
+    let handle_facts =
+        test_binding_facts_for_id(method_usage, method.params[0].binding.as_ref().unwrap())
+            .filter(|binding| !binding.uses.is_empty())
+            .expect("handle binding should be recorded");
     let handle_uses = &handle_facts.uses;
     assert_eq!(
         handle_uses,
@@ -8910,14 +8912,13 @@ class ReadOnlyExternalBoundReceiverParam<A extends ExternalHandle> {
         semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &external_facts);
     let method_usage = semantic
         .usage
-        .methods
-        .get(&UsageMethodKey {
-            type_name: "ReadOnlyExternalBoundReceiverParam".to_string(),
-            method_name: "read".to_string(),
-        })
+        .method_usage_by_current_rust_name(
+            "ReadOnlyExternalBoundReceiverParam".to_string(),
+            "read".to_string(),
+        )
         .expect("read usage should be recorded");
     assert!(
-        method_usage.call_sites.iter().any(|call| {
+        method_usage.call_sites().iter().any(|call| {
             call.name == "getName" && call.boundary == CallArgumentBoundary::KnownContentRead
         }),
         "usage should key the modeled receiver through the type-parameter bound"
@@ -9343,13 +9344,13 @@ fn records_mutual_recursion_edges_without_unbounded_growth() {
         .recursion_facts_for("MutualRecursion", "even");
     assert!(
         even.iter()
-            .any(|fact| { fact.calls.method_name == "odd" && fact.kind == RecursionKind::Mutual })
+            .any(|fact| fact.calls.method_name() == "odd" && fact.kind == RecursionKind::Mutual)
     );
 
     let odd = semantic.facts.recursion_facts_for("MutualRecursion", "odd");
     assert!(
         odd.iter()
-            .any(|fact| { fact.calls.method_name == "even" && fact.kind == RecursionKind::Mutual })
+            .any(|fact| fact.calls.method_name() == "even" && fact.kind == RecursionKind::Mutual)
     );
 }
 
@@ -9368,19 +9369,19 @@ class ThreeCycle {
     let a = semantic.facts.recursion_facts_for("ThreeCycle", "a");
     assert!(
         a.iter()
-            .any(|fact| { fact.calls.method_name == "b" && fact.kind == RecursionKind::Mutual })
+            .any(|fact| fact.calls.method_name() == "b" && fact.kind == RecursionKind::Mutual)
     );
 
     let b = semantic.facts.recursion_facts_for("ThreeCycle", "b");
     assert!(
         b.iter()
-            .any(|fact| { fact.calls.method_name == "c" && fact.kind == RecursionKind::Mutual })
+            .any(|fact| fact.calls.method_name() == "c" && fact.kind == RecursionKind::Mutual)
     );
 
     let c = semantic.facts.recursion_facts_for("ThreeCycle", "c");
     assert!(
         c.iter()
-            .any(|fact| { fact.calls.method_name == "a" && fact.kind == RecursionKind::Mutual })
+            .any(|fact| fact.calls.method_name() == "a" && fact.kind == RecursionKind::Mutual)
     );
 
     assert_eq!(semantic.facts.recursion_facts.len(), 3);
@@ -9416,17 +9417,17 @@ class ConstructorCycle {
     assert_eq!(facts.len(), 2, "{facts:?}");
     assert!(facts.iter().all(|fact| {
         fact.kind == RecursionKind::Mutual
-            && fact.constructor.type_name == "ConstructorCycle"
-            && fact.calls.type_name == "ConstructorCycle"
+            && fact.constructor.type_name() == "ConstructorCycle"
+            && fact.calls.type_name() == "ConstructorCycle"
     }));
 
     let constructors = facts
         .iter()
-        .map(|fact| fact.constructor.rust_name.as_str())
+        .map(|fact| fact.constructor.rust_name())
         .collect::<HashSet<_>>();
     let calls = facts
         .iter()
-        .map(|fact| fact.calls.rust_name.as_str())
+        .map(|fact| fact.calls.rust_name())
         .collect::<HashSet<_>>();
     assert_eq!(constructors, calls);
     assert_eq!(constructors.len(), 2);
@@ -9450,7 +9451,8 @@ fn plans_assignment_in_condition_normalization_shape() {
         .control_flow_plans
         .iter()
         .find(|plan| {
-            plan.method.type_name == "WhileAssignmentNotNull" && plan.method.method_name == "drain"
+            plan.method.type_name() == "WhileAssignmentNotNull"
+                && plan.method.method_name() == "drain"
         })
         .unwrap();
 
@@ -9483,8 +9485,8 @@ fn plans_tail_recursive_loop_normalization_shape() {
         .control_flow_plans
         .iter()
         .find(|plan| {
-            plan.method.type_name == "TailRecursiveAccumulator"
-                && plan.method.method_name == "factorialLoop"
+            plan.method.type_name() == "TailRecursiveAccumulator"
+                && plan.method.method_name() == "factorialLoop"
         })
         .unwrap();
 
@@ -9620,8 +9622,8 @@ class ThrowingTailRecursive {
     let semantic = analyze(source);
 
     assert!(semantic.control_flow_plans.iter().any(|plan| {
-        plan.method.type_name == "ThrowingTailRecursive"
-            && plan.method.method_name == "factorialLoop"
+        plan.method.type_name() == "ThrowingTailRecursive"
+            && plan.method.method_name() == "factorialLoop"
             && plan
                 .rewrites
                 .iter()

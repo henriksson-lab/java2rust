@@ -652,6 +652,10 @@ pub enum LoweredType {
         rust_type_name: String,
         recovery: Option<RustBorrowedFacadeReturnRecovery>,
     },
+    OptionalRustOwned {
+        option_shape: Box<RustSlotShape>,
+        rust_type_name: String,
+    },
     RustUnsignedByteArray {
         java_shape: Box<RustSlotShape>,
         optional: bool,
@@ -694,6 +698,13 @@ impl LoweredType {
             java_shape: Box::new(java_shape),
             rust_type_name,
             recovery,
+        }
+    }
+
+    pub fn optional_rust_owned_return(java_ty: JavaType, rust_type_name: String) -> Self {
+        Self::OptionalRustOwned {
+            option_shape: Box::new(RustSlotShape::conservative(optional_java_type(java_ty))),
+            rust_type_name,
         }
     }
 
@@ -794,6 +805,7 @@ impl LoweredType {
             LoweredType::Slot(shape) => Some(&shape.java_ty),
             LoweredType::RustScalar { java_shape, .. } => Some(&java_shape.java_ty),
             LoweredType::RustBorrowed { java_shape, .. } => Some(&java_shape.java_ty),
+            LoweredType::OptionalRustOwned { option_shape, .. } => Some(&option_shape.java_ty),
             LoweredType::RustUnsignedByteArray { java_shape, .. } => Some(&java_shape.java_ty),
             LoweredType::OptionalElementBorrow { option_shape, .. } => Some(&option_shape.java_ty),
             LoweredType::VecElementBorrow { vec_shape, .. } => Some(&vec_shape.java_ty),
@@ -809,6 +821,10 @@ impl LoweredType {
             }
             | LoweredType::RustBorrowed {
                 java_shape: shape, ..
+            }
+            | LoweredType::OptionalRustOwned {
+                option_shape: shape,
+                ..
             }
             | LoweredType::RustUnsignedByteArray {
                 java_shape: shape, ..
@@ -837,6 +853,11 @@ pub struct RustScalarSlotCastPolicy {
 pub struct RustBorrowedFacadeReturnPolicy {
     pub target: RustSlotShape,
     pub recovery: RustBorrowedFacadeReturnRecovery,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RustOwnedFacadeReturnPolicy {
+    pub target: RustSlotShape,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -909,7 +930,7 @@ pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNameP
             } else {
                 crate::stdlib::boxed_primitive_type(&canonical)
                     .map(boxed_primitive_runtime_rust_type)
-                    .or_else(|| Some(crate::slot_render::rust_name_for_java_named_type(name)))
+                    .or_else(|| Some(crate::java_naming::rust_name_for_java_named_type(name)))
             }
         }
         JavaType::String => Some("String".to_string()),
@@ -1616,27 +1637,28 @@ pub fn borrowed_element_slot_adapter_policy(
     element_shape: &RustSlotShape,
     facts: &FactSet,
 ) -> BorrowedElementSlotAdapterPolicy {
+    let target = normalize_borrowed_element_adapter_target(target, facts);
     let carrier_matches = match carrier {
         BorrowedElementCarrier::Option => {
-            optional_element_target_match_policy(target, carrier_shape, element_shape).matches
+            optional_element_target_match_policy(&target, carrier_shape, element_shape).matches
         }
         BorrowedElementCarrier::Vec => {
-            vec_element_target_match_policy(target, carrier_shape, element_shape).matches
+            vec_element_target_match_policy(&target, carrier_shape, element_shape).matches
         }
         BorrowedElementCarrier::Set => {
-            set_element_target_match_policy(target, carrier_shape, element_shape).matches
+            set_element_target_match_policy(&target, carrier_shape, element_shape).matches
         }
     };
     let element_matches = matches!(carrier, BorrowedElementCarrier::Option)
         && target.optional_element_type().is_none()
-        && borrowed_element_target_matches_element(target, element_shape, facts);
+        && borrowed_element_target_matches_element(&target, element_shape, facts);
     let matches = carrier_matches || element_matches;
     let exact_optional_element_match = matches!(carrier, BorrowedElementCarrier::Option)
         && target.optional_element_type().is_some_and(|element_ty| {
-            optional_element_slot_shape_matches(target, element_ty, element_shape)
+            optional_element_slot_shape_matches(&target, element_ty, element_shape)
         });
     let optional_element_view_projection =
-        optional_element_borrow_target_projection(carrier, target, element_shape, facts);
+        optional_element_borrow_target_projection(carrier, &target, element_shape, facts);
     let adapter = if matches && !exact_optional_element_match {
         Some(
             if optional_element_view_projection
@@ -1665,13 +1687,28 @@ pub fn borrowed_element_slot_adapter_policy(
         None
     };
     BorrowedElementSlotAdapterPolicy {
-        target: target.clone(),
+        target,
         carrier_shape: carrier_shape.clone(),
         element_shape: element_shape.clone(),
         carrier,
         matches,
         adapter,
     }
+}
+
+fn normalize_borrowed_element_adapter_target(
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> RustSlotShape {
+    let mut normalized = target.clone();
+    let effective_facts = EffectiveFacts::new(facts);
+    if normalized.view == ViewShape::Str
+        && coercion_shape_content_policy_with_effective_facts(&normalized, &effective_facts)
+            .string_content
+    {
+        normalized.ownership = OwnershipShape::SharedBorrow;
+    }
+    normalized
 }
 
 fn optional_element_borrow_target_projection(
@@ -2020,7 +2057,7 @@ fn dyn_trait_names_match(actual: &str, target: &str) -> bool {
 
 fn rust_trait_name_for_match(name: &str) -> String {
     if name.contains('.') || name.contains('$') {
-        crate::slot_render::rust_name_for_java_named_type(name)
+        crate::java_naming::rust_name_for_java_named_type(name)
     } else {
         name.to_string()
     }
@@ -2673,6 +2710,7 @@ pub enum SlotConversionPlan {
     RustScalarCast(RustScalarSlotCastPolicy),
     RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
     OptionalRustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy),
+    OptionalRustOwnedFacadeReturn(RustOwnedFacadeReturnPolicy),
     RustUnsignedByteArrayReturn(RustUnsignedByteArrayReturnPolicy),
     Identity { actual: LoweredType, slot: Slot },
 }
@@ -2689,6 +2727,7 @@ impl SlotConversionPlan {
             | SlotConversionPlan::RustScalarCast(_)
             | SlotConversionPlan::RustBorrowedFacadeReturn(_)
             | SlotConversionPlan::OptionalRustBorrowedFacadeReturn(_)
+            | SlotConversionPlan::OptionalRustOwnedFacadeReturn(_)
             | SlotConversionPlan::RustUnsignedByteArrayReturn(_)
             | SlotConversionPlan::Identity { .. } => Vec::new(),
         }
@@ -2749,19 +2788,19 @@ impl LoweredSlotExprConversionPlan {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ReusedOptionalUnwrapProjection {
+pub(crate) enum ReusedOptionalUnwrapProjection {
     KeepCarrier,
     ExpectBorrowedCarrier,
     BorrowElement { ownership: OwnershipShape },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ReusedOptionalUnwrapPlan {
+pub(crate) struct ReusedOptionalUnwrapPlan {
     pub actual: LoweredType,
     pub projection: ReusedOptionalUnwrapProjection,
 }
 
-pub fn reused_optional_unwrap_plan_for_slot(
+pub(crate) fn reused_optional_unwrap_plan_for_slot(
     option_shape: &RustSlotShape,
     element_ty: JavaType,
     slot: &Slot,
@@ -2850,7 +2889,7 @@ fn slot_target_shape(slot: &Slot) -> Option<&RustSlotShape> {
     }
 }
 
-pub fn receiver_method_autoref_satisfies_facade_slot(
+pub(crate) fn receiver_method_autoref_satisfies_facade_slot(
     receiver_abi: crate::facts::ReceiverAbi,
     plan: &LoweredSlotExprConversionPlan,
 ) -> bool {
@@ -2877,7 +2916,7 @@ pub fn receiver_method_autoref_satisfies_facade_slot(
         )
 }
 
-pub fn receiver_method_autoref_satisfies_optional_slot(
+pub(crate) fn receiver_method_autoref_satisfies_optional_slot(
     plan: &LoweredSlotExprConversionPlan,
 ) -> bool {
     let SlotConversionPlan::Shape(shape_plan) = &plan.conversion else {
@@ -3221,6 +3260,18 @@ pub fn lowered_slot_conversion_plan_with_facts(
             Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_),
         ) => slot_conversion_plan_with_facts(java_shape, slot, facts),
         (
+            LoweredType::OptionalRustOwned { .. },
+            Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
+        ) if slot_or_optional_element_targets_erased_object(target) => {
+            SlotConversionPlan::OptionalRustOwnedFacadeReturn(RustOwnedFacadeReturnPolicy {
+                target: target.clone(),
+            })
+        }
+        (
+            LoweredType::OptionalRustOwned { option_shape, .. },
+            Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_),
+        ) => slot_conversion_plan_with_facts(option_shape, slot, facts),
+        (
             LoweredType::RustUnsignedByteArray {
                 java_shape,
                 optional,
@@ -3465,6 +3516,35 @@ mod tests {
         assert!(!receiver_method_autoref_satisfies_facade_slot(
             ReceiverAbi::BorrowedSelf,
             &optional_receiver_plan
+        ));
+    }
+
+    #[test]
+    fn optional_borrowed_string_element_to_string_view_uses_borrow_projection() {
+        let facts = FactSet::default();
+        let carrier_shape =
+            RustSlotShape::for_storage(crate::types::optional_java_type(JavaType::String));
+        let mut element_shape = borrowed_string_content_shape();
+        element_shape.ownership = OwnershipShape::SharedBorrow;
+        let mut target = borrowed_string_content_shape();
+        target.ownership = OwnershipShape::Owned;
+
+        let policy = borrowed_element_slot_adapter_policy(
+            BorrowedElementCarrier::Option,
+            &target,
+            &carrier_shape,
+            &element_shape,
+            &facts,
+        );
+
+        assert_eq!(policy.target.ownership, OwnershipShape::SharedBorrow);
+        assert!(matches!(
+            policy.adapter,
+            Some(BorrowedElementAdapterPolicy {
+                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
+                unwrap_carrier: true,
+                ..
+            })
         ));
     }
 

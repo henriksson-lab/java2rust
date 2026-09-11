@@ -11,11 +11,132 @@ downcast evidence, platform support, or an explicit external display-capability
 fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
 
+Follow-up 2026-09-09 focused triage: rechecked this audit together with 0056.
+The collection-order, queue, map-view, enum, source-object, platform-object, and
+modeled-external display repros are now covered by focused fixtures. The
+smallest remaining code area is `src/stdlib.rs::java_erased_any_to_string` plus
+the downcast collectors it embeds (`source_erased_object_to_string_downcasts`,
+`platform_erased_object_to_string_downcasts`, and
+`external_erased_object_to_string_downcasts`). That path cannot correctly handle
+an arbitrary external value erased behind `Object` without source/platform/fact
+evidence, and the current guards intentionally keep that case loud rather than
+guessing. A low-risk next patch would need a concrete missing carrier fixture;
+otherwise the real remaining fix is a typed-erasure/display-capability model,
+not another broad fallback.
+
+Follow-up 2026-09-09 compile-harness cleanup: three compile-only generated-crate
+stubs for `java_erased_object_to_string` now panic loudly instead of returning
+`String::new()`. This does not solve arbitrary erased external display, but it
+keeps package-identity compile fixtures from carrying a plausible empty-string
+placeholder for the exact display defect this audit is tracking.
+
+Follow-up 2026-09-09 queue capability centralization: the native collection
+planner no longer asks separate boolean questions for "is queue", "is priority
+queue", "is array blocking queue", and "does offer always insert". Those paths
+now share `NativeQueueReceiverKind`, so `offer`, queue head reads/removals,
+bounded-queue unsupported lowering, and comparator-backed `PriorityQueue`
+constructor detection consume the same receiver classification. The planner also
+now emits `NativeCollectionMethod::PriorityQueueAdd` directly, so lowering no
+longer re-derives receiver type identity to decide whether insertion must
+restore natural order. Guard:
+`call_plan::tests::native_queue_receiver_kind_is_the_single_queue_capability_answer`.
+
 Follow-up 2026-09-07 `String.join` null delimiter pass: the focused
 String.join null-display oracle now covers both null elements and a null
 delimiter. The delimiter keeps Java's required non-null contract and raises
 catchable `NullPointerException` instead of becoming an empty Rust delimiter.
 Differential fixture: `tests/differential/StringJoinNullDelimiter.java`.
+
+Follow-up 2026-09-09 `ArrayDeque` queue-alias pass: queue-like
+`ArrayDeque.offer(value)` now reuses the existing native add path instead of
+falling through to an unmodelled facade call, and `getFirst()`, `removeFirst()`,
+and `pop()` reuse the existing head-read/head-removal paths. Differential
+fixtures: `tests/differential/ArrayDequeOffer.java` (`true,true:ab:true`) and
+`tests/differential/ArrayDequeFirstPopCatch.java` (`aab:caught`).
+
+Follow-up 2026-09-09 `LinkedList` queue-alias pass: `LinkedList` now shares
+the queue receiver classification already used for `Deque`, `ArrayDeque`, and
+`PriorityQueue`, so `offer(value)` and its head read/removal methods do not fall
+through to unmodelled facade calls. Differential fixture:
+`tests/differential/LinkedListQueueHeadCatch.java` (`true,true:aabb:caught`).
+
+Follow-up 2026-09-09 bounded/ordered-queue `offer` correction: the native
+`offer(value)` alias is deliberately limited to queue implementations whose
+current carrier can preserve the method's observable contract.
+`ArrayBlockingQueue.offer(value)` is not routed through `Vec::push(...); true`
+until bounded-capacity state is modeled, because Java returns `false` rather
+than inserting when the queue is full. It now fails loudly with `compile_error!`
+rather than falling through to an unmodelled facade/default path. Focused
+generated-crate fixture:
+`idiom_gaps::array_blocking_queue_offer_requires_bounded_queue_support`.
+Known-gap differential fixture:
+`tests/differential/known-gaps/ArrayBlockingQueueOffer.java` (`true,false,a`).
+Custom-comparator `PriorityQueue` instances still need a real priority-queue
+carrier.
+
+Follow-up 2026-09-09 comparator-backed priority queue constructor correction:
+`new PriorityQueue<>(comparator)` now fails loudly with `compile_error!` instead
+of letting the one-argument native collection constructor fallback return the
+comparator expression as if it were the queue carrier. Focused generated-crate
+fixture:
+`idiom_gaps::priority_queue_comparator_constructor_requires_comparator_carrier`.
+Known-gap differential fixture:
+`tests/differential/known-gaps/PriorityQueueComparatorConstructor.java`
+(`3,2,1`).
+Comparator-backed queue ordering still needs a real carrier before it can be
+lowered correctly.
+
+Follow-up 2026-09-09 bounded-queue `add` correction:
+`ArrayBlockingQueue.add(value)` now fails loudly with `compile_error!` instead
+of sharing the `Vec::push(...); true` lowering used by unbounded queue/list
+carriers. This keeps the current carrier from silently accepting an insert that
+Java would reject when the queue is full. Focused generated-crate fixture:
+`idiom_gaps::array_blocking_queue_add_requires_bounded_queue_support`.
+Known-gap differential fixture:
+`tests/differential/known-gaps/ArrayBlockingQueueAdd.java`
+(`true,a,IllegalStateException`). True bounded-capacity queue state remains
+unmodelled.
+
+Follow-up 2026-09-09 `PriorityQueue.add`/`offer` natural-order pass: the native
+`Vec<T>` carrier now sorts after `add(value)` and `offer(value)`, so `element()`
+and `remove()` see the Java natural-order head instead of FIFO insertion order
+for comparable values. Differential fixtures:
+`tests/differential/PriorityQueueHeadOrder.java` and
+`tests/differential/PriorityQueueOfferHeadOrder.java` (`true:true:1:1:5`).
+
+Follow-up 2026-09-09 focused map-view contract oracle: the dedicated
+`map_view_contract_fixtures_match_java_output` loop now groups existing
+map-view, entry-set, and map-entry display fixtures
+so the promoted 0059 collection contracts can be checked without running the
+entire differential suite. This is a measurement-floor change only; the fixtures
+already existed in the broad suite.
+Recheck correction: the focused compile recheck exposed two existing generated
+Rust type errors before this loop could be trusted: set `addAll` initialized a
+`HashSet` slot from a `Vec`, and entry-set `contains` with a parameter-side
+`SimpleEntry` rendered a facade placeholder instead of borrowing the tuple entry
+carrier. Both are now fixed, and `CollectionAddAllReturn` plus
+`MapEntrySetContainsParam` are included in the focused loop.
+Follow-up: the same focused loop now also covers bulk live-view contracts for
+`Map.keySet().containsAll/retainAll`, `Map.values().containsAll/retainAll`, and
+`Map.entrySet().containsAll/retainAll/removeAll` through
+`tests/differential/MapKeySetBulkContract.java`,
+`tests/differential/MapValuesBulkContract.java`, and
+`tests/differential/MapEntrySetBulkContract.java`. These were already
+unit-compiled paths; the differential fixtures pin the Java-visible map
+mutation contract.
+
+Follow-up 2026-09-09 fixed-size view `clear` pass: `Arrays.asList(...).clear()`
+is now classified with the rest of the fixed-size structural mutations and
+raises `UnsupportedOperationException` instead of clearing the Rust carrier.
+The existing `UnmodifiableCollectionMutationCatch` differential fixture now
+covers this alongside fixed-size `add`, unmodifiable collection/list/set/map
+mutation, and aliased unmodifiable-list mutation.
+
+Follow-up 2026-09-09 immutable collection factory pass:
+`Collections.empty*`, `Collections.singleton*`, and `Collections.nCopies`
+locals/direct receivers now keep immutable-view provenance for structural
+mutation lowering. Actual structural changes raise `UnsupportedOperationException`;
+empty-view `clear()` remains the Java no-op.
 
 Follow-up 2026-09-07 erased native collection display pass: erased values
 holding the concrete collection carriers emitted for `ArrayList<String>`,
@@ -25,6 +146,13 @@ differential fixtures: `tests/differential/ErasedArrayListDisplay.java`,
 `tests/differential/ErasedLinkedHashSetDisplay.java`, and
 `tests/differential/ErasedLinkedHashMapDisplay.java`. The broad unknown
 external-erased display risk remains open.
+
+Follow-up 2026-09-09 nullable erased `ArrayList<String>` display pass:
+`Vec<Option<String>>` erased-object values now render present elements normally
+and `None` as Java `null`. Pinned by
+`tests/differential/ErasedNullableArrayListDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop. This is a concrete collection
+carrier arm, not a broad unknown-erased fallback.
 
 Follow-up 2026-09-07 erased `BitSet` display pass: `BitSet` was already a
 modeled platform facade for `get`/`set`, but erased display did not include it.
@@ -338,9 +466,10 @@ Updated 2026-08-25: erased platform display now covers boxed primitive and
 `Character` carriers too. `java_erased_any_to_string` downcasts `char`, integer
 widths, and floats before falling through to source-specific `toString` arms or
 the loud unknown-erased panic. `tests/differential/ErasedBoxedPrimitiveDisplay.java`
-is promoted and covers both concatenation and direct `Object.toString()` over
-autoboxed `int`/`char` values (`i=7,c=A,direct=7/A`). The differential suite is
-green at 102 fixtures.
+is promoted and now included in the focused
+`erased_display_fixtures_match_java_output` loop, covering both concatenation
+and direct `Object.toString()` over autoboxed `int`/`char` values
+(`i=7,c=A,direct=7/A`).
 
 Updated 2026-08-24 thirteenth pass: `List.set(i, v)` is now a native list
 mutation projection that stores the usize index once, clones and returns the
@@ -1128,12 +1257,13 @@ arbitrary opaque `Map.Entry` values whose key/value or backing map cannot yet be
 extracted structurally.
 
 Follow-up 2026-09-07 erased SimpleEntry display pass:
-`Object value = new AbstractMap.SimpleEntry<>(key, value)` now uses the
-constructor's own generic arguments to lower the erased object carrier as the
-same tuple used by typed `Map.Entry` slots. That lets erased display reuse the
-runtime `(String, String)` `key=value` arm instead of emitting an opaque external
-facade whose `toString()` has no key/value state. Covered by
-`tests/differential/ErasedMapEntryDisplay.java` (`xa=1:a=1`).
+`Object value = new AbstractMap.SimpleEntry<>(key, value)` and the matching
+`SimpleImmutableEntry` form now use the constructor's own generic arguments to
+lower the erased object carrier as the same tuple used by typed `Map.Entry`
+slots. That lets erased display reuse the runtime `(String, String)` `key=value`
+arm instead of emitting an opaque external facade whose `toString()` has no
+key/value state. Covered by `tests/differential/ErasedMapEntryDisplay.java` and
+`tests/differential/ErasedSimpleImmutableEntryDisplay.java` (`xa=1:a=1`).
 
 Follow-up 2026-08-28 entry-set iterator display pass:
 `values.entrySet().iterator().next()` now uses the same backing-map recognition
@@ -1496,8 +1626,9 @@ through the backing map's key/value pairs. `containsAll` folds the supplied
 entry collection with `all`, testing each tuple against `map.get(key)` and the
 stored value. `retainAll` mutates the backing map with `retain`, keeping only
 entries present in the supplied entry collection and returning whether the map
-length changed. Same backing-view aliases short-circuit to Java's no-op
-results: `containsAll(self)` is `true`, `retainAll(self)` is `false`. The
+length changed. `removeAll` removes the supplied entry pairs from the backing
+map. Same backing-view aliases short-circuit to Java's no-op results:
+`containsAll(self)` is `true`, `retainAll(self)` is `false`. The
 signature and local-mutability collectors now also recognize mutating map-view
 calls such as `values.entrySet().retainAll(keep)` as mutations of `values`.
 The signature pass also tracks locals initialized from a map view, so
@@ -1678,3 +1809,53 @@ Follow-up 2026-09-07 String.join null-display oracle: the promoted
 their own focused differential loop. This pins the optional Java display path
 used by null-bearing join inputs without relying only on the full fixture
 sweep.
+
+Follow-up 2026-09-10 erased vector collection display: the erased-object
+runtime helper no longer carries bespoke formatting arms for `Vec<String>`,
+`Vec<Option<String>>`, and `Vec<i32>`. Those and the boxed primitive siblings
+now share the erased-object support item's local collection-display helper,
+including nullable primitive vectors such as `Vec<Option<bool>>`,
+`Vec<Option<i8>>`, `Vec<Option<i16>>`, `Vec<Option<char>>`,
+`Vec<Option<f32>>`, `Vec<Option<f64>>`, `Vec<Option<i32>>`, and
+`Vec<Option<i64>>`. Promoted differential fixtures
+`ErasedNullableBooleanArrayListDisplay.java`,
+`ErasedNullableByteArrayListDisplay.java`,
+`ErasedNullableCharacterArrayListDisplay.java`,
+`ErasedNullableDoubleArrayListDisplay.java`,
+`ErasedNullableFloatArrayListDisplay.java`,
+`ErasedNullableIntegerArrayListDisplay.java`,
+`ErasedNullableLongArrayListDisplay.java`, and
+`ErasedNullableShortArrayListDisplay.java` pin the nullable boxed-primitive
+list case through both concatenation and direct `Object.toString()`. The broader
+unknown erased-display capability model remains open.
+
+Follow-up 2026-09-10 cleanup: `source_erased_object_to_string_downcasts`,
+`platform_erased_object_to_string_downcasts`, and
+`external_erased_object_to_string_downcasts` are now guarded as private `stdlib`
+implementation details, with `platform_type_has_erased_display_support` guarded
+as crate-local. The erased-display model gap remains the same typed evidence
+problem shared with 0056.
+
+Follow-up 2026-09-10 borrowed platform erased-display parity:
+`platform_erased_object_to_string_downcasts` now emits the same borrowed
+`&T` downcast arm that source and external display downcasts already emitted.
+This closes the small borrowed-platform carrier mismatch without broadening the
+unknown erased-display model. Guarded by
+`slot_shape_design::erased_file_object_display_delegates_to_file_display`.
+
+Follow-up 2026-09-10 external erased-display carrier parity guard: the modeled
+external `toString` fixture now requires all supported erased carrier downcasts:
+bare `ExternalToken`, borrowed `&ExternalToken`, `Rc<ExternalToken>`, and
+`Arc<ExternalToken>`. This is still not a fallback for unknown erased values;
+it only keeps the fact-backed external display path aligned with the source and
+platform carrier shapes. Guard:
+`slot_shape_design::erased_external_object_display_delegates_to_modeled_to_string_surface`.
+
+Follow-up 2026-09-10 erased-display carrier arm cleanup:
+`platform_erased_object_to_string_downcasts`,
+`external_erased_object_to_string_downcasts`, and source erased-display downcast
+collection now share one private `erased_display_to_string_downcast_arms`
+template for the supported `T`, `&T`, `Rc<T>`, and `Arc<T>` carriers. This
+keeps the carrier parity policy in one place without changing the intentionally
+loud unknown-erased fallback. Guard:
+`layering::stdlib_erased_display_downcast_collectors_stay_internal`.

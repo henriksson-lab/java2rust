@@ -27,17 +27,84 @@ Current status 2026-08-29 (Codex audit pass):
   borrowed string-content slot and uses the structured `NullPointerException`
   projection in propagating contexts. Regression:
   `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
-- Follow-up 2026-09-06: the rendered optional unwrap/null-expect detector is
-  now test-only. Production lowering had already moved to
-  `direct_optional_clone_recovery_unwrap_expr` and structured statement
-  recovery, so the remaining rendered detector is retained only as compatibility
-  regression coverage. Guard:
+- Follow-up 2026-09-09: raw anonymous dyn-trait constructor recovery now accepts
+  only path-like trait names through the same balanced Rust-path validator used
+  for external facade paths. Valid `<dyn Callback>::anonymous()` and
+  `<dyn pkg::Callback>::anonymous()` leaves still recover to structured
+  `AnonymousDynTrait` calls, but malformed raw text such as
+  `<dyn Callback>Extra>::anonymous()` or trait-bound text such as
+  `<dyn Callback + Send>::anonymous()` stays on the ordinary clone-box fallback
+  instead of being treated as semantic evidence. Regression:
+  `coercion::tests::clone_box_parenthesizes_dyn_trait_cast_receiver`.
+- Follow-up 2026-09-10: optional erased-string consuming-view recovery no longer
+  has a raw `.as_str()` suffix parser. Parseable `RustExpr::Raw` leaves are
+  first recovered through `rendered_plus_expr_projection_or_raw_leaf` and then
+  passed through the same structured
+  `rewrite_optional_erased_borrowed_string_view_call_args_projection` path as
+  ordinary expression nodes; rendered replacement remains only behind the raw
+  compatibility fallback. Regressions:
+  `coercion::tests::optional_erased_string_raw_suffix_rewrite_recovers_structured_projection`
+  and
+  `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+- Follow-up 2026-09-10: external static-constant member planning no longer
+  treats `RustType::Raw(owner)` as associated-constant owner identity. Structured
+  `RustType::Named` crate mappings still route to the mapped owner, but raw
+  generic or otherwise opaque field-type text now falls through to the exact
+  external field owner instead of becoming `RawText::CONST`. Regression:
+  `type_coercion::member_access_plan_does_not_use_raw_mapped_field_type_as_static_constant_owner`;
+  guard:
+  `slot_shape_design::access_lowering_owns_bare_field_and_member_access_fallbacks`.
+- Codex follow-up 2026-09-10: `tests/layering.rs` now inventories direct
+  production `RustExpr::Raw(format!(...)`, `RustStmt::Raw(format!(...)`, and
+  `RustItem::Raw(format!(...)` constructors across every `src/*.rs` file.
+  The only allowlisted files are handwritten whole-support-item emitters
+  (`javalibs`, erased-object runtime support in `stdlib`, and representation
+  whole-item compatibility emission). This does not remove any raw compatibility
+  leaf by itself, but it prevents new formatted raw producers from appearing
+  outside named support-item or raw-leaf/recovery boundaries.
+- Follow-up 2026-09-10: rendered string-view detection no longer has a separate
+  `*...` text parser. Raw leaves are first recovered through the structured
+  projection parser, must round-trip through `emit::emit_expr`, and must contain
+  no nested raw leaf before `.as_str()` or `*value.as_str()` is accepted as a
+  string view. Regression:
+  `coercion::tests::an_untagged_string_view_still_falls_back_to_the_text`.
+- Follow-up 2026-09-06, corrected 2026-09-09: the rendered optional
+  unwrap/null-expect detector is still a production compatibility boundary for
+  parseable raw leaves in nullable catchability paths. Production lowering has
+  moved clone recovery to `direct_optional_clone_recovery_unwrap_expr` and
+  structured statement recovery, but this detector remains intentionally fenced
+  behind `recover_raw_expr_for_optional_unwrap_scan`. Guard:
   `layering::clone_recovery_facts_are_structured_not_comment_syntax`.
 - Follow-up 2026-09-06: the cfg-test clone rendering bridge
   (`render_audited_clone_recovery` / `render_clone_projection`) is no longer a
   public API. Production callers use structured `apply_audited_clone_recovery`
   and `apply_clone_projection`; the rendered bridge remains only for same-module
   regression assertions.
+- Follow-up 2026-09-10: `literal_lowering::literal_to_rust` and
+  `stdlib::class_literal_java_name` are crate-local. Their spelling assertions
+  now live beside the owner modules, while integration tests keep only source
+  boundary guards. This does not reduce generated `Raw` compatibility by itself,
+  but it removes two more public rendered-string helpers from the crate API.
+- Follow-up 2026-09-10: `array_plan::ArrayExprPlan`, `child_exprs`, and
+  `plan_array_expr` are crate-local, with direct plan-shape assertions moved
+  into `array_plan.rs`. Integration coverage now checks the layer boundary
+  instead of reaching into the planner type.
+- Follow-up 2026-09-10: `switch_plan::plan_simple_return_switch_case` and its
+  `SimpleReturnSwitchCasePlan` carrier are crate-local. The public boundary
+  remains the whole-switch simple-return plan; the case-level decomposition
+  assertion now lives beside `switch_plan.rs`.
+- Follow-up 2026-09-10: the remaining switch case-plan internals are crate-local
+  too: `SwitchCasePlan`, `SwitchCaseLabelPlan`, `plan_switch_case`,
+  `rewrite_switch_breaks`, `switch_case_stmt_needs_break_rewrite`, and the
+  structured `switch_lowering::switch_case_condition` helper. Direct label,
+  break-rewrite, and condition-expression assertions now live beside
+  `switch_plan.rs`/`switch_lowering.rs`; integration coverage stays on the
+  public whole-switch plan and rendered switch block behavior.
+- Follow-up cleanup: `switch_lowering::switch_match_pattern_expr` is crate-local.
+  Switch lowering still centralizes the one required match-pattern render at the
+  lowering boundary, but external callers cannot use that rendered-expression
+  helper as a public raw-string projection API. Guard:
+  `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
 - The next useful work is not another bulk `Raw(format!(...))` producer sweep.
   It is deleting or narrowing one named compatibility consumer at a time, with
   each pass proving that parseable legacy raw leaves are recovered at a boundary
@@ -51,6 +118,9 @@ Current status 2026-08-29 (Codex audit pass):
   `apply_borrowed_string_view_projection_expr`) is now private test-only code.
   The compatibility regression moved into `coercion.rs`, so integration tests
   no longer require a production-visible rendered projection API.
+  Follow-up cleanup moved the private helper body-shape assertion beside
+  `coercion.rs` as well; `slot_shape_design` now keeps only the boundary guard
+  that the shim remains private and test-only.
 - Follow-up 2026-09-06: mutable-alias raw classification keeps only the
   production predicate (`expr_is_mutable_alias`) public. The detailed
   `RenderedMutableAliasProjection` enum and `rendered_mutable_alias_projection`
@@ -75,6 +145,22 @@ Current status 2026-08-29 (Codex audit pass):
   the public crate surface. Production callers already use the structured
   `lower_bare_name`; the emitted-string wrapper now exists only as a same-module
   unit-test compatibility helper.
+- Follow-up 2026-09-09: the simple Rust type text projection used by
+  `typed_none_projection` is now central in `rust_ir`, and
+  `NativeJavaRustTypePolicy::UnknownRaw` uses it when rendering policies.
+  Primitive and single-identifier unknown type text now becomes structured
+  `RustType`; complex or generic text still falls back to `RustType::Raw`.
+  Same-module regression fixtures were also moved off raw simple type atoms such
+  as `Void`, `T`, and `i32`, and the associated-path owner fallback now uses the
+  same projection before resorting to raw owner text.
+  Regression:
+  `slot_shape_design::slot_render_owns_conservative_java_to_rust_type_projection`.
+- Follow-up 2026-09-09 fail-closed generic recovery: central Rust type-text
+  projection now rejects a whole generic type when any generic argument remains
+  raw. Path-qualified generic bases such as `std::rc::Rc<std::cell::RefCell<T>>`
+  still recover structurally, but unsupported arguments such as `dyn Fn(i32)`
+  no longer get hidden inside an otherwise structured `RustType::Generic`.
+  Regression: `rust_ir::tests::raw_type_arg_projection_keeps_malformed_generics_raw`.
 - Follow-up 2026-09-06: `statement_render` enhanced-for and block render
   helpers are crate-local instead of public crate APIs. The direct structural
   assertions moved beside the implementation; integration coverage now checks
@@ -83,6 +169,11 @@ Current status 2026-08-29 (Codex audit pass):
 - Follow-up 2026-09-06: `slot_render` policy renderers are crate-local. The
   public boundary stays on policy construction and structured `RustType`
   consumers, not external string/type rendering helpers.
+- Follow-up 2026-09-10: `slot_render::slot_no_default_message_policy` is
+  crate-local, and its `SlotNoDefaultMessagePolicy` carrier is crate-local too.
+  The exact compile-error rendering assertion now lives beside the
+  implementation; integration coverage still checks the public default policy
+  and resulting default expression.
 - Follow-up 2026-09-06: `slot_render::storage_placement_type` is private as
   well. Storage placement rendering is still owned by `slot_render`, but the
   type wrapper helper is no longer exposed as a standalone public API.
@@ -102,9 +193,10 @@ Current status 2026-08-29 (Codex audit pass):
   need them.
 - Follow-up 2026-09-06: raw IR leaf pass-through wrappers are no longer public
   APIs. `item_assembly::raw_item` and `statement_render::raw_stmt` were
-  deleted; production and integration-test callers now use `RustItem::Raw` /
-  `RustStmt::raw_leaf` directly for raw-fixture values, and a layering guard
-  pins the boundary.
+  deleted; production callers use crate-local `RustExpr::raw_leaf` /
+  `RustStmt::raw_leaf` only at named compatibility fallbacks, while
+  integration-test raw fixtures use explicit `RustItem::Raw` / `RustStmt::Raw`
+  variants. A layering guard pins that boundary.
 - Follow-up 2026-09-06: coercion fallback-message constructors are crate-local.
   The public API still exposes the diagnostic value type, but the four policy
   renderers for ownership, dispatch, `instanceof`, and borrowed-element
@@ -122,8 +214,8 @@ Current status 2026-08-29 (Codex audit pass):
   and the program-level emission/raw-item bridge consumed by `lower.rs` is
   crate-local; the exception-aware non-program emission helper is private. The
   hierarchy carrier and source-class-bound emission hooks consumed by `lower.rs`
-  are crate-local too. Public callers stay on `RepresentationTypeEmission`
-  rather than a raw string projection.
+  are crate-local too. `RepresentationTypeEmission` has since been narrowed to
+  crate-local as the internal structured alternative to raw string projection.
 - Follow-up 2026-09-06: the array-lowering projection helpers for repeated,
   nested, fallback, ragged array construction, and row-assignment helpers are
   crate-local too. Borrowed 2D-array temporary selection and default element
@@ -183,11 +275,26 @@ Current status 2026-08-29 (Codex audit pass):
   composition points, and same-module tests keep the closure rendering coverage,
   but external callers cannot depend on these compatibility projection helpers.
   Guard: `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+- Follow-up 2026-09-09: that guard now also pins the implementation shape:
+  unbound and current-receiver method-reference closures must compose structured
+  `RustExpr::Closure` plus method-call projections and must not reintroduce
+  `RustExpr::Raw(format!(...))` closure spelling behind the helper boundary.
+- Follow-up 2026-09-09: storage-placement construction no longer reparses every
+  raw payload through broad operator recovery before deciding whether to wrap it
+  in `Rc`/`Arc`. The compatibility recovery now accepts raw text only when the
+  recovered expression is already the expected storage-wrapper constructor call;
+  unrelated raw payloads remain raw and are wrapped as payloads. Regression:
+  `slot_render::tests::storage_placement_construction_builds_nested_calls_structurally`.
 - Follow-up 2026-09-07: static-storage, external-crate path, associated-const,
   and `Class.forName` projection helpers are crate-local too. Production modules
   still share the structured builders, but they are no longer public crate APIs;
   the 0007 guard now pins the crate-local boundary while continuing to reject
   raw formatted static storage and JavaClass path construction.
+- Follow-up 2026-09-09: typed `None` construction now uses a structured
+  `RustType` for primitive and simple identifier type arguments before falling
+  back to raw rendered type text. This keeps `None::<Void>` as a `GenericPath`
+  with `RustType::Named("Void")`, while preserving the raw escape hatch for
+  complex or malformed rendered type text.
 - Follow-up 2026-09-07: `instanceof` and erased-object borrowed/exact-type/
   downcast method-token projections are crate-local. `conversion_lowering`,
   `lower.rs`, and `coercion.rs` still share the structured runtime-check and
@@ -409,8 +516,8 @@ Partial progress 2026-08-24:
   and
   `type_coercion::raw_if_optional_construction_detection_ignores_literal_text`.
 - Follow-up 2026-08-28: text-only string-view detection no longer accepts any
-  raw fragment merely because it ends with `.as_str()`. The public rendered
-  predicate now routes through central expression recovery and requires the
+  raw fragment merely because it ends with `.as_str()`. The private rendered
+  compatibility predicate now routes through central expression recovery and requires the
   whole fragment to recover as a zero-arg `as_str()` projection, a narrow
   `*<string-view>` compatibility spelling, or a complete Rust string literal.
   Malformed suffix text such as `name.as_str() trailing` and compound text such
@@ -1103,7 +1210,7 @@ branch now delegates nullable receiver field reads to
 `lower_optional_receiver_field_access_for_slot`, so `consume(node.name)` lowers
 through the same shaped receiver-field plan as return and assignment slots.
 
-Pinned by `optional_receiver_field_element_recovery_uses_borrowed_carrier_plan`;
+Pinned by `optional_receiver_field_element_recovery_does_not_borrow_returned_call_result`;
 the stale source assertions in `optional_element_borrow_carrier_construction_is_centralized`
 were updated to reflect that optional receiver slot conversion now lives behind
 `conversion_lowering::apply_optional_receiver_slot_projection`.
@@ -2998,9 +3105,9 @@ so opaque fragments keep the same emitted Rust.
 Follow-up 2026-09-06: the structured fallback expression helper is crate-local
 now. `lower.rs` can still use it for thrown non-exception values, but
 integration tests no longer import it as public exception-lowering API.
-The non-result throw policy helper is crate-local too; public tests exercise
-`throw_stmt`, while the uncaught-panic shape is asserted beside the
-implementation.
+The non-result throw policy helper is crate-local too; `throw_stmt` is now a
+private same-module test fixture, while the uncaught-panic shape is asserted
+beside the implementation.
 
 ## Update 2026-08-12 (Codex follow-up) — primitive char casts keep operand structure
 
@@ -4306,12 +4413,16 @@ crate-local callers. `array_lowering::array_expr_with_object_default` is still
 shared between lower.rs and array lowering, but it is no longer exported as
 public API. `call_lowering::apply_class_literal_token_with_rust_type` remains
 available to the lowering paths that already have the planned Rust token type,
-but external callers use the fact-aware `apply_class_literal_token` wrapper.
+but lowering callers use the fact-aware `apply_class_literal_token` wrapper.
 
 Follow-up 2026-09-07: `call_lowering::apply_class_literal_token` is crate-local
 too. The direct structured token assertion moved beside `call_lowering`; external
 tests continue to exercise class-literal planning and generated support rather
 than importing the lowering applicator as public API.
+Follow-up cleanup narrowed `stdlib::ClassLiteralTokenPlan` and
+`stdlib::class_literal_token_plan` to crate-local as well. The direct token-type
+planning matrix now lives beside `stdlib`; `slot_shape_design` keeps the public
+`JavaClass<T>` support and slot-type rendering assertions.
 
 Follow-up 2026-09-06: three item-assembly policy helpers are crate-local as
 well. Java comparable-bound detection, callable clone-bound detection, and
@@ -4583,6 +4694,15 @@ Follow-up 2026-09-07: cast and `instanceof` application helpers in
 `conversion_lowering` are crate-local. Direct structured-IR assertions for
 primitive casts and `matches!` construction moved beside the helpers; integration
 tests keep covering cast/instanceof planning and lowering boundaries.
+Follow-up 2026-09-10: the slot-conversion applicators in the same module are
+crate-local too. Direct application assertions for unsigned-byte return
+conversion, index casts, and optional-element projection now live beside
+`conversion_lowering`; integration tests keep the plan-level and layering
+guards.
+Follow-up cleanup also narrowed the reused optional-unwrap plan carrier and
+receiver autoref satisfaction predicates in `conversion_plan` to crate-local.
+Lowering and call planning still share the structured answers internally, but
+they are no longer public compatibility APIs.
 
 Follow-up 2026-09-07: access-lowering expression builders are crate-local.
 Direct assertions for bare-name lowering, member-access plans, and rust-crate
@@ -4764,3 +4884,145 @@ Follow-up 2026-09-07: method-reference output-shape inference is crate-local
 too. The direct `infer_single_input_method_reference_output_shape_with_context`
 assertions moved beside `method_reference_shape`; `stream` remains the internal
 consumer, and the integration test keeps only the architectural guardrails.
+
+Follow-up 2026-09-09: index-to-usize conversion no longer has a second raw
+decimal-literal arm after boundary recovery. `index_to_usize_projection` still
+recovers raw index operands once through `recover_raw_index_to_usize_operand`,
+then decimal literal fast paths inspect structured `RustExpr::Literal` only.
+The source guard now rejects reintroducing the deleted
+`decimal_integer_literal_projection` helper.
+
+Follow-up 2026-09-09: the inherited-super enum optional adapter no longer keeps
+a local `recover_rendered_none_or_default_value` wrapper around the coercion
+module's structured raw-boundary parser. The compatibility boundary now calls
+`coercion::recover_none_or_default_value` directly and immediately returns to
+`RustExpr` predicates; the slot-shape guard rejects reintroducing the forwarding
+helper.
+
+Follow-up 2026-09-09: borrowed string-view type atoms no longer use
+`RustType::Raw("str")`. `RustType::Str` now represents the bare unsized `str`
+type directly, and `emit_type` owns the spelling. Slot rendering and const
+string type assembly build `&str`/`&'static str` as structured `Ref` nodes whose
+inner type is `Str`; the guard rejects reintroducing raw `str` type text at
+those production sites.
+
+Follow-up 2026-09-09: `JavaClass::<T>::for_name` projection no longer raw-wraps
+the class type argument. Its production caller passes the generated Rust type
+name for the current Java class, so `java_class_for_name_path_projection` now
+uses `RustType::Named` and emits the same `JavaClass::<Owner>::for_name(...)`
+path without treating `Owner` as arbitrary type syntax. The remaining raw class
+token paths are still compatibility boundaries for already-rendered generic or
+unknown type text.
+
+Follow-up 2026-09-09: a production-only raw-constructor scan now leaves no small
+typed atom comparable to `str` or `JavaClass::<Owner>::for_name`. The remaining
+production `RustExpr::Raw`/`RustStmt::Raw` occurrences before module tests are
+emit support, raw-boundary recovery/parsing, and the central `raw_leaf` helpers;
+the remaining production `RustType::Raw` constructors are `UnknownRaw` or
+already-rendered compatibility inputs such as `None::<T>` and generic
+facade/class-token text. Module-test fixtures still contain direct raw nodes as
+assertion inputs or compatibility examples, but they are not production residue.
+The next useful `0007` work should target one of those named compatibility
+boundaries with a typed replacement, not broad raw deletion.
+
+Follow-up 2026-09-09: raw clone-derive support now reuses the central simple
+Rust type projection before falling back to string-generic parsing. That removes
+the local primitive/type-parameter mini-model from `item_assembly` and makes
+top-level raw atoms such as `String`, `i32`, and `T` agree with their structured
+`RustType` equivalents; complex raw generics still remain a compatibility
+boundary only when they are outside the central simple generic/type-argument
+parser.
+
+Follow-up 2026-09-09: the central rendered Rust type projection now recovers
+simple generic, trait, reference, and tuple type arguments such as
+`Box<dyn std::any::Any>`, `Vec<Option<String>>`, `&'static str`, and
+`Vec<(String, i32)>` before falling back to `RustType::Raw`. This removes one
+more raw compatibility pocket from callers like `typed_none_projection` while
+keeping malformed generics, malformed references, malformed tuples, or
+function-like trait text raw. The same pass tightened structured `Rc`/`Arc`
+clone-derive support to require a valid one-argument handle, preserving the old
+malformed-text fail-closed behavior after generic text starts recovering
+structurally.
+
+Follow-up 2026-09-09: the same central type-text recovery now maps exact
+one-argument `Vec<T>`, `Option<T>`, and `ndarray::Array2<T>` text onto the
+dedicated `RustType::Vec`, `RustType::Option`, and `RustType::Array2` variants
+instead of leaving them as generic-name syntax. That keeps recovered rendered
+types aligned with the semantic type IR that emitters and trait-derive checks
+already understand.
+
+Follow-up 2026-09-10: the associated-path owner path now peels a single
+balanced parenthesized type owner when the inner type is already structurally
+recoverable. `rust_type_default_call_expr("(Box<dyn Readable>)")` now builds a
+`RustType::Generic { base: "Box", args: [RustType::DynTrait("Readable")] }`
+owner and emits `<Box<dyn Readable>>::default()` instead of preserving
+`RustType::Raw("(Box<dyn Readable>)")`. This is intentionally local to
+associated paths; the general type-argument parser still keeps `(String)` raw.
+
+Follow-up 2026-09-10: storage-placement construction keeps its compatibility
+fallback behind the central `RustExpr::raw_leaf` constructor. Raw payloads are
+still recovered once to detect an already-wrapped `Rc::new`/`Arc::new` value,
+but unrelated opaque payloads no longer rebuild `RustExpr::Raw` directly in
+`slot_render`; the guard now requires the placement-aware recovery call and the
+central raw-leaf fallback.
+
+Follow-up 2026-09-10: raw clone-derive support now fails closed for raw generic
+arguments that cannot be recovered structurally. `raw_type_arg_supports_derive_clone`
+still handles valid simple atoms, shared handles, `Option`, `Vec`, sized `Box`,
+and clone-adapted dyn-trait boxes, but the final "treat raw text as a named
+semantic type" fallback is gone. Regression:
+`item_assembly::tests::raw_clone_support_fails_closed_for_unrecovered_type_args`;
+the slot-shape guard rejects reintroducing that name-based fallback.
+
+Follow-up 2026-09-10: same-outer/inner constructor raw recovery no longer
+pre-parses the rendered call head with `split_once('(')`. The compatibility
+boundary now uses centralized call recovery, requires exact re-emission before
+accepting the recovered call as semantic evidence, and only then checks whether
+the structured function is a plain `new` constructor. Calls whose recovered
+arguments need inserted grouping now fail closed instead of being treated as
+safe constructor evidence.
+
+Follow-up 2026-09-10: two remaining raw compatibility helpers were narrowed
+from public/crate boundary exposure. `coercion::raw_receiver_projection` is now
+private to `coercion.rs`; crate callers keep using the named postfix receiver
+adapter. `RustExpr::raw_leaf` and `RustStmt::raw_leaf` are crate-local rather
+than public constructors, so outside integration tests must use explicit raw
+fixtures instead of the convenience wrappers. Guard:
+`layering::raw_ir_leaf_wrappers_are_not_public_api`.
+
+Follow-up 2026-09-10: the rendered Rust type parser helpers that expose raw
+type-text details are crate-local now. The CLI uses public
+`rendered_rust_*` facade predicates/accessors, while crate internals keep the
+raw parser names behind the module boundary. The same pass taught
+`rust_type_arg_projection_or_raw` to recover balanced `fn(...)` function-pointer
+types into `RustType::FnPointer`, including nested use inside `Option`, and to
+fail closed when any parameter or return type remains raw. Guards:
+`layering::raw_ir_leaf_wrappers_are_not_public_api` and
+`rust_ir::tests::raw_type_arg_projection_recovers_simple_generic_and_trait_types`.
+
+Follow-up 2026-09-10: same-outer/inner constructor compatibility still recovers
+raw calls at the explicit `raw_constructor_call_expr_projection` /
+`recover_same_outer_inner_constructor_compat_*` boundaries, but
+`lower::rust_expr_has_constructor_call` no longer treats an unrecovered
+`RustExpr::Raw` payload as semantic evidence. That detector now only sees
+structured constructor calls; the compatibility path must recover raw text first
+and then re-enter the structured rewrite. Guard:
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-10: rendered owned-string recovery now follows the same
+fail-closed rule as rendered string-view recovery. A recovered `.to_string()`
+expression is accepted as semantic idempotence evidence only when the recovered
+tree has no nested `RustExpr::Raw` leaves; malformed raw text can still receive
+an explicit fresh `.to_string()` conversion, but it no longer proves that the
+value was already an owned string. Guards:
+`coercion::tests::owned_string_recovery_idempotence_prefers_structure_and_shape`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-10: source `Expr::Raw` lowering now uses the same fail-closed
+rule. `recover_rewritten_raw_expr_or_simple_plus_projection_opt` rejects
+partially recovered trees that contain any nested raw leaf, and
+`lower_source_raw_expr` falls back to one opaque `RustExpr::raw_leaf` instead of
+emitting a structured call with raw children. This keeps raw Java fragments from
+becoming partial semantic evidence at the source-ingress boundary. Guards:
+`lower::tests::source_raw_expr_lowering_recovers_parseable_projection_before_raw_leaf`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
