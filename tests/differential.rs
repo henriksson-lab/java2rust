@@ -20,8 +20,8 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 270;
-const EXPECTED_KNOWN_GAP_FIXTURES: usize = 17;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 277;
+const EXPECTED_KNOWN_GAP_FIXTURES: usize = 15;
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -293,6 +293,35 @@ fn priority_queue_fixtures_match_java_output() {
 }
 
 #[test]
+fn queue_poll_fixture_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = ["QueuePollNull", "QueuePollAliases"];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        if let Err(report) = compare_fixture(&translator, &fixture, class) {
+            failures.push(format!("{class}: {report}"));
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "queue poll fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
 fn map_view_contract_fixtures_match_java_output() {
     let translator = translator_binary().unwrap_or_else(|| {
         panic!("translator binary not built; run `cargo build --release` before differential tests")
@@ -451,6 +480,10 @@ fn list_exception_fixtures_match_java_output() {
         "ArraysCopyOfRangeCatch",
         "ArraysRangeCatch",
         "ArraysStreamRangeCatch",
+        "ArrayBlockingQueueAdd",
+        "ArrayBlockingQueueBadCapacity",
+        "ArrayBlockingQueueNull",
+        "ArrayBlockingQueueOffer",
         "ArrayDequeFirstPopCatch",
         "ArrayDequeOffer",
         "BitSetClearFlipCatch",
@@ -465,6 +498,7 @@ fn list_exception_fixtures_match_java_output() {
         "ExceptionHierarchy",
         "Exceptions",
         "ExceptionsCustom",
+        "FinallySwitchBreak",
         "FloatingParseNull",
         "IntegerParseNull",
         "InputStreamReadBoundsCatch",
@@ -495,6 +529,8 @@ fn list_exception_fixtures_match_java_output() {
         "OptionalFactoryGetCatch",
         "OptionalOfNullCatch",
         "QueueElementCatch",
+        "QueuePollAliases",
+        "QueuePollNull",
         "QueueRemoveCatch",
         "RandomNextIntCatch",
         "RaggedArrayNegativeSizeCatch",
@@ -557,6 +593,7 @@ fn finally_completion_fixtures_match_java_output() {
         "FinallyOnBreak",
         "FinallyOnContinue",
         "FinallyPaths",
+        "FinallySwitchBreak",
         "FinallyThrowOverride",
         "FinallyWhileContinue",
         "CatchFinallyLabeledContinue",
@@ -681,10 +718,6 @@ enum KnownGapExpectation {
         rust_contains: &'static [&'static str],
         rust_not_contains: &'static [&'static str],
     },
-    RustcError {
-        message: &'static str,
-        rust_contains: &'static [&'static str],
-    },
     LoudRuntimePanic {
         message: &'static str,
         diagnostic_code: &'static str,
@@ -785,15 +818,6 @@ fn known_gap_fixtures() -> Vec<KnownGapFixture> {
             },
         },
         KnownGapFixture {
-            display: "tests/differential/known-gaps/FinallySwitchBreak.java",
-            class: "FinallySwitchBreak",
-            expected_java_output: "zfofdf",
-            expectation: KnownGapExpectation::RustcError {
-                message: "E0267",
-                rust_contains: &["|| -> Result", "break;"],
-            },
-        },
-        KnownGapFixture {
             display: "tests/differential/known-gaps/InstanceofSupertype.java",
             class: "InstanceofSupertype",
             expected_java_output: "true,true,false",
@@ -849,34 +873,23 @@ fn known_gap_fixtures() -> Vec<KnownGapFixture> {
             },
         },
         KnownGapFixture {
-            display: "tests/differential/known-gaps/ArrayBlockingQueueAdd.java",
-            class: "ArrayBlockingQueueAdd",
-            expected_java_output: "true,a,IllegalStateException",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "Java ArrayBlockingQueue.add(value) requires bounded-capacity queue support",
-                diagnostic_code: None,
-                rust_contains: &[],
-                rust_not_contains: &["queue.push("],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/ArrayBlockingQueueOffer.java",
-            class: "ArrayBlockingQueueOffer",
-            expected_java_output: "true,false,a",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "Java ArrayBlockingQueue.offer(value) requires bounded-capacity queue support",
-                diagnostic_code: None,
-                rust_contains: &[],
-                rust_not_contains: &["queue.push("],
-            },
-        },
-        KnownGapFixture {
             display: "tests/differential/known-gaps/PriorityQueueComparatorConstructor.java",
             class: "PriorityQueueComparatorConstructor",
             expected_java_output: "3,2,1",
             expectation: KnownGapExpectation::LoudCompileError {
                 message: "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
-                diagnostic_code: None,
+                diagnostic_code: Some("unsupported_priority_queue_comparator_constructor"),
+                rust_contains: &[],
+                rust_not_contains: &["return comparator;"],
+            },
+        },
+        KnownGapFixture {
+            display: "tests/differential/known-gaps/PriorityQueueNamedComparatorConstructor.java",
+            class: "PriorityQueueNamedComparatorConstructor",
+            expected_java_output: "3,2,1",
+            expectation: KnownGapExpectation::LoudCompileError {
+                message: "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
+                diagnostic_code: Some("unsupported_priority_queue_comparator_constructor"),
                 rust_contains: &[],
                 rust_not_contains: &["return comparator;"],
             },
@@ -917,23 +930,23 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
             let diagnostic = translation
                 .diagnostics
                 .iter()
-                .find(|diagnostic| diagnostic.code == diagnostic_code)
+                .find(|diagnostic| diagnostic.code() == diagnostic_code)
                 .ok_or_else(|| {
                     format!(
                         "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
                         translation.diagnostics.iter().collect::<Vec<_>>()
                     )
                 })?;
-            if diagnostic.severity != new_java2rust::diagnostics::Severity::Error {
+            if diagnostic.severity() != new_java2rust::diagnostics::Severity::Error {
                 let _ = std::fs::remove_dir_all(&work);
                 return Err(format!(
                     "diagnostic code {diagnostic_code:?} was not an error: {:?}",
-                    diagnostic.severity
+                    diagnostic.severity()
                 ));
             }
             for (code, message) in also_diagnostic_contains {
                 if !translation.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.code == *code && diagnostic.message.contains(message)
+                    diagnostic.code() == *code && diagnostic.message().contains(message)
                 }) {
                     let _ = std::fs::remove_dir_all(&work);
                     return Err(format!(
@@ -972,26 +985,6 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
                     err
                 },
             )?;
-        }
-        KnownGapExpectation::RustcError {
-            message,
-            rust_contains,
-        } => {
-            check_rust_fragments(&translation.rust, rust_contains, &[]).map_err(|err| {
-                let _ = std::fs::remove_dir_all(&work);
-                err
-            })?;
-            let run = run_translated_rust_source(&work, fixture.class, &translation.rust);
-            let Err(err) = run else {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err("known rustc-loud translation unexpectedly compiled".to_string());
-            };
-            if !err.contains(message) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not fail at rustc with {message:?}: {err}"
-                ));
-            }
         }
         KnownGapExpectation::LoudRuntimePanic {
             message,
@@ -1181,7 +1174,7 @@ fn harness_main(rust: &str, class: &str) -> String {
     let fallible = rust.contains(&format!("pub fn run() -> Result<"));
     if fallible {
         format!(
-            "\nfn main() {{\n    match {class}::run() {{\n        Ok(value) => println!(\"{{value}}\"),\n        Err(err) => println!(\"EXCEPTION:{{}}\", err.class_name),\n    }}\n}}\n"
+            "\nfn main() {{\n    match {class}::run() {{\n        Ok(value) => println!(\"{{value}}\"),\n        Err(err) => println!(\"EXCEPTION:{{}}\", err.class_name()),\n    }}\n}}\n"
         )
     } else {
         format!("\nfn main() {{\n    println!(\"{{}}\", {class}::run());\n}}\n")

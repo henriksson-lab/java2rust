@@ -82,6 +82,12 @@ pub struct MethodDecl {
     pub span: Span,
 }
 
+impl MethodDecl {
+    pub fn params(&self) -> &[Param] {
+        &self.params
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct ConstructorDecl {
     pub name: String,
@@ -95,6 +101,12 @@ pub struct ConstructorDecl {
     pub span: Span,
 }
 
+impl ConstructorDecl {
+    pub fn params(&self) -> &[Param] {
+        &self.params
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Param {
     pub name: String,
@@ -102,6 +114,16 @@ pub struct Param {
     pub ty: JavaType,
     pub is_varargs: bool,
     pub binding: Option<BindingId>,
+}
+
+impl Param {
+    pub fn is_varargs(&self) -> bool {
+        self.is_varargs
+    }
+
+    pub fn binding(&self) -> Option<&BindingId> {
+        self.binding.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -241,6 +263,12 @@ pub struct CatchClause {
     pub source_name: String,
     pub body: Block,
     pub binding: Option<BindingId>,
+}
+
+impl CatchClause {
+    pub fn binding(&self) -> Option<&BindingId> {
+        self.binding.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

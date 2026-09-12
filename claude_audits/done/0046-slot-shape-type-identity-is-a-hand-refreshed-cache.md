@@ -286,3 +286,13 @@ assert_eq!(shape.type_identity,
 
 asserted over the shapes reachable from a corpus translation. Under the redesign
 the assertion is a tautology and the test is unnecessary — which is the point.
+
+## Follow-up 2026-09-12
+
+`TypeIdentity` itself is private-backed now. The stale cache is still gone from
+`RustSlotShape`; the derived identity record exposes declared type, runtime
+bounds, generic arguments, and erasure through read-only accessors instead of
+public mutable fields. Guard:
+`layering::effective_fact_precedence_queries_are_audited_by_consumer_module`;
+focused behavior guard:
+`cargo test --test slot_shape_design type_identity_preserves_generic_erasure_and_wildcard_bounds -- --exact`.

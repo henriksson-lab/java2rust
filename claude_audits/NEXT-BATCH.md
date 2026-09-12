@@ -29,7 +29,19 @@ build clean at 0 errors / 0 warnings.
 
 ---
 
-## 0010 — two items, both small
+## 0010 — landed; historical spec kept for context
+
+Current-tree recheck 2026-09-12: both items below are already implemented and
+guarded. `integer_div_rem_callables` skips locally handled arithmetic throws,
+`plan_program_exceptions_with_fallibility` derives `MethodExceptionPlan` from the
+fallibility fixpoint, and `source_method_named_returns_result_with_exception_plan`
+is gone. Verified:
+`slot_shape_design::integer_div_rem_fallibility_tracks_local_arithmetic_catches`,
+`slot_shape_design::program_exception_plan_uses_callable_fallibility_fixpoint`,
+and `layering::exception_lowering_keeps_exception_paths_structured`.
+
+The section remains as the design record that led to the landed rows below, not
+as work to pick up next.
 
 ### 10a. Catch-aware div/rem seeding (fixes the over-marking)
 
@@ -222,8 +234,10 @@ Two corrections worth carrying forward:
   the naming inconsistency below and close the rest.
 - **0008 is partly demonstrated.** `liveness` is a worked example of an analysis
   reaching lowering. The issue is now specifically that `lattice`,
-  `fact_saturation` and `graph` are still unreachable, and 220 predicates still
-  re-derive locally.
+  `fact_saturation` and `graph` remain upstream-only rather than lowering
+  inputs, and 220 predicates still re-derive locally. The shared graph and
+  saturation modules are crate-internal now, so this is a wiring/design issue
+  rather than public unused API.
 
 ## Dependency order
 
@@ -611,7 +625,7 @@ errors / 0 warnings throughout. Nothing committed.
 | **R1** `later_mutated_names` | Done. `LivenessAnalysis` runs the *same* backward walk in a second `Pass::Writes` mode — gen on `def` instead of `use`, identical loop fixpoints, `try` live floor and scope-correct kills. Fed from `mutated_after_for`. |
 | **R2** `current_stmt_read_counts` | Done. Moved onto the analysis as `use_counts_in(stmt)`; `statement_read_counts` deleted. |
 | **R3** tree-based type parameters | Done. `parse_type_parameter_names`/`_bounds` walk `type_parameter` / `type_bound` nodes; `declared_type_parameters_text` and its angle-bracket scanning deleted. Verified on `<K, V extends Comparable<V>, L extends List<String>>` → `impl<K, V: Ord + Clone, L>`. |
-| **R4** bounded type params stop erasing | Partial. Short bounded type variables no longer erase and the class-level `Comparable<T>` path works for focused probes, but 0017 is not closed: declaration-driven type-variable identity plus method/constructor JDK bounds remain open. |
+| **R4** bounded type params stop erasing | Advanced. Short bounded type variables no longer erase, class-level `Comparable<T>` works, and `claude_audits/repro/GenericBox.java` now compiles under `idiom_gaps::bounded_comparable_type_parameter_call_keeps_parameter_type`. Usage/object-model dispatch requirements also skip `NeedsUnknownRuntimeObject` for scoped type-parameter bindings while preserving same-name concrete-class behavior. 0017 is still not closed: context-only constructor bounds remain intentionally un-emitted when the bound trait is not emitted, and broader declaration-driven type-variable identity remains open. |
 | **R7** (first half) | Generic-detail comparison was centralized as `RustSlotShape::has_more_generic_detail_than`; the full shape partial order/lattice is not consolidated yet. |
 
 Both block walkers now derive read *and* write sets from the analysis, so the
@@ -754,41 +768,32 @@ binding", not as a collision with a parameter of the same name.
 
 ### 6e. Retire the remaining local overrides
 
-Six sites still override `later_read_names` with a locally computed set:
+Current-tree recheck 2026-09-12: this step is complete in code. `lower.rs` no
+longer contains `later_read_names` or `later_mutated_names`, and
+`tests/slot_shape_design.rs::loop_liveness_keeps_owned_value_live_across_back_edge`
+guards both removals. Do not pick up the historical six-site deletion plan below
+as live work; it is retained here only as context for how the deletion was
+intended to be verified.
 
-| site | override | expectation |
-|---|---|---|
-| `lower.rs:5434`, `:5443` | empty set for a terminating if-branch | **redundant** — liveness kills at `return`/`throw` |
-| `lower.rs:8788`, `:8813` | finally-block reads | **redundant** — the `Stmt::Try` arm already folds finally into live-out |
-| `lower.rs:10509` | lambda expression-body carried reads | **needed** — `for_loop_body` only handles *block* bodies |
-
-**Change.** Verify-then-delete the first two pairs, exactly as 6b was done —
-assert both answers, diff over a corpus run, delete when the divergence list is
-empty. For the third, extend `LivenessAnalysis::for_loop_body` to accept an
-expression body, so the lambda path uses the analysis like every other loop
-instead of hand-rolling its carried set.
-
-**Do not skip the diff.** The `catch_future_use_names` episode is the precedent:
-the first subsumption hypothesis was wrong, and only the diff caught it.
+Historical plan: six sites overrode `later_read_names` with locally computed
+sets: two terminating-branch empty-set overrides, two finally-block read
+overrides, and a lambda expression-body carried-read override. The expected end
+state was to route all of them through the shared liveness analysis instead of
+hand-rolled suffix sets.
 
 ### 6f. Delete the name-based fallback scans
 
-Six `unwrap_or_else(|| statement_suffix_*)` sites remain, plus the two
-`finally_read_names` computations. Instrumentation already showed the fallback
-firing 0 times across fixtures and 40/41 repros; the one hit (interface default
-methods) was fixed by giving that path an analysis.
+Current-tree recheck 2026-09-12: this step is complete in code. The historical
+`statement_suffix_read_names` / `statement_suffix_mutated_names` fallback
+helpers are gone from `lower.rs`; `tests/slot_shape_design.rs` guards that the
+function names are absent and that `LowerCtx` no longer carries
+`later_read_names` / `later_mutated_names` override fields. The remaining
+initialization-time try-capture relation is separate from liveness.
 
-**Change.** Once 6e removes the finally overrides, make the fallback
-*unrepresentable* rather than merely unused: have every path that lowers a block
-carry an analysis, then change the accessor to return the set directly instead of
-an `Option`. `statement_suffix_read_names` and `statement_suffix_mutated_names`
-are then dead and get deleted.
-
-**Verify.** `grep -c statement_suffix src/lower.rs` is 0, and `LowerCtx` holds
-one analysis handle plus `current_stmt` plus
-`preinitialized_try_capture_names` — which stays, and should be *renamed* to
-stop reading as a seventh approximation of the move relation. It is an
-initialization-time question, not a liveness one.
+Historical plan: after 6e removed the finally overrides, make the suffix
+fallback unrepresentable instead of merely unused by ensuring every lowered block
+carries analysis evidence. The planned verification was `grep -c statement_suffix
+src/lower.rs == 0`.
 
 ## Sequencing
 
@@ -847,14 +852,10 @@ in at the Try entry was not enough. The catch live floor now covers `finally`
 too. That is the second time verify-then-delete caught a wrong subsumption
 hypothesis — the first was `catch_future_use_names`.
 
-**What remains on `LowerCtx`, and why.** `later_read_names` and
-`later_mutated_names` survive as *deliberate overrides*, consulted only when the
-analysis has no entry for the statement — which happens for exactly one
-construct: a lambda whose body is a bare expression lowers into a loop with no
-`Stmt` node of its own, so there is nothing to key on. That is structural, not
-residue. `try_capture_preinitialized_names` is renamed from
-`preinitialized_try_capture_names` and documented as an initialization-time
-relation, so it stops reading as another approximation of liveness.
+Current-tree recheck 2026-09-12: the paragraph that used to say
+`later_read_names` and `later_mutated_names` survive on `LowerCtx` is stale.
+Both names are absent from `lower.rs`; the slot-shape guard pins that absence.
+The initialization-time try-capture relation remains separate from liveness.
 
 
 ## Round 3 — review fixes (2026-08-02)
@@ -950,16 +951,27 @@ is invisible to the emitter, all 7 exhaustive matches see through it, and
 `recorded_shape() == None` means *unknown* so the query falls back to the old
 text check. A tagged producer can therefore only turn a `false` into a `true`.
 
-Four families are migrated: `StringView`, `SliceView`, `ResultPropagated` and
-`OwnedRecovery`. The last two mattered most — the `?` check matched only
-`RustExpr::Raw` (so a propagated expression on any other variant was propagated
-twice), and clone recovery was an eight-way text alternation one arm of which
-matches an emitted **comment**. Every query is monotone
+Additional current-tree cleanup has tagged the direct borrow producers too:
+`ensure_borrow_projection` now records `Borrowed` for argument/receiver borrows
+and `MutBorrowed` for mutable slice views, while leaving map-key and string-view
+borrows on their dedicated paths. Four earlier families were already migrated:
+`StringView`, `SliceView`, `ResultPropagated` and `OwnedRecovery`. The last two
+mattered most — the `?` check matched only `RustExpr::Raw` (so a propagated
+expression on any other variant was propagated twice), and clone recovery used to
+be an eight-way text alternation, including one arm that matched an emitted
+**comment**. That comment path is gone: the remaining rendered fallback only
+accepts raw leaves that recover to structured clone-recovery expressions, and
+annotated raw comments are no longer treated as syntax. Every query is monotone
 (`tag == expected || <old text check>`), so a producer can be tagged without
 auditing its consumers first.
 
-Next: `OptionalProjected` / `MutBorrowed`, then tag the remaining clone
-producers and delete the comment-matching arm outright.
+Next: finish any remaining `OptionalProjected` producers/consumers, tag the
+remaining clone producers, then delete the rendered clone-recovery fallback once
+no consumer needs it for legacy raw leaves. The optional string-view producer now
+records its exact `String` borrowed `str` element slot, and parse recovery sees
+through that structured projection instead of depending on rendered `.as_ref()`
+text. Parseable raw `as_deref_mut()` optional reborrows are normalized back to a
+structured method call as soon as the compatibility path accepts them.
 
 ### 0008 — steps 1–3 done; the published metric is now misleading
 

@@ -112,7 +112,7 @@ fn lower_nullable_array_element_member_receiver(
     plan: &MemberAccessPlan,
     lowered_receiver: RustExpr,
 ) -> RustExpr {
-    if !matches!(plan.op, MemberAccessOp::RustField { .. }) {
+    if !matches!(plan.op(), MemberAccessOp::RustField { .. }) {
         return lowered_receiver;
     }
     lower_nullable_array_element_receiver(receiver, type_env, lowered_receiver)
@@ -149,7 +149,7 @@ fn lower_optional_sequence_member_receiver(
     lowered_receiver: RustExpr,
 ) -> RustExpr {
     if !matches!(
-        plan.op,
+        plan.op(),
         MemberAccessOp::LenAsI32
             | MemberAccessOp::Array2RowsAsI32
             | MemberAccessOp::Array2ColsAsI32
@@ -172,7 +172,7 @@ fn lower_optional_sequence_member_receiver(
 }
 
 fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> RustExpr {
-    match &plan.op {
+    match plan.op() {
         MemberAccessOp::LenAsI32 => crate::coercion::len_i32_projection(receiver),
         MemberAccessOp::Array2RowsAsI32 => crate::coercion::array2_rows_i32_projection(receiver),
         MemberAccessOp::Array2ColsAsI32 => crate::coercion::array2_cols_i32_projection(receiver),
@@ -182,7 +182,7 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
             } else {
                 owner.clone()
             };
-            associated_const_projection(&owner, &rust_associated_const_ident(&plan.member))
+            associated_const_projection(&owner, &rust_associated_const_ident(plan.member()))
         }
         MemberAccessOp::RustField { rust_name } => field_projection(receiver, rust_name),
     }
@@ -333,7 +333,8 @@ external-pack-field hdf5 HDF5File.OpenMode CREATE mapped
 external-pack-field hdf5 OpenMode READ_ONLY mapped
 "#,
         )
-        .facts;
+        .facts()
+        .clone();
 
         let hdf5_open_mode = Expr::FieldAccess(
             Box::new(Expr::Var("HDF5File".to_string())),

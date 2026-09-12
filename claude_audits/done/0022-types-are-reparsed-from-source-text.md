@@ -150,3 +150,18 @@ measurement instead.
 `focused_package_offline_cargo_uses_local_ndarray_shim` (`tests/batch_translation.rs`)
 passes for the first time — a 2-D array reaching `ndarray::Array2` needs the
 dimension the tree path was dropping. No other suite moved.
+
+## Follow-up 2026-09-12 — parameter `java.io` preservation no longer reparses
+
+`parse_params_node` had one remaining live source-route reparse: every formal
+parameter text was fed through `parse_param_text_fallback` before the tree type
+node, solely so fully-qualified `java.io.*Stream` parameter names could survive
+suffix normalization. That policy now lives in
+`java_type_name_from_parse_tree_node`, next to the rest of tree-owned type-name
+normalization, and the parameter walker uses its `type` child directly.
+
+The documented defensive fallbacks remain: text parsing still handles genuinely
+text-sourced signatures and the parser's measured zero-hit safety nets. Focused
+checks:
+`parser_gaps::preserves_explicit_java_io_stream_parameter_type_names` and
+`parser_tree_sitter` pass.

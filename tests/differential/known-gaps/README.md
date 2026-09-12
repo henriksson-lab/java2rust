@@ -19,7 +19,8 @@ regression test.
 
 ## Aliasing.java
 
-Java reference assignment aliases; the translation copies.
+Java reference assignment aliases; the translator still lacks mutable shared
+object storage.
 
 ```
 java:        5|7|3|9|11|13|17|19
@@ -31,8 +32,8 @@ translator now reports the provable mutable-alias divergence as an
 `observable_alias` error (`src/aliasing.rs`), so the known-wrong Rust is no
 longer a successful translation. The fixture covers local aliases, receiver
 mutation through an alias, array-element storage, holder-field storage, and
-this-field storage. Closing this still needs a shared mutable representation in
-`ObjectRepresentation`.
+this-field storage. Closing this still needs `SharedLocal`/`Rc<RefCell<T>>`
+storage plus receiver/field lowering for mutable shared source objects.
 
 ## InheritanceUpcast.java
 
@@ -146,21 +147,6 @@ Move this fixture to `tests/differential/` with `InnerCapture.java` when
 ordinary and qualified inner construction can route through the shared outer
 handle path.
 
-## FinallySwitchBreak.java
-
-Java executes `finally` on the abrupt switch/loop path before the labeled break
-completes. The current general finally closure carrier cannot contain that
-`break`, so the generated Rust fails loudly at rustc:
-
-```
-java: zfofdf
-translation: rustc E0267
-```
-
-Move this fixture to `tests/differential/` when the finally completion carrier
-can represent switch/loop break completion without emitting `break` inside a
-closure.
-
 ## InstanceofSupertype.java
 
 Java `instanceof` is a subtype test. The current exact erased-object runtime
@@ -240,21 +226,21 @@ Move this fixture to `tests/differential/` only if Java string identity gets a
 real representation. This is the documented policy boundary from 0028, not an
 exception-lowering gap.
 
-## ArrayBlockingQueueAdd.java
-
-Java `ArrayBlockingQueue.add` has bounded-capacity semantics: it inserts when
-space is available and throws `IllegalStateException` when the queue is full.
-The current translation refuses this rather than lowering it to unbounded
-`Vec`/`VecDeque` push semantics.
-
-## ArrayBlockingQueueOffer.java
-
-Java `ArrayBlockingQueue.offer` returns `false` when the bounded queue is full.
-The current translation refuses this rather than lowering it to unbounded
-`Vec`/`VecDeque` push semantics.
-
 ## PriorityQueueComparatorConstructor.java
 
 Java `PriorityQueue(Comparator)` must preserve comparator-defined ordering. The
 current translation refuses comparator-backed priority queues instead of
 silently using the natural ordering carrier.
+
+The checked-in fixture uses an anonymous `Comparator`, so the current translation
+also reports `unsupported_anonymous_class`. Promoting it requires both anonymous
+comparator object lowering and a comparator-backed priority-queue carrier. The
+harness also requires `unsupported_priority_queue_comparator_constructor`.
+
+## PriorityQueueNamedComparatorConstructor.java
+
+This is the same `PriorityQueue(Comparator)` ordering gap, but with a named
+`Comparator` implementation. It isolates the queue-carrier problem from
+anonymous-class lowering: promoting this fixture should require only a
+comparator-backed priority-queue carrier. The harness also requires
+`unsupported_priority_queue_comparator_constructor`.

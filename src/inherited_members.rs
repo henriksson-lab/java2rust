@@ -7,64 +7,222 @@ use crate::java_ir::{FieldDecl, JavaType, Member, MethodDecl, Modifier, Program,
 use crate::java_signature::{JavaCallableSlotKey, source_method_overload_rust_name};
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExternalInheritedInstanceField {
-    pub declaring_type: String,
-    pub field_name: String,
-    pub rust_name: String,
-    pub field_type: JavaType,
-    pub field_nullability: Option<NullabilityState>,
+pub(crate) struct ExternalInheritedInstanceField {
+    declaring_type: String,
+    field_name: String,
+    rust_name: String,
+    field_type: JavaType,
+    field_nullability: Option<NullabilityState>,
+}
+
+impl ExternalInheritedInstanceField {
+    pub(crate) fn new(
+        declaring_type: String,
+        field_name: String,
+        rust_name: String,
+        field_type: JavaType,
+        field_nullability: Option<NullabilityState>,
+    ) -> Self {
+        Self {
+            declaring_type,
+            field_name,
+            rust_name,
+            field_type,
+            field_nullability,
+        }
+    }
+
+    pub(crate) fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
+
+    pub(crate) fn field_type(&self) -> &JavaType {
+        &self.field_type
+    }
+
+    pub(crate) fn field_nullability(&self) -> Option<NullabilityState> {
+        self.field_nullability
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExternalInheritedStaticField {
-    pub declaring_type: String,
-    pub field_name: String,
-    pub field_type: JavaType,
+pub(crate) struct ExternalInheritedStaticField {
+    declaring_type: String,
+    field_name: String,
+    field_type: JavaType,
+}
+
+impl ExternalInheritedStaticField {
+    pub(crate) fn new(declaring_type: String, field_name: String, field_type: JavaType) -> Self {
+        Self {
+            declaring_type,
+            field_name,
+            field_type,
+        }
+    }
+
+    pub(crate) fn declaring_type(&self) -> &str {
+        &self.declaring_type
+    }
+
+    pub(crate) fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub(crate) fn field_type(&self) -> &JavaType {
+        &self.field_type
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct ExternalInheritedInstanceMethod {
-    pub declaring_type: String,
-    pub method_name: String,
-    pub rust_name: String,
-    pub arg_count: usize,
-    pub fact: ExternalApiEffectFact,
+pub(crate) struct ExternalInheritedInstanceMethod {
+    declaring_type: String,
+    method_name: String,
+    rust_name: String,
+    arg_count: usize,
+    fact: ExternalApiEffectFact,
+}
+
+impl ExternalInheritedInstanceMethod {
+    pub(crate) fn new(
+        declaring_type: String,
+        method_name: String,
+        rust_name: String,
+        arg_count: usize,
+        fact: ExternalApiEffectFact,
+    ) -> Self {
+        Self {
+            declaring_type,
+            method_name,
+            rust_name,
+            arg_count,
+            fact,
+        }
+    }
+
+    pub(crate) fn declaring_type(&self) -> &str {
+        &self.declaring_type
+    }
+
+    pub(crate) fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub(crate) fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
+
+    pub(crate) fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub(crate) fn fact(&self) -> &ExternalApiEffectFact {
+        &self.fact
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InheritedInstanceField {
-    pub declaring_type: String,
-    pub field: FieldDecl,
+pub(crate) struct InheritedInstanceField {
+    declaring_type: String,
+    field: FieldDecl,
+}
+
+impl InheritedInstanceField {
+    pub(crate) fn new(declaring_type: String, field: FieldDecl) -> Self {
+        Self {
+            declaring_type,
+            field,
+        }
+    }
+
+    pub(crate) fn declaring_type(&self) -> &str {
+        &self.declaring_type
+    }
+
+    pub(crate) fn field(&self) -> &FieldDecl {
+        &self.field
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct InheritedInstanceFieldRef<'a> {
-    pub declaring_type: &'a str,
-    pub field: &'a FieldDecl,
+pub(crate) struct InheritedInstanceFieldRef<'a> {
+    declaring_type: &'a str,
+    field: &'a FieldDecl,
+}
+
+impl<'a> InheritedInstanceFieldRef<'a> {
+    pub(crate) fn new(declaring_type: &'a str, field: &'a FieldDecl) -> Self {
+        Self {
+            declaring_type,
+            field,
+        }
+    }
+
+    pub(crate) fn declaring_type(&self) -> &'a str {
+        self.declaring_type
+    }
+
+    pub(crate) fn field(&self) -> &'a FieldDecl {
+        self.field
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct InheritedInstanceMethodRef<'a> {
-    pub declaring_type: &'a str,
-    pub declaring_ty: &'a TypeDecl,
-    pub method: &'a crate::java_ir::MethodDecl,
-    pub rust_name: String,
+pub(crate) struct InheritedInstanceMethodRef<'a> {
+    declaring_type: &'a str,
+    declaring_ty: &'a TypeDecl,
+    method: &'a crate::java_ir::MethodDecl,
+    rust_name: String,
 }
 
-pub fn inherited_instance_fields_for_type(
+impl<'a> InheritedInstanceMethodRef<'a> {
+    pub(crate) fn new(
+        declaring_type: &'a str,
+        declaring_ty: &'a TypeDecl,
+        method: &'a crate::java_ir::MethodDecl,
+        rust_name: String,
+    ) -> Self {
+        Self {
+            declaring_type,
+            declaring_ty,
+            method,
+            rust_name,
+        }
+    }
+
+    pub(crate) fn declaring_type(&self) -> &'a str {
+        self.declaring_type
+    }
+
+    pub(crate) fn declaring_ty(&self) -> &'a TypeDecl {
+        self.declaring_ty
+    }
+
+    pub(crate) fn method(&self) -> &'a crate::java_ir::MethodDecl {
+        self.method
+    }
+
+    pub(crate) fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
+}
+
+pub(crate) fn inherited_instance_fields_for_type(
     ty: &TypeDecl,
     support_program: &Program,
 ) -> Vec<InheritedInstanceField> {
     inherited_instance_field_refs_for_type(ty, support_program)
         .into_iter()
-        .map(|inherited| InheritedInstanceField {
-            declaring_type: inherited.declaring_type.to_string(),
-            field: inherited.field.clone(),
+        .map(|inherited| {
+            InheritedInstanceField::new(
+                inherited.declaring_type().to_string(),
+                inherited.field().clone(),
+            )
         })
         .collect()
 }
 
-pub fn inherited_instance_method_refs_for_type<'a>(
+pub(crate) fn inherited_instance_method_refs_for_type<'a>(
     ty: &TypeDecl,
     support_program: &'a Program,
 ) -> Vec<InheritedInstanceMethodRef<'a>> {
@@ -93,12 +251,12 @@ pub fn inherited_instance_method_refs_for_type<'a>(
             if seen_methods.insert(signature) {
                 let rust_name =
                     inherited_method_rust_name_for_child(method, &direct_method_rust_names);
-                methods.push(InheritedInstanceMethodRef {
-                    declaring_type: &super_ty.name,
-                    declaring_ty: super_ty,
+                methods.push(InheritedInstanceMethodRef::new(
+                    &super_ty.name,
+                    super_ty,
                     method,
                     rust_name,
-                });
+                ));
             }
         }
 
@@ -177,17 +335,17 @@ fn collect_inherited_interface_default_methods<'a>(
                 continue;
             }
             let rust_name = inherited_method_rust_name_for_child(method, direct_method_rust_names);
-            methods.push(InheritedInstanceMethodRef {
-                declaring_type: &interface.name,
-                declaring_ty: interface,
+            methods.push(InheritedInstanceMethodRef::new(
+                &interface.name,
+                interface,
                 method,
                 rust_name,
-            });
+            ));
         }
     }
 }
 
-pub fn external_inherited_instance_fields_for_type(
+pub(crate) fn external_inherited_instance_fields_for_type(
     ty: &TypeDecl,
     facts: &FactSet,
 ) -> Vec<ExternalInheritedInstanceField> {
@@ -242,16 +400,15 @@ fn push_external_inherited_instance_field_from_fact(
     if !seen_fields.insert(rust_name.clone()) {
         return;
     }
-    fields.push(ExternalInheritedInstanceField {
-        declaring_type: field_owner.to_string(),
-        field_name: field_name.to_string(),
+    fields.push(ExternalInheritedInstanceField::new(
+        field_owner.to_string(),
+        field_name.to_string(),
         rust_name,
-        field_type: fact
-            .field_type
+        fact.field_type
             .clone()
             .unwrap_or_else(|| JavaType::Unknown("Object".to_string())),
-        field_nullability: inherited_external_field_nullability(facts, field_owner, field_name),
-    });
+        inherited_external_field_nullability(facts, field_owner, field_name),
+    ));
 }
 
 fn inherited_external_field_nullability(
@@ -268,7 +425,7 @@ fn inherited_external_field_nullability(
     facts.field_nullability_for(type_name, field_name)
 }
 
-pub fn external_inherited_static_final_fields_for_type(
+pub(crate) fn external_inherited_static_final_fields_for_type(
     ty: &TypeDecl,
     facts: &FactSet,
 ) -> Vec<ExternalInheritedStaticField> {
@@ -319,14 +476,14 @@ fn push_external_inherited_static_final_field_from_fact(
     let Some(field_type) = fact.field_type.clone() else {
         return;
     };
-    fields.push(ExternalInheritedStaticField {
-        declaring_type: field_owner.to_string(),
-        field_name: field_name.to_string(),
+    fields.push(ExternalInheritedStaticField::new(
+        field_owner.to_string(),
+        field_name.to_string(),
         field_type,
-    });
+    ));
 }
 
-pub fn external_inherited_instance_methods_for_type(
+pub(crate) fn external_inherited_instance_methods_for_type(
     ty: &TypeDecl,
     facts: &FactSet,
 ) -> Vec<ExternalInheritedInstanceMethod> {
@@ -370,13 +527,13 @@ fn record_external_inherited_instance_method_from_fact(
         return;
     };
     let rust_name = crate::parser::to_snake_case(&fact.method_name);
-    let method = ExternalInheritedInstanceMethod {
-        declaring_type: receiver_type.to_string(),
-        method_name: fact.method_name.clone(),
-        rust_name: rust_name.clone(),
+    let method = ExternalInheritedInstanceMethod::new(
+        receiver_type.to_string(),
+        fact.method_name.clone(),
+        rust_name.clone(),
         arg_count,
-        fact: fact.clone(),
-    };
+        fact.clone(),
+    );
     methods
         .entry((rust_name, arg_count))
         .and_modify(|existing| {
@@ -410,14 +567,14 @@ fn external_super_names_for_type(ty: &TypeDecl, facts: &FactSet) -> Vec<String> 
     super_names
 }
 
-pub fn inherited_instance_field_refs_for_type<'a>(
+pub(crate) fn inherited_instance_field_refs_for_type<'a>(
     ty: &TypeDecl,
     support_program: &'a Program,
 ) -> Vec<InheritedInstanceFieldRef<'a>> {
     inherited_instance_field_refs_for_type_in_programs(ty, &[support_program])
 }
 
-pub fn inherited_instance_field_refs_for_type_in_programs<'a>(
+pub(crate) fn inherited_instance_field_refs_for_type_in_programs<'a>(
     ty: &TypeDecl,
     support_programs: &[&'a Program],
 ) -> Vec<InheritedInstanceFieldRef<'a>> {
@@ -442,10 +599,7 @@ pub fn inherited_instance_field_refs_for_type_in_programs<'a>(
                 continue;
             }
             if seen_fields.insert(rust_field_name(&field.name)) {
-                fields.push(InheritedInstanceFieldRef {
-                    declaring_type: &super_ty.name,
-                    field,
-                });
+                fields.push(InheritedInstanceFieldRef::new(&super_ty.name, field));
             }
         }
 
@@ -774,12 +928,12 @@ mod tests {
         let inherited = external_inherited_instance_methods_for_type(&ty, &FactSet::default());
         let method = inherited
             .iter()
-            .find(|method| method.rust_name == "get_default_tool_v_c_f_header_lines")
+            .find(|method| method.rust_name() == "get_default_tool_v_c_f_header_lines")
             .expect("GATKTool builtin method should be inherited");
 
-        assert_eq!(method.arg_count, 0);
+        assert_eq!(method.arg_count(), 0);
         assert_eq!(
-            method.fact.return_type,
+            method.fact().return_type,
             Some(JavaType::Named {
                 name: "Set".to_string(),
                 args: vec![JavaType::Named {

@@ -53,9 +53,9 @@ impl DependencyMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencySourceRoot {
-    pub path: PathBuf,
-    pub mode: DependencyMode,
-    pub package_prefixes: Vec<String>,
+    path: PathBuf,
+    mode: DependencyMode,
+    package_prefixes: Vec<String>,
 }
 
 impl DependencySourceRoot {
@@ -87,13 +87,25 @@ impl DependencySourceRoot {
                     .any(|prefix| package_prefix_matches(prefix, package))
             })
     }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn mode(&self) -> DependencyMode {
+        self.mode
+    }
+
+    pub fn package_prefixes(&self) -> &[String] {
+        &self.package_prefixes
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyFactProvider {
-    pub name: String,
-    pub mode: DependencyMode,
-    pub facts: FactSet,
+    name: String,
+    mode: DependencyMode,
+    facts: FactSet,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,13 +173,25 @@ impl DependencyFactProvider {
             facts,
         }
     }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn mode(&self) -> DependencyMode {
+        self.mode
+    }
+
+    pub fn facts(&self) -> &FactSet {
+        &self.facts
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DependencyModeConfig {
-    pub source_roots: Vec<DependencySourceRoot>,
-    pub fact_providers: Vec<DependencyFactProvider>,
-    pub enable_builtin_external_packs: bool,
+    source_roots: Vec<DependencySourceRoot>,
+    fact_providers: Vec<DependencyFactProvider>,
+    enable_builtin_external_packs: bool,
 }
 
 impl Default for DependencyModeConfig {
@@ -195,6 +219,18 @@ impl DependencyModeConfig {
     pub fn without_builtin_external_packs(mut self) -> Self {
         self.enable_builtin_external_packs = false;
         self
+    }
+
+    pub fn source_roots(&self) -> &[DependencySourceRoot] {
+        &self.source_roots
+    }
+
+    pub fn fact_providers(&self) -> &[DependencyFactProvider] {
+        &self.fact_providers
+    }
+
+    pub fn enable_builtin_external_packs(&self) -> bool {
+        self.enable_builtin_external_packs
     }
 
     pub fn set_builtin_external_packs_enabled(&mut self, enabled: bool) {

@@ -78,7 +78,11 @@ impl ShapeEnv {
         &self.types
     }
 
-    pub fn insert_map_key_set_view_receiver(&mut self, name: impl Into<String>, receiver: Expr) {
+    pub(crate) fn insert_map_key_set_view_receiver(
+        &mut self,
+        name: impl Into<String>,
+        receiver: Expr,
+    ) {
         let name = name.into();
         if let Some(binding) = self.binding_ids.get(&name).cloned() {
             self.map_key_set_view_receivers_by_binding
@@ -88,7 +92,11 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_map_values_view_receiver(&mut self, name: impl Into<String>, receiver: Expr) {
+    pub(crate) fn insert_map_values_view_receiver(
+        &mut self,
+        name: impl Into<String>,
+        receiver: Expr,
+    ) {
         let name = name.into();
         if let Some(binding) = self.binding_ids.get(&name).cloned() {
             self.map_values_view_receivers_by_binding
@@ -98,7 +106,11 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_map_entry_set_view_receiver(&mut self, name: impl Into<String>, receiver: Expr) {
+    pub(crate) fn insert_map_entry_set_view_receiver(
+        &mut self,
+        name: impl Into<String>,
+        receiver: Expr,
+    ) {
         let name = name.into();
         if let Some(binding) = self.binding_ids.get(&name).cloned() {
             self.map_entry_set_view_receivers_by_binding
@@ -108,7 +120,11 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_map_entry_value_receiver(&mut self, name: impl Into<String>, receiver: Expr) {
+    pub(crate) fn insert_map_entry_value_receiver(
+        &mut self,
+        name: impl Into<String>,
+        receiver: Expr,
+    ) {
         let name = name.into();
         if let Some(binding) = self.binding_ids.get(&name).cloned() {
             self.map_entry_value_receivers_by_binding
@@ -160,7 +176,7 @@ impl ShapeEnv {
         self.immutable_collection_view_locals.insert(name, profile);
     }
 
-    pub fn insert_simple_map_entry_value(
+    pub(crate) fn insert_simple_map_entry_value(
         &mut self,
         name: impl Into<String>,
         key: Expr,
@@ -175,7 +191,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn forget_simple_map_entry_value(&mut self, name: &str) {
+    pub(crate) fn forget_simple_map_entry_value(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.simple_map_entry_values_by_binding.remove(binding);
             self.simple_immutable_map_entry_locals_by_binding
@@ -185,7 +201,7 @@ impl ShapeEnv {
         self.simple_immutable_map_entry_locals.remove(name);
     }
 
-    pub fn insert_simple_immutable_map_entry_local(&mut self, name: impl Into<String>) {
+    pub(crate) fn insert_simple_immutable_map_entry_local(&mut self, name: impl Into<String>) {
         let name = name.into();
         if let Some(binding) = self.binding_ids.get(&name).cloned() {
             self.simple_immutable_map_entry_locals_by_binding
@@ -195,7 +211,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn simple_map_entry_local_is_immutable(&self, name: &str) -> bool {
+    pub(crate) fn simple_map_entry_local_is_immutable(&self, name: &str) -> bool {
         if let Some(binding) = self.binding_ids.get(name) {
             return self
                 .simple_immutable_map_entry_locals_by_binding
@@ -204,14 +220,14 @@ impl ShapeEnv {
         self.simple_immutable_map_entry_locals.contains(name)
     }
 
-    pub fn forget_map_entry_value_receiver(&mut self, name: &str) {
+    pub(crate) fn forget_map_entry_value_receiver(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.map_entry_value_receivers_by_binding.remove(binding);
         }
         self.map_entry_value_receivers.remove(name);
     }
 
-    pub fn insert_nested_array2_local(&mut self, name: impl Into<String>) {
+    pub(crate) fn insert_nested_array2_local(&mut self, name: impl Into<String>) {
         let name = name.into();
         if let Some(binding) = self.binding_ids.get(&name).cloned() {
             self.nested_array2_locals_by_binding.insert(binding);
@@ -220,7 +236,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn local_uses_nested_array2_slice(&self, name: &str) -> bool {
+    pub(crate) fn local_uses_nested_array2_slice(&self, name: &str) -> bool {
         if let Some(binding) = self.binding_ids.get(name) {
             return self.nested_array2_locals_by_binding.contains(binding);
         }
@@ -255,28 +271,28 @@ impl ShapeEnv {
         self.nested_array2_locals.remove(name);
     }
 
-    pub fn map_key_set_view_receiver(&self, name: &str) -> Option<&Expr> {
+    pub(crate) fn map_key_set_view_receiver(&self, name: &str) -> Option<&Expr> {
         if let Some(binding) = self.binding_ids.get(name) {
             return self.map_key_set_view_receivers_by_binding.get(binding);
         }
         self.map_key_set_view_receivers.get(name)
     }
 
-    pub fn map_values_view_receiver(&self, name: &str) -> Option<&Expr> {
+    pub(crate) fn map_values_view_receiver(&self, name: &str) -> Option<&Expr> {
         if let Some(binding) = self.binding_ids.get(name) {
             return self.map_values_view_receivers_by_binding.get(binding);
         }
         self.map_values_view_receivers.get(name)
     }
 
-    pub fn map_entry_set_view_receiver(&self, name: &str) -> Option<&Expr> {
+    pub(crate) fn map_entry_set_view_receiver(&self, name: &str) -> Option<&Expr> {
         if let Some(binding) = self.binding_ids.get(name) {
             return self.map_entry_set_view_receivers_by_binding.get(binding);
         }
         self.map_entry_set_view_receivers.get(name)
     }
 
-    pub fn map_entry_value_receiver(&self, name: &str) -> Option<&Expr> {
+    pub(crate) fn map_entry_value_receiver(&self, name: &str) -> Option<&Expr> {
         if let Some(binding) = self.binding_ids.get(name) {
             return self.map_entry_value_receivers_by_binding.get(binding);
         }
@@ -315,7 +331,7 @@ impl ShapeEnv {
         self.immutable_collection_view_locals.get(name).copied()
     }
 
-    pub fn simple_map_entry_value(&self, name: &str) -> Option<(&Expr, &Expr)> {
+    pub(crate) fn simple_map_entry_value(&self, name: &str) -> Option<(&Expr, &Expr)> {
         if let Some(binding) = self.binding_ids.get(name) {
             return self
                 .simple_map_entry_values_by_binding
@@ -385,7 +401,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_local_shape_with_access_name_and_java_type(
+    pub(crate) fn insert_local_shape_with_access_name_and_java_type(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -402,7 +418,7 @@ impl ShapeEnv {
             .insert(access_name.clone(), access_name);
     }
 
-    pub fn insert_local_shape_with_access_name_java_type_and_binding(
+    pub(crate) fn insert_local_shape_with_access_name_java_type_and_binding(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -455,7 +471,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_param_shape_with_access_name_and_java_type(
+    pub(crate) fn insert_param_shape_with_access_name_and_java_type(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -471,7 +487,7 @@ impl ShapeEnv {
             .insert(access_name.clone(), access_name);
     }
 
-    pub fn insert_param_shape_with_access_name_java_type_and_binding(
+    pub(crate) fn insert_param_shape_with_access_name_java_type_and_binding(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -494,14 +510,7 @@ impl ShapeEnv {
             .insert(access_name.clone(), access_name);
     }
 
-    pub fn insert_loop_variable_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
-        let name = name.into();
-        self.types.insert_local(name.clone(), shape.java_ty.clone());
-        self.local_shapes.insert(name.clone(), shape);
-        self.bind_name(BindingKind::LoopVariable, name);
-    }
-
-    pub fn insert_loop_variable_shape_with_access_name_and_binding(
+    pub(crate) fn insert_loop_variable_shape_with_access_name_and_binding(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -537,7 +546,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_catch_param_with_binding(
+    fn insert_catch_param_with_binding(
         &mut self,
         name: impl Into<String>,
         ty: JavaType,
@@ -554,7 +563,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_catch_param_with_access_name_and_binding(
+    pub(crate) fn insert_catch_param_with_access_name_and_binding(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -569,13 +578,6 @@ impl ShapeEnv {
             .insert(name.clone(), access_name.clone());
         self.binding_access_names
             .insert(access_name.clone(), access_name);
-    }
-
-    pub fn insert_catch_param_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
-        let name = name.into();
-        self.types.insert_local(name.clone(), shape.java_ty.clone());
-        self.local_shapes.insert(name.clone(), shape);
-        self.bind_name(BindingKind::CatchParam, name);
     }
 
     pub fn insert_static_type_alias(
@@ -628,7 +630,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_field_shape_with_access_name(
+    fn insert_field_shape_with_access_name(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -649,7 +651,7 @@ impl ShapeEnv {
             .insert(access_name.clone(), access_name);
     }
 
-    pub fn insert_field_shape_with_access_name_and_java_type(
+    pub(crate) fn insert_field_shape_with_access_name_and_java_type(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -715,7 +717,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_type_static_storage_field_shape_with_access_name(
+    pub(crate) fn insert_type_static_storage_field_shape_with_access_name(
         &mut self,
         type_name: impl Into<String>,
         field_name: impl Into<String>,
@@ -761,7 +763,7 @@ impl ShapeEnv {
         }
     }
 
-    pub fn insert_type_static_storage_field_shape_with_access_name_and_java_type(
+    fn insert_type_static_storage_field_shape_with_access_name_and_java_type(
         &mut self,
         type_name: impl Into<String>,
         field_name: impl Into<String>,
@@ -796,7 +798,7 @@ impl ShapeEnv {
         self.insert_static_field_shape_with_access_name(name.clone(), name, shape);
     }
 
-    pub fn insert_static_field_shape_with_access_name(
+    fn insert_static_field_shape_with_access_name(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -828,7 +830,7 @@ impl ShapeEnv {
             .or_insert(access_name);
     }
 
-    pub fn insert_static_field_shape_with_access_name_and_java_type(
+    fn insert_static_field_shape_with_access_name_and_java_type(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -842,7 +844,7 @@ impl ShapeEnv {
         self.types.insert_field(alias, java_ty);
     }
 
-    pub fn insert_static_field_shape_for_owner_with_access_name(
+    pub(crate) fn insert_static_field_shape_for_owner_with_access_name(
         &mut self,
         owner: impl Into<String>,
         name: impl Into<String>,
@@ -860,7 +862,7 @@ impl ShapeEnv {
         self.static_field_owners.entry(alias).or_insert(owner);
     }
 
-    pub fn insert_static_storage_field_shape_with_access_name(
+    fn insert_static_storage_field_shape_with_access_name(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -888,7 +890,7 @@ impl ShapeEnv {
             .or_insert(access_name);
     }
 
-    pub fn insert_static_storage_field_shape_owned_by_with_access_name(
+    pub(crate) fn insert_static_storage_field_shape_owned_by_with_access_name(
         &mut self,
         owner: &str,
         name: impl Into<String>,
@@ -948,7 +950,7 @@ impl ShapeEnv {
         Some(crate::java_naming::rust_name_for_java_named_type(owner))
     }
 
-    pub fn insert_static_storage_field_shape_with_access_name_and_java_type(
+    fn insert_static_storage_field_shape_with_access_name_and_java_type(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -979,7 +981,7 @@ impl ShapeEnv {
         self.types.local_type(name)
     }
 
-    pub fn insert_binding_access_name(
+    pub(crate) fn insert_binding_access_name(
         &mut self,
         name: impl Into<String>,
         access_name: impl Into<String>,
@@ -1001,15 +1003,6 @@ impl ShapeEnv {
 
     pub fn local_shape(&self, name: &str) -> Option<&RustSlotShape> {
         self.local_shapes.get(name)
-    }
-
-    pub(crate) fn idless_compatibility_local_plan_for_declared_type<'a>(
-        &self,
-        locals: &'a [LocalPlan],
-        name: &str,
-        declared_ty: &JavaType,
-    ) -> Option<&'a LocalPlan> {
-        unique_local_plan_for_declared_type(locals, name, declared_ty)
     }
 
     pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
@@ -1118,8 +1111,8 @@ fn java_types_have_same_erased_occurrence_identity(
 }
 
 fn local_plan_matches_declared_type(local: &LocalPlan, declared_ty: &JavaType) -> bool {
-    java_types_have_same_erased_occurrence_identity(&local.java_ty, declared_ty)
-        || java_types_have_same_erased_occurrence_identity(&local.shape.java_ty, declared_ty)
+    java_types_have_same_erased_occurrence_identity(local.java_ty(), declared_ty)
+        || java_types_have_same_erased_occurrence_identity(&local.shape().java_ty, declared_ty)
 }
 
 fn unique_local_plan_for_declared_type<'a>(
@@ -1139,7 +1132,7 @@ fn unique_local_plan_for_declared_type<'a>(
     if java_type_is_erased_object_boundary(declared_ty)
         && let [local] = exact_matches
             .iter()
-            .filter(|local| shape_is_erased_object_boundary(&local.shape))
+            .filter(|local| shape_is_erased_object_boundary(&local.shape()))
             .copied()
             .collect::<Vec<_>>()
             .as_slice()
@@ -1152,15 +1145,49 @@ fn unique_local_plan_for_declared_type<'a>(
     }
 }
 
+pub(crate) fn idless_compatibility_local_plan_for_declared_type<'a>(
+    locals: &'a [LocalPlan],
+    name: &str,
+    declared_ty: &JavaType,
+) -> Option<&'a LocalPlan> {
+    unique_local_plan_for_declared_type(locals, name, declared_ty)
+}
+
 pub(crate) fn fallback_local_shape_from_declared_type(ty: &JavaType) -> RustSlotShape {
     RustSlotShape::conservative(ty.clone())
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ExprShapeContext<'a> {
-    pub signatures: Option<&'a SignaturePlan>,
-    pub representations: Option<&'a RepresentationPlan>,
-    pub facts: Option<&'a FactSet>,
+    signatures: Option<&'a SignaturePlan>,
+    representations: Option<&'a RepresentationPlan>,
+    facts: Option<&'a FactSet>,
+}
+
+impl<'a> ExprShapeContext<'a> {
+    pub fn new(
+        signatures: Option<&'a SignaturePlan>,
+        representations: Option<&'a RepresentationPlan>,
+        facts: Option<&'a FactSet>,
+    ) -> Self {
+        Self {
+            signatures,
+            representations,
+            facts,
+        }
+    }
+
+    pub fn signatures(self) -> Option<&'a SignaturePlan> {
+        self.signatures
+    }
+
+    pub fn representations(self) -> Option<&'a RepresentationPlan> {
+        self.representations
+    }
+
+    pub fn facts(self) -> Option<&'a FactSet> {
+        self.facts
+    }
 }
 
 pub fn infer_expr_shape(expr: &Expr, env: &ShapeEnv) -> RustSlotShape {
@@ -1390,7 +1417,7 @@ fn shape_env_for_type_with_fields(
     let source_static_field_rust_names = crate::java_naming::source_static_field_rust_names(ty);
     for member in &ty.members {
         if let Member::Field(field) = member {
-            let shape = signatures.required_field_shape(&ty.name, &field.name);
+            let shape = signatures.required_declared_field_shape(ty, field);
             let instance_access_name = source_instance_field_rust_names
                 .get(&field.name)
                 .cloned()
@@ -1459,7 +1486,7 @@ pub fn shape_env_for_constructor(
     signatures: &SignaturePlan,
 ) -> ShapeEnv {
     let mut env = shape_env_for_type(ty, signatures);
-    insert_param_shapes(&mut env, &ctor.params, &constructor_signature.params);
+    insert_param_shapes(&mut env, &ctor.params, &constructor_signature.params());
     env
 }
 
@@ -1475,7 +1502,7 @@ pub fn shape_env_for_method(
         shape_env_for_type(ty, signatures)
     };
     seed_type_param_bounds(&mut env, &method.type_params, &method.type_param_bounds);
-    insert_param_shapes(&mut env, &method.params, &method_signature.params);
+    insert_param_shapes(&mut env, &method.params, &method_signature.params());
     env
 }
 
@@ -1512,11 +1539,11 @@ pub fn learn_stmt_shapes(
             let local_plan =
                 local_plan_for_declaration_shape(signatures, locals, binding.as_ref(), name, ty);
             let shape = local_plan
-                .map(|plan| plan.shape.clone())
+                .map(|plan| plan.shape().clone())
                 .unwrap_or_else(|| fallback_local_shape_from_declared_type(ty));
             let env_binding = binding
                 .clone()
-                .or_else(|| local_plan.map(|plan| plan.binding.clone()));
+                .or_else(|| local_plan.map(|plan| plan.binding().clone()));
             env.insert_local_shape_with_access_name_java_type_and_binding(
                 source_name.clone(),
                 access_name.clone(),
@@ -1619,11 +1646,11 @@ pub fn learn_stmt_shapes(
                 var_type,
             );
             let shape = local_plan
-                .map(|plan| plan.shape.clone())
+                .map(|plan| plan.shape().clone())
                 .unwrap_or_else(|| fallback_local_shape_from_declared_type(var_type));
             let env_binding = binding
                 .clone()
-                .or_else(|| local_plan.map(|plan| plan.binding.clone()));
+                .or_else(|| local_plan.map(|plan| plan.binding().clone()));
             env.insert_loop_variable_shape_with_access_name_and_binding(
                 var_name.clone(),
                 var_name.clone(),
@@ -1815,7 +1842,7 @@ fn local_shape_for_declared_type<'a>(
     name: &str,
     declared_ty: &JavaType,
 ) -> Option<&'a RustSlotShape> {
-    unique_local_plan_for_declared_type(locals, name, declared_ty).map(|local| &local.shape)
+    unique_local_plan_for_declared_type(locals, name, declared_ty).map(|local| local.shape())
 }
 
 fn insert_param_shapes(env: &mut ShapeEnv, source_params: &[Param], params: &[ParamPlan]) {
@@ -1826,29 +1853,29 @@ fn insert_param_shapes(env: &mut ShapeEnv, source_params: &[Param], params: &[Pa
         let access_name = access_names
             .get(&source_param.source_name)
             .cloned()
-            .unwrap_or_else(|| param.name.clone());
+            .unwrap_or_else(|| param.name().to_string());
         env.insert_param_shape_with_access_name_java_type_and_binding(
             source_param.source_name.clone(),
             access_name.clone(),
-            param.shape.clone(),
-            param.java_ty.clone(),
+            param.shape().clone(),
+            param.java_ty().clone(),
             source_param.binding.clone(),
         );
-        if param.name != source_param.source_name {
+        if param.name() != source_param.source_name {
             env.insert_param_shape_with_access_name_java_type_and_binding(
-                param.name.clone(),
+                param.name().to_string(),
                 access_name,
-                param.shape.clone(),
-                param.java_ty.clone(),
+                param.shape().clone(),
+                param.java_ty().clone(),
                 source_param.binding.clone(),
             );
         }
     }
     for param in params.iter().skip(source_params.len()) {
         env.insert_param_shape_with_java_type(
-            param.name.clone(),
-            param.shape.clone(),
-            param.java_ty.clone(),
+            param.name().to_string(),
+            param.shape().clone(),
+            param.java_ty().clone(),
         );
     }
 }
@@ -1870,15 +1897,13 @@ fn infer_field_access_shape(
         return Some(shape);
     }
     if let Some(signatures) = ctx.signatures
-        && let Some(crate::member_access_plan::MemberAccessPlan {
-            op: crate::member_access_plan::MemberAccessOp::StaticConstant { owner },
-            ..
-        }) = crate::member_access_plan::plan_member_access_with_facts(
+        && let Some(plan) = crate::member_access_plan::plan_member_access_with_facts(
             receiver,
             field,
             env.type_env(),
             ctx.facts.unwrap_or(&FactSet::default()),
         )
+        && let crate::member_access_plan::MemberAccessOp::StaticConstant { owner } = plan.op()
     {
         if let Some(shape) = signatures
             .field_shape(&owner, field)
@@ -2013,7 +2038,7 @@ fn planned_member_access_shape(
         env.type_env(),
         ctx.facts.unwrap_or(&FactSet::default()),
     )
-    .map(|plan| plan.shape)
+    .map(|plan| plan.shape().clone())
 }
 
 fn infer_indexed_expr_shape(
@@ -2052,24 +2077,23 @@ mod tests {
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
         let mut shape = RustSlotShape::conservative(java_ty.clone());
         shape.ownership = ownership;
-        LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("value"),
-            name: "value".to_string(),
+        LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("value"),
+            "value".to_string(),
             java_ty,
             shape,
-            binding_mutable: false,
-        }
+            false,
+        )
     }
 
     #[test]
     fn unique_idless_local_plan_match_is_still_accepted() {
         let plans = vec![int_plan_with_ownership(OwnershipShape::Owned)];
-        let env = ShapeEnv::new();
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
 
         assert_eq!(
-            env.idless_compatibility_local_plan_for_declared_type(&plans, "value", &java_ty)
-                .map(|plan| plan.shape.ownership),
+            idless_compatibility_local_plan_for_declared_type(&plans, "value", &java_ty)
+                .map(|plan| plan.shape().ownership),
             Some(OwnershipShape::Owned)
         );
     }
@@ -2080,12 +2104,10 @@ mod tests {
             int_plan_with_ownership(OwnershipShape::Owned),
             int_plan_with_ownership(OwnershipShape::SharedBorrow),
         ];
-        let env = ShapeEnv::new();
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
 
         assert!(
-            env.idless_compatibility_local_plan_for_declared_type(&plans, "value", &java_ty)
-                .is_none(),
+            idless_compatibility_local_plan_for_declared_type(&plans, "value", &java_ty).is_none(),
             "id-less same-name/same-type declarations must fail closed instead of selecting by traversal order"
         );
     }
@@ -2095,13 +2117,13 @@ mod tests {
         let mut shape = RustSlotShape::conservative(java_ty.clone());
         shape.ownership = ownership;
         shape.dispatch = DispatchShape::ErasedObject;
-        LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("value"),
-            name: "value".to_string(),
+        LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("value"),
+            "value".to_string(),
             java_ty,
             shape,
-            binding_mutable: false,
-        }
+            false,
+        )
     }
 
     #[test]
@@ -2110,11 +2132,10 @@ mod tests {
             erased_object_plan_with_ownership(OwnershipShape::Owned),
             erased_object_plan_with_ownership(OwnershipShape::SharedBorrow),
         ];
-        let env = ShapeEnv::new();
         let declared_ty = JavaType::Unknown("Object".to_string());
 
         assert!(
-            env.idless_compatibility_local_plan_for_declared_type(&plans, "value", &declared_ty)
+            idless_compatibility_local_plan_for_declared_type(&plans, "value", &declared_ty)
                 .is_none(),
             "ambiguous erased-object compatibility plans must fail closed"
         );
@@ -2125,18 +2146,17 @@ mod tests {
         let string_ty = JavaType::String;
         let mut string_shape = RustSlotShape::conservative(string_ty.clone());
         string_shape.ownership = OwnershipShape::Owned;
-        let plan = LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("value"),
-            name: "value".to_string(),
-            java_ty: string_ty,
-            shape: string_shape,
-            binding_mutable: false,
-        };
+        let plan = LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("value"),
+            "value".to_string(),
+            string_ty,
+            string_shape,
+            false,
+        );
         let plans = vec![plan];
-        let env = ShapeEnv::new();
 
         assert!(
-            env.idless_compatibility_local_plan_for_declared_type(
+            idless_compatibility_local_plan_for_declared_type(
                 &plans,
                 "value",
                 &JavaType::Primitive(PrimitiveType::Boolean),
@@ -2151,13 +2171,13 @@ mod tests {
         let string_ty = JavaType::String;
         let mut string_shape = RustSlotShape::conservative(string_ty.clone());
         string_shape.ownership = OwnershipShape::Owned;
-        let plans = vec![LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("value"),
-            name: "value".to_string(),
-            java_ty: string_ty,
-            shape: string_shape,
-            binding_mutable: false,
-        }];
+        let plans = vec![LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("value"),
+            "value".to_string(),
+            string_ty,
+            string_shape,
+            false,
+        )];
 
         assert!(
             local_shape_for_declared_type(
@@ -2195,17 +2215,16 @@ mod tests {
             args: Vec::new(),
         });
         concrete_shape.ownership = OwnershipShape::Owned;
-        let plans = vec![LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("reader"),
-            name: "reader".to_string(),
-            java_ty: JavaType::Unknown("Object".to_string()),
-            shape: concrete_shape,
-            binding_mutable: false,
-        }];
-        let env = ShapeEnv::new();
+        let plans = vec![LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("reader"),
+            "reader".to_string(),
+            JavaType::Unknown("Object".to_string()),
+            concrete_shape,
+            false,
+        )];
 
         assert!(
-            env.idless_compatibility_local_plan_for_declared_type(&plans, "reader", &declared_ty)
+            idless_compatibility_local_plan_for_declared_type(&plans, "reader", &declared_ty)
                 .is_some(),
             "erased carriers may still have a concrete solved shape matching the declared type"
         );
@@ -2216,13 +2235,13 @@ mod tests {
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
         let mut planned_shape = RustSlotShape::conservative(java_ty.clone());
         planned_shape.ownership = OwnershipShape::SharedBorrow;
-        let plans = vec![LocalPlan {
-            binding: BindingId::new(BindingKind::Local, "value".to_string(), 0),
-            name: "value".to_string(),
-            java_ty: java_ty.clone(),
-            shape: planned_shape,
-            binding_mutable: false,
-        }];
+        let plans = vec![LocalPlan::new(
+            BindingId::new(BindingKind::Local, "value".to_string(), 0),
+            "value".to_string(),
+            java_ty.clone(),
+            planned_shape,
+            false,
+        )];
         let stmt = Stmt::VarDecl {
             ty: java_ty.clone(),
             name: "value".to_string(),
@@ -2246,13 +2265,13 @@ mod tests {
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
         let mut planned_shape = RustSlotShape::conservative(java_ty.clone());
         planned_shape.ownership = OwnershipShape::SharedBorrow;
-        let plans = vec![LocalPlan {
-            binding: BindingId::new(BindingKind::Local, "item".to_string(), 0),
-            name: "item".to_string(),
-            java_ty: java_ty.clone(),
-            shape: planned_shape,
-            binding_mutable: false,
-        }];
+        let plans = vec![LocalPlan::new(
+            BindingId::new(BindingKind::Local, "item".to_string(), 0),
+            "item".to_string(),
+            java_ty.clone(),
+            planned_shape,
+            false,
+        )];
         let stmt = Stmt::EnhancedFor {
             var_type: java_ty.clone(),
             var_name: "item".to_string(),
@@ -2277,13 +2296,13 @@ mod tests {
     fn idless_var_decl_shape_learning_preserves_selected_compatibility_binding() {
         let java_ty = JavaType::String;
         let selected_binding = BindingId::new(BindingKind::Local, "value".to_string(), 7);
-        let plans = vec![LocalPlan {
-            binding: selected_binding.clone(),
-            name: "value".to_string(),
-            java_ty: java_ty.clone(),
-            shape: RustSlotShape::for_storage(java_ty.clone()),
-            binding_mutable: false,
-        }];
+        let plans = vec![LocalPlan::new(
+            selected_binding.clone(),
+            "value".to_string(),
+            java_ty.clone(),
+            RustSlotShape::for_storage(java_ty.clone()),
+            false,
+        )];
         let stmt = Stmt::VarDecl {
             ty: java_ty,
             name: "value".to_string(),
@@ -2304,13 +2323,13 @@ mod tests {
     fn bound_var_decl_shape_learning_preserves_keyword_access_name_binding() {
         let java_ty = JavaType::String;
         let binding = BindingId::new(BindingKind::Local, "self".to_string(), 0);
-        let plans = vec![LocalPlan {
-            binding: binding.clone(),
-            name: "self__".to_string(),
-            java_ty: java_ty.clone(),
-            shape: RustSlotShape::for_storage(java_ty.clone()),
-            binding_mutable: false,
-        }];
+        let plans = vec![LocalPlan::new(
+            binding.clone(),
+            "self__".to_string(),
+            java_ty.clone(),
+            RustSlotShape::for_storage(java_ty.clone()),
+            false,
+        )];
         let stmt = Stmt::VarDecl {
             ty: java_ty,
             name: "self__".to_string(),
@@ -2333,13 +2352,13 @@ mod tests {
     fn idless_enhanced_for_shape_learning_preserves_selected_compatibility_binding() {
         let java_ty = JavaType::String;
         let selected_binding = BindingId::new(BindingKind::LoopVariable, "item".to_string(), 4);
-        let plans = vec![LocalPlan {
-            binding: selected_binding.clone(),
-            name: "item".to_string(),
-            java_ty: java_ty.clone(),
-            shape: RustSlotShape::for_storage(java_ty.clone()),
-            binding_mutable: false,
-        }];
+        let plans = vec![LocalPlan::new(
+            selected_binding.clone(),
+            "item".to_string(),
+            java_ty.clone(),
+            RustSlotShape::for_storage(java_ty.clone()),
+            false,
+        )];
         let stmt = Stmt::EnhancedFor {
             var_type: java_ty,
             var_name: "item".to_string(),

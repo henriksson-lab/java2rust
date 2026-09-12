@@ -950,7 +950,7 @@ fn raw_structured_stmt_projection(text: &str) -> Option<RustStmt> {
 
 fn recover_structured_raw_stmt_expr(expr_text: &str) -> Option<RustExpr> {
     let recovered = recover_parseable_raw_operand_projection(RustExpr::raw_leaf(expr_text));
-    (!matches!(recovered, RustExpr::Raw(_))).then_some(recovered)
+    (!recovered.is_raw_leaf()).then_some(recovered)
 }
 
 fn rust_expr_direct_move_var(expr: &RustExpr) -> Option<String> {
@@ -1289,9 +1289,7 @@ class ExternalLabel {}
             &signatures,
             body,
             &facts,
-            MethodExceptionPlan {
-                wrap_returns_in_result: false,
-            },
+            MethodExceptionPlan::new(false),
         );
         assert_eq!(planned_shell.return_type, default_shell.return_type);
 
@@ -1301,9 +1299,7 @@ class ExternalLabel {}
             &signatures,
             Vec::new(),
             &facts,
-            MethodExceptionPlan {
-                wrap_returns_in_result: true,
-            },
+            MethodExceptionPlan::new(true),
         );
         assert_eq!(
             result_shell.return_type,
@@ -1468,7 +1464,7 @@ class Holder {
         assert_eq!(
             ctor_fn.params[0].ty,
             crate::slot_render::rust_type_for_slot(
-                &signatures.constructor_param_plans(ty, ctor).unwrap()[0].shape
+                signatures.constructor_param_plans(ty, ctor).unwrap()[0].shape()
             )
         );
         assert_eq!(
@@ -1906,9 +1902,7 @@ pub(crate) fn method_function_shell_with_facts(
         signatures,
         body,
         facts,
-        MethodExceptionPlan {
-            wrap_returns_in_result: false,
-        },
+        MethodExceptionPlan::new(false),
     )
 }
 
@@ -2016,8 +2010,8 @@ fn method_return_shape(
 ) -> Option<RustSlotShape> {
     signatures
         .required_method_signature(ty, method)
-        .return_shape
-        .clone()
+        .return_shape()
+        .cloned()
 }
 
 fn method_return_type_with_facts(
@@ -2108,7 +2102,7 @@ fn struct_fields_for_type(
                 ty: rust_type_for_instance_field(
                     ty,
                     &field.name,
-                    &signatures.required_field_shape(&ty.name, &field.name),
+                    &signatures.required_declared_field_shape(ty, field),
                     facts,
                     representations,
                 ),
@@ -2122,9 +2116,9 @@ fn struct_fields_for_type(
         crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
             .into_iter()
             .map(|inherited| RustField {
-                name: inherited.field.name.clone(),
+                name: inherited.field().name.clone(),
                 ty: rust_type_for_slot_maybe_with_representations(
-                    &signatures.required_field_shape(&ty.name, &inherited.field.name),
+                    &signatures.required_field_shape(&ty.name, &inherited.field().name),
                     facts,
                     representations,
                 ),
@@ -2136,9 +2130,9 @@ fn struct_fields_for_type(
         crate::inherited_members::external_inherited_instance_fields_for_type(ty, facts)
             .into_iter()
             .map(|inherited| RustField {
-                name: inherited.rust_name.clone(),
+                name: inherited.rust_name().to_string(),
                 ty: rust_type_for_slot_maybe_with_representations(
-                    &signatures.required_field_shape(&ty.name, &inherited.rust_name),
+                    &signatures.required_field_shape(&ty.name, inherited.rust_name()),
                     facts,
                     representations,
                 ),
@@ -2222,7 +2216,7 @@ fn field_type_is_shared_handle(shape: &RustSlotShape, facts: &FactSet) -> bool {
         return false;
     };
     let placement = facts.storage_placement_for(&name);
-    placement.shared && placement.is_implemented()
+    placement.shared() && placement.is_implemented()
 }
 
 fn instance_field_is_self_referential(
@@ -3398,7 +3392,7 @@ fn constructor_params(
         ctor.params.iter().map(|param| param.source_name.as_str()),
     );
     signature
-        .params
+        .params()
         .iter()
         .enumerate()
         .map(|(index, param)| {
@@ -3407,10 +3401,10 @@ fn constructor_params(
                 .get(index)
                 .and_then(|source_param| access_names.get(&source_param.source_name))
                 .cloned()
-                .unwrap_or_else(|| param.name.clone());
+                .unwrap_or_else(|| param.name().to_string());
             RustParam {
                 name,
-                ty: rust_type_for_slot_with_facts(&param.shape, facts),
+                ty: rust_type_for_slot_with_facts(&param.shape(), facts),
             }
         })
         .collect()
@@ -3447,19 +3441,20 @@ fn method_params_with_optional_lifetime(
         method.params.iter().map(|param| param.source_name.as_str()),
     );
     signature
-        .params
+        .params()
         .iter()
         .enumerate()
         .map(|(index, param)| {
             let callback_param =
-                method_param_is_nonescaping_functional_callback(method, &param.name);
+                method_param_is_nonescaping_functional_callback(method, param.name());
             let submit_callable_param =
-                method_param_is_submit_callable_callback(method, &param.name);
-            let mutable_optional_sequence_param = mutable_array_target_params.contains(&param.name)
-                && optional_sequence_slot(&param.shape);
-            let mutable_owned_binding_param = param.binding_mutable
+                method_param_is_submit_callable_callback(method, param.name());
+            let mutable_optional_sequence_param = mutable_array_target_params
+                .contains(param.name())
+                && optional_sequence_slot(&param.shape());
+            let mutable_owned_binding_param = param.binding_mutable()
                 && matches!(
-                    param.shape.ownership,
+                    param.shape().ownership,
                     OwnershipShape::Owned | OwnershipShape::CopyValue
                 );
             let name = method
@@ -3467,7 +3462,7 @@ fn method_params_with_optional_lifetime(
                 .get(index)
                 .and_then(|source_param| access_names.get(&source_param.source_name))
                 .cloned()
-                .unwrap_or_else(|| param.name.clone());
+                .unwrap_or_else(|| param.name().to_string());
             RustParam {
                 name: if callback_param
                     || submit_callable_param
@@ -3480,15 +3475,15 @@ fn method_params_with_optional_lifetime(
                 },
                 ty: if callback_param || submit_callable_param {
                     let callback_ty = if submit_callable_param {
-                        submit_callable_callback_param_type(method, &param.java_ty, facts)
+                        submit_callable_callback_param_type(method, &param.java_ty(), facts)
                     } else {
-                        functional_callback_param_type(&param.java_ty, facts)
+                        functional_callback_param_type(&param.java_ty(), facts)
                     }
-                    .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape, facts));
+                    .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape(), facts));
                     maybe_add_lifetime_to_refs(callback_ty, lifetime)
                 } else {
                     maybe_add_lifetime_to_refs(
-                        rust_type_for_slot_with_facts(&param.shape, facts),
+                        rust_type_for_slot_with_facts(&param.shape(), facts),
                         lifetime,
                     )
                 },
@@ -3748,13 +3743,13 @@ fn functional_callback_param_type(java_ty: &JavaType, facts: &FactSet) -> Option
     };
 
     let inputs = shape
-        .inputs
+        .inputs()
         .iter()
         .map(source_ty)
         .collect::<Option<Vec<_>>>()?;
     // A missing result *type argument* means the source did not spell the
     // generic out; keep the previous behaviour rather than guess.
-    let return_type = match shape.returns.as_ref().map(source_ty) {
+    let return_type = match shape.returns().as_ref().map(source_ty) {
         Some(Some(result)) => Some(Box::new(result)),
         Some(None) => return None,
         None => None,
@@ -3857,7 +3852,7 @@ fn functional_interface_method_name(java_ty: &JavaType) -> Option<&'static str> 
     };
     let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
     let simple = canonical.rsplit('.').next().unwrap_or(name.as_str());
-    crate::stdlib::functional_interface_shape(simple).map(|shape| shape.method)
+    crate::stdlib::functional_interface_shape(simple).map(|shape| shape.method())
 }
 
 fn scan_block_for_callback_param(
@@ -4684,7 +4679,7 @@ fn method_return_type_with_optional_lifetime(
 ) -> Option<RustType> {
     let base = method_return_type_with_facts(ty, method, signatures, facts)
         .map(|ty| maybe_add_lifetime_to_refs(ty, lifetime));
-    if exceptions.wrap_returns_in_result {
+    if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(base.unwrap_or(RustType::Unit)))
     } else {
         base
@@ -4695,7 +4690,7 @@ fn method_receiver(ty: &TypeDecl, method: &MethodDecl, signatures: &SignaturePla
     if method.modifiers.contains(&Modifier::Static) {
         ReceiverPlan::None
     } else {
-        signatures.required_method_signature(ty, method).receiver
+        signatures.required_method_signature(ty, method).receiver()
     }
 }
 

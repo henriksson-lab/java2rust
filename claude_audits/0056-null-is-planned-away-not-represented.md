@@ -1,7 +1,8 @@
-# 0056 — `null` is planned away, not represented: null tests are constant-folded and null values print as `""`
+# 0056 — Nullable representation is partial; unknown erased display stays loud
 
 Recorded 2026-08-23.
-Status: **open, partially mitigated**.
+Status: **open, narrowed from silent null erasure to explicit nullable carriers,
+catchable null failures, and loud unknown-erased display gaps**.
 Severity: **medium-high, narrowed** — the original everyday null-bearing shapes
 are mostly fixture-backed as explicit nullable carriers, catchable
 `NullPointerException`s, or loud unsupported paths. The remaining live risk is
@@ -29,6 +30,17 @@ used by three package-identity compile checks no longer implement
 `java_erased_object_to_string` as `String::new()`. They now panic with the same
 loud unknown-erased-display message used by runtime support, so compile-only
 tests do not preserve the old silent-empty behaviour in their local scaffolding.
+
+Follow-up cleanup 2026-09-12: `nullability_plan::TernaryNullRefinementPlan` is
+crate-local now, matching its crate-local planner; the `nullability_plan`
+module itself is also crate-internal. Ternary null refinement remains an
+internal lowering detail rather than a public nullable-representation API.
+Guard: `slot_shape_design::operator_lowering_owns_binary_and_unary_rust_spelling`.
+Follow-up cleanup: `facts::external_parameter_nullability_policy` is
+crate-local now. Signature, call planning, and stdlib modeling still share the
+same defaulting rule for unknown external parameters, but callers no longer get
+a public raw nullable-parameter policy hook separate from those planners. Guard:
+`slot_shape_design::slot_policy_and_signature_solver_use_type_capability_facts`.
 
 Follow-up 2026-09-10 compile-harness cleanup: the same loud erased-display stub
 was applied to the co-translated same-simple-name package-peer slot-shape
@@ -1122,7 +1134,7 @@ and the compile-backed idiom test above.
 ## Why nothing noticed
 
 This section was true when the audit was filed, but is now historical. The
-differential suite is at 268 fixtures in the current worktree, and promoted
+differential suite is at 277 fixtures in the current worktree, and promoted
 null fixtures cover null concat, bare null concat, nullable string arguments,
 null default returns,
 `Map.get` misses, nullable constructor arguments stored in fields, nullable

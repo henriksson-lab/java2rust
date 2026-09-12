@@ -1,7 +1,7 @@
 use crate::array_plan::ArrayExprPlan;
 use crate::coercion::{
     BorrowProjectionUse, ensure_borrow_projection, function_call_projection,
-    parenthesize_raw_postfix_receiver, receiver_method_call_projection_exact,
+    postfix_receiver_projection, receiver_method_call_projection_exact,
     recover_parseable_raw_operand_projection,
 };
 use crate::java_ir::{JavaType, PrimitiveType};
@@ -80,11 +80,11 @@ pub(crate) fn array2_from_elem_projection(
         vec![
             RustExpr::Tuple(vec![
                 RustExpr::Cast {
-                    expr: Box::new(parenthesize_raw_array_dimension_cast_operand(rows)),
+                    expr: Box::new(array_dimension_cast_operand_projection(rows)),
                     ty: "usize".to_string(),
                 },
                 RustExpr::Cast {
-                    expr: Box::new(parenthesize_raw_array_dimension_cast_operand(cols)),
+                    expr: Box::new(array_dimension_cast_operand_projection(cols)),
                     ty: "usize".to_string(),
                 },
             ]),
@@ -217,7 +217,7 @@ pub(crate) fn array2_from_rows_projection(
 
 pub(crate) fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
     RustExpr::Index(
-        Box::new(parenthesize_raw_postfix_receiver(array)),
+        Box::new(postfix_receiver_projection(array)),
         Box::new(RustExpr::ArrayLiteral(vec![
             recover_parseable_raw_operand_projection(row),
             recover_parseable_raw_operand_projection(col),
@@ -231,7 +231,7 @@ pub(crate) fn array2_row_mut_assign_stmt(
     value: RustExpr,
 ) -> RustStmt {
     let row = receiver_method_call_projection_exact(
-        parenthesize_raw_postfix_receiver(array),
+        postfix_receiver_projection(array),
         "row_mut",
         vec![recover_parseable_raw_operand_projection(index)],
     );
@@ -261,13 +261,13 @@ pub(crate) fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr 
 
 fn array_dimension_len_projection(expr: RustExpr) -> RustExpr {
     RustExpr::Cast {
-        expr: Box::new(parenthesize_raw_array_dimension_cast_operand(expr)),
+        expr: Box::new(array_dimension_cast_operand_projection(expr)),
         ty: "usize".to_string(),
     }
 }
 
-fn parenthesize_raw_array_dimension_cast_operand(expr: RustExpr) -> RustExpr {
-    parenthesize_raw_postfix_receiver(expr)
+fn array_dimension_cast_operand_projection(expr: RustExpr) -> RustExpr {
+    postfix_receiver_projection(expr)
 }
 
 fn array_initializer_projection(children: Vec<RustExpr>) -> RustExpr {

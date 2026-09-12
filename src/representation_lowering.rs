@@ -81,7 +81,7 @@ fn type_emission_for_with_facts_and_exceptions(
     let Some(representation) = representations.type_representation(&ty.name) else {
         return RepresentationTypeEmission::LowerAsConcreteStruct;
     };
-    match &representation.representation {
+    match representation.representation() {
         ObjectRepresentation::ConcreteStruct => RepresentationTypeEmission::LowerAsConcreteStruct,
         ObjectRepresentation::DynTrait { trait_name } => RepresentationTypeEmission::RawRustItem(
             trait_item_for_type(ty, trait_name, signatures, facts, exceptions),
@@ -152,7 +152,7 @@ pub(crate) fn source_hierarchy_carrier_item_for_type(
     let ObjectRepresentation::SourceHierarchyCarrier {
         carrier_name,
         variants,
-    } = &representation.representation
+    } = representation.representation()
     else {
         return None;
     };
@@ -197,7 +197,7 @@ fn carrier_enum_item(
 /// See [0002b](../claude_audits/0002b-shared-representation-design.md).
 fn carrier_variant_payload_type(variant: &str, facts: &FactSet) -> String {
     let placement = facts.storage_placement_for(variant);
-    if placement.shared && placement.is_implemented() {
+    if placement.shared() && placement.is_implemented() {
         placement.wrap(variant.to_string())
     } else {
         variant.to_string()
@@ -231,6 +231,7 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
         .filter_map(|(field_name, arg_index)| {
             let field_ty = field_types.get(&field_name)?;
             let rust_return_ty = java_enum_payload_accessor_return_type(field_ty)?;
+            let accessor_name = rust_identifier_token(&crate::parser::to_snake_case(&field_name));
             let arms = variants
                 .iter()
                 .map(|variant| {
@@ -244,7 +245,7 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
                 .collect::<Vec<_>>()
                 .join("\n");
             Some(format!(
-                "\n\n    pub fn {field_name}(&self) -> {rust_return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+                "\n\n    pub fn {accessor_name}(&self) -> {rust_return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
             ))
         })
         .collect::<Vec<_>>()
@@ -259,7 +260,7 @@ fn java_enum_constructor_field_arg_indices(constructor: &ConstructorDecl) -> Vec
         .params
         .iter()
         .enumerate()
-        .map(|(index, param)| (param.name.clone(), index))
+        .map(|(index, param)| (param.source_name.clone(), index))
         .collect::<HashMap<_, _>>();
     body.statements
         .iter()
@@ -283,6 +284,14 @@ fn java_enum_constructor_field_arg_indices(constructor: &ConstructorDecl) -> Vec
                 .map(|arg_index| (field_name, arg_index))
         })
         .collect()
+}
+
+fn rust_identifier_token(name: &str) -> String {
+    if crate::java_naming::rust_keyword_is_rawable_identifier(name) {
+        format!("r#{name}")
+    } else {
+        name.to_string()
+    }
 }
 
 fn java_enum_constant_args(ty: &TypeDecl) -> HashMap<String, Vec<Expr>> {
@@ -371,7 +380,7 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
     let Some(representation) = representations.type_representation(&ty.name) else {
         return RepresentationTypeEmission::LowerAsConcreteStruct;
     };
-    match &representation.representation {
+    match representation.representation() {
         ObjectRepresentation::DynTrait { trait_name } => {
             RepresentationTypeEmission::RawRustItem(trait_item_for_type_with_program(
                 ty, trait_name, program, signatures, facts, exceptions,
@@ -595,16 +604,16 @@ fn source_class_bound_trait_method_signature_with_return_shape(
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
-    params.push(match signature.receiver {
+    params.push(match signature.receiver() {
         ReceiverPlan::Mutable => "&mut self".to_string(),
         ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
     });
     let param_shapes = trait_method_param_shape_plan(ty, method, program, signatures);
-    params.extend(signature.params.iter().enumerate().map(|(index, param)| {
-        let shape = param_shapes.get(index).unwrap_or(&param.shape);
+    params.extend(signature.params().iter().enumerate().map(|(index, param)| {
+        let shape = param_shapes.get(index).unwrap_or(&param.shape());
         format!(
             "{}: {}",
-            param.name,
+            param.name(),
             emit_type(&rust_type_for_slot_with_facts(shape, facts))
         )
     }));
@@ -635,7 +644,7 @@ fn source_class_bound_trait_method_return_type_with_shape(
     return_shape_override: Option<&RustSlotShape>,
 ) -> Option<RustType> {
     if method.return_type == JavaType::Void {
-        if exceptions.wrap_returns_in_result {
+        if exceptions.wrap_returns_in_result() {
             return Some(exception_result_type(RustType::Unit));
         }
         return None;
@@ -643,7 +652,7 @@ fn source_class_bound_trait_method_return_type_with_shape(
     let rust_return = return_shape_override
         .map(|shape| rust_type_for_slot_with_facts(shape, facts))
         .unwrap_or_else(|| rust_type_for_java_type_with_facts(&method.return_type, facts));
-    if exceptions.wrap_returns_in_result {
+    if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(rust_return))
     } else {
         Some(rust_return)
@@ -716,15 +725,15 @@ fn source_class_bound_trait_impl_method(
             signatures.required_method_signature(implementing_owner, implementing_method)
         });
     let args = bound_signature
-        .params
+        .params()
         .iter()
         .enumerate()
         .map(|(index, param)| {
             let implementation_shape = implementation_signature
-                .params
+                .params()
                 .get(index)
-                .map(|param| &param.shape);
-            trait_impl_forwarded_arg(param.name.as_str(), &param.shape, implementation_shape)
+                .map(|param| param.shape());
+            trait_impl_forwarded_arg(param.name(), param.shape(), implementation_shape)
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -732,7 +741,7 @@ fn source_class_bound_trait_impl_method(
         trait_impl_forwarding_receiver_arg(
             ty,
             forwarding_owner,
-            Some(implementation_signature.receiver),
+            Some(implementation_signature.receiver()),
         )
     } else {
         format!(
@@ -740,7 +749,7 @@ fn source_class_bound_trait_impl_method(
             trait_impl_forwarding_receiver_arg(
                 ty,
                 forwarding_owner,
-                Some(implementation_signature.receiver)
+                Some(implementation_signature.receiver())
             )
         )
     };
@@ -750,8 +759,8 @@ fn source_class_bound_trait_impl_method(
         call,
         trait_return_shape_for_body
             .as_ref()
-            .or(bound_signature.return_shape.as_ref()),
-        &implementation_signature.return_shape,
+            .or(bound_signature.return_shape()),
+        &implementation_signature.return_shape_cloned(),
         exceptions,
     );
     let body = if source_class_bound_trait_method_return_type_with_shape(
@@ -777,8 +786,8 @@ fn source_class_bound_trait_method_return_shape_plan(
 ) -> Option<RustSlotShape> {
     let bound_shape = signatures
         .required_method_signature(bound, bound_method)
-        .return_shape
-        .clone()?;
+        .return_shape()
+        .cloned()?;
     for (implementation_owner, implementation_method) in candidates {
         if trait_impl_method_compatibility_error(bound_method, implementation_method).is_some() {
             continue;
@@ -788,8 +797,8 @@ fn source_class_bound_trait_method_return_shape_plan(
             .unwrap_or_else(|| {
                 signatures.required_method_signature(implementation_owner, implementation_method)
             })
-            .return_shape
-            .clone()
+            .return_shape()
+            .cloned()
         else {
             continue;
         };
@@ -830,7 +839,7 @@ fn adapt_source_class_bound_trait_impl_return(
     implementation_return_shape: &Option<RustSlotShape>,
     exceptions: MethodExceptionPlan,
 ) -> String {
-    if exceptions.wrap_returns_in_result {
+    if exceptions.wrap_returns_in_result() {
         return call;
     }
     let Some(trait_shape) = trait_return_shape else {
@@ -1257,15 +1266,15 @@ fn trait_impl_method(
             signatures.required_method_signature(implementing_owner, implementing_method)
         });
     let args = interface_signature
-        .params
+        .params()
         .iter()
         .enumerate()
         .map(|(index, param)| {
             let implementation_shape = implementation_signature
-                .params
+                .params()
                 .get(index)
-                .map(|param| &param.shape);
-            trait_impl_forwarded_arg(param.name.as_str(), &param.shape, implementation_shape)
+                .map(|param| param.shape());
+            trait_impl_forwarded_arg(param.name(), param.shape(), implementation_shape)
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1285,14 +1294,14 @@ fn trait_impl_method(
         call,
         trait_return_shape_for_body
             .as_ref()
-            .or(interface_signature.return_shape.as_ref()),
-        &implementation_signature.return_shape,
+            .or(interface_signature.return_shape()),
+        &implementation_signature.return_shape_cloned(),
         interface_exceptions,
     );
-    let body = if interface_exceptions.wrap_returns_in_result
+    let body = if interface_exceptions.wrap_returns_in_result()
         || signatures
             .required_method_signature(interface, interface_method)
-            .return_shape
+            .return_shape()
             .is_some()
     {
         call
@@ -1308,7 +1317,7 @@ fn adapt_trait_impl_forwarded_return(
     implementation_return_shape: &Option<RustSlotShape>,
     interface_exceptions: MethodExceptionPlan,
 ) -> String {
-    if interface_exceptions.wrap_returns_in_result {
+    if interface_exceptions.wrap_returns_in_result() {
         return call;
     }
     let Some(trait_shape) = trait_return_shape else {
@@ -1544,17 +1553,17 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
     if !method.modifiers.contains(&Modifier::Static) {
-        params.push(match receiver_override.unwrap_or(signature.receiver) {
+        params.push(match receiver_override.unwrap_or(signature.receiver()) {
             ReceiverPlan::Mutable => "&mut self".to_string(),
             ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
         });
     }
     let param_shapes = trait_method_param_shape_plan(ty, method, program, signatures);
-    params.extend(signature.params.iter().enumerate().map(|(index, param)| {
-        let shape = param_shapes.get(index).unwrap_or(&param.shape);
+    params.extend(signature.params().iter().enumerate().map(|(index, param)| {
+        let shape = param_shapes.get(index).unwrap_or(&param.shape());
         format!(
             "{}: {}",
-            param.name,
+            param.name(),
             emit_type(&rust_type_for_slot_with_facts(shape, facts))
         )
     }));
@@ -1624,8 +1633,8 @@ pub(crate) fn trait_method_return_shape_plan(
 ) -> Option<RustSlotShape> {
     let interface_shape = signatures
         .required_method_signature(interface, interface_method)
-        .return_shape
-        .clone()?;
+        .return_shape()
+        .cloned()?;
     for implementor in program
         .types
         .iter()
@@ -1645,8 +1654,8 @@ pub(crate) fn trait_method_return_shape_plan(
             .unwrap_or_else(|| {
                 signatures.required_method_signature(implementation_owner, implementation)
             })
-            .return_shape
-            .clone()
+            .return_shape()
+            .cloned()
         else {
             continue;
         };
@@ -1668,9 +1677,9 @@ pub(crate) fn trait_method_param_shape_plan(
 ) -> Vec<RustSlotShape> {
     let interface_signature = signatures.required_method_signature(interface, interface_method);
     let mut param_shapes = interface_signature
-        .params
+        .params()
         .iter()
-        .map(|param| param.shape.clone())
+        .map(|param| param.shape().clone())
         .collect::<Vec<_>>();
     if interface.kind != TypeKind::Interface {
         return param_shapes;
@@ -1694,15 +1703,15 @@ pub(crate) fn trait_method_param_shape_plan(
             .unwrap_or_else(|| {
                 signatures.required_method_signature(implementation_owner, implementation)
             });
-        for (index, implementation_param) in implementation_signature.params.iter().enumerate() {
+        for (index, implementation_param) in implementation_signature.params().iter().enumerate() {
             let Some(interface_shape) = param_shapes.get_mut(index) else {
                 continue;
             };
             if trait_param_shape_should_widen_to_implementation(
                 interface_shape,
-                &implementation_param.shape,
+                &implementation_param.shape(),
             ) {
-                *interface_shape = implementation_param.shape.clone();
+                *interface_shape = implementation_param.shape().clone();
             } else if let Some(declared_param) = implementation.params.get(index)
                 && trait_param_shape_should_widen_to_declared_source_param(
                     interface_shape,
@@ -1778,7 +1787,7 @@ pub(crate) fn trait_method_receiver_plan(
     }
     let interface_receiver = signatures
         .required_method_signature(interface, interface_method)
-        .receiver;
+        .receiver();
     let mut receiver = interface_receiver;
     for implementor in program
         .types
@@ -1799,7 +1808,7 @@ pub(crate) fn trait_method_receiver_plan(
             .unwrap_or_else(|| {
                 signatures.required_method_signature(implementation_owner, implementation)
             })
-            .receiver;
+            .receiver();
         if implementation_receiver == ReceiverPlan::Mutable {
             receiver = ReceiverPlan::Mutable;
         }
@@ -1837,13 +1846,13 @@ fn trait_method_return_type_with_exception_plan(
     let return_shape = return_shape_override.or_else(|| {
         signatures
             .required_method_signature(ty, method)
-            .return_shape
-            .clone()
+            .return_shape()
+            .cloned()
     });
     let rust_return = return_shape
         .as_ref()
         .map(|shape| rust_type_for_slot_with_facts(shape, facts));
-    if exceptions.wrap_returns_in_result {
+    if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(rust_return.unwrap_or(RustType::Unit)))
     } else {
         rust_return
@@ -1856,7 +1865,7 @@ fn dyn_trait_name_for(
 ) -> Option<String> {
     match &representations
         .type_representation(interface_name)?
-        .representation
+        .representation()
     {
         ObjectRepresentation::DynTrait { trait_name } => Some(trait_name.clone()),
         _ => None,
@@ -2274,7 +2283,7 @@ class Holder {
         assert!(matches!(
             enum_representations
                 .type_representation("Holder.Type")
-                .map(|representation| &representation.representation),
+                .map(|representation| representation.representation()),
             Some(ObjectRepresentation::JavaEnum { enum_name, variants })
                 if enum_name == "Holder.Type" && variants == &vec!["SNP".to_string(), "INDEL".to_string()]
         ));

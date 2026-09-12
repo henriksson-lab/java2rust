@@ -2163,3 +2163,21 @@ and `Aliasing.Counter needs SharedLocal`, in addition to the error-level
 `observable_alias` diagnostic. The fixture still stays in known gaps until the
 mutable shared receiver/field-access policy exists, but it now proves the
 primary 0002 repro feeds this audit's remaining implementation queue.
+
+## Update 2026-09-12 (Codex follow-up) — placement axes are private-backed
+
+`StoragePlacement` still carries the same three monotone axes (`shared`,
+`interior_mutable`, `sync`) and the same implementation gate, but callers now
+construct it through `StoragePlacement::new(...)` and read the axes through
+accessors. That keeps storage placement as a named decision boundary instead of
+a public field bag that lowering, rendering, and tests can mutate or pattern
+match directly. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`; law guards
+remain in `storage_strategy::placement_law_tests`.
+
+The same API fence now applies to `TypeStorageFacts`: the storage planner still
+owns mutation of escape, aliasing, mutation, threading, forwardability, and
+static-reachability evidence while it collects facts, but cross-module fixtures
+and callers build/read those axes through named setters and accessors. This
+keeps the evidence record inspectable without making its raw tuple layout public
+API.

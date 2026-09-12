@@ -4,7 +4,7 @@ use crate::string_concat_plan::StringConcatPlan;
 pub(crate) fn string_concat_expr(plan: &StringConcatPlan<'_>, args: Vec<RustExpr>) -> RustExpr {
     let mut format_args = Vec::with_capacity(args.len() + 1);
     format_args.push(crate::coercion::rust_string_literal_projection(
-        &plan.format_string,
+        plan.format_string(),
     ));
     format_args.extend(
         args.into_iter()
@@ -19,10 +19,7 @@ mod tests {
 
     #[test]
     fn string_concat_render_builds_format_macro_with_display_args() {
-        let plan = StringConcatPlan {
-            format_string: "name={}{}".to_string(),
-            args: Vec::new(),
-        };
+        let plan = StringConcatPlan::new("name={}{}".to_string(), Vec::new());
 
         assert_eq!(
             string_concat_expr(

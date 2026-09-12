@@ -10,29 +10,61 @@ use crate::usage::{BindingUse, BindingUseFacts, CallArgumentBoundary, UsageFacts
 
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectModelInput<'a> {
-    pub program: &'a Program,
-    pub facts: &'a FactSet,
-    pub effective_facts: &'a EffectiveFacts<'a>,
-    pub usage: Option<&'a UsageFacts>,
+    program: &'a Program,
+    facts: &'a FactSet,
+    effective_facts: &'a EffectiveFacts<'a>,
+    usage: Option<&'a UsageFacts>,
+}
+
+impl<'a> ObjectModelInput<'a> {
+    pub fn new(
+        program: &'a Program,
+        facts: &'a FactSet,
+        effective_facts: &'a EffectiveFacts<'a>,
+        usage: Option<&'a UsageFacts>,
+    ) -> Self {
+        Self {
+            program,
+            facts,
+            effective_facts,
+            usage,
+        }
+    }
+
+    pub fn program(&self) -> &'a Program {
+        self.program
+    }
+
+    pub fn facts(&self) -> &'a FactSet {
+        self.facts
+    }
+
+    pub fn effective_facts(&self) -> &'a EffectiveFacts<'a> {
+        self.effective_facts
+    }
+
+    pub fn usage(&self) -> Option<&'a UsageFacts> {
+        self.usage
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ObjectModelPlan {
-    pub strategies: BTreeMap<String, ObjectStrategyPlan>,
-    pub hierarchy_edges: Vec<ObjectHierarchyEdge>,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    strategies: BTreeMap<String, ObjectStrategyPlan>,
+    hierarchy_edges: Vec<ObjectHierarchyEdge>,
+    diagnostics: Vec<RepresentationDiagnostic>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectStrategyPlan {
-    pub root: String,
-    pub strategy: ObjectRepresentation,
-    pub requirements: Vec<DispatchRequirement>,
-    pub direct_subtypes: Vec<String>,
-    pub source_methods_access_instance_fields: bool,
-    pub rejected: Vec<RejectedObjectStrategy>,
-    pub provenance: Vec<FactProvenance>,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    root: String,
+    strategy: ObjectRepresentation,
+    requirements: Vec<DispatchRequirement>,
+    direct_subtypes: Vec<String>,
+    source_methods_access_instance_fields: bool,
+    rejected: Vec<RejectedObjectStrategy>,
+    provenance: Vec<FactProvenance>,
+    diagnostics: Vec<RepresentationDiagnostic>,
 }
 
 pub type DispatchRequirement = DispatchRequirementKind;
@@ -40,8 +72,8 @@ pub type UsageDispatchRequirements = BTreeMap<String, Vec<DispatchRequirement>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedObjectStrategy {
-    pub strategy: ObjectRepresentation,
-    pub reason: String,
+    strategy: ObjectRepresentation,
+    reason: String,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -52,31 +84,122 @@ pub struct ObjectHierarchyContext {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectHierarchyEdge {
-    pub super_name: String,
-    pub sub_name: String,
-    pub kind: ObjectHierarchyEdgeKind,
+    super_name: String,
+    sub_name: String,
+    kind: ObjectHierarchyEdgeKind,
+}
+
+impl ObjectHierarchyEdge {
+    pub fn new(
+        super_name: impl Into<String>,
+        sub_name: impl Into<String>,
+        kind: ObjectHierarchyEdgeKind,
+    ) -> Self {
+        Self {
+            super_name: super_name.into(),
+            sub_name: sub_name.into(),
+            kind,
+        }
+    }
+
+    pub fn super_name(&self) -> &str {
+        &self.super_name
+    }
+
+    pub fn sub_name(&self) -> &str {
+        &self.sub_name
+    }
+
+    pub fn kind(&self) -> ObjectHierarchyEdgeKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectHierarchyEdgeRepresentationPolicy {
-    pub representation: ObjectRepresentation,
-    pub represented: bool,
+    representation: ObjectRepresentation,
+    represented: bool,
+}
+
+impl ObjectHierarchyEdgeRepresentationPolicy {
+    pub fn new(representation: ObjectRepresentation, represented: bool) -> Self {
+        Self {
+            representation,
+            represented,
+        }
+    }
+
+    pub fn representation(&self) -> &ObjectRepresentation {
+        &self.representation
+    }
+
+    pub fn represented(&self) -> bool {
+        self.represented
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectHierarchyEdgeDiagnosticInput {
-    pub type_name: String,
-    pub declared_extends: Option<String>,
-    pub declared_implements: Vec<String>,
-    pub edges: Vec<ObjectHierarchyEdge>,
-    pub represented_super_names: BTreeSet<String>,
+    type_name: String,
+    declared_extends: Option<String>,
+    declared_implements: Vec<String>,
+    edges: Vec<ObjectHierarchyEdge>,
+    represented_super_names: BTreeSet<String>,
+}
+
+impl ObjectHierarchyEdgeDiagnosticInput {
+    pub fn new(
+        type_name: String,
+        declared_extends: Option<String>,
+        declared_implements: Vec<String>,
+        edges: Vec<ObjectHierarchyEdge>,
+        represented_super_names: BTreeSet<String>,
+    ) -> Self {
+        Self {
+            type_name,
+            declared_extends,
+            declared_implements,
+            edges,
+            represented_super_names,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyEdgeDiagnosticPolicy {
-    pub type_name: String,
-    pub outcomes: Vec<HierarchyEdgeDiagnosticOutcome>,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    type_name: String,
+    outcomes: Vec<HierarchyEdgeDiagnosticOutcome>,
+    diagnostics: Vec<RepresentationDiagnostic>,
+}
+
+impl HierarchyEdgeDiagnosticPolicy {
+    pub fn new(
+        type_name: String,
+        outcomes: Vec<HierarchyEdgeDiagnosticOutcome>,
+        diagnostics: Vec<RepresentationDiagnostic>,
+    ) -> Self {
+        Self {
+            type_name,
+            outcomes,
+            diagnostics,
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn outcomes(&self) -> &[HierarchyEdgeDiagnosticOutcome] {
+        &self.outcomes
+    }
+
+    pub fn diagnostics(&self) -> &[RepresentationDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_diagnostics(self) -> Vec<RepresentationDiagnostic> {
+        self.diagnostics
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,37 +216,164 @@ pub enum ObjectHierarchyEdgeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyOverrideValidationPolicy {
-    pub type_name: String,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    type_name: String,
+    diagnostics: Vec<RepresentationDiagnostic>,
+}
+
+impl HierarchyOverrideValidationPolicy {
+    pub fn new(type_name: String, diagnostics: Vec<RepresentationDiagnostic>) -> Self {
+        Self {
+            type_name,
+            diagnostics,
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn diagnostics(&self) -> &[RepresentationDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_diagnostics(self) -> Vec<RepresentationDiagnostic> {
+        self.diagnostics
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyOverrideApplicationPolicy {
-    pub type_name: String,
-    pub representation: Option<ObjectRepresentation>,
-    pub provenance: FactProvenance,
-    pub direct_subtypes: Vec<String>,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    type_name: String,
+    representation: Option<ObjectRepresentation>,
+    provenance: FactProvenance,
+    direct_subtypes: Vec<String>,
+    diagnostics: Vec<RepresentationDiagnostic>,
+}
+
+impl HierarchyOverrideApplicationPolicy {
+    pub fn new(
+        type_name: String,
+        representation: Option<ObjectRepresentation>,
+        provenance: FactProvenance,
+        direct_subtypes: Vec<String>,
+        diagnostics: Vec<RepresentationDiagnostic>,
+    ) -> Self {
+        Self {
+            type_name,
+            representation,
+            provenance,
+            direct_subtypes,
+            diagnostics,
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn representation(&self) -> Option<&ObjectRepresentation> {
+        self.representation.as_ref()
+    }
+
+    pub fn provenance(&self) -> FactProvenance {
+        self.provenance
+    }
+
+    pub fn direct_subtypes(&self) -> &[String] {
+        &self.direct_subtypes
+    }
+
+    pub fn diagnostics(&self) -> &[RepresentationDiagnostic] {
+        &self.diagnostics
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyOverrideRepresentationPolicy {
-    pub representation: ObjectRepresentation,
-    pub object_safety: ObjectSafetyPolicy,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    representation: ObjectRepresentation,
+    object_safety: ObjectSafetyPolicy,
+    diagnostics: Vec<RepresentationDiagnostic>,
+}
+
+impl HierarchyOverrideRepresentationPolicy {
+    pub fn new(
+        representation: ObjectRepresentation,
+        object_safety: ObjectSafetyPolicy,
+        diagnostics: Vec<RepresentationDiagnostic>,
+    ) -> Self {
+        Self {
+            representation,
+            object_safety,
+            diagnostics,
+        }
+    }
+
+    pub fn representation(&self) -> &ObjectRepresentation {
+        &self.representation
+    }
+
+    pub fn object_safety(&self) -> ObjectSafetyPolicy {
+        self.object_safety
+    }
+
+    pub fn into_representation_diagnostics(
+        self,
+    ) -> (ObjectRepresentation, Vec<RepresentationDiagnostic>) {
+        (self.representation, self.diagnostics)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedEnumInferencePolicy {
-    pub type_name: String,
-    pub representation: Option<ObjectRepresentation>,
-    pub provenance: Option<FactProvenance>,
+    type_name: String,
+    representation: Option<ObjectRepresentation>,
+    provenance: Option<FactProvenance>,
+}
+
+impl ClosedEnumInferencePolicy {
+    pub fn new(
+        type_name: String,
+        representation: Option<ObjectRepresentation>,
+        provenance: Option<FactProvenance>,
+    ) -> Self {
+        Self {
+            type_name,
+            representation,
+            provenance,
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn representation(&self) -> Option<&ObjectRepresentation> {
+        self.representation.as_ref()
+    }
+
+    pub fn provenance(&self) -> Option<FactProvenance> {
+        self.provenance
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClosedEnumProofPolicy {
-    pub type_name: String,
-    pub proof: ClosedEnumProof,
+    type_name: String,
+    proof: ClosedEnumProof,
+}
+
+impl ClosedEnumProofPolicy {
+    pub fn new(type_name: String, proof: ClosedEnumProof) -> Self {
+        Self { type_name, proof }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn proof(&self) -> &ClosedEnumProof {
+        &self.proof
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -179,16 +429,78 @@ pub enum ObjectRepresentationRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectRepresentationPolicy {
-    pub object_safety: ObjectSafetyPolicy,
-    pub representation: ObjectRepresentation,
-    pub diagnostics: Vec<RepresentationDiagnostic>,
+    object_safety: ObjectSafetyPolicy,
+    representation: ObjectRepresentation,
+    diagnostics: Vec<RepresentationDiagnostic>,
+}
+
+impl ObjectRepresentationPolicy {
+    pub fn new(
+        object_safety: ObjectSafetyPolicy,
+        representation: ObjectRepresentation,
+        diagnostics: Vec<RepresentationDiagnostic>,
+    ) -> Self {
+        Self {
+            object_safety,
+            representation,
+            diagnostics,
+        }
+    }
+
+    pub fn object_safety(&self) -> ObjectSafetyPolicy {
+        self.object_safety
+    }
+
+    pub fn representation(&self) -> &ObjectRepresentation {
+        &self.representation
+    }
+
+    pub fn diagnostics(&self) -> &[RepresentationDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        ObjectSafetyPolicy,
+        ObjectRepresentation,
+        Vec<RepresentationDiagnostic>,
+    ) {
+        (self.object_safety, self.representation, self.diagnostics)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepresentationLookupPolicy {
-    pub java_ty: JavaType,
-    pub fallback: RepresentationLookupFallback,
-    pub representation: ObjectRepresentation,
+    java_ty: JavaType,
+    fallback: RepresentationLookupFallback,
+    representation: ObjectRepresentation,
+}
+
+impl RepresentationLookupPolicy {
+    pub fn new(
+        java_ty: JavaType,
+        fallback: RepresentationLookupFallback,
+        representation: ObjectRepresentation,
+    ) -> Self {
+        Self {
+            java_ty,
+            fallback,
+            representation,
+        }
+    }
+
+    pub fn java_ty(&self) -> &JavaType {
+        &self.java_ty
+    }
+
+    pub fn fallback(&self) -> RepresentationLookupFallback {
+        self.fallback
+    }
+
+    pub fn representation(&self) -> &ObjectRepresentation {
+        &self.representation
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -208,15 +520,58 @@ pub enum ObjectSafetyPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ObjectSafetyFactPolicy {
-    pub type_name: String,
-    pub object_safe_trait: Option<bool>,
-    pub violation: Option<ObjectSafetyViolation>,
+    type_name: String,
+    object_safe_trait: Option<bool>,
+    violation: Option<ObjectSafetyViolation>,
+}
+
+impl ObjectSafetyFactPolicy {
+    pub fn new(
+        type_name: String,
+        object_safe_trait: Option<bool>,
+        violation: Option<ObjectSafetyViolation>,
+    ) -> Self {
+        Self {
+            type_name,
+            object_safe_trait,
+            violation,
+        }
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn object_safe_trait(&self) -> Option<bool> {
+        self.object_safe_trait
+    }
+
+    pub fn violation(&self) -> Option<ObjectSafetyViolation> {
+        self.violation.clone()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepresentationDiagnostic {
-    pub code: &'static str,
-    pub message: String,
+    code: &'static str,
+    message: String,
+}
+
+impl RepresentationDiagnostic {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 pub fn plan_object_model_with_effective_facts(
@@ -227,14 +582,14 @@ pub fn plan_object_model_with_effective_facts(
 }
 
 pub fn plan_object_model_from_input(input: ObjectModelInput<'_>) -> ObjectModelPlan {
-    let _facts = input.facts;
+    let _facts = input.facts();
     let usage_requirements = input
-        .usage
+        .usage()
         .map(dispatch_requirements_from_usage)
         .unwrap_or_default();
     plan_object_model_from_effective_facts_and_usage(
-        input.program,
-        input.effective_facts,
+        input.program(),
+        input.effective_facts(),
         &usage_requirements,
     )
 }
@@ -269,11 +624,15 @@ pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequ
     let mut requirements = UsageDispatchRequirements::new();
     for method in usage.method_usages().chain(usage.constructor_usages()) {
         for binding in method.all_binding_facts() {
-            let Some(type_name) = dispatch_requirement_type_name(&binding.java_ty) else {
+            let Some(type_name) = dispatch_requirement_type_name(binding.java_ty()) else {
                 continue;
             };
-            for use_fact in &binding.uses {
-                for requirement in dispatch_requirements_for_binding_use(binding, use_fact) {
+            for use_fact in binding.uses() {
+                for requirement in dispatch_requirements_for_binding_use(
+                    binding,
+                    use_fact,
+                    method.type_params_in_scope(),
+                ) {
                     push_usage_dispatch_requirement(&mut requirements, type_name, requirement);
                 }
             }
@@ -285,6 +644,7 @@ pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequ
 fn dispatch_requirements_for_binding_use(
     binding: &BindingUseFacts,
     use_fact: &BindingUse,
+    type_params_in_scope: &[String],
 ) -> Vec<DispatchRequirement> {
     match use_fact {
         BindingUse::StoredInField { .. } | BindingUse::Returned => {
@@ -306,9 +666,12 @@ fn dispatch_requirements_for_binding_use(
                     name,
                     receiver_type.as_ref(),
                     *arg_index,
-                    &binding.java_ty,
+                    binding.java_ty(),
                 ) {
                     vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
+                } else if java_type_is_type_param_in_scope(binding.java_ty(), type_params_in_scope)
+                {
+                    Vec::new()
                 } else {
                     vec![DispatchRequirementKind::NeedsUnknownRuntimeObject]
                 }
@@ -317,6 +680,11 @@ fn dispatch_requirements_for_binding_use(
         BindingUse::AssignedFromCall { boundary, .. } => match boundary {
             CallArgumentBoundary::InternalSameType | CallArgumentBoundary::KnownContentRead => {
                 vec![DispatchRequirementKind::NeedsBorrowedTraitView]
+            }
+            CallArgumentBoundary::Unknown
+                if java_type_is_type_param_in_scope(binding.java_ty(), type_params_in_scope) =>
+            {
+                Vec::new()
             }
             CallArgumentBoundary::Unknown => {
                 vec![DispatchRequirementKind::NeedsUnknownRuntimeObject]
@@ -332,6 +700,16 @@ fn dispatch_requirements_for_binding_use(
             Vec::new()
         }
     }
+}
+
+fn java_type_is_type_param_in_scope(java_ty: &JavaType, type_params_in_scope: &[String]) -> bool {
+    let name = match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => name,
+        JavaType::Unknown(name) => name,
+        _ => return false,
+    };
+    let simple = name.rsplit('.').next().unwrap_or(name);
+    type_params_in_scope.iter().any(|param| param == simple)
 }
 
 fn collection_call_stores_binding_value(
@@ -430,6 +808,28 @@ fn merged_dispatch_requirements(
 }
 
 impl ObjectModelPlan {
+    pub fn strategies(&self) -> &BTreeMap<String, ObjectStrategyPlan> {
+        &self.strategies
+    }
+
+    pub fn hierarchy_edges(&self) -> &[ObjectHierarchyEdge] {
+        &self.hierarchy_edges
+    }
+
+    pub fn diagnostics(&self) -> &[RepresentationDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        BTreeMap<String, ObjectStrategyPlan>,
+        Vec<ObjectHierarchyEdge>,
+        Vec<RepresentationDiagnostic>,
+    ) {
+        (self.strategies, self.hierarchy_edges, self.diagnostics)
+    }
+
     pub fn strategy_for(&self, root: &str) -> Option<&ObjectStrategyPlan> {
         self.strategies.get(root)
     }
@@ -444,6 +844,62 @@ impl ObjectModelPlan {
 }
 
 impl ObjectStrategyPlan {
+    pub fn root(&self) -> &str {
+        &self.root
+    }
+
+    pub fn strategy(&self) -> ObjectRepresentation {
+        self.strategy.clone()
+    }
+
+    pub fn requirements(&self) -> &[DispatchRequirement] {
+        &self.requirements
+    }
+
+    pub fn direct_subtypes(&self) -> &[String] {
+        &self.direct_subtypes
+    }
+
+    pub fn source_methods_access_instance_fields(&self) -> bool {
+        self.source_methods_access_instance_fields
+    }
+
+    pub fn rejected(&self) -> &[RejectedObjectStrategy] {
+        &self.rejected
+    }
+
+    pub fn provenance(&self) -> &[FactProvenance] {
+        &self.provenance
+    }
+
+    pub fn diagnostics(&self) -> &[RepresentationDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        String,
+        ObjectRepresentation,
+        Vec<DispatchRequirement>,
+        Vec<String>,
+        bool,
+        Vec<RejectedObjectStrategy>,
+        Vec<FactProvenance>,
+        Vec<RepresentationDiagnostic>,
+    ) {
+        (
+            self.root,
+            self.strategy,
+            self.requirements,
+            self.direct_subtypes,
+            self.source_methods_access_instance_fields,
+            self.rejected,
+            self.provenance,
+            self.diagnostics,
+        )
+    }
+
     pub fn primary_provenance(&self) -> FactProvenance {
         self.provenance
             .last()
@@ -463,6 +919,16 @@ impl ObjectStrategyPlan {
         if !self.provenance.contains(&provenance) {
             self.provenance.push(provenance);
         }
+    }
+}
+
+impl RejectedObjectStrategy {
+    pub fn strategy(&self) -> ObjectRepresentation {
+        self.strategy.clone()
+    }
+
+    pub fn reason(&self) -> &str {
+        &self.reason
     }
 }
 
@@ -489,7 +955,7 @@ fn object_strategy_for_type_with_effective_facts_and_requirements(
                 explicit_hierarchy_override.expect("interface override was checked by match guard");
             let policy =
                 hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
-            (policy.representation, policy.diagnostics)
+            policy.into_representation_diagnostics()
         }
         TypeKind::Interface => {
             let policy = object_representation_policy_with_effective_facts(
@@ -498,7 +964,8 @@ fn object_strategy_for_type_with_effective_facts_and_requirements(
                 },
                 facts,
             );
-            (policy.representation, policy.diagnostics)
+            let (_, representation, diagnostics) = policy.into_parts();
+            (representation, diagnostics)
         }
         TypeKind::Enum => (
             ObjectRepresentation::JavaEnum {
@@ -861,11 +1328,11 @@ fn record_object_hierarchy_edges_for_type(
     {
         record_object_hierarchy_edge(
             plan,
-            ObjectHierarchyEdge {
-                super_name: super_name.to_string(),
-                sub_name: sub_name.clone(),
-                kind: ObjectHierarchyEdgeKind::Extends,
-            },
+            ObjectHierarchyEdge::new(
+                super_name,
+                sub_name.clone(),
+                ObjectHierarchyEdgeKind::Extends,
+            ),
         );
     }
     for super_name in facts
@@ -875,11 +1342,11 @@ fn record_object_hierarchy_edges_for_type(
     {
         record_object_hierarchy_edge(
             plan,
-            ObjectHierarchyEdge {
-                super_name: super_name.to_string(),
-                sub_name: sub_name.clone(),
-                kind: ObjectHierarchyEdgeKind::Implements,
-            },
+            ObjectHierarchyEdge::new(
+                super_name,
+                sub_name.clone(),
+                ObjectHierarchyEdgeKind::Implements,
+            ),
         );
     }
 }
@@ -908,10 +1375,7 @@ pub fn object_hierarchy_edge_representation_policy(
             | ObjectRepresentation::DynTrait { .. }
             | ObjectRepresentation::ErasedObject
     );
-    ObjectHierarchyEdgeRepresentationPolicy {
-        representation,
-        represented,
-    }
+    ObjectHierarchyEdgeRepresentationPolicy::new(representation, represented)
 }
 
 pub fn object_representation_is_user_closed_enum(
@@ -927,8 +1391,8 @@ pub fn object_hierarchy_edge_diagnostic_policy(
 ) -> HierarchyEdgeDiagnosticPolicy {
     let mut outcomes = Vec::new();
     let has_unsupported_extends = input.edges.iter().any(|edge| {
-        edge.kind == ObjectHierarchyEdgeKind::Extends
-            && !input.represented_super_names.contains(&edge.super_name)
+        edge.kind() == ObjectHierarchyEdgeKind::Extends
+            && !input.represented_super_names.contains(edge.super_name())
     }) || (input.edges.is_empty()
         && input
             .declared_extends
@@ -940,16 +1404,17 @@ pub fn object_hierarchy_edge_diagnostic_policy(
     let unsupported_interfaces = input
         .edges
         .iter()
-        .filter(|edge| edge.kind == ObjectHierarchyEdgeKind::Implements)
-        .map(|edge| &edge.super_name)
+        .filter(|edge| edge.kind() == ObjectHierarchyEdgeKind::Implements)
+        .map(|edge| edge.super_name())
         .chain(
             (input.edges.is_empty())
                 .then_some(&input.declared_implements)
                 .into_iter()
-                .flatten(),
+                .flatten()
+                .map(String::as_str),
         )
         .filter(|interface_name| !input.represented_super_names.contains(*interface_name))
-        .cloned()
+        .map(str::to_string)
         .collect::<Vec<_>>();
     if !unsupported_interfaces.is_empty() {
         outcomes.push(HierarchyEdgeDiagnosticOutcome::UnsupportedInterfaceImpl {
@@ -960,11 +1425,7 @@ pub fn object_hierarchy_edge_diagnostic_policy(
         .iter()
         .map(|outcome| render_hierarchy_edge_diagnostic_outcome(&input.type_name, outcome))
         .collect();
-    HierarchyEdgeDiagnosticPolicy {
-        type_name: input.type_name,
-        outcomes,
-        diagnostics,
-    }
+    HierarchyEdgeDiagnosticPolicy::new(input.type_name, outcomes, diagnostics)
 }
 
 fn render_hierarchy_edge_diagnostic_outcome(
@@ -972,20 +1433,20 @@ fn render_hierarchy_edge_diagnostic_outcome(
     outcome: &HierarchyEdgeDiagnosticOutcome,
 ) -> RepresentationDiagnostic {
     match outcome {
-        HierarchyEdgeDiagnosticOutcome::UnsupportedInheritance => RepresentationDiagnostic {
-            code: "unsupported_inheritance",
-            message: format!(
+        HierarchyEdgeDiagnosticOutcome::UnsupportedInheritance => RepresentationDiagnostic::new(
+            "unsupported_inheritance",
+            format!(
                 "{type_name} participates in an extends hierarchy, but hierarchy lowering is not implemented yet"
             ),
-        },
+        ),
         HierarchyEdgeDiagnosticOutcome::UnsupportedInterfaceImpl { interfaces } => {
-            RepresentationDiagnostic {
-                code: "unsupported_interface_impl",
-                message: format!(
+            RepresentationDiagnostic::new(
+                "unsupported_interface_impl",
+                format!(
                     "{type_name} implements interfaces without a supported representation: {}",
                     interfaces.join(", ")
                 ),
-            }
+            )
         }
     }
 }
@@ -995,28 +1456,28 @@ pub fn object_representation_lookup_policy(
     planned_representation: Option<ObjectRepresentation>,
 ) -> RepresentationLookupPolicy {
     if let Some(representation) = planned_representation {
-        return RepresentationLookupPolicy {
-            java_ty: java_ty.clone(),
-            fallback: RepresentationLookupFallback::PlannedType,
+        return RepresentationLookupPolicy::new(
+            java_ty.clone(),
+            RepresentationLookupFallback::PlannedType,
             representation,
-        };
+        );
     }
     match java_ty {
-        JavaType::Named { name, .. } if name == "Object" => RepresentationLookupPolicy {
-            java_ty: java_ty.clone(),
-            fallback: RepresentationLookupFallback::ConservativeErasedObject,
-            representation: ObjectRepresentation::ErasedObject,
-        },
-        JavaType::Unknown(_) | JavaType::Wildcard(_) => RepresentationLookupPolicy {
-            java_ty: java_ty.clone(),
-            fallback: RepresentationLookupFallback::ConservativeErasedObject,
-            representation: ObjectRepresentation::ErasedObject,
-        },
-        _ => RepresentationLookupPolicy {
-            java_ty: java_ty.clone(),
-            fallback: RepresentationLookupFallback::ConservativeConcrete,
-            representation: ObjectRepresentation::ConcreteStruct,
-        },
+        JavaType::Named { name, .. } if name == "Object" => RepresentationLookupPolicy::new(
+            java_ty.clone(),
+            RepresentationLookupFallback::ConservativeErasedObject,
+            ObjectRepresentation::ErasedObject,
+        ),
+        JavaType::Unknown(_) | JavaType::Wildcard(_) => RepresentationLookupPolicy::new(
+            java_ty.clone(),
+            RepresentationLookupFallback::ConservativeErasedObject,
+            ObjectRepresentation::ErasedObject,
+        ),
+        _ => RepresentationLookupPolicy::new(
+            java_ty.clone(),
+            RepresentationLookupFallback::ConservativeConcrete,
+            ObjectRepresentation::ConcreteStruct,
+        ),
     }
 }
 
@@ -1071,7 +1532,7 @@ fn apply_closed_enum_strategy_selection(facts: &EffectiveFacts<'_>, plan: &mut O
             facts,
             &strategy.requirements,
         );
-        if let Some(representation) = policy.representation {
+        if let Some(representation) = policy.representation().cloned() {
             if closed_enum_is_rejected_by_requirements(&strategy.requirements) {
                 strategy.rejected.push(RejectedObjectStrategy {
                     strategy: representation,
@@ -1080,7 +1541,7 @@ fn apply_closed_enum_strategy_selection(facts: &EffectiveFacts<'_>, plan: &mut O
             } else {
                 strategy.strategy =
                     source_hierarchy_carrier_strategy_if_needed(strategy, representation);
-                if let Some(provenance) = policy.provenance {
+                if let Some(provenance) = policy.provenance() {
                     strategy.add_provenance(provenance);
                 }
                 continue;
@@ -1136,7 +1597,7 @@ fn closed_enum_rejection_reason(
     direct_subtypes: &[String],
     facts: &EffectiveFacts<'_>,
 ) -> String {
-    match closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts).proof {
+    match closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts).proof() {
         ClosedEnumProof::Proven { .. } => {
             format!("closed enum for {type_name} was not applicable to the current representation")
         }
@@ -1321,17 +1782,18 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             &context,
             facts,
         );
-        plan.diagnostics.extend(policy.diagnostics.clone());
-        let Some(representation) = policy.representation else {
+        plan.diagnostics
+            .extend(policy.diagnostics().iter().cloned());
+        let Some(representation) = policy.representation().cloned() else {
             continue;
         };
-        if let Some(strategy) = plan.strategy_for_mut(&policy.type_name) {
+        if let Some(strategy) = plan.strategy_for_mut(policy.type_name()) {
             if erased_override_should_not_replace_parsed_source(override_fact, strategy) {
                 continue;
             }
             strategy.strategy = representation;
-            strategy.replace_provenance(policy.provenance);
-            strategy.direct_subtypes = policy.direct_subtypes;
+            strategy.replace_provenance(policy.provenance());
+            strategy.direct_subtypes = policy.direct_subtypes().to_vec();
             strategy.rejected.clear();
             continue;
         }
@@ -1339,13 +1801,13 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             continue;
         }
         plan.insert_strategy(ObjectStrategyPlan {
-            root: policy.type_name.clone(),
+            root: policy.type_name().to_string(),
             strategy: representation,
-            requirements: facts.dispatch_requirements_for(&policy.type_name),
-            direct_subtypes: policy.direct_subtypes,
+            requirements: facts.dispatch_requirements_for(policy.type_name()),
+            direct_subtypes: policy.direct_subtypes().to_vec(),
             source_methods_access_instance_fields: false,
             rejected: Vec::new(),
-            provenance: vec![policy.provenance],
+            provenance: vec![policy.provenance()],
             diagnostics: Vec::new(),
         });
     }
@@ -1390,11 +1852,11 @@ pub fn object_representation_policy_with_effective_facts(
 ) -> ObjectRepresentationPolicy {
     let object_safety = object_safety_policy_for_request(&request, facts);
     if object_safety == ObjectSafetyPolicy::RejectedNonObjectSafe {
-        return ObjectRepresentationPolicy {
-            diagnostics: vec![non_object_safe_trait_fallback_diagnostic(&request, facts)],
+        return ObjectRepresentationPolicy::new(
             object_safety,
-            representation: ObjectRepresentation::ErasedObject,
-        };
+            ObjectRepresentation::ErasedObject,
+            vec![non_object_safe_trait_fallback_diagnostic(&request, facts)],
+        );
     }
     let representation = match &request {
         ObjectRepresentationRequest::DefaultInterface { type_name } => {
@@ -1411,22 +1873,18 @@ pub fn object_representation_policy_with_effective_facts(
             ObjectRepresentation::ErasedObject
         }
     };
-    ObjectRepresentationPolicy {
-        object_safety,
-        representation,
-        diagnostics: Vec::new(),
-    }
+    ObjectRepresentationPolicy::new(object_safety, representation, Vec::new())
 }
 
 pub fn object_safety_fact_policy_with_effective_facts(
     type_name: &str,
     facts: &EffectiveFacts<'_>,
 ) -> ObjectSafetyFactPolicy {
-    ObjectSafetyFactPolicy {
-        type_name: type_name.to_string(),
-        object_safe_trait: facts.object_safe_trait_fact_for_name(type_name),
-        violation: facts.object_safety_violation_for_name(type_name),
-    }
+    ObjectSafetyFactPolicy::new(
+        type_name.to_string(),
+        facts.object_safe_trait_fact_for_name(type_name),
+        facts.object_safety_violation_for_name(type_name),
+    )
 }
 
 impl ObjectHierarchyContext {
@@ -1483,28 +1941,30 @@ pub fn hierarchy_override_application_policy_with_effective_facts(
 ) -> HierarchyOverrideApplicationPolicy {
     let validation = hierarchy_override_validation_policy(override_fact, context);
     let direct_subtypes = hierarchy_override_represented_subtypes(override_fact, context);
-    let mut diagnostics = validation.diagnostics;
+    let mut diagnostics = validation.into_diagnostics();
     let representation = if context.contains_type(&override_fact.type_name) {
         let policy =
             hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
-        diagnostics.extend(policy.diagnostics);
-        Some(policy.representation)
+        let (representation, policy_diagnostics) = policy.into_representation_diagnostics();
+        diagnostics.extend(policy_diagnostics);
+        Some(representation)
     } else if hierarchy_override_introduces_boundary_root(override_fact) {
         let policy =
             hierarchy_override_representation_policy_with_effective_facts(override_fact, facts);
-        diagnostics.extend(policy.diagnostics);
-        Some(policy.representation)
+        let (representation, policy_diagnostics) = policy.into_representation_diagnostics();
+        diagnostics.extend(policy_diagnostics);
+        Some(representation)
     } else {
         None
     };
 
-    HierarchyOverrideApplicationPolicy {
-        type_name: override_fact.type_name.clone(),
+    HierarchyOverrideApplicationPolicy::new(
+        override_fact.type_name.clone(),
         representation,
-        provenance: override_fact.provenance,
+        override_fact.provenance,
         direct_subtypes,
         diagnostics,
-    }
+    )
 }
 
 fn hierarchy_override_represented_subtypes(
@@ -1550,10 +2010,7 @@ pub fn hierarchy_override_validation_policy(
             context,
         );
     }
-    HierarchyOverrideValidationPolicy {
-        type_name: override_fact.type_name.clone(),
-        diagnostics,
-    }
+    HierarchyOverrideValidationPolicy::new(override_fact.type_name.clone(), diagnostics)
 }
 
 fn hierarchy_override_introduces_boundary_root(override_fact: &HierarchyOverride) -> bool {
@@ -1579,22 +2036,22 @@ pub fn hierarchy_override_representation_policy_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> HierarchyOverrideRepresentationPolicy {
     match &override_fact.strategy {
-        HierarchyStrategy::ConcreteStruct => HierarchyOverrideRepresentationPolicy {
-            object_safety: ObjectSafetyPolicy::NotRequired,
-            representation: ObjectRepresentation::ConcreteStruct,
-            diagnostics: Vec::new(),
-        },
+        HierarchyStrategy::ConcreteStruct => HierarchyOverrideRepresentationPolicy::new(
+            ObjectRepresentation::ConcreteStruct,
+            ObjectSafetyPolicy::NotRequired,
+            Vec::new(),
+        ),
         HierarchyStrategy::ClosedEnum {
             enum_name,
             variants,
-        } => HierarchyOverrideRepresentationPolicy {
-            object_safety: ObjectSafetyPolicy::NotRequired,
-            representation: ObjectRepresentation::ClosedEnum {
+        } => HierarchyOverrideRepresentationPolicy::new(
+            ObjectRepresentation::ClosedEnum {
                 enum_name: enum_name.clone(),
                 variants: variants.clone(),
             },
-            diagnostics: Vec::new(),
-        },
+            ObjectSafetyPolicy::NotRequired,
+            Vec::new(),
+        ),
         HierarchyStrategy::DynTrait { trait_name } => {
             hierarchy_override_representation_from_object_policy(
                 object_representation_policy_with_effective_facts(
@@ -1641,7 +2098,7 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
 ) -> ClosedEnumInferencePolicy {
     let proof_policy =
         closed_enum_proof_policy_with_effective_facts(type_name, direct_subtypes, facts);
-    let variants = match &proof_policy.proof {
+    let variants = match proof_policy.proof() {
         ClosedEnumProof::Proven { variants, .. } => {
             Some(closed_enum_variant_names_for_subtypes(variants))
         }
@@ -1670,11 +2127,7 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
     let provenance = representation
         .is_some()
         .then_some(FactProvenance::CorpusAnalysis);
-    ClosedEnumInferencePolicy {
-        type_name: type_name.to_string(),
-        representation,
-        provenance,
-    }
+    ClosedEnumInferencePolicy::new(type_name.to_string(), representation, provenance)
 }
 
 pub(crate) fn closed_enum_variant_names_for_subtypes(subtypes: &[String]) -> Vec<String> {
@@ -1690,28 +2143,25 @@ pub fn closed_enum_proof_policy_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> ClosedEnumProofPolicy {
     let proof = match facts.closed_hierarchy_fact_for_name_with_provenance(type_name) {
-        Some(closed_fact) if closed_fact.value => {
+        Some(closed_fact) if *closed_fact.value() => {
             if let Some(permits_fact) = facts.sealed_permitted_subtypes_for(type_name) {
-                let missing = missing_permitted_subtypes(&permits_fact.value, direct_subtypes);
+                let missing = missing_permitted_subtypes(permits_fact.value(), direct_subtypes);
                 if !missing.is_empty() {
                     ClosedEnumProof::MissingPermittedSubtypes { missing }
                 } else {
                     closed_enum_terminal_variant_proof(
                         direct_subtypes,
                         facts,
-                        closed_fact.provenance,
+                        closed_fact.provenance(),
                     )
                 }
             } else {
-                closed_enum_terminal_variant_proof(direct_subtypes, facts, closed_fact.provenance)
+                closed_enum_terminal_variant_proof(direct_subtypes, facts, closed_fact.provenance())
             }
         }
         _ => ClosedEnumProof::OpenWorld,
     };
-    ClosedEnumProofPolicy {
-        type_name: type_name.to_string(),
-        proof,
-    }
+    ClosedEnumProofPolicy::new(type_name.to_string(), proof)
 }
 
 fn closed_enum_terminal_variant_proof(
@@ -1771,11 +2221,8 @@ fn simple_hierarchy_name(name: &str) -> &str {
 fn hierarchy_override_representation_from_object_policy(
     policy: ObjectRepresentationPolicy,
 ) -> HierarchyOverrideRepresentationPolicy {
-    HierarchyOverrideRepresentationPolicy {
-        representation: policy.representation,
-        object_safety: policy.object_safety,
-        diagnostics: policy.diagnostics,
-    }
+    let (object_safety, representation, diagnostics) = policy.into_parts();
+    HierarchyOverrideRepresentationPolicy::new(representation, object_safety, diagnostics)
 }
 
 fn push_closed_enum_override_validation_diagnostics(
@@ -1815,10 +2262,7 @@ fn push_closed_enum_override_validation_diagnostics(
 }
 
 fn representation_override_conflict_diagnostic(message: String) -> RepresentationDiagnostic {
-    RepresentationDiagnostic {
-        code: "representation_override_conflict",
-        message,
-    }
+    RepresentationDiagnostic::new("representation_override_conflict", message)
 }
 
 fn object_safety_policy_for_request(
@@ -1889,10 +2333,7 @@ fn non_object_safe_trait_fallback_diagnostic(
             format!("erased object representation for {type_name} does not require object safety")
         }
     };
-    RepresentationDiagnostic {
-        code: "non_object_safe_trait_fallback",
-        message,
-    }
+    RepresentationDiagnostic::new("non_object_safe_trait_fallback", message)
 }
 
 fn object_safety_diagnostic_type_name(type_name: &str) -> &str {
@@ -1952,24 +2393,24 @@ mod tests {
         let hidden_binding = BindingId::new(BindingKind::Local, "value", 0);
         let visible_binding = BindingId::new(BindingKind::Local, "value", 1);
         let method = MethodUsageFacts::from_exact_binding_facts([
-            BindingUseFacts {
-                name: "value".to_string(),
-                binding: Some(hidden_binding),
-                java_ty: JavaType::Named {
+            BindingUseFacts::new(
+                "value",
+                Some(hidden_binding),
+                JavaType::Named {
                     name: "Hidden".to_string(),
                     args: Vec::new(),
                 },
-                uses: vec![BindingUse::Returned],
-            },
-            BindingUseFacts {
-                name: "value".to_string(),
-                binding: Some(visible_binding),
-                java_ty: JavaType::Named {
+                vec![BindingUse::Returned],
+            ),
+            BindingUseFacts::new(
+                "value",
+                Some(visible_binding),
+                JavaType::Named {
                     name: "Visible".to_string(),
                     args: Vec::new(),
                 },
-                uses: Vec::new(),
-            },
+                Vec::new(),
+            ),
         ]);
 
         let mut usage = UsageFacts::default();

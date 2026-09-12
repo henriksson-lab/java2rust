@@ -1,12 +1,20 @@
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Span {
-    pub start: usize,
-    pub end: usize,
+    start: usize,
+    end: usize,
 }
 
 impl Span {
     pub fn new(start: usize, end: usize) -> Self {
         Self { start, end }
+    }
+
+    pub fn start(&self) -> usize {
+        self.start
+    }
+
+    pub fn end(&self) -> usize {
+        self.end
     }
 }
 
@@ -19,10 +27,28 @@ pub enum Severity {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Diagnostic {
-    pub severity: Severity,
-    pub code: &'static str,
-    pub message: String,
-    pub span: Option<Span>,
+    severity: Severity,
+    code: &'static str,
+    message: String,
+    span: Option<Span>,
+}
+
+impl Diagnostic {
+    pub fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn span(&self) -> Option<Span> {
+        self.span
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

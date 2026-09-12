@@ -39,7 +39,7 @@ fn dependency_mode_config_tracks_roots_and_fact_provider_modes() {
 
     let resolution_roots = config
         .source_roots_for_resolution()
-        .map(|root| (root.path.to_string_lossy().into_owned(), root.mode))
+        .map(|root| (root.path().to_string_lossy().into_owned(), root.mode()))
         .collect::<Vec<_>>();
     assert_eq!(
         resolution_roots,
@@ -61,7 +61,7 @@ fn dependency_mode_config_tracks_roots_and_fact_provider_modes() {
     assert_eq!(
         config
             .source_roots_for_source_index()
-            .map(|root| (root.path.to_string_lossy().into_owned(), root.mode))
+            .map(|root| (root.path().to_string_lossy().into_owned(), root.mode()))
             .collect::<Vec<_>>(),
         vec![
             (
@@ -1203,47 +1203,47 @@ class Box<T> {
         report
             .top_source_dependency_method_calls
             .iter()
-            .any(|summary| summary.receiver_type == "AlleleLike"
-                && summary.method_name == "label_box"
-                && summary.source_mode == DependencyMode::CoTranslateSource),
+            .any(|summary| summary.receiver_type() == "AlleleLike"
+                && summary.method_name() == "label_box"
+                && summary.source_mode() == DependencyMode::CoTranslateSource),
         "source dependency method summary should identify resolved dependency receivers: {rendered}"
     );
     assert!(
         report
             .top_source_dependency_constructor_types
             .iter()
-            .any(|summary| summary.type_name == "AlleleLike"
-                && summary.arity == 1
-                && summary.source_mode == DependencyMode::CoTranslateSource),
+            .any(|summary| summary.type_name() == "AlleleLike"
+                && summary.arity() == 1
+                && summary.source_mode() == DependencyMode::CoTranslateSource),
         "source dependency constructor summary should identify resolved dependency constructors: {rendered}"
     );
     assert!(
         report
             .top_source_dependency_field_accesses
             .iter()
-            .any(|summary| summary.type_name == "AlleleLike"
-                && summary.field_name == "length"
-                && summary.source_mode == DependencyMode::CoTranslateSource),
+            .any(|summary| summary.type_name() == "AlleleLike"
+                && summary.field_name() == "length"
+                && summary.source_mode() == DependencyMode::CoTranslateSource),
         "source dependency field summary should identify resolved dependency fields: {rendered}"
     );
     assert!(
         report
             .top_source_dependency_field_accesses
             .iter()
-            .any(|summary| summary.type_name == "AlleleBase"
-                && summary.field_name == "inherited_length"
-                && summary.source_mode == DependencyMode::CoTranslateSource),
+            .any(|summary| summary.type_name() == "AlleleBase"
+                && summary.field_name() == "inherited_length"
+                && summary.source_mode() == DependencyMode::CoTranslateSource),
         "source dependency field summary should identify inherited dependency fields by declaring type: {rendered}"
     );
     assert!(
         report
             .top_source_dependency_field_contexts
             .iter()
-            .any(|summary| summary.declaring_type == "AlleleBase"
-                && summary.field_name == "inherited_length"
-                && summary.receiver_type == "AlleleLike"
-                && summary.enclosing_type == "UsesVariant"
-                && summary.enclosing_member == "score"),
+            .any(|summary| summary.declaring_type() == "AlleleBase"
+                && summary.field_name() == "inherited_length"
+                && summary.receiver_type() == "AlleleLike"
+                && summary.enclosing_type() == "UsesVariant"
+                && summary.enclosing_member() == "score"),
         "source dependency field context should show where inherited dependency fields are consumed: {rendered}"
     );
     assert!(
@@ -1438,20 +1438,20 @@ final class SummarySelected implements SummaryChoice {}
         report
             .top_source_dependency_field_accesses
             .iter()
-            .any(|summary| summary.type_name == "SummaryType"
-                && summary.field_name == "length"
-                && summary.source_mode == DependencyMode::SourceSummary),
+            .any(|summary| summary.type_name() == "SummaryType"
+                && summary.field_name() == "length"
+                && summary.source_mode() == DependencyMode::SourceSummary),
         "source-summary field table should identify direct dependency fields: {rendered}"
     );
     assert!(
         report
             .top_source_dependency_field_contexts
             .iter()
-            .any(|summary| summary.declaring_type == "SummaryBase"
-                && summary.field_name == "inherited_length"
-                && summary.receiver_type == "SummaryType"
-                && summary.enclosing_type == "UsesSummary"
-                && summary.enclosing_member == "score"),
+            .any(|summary| summary.declaring_type() == "SummaryBase"
+                && summary.field_name() == "inherited_length"
+                && summary.receiver_type() == "SummaryType"
+                && summary.enclosing_type() == "UsesSummary"
+                && summary.enclosing_member() == "score"),
         "source-summary field contexts should identify inherited dependency fields and consumers: {rendered}"
     );
     assert!(
@@ -1586,13 +1586,13 @@ class UsesArgs {
             .top_source_summary_recommendations
             .iter()
             .any(|recommendation| {
-                recommendation.package_prefix == "app.helper"
-                    && recommendation.target_type == "FindArgs"
-                    && recommendation.constructor_guesses >= 1
-                    && recommendation.field_guesses >= 2
-                    && recommendation.count >= 3
+                recommendation.package_prefix() == "app.helper"
+                    && recommendation.target_type() == "FindArgs"
+                    && recommendation.constructor_guesses() >= 1
+                    && recommendation.field_guesses() >= 2
+                    && recommendation.count() >= 3
                     && recommendation
-                        .sample_files
+                        .sample_files()
                         .contains(&"app/usecase/UsesArgs.java".to_string())
             }),
         "project constructor/field guesses should recommend a source-summary root: {rendered}"
@@ -1991,7 +1991,7 @@ public final class FermiLiteAssembly {
             .top_external_api_guess_methods
             .iter()
             .any(|summary| matches!(
-                summary.receiver_type.as_str(),
+                summary.receiver_type(),
                 "FermiLiteAssembler" | "FermiLiteAssembly" | "Connection" | "Contig"
             )),
         "source-summary FermiLite-shaped graph calls should not become external pack guesses: {rendered}"
@@ -2433,18 +2433,21 @@ public final class Helper {
         "overlapping source roots should assign each file to exactly one most-specific root: {rendered}"
     );
     assert!(
-        report.source_roots.iter().any(|root| root.path == app_root
-            && root.mode == DependencyMode::PrimarySource
-            && root.files_seen == 1),
+        report
+            .source_roots
+            .iter()
+            .any(|root| root.path() == app_root
+                && root.mode() == DependencyMode::PrimarySource
+                && root.files_seen() == 1),
         "primary root should retain its file even when configured after a broader summary root: {rendered}"
     );
     assert!(
         report
             .source_roots
             .iter()
-            .any(|root| root.path == parent_root
-                && root.mode == DependencyMode::SourceSummary
-                && root.files_seen == 1),
+            .any(|root| root.path() == parent_root
+                && root.mode() == DependencyMode::SourceSummary
+                && root.files_seen() == 1),
         "summary parent should see only dependency files outside the more-specific primary root: {rendered}"
     );
     assert_eq!(report.files_resolved_without_errors, 1, "{rendered}");
@@ -2548,7 +2551,7 @@ class UsesAssemblyGraph {
         !report
             .top_external_api_guess_methods
             .iter()
-            .any(|summary| matches!(summary.receiver_type.as_str(), "Connection" | "Contig")),
+            .any(|summary| matches!(summary.receiver_type(), "Connection" | "Contig")),
         "primary source graph methods should resolve as source calls, not external guesses: {rendered}"
     );
     assert!(
@@ -2560,7 +2563,7 @@ class UsesAssemblyGraph {
             .top_external_constructor_guess_types
             .iter()
             .any(|summary| matches!(
-                summary.type_name.as_str(),
+                summary.type_name(),
                 "AssemblyGraph" | "Connection" | "Contig"
             )),
         "primary source graph constructors should resolve as source constructors, not external guesses: {rendered}"
@@ -3176,11 +3179,11 @@ catch dep.AnalysisTarget summarize 0 dep.AnalysisException
 "#,
     );
     assert!(
-        parsed_dispatch_facts.diagnostics.is_empty(),
+        parsed_dispatch_facts.diagnostics().is_empty(),
         "{:?}",
-        parsed_dispatch_facts.diagnostics
+        parsed_dispatch_facts.diagnostics()
     );
-    provider_facts.extend_from(parsed_dispatch_facts.facts);
+    provider_facts.extend_from(parsed_dispatch_facts.facts().clone());
 
     let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
     config.add_fact_provider(
@@ -3366,7 +3369,8 @@ class UsesSummaryConstant {
         "{rendered}"
     );
     assert_eq!(
-        report.fact_providers[0].external_field_facts, 1,
+        report.fact_providers[0].external_field_facts(),
+        1,
         "{rendered}"
     );
     assert!(
@@ -3595,24 +3599,25 @@ class UsesRuntime {
         "#,
     );
     assert!(
-        parsed_manifest.diagnostics.is_empty(),
+        parsed_manifest.diagnostics().is_empty(),
         "manifest should parse cleanly: {:?}",
-        parsed_manifest.diagnostics
+        parsed_manifest.diagnostics()
     );
 
     let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
     config
-        .add_external_pack_provider("dep.runtime.manifest", parsed_manifest.facts)
+        .add_external_pack_provider("dep.runtime.manifest", parsed_manifest.facts().clone())
         .expect("single-mode manifest should infer a dependency fact-provider mode");
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
 
     assert_eq!(
-        report.fact_providers[0].mode,
+        report.fact_providers[0].mode(),
         DependencyMode::RustCrateMapping
     );
     assert_eq!(
-        report.fact_providers[0].facts, 15,
+        report.fact_providers[0].facts(),
+        15,
         "fact provider count should include pack boundaries, modeled API/constructor, facade mappings, and unsupported entries"
     );
     assert_eq!(report.configured_provider_facts, 15, "{rendered}");
@@ -3662,26 +3667,31 @@ class UsesRuntime {
         "{rendered}"
     );
     assert_eq!(
-        report.fact_providers[0].external_crate_api_mapping_facts, 1,
+        report.fact_providers[0].external_crate_api_mapping_facts(),
+        1,
         "{rendered}"
     );
     assert_eq!(
-        report.fact_providers[0].external_crate_constructor_mapping_facts, 1,
+        report.fact_providers[0].external_crate_constructor_mapping_facts(),
+        1,
         "{rendered}"
     );
     assert_eq!(
-        report.fact_providers[0].hierarchy_override_facts, 1,
+        report.fact_providers[0].hierarchy_override_facts(),
+        1,
         "{rendered}"
     );
     assert_eq!(
-        report.fact_providers[0].type_capability_facts, 1,
+        report.fact_providers[0].type_capability_facts(),
+        1,
         "{rendered}"
     );
     assert_eq!(
-        report.fact_providers[0].field_nullability_facts, 1,
+        report.fact_providers[0].field_nullability_facts(),
+        1,
         "{rendered}"
     );
-    assert_eq!(report.fact_providers[0].exception_facts, 1, "{rendered}");
+    assert_eq!(report.fact_providers[0].exception_facts(), 1, "{rendered}");
     assert_eq!(report.external_api_explained_method_calls, 2, "{rendered}");
     assert_eq!(
         report.external_api_unsupported_method_calls, 1,
@@ -3817,9 +3827,9 @@ class UsesBoundaries {
         "#,
     );
     assert!(
-        ffi_manifest.diagnostics.is_empty(),
+        ffi_manifest.diagnostics().is_empty(),
         "FFI manifest should parse cleanly: {:?}",
-        ffi_manifest.diagnostics
+        ffi_manifest.diagnostics()
     );
 
     let conservative_manifest = parse_external_pack_manifest(
@@ -3831,18 +3841,21 @@ class UsesBoundaries {
         "#,
     );
     assert!(
-        conservative_manifest.diagnostics.is_empty(),
+        conservative_manifest.diagnostics().is_empty(),
         "conservative manifest should parse cleanly: {:?}",
-        conservative_manifest.diagnostics
+        conservative_manifest.diagnostics()
     );
 
     let mut config =
         DependencyModeConfig::for_primary_source_root(&app_root).without_builtin_external_packs();
     config
-        .add_external_pack_provider("native.runtime.manifest", ffi_manifest.facts)
+        .add_external_pack_provider("native.runtime.manifest", ffi_manifest.facts().clone())
         .expect("single FFI pack mode should be inferred");
     config
-        .add_external_pack_provider("legacy.runtime.manifest", conservative_manifest.facts)
+        .add_external_pack_provider(
+            "legacy.runtime.manifest",
+            conservative_manifest.facts().clone(),
+        )
         .expect("single conservative pack mode should be inferred");
 
     let report = benchmark_java_resolver_config(&config).unwrap();
@@ -3853,16 +3866,16 @@ class UsesBoundaries {
         report
             .fact_providers
             .iter()
-            .any(|provider| provider.name == "native.runtime.manifest"
-                && provider.mode == DependencyMode::FfiBoundary),
+            .any(|provider| provider.name() == "native.runtime.manifest"
+                && provider.mode() == DependencyMode::FfiBoundary),
         "{rendered}"
     );
     assert!(
         report
             .fact_providers
             .iter()
-            .any(|provider| provider.name == "legacy.runtime.manifest"
-                && provider.mode == DependencyMode::ConservativeBoundary),
+            .any(|provider| provider.name() == "legacy.runtime.manifest"
+                && provider.mode() == DependencyMode::ConservativeBoundary),
         "{rendered}"
     );
     assert_eq!(report.unexplained_method_calls, 0, "{rendered}");
@@ -3979,15 +3992,15 @@ class UsesIncompleteBoundary {
         "#,
     );
     assert!(
-        parsed_manifest.diagnostics.is_empty(),
+        parsed_manifest.diagnostics().is_empty(),
         "manifest should parse cleanly: {:?}",
-        parsed_manifest.diagnostics
+        parsed_manifest.diagnostics()
     );
 
     let mut config =
         DependencyModeConfig::for_primary_source_root(&app_root).without_builtin_external_packs();
     config
-        .add_external_pack_provider("dep.incomplete.manifest", parsed_manifest.facts)
+        .add_external_pack_provider("dep.incomplete.manifest", parsed_manifest.facts().clone())
         .unwrap();
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
@@ -4132,21 +4145,21 @@ class UsesIncompleteRuntimeBoundary {
         "#,
     );
     assert!(
-        parsed_manifest.diagnostics.is_empty(),
+        parsed_manifest.diagnostics().is_empty(),
         "manifest should parse cleanly: {:?}",
-        parsed_manifest.diagnostics
+        parsed_manifest.diagnostics()
     );
 
     let mut config =
         DependencyModeConfig::for_primary_source_root(&app_root).without_builtin_external_packs();
     config
-        .add_external_pack_provider("dep.runtime.manifest", parsed_manifest.facts)
+        .add_external_pack_provider("dep.runtime.manifest", parsed_manifest.facts().clone())
         .unwrap();
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
 
     assert_eq!(
-        report.fact_providers[0].mode,
+        report.fact_providers[0].mode(),
         DependencyMode::RustCrateMapping
     );
     assert_eq!(report.external_pack_explained_method_calls, 2, "{rendered}");
@@ -4265,9 +4278,9 @@ class UsesIncompleteRuntimePacks {
         "#,
     );
     assert!(
-        ffi_manifest.diagnostics.is_empty(),
+        ffi_manifest.diagnostics().is_empty(),
         "FFI manifest should parse cleanly: {:?}",
-        ffi_manifest.diagnostics
+        ffi_manifest.diagnostics()
     );
 
     let conservative_manifest = parse_external_pack_manifest(
@@ -4277,18 +4290,21 @@ class UsesIncompleteRuntimePacks {
         "#,
     );
     assert!(
-        conservative_manifest.diagnostics.is_empty(),
+        conservative_manifest.diagnostics().is_empty(),
         "conservative manifest should parse cleanly: {:?}",
-        conservative_manifest.diagnostics
+        conservative_manifest.diagnostics()
     );
 
     let mut config =
         DependencyModeConfig::for_primary_source_root(&app_root).without_builtin_external_packs();
     config
-        .add_external_pack_provider("native.runtime.incomplete", ffi_manifest.facts)
+        .add_external_pack_provider("native.runtime.incomplete", ffi_manifest.facts().clone())
         .unwrap();
     config
-        .add_external_pack_provider("legacy.runtime.incomplete", conservative_manifest.facts)
+        .add_external_pack_provider(
+            "legacy.runtime.incomplete",
+            conservative_manifest.facts().clone(),
+        )
         .unwrap();
 
     let report = benchmark_java_resolver_config(&config).unwrap();
@@ -4370,9 +4386,9 @@ fn external_pack_provider_rejects_missing_or_mixed_manifest_modes() {
         external-pack dep.b dep.b rust-crate-mapping mapped target=dep_b
         "#,
     );
-    assert!(mixed_manifest.diagnostics.is_empty());
+    assert!(mixed_manifest.diagnostics().is_empty());
     let mixed = config
-        .add_external_pack_provider("mixed", mixed_manifest.facts)
+        .add_external_pack_provider("mixed", mixed_manifest.facts().clone())
         .unwrap_err();
     assert_eq!(
         mixed,
@@ -4796,15 +4812,15 @@ class UseEvidence {
         "closed-enum BreakpointEvidence BreakpointEvidenceValue SplitRead ExternalEvidence\n",
     );
     assert!(
-        parsed_facts.diagnostics.is_empty(),
+        parsed_facts.diagnostics().is_empty(),
         "external hierarchy override facts should parse cleanly: {:?}",
-        parsed_facts.diagnostics
+        parsed_facts.diagnostics()
     );
     let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
     config.add_fact_provider(
         "user.breakpoint-evidence.closed-enum",
         DependencyMode::ExternalFactModel,
-        parsed_facts.facts,
+        parsed_facts.facts().clone(),
     );
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
@@ -4877,14 +4893,14 @@ class PayloadSerializer extends dep.runtime.Serializer<Payload> {
         "#,
     );
     assert!(
-        parsed_manifest.diagnostics.is_empty(),
+        parsed_manifest.diagnostics().is_empty(),
         "runtime manifest should parse cleanly: {:?}",
-        parsed_manifest.diagnostics
+        parsed_manifest.diagnostics()
     );
     let mut config =
         DependencyModeConfig::for_primary_source_root(&app_root).without_builtin_external_packs();
     config
-        .add_external_pack_provider("dep.runtime.manifest", parsed_manifest.facts)
+        .add_external_pack_provider("dep.runtime.manifest", parsed_manifest.facts().clone())
         .expect("single-mode manifest should infer an external fact-model provider");
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
@@ -4947,13 +4963,13 @@ final class GenericFactoryImpl implements GenericFactory {
         "#,
     );
     assert!(
-        parsed_manifest.diagnostics.is_empty(),
+        parsed_manifest.diagnostics().is_empty(),
         "object-safety manifest should parse cleanly: {:?}",
-        parsed_manifest.diagnostics
+        parsed_manifest.diagnostics()
     );
     let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
     config
-        .add_external_pack_provider("dep.runtime.object-safety", parsed_manifest.facts)
+        .add_external_pack_provider("dep.runtime.object-safety", parsed_manifest.facts().clone())
         .expect("single-mode manifest should infer an external fact-model provider");
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
@@ -5036,16 +5052,16 @@ class UseSignalEvidence {
         "closed-enum SignalEvidence SignalEvidenceValue SplitRead MateUnmapped InterContigPair SameStrandPair\n",
     );
     assert!(
-        parsed_facts.diagnostics.is_empty(),
+        parsed_facts.diagnostics().is_empty(),
         "multi-level hierarchy override facts should parse cleanly: {:?}",
-        parsed_facts.diagnostics
+        parsed_facts.diagnostics()
     );
 
     let mut config = DependencyModeConfig::for_primary_source_root(&app_root);
     config.add_fact_provider(
         "user.signal-evidence.closed-enum",
         DependencyMode::ExternalFactModel,
-        parsed_facts.facts,
+        parsed_facts.facts().clone(),
     );
     let report = benchmark_java_resolver_config(&config).unwrap();
     let rendered = render_resolver_benchmark_report(&report);
@@ -5091,10 +5107,10 @@ class Child extends Base {}
         report
             .top_object_representation_diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "unsupported_inheritance"
-                && diagnostic.mode == Some(DependencyMode::PrimarySource)
+            .any(|diagnostic| diagnostic.code() == "unsupported_inheritance"
+                && diagnostic.mode() == Some(DependencyMode::PrimarySource)
                 && diagnostic
-                    .message
+                    .message()
                     .contains("participates in an extends hierarchy")),
         "top representation diagnostics should retain code/message detail: {rendered}"
     );
@@ -5157,10 +5173,10 @@ public class Child extends Base {}
         report
             .top_object_representation_diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "unsupported_inheritance"
-                && diagnostic.mode == Some(DependencyMode::CoTranslateSource)
+            .any(|diagnostic| diagnostic.code() == "unsupported_inheritance"
+                && diagnostic.mode() == Some(DependencyMode::CoTranslateSource)
                 && diagnostic
-                    .sample_files
+                    .sample_files()
                     .iter()
                     .any(|file| file == "dep/model/DependencyHierarchy.java")),
         "co-translated dependency object pressure should be labeled by source-root mode: {rendered}"
@@ -5464,12 +5480,12 @@ public class Noise {
     let summary_root = report
         .source_roots
         .iter()
-        .find(|root| root.mode == DependencyMode::SourceSummary)
+        .find(|root| root.mode() == DependencyMode::SourceSummary)
         .unwrap();
 
     assert_eq!(report.files_seen, 2, "{rendered}");
-    assert_eq!(summary_root.files_seen, 1, "{rendered}");
-    assert_eq!(summary_root.package_prefixes, vec!["dep.keep".to_string()]);
+    assert_eq!(summary_root.files_seen(), 1, "{rendered}");
+    assert_eq!(summary_root.package_prefixes(), &["dep.keep".to_string()]);
     assert!(
         rendered.contains("SourceSummary\t1\tdep.keep"),
         "{rendered}"

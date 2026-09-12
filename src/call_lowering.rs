@@ -4,7 +4,9 @@ use crate::call_plan::{
     NativeStringNewTarget, NewTargetPlan,
 };
 use crate::coercion::{
-    IndexToUsizeProjection, JavaDisplayPlan, apply_java_display_plan, arrays_as_list_projection,
+    IndexToUsizeProjection, JavaDisplayPlan, apply_java_display_plan,
+    array_blocking_queue_empty_new_projection, array_blocking_queue_from_source_projection,
+    array_blocking_queue_with_capacity_projection, arrays_as_list_projection,
     arrays_binary_search_projection, arrays_binary_search_range_projection,
     arrays_compare_projection, arrays_compare_range_projection, arrays_copy_of_projection,
     arrays_copy_of_range_projection, arrays_deep_equals_projection,
@@ -1146,11 +1148,14 @@ fn apply_native_collection_method(
         NativeCollectionMethod::PriorityQueueAdd => {
             return apply_priority_queue_add(receiver, args);
         }
-        NativeCollectionMethod::ArrayBlockingQueueAddUnsupported => {
-            return apply_array_blocking_queue_add_unsupported(args);
+        NativeCollectionMethod::ArrayBlockingQueueAdd => {
+            return apply_array_blocking_queue_add(receiver, args);
         }
-        NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported => {
-            return apply_array_blocking_queue_offer_unsupported(args);
+        NativeCollectionMethod::ArrayBlockingQueueOffer => {
+            return apply_array_blocking_queue_offer(receiver, args);
+        }
+        NativeCollectionMethod::ArrayBlockingQueuePutUnsupported => {
+            return apply_array_blocking_queue_put_unsupported(args);
         }
         NativeCollectionMethod::ListInsert => {
             return apply_list_insert(receiver, args);
@@ -1175,6 +1180,12 @@ fn apply_native_collection_method(
         }
         NativeCollectionMethod::QueueElement => {
             return queue_element_projection(receiver);
+        }
+        NativeCollectionMethod::QueuePeek => {
+            return queue_peek_projection(receiver);
+        }
+        NativeCollectionMethod::QueuePoll => {
+            return queue_poll_projection(receiver);
         }
         NativeCollectionMethod::QueueRemove => {
             return queue_remove_projection(receiver);
@@ -1380,8 +1391,8 @@ fn native_collection_mutation_needs_erased_object_arg(
         method,
         NativeCollectionMethod::ListAdd
             | NativeCollectionMethod::PriorityQueueAdd
-            | NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
-            | NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported
+            | NativeCollectionMethod::ArrayBlockingQueueAdd
+            | NativeCollectionMethod::ArrayBlockingQueueOffer
             | NativeCollectionMethod::ListInsert
             | NativeCollectionMethod::SetInsert
     ) {
@@ -1429,23 +1440,159 @@ fn apply_priority_queue_add(receiver: RustExpr, mut args: Vec<RustExpr>) -> Rust
     }
 }
 
-fn apply_array_blocking_queue_add_unsupported(args: Vec<RustExpr>) -> RustExpr {
+fn apply_array_blocking_queue_add(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 1 {
         return compile_error_call(
             "Java ArrayBlockingQueue.add(value) requires one value argument",
         );
     }
-    compile_error_call("Java ArrayBlockingQueue.add(value) requires bounded-capacity queue support")
+    unwrap_result_or_panic_uncaught_java_exception(array_blocking_queue_add_result_projection(
+        receiver, args,
+    ))
 }
 
-fn apply_array_blocking_queue_offer_unsupported(args: Vec<RustExpr>) -> RustExpr {
+fn apply_array_blocking_queue_offer(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 1 {
         return compile_error_call(
             "Java ArrayBlockingQueue.offer(value) requires one value argument",
         );
     }
-    compile_error_call(
-        "Java ArrayBlockingQueue.offer(value) requires bounded-capacity queue support",
+    unwrap_result_or_panic_uncaught_java_exception(array_blocking_queue_offer_result_projection(
+        receiver, args,
+    ))
+}
+
+fn apply_array_blocking_queue_put_unsupported(args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 1 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.put(value) requires one value argument",
+        );
+    }
+    compile_error_call("unsupported Java ArrayBlockingQueue.put requires blocking queue semantics")
+}
+
+pub(crate) fn array_blocking_queue_add_result_projection(
+    receiver: RustExpr,
+    mut args: Vec<RustExpr>,
+) -> RustExpr {
+    if args.len() != 1 {
+        return function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![crate::exception_lowering::new_exception_expr(
+                "IllegalStateException",
+                rust_string_literal_projection(
+                    "Java ArrayBlockingQueue.add(value) requires one value argument",
+                ),
+            )],
+        );
+    }
+    let value = args.pop().expect("len checked");
+    if array_blocking_queue_value_is_literal_null(&value) {
+        return function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![array_blocking_queue_null_element_exception_expr()],
+        );
+    }
+    RustExpr::If {
+        condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
+        then_expr: Box::new(RustExpr::Block {
+            stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver,
+                "push",
+                vec![value],
+            ))],
+            tail: Some(Box::new(function_call_projection(
+                ok_bool_java_exception_path_projection(),
+                vec![RustExpr::Literal("true".to_string())],
+            ))),
+        }),
+        else_expr: Box::new(function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![array_blocking_queue_full_exception_expr("add")],
+        )),
+    }
+}
+
+pub(crate) fn array_blocking_queue_offer_result_projection(
+    receiver: RustExpr,
+    mut args: Vec<RustExpr>,
+) -> RustExpr {
+    let value = args.pop().expect("len checked");
+    if array_blocking_queue_value_is_literal_null(&value) {
+        return function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![array_blocking_queue_null_element_exception_expr()],
+        );
+    }
+    RustExpr::If {
+        condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
+        then_expr: Box::new(RustExpr::Block {
+            stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver,
+                "push",
+                vec![value],
+            ))],
+            tail: Some(Box::new(function_call_projection(
+                ok_bool_java_exception_path_projection(),
+                vec![RustExpr::Literal("true".to_string())],
+            ))),
+        }),
+        else_expr: Box::new(function_call_projection(
+            ok_bool_java_exception_path_projection(),
+            vec![RustExpr::Literal("false".to_string())],
+        )),
+    }
+}
+
+fn ok_bool_java_exception_path_projection() -> RustExpr {
+    RustExpr::generic_path(
+        ["Ok"],
+        vec![
+            RustType::Named("bool".to_string()),
+            RustType::Named("JavaException".to_string()),
+        ],
+        Option::<&str>::None,
+    )
+}
+
+fn array_blocking_queue_has_capacity_expr(receiver: RustExpr) -> RustExpr {
+    RustExpr::Binary {
+        op: "<".to_string(),
+        left: Box::new(receiver_method_call_projection_exact(
+            receiver.clone(),
+            "len",
+            Vec::new(),
+        )),
+        right: Box::new(receiver_method_call_projection_exact(
+            receiver,
+            "capacity",
+            Vec::new(),
+        )),
+    }
+}
+
+fn array_blocking_queue_value_is_literal_null(value: &RustExpr) -> bool {
+    match value.unshaped() {
+        RustExpr::Var(name) | RustExpr::Literal(name) if name == "None" => true,
+        RustExpr::Path(segments) => matches!(segments.as_slice(), [name] if name == "None"),
+        RustExpr::GenericPath { base, member, .. } => {
+            member.is_none() && matches!(base.as_slice(), [name] if name == "None")
+        }
+        _ => false,
+    }
+}
+
+fn array_blocking_queue_null_element_exception_expr() -> RustExpr {
+    crate::exception_lowering::new_exception_expr(
+        "NullPointerException",
+        rust_string_literal_projection("Java ArrayBlockingQueue does not permit null elements"),
+    )
+}
+
+fn array_blocking_queue_full_exception_expr(method: &str) -> RustExpr {
+    crate::exception_lowering::new_exception_expr(
+        "IllegalStateException",
+        rust_string_literal_projection(&format!("Java ArrayBlockingQueue.{method} on full queue")),
     )
 }
 
@@ -1946,6 +2093,37 @@ fn queue_element_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(queue_element_result_projection(receiver))
 }
 
+fn queue_peek_projection(receiver: RustExpr) -> RustExpr {
+    receiver_method_call_projection_exact(
+        receiver_method_call_projection_exact(
+            receiver,
+            "get",
+            vec![RustExpr::Literal("0".to_string())],
+        ),
+        "cloned",
+        Vec::new(),
+    )
+}
+
+fn queue_poll_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::If {
+        condition: Box::new(receiver_method_call_projection_exact(
+            receiver.clone(),
+            "is_empty",
+            Vec::new(),
+        )),
+        then_expr: Box::new(RustExpr::Var("None".to_string())),
+        else_expr: Box::new(function_call_projection(
+            RustExpr::Var("Some".to_string()),
+            vec![receiver_method_call_projection_exact(
+                receiver,
+                "remove",
+                vec![RustExpr::Literal("0".to_string())],
+            )],
+        )),
+    }
+}
+
 pub(crate) fn queue_element_result_projection(receiver: RustExpr) -> RustExpr {
     let value = receiver_method_call_projection_exact(
         receiver_method_call_projection_exact(
@@ -2358,18 +2536,20 @@ fn collection_bulk_source_aliases_receiver(source: &RustExpr, receiver: &RustExp
 
 pub(crate) fn apply_class_literal_token(ty: &JavaType, facts: &FactSet) -> RustExpr {
     let plan = crate::stdlib::class_literal_token_plan(ty, facts);
-    apply_class_literal_token_with_rust_type(ty, plan.rust_type)
+    apply_planned_class_literal_token(plan.java_name(), plan.rust_type().clone())
 }
 
 pub(crate) fn apply_class_literal_token_with_rust_type(
     ty: &JavaType,
     rust_type: RustType,
 ) -> RustExpr {
+    apply_planned_class_literal_token(&crate::stdlib::class_literal_java_name(ty), rust_type)
+}
+
+fn apply_planned_class_literal_token(java_name: &str, rust_type: RustType) -> RustExpr {
     function_call_projection(
         java_class_literal_path_projection(rust_type),
-        vec![rust_string_literal_projection(
-            &crate::stdlib::class_literal_java_name(ty),
-        )],
+        vec![rust_string_literal_projection(java_name)],
     )
 }
 
@@ -2396,17 +2576,17 @@ fn apply_new_target_with_optional_representations(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
-    if let Some(external_crate) = &target.external_crate {
+    if let Some(external_crate) = target.external_crate() {
         return function_call_projection(
             external_crate_associated_path_projection(
-                &external_crate.crate_name,
-                &external_crate.type_name,
-                &external_crate.rust_name,
+                external_crate.crate_name(),
+                external_crate.type_name(),
+                external_crate.rust_name(),
             ),
             args,
         );
     }
-    if let Some(native_collection) = target.native_collection {
+    if let Some(native_collection) = target.native_collection() {
         return apply_native_collection_new_target(
             target,
             native_collection,
@@ -2415,12 +2595,12 @@ fn apply_new_target_with_optional_representations(
             representations,
         );
     }
-    if let Some(native_string) = target.native_string {
+    if let Some(native_string) = target.native_string() {
         return apply_native_string_new_target(native_string, args);
     }
-    if target.rust_name == "new"
+    if target.rust_name() == "new"
         && args.len() == 1
-        && boxed_primitive_constructor_owner(&target.owner_shape.java_ty)
+        && boxed_primitive_constructor_owner(&target.owner_shape().java_ty)
     {
         return args
             .into_iter()
@@ -2428,23 +2608,27 @@ fn apply_new_target_with_optional_representations(
             .expect("checked boxed primitive constructor arity");
     }
     if matches!(
-        &target.owner_shape.java_ty,
+        &target.owner_shape().java_ty,
         JavaType::Named { name, .. } | JavaType::Unknown(name)
             if name == "Object" || name == "java.lang.Object"
     ) {
         return java_plain_object_constructor_projection();
     }
-    if shape_is_erased_object_boundary(&target.owner_shape) {
+    if shape_is_erased_object_boundary(target.owner_shape()) {
         return erased_object_constructor_projection(args);
     }
-    if target.rust_name == "new"
+    if target.rust_name() == "new"
         && args.is_empty()
         && let Some(sequence_like) = sequence_like_empty_native_collection_projection(target, facts)
     {
         return sequence_like;
     }
     function_call_projection(
-        constructor_owner_associated_path_projection(&target.owner_shape, &target.rust_name, facts),
+        constructor_owner_associated_path_projection(
+            target.owner_shape(),
+            target.rust_name(),
+            facts,
+        ),
         args,
     )
 }
@@ -2513,19 +2697,24 @@ fn apply_native_collection_new_target(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
+    let is_array_blocking_queue =
+        crate::stdlib::java_type_is_array_blocking_queue(&target.owner_shape().java_ty);
     if matches!(
         native_collection_new_target_kind(native_collection),
         crate::stdlib::JavaCollectionKind::Set
     ) && representations
         .map(|representations| {
             crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
-                &target.owner_shape.java_ty,
+                &target.owner_shape().java_ty,
                 facts,
                 representations,
             )
         })
         .unwrap_or_else(|| {
-            crate::slot_render::java_set_uses_hash_free_carrier(&target.owner_shape.java_ty, facts)
+            crate::slot_render::java_set_uses_hash_free_carrier(
+                &target.owner_shape().java_ty,
+                facts,
+            )
         })
     {
         return match native_collection {
@@ -2557,6 +2746,9 @@ fn apply_native_collection_new_target(
         };
     }
     match native_collection {
+        NativeCollectionNewTarget::Empty { .. } if is_array_blocking_queue => {
+            array_blocking_queue_empty_new_projection()
+        }
         NativeCollectionNewTarget::Empty { kind } => {
             if matches!(kind, crate::stdlib::JavaCollectionKind::List) {
                 sequence_like_empty_native_collection_projection(target, facts)
@@ -2565,16 +2757,29 @@ fn apply_native_collection_new_target(
                 native_collection_empty_new_projection(kind)
             }
         }
+        NativeCollectionNewTarget::WithCapacity { .. } if is_array_blocking_queue => {
+            let capacity = args
+                .pop()
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+            array_blocking_queue_with_capacity_projection(capacity)
+        }
         NativeCollectionNewTarget::WithCapacity { kind } => {
             let capacity = args
                 .pop()
                 .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
             native_collection_with_capacity_projection(kind, capacity)
         }
+        NativeCollectionNewTarget::FromSource { .. } if is_array_blocking_queue => args
+            .pop()
+            .map(array_blocking_queue_from_source_projection)
+            .unwrap_or_else(array_blocking_queue_empty_new_projection),
         NativeCollectionNewTarget::FromSource { kind } => args
             .pop()
             .map(|source| native_collection_from_source_projection(kind, source))
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
+        NativeCollectionNewTarget::FromSingleArg { .. } if is_array_blocking_queue => args
+            .pop()
+            .unwrap_or_else(array_blocking_queue_empty_new_projection),
         NativeCollectionNewTarget::FromSingleArg { kind } => args
             .pop()
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
@@ -2594,7 +2799,7 @@ fn sequence_like_empty_native_collection_projection(
     target: &NewTargetPlan,
     facts: &FactSet,
 ) -> Option<RustExpr> {
-    let element_ty = facts.sequence_element_type_for(&target.owner_shape.java_ty)?;
+    let element_ty = facts.sequence_element_type_for(&target.owner_shape().java_ty)?;
     Some(function_call_projection(
         RustExpr::GenericPath {
             base: vec!["Vec".to_string()],

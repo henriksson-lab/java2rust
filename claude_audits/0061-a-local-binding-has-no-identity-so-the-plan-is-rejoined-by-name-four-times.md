@@ -14,6 +14,14 @@ through the usage/signature compatibility paths. Treat future fixes here as
 id-less-boundary cleanup, not as evidence that normal Java source locals are
 still rejoined by name.
 
+Follow-up cleanup renamed the private name-keyed local constraint readers on
+`MethodConstraintSet` and `ConstructorConstraintSet` to
+`idless_compatibility_local*`. Resolver-bound propagation continues to use
+`local_by_binding`/`local_mut_by_binding`; the remaining source-name path is now
+grep-visible as compatibility fallback instead of hiding behind generic
+`local(name)` helpers. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
 Follow-up 2026-09-09: `MethodUsageFacts` no longer exposes the boolean
 `binding_for_declaration_with_name_fallback` footgun. Exact binding-id lookup is
 now `binding_facts_for_declaration_id`, and the remaining legacy source-name
@@ -77,6 +85,16 @@ catch live sets by source name alone. The filter now removes only the catch
 binding declared by that `try`, preserving any distinct same-name binding
 already present in the set. Regression:
 `liveness::tests::catch_binding_filter_preserves_distinct_same_name_bindings`.
+Follow-up cleanup narrowed the `liveness` module itself to crate-internal use;
+the production liveness questions remain available to lowering, while the two
+raw set-projection accessors used only by same-module regression tests are now
+`#[cfg(test)]` private helpers. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`.
+Follow-up cleanup also narrowed `LivenessAnalysis`, its production query
+methods, and the internal `Binding`/`OUTER_DECL` representation to crate or
+same-module visibility. Lowering and signature analysis still consume the
+same liveness relation, but the binding-identity carrier is no longer exposed
+as public crate surface.
 
 Follow-up 2026-09-06, updated 2026-09-10: the centralized `MethodUsageFacts`
 compatibility readers remain available to internal analysis/lowering modules,
@@ -85,8 +103,8 @@ but the mutable maps are no longer public or crate-local APIs.
 and `name_binding_is_current` are crate-local. `all_binding_facts()` remains as
 the public read-only aggregate view for integration tests and production passes
 that need all validated facts without reaching into the legacy maps.
-`ShapeEnv::idless_compatibility_local_plan_for_declared_type` is also
-crate-local now; the only production entry remains
+`expr_shape::idless_compatibility_local_plan_for_declared_type` is also
+crate-local now and no longer hangs off `ShapeEnv`; the only production entry remains
 `lower::idless_compatibility_local_plan_for_declaration`.
 `lower::local_plan_for_declaration` now takes `&ShapeEnv` rather than
 `&mut ShapeEnv`, matching the read-only compatibility lookup boundary and
@@ -94,9 +112,9 @@ preventing declaration-plan selection from implying cursor-style mutation.
 The fallback shape builder used by that compatibility path,
 `fallback_local_shape_from_declared_type`, is crate-local as well; the layering
 guard pins both boundaries.
-`UsageFacts::source_method_usage_for_owner` is crate-local too, keeping the
-owner-explicit Java-key lookup available to internal analysis without making it
-part of the public crate API.
+`UsageFacts::source_method_usage_for_owner` is private now; internal
+cross-module callers use the narrower resolved-owner wrapper instead of a broad
+owner-explicit Java-key lookup.
 Follow-up cleanup narrowed the source binding/field Rust-name allocation helpers
 in `java_naming` to crate-local. They remain the centralized internal policy for
 escaped source names, but integration tests now guard the boundary instead of
@@ -147,6 +165,13 @@ crate-local now. Integration tests that need exact binding-id assertions go
 through the public validated `all_binding_facts()` view with test-local helpers,
 so downstream users cannot depend on the direct exact-id compatibility reader.
 Guard: `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+Codex follow-up 2026-09-12 narrowed four `ShapeEnv` local side-fact helpers to
+crate-local: `insert_simple_immutable_map_entry_local`,
+`simple_map_entry_local_is_immutable`, `insert_nested_array2_local`, and
+`local_uses_nested_array2_slice`. Lowering still uses those binding-aware local
+side tables internally, but they are no longer public API for name-keyed local
+fact mutation/inspection. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
 
 Follow-up 2026-09-10: the generic mixed `MethodUsageFacts::from_binding_facts`
 constructor is gone. Fixtures and internal tests now spell whether they are
@@ -303,11 +328,12 @@ Partial progress:
   `signature::tests::bound_nullability_constraints_do_not_fall_back_by_name`.
 
 Update 2026-08-26: the lowering occurrence cursor described in the original
-finding is gone in the current tree. `ShapeEnv::next_local_plan_for_declared_type`
-no longer advances `local_plan_occurrences` or saturates/overruns through a
-shared mutable counter; it accepts only a unique exact `(name, declared type)`
-compatibility match, with a narrow erased-object boundary special case, and
-otherwise fails closed. The one production caller is explicitly named
+finding is gone in the current tree.
+`expr_shape::idless_compatibility_local_plan_for_declared_type` is a
+module-level helper rather than a `ShapeEnv` cursor method; it accepts only a
+unique exact `(name, declared type)` compatibility match, with a narrow
+erased-object boundary special case, and otherwise fails closed. The one
+production caller is explicitly named
 `idless_compatibility_local_plan_for_declaration`, and `tests/layering.rs` now
 guards both the single caller and the absence of the old cursor symbols. The
   audit remains open for the remaining compatibility surface: the legacy
@@ -325,7 +351,8 @@ guards both the single caller and the absence of the old cursor symbols. The
   `layering::idless_local_binding_compatibility_surface_stays_explicit`, and
   `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
 - Follow-up 2026-08-26: `expr_shape`'s id-less shape-learning helper now shares
-  the same unique-match policy as `ShapeEnv::next_local_plan_for_declared_type`.
+  the same unique-match policy as
+  `expr_shape::idless_compatibility_local_plan_for_declared_type`.
   Duplicate same-name/same-type compatibility plans fail closed instead of
   returning the first shape. Regression:
   `expr_shape::tests::ambiguous_same_name_same_type_idless_local_shape_fails_closed`.
@@ -492,8 +519,8 @@ pub struct BindingId { pub kind: BindingKind, pub name: String, pub occurrence: 
 
 4. **Lowering now has an explicit id-less compatibility helper.**
    The original shared mutable cursor has been removed. Current
-   `expr_shape::ShapeEnv::next_local_plan_for_declared_type` filters the plan
-   slice by `(name, declared type)` and returns a plan only when the match is
+   `expr_shape::idless_compatibility_local_plan_for_declared_type` filters the
+   plan slice by `(name, declared type)` and returns a plan only when the match is
    unique, or when the erased-object boundary special case finds one
    boundary-shaped plan. It no longer has `local_plan_occurrences` or
    `consume_local_plan_occurrence`. The remaining concern is not cursor drift
@@ -591,11 +618,13 @@ looks up local plans by `BindingId`. The remaining root cause is compatibility
 only: some synthetic/parser-only IR can still arrive without a resolver id, so
 those callers must stay explicitly fenced and fail closed on ambiguity.
 
-There is no `BindingId` on the IR node. A `Stmt::VarDecl`
-(`src/java_ir.rs`) carries `ty`, `name`, `source_name`, `initializer` and no
-identity, so every phase that wants to say something *about a particular
-declaration* has to key it by something the IR does expose. Name is the only
-candidate, and name is not unique within a method body.
+Ordinary parsed Java declarations now do have resolver identity: `Param`,
+`Stmt::VarDecl`, `Stmt::EnhancedFor`, and `CatchClause` carry
+`binding: Option<BindingId>`. The remaining lossy surface is the explicit
+id-less compatibility path for synthetic/parser-only declarations whose
+`binding` is still `None`. Callers on that path must treat the source name as
+ambiguous unless the compatibility helper proves a unique `(name, declared
+type)` match.
 
 Because the key is lossy, each phase repairs the lossiness in its own way:
 `usage` merges, `signature` gives up (mechanism 2) or takes the first
@@ -605,7 +634,8 @@ Each repair is locally defensible and they compose into different answers.
 The `Option`/absence question is the same bug in a second form: a `LocalPlan`
 lookup returning `Some(plan)` cannot distinguish "this is the plan for this
 declaration" from "this is some plan for some declaration that shares this
-name". `next_local_plan_for_declared_type` returns `Option<&LocalPlan>` where
+name". `idless_compatibility_local_plan_for_declared_type` returns
+`Option<&LocalPlan>` where
 the meaningful states are *three*: planned, not-planned, and
 plan-belongs-to-a-different-binding — and the third is silently reported as the
 first.
@@ -658,7 +688,7 @@ helpers, especially callers that still cannot provide a declaration
    and the `let usage = if duplicate_names.contains(name) { None }` guards go
    away entirely — shadowed locals become ordinary distinct bindings.
    `local_constraints_for_declared_type` becomes a `HashMap` index.
-   `expr_shape::next_local_plan_for_declared_type`,
+   `expr_shape::idless_compatibility_local_plan_for_declared_type`,
    `consume_local_plan_occurrence` and the
    `Rc<RefCell<HashMap<(String,String),usize>>>` cursor go away, replaced by
    `plan.locals.get(&stmt.binding)`.
@@ -773,7 +803,7 @@ The remaining name rejoin points are:
   locals and no longer falls through to `usage.bindings.get(name)` when that id
   misses. The legacy name fallback is kept only for callers that have no binding
   id, and is still disabled for duplicate names.
-- `expr_shape::ShapeEnv::next_local_plan_for_declared_type` still exists for
+- `expr_shape::idless_compatibility_local_plan_for_declared_type` remains for
   id-less synthetic compatibility paths, but lowering no longer falls through to
   it when a source declaration has a `BindingId` and the binding-keyed plan lookup
   misses, and the compatibility lookup no longer reuses a same-name local plan
@@ -861,11 +891,12 @@ now uses `all_binding_facts()`, so a same-name binding preserved only in
 view, or `instanceof` support. Regression:
 `object_model::tests::dispatch_requirements_include_shadowed_binding_id_facts`.
 
-Follow-up 2026-08-25: the id-less synthetic local-plan cursor no longer reuses
-the first same-name erased-object plan forever. `ShapeEnv::
-next_local_plan_for_declared_type` now consumes the `(name, declared-type)`
-occurrence before selecting an erased-boundary match, so repeated compatibility
-lookups advance to the next matching plan and overrun fails closed. Regression:
+Follow-up 2026-08-25: the id-less synthetic local-plan lookup no longer reuses
+the first same-name erased-object plan forever.
+`expr_shape::idless_compatibility_local_plan_for_declared_type` now consumes the
+`(name, declared-type)` occurrence before selecting an erased-boundary match, so
+repeated compatibility lookups advance to the next matching plan and overrun
+fails closed. Regression:
 `expr_shape::tests::erased_object_local_plan_lookup_consumes_occurrences`.
 
 Follow-up 2026-08-25: signature local constraint lookup by bare name now fails
@@ -937,7 +968,7 @@ shadowing that field after the block ends. Regression:
 `usage::tests::block_scoped_local_does_not_shadow_field_after_scope`.
 
 Follow-up 2026-08-25: the remaining lowering-side
-`next_local_plan_for_declared_type` call is now fenced behind an explicitly
+`idless_compatibility_local_plan_for_declared_type` call is now fenced behind an explicitly
 named `idless_compatibility_local_plan_for_declaration` helper. Bound source
 declarations still return only the binding-keyed plan lookup result and do not
 fall through to the compatibility cursor when that lookup misses. Source guard:
@@ -958,7 +989,7 @@ Explorer follow-up 2026-08-25: the two concrete compatibility risks identified
 by the latest explorer pass are now fixed.
 
 - Fixed: id-less initialized declarations no longer select a local plan by
-  occurrence cursor. `ShapeEnv::next_local_plan_for_declared_type` now accepts a
+  occurrence cursor. `expr_shape::idless_compatibility_local_plan_for_declared_type` now accepts a
   unique declared-type match, but same-name/same-type ambiguity fails closed,
   including erased-object boundary matches. The lowering helper therefore no
   longer depends on resolver-missed lowering and signature planning traversing
@@ -989,8 +1020,8 @@ Focused guard audit 2026-08-25:
   generated-Rust outer-map case.
 - Added source guard
   `layering::idless_local_binding_compatibility_surface_stays_explicit`: the
-  only production `next_local_plan_for_declared_type` call must stay behind the
-  named `idless_compatibility_local_plan_for_declaration` helper, and
+  only production `idless_compatibility_local_plan_for_declared_type` call must
+  stay behind the named `idless_compatibility_local_plan_for_declaration` helper, and
   `collect_duplicate_declared_local_names(block)` must remain limited to the
   one source-nullability fail-closed call site plus its guard.
 
@@ -1337,11 +1368,14 @@ instead of reaching into `.bindings` directly. Regression:
 `layering::legacy_usage_binding_name_map_is_owned_by_usage_module`.
 
 Follow-up 2026-08-29: aliasing's unresolved handle receiver type lookup now
-asks `MethodUsageFacts::visible_binding_java_type_for_name` for the current
-visible binding instead of scanning whole-method same-name binding history with
-`all_binding_facts()`. A hidden earlier `String handle` can no longer make the
-current `Record handle` look ambiguous and suppress receiver-specific external
-mutation facts. Regression:
+asks `MethodUsageFacts::receiver_handle_java_type` for the current visible
+binding instead of scanning whole-method same-name binding history with
+`all_binding_facts()`. The generic `visible_binding_java_type_for_name` helper
+is private to `usage.rs`, so cross-module callers must ask the semantic receiver
+question instead of treating the compatibility name map as a general type
+environment. A hidden earlier `String handle` can no longer make the current
+`Record handle` look ambiguous and suppress receiver-specific external mutation
+facts. Regression:
 `aliasing::tests::receiver_java_type_for_handle_uses_visible_binding_over_same_name_history`.
 
 Follow-up 2026-08-29: self-mutability propagation now uses exact
@@ -1517,11 +1551,13 @@ constraints from the emitted-name-indexed constraint table. Regressions:
 `signature::tests::facade_mut_borrow_enhanced_for_receiver_type_uses_source_name`,
 and `signature::tests::string_return_borrowed_view_uses_param_source_name`.
 
-Follow-up 2026-09-07: the explicit id-less local-plan compatibility lookup is
-read-only at the type level. `ShapeEnv::idless_compatibility_local_plan_for_declared_type`
-and lower's wrapper now take immutable `ShapeEnv` references, making the
-remaining compatibility path visibly a lookup rather than another occurrence
-cursor or shape-mutating fallback.
+Follow-up 2026-09-07, tightened 2026-09-12: the explicit id-less local-plan
+compatibility lookup is read-only at the type level.
+`expr_shape::idless_compatibility_local_plan_for_declared_type` is a module-level
+compatibility primitive rather than a `ShapeEnv` method, and lower's wrapper no
+longer passes a shape environment into the id-less-only lookup. The remaining
+compatibility path is visibly a lookup rather than another occurrence cursor or
+shape-mutating fallback.
 
 Follow-up 2026-09-07: several source-IR signature collectors now compare
 keyword-escaped parameters by Java `source_name`, not emitted Rust `name`.
@@ -1633,10 +1669,10 @@ tests keep the direct stale-name/nullability assertions. Guard:
 
 Follow-up 2026-09-10 API fence: the non-binding `MethodUsageFacts` collections
 and flags are private-backed too. Call-site, constructor-call, returned-call,
-field-use, and `mutates_self` reads now go through slice/bool accessors, and
-synthetic field-use fixtures use `MethodUsageFacts::from_field_uses` instead of
-mutating the vector directly. Guard:
-`layering::usage_owns_call_site_boundary_facts`.
+field-use, and `mutates_self` reads now go through slice/bool accessors. A later
+cleanup deleted the temporary synthetic field-use constructor after it proved to
+have no callers, so field-use fixture construction no longer has a standalone
+helper. Guard: `layering::usage_owns_call_site_boundary_facts`.
 
 Follow-up 2026-09-10 API fence: `MethodUsageFacts` visible-binding scope
 maintenance is private to `usage.rs`. `snapshot_visible_binding_for_scope`,
@@ -1645,4 +1681,205 @@ maintenance is private to `usage.rs`. `snapshot_visible_binding_for_scope`,
 `visible_binding_id_for_name`, and `name_binding_is_current` no longer expose
 crate-local hooks for mutating or querying the compatibility name map directly;
 cross-module users keep the narrower typed readers. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up 2026-09-11 API fence: constructor-side rust-name compatibility usage
+helpers are gone. `UsageFacts::insert_constructor_usage_for_current_rust_name`
+was unused and deleted; integration tests that previously queried
+`constructor_usage_by_current_rust_name` now resolve the source constructor
+declaration and call `source_constructor_usage(ty, ctor)`. A later same-day pass
+removed the method-side siblings too: integration tests now resolve source
+method declarations and call `source_method_usage(ty, method)`, and the two
+synthetic rust-name method fixture builders were replaced by tiny source
+programs whose bodies produce the same usage facts through `analyze_usage`.
+Guard:
+`layering::usage_keys_hide_raw_owner_and_name_fields`.
+
+Follow-up cleanup narrowed `LocalPlan::source_name` to crate-local and deleted
+the unused `LocalPlan::access_name` accessor. The plan still carries explicit
+binding and emitted access-name data, but external tests and users no longer get
+a public convenience API that encourages treating local-plan identity as a pair
+of names instead of the resolver `BindingId`. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up cleanup also narrowed `MethodUsageFacts::from_exact_binding_facts` to
+test-only crate-local callers. Exact binding fixtures can still construct
+method-usage facts directly, but production code and external consumers keep the
+validated read-only `all_binding_facts()` view instead of a public constructor
+for binding fact maps. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up cleanup deleted the sibling `MethodUsageFacts::from_field_uses`
+constructor after narrowing showed it had no callers. Public consumers still get
+the read-only `field_uses()` accessor, while synthetic field-use map
+construction no longer has a standalone helper. Guard:
+`layering::usage_owns_call_site_boundary_facts`.
+
+Follow-up guard cleanup made the intentional public usage boundary explicit.
+`UsageFacts::source_method_usage` and `source_constructor_usage` remain public
+because they take resolved source declarations, while the Java-key, owner-key,
+and resolved-source compatibility helpers stay crate-local. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up cleanup narrowed the usage call-boundary policy carriers. The public
+factory functions still return `CallResultBoundaryPolicy`,
+`ConstructorInvocationBoundaryPolicy`, `CallArgumentBoundaryPolicy`, and
+`MethodApiBoundaryPolicy`, but those records no longer expose their raw
+name/count/type/boundary fields for external construction or mutation. Tests and
+callers assert through accessors instead. Guard:
+`layering::usage_owns_call_site_boundary_facts`.
+
+Follow-up cleanup removed the stale receiver-type argument from
+`resolved_receiver_call_boundary`. The boundary decision had already stopped
+using static receiver type to upgrade resolved source instance calls, so the
+extra parameter only preserved an id-less compatibility-looking hook. Guard:
+`usage::tests::resolved_receiver_boundary_keeps_cross_object_source_calls_unknown`.
+
+Follow-up cleanup narrowed the stored call-site usage records too.
+`CallSiteUse`, `ConstructorCallSiteUse`, and `ReturnedCallResultUse` still expose
+read-only query methods, but their raw name/count/boundary/resolved payloads are
+private-backed. Signature propagation and integration tests now read those facts
+through accessors instead of reaching into the usage record layout. Guard:
+`layering::usage_owns_call_site_boundary_facts`.
+
+Follow-up cleanup private-backed `BindingUseFacts` as well. The usage walker
+still owns mutation of binding-use payloads internally, while callers and tests
+read binding source name, optional `BindingId`, Java type, and recorded uses
+through accessors. A later cleanup narrowed `BindingUseFacts::new` to test-only
+crate-local fixtures and moved synthetic policy assertions beside
+`signature.rs`, so integration tests no longer get a public constructor for
+id-less binding fact payloads. This keeps local-binding facts from exposing a
+mutable name/id/type tuple as public identity. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Follow-up cleanup narrowed signature binding-boundary helpers that are only
+used inside the signature solver. `binding_boundary_policy`,
+`external_argument_binding_constraints`,
+`external_call_return_binding_constraints`, and
+`external_receiver_binding_constraints` are crate-local now; public callers keep
+the higher-level method/constructor/field/signature-policy entry points. The
+native collection receiver mutation assertion moved beside the helper in
+`signature.rs`, while the integration fixture keeps the end-to-end signature
+shape assertion. Guards:
+`signature::tests::external_receiver_constraints_keep_native_collection_mutable_borrow`,
+`slot_shape_design::native_collection_add_all_argument_boundary_borrows_source_content`,
+and `layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`.
+
+Codex follow-up 2026-09-12: the remaining exported slot-policy helper no longer
+asks the broad name-only question "does this method assign to this binding?".
+Callers now use
+`idless_compatibility_exact_returned_param_is_assignment_safe(...)`, which
+combines the exact-return and no-assignment checks behind the id-less
+compatibility boundary; the raw assignment scan is private to `slot_policy.rs`.
+Guard: `layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Codex follow-up 2026-09-12: signature's method and constructor constraint sets
+no longer open-code separate copies of the id-less local-name uniqueness check.
+Both wrappers still name the compatibility boundary, but they delegate the
+"duplicate visible name fails closed" policy to one private helper:
+`idless_compatibility_local_index_for_constraints(...)`. This is a fence
+tightening step only; the audit remains open for the broader id-less
+compatibility surface. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up 2026-09-12: the exact `BindingId` local-constraint lookup beside
+that compatibility path is centralized too. `MethodConstraintSet` and
+`ConstructorConstraintSet` still expose separate internal read/mutate wrappers,
+but both route through `local_index_for_binding_constraints(...)`, which also
+validates indexed entries before falling back to the local list. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up 2026-09-12: method/constructor parameter-name lookup now follows
+the same pattern. The two constraint-set wrappers delegate to
+`param_index_for_constraints(...)`, so the indexed fast path is validated once
+before falling back to the parameter list instead of keeping parallel name
+lookup snippets beside the id-less compatibility code. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up cleanup: the id-less local-name read and mutable-read wrappers
+now share `idless_compatibility_local_for_constraints(...)` and
+`idless_compatibility_local_mut_for_constraints(...)` instead of duplicating the
+index-to-local lookup in both method and constructor constraint sets. The
+exact-`BindingId` siblings now share `local_for_binding_constraints(...)` and
+`local_mut_for_binding_constraints(...)` too. This keeps the compatibility and
+exact-binding boundaries named on each wrapper while moving the shared behavior
+into private helpers. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up cleanup: declared visible-binding insertion now goes through the
+private owner-module helper `MethodUsageFacts::insert_visible_binding_for_scope`.
+The free `insert_binding_use_facts` wrapper delegates to that method instead of
+mutating `bindings`/`bindings_by_id` directly, matching the existing
+snapshot/restore/record helper boundary for the legacy visible-name map. Guard:
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Codex follow-up cleanup: the test-only visible-binding fixture constructor now
+delegates to the same private owner-module insertion policy through
+`MethodUsageFacts::insert_visible_binding_facts_for_scope(...)` instead of
+open-coding the two-map update. The helper accepts a pre-built `BindingUseFacts`
+so fixture payloads keep their existing recorded uses while the map-maintenance
+rule stays in one place. Guard:
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+
+Codex follow-up cleanup: current visible-name validation is now centralized in
+the private owner-module helper
+`MethodUsageFacts::current_visible_binding_facts_for_name(...)`. The id-less
+compatibility lookup, visible binding-id lookup, scope snapshot, and current
+name check share the same stale-map rejection path, while receiver-handle type
+lookup still requires a resolver binding id and does not treat id-less
+compatibility entries as a general type environment. Guards:
+`usage::tests::visible_binding_id_for_name_centralizes_compatibility_lookup` and
+`layering::signature_uses_usage_binding_policy_for_legacy_name_fallback`.
+The same pass moved mutable visible-name updates behind the private
+`current_visible_name_binding_mut_for_scope(...)` helper, so record-use paths
+share the same current-name-map validation before mutating the compatibility
+entry.
+
+Codex follow-up cleanup: source-constructor compatibility substitution now
+matches Java IR reads against `Param::source_name` rather than the rendered Rust
+parameter name. This closes the keyword-escaped residue in delegated
+`this(...)`/`super(...)` constructor composition. The same source-name rule now
+feeds enum payload constructor detection in both lowering and representation
+emission, and the hand-rendered enum payload accessor path emits raw identifiers
+for rawable Rust keywords. Guards:
+`idiom_gaps::source_super_constructor_composes_delegated_parameter_bindings` and
+`idiom_gaps::source_enum_constructor_payload_fields_emit_match_backed_accessors`.
+
+Codex follow-up cleanup: `ShapeEnv`'s map-view and simple-map-entry side-table
+helpers are crate-local now. Lowering and shape inference still share the
+binding-aware tables internally, but external callers cannot mutate or inspect
+those name-keyed compatibility side facts directly. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up cleanup: delegated-null constructor field constraints in
+signature analysis now compare target constructor assignments against
+`Param::source_name` rather than the emitted Rust parameter name. A delegated
+constructor target that initializes a field from a Java parameter such as
+`self` can now still mark `this(..., null)` fields nullable after Rust keyword
+renaming. Guard:
+`idiom_gaps::source_super_constructor_delegated_null_marks_flattened_field_optional`.
+
+Codex follow-up cleanup: `ShapeEnv` access-name insertion helpers are
+crate-local now. Lowering and stream lowering can still attach rendered access
+names to exact binding/source-name facts, and field/static-storage lowering can
+still attach access names to side facts, but downstream callers cannot mutate
+the name/access-name compatibility maps through public `ShapeEnv` methods.
+Guard: `layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up cleanup: the unused id-less loop-variable and catch-parameter
+compatibility insertion helpers were deleted. Shape collection still seeds
+legacy compatibility bindings through the binding-aware insertion helpers when
+no resolver `BindingId` exists, but integration tests and downstream callers no
+longer have a separate API for writing those binding-kind side facts. The
+catch-parameter insertion helper that lacks an access-name boundary is private to
+`expr_shape` now; cross-module lowering uses the exact source/emitted-name
+wrapper instead. Boundary guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up cleanup: the intermediate field/static-field/static-storage
+access-name insertion steps inside `ShapeEnv` are private unless a lowerer
+actually needs the cross-module owner-aware boundary. That keeps ordinary field
+and storage side-table mutation owned by `expr_shape`, while lowering still gets
+crate-local entry points for owner-qualified static field and type static-storage
+facts. Boundary guard:
 `layering::idless_local_binding_compatibility_surface_stays_explicit`.

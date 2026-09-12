@@ -29,7 +29,7 @@ use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, UnaryOp};
 /// Kept separate from the Rust rendering so that arithmetic happens with Java's
 /// widths and overflow behaviour rather than the target type's.
 #[derive(Debug, Clone, PartialEq)]
-pub enum ConstantValue {
+pub(crate) enum ConstantValue {
     Bool(bool),
     Int(i32),
     Long(i64),
@@ -45,7 +45,7 @@ impl ConstantValue {
     /// Returns `None` when the declared type and the folded value disagree —
     /// a mismatch means the fold was wrong, and emitting anything would defeat
     /// the point of the module.
-    pub fn rust_value_for(&self, java_ty: &JavaType) -> Option<String> {
+    pub(crate) fn rust_value_for(&self, java_ty: &JavaType) -> Option<String> {
         match (java_ty, self) {
             (JavaType::Primitive(PrimitiveType::Boolean), Self::Bool(value)) => {
                 Some(value.to_string())
@@ -151,7 +151,7 @@ fn render_f32(value: f32) -> String {
 /// 3. failing that it must be unambiguous across everything recorded;
 /// 4. otherwise nothing folds and the loud `compile_error!` stands.
 #[derive(Debug, Clone, Default)]
-pub struct ConstantScope {
+pub(crate) struct ConstantScope {
     /// Fully-qualified `pkg.Owner.FIELD`, in every alias spelling.
     qualified: BTreeMap<String, ConstantValue>,
     /// `(simple owner, field alias)` -> the qualified owners that declare it.
@@ -166,7 +166,7 @@ pub struct ConstantScope {
 }
 
 impl ConstantScope {
-    pub fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self::default()
     }
 
@@ -176,7 +176,7 @@ impl ConstantScope {
     /// `Var("sizeof_bcf_header")` and `CommonInfo.X` as
     /// `FieldAccess(Var("common_info"), "X")`. Rather than guess which spelling
     /// a given reference will use, every one is recorded.
-    pub fn record(&mut self, owner: &str, field_name: &str, value: ConstantValue) {
+    pub(crate) fn record(&mut self, owner: &str, field_name: &str, value: ConstantValue) {
         let simple_owner = owner.rsplit('.').next().unwrap_or(owner);
         for field_alias in name_aliases(field_name) {
             for owner_alias in name_aliases(owner) {
@@ -196,7 +196,11 @@ impl ConstantScope {
     ///
     /// `own` are that owner's already-folded constants, which Java makes
     /// visible as bare names inside it.
-    pub fn focus_on_owner(&mut self, package: Option<&str>, own: BTreeMap<String, ConstantValue>) {
+    pub(crate) fn focus_on_owner(
+        &mut self,
+        package: Option<&str>,
+        own: BTreeMap<String, ConstantValue>,
+    ) {
         self.package = package.map(str::to_string);
         self.own = own;
     }
@@ -251,7 +255,7 @@ fn dotted_path(expr: &Expr) -> Option<String> {
 }
 
 /// Folds `expr` if — and only if — it is a Java constant expression.
-pub fn fold_constant_expr(expr: &Expr, scope: &ConstantScope) -> Option<ConstantValue> {
+pub(crate) fn fold_constant_expr(expr: &Expr, scope: &ConstantScope) -> Option<ConstantValue> {
     match expr {
         Expr::Literal(literal) => fold_literal(literal),
         // A bare name is a constant only if it is one of the constants already

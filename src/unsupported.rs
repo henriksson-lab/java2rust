@@ -1,11 +1,11 @@
 use crate::java_ir::{Expr, Member, Stmt};
 use crate::rust_ir::{RustExpr, RustStmt};
 
-pub fn compile_error_stmt(message: &str) -> RustStmt {
+pub(crate) fn compile_error_stmt(message: &str) -> RustStmt {
     RustStmt::Expr(compile_error_expr(message))
 }
 
-pub fn compile_error_expr(message: &str) -> RustExpr {
+pub(crate) fn compile_error_expr(message: &str) -> RustExpr {
     RustExpr::MacroCall {
         macro_name: "compile_error".to_string(),
         args: vec![RustExpr::Literal(format!("{message:?}"))],
@@ -14,7 +14,7 @@ pub fn compile_error_expr(message: &str) -> RustExpr {
 
 /// A `compile_error!` at item position, for a refusal that has no expression or
 /// statement to attach to.
-pub fn compile_error_item_text(message: &str) -> String {
+pub(crate) fn compile_error_item_text(message: &str) -> String {
     format!("compile_error!({message:?});")
 }
 
@@ -24,7 +24,7 @@ pub fn compile_error_item_text(message: &str) -> String {
 /// type-check for the surrounding item to parse, so the refusal is paired with
 /// a value. Used for external constants that have a declared type and no
 /// modelled value.
-pub fn compile_error_value_text(message: &str, value: &str) -> String {
+pub(crate) fn compile_error_value_text(message: &str, value: &str) -> String {
     format!("{{ compile_error!({message:?}); {value} }}")
 }
 
@@ -34,11 +34,11 @@ pub fn compile_error_value_text(message: &str, value: &str) -> String {
 /// known well enough to name a value — naming the type as a value works only
 /// for a unit struct and fails with `E0423` as soon as the type resolves
 /// through an alias.
-pub fn compile_error_diverging_text(message: &str) -> String {
+pub(crate) fn compile_error_diverging_text(message: &str) -> String {
     compile_error_value_text(message, &format!("panic!({message:?})"))
 }
 
-pub fn compile_error_expr_consuming(expr: &RustExpr, message: &str) -> RustExpr {
+pub(crate) fn compile_error_expr_consuming(expr: &RustExpr, message: &str) -> RustExpr {
     RustExpr::Block {
         stmts: vec![RustStmt::Let {
             mutable: false,
@@ -80,16 +80,43 @@ pub enum UnsupportedMemberLowering {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedLoweringMessagePolicy {
-    pub message: String,
+    message: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnsupportedDiagnosticPolicy {
-    pub code: &'static str,
-    pub message: String,
+    code: &'static str,
+    message: String,
+}
+
+impl UnsupportedDiagnosticPolicy {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
 }
 
 impl UnsupportedLoweringMessagePolicy {
+    pub fn new(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+        }
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     pub fn compile_error_stmt(&self) -> RustStmt {
         compile_error_stmt(&self.message)
     }
@@ -99,26 +126,26 @@ impl UnsupportedLoweringMessagePolicy {
     }
 }
 
-pub fn unsupported_constructor_body(kind: UnsupportedConstructorLowering) -> Vec<RustStmt> {
+pub(crate) fn unsupported_constructor_body(kind: UnsupportedConstructorLowering) -> Vec<RustStmt> {
     let policy = unsupported_constructor_message_policy(kind);
     vec![
         policy.compile_error_stmt(),
         RustStmt::Return(Some(RustExpr::MacroCall {
             macro_name: "panic".to_string(),
-            args: vec![RustExpr::Literal(format!("{:?}", policy.message))],
+            args: vec![RustExpr::Literal(format!("{:?}", policy.message()))],
         })),
     ]
 }
 
-pub fn unsupported_statement_stmt(kind: UnsupportedStatementLowering) -> RustStmt {
+pub(crate) fn unsupported_statement_stmt(kind: UnsupportedStatementLowering) -> RustStmt {
     unsupported_statement_message_policy(kind).compile_error_stmt()
 }
 
-pub fn unsupported_try_catch_finally_stmt() -> RustStmt {
+pub(crate) fn unsupported_try_catch_finally_stmt() -> RustStmt {
     unsupported_statement_stmt(UnsupportedStatementLowering::TryCatchFinally)
 }
 
-pub fn unsupported_expression_expr(kind: UnsupportedExpressionLowering) -> RustExpr {
+pub(crate) fn unsupported_expression_expr(kind: UnsupportedExpressionLowering) -> RustExpr {
     unsupported_expression_message_policy(kind).compile_error_expr()
 }
 
@@ -180,37 +207,28 @@ pub(crate) fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemb
     }
 }
 
-pub fn unsupported_constructor_message_policy(
+pub(crate) fn unsupported_constructor_message_policy(
     kind: UnsupportedConstructorLowering,
 ) -> UnsupportedLoweringMessagePolicy {
-    UnsupportedLoweringMessagePolicy {
-        message: constructor_message(kind),
-    }
+    UnsupportedLoweringMessagePolicy::new(constructor_message(kind))
 }
 
-pub fn unsupported_statement_message_policy(
+pub(crate) fn unsupported_statement_message_policy(
     kind: UnsupportedStatementLowering,
 ) -> UnsupportedLoweringMessagePolicy {
-    UnsupportedLoweringMessagePolicy {
-        message: statement_message(kind),
-    }
+    UnsupportedLoweringMessagePolicy::new(statement_message(kind))
 }
 
-pub fn unsupported_expression_message_policy(
+pub(crate) fn unsupported_expression_message_policy(
     kind: UnsupportedExpressionLowering,
 ) -> UnsupportedLoweringMessagePolicy {
-    UnsupportedLoweringMessagePolicy {
-        message: expression_message(kind),
-    }
+    UnsupportedLoweringMessagePolicy::new(expression_message(kind))
 }
 
-pub fn unsupported_member_diagnostic_policy(
+pub(crate) fn unsupported_member_diagnostic_policy(
     kind: UnsupportedMemberLowering,
 ) -> UnsupportedDiagnosticPolicy {
-    UnsupportedDiagnosticPolicy {
-        code: "unsupported_member",
-        message: member_message(kind),
-    }
+    UnsupportedDiagnosticPolicy::new("unsupported_member", member_message(kind))
 }
 
 fn constructor_message(kind: UnsupportedConstructorLowering) -> String {
@@ -235,6 +253,95 @@ fn member_message(kind: UnsupportedMemberLowering) -> String {
     match kind {
         UnsupportedMemberLowering::ParserUnsupported(reason) => reason,
     }
+}
+
+#[cfg(test)]
+#[test]
+fn unsupported_lowering_policy_owns_compile_error_placeholders() {
+    let statement_policy =
+        unsupported_statement_message_policy(UnsupportedStatementLowering::LocalTypeDeclaration);
+    assert_eq!(
+        statement_policy.message(),
+        "unsupported Java statement: local type declaration"
+    );
+    assert_eq!(
+        statement_policy.compile_error_stmt(),
+        RustStmt::Expr(RustExpr::MacroCall {
+            macro_name: "compile_error".to_string(),
+            args: vec![RustExpr::Literal(
+                "\"unsupported Java statement: local type declaration\"".to_string()
+            )],
+        })
+    );
+
+    let constructor_policy = unsupported_constructor_message_policy(
+        UnsupportedConstructorLowering::SuperRequiresInheritanceLowering,
+    );
+    assert_eq!(
+        constructor_policy.message(),
+        "unsupported Java constructor: super(...) requires inheritance lowering"
+    );
+    assert_eq!(
+        unsupported_constructor_body(
+            UnsupportedConstructorLowering::SuperRequiresInheritanceLowering
+        ),
+        vec![
+            RustStmt::Expr(RustExpr::MacroCall {
+                macro_name: "compile_error".to_string(),
+                args: vec![RustExpr::Literal(
+                    "\"unsupported Java constructor: super(...) requires inheritance lowering\""
+                        .to_string()
+                )],
+            }),
+            RustStmt::Return(Some(RustExpr::MacroCall {
+                macro_name: "panic".to_string(),
+                args: vec![RustExpr::Literal(
+                    "\"unsupported Java constructor: super(...) requires inheritance lowering\""
+                        .to_string()
+                )],
+            })),
+        ]
+    );
+
+    assert_eq!(
+        unsupported_expression_message_policy(UnsupportedExpressionLowering::MethodReference)
+            .message(),
+        "unsupported Java expression: method reference"
+    );
+    let unsupported_member_policy = unsupported_member_diagnostic_policy(
+        UnsupportedMemberLowering::ParserUnsupported("record component".to_string()),
+    );
+    assert_eq!(unsupported_member_policy.code(), "unsupported_member");
+    assert_eq!(unsupported_member_policy.message(), "record component");
+    assert_eq!(
+        unsupported_statement_stmt(UnsupportedStatementLowering::LocalTypeDeclaration),
+        RustStmt::Expr(RustExpr::MacroCall {
+            macro_name: "compile_error".to_string(),
+            args: vec![RustExpr::Literal(
+                "\"unsupported Java statement: local type declaration\"".to_string()
+            )],
+        })
+    );
+    assert_eq!(
+        unsupported_expression_expr(UnsupportedExpressionLowering::MethodReference),
+        compile_error_expr("unsupported Java expression: method reference")
+    );
+    assert_eq!(
+        unsupported_expression_expr(UnsupportedExpressionLowering::ParserUnsupported(
+            "unsupported expression node: weird_\"quoted\"_\\_node".to_string()
+        )),
+        compile_error_expr(
+            "unsupported Java expression: unsupported expression node: weird_\"quoted\"_\\_node"
+        )
+    );
+    let message = "unsupported \"quoted\" Java path \\pkg\\Type with {braces} and \"#";
+    assert_eq!(
+        crate::emit::emit_expr(&compile_error_expr_consuming(
+            &RustExpr::Var("value".to_string()),
+            message
+        )),
+        format!("{{ let _ = value; compile_error!({message:?}) }}")
+    );
 }
 
 fn statement_message(kind: UnsupportedStatementLowering) -> String {

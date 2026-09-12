@@ -38,16 +38,16 @@ use new_java2rust::external_packs::{
     unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
-    BorrowedReturnRecovery, CallableKey, CallableKind, ClosedHierarchyFact, ExceptionFact,
-    ExceptionKind, ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact,
-    ExternalApiRole, ExternalArgumentAliasPolicy, ExternalConstructorFact,
-    ExternalCrateApiMappingFact, ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact,
-    ExternalFieldFact, ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact,
-    FacadeAbiFact, FacadeSlot, FactProvenance, FactSet, FieldKey, FieldNullabilityFact,
-    FieldNullabilityProvenance, HierarchyOverride, HierarchyStrategy, NullabilityState,
-    ObjectSafetyFact, ObjectSafetyViolation, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
-    Staticness, TypeCapabilityOverride, UnsupportedExternalApiFact,
-    UnsupportedExternalConstructorFact, UnsupportedExternalFieldFact,
+    BorrowedReturnRecovery, CallableKey, ClosedHierarchyFact, ExceptionFact, ExceptionKind,
+    ExternalApiArgumentEffectFact, ExternalApiCoverage, ExternalApiEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalConstructorFact, ExternalCrateApiMappingFact,
+    ExternalCrateConstructorMappingFact, ExternalCrateTypeMappingFact, ExternalFieldFact,
+    ExternalFieldKind, ExternalLibraryMode, ExternalLibraryPackFact, FacadeAbiFact, FacadeSlot,
+    FactProvenance, FactSet, FieldKey, FieldNullabilityFact, FieldNullabilityProvenance,
+    HierarchyOverride, HierarchyStrategy, NullabilityState, ObjectSafetyFact,
+    ObjectSafetyViolation, ReceiverAbi, ReceiverMutabilityFact, ResultAbi, Staticness,
+    TypeCapabilityOverride, UnsupportedExternalApiFact, UnsupportedExternalConstructorFact,
+    UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
 use new_java2rust::{parser, resolve, semantic_analysis};
@@ -936,8 +936,8 @@ fn builtin_external_member_lookup_uses_cached_pack_facts() {
             arity,
             true,
         );
-        assert_eq!(policy.role, role);
-        assert_eq!(policy.provenance, FactProvenance::ExternalLibraryPack);
+        assert_eq!(policy.role(), role);
+        assert_eq!(policy.provenance(), FactProvenance::ExternalLibraryPack);
     }
 
     let gatk_constants_pack = utils_facts
@@ -1050,7 +1050,7 @@ fn commons_math_localized_formats_implements_localizable_pack_trait() {
     assert!(
         facts
             .hierarchy_subtype_policy(&localized_formats, &localizable)
-            .reaches,
+            .reaches(),
         "LocalizedFormats should implement Localizable through Commons Math pack facts"
     );
 }
@@ -1494,7 +1494,7 @@ fn pack_owned_domain_getters_take_precedence_over_generic_stdlib_provenance() {
                 0,
                 true,
             )
-            .provenance,
+            .provenance(),
             FactProvenance::ExternalLibraryPack,
             "{receiver}.{method} should be owned by its external pack, not generic stdlib"
         );
@@ -1507,7 +1507,7 @@ fn pack_owned_domain_getters_take_precedence_over_generic_stdlib_provenance() {
             0,
             true,
         )
-        .provenance,
+        .provenance(),
         FactProvenance::BuiltinExternalModel,
         "unlinked libraries should keep reusable stdlib getter inference"
     );
@@ -2201,9 +2201,9 @@ fn parsed_external_pack_manifest_reports_members_outside_declared_boundaries() {
         "external_pack_manifest_unowned_exception_fact",
     ] {
         assert!(
-            parsed.diagnostics.has_code(code),
+            parsed.diagnostics().has_code(code),
             "parsed manifest should report {code}: {:?}",
-            parsed.diagnostics
+            parsed.diagnostics()
         );
     }
 }
@@ -2216,15 +2216,19 @@ fn external_pack_manifest_parser_records_type_level_rust_type_name() {
         "#,
     );
 
-    assert!(parsed.diagnostics.is_empty(), "{:?}", parsed.diagnostics);
+    assert!(
+        parsed.diagnostics().is_empty(),
+        "{:?}",
+        parsed.diagnostics()
+    );
     assert_eq!(
         parsed
-            .facts
+            .facts()
             .external_crate_rust_type_name_for("dep.variant.Reader"),
         Some("ReaderHandle")
     );
     assert_eq!(
-        parsed.facts.external_crate_rust_type_name_for("Reader"),
+        parsed.facts().external_crate_rust_type_name_for("Reader"),
         Some("ReaderHandle")
     );
 }
@@ -2362,13 +2366,13 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         "#,
     );
     assert!(
-        parsed.diagnostics.is_empty(),
+        parsed.diagnostics().is_empty(),
         "manifest parse should be clean: {:?}",
-        parsed.diagnostics
+        parsed.diagnostics()
     );
 
     let pack = parsed
-        .facts
+        .facts()
         .external_library_pack_for_type("dep.variant.Record")
         .expect("parsed package prefix should produce a pack boundary fact");
     assert_eq!(pack.pack_name, "dep.variant");
@@ -2381,7 +2385,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     assert_eq!(pack.provenance, FactProvenance::ExternalLibraryPack);
 
     let record_strategy = parsed
-        .facts
+        .facts()
         .hierarchy_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Record")
@@ -2392,7 +2396,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         FactProvenance::ExternalLibraryPack
     );
     let builder_strategy = parsed
-        .facts
+        .facts()
         .hierarchy_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Builder")
@@ -2404,7 +2408,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         }
     );
     let kind_strategy = parsed
-        .facts
+        .facts()
         .hierarchy_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Kind")
@@ -2417,14 +2421,14 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         }
     );
     let value_strategy = parsed
-        .facts
+        .facts()
         .hierarchy_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Value")
         .expect("concrete strategy should be parsed");
     assert_eq!(value_strategy.strategy, HierarchyStrategy::ConcreteStruct);
     let kind_closed = parsed
-        .facts
+        .facts()
         .closed_hierarchy_facts
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Kind")
@@ -2433,7 +2437,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     assert_eq!(kind_closed.provenance, FactProvenance::ExternalLibraryPack);
 
     let record_capability = parsed
-        .facts
+        .facts()
         .type_capability_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Record")
@@ -2445,21 +2449,21 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         FactProvenance::ExternalLibraryPack
     );
     assert!(
-        parsed.facts.is_clone_type(&JavaType::Named {
+        parsed.facts().is_clone_type(&JavaType::Named {
             name: "dep.variant.record".to_string(),
             args: Vec::new(),
         }),
         "capability facts should be addressable by resolver-canonical qualified spelling"
     );
     assert!(
-        parsed.facts.is_final_type(&JavaType::Named {
+        parsed.facts().is_final_type(&JavaType::Named {
             name: "dep.variant.record".to_string(),
             args: Vec::new(),
         }),
         "final capability lookup should normalize qualified type spellings"
     );
     assert_eq!(
-        parsed.facts.sequence_element_type_for(&JavaType::Named {
+        parsed.facts().sequence_element_type_for(&JavaType::Named {
             name: "dep.variant.Collection".to_string(),
             args: Vec::new(),
         }),
@@ -2469,7 +2473,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         })
     );
     assert_eq!(
-        parsed.facts.sequence_element_type_for(&JavaType::Named {
+        parsed.facts().sequence_element_type_for(&JavaType::Named {
             name: "dep.variant.collection".to_string(),
             args: Vec::new(),
         }),
@@ -2481,21 +2485,21 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     );
     assert_eq!(
         parsed
-            .facts
+            .facts()
             .object_safe_trait_fact_for_name("dep.variant.named"),
         Some(true),
         "object-safe capability lookup should normalize qualified type spellings"
     );
     assert_eq!(
         parsed
-            .facts
+            .facts()
             .closed_hierarchy_fact_for_name("dep.variant.kind"),
         Some(true),
         "closed-hierarchy lookup should normalize qualified type spellings"
     );
     assert!(
         parsed
-            .facts
+            .facts()
             .has_object_representation_facts(&JavaType::Named {
                 name: "dep.variant.record".to_string(),
                 args: Vec::new(),
@@ -2503,7 +2507,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         "representation fact presence should normalize qualified type spellings"
     );
     let named_record = parsed
-        .facts
+        .facts()
         .type_capability_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.NamedRecord")
@@ -2522,7 +2526,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         ]
     );
     let named = parsed
-        .facts
+        .facts()
         .type_capability_overrides
         .iter()
         .find(|fact| fact.type_name == "dep.variant.Named")
@@ -2536,7 +2540,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         })
     );
     let generic_factory_safety = parsed
-        .facts
+        .facts()
         .object_safety_facts
         .iter()
         .find(|fact| fact.type_name == "dep.variant.GenericFactory")
@@ -2559,7 +2563,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         ]
     );
     let generic_factory_capability = parsed
-        .facts
+        .facts()
         .type_capability_overrides
         .iter()
         .find(|fact| {
@@ -2571,7 +2575,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         FactProvenance::ExternalLibraryPack
     );
     let type_field = parsed
-        .facts
+        .facts()
         .field_nullability_facts
         .iter()
         .find(|fact| {
@@ -2584,7 +2588,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         FieldNullabilityProvenance::ExternalLibraryPack
     );
     let set_contig_argument = parsed
-        .facts
+        .facts()
         .external_api_argument_effect_for_receiver(Some("dep.variant.Builder"), "setContig", 0)
         .expect("external-pack-argument should emit an argument effect fact");
     assert_eq!(set_contig_argument.parameter_type, Some(JavaType::String));
@@ -2605,7 +2609,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         FactProvenance::ExternalLibraryPack
     );
     let builder_constructor_argument = parsed
-        .facts
+        .facts()
         .external_constructor_argument_effect_for("dep.variant.Builder", 2, 1)
         .expect("external-pack-constructor-argument should emit a constructor argument fact");
     assert_eq!(
@@ -2628,14 +2632,17 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         ExternalArgumentAliasPolicy::Borrowed
     );
     let builder_constructor = parsed
-        .facts
-        .external_constructor_for_key(&CallableKey::constructor(
+        .facts()
+        .external_constructor_for(
             "dep.variant.Builder",
-            vec![
-                new_java2rust::facts::TypePattern::Any,
-                new_java2rust::facts::TypePattern::erased("Options"),
+            &[
+                JavaType::Unknown("_".to_string()),
+                JavaType::Named {
+                    name: "Options".to_string(),
+                    args: Vec::new(),
+                },
             ],
-        ))
+        )
         .expect("constructor argument type facts should refine constructor callable keys");
     assert_eq!(
         builder_constructor.arg_types,
@@ -2648,13 +2655,13 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
         ]
     );
     let conversion_adapter = parsed
-        .facts
+        .facts()
         .external_conversion_adapter_for("dep.variant.Leaf", "dep.variant.Root")
         .expect("external-pack-conversion should emit a conversion adapter fact");
     assert_eq!(conversion_adapter.from_type, "dep.variant.Leaf");
     assert_eq!(conversion_adapter.to_type, "dep.variant.Root");
     let decode_error = parsed
-        .facts
+        .facts()
         .exception_facts
         .iter()
         .find(|fact| fact.type_name == "dep.variant.DecodeError")
@@ -2662,13 +2669,15 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     assert_eq!(decode_error.kind, ExceptionKind::Checked);
     assert_eq!(decode_error.provenance, FactProvenance::ExternalLibraryPack);
     assert_eq!(
-        parsed.facts.exception_kind_for("dep.variant.decode_error"),
+        parsed
+            .facts()
+            .exception_kind_for("dep.variant.decode_error"),
         Some(ExceptionKind::Checked),
         "exception facts should be addressable by resolver-canonical qualified spelling"
     );
 
     let getter = parsed
-        .facts
+        .facts()
         .external_api_effect_for_receiver(Some("dep.variant.Record"), "getContig")
         .expect("modeled manifest API should produce an external API effect fact");
     assert_eq!(getter.role, ExternalApiRole::Getter);
@@ -2681,7 +2690,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     assert_eq!(getter.provenance, FactProvenance::ExternalLibraryPack);
 
     let reader = parsed
-        .facts
+        .facts()
         .external_api_effect_for_receiver_with_arity(Some("dep.variant.Reader"), "read", Some(1))
         .expect("mapped manifest API should still be represented as a fact");
     assert_eq!(reader.arg_count, Some(1));
@@ -2694,14 +2703,14 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     );
     assert_eq!(
         parsed
-            .facts
+            .facts()
             .external_rust_return_type_for_receiver(Some("dep.variant.Reader"), "read", Some(1))
             .map(|fact| fact.rust_type_name.as_str()),
         Some("usize")
     );
     assert_eq!(
         parsed
-            .facts
+            .facts()
             .external_crate_api_mapping_for_receiver("dep.variant.Reader", "read", Some(1))
             .map(|mapping| mapping.rust_name.as_str()),
         None,
@@ -2709,13 +2718,13 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     );
 
     let constructor = parsed
-        .facts
+        .facts()
         .external_constructor_for("dep.variant.Builder", &[])
         .expect("manifest constructor entry should produce constructor fact");
     assert_eq!(constructor.provenance, FactProvenance::ExternalLibraryPack);
 
     let field = parsed
-        .facts
+        .facts()
         .external_field_for("dep.variant.Record", "TYPE")
         .expect("manifest field entry should produce field fact");
     assert_eq!(field.provenance, FactProvenance::ExternalLibraryPack);
@@ -2728,20 +2737,20 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     );
     assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
     let field_value = parsed
-        .facts
+        .facts()
         .external_field_value_for("dep.variant.Record", "TYPE")
         .expect("manifest field value metadata should produce a value fact");
     assert_eq!(field_value.rust_value, "DepVariantKind::TYPE");
 
     let unsupported = parsed
-        .facts
+        .facts()
         .unsupported_external_api_for_receiver("dep.variant.Reader", "rawDecode")
         .expect("unsupported manifest entry should produce explicit diagnostic fact");
     assert_eq!(unsupported.pack_name, "dep.variant");
     assert_eq!(unsupported.reason, "requires runtime codec state");
 
     let unsupported_constructor = parsed
-        .facts
+        .facts()
         .unsupported_external_constructor_for("dep.variant.LegacyReader", 1)
         .expect("unsupported manifest constructor should produce explicit diagnostic fact");
     assert_eq!(unsupported_constructor.pack_name, "dep.variant");
@@ -2751,7 +2760,7 @@ fn external_pack_manifest_parser_emits_pack_boundary_and_member_facts() {
     );
 
     let unsupported_field = parsed
-        .facts
+        .facts()
         .unsupported_external_field_for("dep.variant.Record", "RAW_HANDLE")
         .expect("unsupported manifest field should produce explicit diagnostic fact");
     assert_eq!(unsupported_field.pack_name, "dep.variant");
@@ -2786,24 +2795,20 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
         external-pack-field dep.keys dep.keys.Record TYPE semantic type=dep.keys.RecordType const-kind=enum-variant
         "#,
     );
-    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
 
-    let method_key = CallableKey::method("dep.keys.Record", "name", Staticness::Unknown, 0);
-    let method = parsed
-        .facts
-        .external_api_effect_for_key(&method_key)
+    let parsed_index = parsed.facts().external_lookup_index();
+    let method = parsed_index
+        .external_api_effect_for_call(Some("dep.keys.Record"), "name", &[])
         .expect("method fact should be addressable by callable key");
     assert_eq!(method.return_type, Some(JavaType::String));
 
-    let parse_key = CallableKey::method_with_params(
-        "dep.keys.Record",
-        "parse",
-        Staticness::Unknown,
-        vec![new_java2rust::facts::TypePattern::exact("String")],
-    );
-    let parse_method = parsed
-        .facts
-        .external_api_effect_for_key(&parse_key)
+    let parse_method = parsed_index
+        .external_api_effect_for_call(Some("dep.keys.Record"), "parse", &[JavaType::String])
         .expect("typed method fact should be addressable by parameterized callable key");
     assert_eq!(parse_method.return_type, Some(JavaType::String));
     assert!(
@@ -2811,42 +2816,25 @@ fn callable_keys_lookup_external_pack_api_constructor_and_field_facts() {
             .callable_key()
             .is_some_and(|key| !matches!(key.params(), [new_java2rust::facts::TypePattern::Any]))
     );
-    let parsed_index = parsed.facts.external_lookup_index();
     let typed_call = parsed_index
         .external_api_effect_for_call(Some("dep.keys.Record"), "parse", &[JavaType::String])
         .expect("call-shaped lookup should select typed external API facts");
     assert_eq!(typed_call.return_type, Some(JavaType::String));
 
-    let constructor_key = CallableKey::constructor(
-        "dep.keys.Builder",
-        vec![new_java2rust::facts::TypePattern::Any],
-    );
     let constructor = parsed
-        .facts
-        .external_constructor_for_key(&constructor_key)
+        .facts()
+        .external_constructor_for("dep.keys.Builder", &[JavaType::Unknown("_".to_string())])
         .expect("constructor fact should be addressable by callable key");
     assert_eq!(constructor.arg_types.len(), 1);
 
-    let field_key = CallableKey::field(
-        "dep.keys.Record",
-        "TYPE",
-        CallableKind::StaticField,
-        Staticness::Static,
-    );
     let field = parsed
-        .facts
-        .external_field_for_key(&field_key)
+        .facts()
+        .external_field_for("dep.keys.Record", "TYPE")
         .expect("field fact should be addressable by callable key");
     assert_eq!(field.field_kind, ExternalFieldKind::EnumVariant);
 
-    let builtin_key = CallableKey::field(
-        "GenotypeType",
-        "HET",
-        CallableKind::StaticField,
-        Staticness::Static,
-    );
-    let builtin_field = new_java2rust::external_packs::external_field_for_key(&builtin_key)
-        .expect("builtin pack field should be addressable through the key index");
+    let builtin_field = new_java2rust::external_packs::external_field_for("GenotypeType", "HET")
+        .expect("builtin pack field should be addressable through the shaped lookup");
     assert_eq!(builtin_field.field_kind, ExternalFieldKind::EnumVariant);
 }
 
@@ -2859,28 +2847,13 @@ fn external_api_params_can_declare_type_parameter_patterns() {
         external-pack-api dep.typeparam dep.typeparam.Box acceptAny semantic getter read-only definitely-non-null params=String return=String
         "#,
     );
-    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
-
-    let type_param_key = CallableKey::method_with_params(
-        "dep.typeparam.Box",
-        "acceptAny",
-        Staticness::Unknown,
-        vec![new_java2rust::facts::TypePattern::TypeParam(
-            "T".to_string(),
-        )],
-    );
-    let type_param_fact = parsed
-        .facts
-        .external_api_effect_for_key(&type_param_key)
-        .expect("type-parameter pattern should be addressable by callable key");
-    assert_eq!(
-        type_param_fact.parameter_patterns,
-        Some(vec![new_java2rust::facts::TypePattern::TypeParam(
-            "T".to_string()
-        )])
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
     );
 
-    let index = parsed.facts.external_lookup_index();
+    let index = parsed.facts().external_lookup_index();
     let exact = index
         .external_api_effect_for_call(Some("dep.typeparam.Box"), "acceptAny", &[JavaType::String])
         .expect("exact String pattern should still outrank the type-parameter fallback");
@@ -2900,6 +2873,12 @@ fn external_api_params_can_declare_type_parameter_patterns() {
             args: Vec::new(),
         })
     );
+    assert_eq!(
+        fallback.parameter_patterns,
+        Some(vec![new_java2rust::facts::TypePattern::TypeParam(
+            "T".to_string()
+        )])
+    );
 }
 
 #[test]
@@ -2909,10 +2888,14 @@ fn external_fact_api_params_can_declare_type_parameter_patterns() {
         external-api accept dep.override.Box getter read-only definitely-non-null params=type-param:E return=Object
         "#,
     );
-    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
 
     let fact = parsed
-        .facts
+        .facts()
         .external_api_effect_for_receiver(Some("dep.override.Box"), "accept")
         .expect("external fact override should produce an API effect fact");
     assert_eq!(fact.arg_count, Some(1));
@@ -2926,16 +2909,18 @@ fn external_fact_api_params_can_declare_type_parameter_patterns() {
 
 #[test]
 fn builtin_external_pack_constructor_lookup_uses_callable_key_index() {
-    let key = CallableKey::constructor("HDF5File", vec![new_java2rust::facts::TypePattern::Any]);
-    let constructor = new_java2rust::external_packs::external_constructor_for_key(&key)
-        .expect("builtin constructor fact should remain addressable by callable key");
+    let constructor = new_java2rust::external_packs::external_constructor_for(
+        "HDF5File",
+        &[JavaType::Unknown("_".to_string())],
+    )
+    .expect("builtin constructor fact should remain addressable through the shaped lookup");
 
     assert_eq!(constructor.type_name, "HDF5File");
     assert_eq!(constructor.arg_types.len(), 1);
 }
 
 #[test]
-fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
+fn facade_abi_lookup_uses_external_method_shape_and_prefers_user_override() {
     let key = CallableKey::method("dep.facade.Reader", "read", Staticness::Unknown, 1);
     let mut facts = FactSet::default();
     facts.facade_abi_facts.push(FacadeAbiFact {
@@ -2962,8 +2947,8 @@ fn facade_abi_lookup_uses_callable_key_and_prefers_user_override() {
     });
 
     let selected = facts
-        .facade_abi_for_key(&key)
-        .expect("facade ABI should be addressable by callable key");
+        .facade_abi_for_external_method("dep.facade.Reader", "read", 1)
+        .expect("facade ABI should be addressable by external method shape");
     assert_eq!(selected.rust_path, "override_facade::read");
     assert_eq!(selected.receiver, ReceiverAbi::FreeFunction);
 }
@@ -3018,10 +3003,14 @@ fn external_pack_rust_usize_return_declares_index_facade_slot() {
         external-pack-api dep.index dep.index.Reader position semantic getter read-only definitely-non-null args=0 return=int rust-return=usize
         "#,
     );
-    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
 
     let fact = parsed
-        .facts
+        .facts()
         .external_rust_return_type_facts
         .iter()
         .find(|fact| fact.receiver_type.as_deref() == Some("dep.index.Reader"))
@@ -3038,10 +3027,14 @@ fn external_pack_rust_crate_return_declares_crate_handle_facade_slot() {
         external-pack-api dep.handle dep.handle.Reader handle semantic getter read-only definitely-non-null args=0 return=dep.handle.Handle rust-return=dep_facade::ReaderHandle
         "#,
     );
-    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
 
     let fact = parsed
-        .facts
+        .facts()
         .external_rust_return_type_facts
         .iter()
         .find(|fact| fact.receiver_type.as_deref() == Some("dep.handle.Reader"))
@@ -3077,10 +3070,14 @@ fn external_pack_rust_borrowed_return_declares_recovery_policy() {
         external-pack-api dep.path dep.path.Reader file semantic getter read-only definitely-non-null args=0 return=dep.path.File rust-return=&std::path::Path borrowed-return-recovery=to-path-buf
         "#,
     );
-    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+    assert!(
+        !parsed.diagnostics().has_errors(),
+        "{:?}",
+        parsed.diagnostics()
+    );
 
     let fact = parsed
-        .facts
+        .facts()
         .external_rust_return_type_facts
         .iter()
         .find(|fact| fact.receiver_type.as_deref() == Some("dep.path.Reader"))
@@ -3102,7 +3099,7 @@ fn external_pack_manifest_parser_feeds_semantic_analysis_without_lowering_rules(
         external-pack-constructor dep.io Reader 0 mapped rust-type=ReaderHandle rust=open
         "#,
     );
-    assert!(parsed.diagnostics.is_empty());
+    assert!(parsed.diagnostics().is_empty());
 
     let source = r#"
 package app;
@@ -3116,7 +3113,7 @@ class UseDependency {
     let program = parser::parse_java_source(source).program;
     let resolved = resolve::resolve_program(&program, Default::default());
     let semantic =
-        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &parsed.facts);
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, parsed.facts());
 
     let read = semantic
         .facts
@@ -3171,9 +3168,9 @@ fn parsed_external_pack_manifest_owns_missing_and_unsupported_diagnostics() {
         "#,
     );
     assert!(
-        parsed.diagnostics.is_empty(),
+        parsed.diagnostics().is_empty(),
         "manifest parse should be clean: {:?}",
-        parsed.diagnostics
+        parsed.diagnostics()
     );
 
     let source = r#"
@@ -3206,21 +3203,29 @@ class UseParsedPackCoverage {
     let program = parser::parse_java_source(source).program;
     let resolved = resolve::resolve_program(&program, Default::default());
     let semantic =
-        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &parsed.facts);
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, parsed.facts());
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_unsupported_api"
-            && diagnostic.message.contains("Reader.rawDecode")
-            && diagnostic.message.contains("dep.runtime")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_unsupported_api"
+                    && diagnostic.message().contains("Reader.rawDecode")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "unsupported parsed-pack APIs should produce pack-owned diagnostics: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_unsupported_api"
-            && diagnostic.message.contains("Reader.inlineRawDecode")
-            && diagnostic.message.contains("dep.runtime")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_unsupported_api"
+                    && diagnostic.message().contains("Reader.inlineRawDecode")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "inline unsupported parsed-pack API coverage should produce the same pack-owned diagnostic: {:?}",
         semantic.diagnostics
     );
@@ -3228,43 +3233,61 @@ class UseParsedPackCoverage {
         semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"
-                && diagnostic.message.contains("Reader.unmodeled")
-                && diagnostic.message.contains("dep.runtime")),
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic.message().contains("Reader.unmodeled")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "missing parsed-pack APIs should produce pack-owned diagnostics: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_constructor"
-            && diagnostic.message.contains("Reader constructor")
-            && diagnostic.message.contains("2 argument")
-            && diagnostic.message.contains("dep.runtime")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_constructor"
+                    && diagnostic.message().contains("Reader constructor")
+                    && diagnostic.message().contains("2 argument")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "missing parsed-pack constructors should produce pack-owned diagnostics: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_unsupported_constructor"
-            && diagnostic.message.contains("Reader constructor")
-            && diagnostic.message.contains("1 argument")
-            && diagnostic.message.contains("dep.runtime")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_unsupported_constructor"
+                    && diagnostic.message().contains("Reader constructor")
+                    && diagnostic.message().contains("1 argument")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "unsupported parsed-pack constructors should produce pack-owned diagnostics: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_field"
-            && diagnostic.message.contains("Reader.UNMODELED")
-            && diagnostic.message.contains("dep.runtime")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_field"
+                    && diagnostic.message().contains("Reader.UNMODELED")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "missing parsed-pack fields should produce pack-owned diagnostics: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_unsupported_field"
-            && diagnostic.message.contains("Reader.UNSUPPORTED")
-            && diagnostic.message.contains("dep.runtime")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_unsupported_field"
+                    && diagnostic.message().contains("Reader.UNSUPPORTED")
+                    && diagnostic.message().contains("dep.runtime")
+            ),
         "unsupported parsed-pack fields should produce pack-owned diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -3325,11 +3348,11 @@ fn external_pack_manifest_parser_reports_invalid_manifest_lines() {
         "#,
     );
 
-    assert!(parsed.diagnostics.has_errors());
-    assert_eq!(parsed.diagnostics.len(), 9);
+    assert!(parsed.diagnostics().has_errors());
+    assert_eq!(parsed.diagnostics().len(), 9);
     assert!(
         parsed
-            .diagnostics
+            .diagnostics()
             .has_code("external_pack_manifest_parse_error")
     );
 }
@@ -3390,9 +3413,9 @@ class VariantContextMapEntryLoop {
 
     assert!(
         semantic.diagnostics.iter().all(|diagnostic| {
-            !(diagnostic.code == "external_pack_missing_api"
-                && (diagnostic.message.contains("Allele.getKey")
-                    || diagnostic.message.contains("Allele.getValue")))
+            !(diagnostic.code() == "external_pack_missing_api"
+                && (diagnostic.message().contains("Allele.getKey")
+                    || diagnostic.message().contains("Allele.getValue")))
         }),
         "Map.Entry accessors should not be attributed to the Allele external pack: {:?}",
         semantic.diagnostics
@@ -3832,7 +3855,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             1,
             true,
         )
-        .provenance,
+        .provenance(),
         FactProvenance::ExternalLibraryPack,
         "Allele.create precision should come from the variantcontext pack, not stdlib"
     );
@@ -3851,7 +3874,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             0,
             true,
         )
-        .provenance,
+        .provenance(),
         FactProvenance::ExternalLibraryPack,
         "Allele.getBaseString precision should come from the variantcontext pack, not stdlib"
     );
@@ -3874,7 +3897,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
                 0,
                 true,
             )
-            .provenance,
+            .provenance(),
             FactProvenance::ExternalLibraryPack,
             "{receiver}.{method} precision should come from the variantcontext pack, not stdlib"
         );
@@ -3886,7 +3909,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             1,
             true,
         )
-        .provenance,
+        .provenance(),
         FactProvenance::BuiltinExternalModel,
         "Object-inherited methods stay generic builtin even when a pack also models the receiver"
     );
@@ -3897,7 +3920,7 @@ fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
             0,
             true,
         )
-        .provenance,
+        .provenance(),
         FactProvenance::BuiltinExternalModel,
         "unknown-library domain getters should keep the generic stdlib fallback"
     );
@@ -4095,8 +4118,8 @@ class VariantValidationCatchOrder {
     );
     assert!(
         semantic.diagnostics.iter().all(|diagnostic| {
-            diagnostic.code != "external_pack_missing_api"
-                && diagnostic.code != "external_api_unsupported"
+            diagnostic.code() != "external_pack_missing_api"
+                && diagnostic.code() != "external_api_unsupported"
         }),
         "VariantContext exception flow should be covered by pack facts, got {:?}",
         semantic.diagnostics
@@ -4155,8 +4178,8 @@ class VariantContextPilotUse {
 
     assert!(
         semantic.diagnostics.iter().all(|diagnostic| {
-            diagnostic.code != "external_pack_missing_api"
-                && diagnostic.code != "external_api_unsupported"
+            diagnostic.code() != "external_pack_missing_api"
+                && diagnostic.code() != "external_api_unsupported"
         }),
         "VariantContext pilot flow should be covered by pack facts, got {:?}",
         semantic.diagnostics
@@ -4309,8 +4332,8 @@ class VariantContextReadFlowUse {
 
     assert!(
         semantic.diagnostics.iter().all(|diagnostic| {
-            diagnostic.code != "external_pack_missing_api"
-                && diagnostic.code != "external_api_unsupported"
+            diagnostic.code() != "external_pack_missing_api"
+                && diagnostic.code() != "external_api_unsupported"
         }),
         "VariantContext read flow should be covered by pack facts, got {:?}",
         semantic.diagnostics
@@ -4471,8 +4494,8 @@ class VariantContextGenotypeFlowUse {
 
     assert!(
         semantic.diagnostics.iter().all(|diagnostic| {
-            diagnostic.code != "external_pack_missing_api"
-                && diagnostic.code != "external_api_unsupported"
+            diagnostic.code() != "external_pack_missing_api"
+                && diagnostic.code() != "external_api_unsupported"
         }),
         "VariantContext genotype flow should be covered by pack facts, got {:?}",
         semantic.diagnostics
@@ -5973,8 +5996,10 @@ class VcfPackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"
-                && diagnostic.message.contains("VariantContextWriterBuilder")),
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic.message().contains("VariantContextWriterBuilder")
+            ),
         "modeled VCF writer builder calls should not produce pack-missing diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -6074,7 +6099,7 @@ class OptimizationBoundaryUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_constructor"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_constructor"),
         "modeled Apache Commons Math optimization constructors should not report pack gaps"
     );
 
@@ -6336,9 +6361,13 @@ class HelpCategoryUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Picard program-group constructors and getters should not report pack gaps"
     );
 
@@ -6442,9 +6471,13 @@ class AvroSchemaParserUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Avro parser constructors and parse should not report pack gaps"
     );
 
@@ -6554,7 +6587,7 @@ class BarclayDocExceptionUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_constructor"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_constructor"),
         "modeled Barclay DocException constructors should not report pack gaps"
     );
 
@@ -6678,7 +6711,7 @@ class BarclayArgparserUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_constructor"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_constructor"),
         "modeled nested Barclay exception constructors should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -6761,9 +6794,13 @@ class ScalaTuple4Use {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Scala Tuple4 constructors and accessors should not report pack gaps"
     );
 
@@ -6984,9 +7021,13 @@ class KryoPrimitiveIoUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Kryo primitive IO constructor and methods should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -7045,7 +7086,7 @@ class KryoObjectSerializationUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_api"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_api"),
         "modeled Kryo object serialization and close methods should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -7088,9 +7129,13 @@ class KryoCollectionSerializerUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Kryo serializer constructors should not report pack gaps"
     );
 
@@ -7213,9 +7258,13 @@ class OpenCsvIoUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled OpenCSV constructors and APIs should not report pack gaps"
     );
 
@@ -7366,9 +7415,13 @@ class JsonRuntimeUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled org.json constructors and APIs should not report pack gaps"
     );
 
@@ -7481,9 +7534,13 @@ class ReflectionsRuntimeUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Reflections constructors and discovery APIs should not report pack gaps"
     );
 
@@ -7685,9 +7742,13 @@ class HadoopConfigurationUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Hadoop Configuration constructors and APIs should not report pack gaps"
     );
 
@@ -7796,9 +7857,13 @@ class ApacheCommonsConfigurationUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Apache Commons Configuration constructors and APIs should not report pack gaps"
     );
 
@@ -8359,9 +8424,13 @@ class SparkRuntimeUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Spark constructors and APIs should not report pack gaps"
     );
 
@@ -8566,10 +8635,14 @@ class BwaNativeWrapperUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_field"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_field"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled BWA constructors, fields, and methods should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -8729,9 +8802,13 @@ class JGraphTRuntimeUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled JGraphT constructors and APIs should not report pack gaps"
     );
 
@@ -8906,9 +8983,13 @@ class FastutilRuntimeUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled fastutil constructors and APIs should not report pack gaps"
     );
 
@@ -9034,7 +9115,7 @@ fn disq_write_pack_declares_temp_parts_option_boundary() {
         assert!(
             facts
                 .hierarchy_subtype_policy(&concrete_ty, &write_option_ty)
-                .reaches,
+                .reaches(),
             "{type_name} should implement WriteOption through DISQ pack facts"
         );
         let conversion = facts
@@ -9101,9 +9182,13 @@ class DisqWriteOptionUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled DISQ write-option constructors should not report pack gaps"
     );
 
@@ -9302,10 +9387,14 @@ class IntelGklNativeUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_field"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_field"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Intel GKL native wrappers should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -9503,9 +9592,13 @@ class GuavaImmutableMapBuilderUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled Guava ImmutableMap.Builder constructors and methods should not report pack gaps"
     );
 
@@ -9797,10 +9890,14 @@ class BroadHttpRetrySettingsUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"
-            && diagnostic.code != "external_pack_missing_field"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+                    && diagnostic.code() != "external_pack_missing_field"
+            ),
         "modeled Broad HTTP settings constructors, field, and redirect should not report pack gaps"
     );
 
@@ -10087,9 +10184,13 @@ class PicardVcfTruthAndCallStatesUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_field"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_field"
+            ),
         "modeled Picard VCF constructor and fields should not report pack gaps"
     );
 
@@ -10911,7 +11012,7 @@ class SamHeaderPackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "newly modeled SAM header calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -11698,9 +11799,13 @@ class SamRecordUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled SAMRecord constructor and getters should not report pack gaps"
     );
 
@@ -12022,9 +12127,13 @@ class ReferenceUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled SAM reference constructors and getters should not report pack gaps"
     );
 
@@ -12162,13 +12271,13 @@ fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
     assert!(
         facts
             .hierarchy_subtype_policy(&simple_feature_ty, &feature_ty)
-            .reaches,
+            .reaches(),
         "SimpleFeature -> Feature should be provided by external pack capability facts"
     );
     assert!(
         facts
             .hierarchy_subtype_policy(&simple_feature_ty, &locatable_ty)
-            .reaches,
+            .reaches(),
         "SimpleFeature -> Locatable should be provided by external pack capability facts"
     );
     assert!(
@@ -12788,7 +12897,7 @@ class SamReaderFactoryUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_api"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_api"),
         "modeled SAM reader factory helpers should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -12829,7 +12938,7 @@ class SamWriterFactoryUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_api"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_api"),
         "modeled SAM writer factory helper should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -13180,7 +13289,7 @@ class CommonsCollectionsUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_api"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_api"),
         "modeled MultiMap helpers should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -13363,7 +13472,7 @@ fn apache_commons_compress_and_lang_packs_declare_helper_constructor_boundaries(
                 arg_len,
                 true,
             )
-            .provenance,
+            .provenance(),
             FactProvenance::ExternalLibraryPack,
             "{type_name}.{method_name}/{arg_len} precision should come from the Apache Commons Lang pack, not stdlib"
         );
@@ -13453,9 +13562,13 @@ class CommonsLangMutableCounterUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().all(|diagnostic| diagnostic.code
-            != "external_pack_missing_constructor"
-            && diagnostic.code != "external_pack_missing_api"),
+        semantic
+            .diagnostics
+            .iter()
+            .all(
+                |diagnostic| diagnostic.code() != "external_pack_missing_constructor"
+                    && diagnostic.code() != "external_pack_missing_api"
+            ),
         "modeled MutableInt constructor and methods should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -13745,7 +13858,7 @@ class JamaMatrixUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_api"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_api"),
         "modeled Jama matrix helpers should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -14761,7 +14874,7 @@ class GenomicsDbPackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "modeled GenomicsDB pack calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -15815,7 +15928,7 @@ class HtsjdkHeaderWriteUse {
         semantic
             .diagnostics
             .iter()
-            .all(|diagnostic| diagnostic.code != "external_pack_missing_api"),
+            .all(|diagnostic| diagnostic.code() != "external_pack_missing_api"),
         "modeled HTSJDK header/binary codec helpers should not report pack gaps: {:?}",
         semantic.diagnostics
     );
@@ -16344,7 +16457,7 @@ class SamtoolsUtilPackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "newly modeled samtools util calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -16356,7 +16469,7 @@ fn user_override_beats_variantcontext_pack_fact() {
     let override_facts = parse_external_facts(
         "external-api getAttribute VariantContext getter read-only definitely-non-null",
     );
-    facts.extend_from(override_facts.facts);
+    facts.extend_from(override_facts.facts().clone());
 
     let attribute = facts
         .external_api_effect_for_receiver(Some("VariantContext"), "getAttribute")
@@ -16386,11 +16499,11 @@ class VariantContextOverrideUse {
         "external-api getAttribute VariantContext getter read-only definitely-non-null args=1 return=Object",
     );
     assert!(
-        override_facts.diagnostics.is_empty(),
+        override_facts.diagnostics().is_empty(),
         "{:?}",
-        override_facts.diagnostics
+        override_facts.diagnostics()
     );
-    facts.extend_from(override_facts.facts);
+    facts.extend_from(override_facts.facts().clone());
 
     let semantic = semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &facts);
     let attribute = semantic
@@ -16417,8 +16530,10 @@ class VariantContextOverrideUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"
-                && diagnostic.message.contains("VariantContext.getAttribute")),
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic.message().contains("VariantContext.getAttribute")
+            ),
         "user-overridden pack APIs should remain covered by the external boundary: {:?}",
         semantic.diagnostics
     );
@@ -16452,8 +16567,10 @@ class ObjectMethodOnPackTypeUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"
-                && diagnostic.message.contains("Allele.equals")),
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic.message().contains("Allele.equals")
+            ),
         "inherited Object methods should not produce pack-missing diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -16487,8 +16604,10 @@ class AlleleEqualsOverloadUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"
-                && diagnostic.message.contains("Allele.equals")),
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic.message().contains("Allele.equals")
+            ),
         "modeled Allele.equals overload should not produce pack-missing diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -16519,8 +16638,10 @@ class NestedEnumNameUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"
-                && diagnostic.message.contains("SortOrder.name")),
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic.message().contains("SortOrder.name")
+            ),
         "SAM header nested enum name() should not produce pack-missing diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -17908,7 +18029,7 @@ class VariantPackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "newly modeled GATK-shaped variantcontext calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -17981,7 +18102,7 @@ class VariantUtilsObservedPackUse {
             !semantic
                 .diagnostics
                 .iter()
-                .any(|diagnostic| diagnostic.message.contains(needle)),
+                .any(|diagnostic| diagnostic.message().contains(needle)),
             "{needle} should be covered by external pack facts, diagnostics were {:?}",
             semantic.diagnostics
         );
@@ -18003,9 +18124,13 @@ class UnsupportedVariantPackUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_unsupported_api"
-            && diagnostic.message.contains("VariantContext.fullyDecode")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_unsupported_api"
+                    && diagnostic.message().contains("VariantContext.fullyDecode")
+            ),
         "unsupported pack APIs should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18032,12 +18157,18 @@ class MissingVariantPackUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_api"
-            && diagnostic
-                .message
-                .contains("VariantContext.unmodeledPackMethod")
-            && diagnostic.message.contains("htsjdk.variant.variantcontext")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic
+                        .message()
+                        .contains("VariantContext.unmodeledPackMethod")
+                    && diagnostic
+                        .message()
+                        .contains("htsjdk.variant.variantcontext")
+            ),
         "missing pack APIs should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18106,12 +18237,16 @@ class MissingHdf5PackUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_api"
-            && diagnostic
-                .message
-                .contains("HDF5File.unmodeledNativeBoundary")
-            && diagnostic.message.contains("hdf5")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic
+                        .message()
+                        .contains("HDF5File.unmodeledNativeBoundary")
+                    && diagnostic.message().contains("hdf5")
+            ),
         "missing HDF5 facade APIs should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18136,10 +18271,14 @@ class MissingHdf5ConstructorUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_constructor"
-            && diagnostic.message.contains("HDF5File constructor")
-            && diagnostic.message.contains("hdf5")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_constructor"
+                    && diagnostic.message().contains("HDF5File constructor")
+                    && diagnostic.message().contains("hdf5")
+            ),
         "missing HDF5 facade constructors should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18175,10 +18314,14 @@ class MissingHdf5FieldUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_field"
-            && diagnostic.message.contains("HDF5File.unmodeledField")
-            && diagnostic.message.contains("hdf5")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_field"
+                    && diagnostic.message().contains("HDF5File.unmodeledField")
+                    && diagnostic.message().contains("hdf5")
+            ),
         "missing HDF5 facade fields should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18205,12 +18348,16 @@ class MissingSqlitePackUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_api"
-            && diagnostic
-                .message
-                .contains("SQLiteConnection.unmodeledStatementFactory")
-            && diagnostic.message.contains("sqlite")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic
+                        .message()
+                        .contains("SQLiteConnection.unmodeledStatementFactory")
+                    && diagnostic.message().contains("sqlite")
+            ),
         "missing SQLite facade APIs should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18235,10 +18382,14 @@ class MissingSqliteConstructorUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_constructor"
-            && diagnostic.message.contains("SQLiteConfig constructor")
-            && diagnostic.message.contains("sqlite")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_constructor"
+                    && diagnostic.message().contains("SQLiteConfig constructor")
+                    && diagnostic.message().contains("sqlite")
+            ),
         "missing SQLite facade constructors should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18264,10 +18415,16 @@ class MissingSqliteFieldUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_field"
-            && diagnostic.message.contains("SQLiteConfig.unmodeledOption")
-            && diagnostic.message.contains("sqlite")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_field"
+                    && diagnostic
+                        .message()
+                        .contains("SQLiteConfig.unmodeledOption")
+                    && diagnostic.message().contains("sqlite")
+            ),
         "missing SQLite facade fields should produce a pack-owned diagnostic"
     );
     assert!(
@@ -18747,7 +18904,7 @@ class Hdf5PackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "newly modeled HDF5 facade calls should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -19591,7 +19748,7 @@ class JdbcSqlitePackUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.code == "external_pack_missing_api"),
+            .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "modeled JDBC workflow should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
     );
@@ -19616,21 +19773,29 @@ class HeavyJdbcResultUse {
 
     for method in ["getBlob", "getClob", "getArray", "getSQLXML"] {
         assert!(
-            semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-                == "external_pack_unsupported_api"
-                && diagnostic
-                    .message
-                    .contains(&format!("java.sql.ResultSet.{method}"))
-                && diagnostic.message.contains("java.sql")),
+            semantic
+                .diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.code() == "external_pack_unsupported_api"
+                        && diagnostic
+                            .message()
+                            .contains(&format!("java.sql.ResultSet.{method}"))
+                        && diagnostic.message().contains("java.sql")
+                ),
             "unsupported JDBC {method} should produce a java.sql pack-owned diagnostic: {:?}",
             semantic.diagnostics
         );
         assert!(
-            !semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-                == "external_pack_missing_api"
-                && diagnostic
-                    .message
-                    .contains(&format!("java.sql.ResultSet.{method}"))),
+            !semantic
+                .diagnostics
+                .iter()
+                .any(
+                    |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                        && diagnostic
+                            .message()
+                            .contains(&format!("java.sql.ResultSet.{method}"))
+                ),
             "unsupported JDBC {method} should not also be reported as a missing pack API: {:?}",
             semantic.diagnostics
         );
@@ -19655,42 +19820,58 @@ class MissingJdbcPackUse {
     );
 
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_api"
-            && diagnostic
-                .message
-                .contains("java.sql.Connection.unmodeledConnectionMethod")
-            && diagnostic.message.contains("java.sql")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic
+                        .message()
+                        .contains("java.sql.Connection.unmodeledConnectionMethod")
+                    && diagnostic.message().contains("java.sql")
+            ),
         "missing JDBC connection APIs should produce a java.sql pack-owned diagnostic: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_api"
-            && diagnostic
-                .message
-                .contains("java.sql.ResultSet.unmodeledResultSetMethod")
-            && diagnostic.message.contains("java.sql")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_api"
+                    && diagnostic
+                        .message()
+                        .contains("java.sql.ResultSet.unmodeledResultSetMethod")
+                    && diagnostic.message().contains("java.sql")
+            ),
         "missing JDBC result-set APIs should produce a java.sql pack-owned diagnostic: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_field"
-            && diagnostic
-                .message
-                .contains("java.sql.ResultSet.unmodeledColumn")
-            && diagnostic.message.contains("java.sql")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_field"
+                    && diagnostic
+                        .message()
+                        .contains("java.sql.ResultSet.unmodeledColumn")
+                    && diagnostic.message().contains("java.sql")
+            ),
         "missing JDBC result-set fields should produce a java.sql pack-owned diagnostic: {:?}",
         semantic.diagnostics
     );
     assert!(
-        semantic.diagnostics.iter().any(|diagnostic| diagnostic.code
-            == "external_pack_missing_constructor"
-            && diagnostic
-                .message
-                .contains("java.sql.Connection constructor")
-            && diagnostic.message.contains("java.sql")),
+        semantic
+            .diagnostics
+            .iter()
+            .any(
+                |diagnostic| diagnostic.code() == "external_pack_missing_constructor"
+                    && diagnostic
+                        .message()
+                        .contains("java.sql.Connection constructor")
+                    && diagnostic.message().contains("java.sql")
+            ),
         "missing JDBC facade constructors should produce a java.sql pack-owned diagnostic: {:?}",
         semantic.diagnostics
     );
@@ -19822,7 +20003,7 @@ class ProjectConnectionUse {
         !semantic
             .diagnostics
             .iter()
-            .any(|diagnostic| diagnostic.message.contains("external pack java.sql")),
+            .any(|diagnostic| diagnostic.message().contains("external pack java.sql")),
         "java.sql pack should not report missing APIs for project Connection/Class names: {:?}",
         semantic.diagnostics
     );

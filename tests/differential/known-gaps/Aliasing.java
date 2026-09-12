@@ -1,10 +1,11 @@
 /**
  * Java reference assignment creates a second name for one object. The
- * translation has no shared representation to lower that into, so it copies.
+ * translation still has no SharedLocal representation to lower that into.
  *
- * Every line below is a case where the copy is observable. Java prints
- * "5|7|3|9|11|13|17|19"; the translation computes stale values once each struct
- * derives Clone.
+ * Every line below is a case where copying would be observable. Java prints
+ * "5|7|3|9|11|13|17|19"; the current known-gap harness requires the translator
+ * to fail loudly with observable_alias/storage_strategy_disagreement rather
+ * than accepting stale clone semantics.
  */
 public class Aliasing {
     static class Node {

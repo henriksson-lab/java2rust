@@ -33,7 +33,8 @@ impl CallGraph {
         &self.edges
     }
 
-    pub fn from_edges(edges: Vec<CallGraphEdge>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_edges(edges: Vec<CallGraphEdge>) -> Self {
         Self {
             nodes: edges
                 .iter()
@@ -137,22 +138,25 @@ impl CallableKey {
         }
     }
 
-    pub fn resolved_method(resolved: &ResolvedCall) -> Self {
+    pub(crate) fn resolved_method(resolved: &ResolvedCall) -> Self {
         Self::method_identity(resolved.declaring_type.clone(), resolved.rust_name.clone())
     }
 
-    pub fn method_identity(type_name: impl Into<String>, method_name: impl Into<String>) -> Self {
+    pub(crate) fn method_identity(
+        type_name: impl Into<String>,
+        method_name: impl Into<String>,
+    ) -> Self {
         CallableKey::Method {
             type_name: type_name.into(),
             method_name: method_name.into(),
         }
     }
 
-    pub fn resolved_constructor(resolved: &ResolvedConstructor) -> Self {
+    pub(crate) fn resolved_constructor(resolved: &ResolvedConstructor) -> Self {
         Self::constructor_identity(resolved.declaring_type.clone(), resolved.rust_name.clone())
     }
 
-    pub fn constructor_identity(
+    pub(crate) fn constructor_identity(
         type_name: impl Into<String>,
         rust_name: impl Into<String>,
     ) -> Self {
@@ -174,7 +178,7 @@ impl CallableKey {
         }
     }
 
-    pub fn external_constructor(type_name: impl Into<String>, arg_count: usize) -> Self {
+    pub(crate) fn external_constructor(type_name: impl Into<String>, arg_count: usize) -> Self {
         CallableKey::ExternalConstructor {
             type_name: type_name.into(),
             arg_count,
@@ -279,7 +283,8 @@ pub struct CallGraphEdge {
 }
 
 impl CallGraphEdge {
-    pub fn new(caller: CallableKey, callee: CallableKey, kind: CallGraphEdgeKind) -> Self {
+    #[cfg(test)]
+    pub(crate) fn new(caller: CallableKey, callee: CallableKey, kind: CallGraphEdgeKind) -> Self {
         Self {
             caller,
             callee,
@@ -393,10 +398,24 @@ impl UsageConstructorKey {
     }
 }
 
+fn rust_method_family_key_matches(
+    key: &UsageMethodKey,
+    type_name: &str,
+    method_name: &str,
+) -> bool {
+    if key.type_name() != type_name {
+        return false;
+    }
+    let rust_base = crate::parser::to_snake_case(method_name);
+    let overload_prefix = format!("{rust_base}_");
+    key.method_name() == rust_base || key.method_name().starts_with(&overload_prefix)
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MethodUsageFacts {
     bindings: HashMap<String, BindingUseFacts>,
     bindings_by_id: HashMap<BindingId, BindingUseFacts>,
+    type_params_in_scope: Vec<String>,
     call_sites: Vec<CallSiteUse>,
     constructor_call_sites: Vec<ConstructorCallSiteUse>,
     returned_call_results: Vec<ReturnedCallResultUse>,
@@ -405,66 +424,38 @@ pub struct MethodUsageFacts {
 }
 
 impl UsageFacts {
-    pub(crate) fn method_usage_by_key(&self, key: &UsageMethodKey) -> Option<&MethodUsageFacts> {
+    fn method_usage_by_key(&self, key: &UsageMethodKey) -> Option<&MethodUsageFacts> {
         self.methods.get(key)
     }
 
-    pub(crate) fn constructor_usage_by_key(
-        &self,
-        key: &UsageConstructorKey,
-    ) -> Option<&MethodUsageFacts> {
+    fn constructor_usage_by_key(&self, key: &UsageConstructorKey) -> Option<&MethodUsageFacts> {
         self.constructors.get(key)
     }
 
-    pub fn method_usage_by_current_rust_name(
+    pub(crate) fn current_rust_method_usage(
         &self,
-        type_name: impl AsRef<str>,
-        method_name: impl AsRef<str>,
+        type_name: &str,
+        method_name: &str,
     ) -> Option<&MethodUsageFacts> {
         self.method_usage_by_key(&UsageMethodKey::current_rust_method_name(
-            type_name.as_ref(),
-            method_name.as_ref(),
+            type_name,
+            method_name,
         ))
     }
 
-    pub fn constructor_usage_by_current_rust_name(
+    pub(crate) fn current_rust_constructor_usage(
         &self,
-        type_name: impl AsRef<str>,
-        rust_name: impl AsRef<str>,
+        type_name: &str,
+        rust_name: &str,
     ) -> Option<&MethodUsageFacts> {
         self.constructor_usage_by_key(&UsageConstructorKey::current_rust_constructor_name(
-            type_name.as_ref(),
-            rust_name.as_ref(),
+            type_name, rust_name,
         ))
     }
 
     #[cfg(test)]
     pub(crate) fn insert_method_usage(&mut self, key: UsageMethodKey, usage: MethodUsageFacts) {
         self.methods.insert(key, usage);
-    }
-
-    pub fn insert_method_usage_for_current_rust_name(
-        &mut self,
-        type_name: impl Into<String>,
-        method_name: impl Into<String>,
-        usage: MethodUsageFacts,
-    ) {
-        self.methods.insert(
-            UsageMethodKey::current_rust_method_name(type_name, method_name),
-            usage,
-        );
-    }
-
-    pub fn insert_constructor_usage_for_current_rust_name(
-        &mut self,
-        type_name: impl Into<String>,
-        rust_name: impl Into<String>,
-        usage: MethodUsageFacts,
-    ) {
-        self.constructors.insert(
-            UsageConstructorKey::current_rust_constructor_name(type_name, rust_name),
-            usage,
-        );
     }
 
     pub(crate) fn method_entries(
@@ -487,16 +478,25 @@ impl UsageFacts {
         self.constructors.values()
     }
 
-    pub(crate) fn rust_name_method_entries(
+    pub(crate) fn binding_facts_for_rust_method_family(
         &self,
-    ) -> impl Iterator<Item = (&UsageMethodKey, &MethodUsageFacts)> {
-        self.methods_by_rust_name.iter()
+        type_name: &str,
+        method_name: &str,
+        binding_id: &BindingId,
+    ) -> Option<&BindingUseFacts> {
+        let mut matches = self
+            .methods_by_rust_name
+            .iter()
+            .filter_map(|(key, method)| {
+                rust_method_family_key_matches(key, type_name, method_name)
+                    .then(|| method.binding_facts_for_id(binding_id))
+                    .flatten()
+            });
+        let first = matches.next()?;
+        matches.next().is_none().then_some(first)
     }
 
-    pub(crate) fn source_method_usage_by_java_key(
-        &self,
-        key: &JavaCallableKey,
-    ) -> Option<&MethodUsageFacts> {
+    fn source_method_usage_by_java_key(&self, key: &JavaCallableKey) -> Option<&MethodUsageFacts> {
         self.methods_by_java_key.get(key)
     }
 
@@ -508,7 +508,7 @@ impl UsageFacts {
         self.source_method_usage_for_owner(JavaOwnerKey::source_type(ty), method)
     }
 
-    pub(crate) fn source_method_usage_for_owner(
+    fn source_method_usage_for_owner(
         &self,
         owner: JavaOwnerKey,
         method: &crate::java_ir::MethodDecl,
@@ -516,6 +516,14 @@ impl UsageFacts {
         self.source_method_usage_by_java_key(&JavaCallableKey::source_method_for_owner(
             owner, method,
         ))
+    }
+
+    pub(crate) fn resolved_source_method_usage_for_owner(
+        &self,
+        owner: &str,
+        method: &crate::java_ir::MethodDecl,
+    ) -> Option<&MethodUsageFacts> {
+        self.source_method_usage_for_owner(JavaOwnerKey::resolved_source(owner), method)
     }
 
     pub(crate) fn resolved_source_method_usage(
@@ -526,7 +534,7 @@ impl UsageFacts {
         self.source_method_usage_by_java_key(&resolved_source_method_key(resolved, source_name))
     }
 
-    pub(crate) fn source_constructor_usage(
+    pub fn source_constructor_usage(
         &self,
         ty: &TypeDecl,
         ctor: &crate::java_ir::ConstructorDecl,
@@ -547,8 +555,14 @@ impl UsageFacts {
             .insert(JavaCallableKey::source_method_for_type(ty, method), usage);
     }
 
-    pub(crate) fn source_method_usage_java_keys(&self) -> impl Iterator<Item = &JavaCallableKey> {
-        self.methods_by_java_key.keys()
+    pub(crate) fn source_method_usage_has_collapsed_owner_alias(
+        &self,
+        aliases: &[&str],
+        java_name: &str,
+    ) -> bool {
+        self.methods_by_java_key
+            .keys()
+            .any(|key| aliases.contains(&key.owner()) && key.java_name() == java_name)
     }
 
     pub(crate) fn insert_rust_name_method_usage(
@@ -598,11 +612,8 @@ impl MethodUsageFacts {
         self.mutates_self
     }
 
-    pub fn from_field_uses(field_uses: impl IntoIterator<Item = FieldUse>) -> Self {
-        Self {
-            field_uses: field_uses.into_iter().collect(),
-            ..Self::default()
-        }
+    pub fn type_params_in_scope(&self) -> &[String] {
+        &self.type_params_in_scope
     }
 
     #[cfg(test)]
@@ -610,7 +621,10 @@ impl MethodUsageFacts {
         self.mutates_self = true;
     }
 
-    pub fn from_exact_binding_facts(bindings: impl IntoIterator<Item = BindingUseFacts>) -> Self {
+    #[cfg(test)]
+    pub(crate) fn from_exact_binding_facts(
+        bindings: impl IntoIterator<Item = BindingUseFacts>,
+    ) -> Self {
         let mut facts = Self::default();
         for binding in bindings {
             if let Some(binding_id) = binding.binding.clone() {
@@ -639,10 +653,7 @@ impl MethodUsageFacts {
     ) -> Self {
         let mut facts = Self::default();
         for binding in bindings {
-            if let Some(binding_id) = binding.binding.clone() {
-                facts.bindings_by_id.insert(binding_id, binding.clone());
-            }
-            facts.bindings.insert(binding.name.clone(), binding);
+            facts.insert_visible_binding_facts_for_scope(binding);
         }
         facts
     }
@@ -678,6 +689,10 @@ impl MethodUsageFacts {
         &self,
         name: &str,
     ) -> Option<&BindingUseFacts> {
+        self.current_visible_binding_facts_for_name(name)
+    }
+
+    fn current_visible_binding_facts_for_name(&self, name: &str) -> Option<&BindingUseFacts> {
         let name_binding = self.bindings.get(name)?;
         if !self.binding_use_facts_are_current(name, name_binding) {
             return None;
@@ -697,22 +712,18 @@ impl MethodUsageFacts {
     }
 
     fn visible_binding_id_for_name(&self, name: &str) -> Option<BindingId> {
-        let binding = self.bindings.get(name)?;
-        if !self.binding_use_facts_are_current(name, binding) {
-            return None;
-        }
-        let binding_id = binding.binding.clone()?;
-        self.bindings_by_id
-            .get(&binding_id)
-            .filter(|facts| binding_id_facts_are_current(&binding_id, facts))
-            .map(|_| binding_id)
+        self.current_visible_binding_facts_for_name(name)
+            .and_then(|binding| binding.binding.clone())
     }
 
-    pub(crate) fn visible_binding_java_type_for_name(&self, name: &str) -> Option<&JavaType> {
-        let binding_id = self.visible_binding_id_for_name(name)?;
-        self.bindings_by_id
-            .get(&binding_id)
-            .map(|binding| &binding.java_ty)
+    fn visible_binding_java_type_for_name(&self, name: &str) -> Option<&JavaType> {
+        let binding = self.current_visible_binding_facts_for_name(name)?;
+        binding.binding.as_ref()?;
+        Some(&binding.java_ty)
+    }
+
+    pub(crate) fn receiver_handle_java_type(&self, handle: &str) -> Option<&JavaType> {
+        self.visible_binding_java_type_for_name(handle)
     }
 
     pub(crate) fn binding_facts_for_id(&self, binding_id: &BindingId) -> Option<&BindingUseFacts> {
@@ -722,17 +733,22 @@ impl MethodUsageFacts {
     }
 
     fn name_binding_is_current(&self, name: &str) -> bool {
-        let Some(binding) = self.bindings.get(name) else {
-            return false;
-        };
-        self.binding_use_facts_are_current(name, binding)
+        self.current_visible_binding_facts_for_name(name).is_some()
     }
 
     fn snapshot_visible_binding_for_scope(&self, name: &str) -> Option<BindingUseFacts> {
-        self.bindings
-            .get(name)
-            .filter(|binding| self.binding_use_facts_are_current(name, binding))
-            .cloned()
+        self.current_visible_binding_facts_for_name(name).cloned()
+    }
+
+    fn current_visible_name_binding_mut_for_scope(
+        &mut self,
+        name: &str,
+    ) -> Option<&mut BindingUseFacts> {
+        if self.name_binding_is_current(name) {
+            self.bindings.get_mut(name)
+        } else {
+            None
+        }
     }
 
     fn hide_visible_binding_for_scope(&mut self, name: &str) -> Option<BindingUseFacts> {
@@ -764,14 +780,38 @@ impl MethodUsageFacts {
         }
     }
 
+    fn insert_visible_binding_for_scope(
+        &mut self,
+        name: String,
+        binding: Option<BindingId>,
+        java_ty: JavaType,
+    ) -> Option<BindingUseFacts> {
+        let binding_facts = BindingUseFacts {
+            name: name.clone(),
+            binding: binding.clone(),
+            java_ty,
+            uses: Vec::new(),
+        };
+        self.insert_visible_binding_facts_for_scope(binding_facts)
+    }
+
+    fn insert_visible_binding_facts_for_scope(
+        &mut self,
+        binding_facts: BindingUseFacts,
+    ) -> Option<BindingUseFacts> {
+        let name = binding_facts.name.clone();
+        if let Some(binding) = binding_facts.binding.clone() {
+            self.bindings_by_id.insert(binding, binding_facts.clone());
+        }
+        self.bindings.insert(name, binding_facts)
+    }
+
     fn record_visible_binding_use(&mut self, name: &str, usage: BindingUse) {
         if let Some(binding_id) = self.visible_binding_id_for_name(name) {
             if let Some(binding) = self.bindings_by_id.get_mut(&binding_id) {
                 binding.uses.push(usage);
             }
-        } else if self.name_binding_is_current(name)
-            && let Some(binding) = self.bindings.get_mut(name)
-        {
+        } else if let Some(binding) = self.current_visible_name_binding_mut_for_scope(name) {
             binding.uses.push(usage);
         }
     }
@@ -793,9 +833,7 @@ impl MethodUsageFacts {
                 recorded_by_id = true;
             }
         }
-        if self.name_binding_is_current(name)
-            && let Some(binding) = self.bindings.get_mut(name)
-        {
+        if let Some(binding) = self.current_visible_name_binding_mut_for_scope(name) {
             binding.uses.push(usage);
         } else if !recorded_by_id {
             self.record_visible_binding_use(name, usage);
@@ -858,10 +896,43 @@ fn binding_id_facts_are_current(binding_id: &BindingId, facts: &BindingUseFacts)
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BindingUseFacts {
-    pub name: String,
-    pub binding: Option<BindingId>,
-    pub java_ty: JavaType,
-    pub uses: Vec<BindingUse>,
+    name: String,
+    binding: Option<BindingId>,
+    java_ty: JavaType,
+    uses: Vec<BindingUse>,
+}
+
+impl BindingUseFacts {
+    #[cfg(test)]
+    pub(crate) fn new(
+        name: impl Into<String>,
+        binding: Option<BindingId>,
+        java_ty: JavaType,
+        uses: Vec<BindingUse>,
+    ) -> Self {
+        Self {
+            name: name.into(),
+            binding,
+            java_ty,
+            uses,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn binding(&self) -> Option<&BindingId> {
+        self.binding.as_ref()
+    }
+
+    pub fn java_ty(&self) -> &JavaType {
+        &self.java_ty
+    }
+
+    pub fn uses(&self) -> &[BindingUse] {
+        &self.uses
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -929,61 +1000,199 @@ pub enum CallArgumentBoundary {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallSiteUse {
-    pub name: String,
-    pub arg_count: usize,
-    pub result_returned: bool,
-    pub receiver_is_self: bool,
-    pub receiver_targets_self_field: bool,
-    pub receiver_type: Option<JavaType>,
-    pub null_arg_indices: Vec<usize>,
-    pub nullable_source_call_arg_indices: Vec<usize>,
-    pub boundary: CallArgumentBoundary,
-    pub resolved: Option<ResolvedCall>,
+    name: String,
+    arg_count: usize,
+    result_returned: bool,
+    receiver_is_self: bool,
+    receiver_targets_self_field: bool,
+    receiver_type: Option<JavaType>,
+    null_arg_indices: Vec<usize>,
+    nullable_source_call_arg_indices: Vec<usize>,
+    boundary: CallArgumentBoundary,
+    resolved: Option<ResolvedCall>,
+}
+
+impl CallSiteUse {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn result_returned(&self) -> bool {
+        self.result_returned
+    }
+
+    pub fn receiver_is_self(&self) -> bool {
+        self.receiver_is_self
+    }
+
+    pub fn receiver_targets_self_field(&self) -> bool {
+        self.receiver_targets_self_field
+    }
+
+    pub fn receiver_type(&self) -> Option<&JavaType> {
+        self.receiver_type.as_ref()
+    }
+
+    pub fn null_arg_indices(&self) -> &[usize] {
+        &self.null_arg_indices
+    }
+
+    pub fn nullable_source_call_arg_indices(&self) -> &[usize] {
+        &self.nullable_source_call_arg_indices
+    }
+
+    pub fn boundary(&self) -> CallArgumentBoundary {
+        self.boundary
+    }
+
+    pub fn resolved(&self) -> Option<&ResolvedCall> {
+        self.resolved.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ConstructorCallSiteUse {
-    pub name: String,
-    pub arg_count: usize,
-    pub null_arg_indices: Vec<usize>,
-    pub nullable_source_call_arg_indices: Vec<usize>,
-    pub boundary: CallArgumentBoundary,
-    pub resolved: Option<ResolvedConstructor>,
+    name: String,
+    arg_count: usize,
+    null_arg_indices: Vec<usize>,
+    nullable_source_call_arg_indices: Vec<usize>,
+    boundary: CallArgumentBoundary,
+    resolved: Option<ResolvedConstructor>,
+}
+
+impl ConstructorCallSiteUse {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn null_arg_indices(&self) -> &[usize] {
+        &self.null_arg_indices
+    }
+
+    pub fn nullable_source_call_arg_indices(&self) -> &[usize] {
+        &self.nullable_source_call_arg_indices
+    }
+
+    pub fn boundary(&self) -> CallArgumentBoundary {
+        self.boundary
+    }
+
+    pub fn resolved(&self) -> Option<&ResolvedConstructor> {
+        self.resolved.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReturnedCallResultUse {
-    pub name: String,
-    pub arg_count: usize,
-    pub receiver_type: Option<JavaType>,
-    pub boundary: CallArgumentBoundary,
-    pub resolved: Option<ResolvedCall>,
+    name: String,
+    arg_count: usize,
+    receiver_type: Option<JavaType>,
+    boundary: CallArgumentBoundary,
+    resolved: Option<ResolvedCall>,
+}
+
+impl ReturnedCallResultUse {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn receiver_type(&self) -> Option<&JavaType> {
+        self.receiver_type.as_ref()
+    }
+
+    pub fn boundary(&self) -> CallArgumentBoundary {
+        self.boundary
+    }
+
+    pub fn resolved(&self) -> Option<&ResolvedCall> {
+        self.resolved.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallResultBoundaryPolicy {
-    pub name: String,
-    pub arg_count: usize,
-    pub receiver_type: Option<JavaType>,
-    pub boundary: CallArgumentBoundary,
-    pub resolved: Option<ResolvedCall>,
+    name: String,
+    arg_count: usize,
+    receiver_type: Option<JavaType>,
+    boundary: CallArgumentBoundary,
+    resolved: Option<ResolvedCall>,
+}
+
+impl CallResultBoundaryPolicy {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn receiver_type(&self) -> Option<&JavaType> {
+        self.receiver_type.as_ref()
+    }
+
+    pub fn boundary(&self) -> CallArgumentBoundary {
+        self.boundary
+    }
+
+    pub fn resolved(&self) -> Option<&ResolvedCall> {
+        self.resolved.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConstructorInvocationBoundaryPolicy {
-    pub kind: ConstructorInvocationKind,
-    pub boundary: CallArgumentBoundary,
+    kind: ConstructorInvocationKind,
+    boundary: CallArgumentBoundary,
+}
+
+impl ConstructorInvocationBoundaryPolicy {
+    pub fn kind(&self) -> ConstructorInvocationKind {
+        self.kind
+    }
+
+    pub fn boundary(&self) -> CallArgumentBoundary {
+        self.boundary
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallArgumentBoundaryPolicy {
-    pub name: String,
-    pub boundary: CallArgumentBoundary,
+    name: String,
+    boundary: CallArgumentBoundary,
+}
+
+impl CallArgumentBoundaryPolicy {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn boundary(&self) -> CallArgumentBoundary {
+        self.boundary
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodApiBoundaryPolicy {
-    pub public_api: bool,
+    public_api: bool,
+}
+
+impl MethodApiBoundaryPolicy {
+    pub fn public_api(&self) -> bool {
+        self.public_api
+    }
 }
 
 pub fn analyze_usage(program: &Program) -> UsageFacts {
@@ -1104,6 +1313,8 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
         match member {
             Member::Method(method) => {
                 let mut method_facts = MethodUsageFacts::default();
+                method_facts.type_params_in_scope =
+                    usage_type_params_in_scope(&ty.type_params, &method.type_params);
                 let type_env = usage_type_env(ty, &method.type_params, &method.type_param_bounds);
                 for param in &method.params {
                     insert_binding_use_facts(
@@ -1143,6 +1354,8 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
             }
             Member::Constructor(ctor) => {
                 let mut ctor_facts = MethodUsageFacts::default();
+                ctor_facts.type_params_in_scope =
+                    usage_type_params_in_scope(&ty.type_params, &ctor.type_params);
                 let type_env = usage_type_env(ty, &ctor.type_params, &ctor.type_param_bounds);
                 for param in &ctor.params {
                     insert_binding_use_facts(
@@ -1187,6 +1400,15 @@ fn usage_type_env(
     insert_usage_type_param_bounds(&mut env, &ty.type_params, &ty.type_param_bounds);
     insert_usage_type_param_bounds(&mut env, member_type_params, member_type_param_bounds);
     env
+}
+
+fn usage_type_params_in_scope(
+    type_params: &[String],
+    member_type_params: &[String],
+) -> Vec<String> {
+    let mut scope = type_params.to_vec();
+    scope.extend(member_type_params.iter().cloned());
+    scope
 }
 
 fn insert_usage_type_param_bounds(
@@ -1760,7 +1982,7 @@ fn exception_assignable_to_catch(thrown: &JavaType, catch_ty: &JavaType, facts: 
     facts
         .hierarchy_lookup_index()
         .hierarchy_subtype_policy(thrown, catch_ty)
-        .reaches
+        .reaches()
 }
 
 fn block_does_not_rethrow_checked_exception(block: &Block, facts: &FactSet) -> bool {
@@ -1874,7 +2096,9 @@ fn internal_method_names(ty: &TypeDecl) -> HashSet<String> {
     ty.members
         .iter()
         .filter_map(|member| match member {
-            Member::Method(method) if !method_api_boundary_policy(&method.modifiers).public_api => {
+            Member::Method(method)
+                if !method_api_boundary_policy(&method.modifiers).public_api() =>
+            {
                 Some(method.name.clone())
             }
             _ => None,
@@ -2518,11 +2742,6 @@ fn call_result_boundary_policy_with_context(
             });
             let boundary =
                 call_argument_boundary_policy(receiver.as_deref(), name, internal_methods).boundary;
-            let boundary = resolved_receiver_call_boundary(
-                boundary,
-                receiver_type.as_ref(),
-                resolved.as_ref(),
-            );
             let boundary = modeled_receiver_call_boundary(
                 boundary,
                 receiver_type.as_ref(),
@@ -2812,11 +3031,7 @@ fn analyze_expr_with_context(
                 field_types,
                 semantic_facts,
             );
-            let call_boundary = resolved_receiver_call_boundary(
-                policy.boundary,
-                receiver_type.as_ref(),
-                resolved.as_ref(),
-            );
+            let call_boundary = resolved_receiver_call_boundary(policy.boundary, resolved.as_ref());
             let call_boundary = modeled_receiver_call_boundary(
                 call_boundary,
                 receiver_type.as_ref(),
@@ -3138,11 +3353,7 @@ fn analyze_expr_with_context(
                     Some(ty.clone()),
                     args.len(),
                     arg_index,
-                    constructor_argument_boundary_policy(
-                        resolved.as_ref(),
-                        current_type,
-                        arg_index,
-                    ),
+                    constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
                 );
                 analyze_nested_argument_expr(
                     arg,
@@ -3827,14 +4038,12 @@ fn constructor_result_boundary_policy(
 
 fn constructor_argument_boundary_policy(
     resolved: Option<&ResolvedConstructor>,
-    current_type: &str,
     arg_index: usize,
 ) -> CallArgumentBoundary {
-    if resolved
-        .filter(|resolved| resolved.declaring_type == current_type)
-        .and_then(|resolved| resolved.params.get(arg_index))
-        .is_some()
-    {
+    let Some(resolved) = resolved else {
+        return CallArgumentBoundary::Unknown;
+    };
+    if resolved.params.get(arg_index).is_some() {
         CallArgumentBoundary::InternalSameType
     } else {
         CallArgumentBoundary::Unknown
@@ -3853,7 +4062,6 @@ fn constructor_invocation_boundary_policy_for_expr(
 
 fn resolved_receiver_call_boundary(
     boundary: CallArgumentBoundary,
-    receiver_type: Option<&JavaType>,
     resolved: Option<&ResolvedCall>,
 ) -> CallArgumentBoundary {
     if boundary != CallArgumentBoundary::Unknown {
@@ -3865,11 +4073,7 @@ fn resolved_receiver_call_boundary(
     if resolved.kind != crate::java_ir::CallKind::Instance {
         return boundary;
     }
-    if receiver_static_type_matches_declaring_type(receiver_type, &resolved.declaring_type) {
-        CallArgumentBoundary::KnownContentRead
-    } else {
-        boundary
-    }
+    CallArgumentBoundary::KnownContentRead
 }
 
 fn modeled_receiver_call_boundary(
@@ -3925,7 +4129,7 @@ fn source_receiver_call_boundary(
 ) -> CallArgumentBoundary {
     if boundary != CallArgumentBoundary::Unknown {
         return boundary;
-    }
+    };
     let Some(receiver_name) = receiver_type.and_then(usage_java_type_name) else {
         return boundary;
     };
@@ -3940,16 +4144,6 @@ fn source_receiver_call_boundary(
         return CallArgumentBoundary::KnownContentRead;
     }
     boundary
-}
-
-fn receiver_static_type_matches_declaring_type(
-    receiver_type: Option<&JavaType>,
-    declaring_type: &str,
-) -> bool {
-    let Some(JavaType::Named { name, .. }) = receiver_type else {
-        return false;
-    };
-    name == declaring_type
 }
 
 pub fn call_argument_use_boundary_policy(
@@ -3974,16 +4168,7 @@ fn insert_binding_use_facts(
     binding: Option<BindingId>,
     java_ty: JavaType,
 ) -> Option<BindingUseFacts> {
-    let binding_facts = BindingUseFacts {
-        name: name.clone(),
-        binding: binding.clone(),
-        java_ty,
-        uses: Vec::new(),
-    };
-    if let Some(binding) = binding {
-        facts.bindings_by_id.insert(binding, binding_facts.clone());
-    }
-    facts.bindings.insert(name, binding_facts)
+    facts.insert_visible_binding_for_scope(name, binding, java_ty)
 }
 
 fn restore_binding_use_facts(
@@ -4077,52 +4262,12 @@ class KeyOwner {
     }
 
     #[test]
-    fn receiver_static_type_match_fails_closed_for_package_qualified_simple_name() {
-        assert!(receiver_static_type_matches_declaring_type(
-            Some(&JavaType::Named {
-                name: "a.Item".to_string(),
-                args: Vec::new(),
-            }),
-            "a.Item",
-        ));
-        assert!(receiver_static_type_matches_declaring_type(
-            Some(&JavaType::Named {
-                name: "Item".to_string(),
-                args: Vec::new(),
-            }),
-            "Item",
-        ));
-        assert!(!receiver_static_type_matches_declaring_type(
-            Some(&JavaType::Named {
-                name: "Item".to_string(),
-                args: Vec::new(),
-            }),
-            "a.Item",
-        ));
-        assert!(!receiver_static_type_matches_declaring_type(
-            Some(&JavaType::Named {
-                name: "a.Item".to_string(),
-                args: Vec::new(),
-            }),
-            "Item",
-        ));
-    }
-
-    #[test]
-    fn resolved_receiver_boundary_refuses_package_qualified_simple_name_match() {
+    fn resolved_receiver_boundary_treats_source_instance_calls_as_content_reads() {
         let resolved = resolved_instance_call("a.Item");
-        let bare_item = JavaType::Named {
-            name: "Item".to_string(),
-            args: Vec::new(),
-        };
 
         assert_eq!(
-            resolved_receiver_call_boundary(
-                CallArgumentBoundary::Unknown,
-                Some(&bare_item),
-                Some(&resolved),
-            ),
-            CallArgumentBoundary::Unknown
+            resolved_receiver_call_boundary(CallArgumentBoundary::Unknown, Some(&resolved)),
+            CallArgumentBoundary::KnownContentRead
         );
     }
 
@@ -4339,8 +4484,22 @@ class KeyOwner {
             facts.visible_binding_java_type_for_name("value"),
             Some(&JavaType::String)
         );
+        assert_eq!(
+            facts.receiver_handle_java_type("value"),
+            Some(&JavaType::String)
+        );
         assert_eq!(facts.visible_binding_id_for_name("missing"), None);
         assert_eq!(facts.visible_binding_java_type_for_name("missing"), None);
+
+        let compatibility =
+            MethodUsageFacts::from_idless_compatibility_facts([binding_fact("legacy", None)]);
+        assert!(
+            compatibility
+                .idless_compatibility_binding_facts_for_source_name("legacy")
+                .is_some()
+        );
+        assert_eq!(compatibility.visible_binding_id_for_name("legacy"), None);
+        assert_eq!(compatibility.receiver_handle_java_type("legacy"), None);
     }
 
     #[test]

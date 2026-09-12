@@ -1,3 +1,4 @@
+use crate::call_plan::{NativeCollectionNewTarget, plan_native_collection_constructor_for_args};
 use crate::diagnostics::Severity;
 use crate::facts::FactSet;
 use crate::java_ir::{
@@ -11,9 +12,35 @@ use crate::types::{TypeEnv, infer_expr_type};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoweringDiagnosticPlan {
-    pub severity: Severity,
-    pub code: &'static str,
-    pub message: String,
+    severity: Severity,
+    code: &'static str,
+    message: String,
+}
+
+impl LoweringDiagnosticPlan {
+    pub(crate) fn new(severity: Severity, code: &'static str, message: String) -> Self {
+        Self {
+            severity,
+            code,
+            message,
+        }
+    }
+
+    pub fn severity(&self) -> Severity {
+        self.severity
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_parts(self) -> (Severity, &'static str, String) {
+        (self.severity, self.code, self.message)
+    }
 }
 
 pub fn collect_lowering_diagnostic_plans(
@@ -24,43 +51,38 @@ pub fn collect_lowering_diagnostic_plans(
     control_flow_plans: &[MethodControlFlowPlan],
 ) -> Vec<LoweringDiagnosticPlan> {
     let mut diagnostics = Vec::new();
-    diagnostics.extend(
-        facts
-            .diagnostics()
-            .into_iter()
-            .map(|diagnostic| LoweringDiagnosticPlan {
-                severity: Severity::Warning,
-                code: diagnostic.code,
-                message: diagnostic.message,
-            }),
-    );
+    diagnostics.extend(facts.diagnostics().into_iter().map(|diagnostic| {
+        let (code, message) = diagnostic.into_parts();
+        LoweringDiagnosticPlan::new(Severity::Warning, code, message)
+    }));
     diagnostics.extend(
         representations
             .diagnostics_for_program(program)
             .into_iter()
-            .map(|diagnostic| LoweringDiagnosticPlan {
-                severity: Severity::Unsupported,
-                code: diagnostic.code,
-                message: diagnostic.message,
+            .map(|diagnostic| {
+                LoweringDiagnosticPlan::new(
+                    Severity::Unsupported,
+                    diagnostic.code(),
+                    diagnostic.message().to_string(),
+                )
             }),
     );
-    diagnostics.extend(
-        signatures
-            .diagnostics()
-            .iter()
-            .map(|diagnostic| LoweringDiagnosticPlan {
-                severity: Severity::Warning,
-                code: diagnostic.code,
-                message: diagnostic.message.clone(),
-            }),
-    );
+    diagnostics.extend(signatures.diagnostics().iter().map(|diagnostic| {
+        LoweringDiagnosticPlan::new(
+            Severity::Warning,
+            diagnostic.code(),
+            diagnostic.message().to_string(),
+        )
+    }));
     diagnostics.extend(
         control_flow_rewrite_diagnostics(control_flow_plans)
             .into_iter()
-            .map(|diagnostic| LoweringDiagnosticPlan {
-                severity: Severity::Unsupported,
-                code: diagnostic.code,
-                message: diagnostic.message,
+            .map(|diagnostic| {
+                LoweringDiagnosticPlan::new(
+                    Severity::Unsupported,
+                    diagnostic.code(),
+                    diagnostic.message().to_string(),
+                )
             }),
     );
     diagnostics.extend(collect_java_reference_identity_equality_diagnostics(
@@ -76,7 +98,12 @@ fn collect_java_reference_identity_equality_diagnostics(
     let identity = SourceIdentityFacts::from_program(program, facts);
     let mut diagnostics = Vec::new();
     for ty in &program.types {
-        collect_type_reference_identity_equality_diagnostics(ty, &identity, &mut diagnostics);
+        collect_type_reference_identity_equality_diagnostics(
+            ty,
+            facts,
+            &identity,
+            &mut diagnostics,
+        );
     }
     diagnostics
 }
@@ -114,7 +141,7 @@ impl SourceIdentityFacts {
             self.source_classes.insert(simple.clone());
         }
         let placement = storage_facts.storage_placement_for(&ty.name);
-        if placement.shared && placement.is_implemented() {
+        if placement.shared() && placement.is_implemented() {
             self.implemented_reference_identity.insert(ty.name.clone());
             self.implemented_reference_identity.insert(simple.clone());
         }
@@ -235,6 +262,7 @@ fn method_overrides_object_equals(method: &MethodDecl) -> bool {
 
 fn collect_type_reference_identity_equality_diagnostics(
     ty: &TypeDecl,
+    facts: &FactSet,
     identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
@@ -256,6 +284,7 @@ fn collect_type_reference_identity_equality_diagnostics(
                     collect_block_reference_identity_equality_diagnostics(
                         body,
                         &mut env,
+                        facts,
                         identity,
                         diagnostics,
                     );
@@ -270,6 +299,7 @@ fn collect_type_reference_identity_equality_diagnostics(
                     collect_block_reference_identity_equality_diagnostics(
                         body,
                         &mut env,
+                        facts,
                         identity,
                         diagnostics,
                     );
@@ -280,14 +310,18 @@ fn collect_type_reference_identity_equality_diagnostics(
                     collect_expr_reference_identity_equality_diagnostics(
                         initializer,
                         &field_env,
+                        facts,
                         identity,
                         diagnostics,
                     );
                 }
             }
-            Member::Type(nested) => {
-                collect_type_reference_identity_equality_diagnostics(nested, identity, diagnostics)
-            }
+            Member::Type(nested) => collect_type_reference_identity_equality_diagnostics(
+                nested,
+                facts,
+                identity,
+                diagnostics,
+            ),
             Member::Unsupported { .. } => {}
         }
     }
@@ -296,17 +330,25 @@ fn collect_type_reference_identity_equality_diagnostics(
 fn collect_block_reference_identity_equality_diagnostics(
     block: &Block,
     env: &mut TypeEnv,
+    facts: &FactSet,
     identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     for stmt in &block.statements {
-        collect_stmt_reference_identity_equality_diagnostics(stmt, env, identity, diagnostics);
+        collect_stmt_reference_identity_equality_diagnostics(
+            stmt,
+            env,
+            facts,
+            identity,
+            diagnostics,
+        );
     }
 }
 
 fn collect_stmt_reference_identity_equality_diagnostics(
     stmt: &Stmt,
     env: &mut TypeEnv,
+    facts: &FactSet,
     identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
@@ -321,6 +363,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     initializer,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -331,13 +374,26 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 target,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
-            collect_expr_reference_identity_equality_diagnostics(value, env, identity, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                value,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            );
         }
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
-            collect_expr_reference_identity_equality_diagnostics(expr, env, identity, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                expr,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            );
         }
         Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
         Stmt::If {
@@ -348,12 +404,14 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 condition,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
             collect_block_reference_identity_equality_diagnostics(
                 then_block,
                 &mut env.clone(),
+                facts,
                 identity,
                 diagnostics,
             );
@@ -361,6 +419,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_block_reference_identity_equality_diagnostics(
                     else_block,
                     &mut env.clone(),
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -375,12 +434,14 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 condition,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
             collect_block_reference_identity_equality_diagnostics(
                 body,
                 &mut env.clone(),
+                facts,
                 identity,
                 diagnostics,
             );
@@ -397,6 +458,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_stmt_reference_identity_equality_diagnostics(
                     init_stmt,
                     &mut loop_env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -405,6 +467,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     condition,
                     &loop_env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -413,6 +476,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     update_expr,
                     &loop_env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -420,6 +484,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_block_reference_identity_equality_diagnostics(
                 body,
                 &mut loop_env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -434,6 +499,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 iterable,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -442,6 +508,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_block_reference_identity_equality_diagnostics(
                 body,
                 &mut body_env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -450,6 +517,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 selector,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -457,6 +525,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_switch_case_reference_identity_equality_diagnostics(
                     case,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -473,6 +542,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_stmt_reference_identity_equality_diagnostics(
                     resource,
                     &mut try_env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -480,6 +550,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_block_reference_identity_equality_diagnostics(
                 body,
                 &mut try_env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -487,6 +558,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_catch_reference_identity_equality_diagnostics(
                     catch,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -495,19 +567,21 @@ fn collect_stmt_reference_identity_equality_diagnostics(
                 collect_block_reference_identity_equality_diagnostics(
                     finally_block,
                     &mut env.clone(),
+                    facts,
                     identity,
                     diagnostics,
                 );
             }
         }
         Stmt::LocalType(ty) => {
-            collect_type_reference_identity_equality_diagnostics(ty, identity, diagnostics);
+            collect_type_reference_identity_equality_diagnostics(ty, facts, identity, diagnostics);
         }
         Stmt::ConstructorInvocation { args, .. } => {
             for arg in args {
                 collect_expr_reference_identity_equality_diagnostics(
                     arg,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -517,6 +591,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             collect_block_reference_identity_equality_diagnostics(
                 block,
                 &mut env.clone(),
+                facts,
                 identity,
                 diagnostics,
             );
@@ -527,6 +602,7 @@ fn collect_stmt_reference_identity_equality_diagnostics(
 fn collect_switch_case_reference_identity_equality_diagnostics(
     case: &SwitchCase,
     env: &TypeEnv,
+    facts: &FactSet,
     identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
@@ -536,6 +612,7 @@ fn collect_switch_case_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 expr,
                 &case_env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -545,6 +622,7 @@ fn collect_switch_case_reference_identity_equality_diagnostics(
         collect_stmt_reference_identity_equality_diagnostics(
             stmt,
             &mut case_env,
+            facts,
             identity,
             diagnostics,
         );
@@ -554,6 +632,7 @@ fn collect_switch_case_reference_identity_equality_diagnostics(
 fn collect_catch_reference_identity_equality_diagnostics(
     catch: &CatchClause,
     env: &TypeEnv,
+    facts: &FactSet,
     identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
@@ -567,6 +646,7 @@ fn collect_catch_reference_identity_equality_diagnostics(
     collect_block_reference_identity_equality_diagnostics(
         &catch.body,
         &mut catch_env,
+        facts,
         identity,
         diagnostics,
     );
@@ -575,9 +655,23 @@ fn collect_catch_reference_identity_equality_diagnostics(
 fn collect_expr_reference_identity_equality_diagnostics(
     expr: &Expr,
     env: &TypeEnv,
+    facts: &FactSet,
     identity: &SourceIdentityFacts,
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
+    if let Expr::New { ty, args, .. } = expr
+        && matches!(
+            plan_native_collection_constructor_for_args(ty, args, env, facts),
+            Some(NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. })
+        )
+    {
+        diagnostics.push(LoweringDiagnosticPlan::new(
+            Severity::Unsupported,
+            "unsupported_priority_queue_comparator_constructor",
+            "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support"
+                .to_string(),
+        ));
+    }
     if let Expr::Binary { op, left, right } = expr
         && matches!(op, BinaryOp::Eq | BinaryOp::Ne)
         && !expr_is_null_literal(left)
@@ -588,11 +682,11 @@ fn collect_expr_reference_identity_equality_diagnostics(
         if let Some(code) =
             reference_identity_equality_diagnostic_code(&left_ty, &right_ty, identity)
         {
-            diagnostics.push(LoweringDiagnosticPlan {
-                severity: Severity::Warning,
+            diagnostics.push(LoweringDiagnosticPlan::new(
+                Severity::Warning,
                 code,
-                message: "Java ==/!= on reference type is currently lowered as Rust equality; object identity is not represented yet".to_string(),
-            });
+                "Java ==/!= on reference type is currently lowered as Rust equality; object identity is not represented yet".to_string(),
+            ));
         }
     }
     if let Expr::InstanceOf {
@@ -600,38 +694,38 @@ fn collect_expr_reference_identity_equality_diagnostics(
     } = expr
         && source_instanceof_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
     {
-        diagnostics.push(LoweringDiagnosticPlan {
-            severity: Severity::Unsupported,
-            code: "unsupported_instanceof_source_hierarchy_runtime_carrier",
-            message: format!(
+        diagnostics.push(LoweringDiagnosticPlan::new(
+            Severity::Unsupported,
+            "unsupported_instanceof_source_hierarchy_runtime_carrier",
+            format!(
                 "unsupported Java instanceof check: target type {} has source subtypes and requires class hierarchy lowering",
                 concrete_java_type_name(ty).unwrap_or("unknown")
             ),
-        });
+        ));
     }
     if let Expr::Cast { ty, expr: source } = expr
         && erased_object_cast_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
     {
-        diagnostics.push(LoweringDiagnosticPlan {
-            severity: Severity::Unsupported,
-            code: "unsupported_cast_source_hierarchy_runtime_carrier",
-            message: format!(
+        diagnostics.push(LoweringDiagnosticPlan::new(
+            Severity::Unsupported,
+            "unsupported_cast_source_hierarchy_runtime_carrier",
+            format!(
                 "unsupported Java cast: target type {} has source subtypes and requires class hierarchy lowering",
                 concrete_java_type_name(ty).unwrap_or("unknown")
             ),
-        });
+        ));
     } else if let Expr::Cast { ty, expr: source } = expr
         && source_class_cast_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
     {
-        diagnostics.push(LoweringDiagnosticPlan {
-            severity: Severity::Unsupported,
-            code: "unsupported_inheritance",
-            message: format!(
+        diagnostics.push(LoweringDiagnosticPlan::new(
+            Severity::Unsupported,
+            "unsupported_inheritance",
+            format!(
                 "unsupported Java class upcast: {} to {} requires class hierarchy lowering",
                 concrete_java_type_name(&infer_expr_type(source, env)).unwrap_or("unknown"),
                 concrete_java_type_name(ty).unwrap_or("unknown")
             ),
-        });
+        ));
     }
     // `a.equals(b)` on a class that does not override `equals` is *identity* in
     // Java, not structural comparison. Same defect as `==`, and worse in effect:
@@ -653,25 +747,38 @@ fn collect_expr_reference_identity_equality_diagnostics(
         && identity.inherits_object_equals(&receiver_type)
         && !identity.type_name_has_implemented_reference_identity(&receiver_type)
     {
-        diagnostics.push(LoweringDiagnosticPlan {
-            severity: Severity::Warning,
-            code: "java_inherited_equals_identity",
-            message: format!(
+        diagnostics.push(LoweringDiagnosticPlan::new(
+            Severity::Warning,
+            "java_inherited_equals_identity",
+            format!(
                 "{receiver_type} does not override equals, so Java compares references here; \
                  lowering compares fields, which reports equal for distinct objects"
             ),
-        });
+        ));
     }
     match expr {
         Expr::FieldAccess(receiver, _) => collect_expr_reference_identity_equality_diagnostics(
             receiver,
             env,
+            facts,
             identity,
             diagnostics,
         ),
         Expr::ArrayAccess(array, index) => {
-            collect_expr_reference_identity_equality_diagnostics(array, env, identity, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(index, env, identity, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                array,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            );
+            collect_expr_reference_identity_equality_diagnostics(
+                index,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            );
         }
         Expr::ArrayCreation {
             dimensions,
@@ -682,6 +789,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     dimension,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -691,6 +799,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                     collect_expr_reference_identity_equality_diagnostics(
                         item,
                         env,
+                        facts,
                         identity,
                         diagnostics,
                     );
@@ -702,17 +811,36 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     item,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_expr_reference_identity_equality_diagnostics(left, env, identity, diagnostics);
-            collect_expr_reference_identity_equality_diagnostics(right, env, identity, diagnostics);
+            collect_expr_reference_identity_equality_diagnostics(
+                left,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            );
+            collect_expr_reference_identity_equality_diagnostics(
+                right,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            );
         }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
-            collect_expr_reference_identity_equality_diagnostics(expr, env, identity, diagnostics)
+            collect_expr_reference_identity_equality_diagnostics(
+                expr,
+                env,
+                facts,
+                identity,
+                diagnostics,
+            )
         }
         Expr::Ternary {
             condition,
@@ -722,18 +850,21 @@ fn collect_expr_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 condition,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
             collect_expr_reference_identity_equality_diagnostics(
                 then_expr,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
             collect_expr_reference_identity_equality_diagnostics(
                 else_expr,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -742,6 +873,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
             collect_expr_reference_identity_equality_diagnostics(
                 selector,
                 env,
+                facts,
                 identity,
                 diagnostics,
             );
@@ -749,6 +881,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     &case.value,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -759,6 +892,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     receiver,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -767,6 +901,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     arg,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -777,6 +912,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 collect_expr_reference_identity_equality_diagnostics(
                     arg,
                     env,
+                    facts,
                     identity,
                     diagnostics,
                 );
@@ -786,6 +922,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
                     if let Member::Type(ty) = member {
                         collect_type_reference_identity_equality_diagnostics(
                             ty,
+                            facts,
                             identity,
                             diagnostics,
                         );
@@ -797,12 +934,14 @@ fn collect_expr_reference_identity_equality_diagnostics(
             LambdaBody::Expr(expr) => collect_expr_reference_identity_equality_diagnostics(
                 expr,
                 env,
+                facts,
                 identity,
                 diagnostics,
             ),
             LambdaBody::Block(block) => collect_block_reference_identity_equality_diagnostics(
                 block,
                 &mut env.clone(),
+                facts,
                 identity,
                 diagnostics,
             ),

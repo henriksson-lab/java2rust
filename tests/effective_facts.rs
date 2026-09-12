@@ -43,10 +43,7 @@ fn effective_facts_own_object_safety_override_precedence() {
     );
     assert_eq!(
         effective.object_safe_trait_fact_for_name_with_provenance("Api"),
-        Some(EffectiveFact {
-            value: false,
-            provenance: FactProvenance::UserOverride,
-        })
+        Some(EffectiveFact::new(false, FactProvenance::UserOverride))
     );
 }
 
@@ -105,10 +102,7 @@ fn effective_facts_own_closed_hierarchy_variant_resolution() {
     }));
     assert_eq!(
         effective.closed_hierarchy_fact_for_name_with_provenance("Expr"),
-        Some(EffectiveFact {
-            value: true,
-            provenance: FactProvenance::UserOverride,
-        })
+        Some(EffectiveFact::new(true, FactProvenance::UserOverride))
     );
     assert_eq!(
         effective.closed_hierarchy_variants_for("Expr", &["Add".to_string()]),

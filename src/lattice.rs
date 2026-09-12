@@ -2,12 +2,22 @@ use crate::facts::NullabilityState;
 use crate::slot_shape::{DispatchShape, OwnershipShape, ViewShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RankedLatticeJoin<T> {
-    pub kept: T,
-    pub rejected: Option<T>,
+pub(crate) struct RankedLatticeJoin<T> {
+    kept: T,
+    rejected: Option<T>,
 }
 
-pub fn join_ranked_lattice<T>(
+impl<T> RankedLatticeJoin<T> {
+    pub(crate) fn new(kept: T, rejected: Option<T>) -> Self {
+        Self { kept, rejected }
+    }
+
+    pub(crate) fn into_parts(self) -> (T, Option<T>) {
+        (self.kept, self.rejected)
+    }
+}
+
+pub(crate) fn join_ranked_lattice<T>(
     current: Option<T>,
     next: T,
     rank: impl Fn(&T) -> u8,
@@ -16,31 +26,19 @@ where
     T: Clone + Eq,
 {
     let Some(current) = current else {
-        return RankedLatticeJoin {
-            kept: next,
-            rejected: None,
-        };
+        return RankedLatticeJoin::new(next, None);
     };
     if current == next {
-        return RankedLatticeJoin {
-            kept: current,
-            rejected: None,
-        };
+        return RankedLatticeJoin::new(current, None);
     }
     if rank(&current) >= rank(&next) {
-        RankedLatticeJoin {
-            kept: current,
-            rejected: Some(next),
-        }
+        RankedLatticeJoin::new(current, Some(next))
     } else {
-        RankedLatticeJoin {
-            kept: next,
-            rejected: Some(current),
-        }
+        RankedLatticeJoin::new(next, Some(current))
     }
 }
 
-pub fn ownership_lattice_rank(requirement: &OwnershipShape) -> u8 {
+pub(crate) fn ownership_lattice_rank(requirement: &OwnershipShape) -> u8 {
     match requirement {
         OwnershipShape::Owned => 40,
         OwnershipShape::CopyValue => 30,
@@ -49,7 +47,7 @@ pub fn ownership_lattice_rank(requirement: &OwnershipShape) -> u8 {
     }
 }
 
-pub fn view_lattice_rank(requirement: &ViewShape) -> u8 {
+pub(crate) fn view_lattice_rank(requirement: &ViewShape) -> u8 {
     match requirement {
         ViewShape::Native => 50,
         ViewShape::ErasedObjectView => 40,
@@ -58,7 +56,7 @@ pub fn view_lattice_rank(requirement: &ViewShape) -> u8 {
     }
 }
 
-pub fn dispatch_shape_lattice_rank(requirement: &DispatchShape) -> u8 {
+pub(crate) fn dispatch_shape_lattice_rank(requirement: &DispatchShape) -> u8 {
     match requirement {
         DispatchShape::Concrete => 50,
         DispatchShape::ErasedObject => 40,
@@ -67,7 +65,7 @@ pub fn dispatch_shape_lattice_rank(requirement: &DispatchShape) -> u8 {
     }
 }
 
-pub fn storage_nullability_lattice_rank(requirement: &NullabilityState) -> u8 {
+pub(crate) fn storage_nullability_lattice_rank(requirement: &NullabilityState) -> u8 {
     match requirement {
         NullabilityState::MaybeNull => 40,
         NullabilityState::DefinitelyNull => 30,

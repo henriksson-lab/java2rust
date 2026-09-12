@@ -23,8 +23,26 @@ use crate::parser::parse_type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalPackManifestParse {
-    pub facts: FactSet,
-    pub diagnostics: DiagnosticBag,
+    facts: FactSet,
+    diagnostics: DiagnosticBag,
+}
+
+impl ExternalPackManifestParse {
+    pub fn new(facts: FactSet, diagnostics: DiagnosticBag) -> Self {
+        Self { facts, diagnostics }
+    }
+
+    pub fn facts(&self) -> &FactSet {
+        &self.facts
+    }
+
+    pub fn diagnostics(&self) -> &DiagnosticBag {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(self) -> (FactSet, DiagnosticBag) {
+        (self.facts, self.diagnostics)
+    }
 }
 
 const VARIANTCONTEXT_PACK: &str = "htsjdk.variant.variantcontext";
@@ -1959,7 +1977,7 @@ pub fn parse_external_pack_manifest(source: &str) -> ExternalPackManifestParse {
     refine_constructor_fact_arg_types_from_argument_effects(&mut facts);
     diagnostics.extend(audit_external_pack_fact_boundaries(&facts));
 
-    ExternalPackManifestParse { facts, diagnostics }
+    ExternalPackManifestParse::new(facts, diagnostics)
 }
 
 fn refine_constructor_fact_arg_types_from_argument_effects(facts: &mut FactSet) {
@@ -27695,6 +27713,17 @@ const JAVA_SQL_UNSUPPORTED_APIS: &[ExternalPackUnsupportedApi] = &[
 ];
 
 pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
+    builtin_external_pack_manifest_slice().to_vec()
+}
+
+pub(crate) fn builtin_external_pack_manifest_slice() -> &'static [ExternalPackManifest] {
+    static MANIFESTS: OnceLock<Vec<ExternalPackManifest>> = OnceLock::new();
+    MANIFESTS
+        .get_or_init(build_builtin_external_pack_manifests)
+        .as_slice()
+}
+
+fn build_builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
     vec![
         ExternalPackManifest {
             pack_name: VARIANTCONTEXT_PACK,
@@ -28798,9 +28827,10 @@ pub fn builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
 }
 
 pub fn builtin_external_pack_manifest(pack_name: &str) -> Option<ExternalPackManifest> {
-    builtin_external_pack_manifests()
-        .into_iter()
+    builtin_external_pack_manifest_slice()
+        .iter()
         .find(|manifest| manifest.pack_name == pack_name)
+        .cloned()
 }
 
 pub fn builtin_external_pack_manifest_for_provider_name(
@@ -29343,7 +29373,7 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
     static INDEX: OnceLock<BuiltinExternalPackLookupIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
         let mut index = BuiltinExternalPackLookupIndex::default();
-        for manifest in builtin_external_pack_manifests() {
+        for manifest in builtin_external_pack_manifest_slice() {
             for api in manifest.modeled_apis {
                 for receiver_alias in external_receiver_lookup_aliases(api.receiver_type) {
                     for method_alias in external_method_name_lookup_aliases(api.method_name) {
@@ -30040,24 +30070,6 @@ fn java_platform_api_effects_for_method_arity(
         java_platform_api_effect_for_receiver_with_arity(receiver, method_name, Some(arg_count))
     })
     .collect()
-}
-
-pub fn external_api_effect_for_key(key: &CallableKey) -> Option<ExternalApiEffectFact> {
-    if key.kind() != CallableKind::Method {
-        return None;
-    }
-    if let Some(effect) = builtin_external_pack_lookup_index()
-        .api_effects_by_key
-        .get(key)
-        .cloned()
-    {
-        return Some(effect);
-    }
-    external_api_effect_for_receiver_with_arity(
-        Some(key.owner_type()),
-        key.member_name(),
-        Some(key.arity()),
-    )
 }
 
 pub fn java_platform_api_effect_for_receiver_with_arity(
@@ -31355,21 +31367,6 @@ pub fn external_constructor_for(
         .cloned()
 }
 
-pub fn external_constructor_for_key(key: &CallableKey) -> Option<ExternalConstructorFact> {
-    if key.kind() != CallableKind::Constructor {
-        return None;
-    }
-    if let Some(constructor) = builtin_external_pack_lookup_index()
-        .constructors_by_key
-        .get(key)
-        .cloned()
-    {
-        return Some(constructor);
-    }
-    let arg_types = vec![JavaType::Unknown("_".to_string()); key.arity()];
-    external_constructor_for(key.owner_type(), &arg_types)
-}
-
 pub fn external_field_for(type_name: &str, field_name: &str) -> Option<ExternalFieldFact> {
     let canonical_type_name = crate::stdlib::canonical_external_receiver_type_key(type_name);
     let snake_type_name = crate::parser::to_snake_case(type_name);
@@ -31415,23 +31412,6 @@ pub fn external_field_value_for(
             .get(&(type_key.to_string(), field_key.to_string()))
             .cloned()
     })
-}
-
-pub fn external_field_for_key(key: &CallableKey) -> Option<ExternalFieldFact> {
-    if !matches!(
-        key.kind(),
-        CallableKind::StaticField | CallableKind::InstanceField
-    ) {
-        return None;
-    }
-    if let Some(field) = builtin_external_pack_lookup_index()
-        .fields_by_key
-        .get(key)
-        .cloned()
-    {
-        return Some(field);
-    }
-    external_field_for(key.owner_type(), key.member_name())
 }
 
 pub fn unsupported_external_constructor_for(
@@ -31766,8 +31746,8 @@ fn builtin_external_pack_type_matchers() -> &'static [BuiltinExternalPackTypeMat
 
 fn build_builtin_external_pack_type_matchers() -> Vec<BuiltinExternalPackTypeMatcher> {
     let mut matchers = Vec::new();
-    for manifest in builtin_external_pack_manifests() {
-        let pack = manifest_pack_fact(&manifest);
+    for manifest in builtin_external_pack_manifest_slice() {
+        let pack = manifest_pack_fact(manifest);
         for pattern in manifest.owned_type_patterns {
             push_builtin_pack_matcher(
                 &mut matchers,
@@ -31859,8 +31839,8 @@ fn builtin_external_pack_boundary_audit_matchers() -> &'static [BuiltinExternalP
 
 fn build_builtin_external_pack_boundary_audit_matchers() -> Vec<BuiltinExternalPackTypeMatcher> {
     let mut matchers = build_builtin_external_pack_type_matchers();
-    for manifest in builtin_external_pack_manifests() {
-        let pack = manifest_pack_fact(&manifest);
+    for manifest in builtin_external_pack_manifest_slice() {
+        let pack = manifest_pack_fact(manifest);
         for constructor in manifest.modeled_constructors {
             push_builtin_pack_matcher(
                 &mut matchers,
@@ -32021,7 +32001,8 @@ external-pack-conversion org.apache.commons.codec org.apache.commons.codec.binar
 external-pack-conversion org.apache.commons.codec Base64OutputStream OutputStream into
 "#,
         )
-        .facts,
+        .facts()
+        .clone(),
     );
 
     facts
@@ -32037,7 +32018,8 @@ external-pack-conversion net.sourceforge.iharder.base64 net.sourceforge.iharder.
 external-pack-conversion net.sourceforge.iharder.base64 Base64.OutputStream OutputStream into
 "#,
         )
-        .facts,
+        .facts()
+        .clone(),
     );
 
     facts

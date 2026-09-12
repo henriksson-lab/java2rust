@@ -2227,13 +2227,13 @@ arguments that need a clone before the external `Into` adapter. The stale local
 reused-optional borrowed source argument row was removed from the failure
 baseline, and the nearby borrowed-varargs fixture is compile-backed.
 
-Follow-up 2026-08-29: unresolved receiver calls on parsed source receiver types
-no longer impose an external/unknown runtime-object boundary. This keeps a
-source interface as a dyn trait when the call is written through the interface
-but resolution has not attached a concrete method, as in `Distribution d;
-d.value()`. The inherited-implements `this` argument fixture now emits
-`impl Distribution for ConcreteDistribution`, lowers `sampler.sample(self)`, and
-passes its generated-crate check.
+Follow-up 2026-08-29, extended 2026-09-12: receiver calls on parsed source
+receiver types no longer impose an external/unknown runtime-object boundary.
+This keeps a source interface as a dyn trait when the call is written through
+the interface, both for unresolved calls and for resolved source instance calls,
+as in `Distribution d; d.value()`. The inherited-implements `this` argument
+fixture now emits `impl Distribution for ConcreteDistribution`, lowers
+`sampler.sample(self)`, and passes its generated-crate check.
 
 Follow-up 2026-08-29: the aggregate neutral idiom generated-crate check now
 passes. The remaining errors were stale generated test harnesses rather than

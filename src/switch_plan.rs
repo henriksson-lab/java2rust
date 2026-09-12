@@ -6,28 +6,80 @@ pub const SWITCH_MATCHED: &str = "__java_switch_matched";
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SwitchPlan<'a> {
-    pub selector: &'a Expr,
-    pub cases: &'a [SwitchCase],
-    pub break_label: &'static str,
-    pub value_binding: &'static str,
-    pub matched_binding: &'static str,
+    selector: &'a Expr,
+    cases: &'a [SwitchCase],
+    break_label: &'static str,
+    value_binding: &'static str,
+    matched_binding: &'static str,
+}
+
+impl<'a> SwitchPlan<'a> {
+    pub fn selector(&self) -> &'a Expr {
+        self.selector
+    }
+
+    pub fn cases(&self) -> &'a [SwitchCase] {
+        self.cases
+    }
+
+    pub fn break_label(&self) -> &'static str {
+        self.break_label
+    }
+
+    pub fn value_binding(&self) -> &'static str {
+        self.value_binding
+    }
+
+    pub fn matched_binding(&self) -> &'static str {
+        self.matched_binding
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SwitchCasePlan {
-    pub(crate) labels: Vec<SwitchCaseLabelPlan>,
+    labels: Vec<SwitchCaseLabelPlan>,
+}
+
+impl SwitchCasePlan {
+    pub(crate) fn labels(&self) -> &[SwitchCaseLabelPlan] {
+        &self.labels
+    }
+
+    pub(crate) fn into_labels(self) -> Vec<SwitchCaseLabelPlan> {
+        self.labels
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct SimpleReturnSwitchPlan<'a> {
-    pub selector: &'a Expr,
-    pub cases: &'a [SwitchCase],
+    selector: &'a Expr,
+    cases: &'a [SwitchCase],
+}
+
+impl<'a> SimpleReturnSwitchPlan<'a> {
+    pub fn selector(&self) -> &'a Expr {
+        self.selector
+    }
+
+    pub fn cases(&self) -> &'a [SwitchCase] {
+        self.cases
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct SimpleReturnSwitchCasePlan<'a> {
-    pub labels: Vec<SwitchCaseLabelPlan>,
-    pub return_expr: &'a Expr,
+    labels: Vec<SwitchCaseLabelPlan>,
+    return_expr: &'a Expr,
+}
+
+impl<'a> SimpleReturnSwitchCasePlan<'a> {
+    pub(crate) fn into_labels(self) -> Vec<SwitchCaseLabelPlan> {
+        self.labels
+    }
+
+    pub(crate) fn return_expr(&self) -> &'a Expr {
+        self.return_expr
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -96,7 +148,7 @@ pub(crate) fn plan_simple_return_switch_case(
         return None;
     };
     Some(SimpleReturnSwitchCasePlan {
-        labels: plan_switch_case(case).labels,
+        labels: plan_switch_case(case).into_labels(),
         return_expr,
     })
 }
@@ -189,11 +241,11 @@ mod tests {
         assert!(plan_simple_return_switch_case(&label_group).is_none());
 
         let planned = plan_simple_return_switch_case(&return_group).unwrap();
+        assert_eq!(planned.return_expr(), &Expr::Literal(Literal::Int(30)));
         assert_eq!(
-            planned.labels,
+            planned.into_labels(),
             vec![SwitchCaseLabelPlan::Expr(Expr::Literal(Literal::Int(3)))]
         );
-        assert_eq!(planned.return_expr, &Expr::Literal(Literal::Int(30)));
     }
 
     #[test]
@@ -208,11 +260,11 @@ mod tests {
         };
 
         assert!(matches!(
-            plan_switch_case(&expr_case).labels.as_slice(),
+            plan_switch_case(&expr_case).labels(),
             [SwitchCaseLabelPlan::Expr(_)]
         ));
         assert!(matches!(
-            plan_switch_case(&default_case).labels.as_slice(),
+            plan_switch_case(&default_case).labels(),
             [SwitchCaseLabelPlan::Default]
         ));
         assert!(switch_case_stmt_needs_break_rewrite(

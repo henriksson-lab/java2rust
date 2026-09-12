@@ -2,15 +2,40 @@ use crate::rust_ir::{RustExpr, RustStmt};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TailRecursiveLoopRender {
-    pub(crate) params: Vec<String>,
-    pub(crate) condition: RustExpr,
-    pub(crate) base_return: RustExpr,
-    pub(crate) next_args: Vec<RustExpr>,
+    params: Vec<String>,
+    condition: RustExpr,
+    base_return: RustExpr,
+    next_args: Vec<RustExpr>,
+}
+
+impl TailRecursiveLoopRender {
+    pub(crate) fn new(
+        params: Vec<String>,
+        condition: RustExpr,
+        base_return: RustExpr,
+        next_args: Vec<RustExpr>,
+    ) -> Self {
+        Self {
+            params,
+            condition,
+            base_return,
+            next_args,
+        }
+    }
+
+    fn into_parts(self) -> (Vec<String>, RustExpr, RustExpr, Vec<RustExpr>) {
+        (
+            self.params,
+            self.condition,
+            self.base_return,
+            self.next_args,
+        )
+    }
 }
 
 pub(crate) fn render_tail_recursive_loop_body(plan: TailRecursiveLoopRender) -> Vec<RustStmt> {
-    let mut stmts = plan
-        .params
+    let (params, condition, base_return, next_args) = plan.into_parts();
+    let mut stmts = params
         .iter()
         .map(|param| RustStmt::Let {
             mutable: true,
@@ -21,12 +46,12 @@ pub(crate) fn render_tail_recursive_loop_body(plan: TailRecursiveLoopRender) -> 
         .collect::<Vec<_>>();
 
     let mut loop_body = vec![RustStmt::If {
-        condition: plan.condition,
-        then_body: vec![RustStmt::Return(Some(plan.base_return))],
+        condition,
+        then_body: vec![RustStmt::Return(Some(base_return))],
         else_body: Vec::new(),
     }];
     loop_body.extend(
-        plan.next_args
+        next_args
             .into_iter()
             .enumerate()
             .map(|(index, arg)| RustStmt::Let {
@@ -37,7 +62,7 @@ pub(crate) fn render_tail_recursive_loop_body(plan: TailRecursiveLoopRender) -> 
             }),
     );
     loop_body.extend(
-        plan.params
+        params
             .into_iter()
             .enumerate()
             .map(|(index, param)| RustStmt::Assign {
@@ -75,15 +100,15 @@ mod tests {
 
     #[test]
     fn tail_recursive_loop_body_is_structured() {
-        let stmts = render_tail_recursive_loop_body(TailRecursiveLoopRender {
-            params: vec!["n".to_string(), "acc".to_string()],
-            condition: binary("<=", var("n"), RustExpr::Literal("1".to_string())),
-            base_return: var("acc"),
-            next_args: vec![
+        let stmts = render_tail_recursive_loop_body(TailRecursiveLoopRender::new(
+            vec!["n".to_string(), "acc".to_string()],
+            binary("<=", var("n"), RustExpr::Literal("1".to_string())),
+            var("acc"),
+            vec![
                 binary("-", var("n"), RustExpr::Literal("1".to_string())),
                 binary("*", var("acc"), var("n")),
             ],
-        });
+        ));
 
         assert_eq!(
             stmts,

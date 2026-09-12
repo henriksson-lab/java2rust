@@ -14,18 +14,58 @@ use crate::stream_shape::{
 use crate::types::{TypeEnv, optional_java_type, sequence_element_type};
 
 pub struct StreamPlan<'a> {
-    pub source: StreamSource<'a>,
-    pub ops: Vec<StreamOp<'a>>,
-    pub terminal: StreamTerminal<'a>,
-    pub source_element: StreamElement,
-    pub actual: LoweredType,
+    source: StreamSource<'a>,
+    ops: Vec<StreamOp<'a>>,
+    terminal: StreamTerminal<'a>,
+    source_element: StreamElement,
+    actual: LoweredType,
+}
+
+impl<'a> StreamPlan<'a> {
+    pub fn source(&self) -> &StreamSource<'a> {
+        &self.source
+    }
+
+    pub fn ops(&self) -> &[StreamOp<'a>] {
+        &self.ops
+    }
+
+    pub fn terminal(&self) -> &StreamTerminal<'a> {
+        &self.terminal
+    }
+
+    pub fn source_element(&self) -> &StreamElement {
+        &self.source_element
+    }
+
+    pub fn actual(&self) -> &LoweredType {
+        &self.actual
+    }
 }
 
 pub struct StreamSource<'a> {
-    pub expr: &'a Expr,
-    pub optional_sequence: bool,
-    pub iteration: StreamSourceIteration,
-    pub range: Option<StreamSourceRange<'a>>,
+    expr: &'a Expr,
+    optional_sequence: bool,
+    iteration: StreamSourceIteration,
+    range: Option<StreamSourceRange<'a>>,
+}
+
+impl<'a> StreamSource<'a> {
+    pub fn expr(&self) -> &'a Expr {
+        self.expr
+    }
+
+    pub fn optional_sequence(&self) -> bool {
+        self.optional_sequence
+    }
+
+    pub fn iteration(&self) -> StreamSourceIteration {
+        self.iteration
+    }
+
+    pub fn range(&self) -> Option<StreamSourceRange<'a>> {
+        self.range
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -35,7 +75,17 @@ pub enum StreamSourceRange<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamElement {
-    pub shape: RustSlotShape,
+    shape: RustSlotShape,
+}
+
+impl StreamElement {
+    pub fn new(shape: RustSlotShape) -> Self {
+        Self { shape }
+    }
+
+    pub fn shape(&self) -> &RustSlotShape {
+        &self.shape
+    }
 }
 
 pub enum StreamOp<'a> {
@@ -77,23 +127,69 @@ pub enum StreamTerminal<'a> {
 }
 
 pub struct ReducePlan<'a> {
-    pub identity: &'a Expr,
-    pub accumulator: ReduceLambdaPlan<'a>,
+    identity: &'a Expr,
+    accumulator: ReduceLambdaPlan<'a>,
+}
+
+impl<'a> ReducePlan<'a> {
+    pub fn identity(&self) -> &'a Expr {
+        self.identity
+    }
+
+    pub fn accumulator(&self) -> &ReduceLambdaPlan<'a> {
+        &self.accumulator
+    }
 }
 
 #[derive(Clone)]
 pub struct LambdaPlan<'a> {
-    pub param_name: String,
-    pub rust_param_name: String,
-    pub body: StreamLambdaBody<'a>,
+    param_name: String,
+    rust_param_name: String,
+    body: StreamLambdaBody<'a>,
+}
+
+impl<'a> LambdaPlan<'a> {
+    pub fn param_name(&self) -> &str {
+        &self.param_name
+    }
+
+    pub fn rust_param_name(&self) -> &str {
+        &self.rust_param_name
+    }
+
+    pub fn body(&self) -> StreamLambdaBody<'a> {
+        self.body
+    }
 }
 
 pub struct ReduceLambdaPlan<'a> {
-    pub left_param_name: String,
-    pub left_rust_param_name: String,
-    pub right_param_name: String,
-    pub right_rust_param_name: String,
-    pub body: StreamLambdaBody<'a>,
+    left_param_name: String,
+    left_rust_param_name: String,
+    right_param_name: String,
+    right_rust_param_name: String,
+    body: StreamLambdaBody<'a>,
+}
+
+impl<'a> ReduceLambdaPlan<'a> {
+    pub fn left_param_name(&self) -> &str {
+        &self.left_param_name
+    }
+
+    pub fn left_rust_param_name(&self) -> &str {
+        &self.left_rust_param_name
+    }
+
+    pub fn right_param_name(&self) -> &str {
+        &self.right_param_name
+    }
+
+    pub fn right_rust_param_name(&self) -> &str {
+        &self.right_rust_param_name
+    }
+
+    pub fn body(&self) -> StreamLambdaBody<'a> {
+        self.body
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -143,17 +239,53 @@ pub enum FlatMapPlan<'a> {
 }
 
 pub struct LambdaCollectionStreamPlan<'a> {
-    pub lambda: LambdaPlan<'a>,
-    pub source: &'a Expr,
-    pub optional_sequence: bool,
-    pub iteration: StreamSourceIteration,
+    lambda: LambdaPlan<'a>,
+    source: &'a Expr,
+    optional_sequence: bool,
+    iteration: StreamSourceIteration,
+}
+
+impl<'a> LambdaCollectionStreamPlan<'a> {
+    pub fn lambda(&self) -> &LambdaPlan<'a> {
+        &self.lambda
+    }
+
+    pub fn source(&self) -> &'a Expr {
+        self.source
+    }
+
+    pub fn optional_sequence(&self) -> bool {
+        self.optional_sequence
+    }
+
+    pub fn iteration(&self) -> StreamSourceIteration {
+        self.iteration
+    }
 }
 
 pub struct StreamSubPipeline<'a> {
-    pub source: StreamSource<'a>,
-    pub ops: Vec<StreamOp<'a>>,
-    pub source_element: StreamElement,
-    pub output_shape: RustSlotShape,
+    source: StreamSource<'a>,
+    ops: Vec<StreamOp<'a>>,
+    source_element: StreamElement,
+    output_shape: RustSlotShape,
+}
+
+impl<'a> StreamSubPipeline<'a> {
+    pub fn source(&self) -> &StreamSource<'a> {
+        &self.source
+    }
+
+    pub fn ops(&self) -> &[StreamOp<'a>] {
+        &self.ops
+    }
+
+    pub fn source_element(&self) -> &StreamElement {
+        &self.source_element
+    }
+
+    pub fn output_shape(&self) -> &RustSlotShape {
+        &self.output_shape
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -235,9 +367,9 @@ fn build_stream_plan_core<'a>(
         },
         ops,
         terminal,
-        source_element: StreamElement {
-            shape: infer_stream_source_element_shape_with_facts(source, env, facts)?,
-        },
+        source_element: StreamElement::new(infer_stream_source_element_shape_with_facts(
+            source, env, facts,
+        )?),
         actual,
     })
 }
@@ -249,7 +381,7 @@ fn stream_source_is_optional_sequence(source: &Expr, env: &TypeEnv, facts: &Fact
     };
     crate::types::stream_element_type(&element_ty).is_some()
         || crate::stream_shape::stream_source_capability_policy(&element_ty, facts)
-            .capability_element
+            .capability_element()
             .is_some()
 }
 
@@ -816,9 +948,11 @@ fn lambda_stream_chain_plan<'a>(
                 range: receiver_source_spec(return_expr)?.range,
             },
             ops,
-            source_element: StreamElement {
-                shape: infer_stream_source_element_shape_with_facts(source, &lambda_env, facts)?,
-            },
+            source_element: StreamElement::new(infer_stream_source_element_shape_with_facts(
+                source,
+                &lambda_env,
+                facts,
+            )?),
             output_shape,
         }),
     })
@@ -870,7 +1004,7 @@ fn stream_prefix_local_planning_type(
 fn java_type_is_stream_capable(java_ty: &JavaType, facts: &FactSet) -> bool {
     crate::types::stream_element_type(java_ty).is_some()
         || crate::stream_shape::stream_source_capability_policy(java_ty, facts)
-            .capability_element
+            .capability_element()
             .is_some()
 }
 

@@ -22,7 +22,7 @@ use crate::java_ir::{
 ///
 /// Names are the Java type names as written, plus their simple form, because a
 /// creation can spell a nested type either way.
-pub fn object_array_element_type_names(program: &Program) -> BTreeSet<String> {
+fn object_array_element_type_names(program: &Program) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for ty in &program.types {
         collect_in_type(ty, &mut names);
@@ -31,7 +31,7 @@ pub fn object_array_element_type_names(program: &Program) -> BTreeSet<String> {
 }
 
 /// Whether any array creation in `program` allocates elements of `ty`.
-pub fn program_allocates_object_array_of(program: &Program, ty: &TypeDecl) -> bool {
+pub(crate) fn program_allocates_object_array_of(program: &Program, ty: &TypeDecl) -> bool {
     let names = object_array_element_type_names(program);
     if names.contains(&ty.name) {
         return true;

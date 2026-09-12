@@ -3,7 +3,10 @@
 Status: **open, partially implemented** (`SharedImmutable`/`Rc<T>` plus
 reference-identity lowering have landed; mutable aliasing still lacks
 `SharedLocal`/`Rc<RefCell<T>>` lowering)
-Severity: high — silently changes program meaning
+Severity: high — mutable alias semantics still need a real representation; the
+current gate makes the known gap loud through `observable_alias` /
+`storage_strategy_disagreement` diagnostics rather than silently accepting the
+old clone semantics
 Kind: missing representation in the object model
 
 ## Symptom
@@ -14,7 +17,22 @@ below was originally translated as a deep copy (`a.clone()`), so subsequent
 mutation through one reference was not observed through the other. The
 `SharedImmutable` tier now covers aliased source values that are not mutated
 after sharing, but this mutable `Node` shape still requires the unimplemented
-`SharedLocal` tier.
+`SharedLocal` tier. Current known-gap fixtures assert that this is reported
+loudly; the remaining defect is the missing mutable shared carrier, not an
+undetected clone in the gated path.
+
+Follow-up cleanup 2026-09-12: the `aliasing` module is crate-internal now. The
+translator still reports observable mutable-alias diagnostics through the batch
+analysis path, but the detection structs/helpers and diagnostic entry point are
+`pub(crate)` implementation details rather than public crate API. The no-facts
+convenience collector is test-only/private; production reporting uses the
+fact-aware collector.
+
+Codex follow-up cleanup 2026-09-12: `ObservableAlias` is no longer a
+crate-local field bag. The detector constructs it through `new(...)`, the
+reporter reads the diagnostic fields through accessors, and same-module tests
+assert observed alias facts through the same API. This is a layout cleanup only;
+mutable aliasing still requires the `SharedLocal` representation work above.
 
 ## Minimal repro
 

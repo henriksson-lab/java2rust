@@ -24,9 +24,9 @@ fn local_let_stmt_with_facts_and_type_annotation(
     annotate_type: bool,
 ) -> RustStmt {
     RustStmt::Let {
-        mutable: local.binding_mutable,
-        name: local.name.clone(),
-        ty: annotate_type.then(|| rust_type_for_slot_with_facts(&local.shape, facts)),
+        mutable: local.binding_mutable(),
+        name: local.name().to_string(),
+        ty: annotate_type.then(|| rust_type_for_slot_with_facts(local.shape(), facts)),
         value,
     }
 }
@@ -39,10 +39,10 @@ pub(crate) fn local_let_stmt_with_facts_representations_and_type_annotation(
     annotate_type: bool,
 ) -> RustStmt {
     RustStmt::Let {
-        mutable: local.binding_mutable,
-        name: local.name.clone(),
+        mutable: local.binding_mutable(),
+        name: local.name().to_string(),
         ty: annotate_type.then(|| {
-            rust_type_for_slot_with_facts_and_representations(&local.shape, facts, representations)
+            rust_type_for_slot_with_facts_and_representations(local.shape(), facts, representations)
         }),
         value,
     }
@@ -167,13 +167,13 @@ mod tests {
 
     #[test]
     fn local_let_helper_uses_fact_aware_slot_types() {
-        let local = LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("count"),
-            name: "count".to_string(),
-            java_ty: JavaType::Primitive(PrimitiveType::Int),
-            shape: RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int)),
-            binding_mutable: true,
-        };
+        let local = LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("count"),
+            "count".to_string(),
+            JavaType::Primitive(PrimitiveType::Int),
+            RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int)),
+            true,
+        );
 
         assert_eq!(
             local_let_stmt_with_facts(
@@ -197,13 +197,13 @@ mod tests {
             name: "ExternalId".to_string(),
             args: Vec::new(),
         };
-        let external_local = LocalPlan {
-            binding: crate::binding_id::BindingId::compatibility_local("ids"),
-            name: "ids".to_string(),
-            java_ty: external_ids.clone(),
-            shape: RustSlotShape::conservative(external_ids),
-            binding_mutable: false,
-        };
+        let external_local = LocalPlan::new(
+            crate::binding_id::BindingId::compatibility_local("ids"),
+            "ids".to_string(),
+            external_ids.clone(),
+            RustSlotShape::conservative(external_ids),
+            false,
+        );
         let mut facts = FactSet::default();
         facts
             .type_capability_overrides

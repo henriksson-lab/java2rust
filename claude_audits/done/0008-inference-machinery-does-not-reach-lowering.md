@@ -23,6 +23,23 @@ Follow-up 2026-09-10: the shared SCC utility in `src/graph.rs`
 crate-local. It remains live in `signature.rs` and `semantic_analysis.rs`, but
 is no longer exported as public crate API.
 
+Follow-up 2026-09-12: `fact_saturation` is crate-internal as well. The finite
+and worklist saturation helpers remain live in the upstream facts, semantic
+analysis, and signature layers, but they are no longer exported as public crate
+API. The historical lowering observation below is unchanged: lowering still
+does not consume the saturation machinery directly.
+Follow-up cleanup tightened this further by spelling the internal saturation
+engine pieces as `pub(crate)` inside the private module: `SaturationStep`, the
+finite/worklist result carriers, the worklist policy/inserter, and the
+finite/worklist entry points. The small public DTOs that existing public queries
+return (`FiniteFactDomain`, `FiniteSaturationPolicy`, and `WorklistStats`) stay
+public but private-backed.
+
+Follow-up cleanup: the ranked lattice join carrier and rank helpers in
+`lattice.rs` are crate-local now too. Signature solving still consumes them for
+requirement precedence, but the lattice utility is an internal analysis
+primitive rather than public crate API.
+
 None of `lattice`, `fact_saturation`, or `graph` is referenced from
 `src/lower.rs`:
 
@@ -408,3 +425,21 @@ The survey's own summary is the useful part: `slot_render.rs`'s
 `ownership × (view, dispatch, java_ty)` with each axis matched once and no
 cross-product enumerated. Every defect above is a cross-product that was
 enumerated instead.
+
+Codex follow-up 2026-09-12: the erased Java type identity predicate moved out of
+`lower.rs` and into `slot_shape.rs`, next to `RustSlotShape`'s
+generic-detail order. Lowering still asks the same question at the same call
+sites, but there is no longer a local duplicate deciding whether two slot shapes
+share one erased runtime type. Guard:
+`slot_shape::tests::erased_identity_ignores_named_generic_arguments_only`.
+
+Codex follow-up 2026-09-12: the related "has generic or sequence detail" query
+is now owned by `slot_shape.rs` too. `RustSlotShape` exposes
+`has_generic_or_sequence_detail()`, and lowering uses that method where it
+already has a shape instead of re-deriving detail from raw `JavaType` locally.
+This keeps raw-erasure cast and exact generic external-call lowering on the same
+slot-shape query as the generic-detail order. Guards:
+`slot_shape::tests::generic_or_sequence_detail_covers_named_args_and_facade_sequences`,
+`type_coercion::cast_semantics_policy_names_generic_raw_wildcard_and_optional_result_casts`,
+`idiom_gaps::raw_list_cast_over_typed_external_call_uses_target_slot_shape`,
+and `idiom_gaps::static_external_call_to_generic_set_slot_uses_external_return_shape`.

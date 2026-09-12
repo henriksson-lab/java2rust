@@ -45,6 +45,242 @@ fn production_source_without_cfg_test_items(source: &str) -> String {
 }
 
 #[test]
+fn batch_translation_options_is_not_a_public_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let options_source = source
+        .split("#[derive(Clone)]\npub struct BatchTranslationOptions")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("impl fmt::Debug for BatchTranslationOptions")
+                .next()
+        })
+        .expect("BatchTranslationOptions should remain discoverable");
+    for field in [
+        "pub emission_jobs:",
+        "pub event_sink:",
+        "pub(crate) emission_jobs:",
+        "pub(crate) event_sink:",
+    ] {
+        assert!(
+            !options_source.contains(field),
+            "BatchTranslationOptions should expose constructor/accessors, not raw fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn new(emission_jobs: usize, event_sink: Option<Arc<BatchTranslationEventSink>>) -> Self",
+        "pub fn emission_jobs(&self) -> usize",
+        "pub fn event_sink(&self) -> Option<&BatchTranslationEventSink>",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchTranslationOptions should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
+fn batch_source_is_not_a_public_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let source_record = source
+        .split("#[derive(Debug, Clone)]\npub struct BatchSource")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BatchSource").next())
+        .expect("BatchSource should remain discoverable");
+    for field in ["pub path:", "pub source:"] {
+        assert!(
+            !source_record.contains(field),
+            "BatchSource should expose constructor/accessors, not raw fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn new(path: impl Into<String>, source: impl Into<String>) -> Self",
+        "pub fn path(&self) -> &str",
+        "pub fn source(&self) -> &str",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchSource should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
+fn batch_translation_is_not_a_public_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let translation_source = source
+        .split("#[derive(Debug, Clone)]\npub struct BatchTranslation")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BatchTranslation").next())
+        .expect("BatchTranslation should remain discoverable");
+    for field in ["pub path:", "pub rust:", "pub diagnostics:"] {
+        assert!(
+            !translation_source.contains(field),
+            "BatchTranslation should expose constructor/accessors, not raw fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn new(path: impl Into<String>, rust: String, diagnostics: DiagnosticBag) -> Self",
+        "pub fn path(&self) -> &str",
+        "pub fn rust(&self) -> &str",
+        "pub fn diagnostics(&self) -> &DiagnosticBag",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchTranslation should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
+fn batch_translation_event_is_not_a_public_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let event_source = source
+        .split("#[derive(Debug, Clone)]\npub struct BatchTranslationEvent")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BatchTranslationEvent").next())
+        .expect("BatchTranslationEvent should remain discoverable");
+    for field in [
+        "pub phase:",
+        "pub index:",
+        "pub path:",
+        "pub elapsed_ms:",
+        "pub status:",
+    ] {
+        assert!(
+            !event_source.contains(field),
+            "BatchTranslationEvent should expose constructor/accessors, not raw fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn new(",
+        "pub fn phase(&self) -> &'static str",
+        "pub fn index(&self) -> usize",
+        "pub fn path(&self) -> &str",
+        "pub fn elapsed_ms(&self) -> u128",
+        "pub fn status(&self) -> &'static str",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchTranslationEvent should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
+fn batch_translation_timings_is_not_a_public_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let timings_source = source
+        .split("#[derive(Debug, Clone, Default)]\npub struct BatchTranslationTimings")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BatchTranslationTimings").next())
+        .expect("BatchTranslationTimings should remain discoverable");
+    for field in [
+        "pub primary_parse_ms:",
+        "pub context_parse_ms:",
+        "pub summary_parse_ms:",
+        "pub global_analysis_ms:",
+        "pub global_resolve_ms:",
+        "pub global_semantic_ms:",
+        "pub global_representation_ms:",
+        "pub global_signature_ms:",
+        "pub emission_ms:",
+    ] {
+        assert!(
+            !timings_source.contains(field),
+            "BatchTranslationTimings should expose read-only accessors, not raw fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn primary_parse_ms(&self) -> u128",
+        "pub fn context_parse_ms(&self) -> u128",
+        "pub fn summary_parse_ms(&self) -> u128",
+        "pub fn global_analysis_ms(&self) -> u128",
+        "pub fn global_resolve_ms(&self) -> u128",
+        "pub fn global_semantic_ms(&self) -> u128",
+        "pub fn global_representation_ms(&self) -> u128",
+        "pub fn global_signature_ms(&self) -> u128",
+        "pub fn emission_ms(&self) -> u128",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchTranslationTimings should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
+fn batch_analysis_profile_is_not_a_public_metrics_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let profile_source = source
+        .split("#[derive(Debug, Clone, Default)]\npub struct BatchAnalysisProfile")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BatchAnalysisProfile").next())
+        .expect("BatchAnalysisProfile should remain discoverable");
+    for field in [
+        "pub primary_files:",
+        "pub context_files:",
+        "pub summary_files:",
+        "pub program_types:",
+        "pub program_methods:",
+        "pub program_constructors:",
+        "pub program_fields:",
+        "pub external_fact_count:",
+    ] {
+        assert!(
+            !profile_source.contains(field),
+            "BatchAnalysisProfile should expose read-only accessors, not raw metric fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn primary_files(&self) -> usize",
+        "pub fn context_files(&self) -> usize",
+        "pub fn summary_files(&self) -> usize",
+        "pub fn program_types(&self) -> usize",
+        "pub fn program_methods(&self) -> usize",
+        "pub fn program_constructors(&self) -> usize",
+        "pub fn program_fields(&self) -> usize",
+        "pub fn external_fact_count(&self) -> usize",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchAnalysisProfile should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
+fn batch_translation_report_is_not_a_public_field_bag() {
+    let source = include_str!("../src/lib.rs");
+    let report_source = source
+        .split("#[derive(Debug, Clone)]\npub struct BatchTranslationReport")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BatchTranslationReport").next())
+        .expect("BatchTranslationReport should remain discoverable");
+    for field in [
+        "pub translations:",
+        "pub timings:",
+        "pub analysis_profile:",
+        "pub events:",
+    ] {
+        assert!(
+            !report_source.contains(field),
+            "BatchTranslationReport should expose read-only accessors, not raw fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn translations(&self) -> &[BatchTranslation]",
+        "pub fn timings(&self) -> &BatchTranslationTimings",
+        "pub fn analysis_profile(&self) -> &BatchAnalysisProfile",
+        "pub fn events(&self) -> &[BatchTranslationEvent]",
+    ] {
+        assert!(
+            source.contains(accessor),
+            "BatchTranslationReport should keep accessor API: {accessor}"
+        );
+    }
+}
+
+#[test]
 fn plan_layers_keep_rust_rendering_out_of_source_analysis() {
     let signature_source = include_str!("../src/signature.rs")
         .split("#[cfg(test)]")
@@ -145,6 +381,116 @@ fn plan_layers_keep_rust_rendering_out_of_source_analysis() {
 }
 
 #[test]
+fn output_markers_are_not_public_field_bags() {
+    let source = include_str!("../src/output_markers.rs");
+    assert!(source.contains("pub struct OutputMarker"));
+    let body = source
+        .split("pub struct OutputMarker")
+        .nth(1)
+        .and_then(|tail| tail.split("impl OutputMarker").next())
+        .expect("OutputMarker body should be present");
+    for field in ["pub name:", "pub text:", "pub kind:"] {
+        assert!(
+            !body.contains(field),
+            "OutputMarker should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(source.contains("pub const fn new("));
+    assert!(source.contains("pub fn name(&self)"));
+    assert!(source.contains("pub fn text(&self)"));
+    assert!(source.contains("pub fn kind(&self)"));
+}
+
+#[test]
+fn representation_boundary_policy_carriers_are_not_public_field_bags() {
+    let source = include_str!("../src/representation.rs");
+    let type_representation_source = source
+        .split("pub struct TypeRepresentation")
+        .nth(1)
+        .and_then(|tail| tail.split("impl TypeRepresentation").next())
+        .expect("TypeRepresentation should remain discoverable");
+    for field in [
+        "pub java_name: String",
+        "pub representation: ObjectRepresentation",
+        "pub provenance: RepresentationProvenance",
+        "pub direct_subtypes: Vec<String>",
+    ] {
+        assert!(
+            !type_representation_source.contains(field),
+            "TypeRepresentation should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(source.contains("pub fn java_name(&self) -> &str"));
+    assert!(source.contains("pub fn representation(&self) -> &ObjectRepresentation"));
+    assert!(source.contains("pub fn provenance(&self) -> RepresentationProvenance"));
+    assert!(source.contains("pub fn direct_subtypes(&self) -> &[String]"));
+
+    let enum_path_source = source
+        .split("pub struct JavaEnumVariantPath")
+        .nth(1)
+        .and_then(|tail| tail.split("impl JavaEnumVariantPath").next())
+        .expect("JavaEnumVariantPath should remain discoverable");
+    assert!(!enum_path_source.contains("pub enum_name: String"));
+    assert!(!enum_path_source.contains("pub variant_name: String"));
+    assert!(source.contains("pub fn enum_name(&self) -> &str"));
+    assert!(source.contains("pub fn variant_name(&self) -> &str"));
+
+    let boundary_policy_source = source
+        .split("pub struct SourceSummarySuperclassBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("impl SourceSummarySuperclassBoundaryPolicy")
+                .next()
+        })
+        .expect("SourceSummarySuperclassBoundaryPolicy should remain discoverable");
+    assert!(!boundary_policy_source.contains("pub boundary_types: Vec<String>"));
+    assert!(!boundary_policy_source.contains("pub facts: Vec<HierarchyOverride>"));
+    assert!(source.contains("pub fn boundary_types(&self) -> &[String]"));
+    assert!(source.contains("pub fn facts(&self) -> &[HierarchyOverride]"));
+}
+
+#[test]
+fn functional_interface_shape_is_not_a_public_field_bag() {
+    let source = include_str!("../src/stdlib.rs");
+    let shape_source = source
+        .split("pub struct FunctionalInterfaceShape")
+        .nth(1)
+        .and_then(|tail| tail.split("impl FunctionalInterfaceShape").next())
+        .expect("FunctionalInterfaceShape should remain discoverable");
+    assert!(!shape_source.contains("pub method: &'static str"));
+    assert!(!shape_source.contains("pub inputs: Vec<FunctionalTypeSource>"));
+    assert!(!shape_source.contains("pub returns: Option<FunctionalTypeSource>"));
+    assert!(source.contains("pub fn method(&self) -> &'static str"));
+    assert!(source.contains("pub fn inputs(&self) -> &[FunctionalTypeSource]"));
+    assert!(source.contains("pub fn returns(&self) -> Option<FunctionalTypeSource>"));
+}
+
+#[test]
+fn stdlib_external_api_method_policy_is_not_a_public_field_bag() {
+    let source = include_str!("../src/stdlib.rs");
+    let policy_source = source
+        .split("pub struct ExternalApiMethodPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalApiMethodPolicy").next())
+        .expect("ExternalApiMethodPolicy should remain discoverable");
+    for field in [
+        "pub role: ExternalApiRole",
+        "pub receiver_mutability: ReceiverMutabilityFact",
+        "pub return_nullability: NullabilityState",
+        "pub provenance: FactProvenance",
+    ] {
+        assert!(
+            !policy_source.contains(field),
+            "ExternalApiMethodPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(source.contains("pub fn role(&self) -> ExternalApiRole"));
+    assert!(source.contains("pub fn receiver_mutability(&self) -> ReceiverMutabilityFact"));
+    assert!(source.contains("pub fn return_nullability(&self) -> NullabilityState"));
+    assert!(source.contains("pub fn provenance(&self) -> FactProvenance"));
+}
+
+#[test]
 fn type_helpers_live_outside_slot_shape() {
     let source = include_str!("../src/types.rs");
     let slot_shape_source = include_str!("../src/slot_shape.rs");
@@ -164,6 +510,49 @@ fn member_access_plan_stays_fact_and_shape_based() {
     assert!(source.contains("infer_member_access_type"));
     assert!(source.contains("pub struct JavaMemberAccessPolicy"));
     assert!(source.contains("pub enum JavaMemberAccessKind"));
+    let java_member_access_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct JavaMemberAccessPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl JavaMemberAccessPolicy").next())
+        .expect("JavaMemberAccessPolicy source should remain discoverable");
+    for field in [
+        "pub member: String",
+        "pub java_ty: JavaType",
+        "pub kind: JavaMemberAccessKind",
+    ] {
+        assert!(
+            !java_member_access_policy_source.contains(field),
+            "JavaMemberAccessPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let member_access_plan_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct MemberAccessPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("impl MemberAccessPlan").next())
+        .expect("MemberAccessPlan source should remain discoverable");
+    for field in [
+        "pub member: String",
+        "pub java_ty: JavaType",
+        "pub shape: RustSlotShape",
+        "pub op: MemberAccessOp",
+    ] {
+        assert!(
+            !member_access_plan_source.contains(field),
+            "MemberAccessPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(source.contains("pub fn member(&self) -> &str"));
+    assert!(source.contains("pub fn java_ty(&self) -> &JavaType"));
+    assert!(source.contains("pub fn kind(&self) -> JavaMemberAccessKind"));
+    assert!(source.contains("pub fn shape(&self) -> &RustSlotShape"));
+    assert!(source.contains("pub fn op(&self) -> &MemberAccessOp"));
+    assert!(source.contains(
+        "pub fn new(member: impl Into<String>, java_ty: JavaType, kind: JavaMemberAccessKind) -> Self"
+    ));
+    assert!(source.contains("Some(JavaMemberAccessPolicy::new("));
+    assert!(source.contains("Some(MemberAccessPlan::new("));
+    assert!(!source.contains("Some(JavaMemberAccessPolicy {"));
+    assert!(!source.contains("Some(MemberAccessPlan {"));
     assert!(!source.contains("pub fn java_member_access_policy("));
     assert!(source.contains("pub fn java_member_access_policy_with_facts"));
     assert!(!source.contains("pub fn plan_member_access("));
@@ -198,16 +587,48 @@ fn unsupported_lowering_policy_stays_planned_before_lowering() {
 
     assert!(source.contains("pub struct UnsupportedDiagnosticPolicy"));
     assert!(source.contains("pub struct UnsupportedLoweringMessagePolicy"));
+    let unsupported_message_policy_source = source
+        .split(
+            "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct UnsupportedLoweringMessagePolicy",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl UnsupportedLoweringMessagePolicy").next())
+        .expect("unsupported lowering message policy source should remain discoverable");
+    assert!(!unsupported_message_policy_source.contains("pub message: String"));
+    assert!(
+        source.contains("impl UnsupportedLoweringMessagePolicy")
+            && source.contains("pub fn new(message: impl Into<String>)")
+            && source.contains("pub fn message(&self) -> &str"),
+        "unsupported lowering message policy should expose constructor/accessors, not raw fields"
+    );
+    let unsupported_diagnostic_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct UnsupportedDiagnosticPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl UnsupportedDiagnosticPolicy").next())
+        .expect("unsupported diagnostic policy source should remain discoverable");
+    assert!(!unsupported_diagnostic_policy_source.contains("pub code: &'static str"));
+    assert!(!unsupported_diagnostic_policy_source.contains("pub message: String"));
+    assert!(
+        source.contains("impl UnsupportedDiagnosticPolicy")
+            && source.contains("pub fn new(code: &'static str, message: impl Into<String>)")
+            && source.contains("pub fn code(&self) -> &'static str")
+            && source.contains("pub fn message(&self) -> &str"),
+        "unsupported diagnostic policy should expose constructor/accessors, not raw fields"
+    );
     assert!(source.contains("pub(crate) fn plan_unsupported_expression"));
     assert!(source.contains("pub(crate) fn plan_unsupported_member"));
     assert!(source.contains("pub(crate) fn plan_unsupported_statement"));
     assert!(!source.contains("pub fn plan_unsupported_expression"));
     assert!(!source.contains("pub fn plan_unsupported_member"));
     assert!(!source.contains("pub fn plan_unsupported_statement"));
-    assert!(source.contains("pub fn unsupported_member_diagnostic_policy"));
-    assert!(source.contains("pub fn unsupported_constructor_message_policy"));
-    assert!(source.contains("pub fn unsupported_statement_message_policy"));
-    assert!(source.contains("pub fn unsupported_expression_message_policy"));
+    assert!(source.contains("pub(crate) fn unsupported_member_diagnostic_policy"));
+    assert!(source.contains("pub(crate) fn unsupported_constructor_message_policy"));
+    assert!(source.contains("pub(crate) fn unsupported_statement_message_policy"));
+    assert!(source.contains("pub(crate) fn unsupported_expression_message_policy"));
+    assert!(!source.contains("pub fn unsupported_member_diagnostic_policy"));
+    assert!(!source.contains("pub fn unsupported_constructor_message_policy"));
+    assert!(!source.contains("pub fn unsupported_statement_message_policy"));
+    assert!(!source.contains("pub fn unsupported_expression_message_policy"));
     assert!(lower_source.contains("plan_unsupported_expression"));
     assert!(lower_source.contains("plan_unsupported_member"));
     assert!(lower_source.contains("plan_unsupported_statement"));
@@ -250,12 +671,15 @@ fn unsupported_compile_error_literals_are_centralized() {
 
     let unsupported_source = std::fs::read_to_string("src/unsupported.rs").unwrap();
     let compile_error_expr = unsupported_source
-        .split("pub fn compile_error_expr")
+        .split("pub(crate) fn compile_error_expr")
         .nth(1)
         .unwrap()
         .split("/// A `compile_error!` at item position")
         .next()
         .unwrap();
+    assert!(!unsupported_source.contains("pub fn compile_error_expr(message"));
+    assert!(!unsupported_source.contains("pub fn compile_error_stmt(message"));
+    assert!(!unsupported_source.contains("pub fn compile_error_expr_consuming(expr"));
     assert!(
         compile_error_expr.contains("RustExpr::MacroCall"),
         "expression-position compile_error! should use structured macro-call IR"
@@ -273,6 +697,20 @@ fn unsupported_compile_error_literals_are_centralized() {
             .contains("RustExpr::Raw(format!(\n        \"{{ let _ = {}; compile_error!"),
         "compile_error expressions that consume a value should use structured block IR"
     );
+    for helper in [
+        "compile_error_item_text",
+        "compile_error_value_text",
+        "compile_error_diverging_text",
+    ] {
+        assert!(
+            unsupported_source.contains(&format!("pub(crate) fn {helper}(")),
+            "{helper} should stay available to internal rendered-text support"
+        );
+        assert!(
+            !unsupported_source.contains(&format!("pub fn {helper}(")),
+            "{helper} should not be public API"
+        );
+    }
     assert!(
         !unsupported_source.contains("RustExpr::Raw(format!(\"panic!"),
         "unsupported constructor diverging placeholders should use structured panic macro IR"
@@ -280,7 +718,44 @@ fn unsupported_compile_error_literals_are_centralized() {
 }
 
 #[test]
+fn lowered_program_is_not_a_public_field_bag() {
+    let lower_source = include_str!("../src/lower.rs");
+    let lowered_program_source = lower_source
+        .split("#[derive(Debug, Clone)]\npub struct LoweredProgram")
+        .nth(1)
+        .and_then(|tail| tail.split("impl LoweredProgram").next())
+        .expect("LoweredProgram source should remain discoverable");
+
+    assert!(!lowered_program_source.contains("pub file: RustFile"));
+    assert!(!lowered_program_source.contains("pub diagnostics: DiagnosticBag"));
+    assert!(lower_source.contains("pub fn file(&self) -> &RustFile"));
+    assert!(lower_source.contains("pub fn diagnostics(&self) -> &DiagnosticBag"));
+    assert!(lower_source.contains("pub fn diagnostics_mut(&mut self) -> &mut DiagnosticBag"));
+    assert!(lower_source.contains("pub fn into_parts(self) -> (RustFile, DiagnosticBag)"));
+}
+
+#[test]
 fn production_formatted_raw_constructors_stay_in_named_boundaries() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+    for helper in [
+        "java_class_support_item",
+        "java_class_support_item_with_classloader_shim",
+        "java_floating_point_display_support_item",
+        "java_comparable_support_item",
+        "java_platform_facade_support_item",
+        "java_string_split_support_item",
+        "java_string_format_support_item",
+    ] {
+        assert!(
+            stdlib_source.contains(&format!("pub(crate) fn {helper}(")),
+            "{helper} should remain crate-local support-item implementation detail"
+        );
+        assert!(
+            !stdlib_source.contains(&format!("pub fn {helper}(")),
+            "{helper} should not expose raw support-item construction as public API"
+        );
+    }
+
     let allowed_files = [
         "src/javalibs.rs",                // handwritten support item text
         "src/representation_lowering.rs", // whole-item compatibility emission
@@ -332,6 +807,14 @@ fn string_concat_layers_keep_semantics_and_rendering_separate() {
     assert!(!semantic_source.contains("rust_ir"));
     assert!(!semantic_source.contains("emit::"));
     assert!(!semantic_source.contains("format!("));
+    let concat_parts_source = semantic_source
+        .split("pub(crate) struct StringConcatParts")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<'a> StringConcatParts").next())
+        .expect("StringConcatParts should remain discoverable");
+    assert!(!concat_parts_source.contains("pub(crate) parts:"));
+    assert!(semantic_source.contains("pub(crate) fn parts(&self) -> &[&'a Expr]"));
+    assert!(semantic_source.contains("pub(crate) fn into_parts(self) -> Vec<&'a Expr>"));
     assert!(!plan_source.contains("rust_ir"));
     assert!(!plan_source.contains("emit::"));
     assert!(!plan_source.contains("format!("));
@@ -354,13 +837,103 @@ fn conversion_plan_owns_stream_collect_actual_shape_selection_layering() {
     assert!(!coercion_source.contains("collected_sequence_from_element_shape"));
     assert!(!stream_source.contains("OwnershipShape"));
     assert!(!stream_source.contains("list_java_type"));
+    assert!(stream_source.contains("pub struct StreamElement"));
+    assert!(stream_source.contains("    shape: RustSlotShape"));
+    assert!(!stream_source.contains("pub shape: RustSlotShape"));
+    assert!(stream_source.contains("pub fn shape(&self) -> &RustSlotShape"));
+    for field in [
+        "pub source: StreamSource",
+        "pub ops: Vec<StreamOp",
+        "pub terminal: StreamTerminal",
+        "pub source_element: StreamElement",
+        "pub actual: LoweredType",
+        "pub expr: &'a Expr",
+        "pub optional_sequence: bool",
+        "pub iteration: StreamSourceIteration",
+        "pub range: Option<StreamSourceRange",
+        "pub param_name: String",
+        "pub rust_param_name: String",
+        "pub body: StreamLambdaBody",
+        "pub output_shape: RustSlotShape",
+    ] {
+        assert!(!stream_source.contains(field));
+    }
+    assert!(stream_source.contains("pub fn source(&self) -> &StreamSource"));
+    assert!(stream_source.contains("pub fn ops(&self) -> &[StreamOp"));
+    assert!(stream_source.contains("pub fn terminal(&self) -> &StreamTerminal"));
     assert!(stream_source.contains("use crate::conversion_plan::LoweredType"));
     assert!(stream_source.contains("LoweredType::collected_sequence_from_element_shape"));
 }
 
 #[test]
+fn dependency_mode_config_is_not_a_public_field_bag() {
+    let source = include_str!("../src/dependency_mode.rs");
+
+    for (struct_name, forbidden_fields, required_accessors) in [
+        (
+            "DependencySourceRoot",
+            &[
+                "pub path: PathBuf",
+                "pub mode: DependencyMode",
+                "pub package_prefixes: Vec<String>",
+            ][..],
+            &[
+                "pub fn path(&self) -> &Path",
+                "pub fn mode(&self) -> DependencyMode",
+                "pub fn package_prefixes(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "DependencyFactProvider",
+            &[
+                "pub name: String",
+                "pub mode: DependencyMode",
+                "pub facts: FactSet",
+            ][..],
+            &[
+                "pub fn name(&self) -> &str",
+                "pub fn mode(&self) -> DependencyMode",
+                "pub fn facts(&self) -> &FactSet",
+            ][..],
+        ),
+        (
+            "DependencyModeConfig",
+            &[
+                "pub source_roots: Vec<DependencySourceRoot>",
+                "pub fact_providers: Vec<DependencyFactProvider>",
+                "pub enable_builtin_external_packs: bool",
+            ][..],
+            &[
+                "pub fn source_roots(&self) -> &[DependencySourceRoot]",
+                "pub fn fact_providers(&self) -> &[DependencyFactProvider]",
+                "pub fn enable_builtin_external_packs(&self) -> bool",
+            ][..],
+        ),
+    ] {
+        let struct_source = source
+            .split(&format!("pub struct {struct_name}"))
+            .nth(1)
+            .and_then(|tail| tail.split("impl").next())
+            .unwrap_or_else(|| panic!("{struct_name} source should remain discoverable"));
+        for field in forbidden_fields {
+            assert!(
+                !struct_source.contains(field),
+                "{struct_name} should not expose `{field}`"
+            );
+        }
+        for accessor in required_accessors {
+            assert!(
+                source.contains(accessor),
+                "{struct_name} should expose `{accessor}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn aliasing_uses_binding_fact_view_instead_of_legacy_name_map() {
-    let source = include_str!("../src/aliasing.rs")
+    let full_source = include_str!("../src/aliasing.rs");
+    let source = full_source
         .split("#[cfg(test)]")
         .next()
         .expect("production aliasing source should be present");
@@ -369,6 +942,39 @@ fn aliasing_uses_binding_fact_view_instead_of_legacy_name_map() {
         !source.contains(".bindings.get("),
         "alias analysis should consume all_binding_facts() or binding ids instead of the legacy name map"
     );
+    assert!(
+        !source.contains("fn observable_aliases(program: &Program, usage: &UsageFacts)"),
+        "the no-facts observable-alias convenience wrapper should stay test-only"
+    );
+    assert!(
+        full_source.contains("fn observable_aliases_with_facts"),
+        "production alias diagnostics should use the fact-aware collector"
+    );
+    let observable_alias_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct ObservableAlias")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive(Debug, Clone, PartialEq, Eq)]").next())
+        .expect("ObservableAlias should remain discoverable");
+    for field in [
+        "pub(crate) callable: String",
+        "pub(crate) original: String",
+        "pub(crate) alias: String",
+        "pub(crate) mutated_through: String",
+        "pub(crate) observed_through: String",
+        "pub(crate) mutation: MutationKind",
+    ] {
+        assert!(!observable_alias_source.contains(field));
+    }
+    for accessor in [
+        "pub(crate) fn callable(&self) -> &str",
+        "pub(crate) fn original(&self) -> &str",
+        "pub(crate) fn alias(&self) -> &str",
+        "pub(crate) fn mutated_through(&self) -> &str",
+        "pub(crate) fn observed_through(&self) -> &str",
+        "pub(crate) fn mutation(&self) -> &MutationKind",
+    ] {
+        assert!(source.contains(accessor));
+    }
 }
 
 #[test]
@@ -502,18 +1108,68 @@ fn object_representation_policy_source_boundaries_stay_in_object_model() {
     assert!(effective_facts_source.contains("pub fn dispatch_requirements_for"));
     assert!(object_model_source.contains("use crate::effective_facts::EffectiveFacts"));
     assert!(object_model_source.contains("pub struct ObjectModelInput"));
-    assert!(object_model_source.contains("pub program: &'a Program"));
-    assert!(object_model_source.contains("pub facts: &'a FactSet"));
-    assert!(object_model_source.contains("pub effective_facts: &'a EffectiveFacts<'a>"));
-    assert!(object_model_source.contains("pub usage: Option<&'a UsageFacts>"));
+    let object_model_input_source = object_model_source
+        .split("#[derive(Debug, Clone, Copy)]\npub struct ObjectModelInput")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<'a> ObjectModelInput").next())
+        .expect("ObjectModelInput source should remain discoverable");
+    for field in [
+        "pub program: &'a Program",
+        "pub facts: &'a FactSet",
+        "pub effective_facts: &'a EffectiveFacts<'a>",
+        "pub usage: Option<&'a UsageFacts>",
+    ] {
+        assert!(
+            !object_model_input_source.contains(field),
+            "ObjectModelInput should expose constructor/accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(object_model_source.contains("pub fn new(\n        program: &'a Program"));
+    assert!(object_model_source.contains("pub fn program(&self) -> &'a Program"));
+    assert!(object_model_source.contains("pub fn facts(&self) -> &'a FactSet"));
+    assert!(
+        object_model_source.contains("pub fn effective_facts(&self) -> &'a EffectiveFacts<'a>")
+    );
+    assert!(object_model_source.contains("pub fn usage(&self) -> Option<&'a UsageFacts>"));
     assert!(object_model_source.contains("pub fn plan_object_model_from_input"));
     assert!(object_model_source.contains("plan_object_model_with_effective_facts"));
     assert!(representation_source.contains("ObjectModelInput"));
     assert!(representation_source.contains("plan_object_model_from_input"));
-    assert!(representation_source.contains("usage: Some(&usage)"));
-    assert!(object_model_source.contains("pub strategies: BTreeMap<String, ObjectStrategyPlan>"));
+    assert!(representation_source.contains("ObjectModelInput::new("));
+    let object_model_plan_source = object_model_source
+        .split("pub struct ObjectModelPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ObjectModelPlan").next())
+        .expect("ObjectModelPlan source should remain discoverable");
+    assert!(!object_model_plan_source.contains("pub strategies:"));
+    assert!(!object_model_plan_source.contains("pub hierarchy_edges:"));
+    assert!(!object_model_plan_source.contains("pub diagnostics:"));
+    assert!(object_model_source.contains("pub fn strategies(&self)"));
+    assert!(object_model_source.contains("pub fn hierarchy_edges(&self)"));
+    assert!(object_model_source.contains("pub fn diagnostics(&self)"));
+    assert!(object_model_source.contains("pub fn into_parts("));
     assert!(object_model_source.contains("pub fn strategy_for(&self, root: &str)"));
-    assert!(object_model_source.contains("pub provenance: Vec<FactProvenance>"));
+    let object_strategy_plan_source = object_model_source
+        .split("pub struct ObjectStrategyPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ObjectStrategyPlan").next())
+        .expect("ObjectStrategyPlan source should remain discoverable");
+    for field in [
+        "pub root:",
+        "pub strategy:",
+        "pub requirements:",
+        "pub direct_subtypes:",
+        "pub source_methods_access_instance_fields:",
+        "pub rejected:",
+        "pub provenance:",
+        "pub diagnostics:",
+    ] {
+        assert!(
+            !object_strategy_plan_source.contains(field),
+            "ObjectStrategyPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(object_model_source.contains("pub fn provenance(&self) -> &[FactProvenance]"));
     assert!(object_model_source.contains("pub fn primary_provenance(&self)"));
     assert!(object_model_source.contains("fn add_provenance(&mut self"));
     assert!(object_model_source.contains("pub enum ObjectRepresentationRequest"));
@@ -524,16 +1180,62 @@ fn object_representation_policy_source_boundaries_stay_in_object_model() {
     assert!(object_model_source.contains("pub struct RepresentationLookupPolicy"));
     assert!(object_model_source.contains("pub enum RepresentationLookupFallback"));
     assert!(object_model_source.contains("pub fn object_representation_lookup_policy"));
+    let representation_lookup_policy_source = object_model_source
+        .split("pub struct RepresentationLookupPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl RepresentationLookupPolicy").next())
+        .expect("RepresentationLookupPolicy source should remain discoverable");
+    for field in [
+        "pub java_ty: JavaType",
+        "pub fallback: RepresentationLookupFallback",
+        "pub representation: ObjectRepresentation",
+    ] {
+        assert!(
+            !representation_lookup_policy_source.contains(field),
+            "RepresentationLookupPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(object_model_source.contains("pub fn fallback(&self) -> RepresentationLookupFallback"));
+    assert!(object_model_source.contains("pub fn representation(&self) -> &ObjectRepresentation"));
     assert!(!representation_source.contains("pub struct RepresentationLookupPolicy"));
     assert!(!representation_source.contains("pub enum RepresentationLookupFallback"));
     assert!(representation_source.contains("object_representation_lookup_policy"));
     assert!(representation_source.contains("pub struct RepresentationDispatchPolicy"));
     assert!(representation_source.contains("pub fn representation_dispatch_policy"));
+    let representation_dispatch_policy_source = representation_source
+        .split("pub struct RepresentationDispatchPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl RepresentationDispatchPolicy").next())
+        .expect("RepresentationDispatchPolicy source should remain discoverable");
+    assert!(
+        !representation_dispatch_policy_source.contains("pub representation: ObjectRepresentation")
+    );
+    assert!(!representation_dispatch_policy_source.contains("pub dispatch: DispatchShape"));
+    assert!(
+        representation_source.contains("pub fn representation(&self) -> &ObjectRepresentation")
+    );
+    assert!(representation_source.contains("pub fn dispatch(&self) -> &DispatchShape"));
+    assert!(representation_source.contains("pub fn into_dispatch(self) -> DispatchShape"));
     assert!(representation_source.contains("representation_lookup_policy"));
     assert!(object_model_source.contains("ConservativeConcrete"));
     assert!(object_model_source.contains("ConservativeErasedObject"));
     assert!(object_model_source.contains("pub enum ObjectSafetyPolicy"));
     assert!(object_model_source.contains("pub struct ObjectSafetyFactPolicy"));
+    let object_safety_fact_policy_source = object_model_source
+        .split("pub struct ObjectSafetyFactPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ObjectSafetyFactPolicy").next())
+        .expect("ObjectSafetyFactPolicy source should remain discoverable");
+    for field in [
+        "pub type_name: String",
+        "pub object_safe_trait: Option<bool>",
+        "pub violation: Option<ObjectSafetyViolation>",
+    ] {
+        assert!(
+            !object_safety_fact_policy_source.contains(field),
+            "ObjectSafetyFactPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
     assert!(!object_model_source.contains("pub fn object_safety_fact_policy("));
     assert!(object_model_source.contains("pub fn object_safety_fact_policy_with_effective_facts"));
     assert!(object_model_source.contains("object_safety_policy_for_request"));
@@ -566,14 +1268,92 @@ fn object_representation_policy_source_boundaries_stay_in_object_model() {
         object_model_source
             .contains("pub fn hierarchy_override_representation_policy_with_effective_facts")
     );
+    let override_validation_policy_source = object_model_source
+        .split("pub struct HierarchyOverrideValidationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl HierarchyOverrideValidationPolicy").next())
+        .expect("HierarchyOverrideValidationPolicy source should remain discoverable");
+    assert!(!override_validation_policy_source.contains("pub type_name: String"));
+    assert!(
+        !override_validation_policy_source
+            .contains("pub diagnostics: Vec<RepresentationDiagnostic>")
+    );
+    let override_application_policy_source = object_model_source
+        .split("pub struct HierarchyOverrideApplicationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl HierarchyOverrideApplicationPolicy").next())
+        .expect("HierarchyOverrideApplicationPolicy source should remain discoverable");
+    for field in [
+        "pub type_name: String",
+        "pub representation: Option<ObjectRepresentation>",
+        "pub provenance: FactProvenance",
+        "pub direct_subtypes: Vec<String>",
+        "pub diagnostics: Vec<RepresentationDiagnostic>",
+    ] {
+        assert!(
+            !override_application_policy_source.contains(field),
+            "HierarchyOverrideApplicationPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let override_representation_policy_source = object_model_source
+        .split("pub struct HierarchyOverrideRepresentationPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("impl HierarchyOverrideRepresentationPolicy")
+                .next()
+        })
+        .expect("HierarchyOverrideRepresentationPolicy source should remain discoverable");
+    for field in [
+        "pub representation: ObjectRepresentation",
+        "pub object_safety: ObjectSafetyPolicy",
+        "pub diagnostics: Vec<RepresentationDiagnostic>",
+    ] {
+        assert!(
+            !override_representation_policy_source.contains(field),
+            "HierarchyOverrideRepresentationPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
     assert!(!representation_source.contains("pub struct RepresentationHierarchyFactPolicy"));
     assert!(!representation_source.contains("representation_hierarchy_fact_policy"));
     assert!(object_model_source.contains("pub struct ObjectHierarchyEdge"));
+    let object_hierarchy_edge_source = object_model_source
+        .split("pub struct ObjectHierarchyEdge")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ObjectHierarchyEdge").next())
+        .expect("ObjectHierarchyEdge source should remain discoverable");
+    for field in [
+        "pub super_name: String",
+        "pub sub_name: String",
+        "pub kind: ObjectHierarchyEdgeKind",
+    ] {
+        assert!(
+            !object_hierarchy_edge_source.contains(field),
+            "ObjectHierarchyEdge should expose constructor/accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(object_model_source.contains("pub fn new(\n        super_name:"));
+    assert!(object_model_source.contains("pub fn super_name(&self) -> &str"));
+    assert!(object_model_source.contains("pub fn sub_name(&self) -> &str"));
+    assert!(object_model_source.contains("pub fn kind(&self) -> ObjectHierarchyEdgeKind"));
     assert!(object_model_source.contains("pub enum ObjectHierarchyEdgeKind"));
     assert!(object_model_source.contains("pub struct ObjectHierarchyEdgeRepresentationPolicy"));
     assert!(object_model_source.contains("pub fn object_hierarchy_edge_representation_policy"));
+    let edge_representation_policy_source = object_model_source
+        .split("pub struct ObjectHierarchyEdgeRepresentationPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("impl ObjectHierarchyEdgeRepresentationPolicy")
+                .next()
+        })
+        .expect("ObjectHierarchyEdgeRepresentationPolicy source should remain discoverable");
+    assert!(
+        !edge_representation_policy_source.contains("pub representation: ObjectRepresentation")
+    );
+    assert!(!edge_representation_policy_source.contains("pub represented: bool"));
+    assert!(object_model_source.contains("pub fn represented(&self) -> bool"));
     assert!(object_model_source.contains("hierarchy_edges: Vec<ObjectHierarchyEdge>"));
-    assert!(representation_source.contains("for edge in object_plan.hierarchy_edges"));
+    assert!(representation_source.contains("let (strategies, hierarchy_edges, diagnostics)"));
+    assert!(representation_source.contains("for edge in hierarchy_edges"));
     assert!(representation_source.contains("object_hierarchy_edge_representation_policy"));
     assert!(!representation_source.contains("fn collect_hierarchy_edges("));
     assert!(!representation_source.contains("ObjectRepresentation::ClosedEnum { .. }"));
@@ -597,6 +1377,28 @@ fn object_representation_policy_source_boundaries_stay_in_object_model() {
     assert!(!object_model_source.contains("pub fn closed_enum_proof_policy("));
     assert!(object_model_source.contains("pub fn closed_enum_proof_policy_with_effective_facts"));
     assert!(object_model_source.contains("MissingPermittedSubtypes"));
+    let closed_enum_inference_policy_source = object_model_source
+        .split("pub struct ClosedEnumInferencePolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ClosedEnumInferencePolicy").next())
+        .expect("ClosedEnumInferencePolicy source should remain discoverable");
+    for field in [
+        "pub type_name: String",
+        "pub representation: Option<ObjectRepresentation>",
+        "pub provenance: Option<FactProvenance>",
+    ] {
+        assert!(
+            !closed_enum_inference_policy_source.contains(field),
+            "ClosedEnumInferencePolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let closed_enum_proof_policy_source = object_model_source
+        .split("pub struct ClosedEnumProofPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ClosedEnumProofPolicy").next())
+        .expect("ClosedEnumProofPolicy source should remain discoverable");
+    assert!(!closed_enum_proof_policy_source.contains("pub type_name: String"));
+    assert!(!closed_enum_proof_policy_source.contains("pub proof: ClosedEnumProof"));
     assert!(facts_source.contains("pub struct SealedPermitsFact"));
     assert!(effective_facts_source.contains("sealed_permitted_subtypes_for"));
     assert!(!representation_source.contains("fn validate_hierarchy_override"));
@@ -604,6 +1406,53 @@ fn object_representation_policy_source_boundaries_stay_in_object_model() {
     assert!(object_model_source.contains("pub struct HierarchyEdgeDiagnosticPolicy"));
     assert!(object_model_source.contains("pub enum HierarchyEdgeDiagnosticOutcome"));
     assert!(object_model_source.contains("pub fn object_hierarchy_edge_diagnostic_policy"));
+    let edge_diagnostic_input_source = object_model_source
+        .split("pub struct ObjectHierarchyEdgeDiagnosticInput")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ObjectHierarchyEdgeDiagnosticInput").next())
+        .expect("ObjectHierarchyEdgeDiagnosticInput source should remain discoverable");
+    for field in [
+        "pub type_name: String",
+        "pub declared_extends: Option<String>",
+        "pub declared_implements: Vec<String>",
+        "pub edges: Vec<ObjectHierarchyEdge>",
+        "pub represented_super_names: BTreeSet<String>",
+    ] {
+        assert!(
+            !edge_diagnostic_input_source.contains(field),
+            "ObjectHierarchyEdgeDiagnosticInput should use a constructor, not raw public fields: {field}"
+        );
+    }
+    let edge_diagnostic_policy_source = object_model_source
+        .split("pub struct HierarchyEdgeDiagnosticPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl HierarchyEdgeDiagnosticPolicy").next())
+        .expect("HierarchyEdgeDiagnosticPolicy source should remain discoverable");
+    for field in [
+        "pub type_name: String",
+        "pub outcomes: Vec<HierarchyEdgeDiagnosticOutcome>",
+        "pub diagnostics: Vec<RepresentationDiagnostic>",
+    ] {
+        assert!(
+            !edge_diagnostic_policy_source.contains(field),
+            "HierarchyEdgeDiagnosticPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let representation_diagnostic_source = object_model_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RepresentationDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl RepresentationDiagnostic").next())
+        .expect("object_model::RepresentationDiagnostic struct source should be present");
+    assert!(!representation_diagnostic_source.contains("pub code: &'static str"));
+    assert!(!representation_diagnostic_source.contains("pub message: String"));
+    assert!(
+        object_model_source.contains("impl RepresentationDiagnostic")
+            && object_model_source
+                .contains("pub fn new(code: &'static str, message: impl Into<String>)")
+            && object_model_source.contains("pub fn code(&self) -> &'static str")
+            && object_model_source.contains("pub fn message(&self) -> &str"),
+        "representation diagnostics should expose constructor/accessors, not raw fields"
+    );
     assert!(representation_source.contains("ObjectHierarchyEdgeDiagnosticInput"));
     assert!(representation_source.contains("pub fn hierarchy_edge_diagnostic_policy"));
     assert!(representation_source.contains("object_hierarchy_edge_diagnostic_policy"));
@@ -616,6 +1465,21 @@ fn object_representation_policy_source_boundaries_stay_in_object_model() {
     assert!(
         object_model_source.contains("pub fn object_representation_policy_with_effective_facts")
     );
+    let object_representation_policy_source = object_model_source
+        .split("pub struct ObjectRepresentationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ObjectRepresentationPolicy").next())
+        .expect("ObjectRepresentationPolicy source should remain discoverable");
+    for field in [
+        "pub object_safety: ObjectSafetyPolicy",
+        "pub representation: ObjectRepresentation",
+        "pub diagnostics: Vec<RepresentationDiagnostic>",
+    ] {
+        assert!(
+            !object_representation_policy_source.contains(field),
+            "ObjectRepresentationPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
     assert!(!facts_source.contains("HierarchyStrategy::BoxedDynTrait"));
     assert!(!facts_source.contains("BoxedDynTrait {"));
     assert!(!object_model_source.contains("ObjectRepresentation::BoxedDynTrait"));
@@ -638,6 +1502,15 @@ fn switch_plan_keeps_rust_rendering_out_of_plan_layer() {
     assert!(!source.contains("emit_statements"));
     assert!(!source.contains("render_switch"));
     assert!(!source.contains("switch_case_condition"));
+    assert!(!include_str!("../src/switch_lowering.rs").contains("pub label_condition:"));
+    assert!(!include_str!("../src/switch_lowering.rs").contains("pub statements: Vec<RustStmt>"));
+    assert!(!source.contains("pub selector:"));
+    assert!(!source.contains("pub cases:"));
+    assert!(!source.contains("pub break_label:"));
+    assert!(!source.contains("pub value_binding:"));
+    assert!(!source.contains("pub matched_binding:"));
+    assert!(!source.contains("pub(crate) labels:"));
+    assert!(!source.contains("pub return_expr:"));
     assert!(source.contains("pub fn plan_simple_return_switch"));
     assert!(source.contains("pub(crate) fn plan_simple_return_switch_case"));
     assert!(!source.contains("pub fn plan_simple_return_switch_case"));
@@ -723,13 +1596,144 @@ fn conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer() {
     assert!(source.contains("pub struct SyntaxCoercionPlan"));
     assert!(source.contains("pub enum InstanceOfCheck"));
     assert!(source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
-    assert!(source.contains("pub coercion: ShapeCoercionPlan"));
-    assert!(source.contains("pub check: InstanceOfCheck"));
+    assert!(source.contains("pub struct CastConversionPlan"));
+    let conversion_diagnostic_source = source
+        .split("pub struct ConversionDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive(Debug, Clone, PartialEq, Eq)]").next())
+        .unwrap();
+    assert!(conversion_diagnostic_source.contains("pub fn new("));
+    assert!(conversion_diagnostic_source.contains("pub fn code(&self) -> &'static str"));
+    assert!(conversion_diagnostic_source.contains("pub fn message(&self) -> &str"));
+    for field in ["pub code: &'static str", "pub message: String"] {
+        assert!(
+            !conversion_diagnostic_source.contains(field),
+            "ConversionDiagnostic should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let shape_coercion_plan_source = source
+        .split("pub struct ShapeCoercionPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct SyntaxCoercionPlan").next())
+        .unwrap();
+    assert!(shape_coercion_plan_source.contains("pub fn new("));
+    assert!(shape_coercion_plan_source.contains("pub fn actual(&self) -> &RustSlotShape"));
+    assert!(shape_coercion_plan_source.contains("pub fn target(&self) -> &RustSlotShape"));
+    assert!(
+        shape_coercion_plan_source.contains("pub fn dispatch(&self) -> &DispatchCoercionPolicy")
+    );
+    assert!(shape_coercion_plan_source.contains("pub fn view(&self) -> &ViewCoercionPolicy"));
+    assert!(
+        shape_coercion_plan_source
+            .contains("pub fn optional(&self) -> &OptionalShapeCoercionPolicy")
+    );
+    assert!(
+        shape_coercion_plan_source.contains("pub fn ownership(&self) -> &OwnershipCoercionPolicy")
+    );
+    assert!(
+        shape_coercion_plan_source
+            .contains("pub fn primitive_widening(&self) -> Option<PrimitiveWideningPolicy>")
+    );
+    for field in [
+        "pub actual: RustSlotShape",
+        "pub target: RustSlotShape",
+        "pub dispatch: DispatchCoercionPolicy",
+        "pub view: ViewCoercionPolicy",
+        "pub optional: OptionalShapeCoercionPolicy",
+        "pub ownership: OwnershipCoercionPolicy",
+        "pub primitive_widening: Option<PrimitiveWideningPolicy>",
+    ] {
+        assert!(
+            !shape_coercion_plan_source.contains(field),
+            "ShapeCoercionPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let cast_conversion_plan_source = source
+        .split("pub struct CastConversionPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct InstanceOfPlan").next())
+        .unwrap();
+    assert!(source.contains(
+        "pub(crate) fn new(\n        actual: RustSlotShape,\n        target: RustSlotShape,\n        semantics: JavaCastSemanticsPolicy,\n        coercion: ShapeCoercionPlan,"
+    ));
+    assert!(source.contains("pub fn actual(&self) -> &RustSlotShape"));
+    assert!(source.contains("pub fn target(&self) -> &RustSlotShape"));
+    assert!(source.contains("pub fn semantics(&self) -> &JavaCastSemanticsPolicy"));
+    assert!(source.contains("pub fn coercion(&self) -> &ShapeCoercionPlan"));
+    assert!(!cast_conversion_plan_source.contains("pub actual: RustSlotShape"));
+    assert!(!cast_conversion_plan_source.contains("pub target: RustSlotShape"));
+    assert!(!cast_conversion_plan_source.contains("pub semantics: JavaCastSemanticsPolicy"));
+    assert!(!cast_conversion_plan_source.contains("pub coercion: ShapeCoercionPlan"));
+    assert!(source.contains("pub struct InstanceOfPlan"));
+    let instanceof_plan_source = source
+        .split("pub struct InstanceOfPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct SlotExprConversionPlan").next())
+        .unwrap();
+    assert!(instanceof_plan_source.contains("pub(crate) fn new("));
+    assert!(instanceof_plan_source.contains("actual: RustSlotShape"));
+    assert!(instanceof_plan_source.contains("target: RustSlotShape"));
+    assert!(instanceof_plan_source.contains("check: InstanceOfCheck"));
+    assert!(source.contains("pub fn check(&self) -> &InstanceOfCheck"));
+    assert!(!instanceof_plan_source.contains("pub actual: RustSlotShape"));
+    assert!(!instanceof_plan_source.contains("pub target: RustSlotShape"));
+    assert!(!instanceof_plan_source.contains("pub check: InstanceOfCheck"));
     assert!(source.contains("pub enum LoweredType"));
     assert!(source.contains("pub enum SlotConversionPlan"));
     assert!(source.contains("pub struct SlotExprConversionPlan"));
     assert!(source.contains("pub struct LoweredSlotExprConversionPlan"));
-    assert!(source.contains("pub conversion: SlotConversionPlan"));
+    let slot_expr_conversion_plan_source = source
+        .split("pub struct SlotExprConversionPlan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub struct LoweredSlotExprConversionPlan")
+                .next()
+        })
+        .unwrap();
+    assert!(slot_expr_conversion_plan_source.contains("pub fn new("));
+    assert!(slot_expr_conversion_plan_source.contains("pub fn actual(&self) -> &RustSlotShape"));
+    assert!(slot_expr_conversion_plan_source.contains("pub fn slot(&self) -> &Slot"));
+    assert!(
+        slot_expr_conversion_plan_source
+            .contains("pub fn conversion(&self) -> &SlotConversionPlan")
+    );
+    for field in [
+        "pub actual: RustSlotShape",
+        "pub slot: Slot",
+        "pub conversion: SlotConversionPlan",
+    ] {
+        assert!(
+            !slot_expr_conversion_plan_source.contains(field),
+            "SlotExprConversionPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let lowered_slot_expr_conversion_plan_source = source
+        .split("pub struct LoweredSlotExprConversionPlan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]")
+                .next()
+        })
+        .unwrap();
+    assert!(lowered_slot_expr_conversion_plan_source.contains("pub fn new("));
+    assert!(
+        lowered_slot_expr_conversion_plan_source.contains("pub fn actual(&self) -> &LoweredType")
+    );
+    assert!(lowered_slot_expr_conversion_plan_source.contains("pub fn slot(&self) -> &Slot"));
+    assert!(
+        lowered_slot_expr_conversion_plan_source
+            .contains("pub fn conversion(&self) -> &SlotConversionPlan")
+    );
+    for field in [
+        "pub actual: LoweredType",
+        "pub slot: Slot",
+        "pub conversion: SlotConversionPlan",
+    ] {
+        assert!(
+            !lowered_slot_expr_conversion_plan_source.contains(field),
+            "LoweredSlotExprConversionPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
     assert!(source.contains("pub fn actual_shape_for_slot_expr"));
     assert!(source.contains("pub fn plan_slot_conversion"));
     assert!(source.contains("pub fn plan_lowered_slot_conversion"));
@@ -737,8 +1741,8 @@ fn conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer() {
     assert!(source.contains("plan_instanceof_check"));
     assert!(source.contains("slot_conversion_plan_with_facts"));
     assert!(source.contains("lowered_slot_conversion_plan_with_facts"));
-    assert!(lowering_source.contains("apply_shape_coercion_plan(expr, &plan.coercion)"));
-    assert!(lowering_source.contains("instanceof_check_projection(expr, &plan.check)"));
+    assert!(lowering_source.contains("apply_shape_coercion_plan(expr, plan.coercion())"));
+    assert!(lowering_source.contains("instanceof_check_projection(expr, plan.check())"));
     assert!(lowering_source.contains("pub(crate) fn apply_slot_expr_conversion"));
     assert!(lowering_source.contains("pub(crate) fn apply_lowered_slot_expr_conversion"));
     assert!(lowering_source.contains("pub(crate) fn apply_lowered_slot_conversion_to_expr"));
@@ -819,7 +1823,7 @@ fn resolved_unknown_source_calls_can_propagate_signature_constraints() {
         })
         .expect("method call-site propagation should be present");
 
-    assert!(propagation.contains("let Some(resolved) = &call_site.resolved"));
+    assert!(propagation.contains("let Some(resolved) = call_site.resolved() else"));
     assert!(propagation.contains("constraints.methods.get(&callee_key)"));
     assert!(propagation.contains("resolved_source_call_propagates_signature_constraints"));
     assert!(propagation.contains("CallArgumentBoundary::Unknown"));
@@ -852,6 +1856,17 @@ fn inner_class_construction_diagnostics_stay_internal() {
 
     assert!(source.contains("pub(crate) struct UnconstructableInnerClass"));
     assert!(!source.contains("pub struct UnconstructableInnerClass"));
+    let unconstructable_source = source
+        .split(
+            "#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct UnconstructableInnerClass",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl UnconstructableInnerClass").next())
+        .expect("unconstructable inner class carrier should remain discoverable");
+    assert!(!unconstructable_source.contains("pub(crate) inner_type: String"));
+    assert!(!unconstructable_source.contains("pub(crate) outer_type: String"));
+    assert!(source.contains("pub(crate) fn inner_type(&self) -> &str"));
+    assert!(source.contains("pub(crate) fn outer_type(&self) -> &str"));
     assert!(source.contains("pub(crate) fn unconstructable_inner_classes"));
     assert!(!source.contains("pub fn unconstructable_inner_classes"));
     assert!(source.contains("pub(crate) fn report_unconstructable_inner_classes"));
@@ -896,27 +1911,109 @@ fn idless_local_binding_compatibility_surface_stays_explicit() {
     assert!(
         usage_source.contains("#[cfg(test)]\n    pub(crate) fn from_idless_compatibility_facts")
     );
+    assert!(usage_source.contains("#[cfg(test)]\n    pub(crate) fn from_exact_binding_facts"));
+    assert!(usage_source.contains("pub(crate) fn from_exact_binding_facts"));
+    assert!(!usage_source.contains("pub fn from_exact_binding_facts"));
     assert!(usage_source.contains("pub(crate) fn from_idless_compatibility_facts"));
     assert!(!usage_source.contains("pub fn from_idless_compatibility_facts"));
     assert!(usage_source.contains("#[cfg(test)]\n    fn from_visible_binding_fixture_facts"));
     assert!(!usage_source.contains("pub(crate) fn from_visible_binding_fixture_facts"));
     assert!(!usage_source.contains("pub fn from_visible_binding_fixture_facts"));
-    assert_eq!(
-        lower_source
-            .matches("idless_compatibility_local_plan_for_declared_type")
-            .count(),
-        1,
-        "lowering should have exactly one id-less local-plan compatibility call"
-    );
+    assert!(usage_source.contains("pub fn source_method_usage("));
+    assert!(usage_source.contains("pub fn source_constructor_usage("));
+    assert!(usage_source.contains("fn source_method_usage_by_java_key"));
+    assert!(!usage_source.contains("pub(crate) fn source_method_usage_by_java_key"));
+    assert!(usage_source.contains("fn source_method_usage_for_owner"));
+    assert!(!usage_source.contains("pub(crate) fn source_method_usage_for_owner"));
+    assert!(usage_source.contains("pub(crate) fn resolved_source_method_usage_for_owner"));
+    assert!(usage_source.contains("pub(crate) fn resolved_source_method_usage"));
+    assert!(!usage_source.contains("pub fn source_method_usage_by_java_key"));
+    assert!(!usage_source.contains("pub fn source_method_usage_for_owner"));
+    assert!(!usage_source.contains("pub fn resolved_source_method_usage"));
     assert!(lower_source.contains("fn idless_compatibility_local_plan_for_declaration"));
-    assert!(lower_source.contains(
-        "idless_compatibility_local_plan_for_declaration(name, ty, initializer, env, ctx)"
-    ));
+    assert!(
+        lower_source.contains(
+            "idless_compatibility_local_plan_for_declaration(name, ty, initializer, ctx)"
+        )
+    );
     assert!(
         expr_shape_source
             .contains("pub(crate) fn idless_compatibility_local_plan_for_declared_type")
     );
+    assert!(
+        !expr_shape_source
+            .contains("fn idless_compatibility_local_plan_for_declared_type<'a>(\n        &self"),
+        "id-less compatibility local-plan lookup should not hang off ShapeEnv"
+    );
     assert!(expr_shape_source.contains("pub(crate) fn fallback_local_shape_from_declared_type"));
+    for helper in [
+        "insert_map_key_set_view_receiver",
+        "insert_map_values_view_receiver",
+        "insert_map_entry_set_view_receiver",
+        "insert_map_entry_value_receiver",
+        "insert_simple_map_entry_value",
+        "forget_simple_map_entry_value",
+        "insert_simple_immutable_map_entry_local",
+        "simple_map_entry_local_is_immutable",
+        "forget_map_entry_value_receiver",
+        "map_key_set_view_receiver",
+        "map_values_view_receiver",
+        "map_entry_set_view_receiver",
+        "map_entry_value_receiver",
+        "simple_map_entry_value",
+        "insert_nested_array2_local",
+        "local_uses_nested_array2_slice",
+        "insert_local_shape_with_access_name_and_java_type",
+        "insert_local_shape_with_access_name_java_type_and_binding",
+        "insert_param_shape_with_access_name_and_java_type",
+        "insert_param_shape_with_access_name_java_type_and_binding",
+        "insert_field_shape_with_access_name_and_java_type",
+        "insert_static_storage_field_shape_owned_by_with_access_name",
+        "insert_type_static_storage_field_shape_with_access_name",
+        "insert_static_field_shape_for_owner_with_access_name",
+        "insert_loop_variable_shape_with_access_name_and_binding",
+        "insert_catch_param_with_access_name_and_binding",
+        "insert_binding_access_name",
+    ] {
+        assert!(
+            expr_shape_source.contains(&format!("pub(crate) fn {helper}(")),
+            "{helper} should stay crate-internal"
+        );
+        assert!(
+            !expr_shape_source.contains(&format!("pub fn {helper}(")),
+            "{helper} should not be public API"
+        );
+    }
+    for removed_helper in ["insert_loop_variable_shape", "insert_catch_param_shape"] {
+        assert!(
+            !expr_shape_source.contains(&format!("fn {removed_helper}(")),
+            "{removed_helper} should stay deleted; use binding-aware insertion instead"
+        );
+    }
+    assert!(expr_shape_source.contains("fn insert_catch_param_with_binding("));
+    assert!(
+        !expr_shape_source.contains("pub fn insert_catch_param_with_binding(")
+            && !expr_shape_source.contains("pub(crate) fn insert_catch_param_with_binding("),
+        "catch-param insertion without an access-name boundary should stay private"
+    );
+    for private_helper in [
+        "insert_field_shape_with_access_name",
+        "insert_type_static_storage_field_shape_with_access_name_and_java_type",
+        "insert_static_field_shape_with_access_name",
+        "insert_static_field_shape_with_access_name_and_java_type",
+        "insert_static_storage_field_shape_with_access_name",
+        "insert_static_storage_field_shape_with_access_name_and_java_type",
+    ] {
+        assert!(
+            expr_shape_source.contains(&format!("fn {private_helper}(")),
+            "{private_helper} should stay available inside expr_shape"
+        );
+        assert!(
+            !expr_shape_source.contains(&format!("pub fn {private_helper}("))
+                && !expr_shape_source.contains(&format!("pub(crate) fn {private_helper}(")),
+            "{private_helper} should stay private to expr_shape"
+        );
+    }
     assert_eq!(
         expr_shape_source
             .matches("idless_compatibility_local_plan_for_declared_type")
@@ -929,6 +2026,125 @@ fn idless_local_binding_compatibility_surface_stays_explicit() {
             && !expr_shape_source.contains("consume_local_plan_occurrence"),
         "id-less local-plan compatibility must fail closed by unique exact match, not advance a shared occurrence cursor"
     );
+    let expr_shape_context_source = expr_shape_source
+        .split("#[derive(Debug, Clone, Copy, Default)]\npub struct ExprShapeContext")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<'a> ExprShapeContext<'a>").next())
+        .expect("ExprShapeContext source should remain discoverable");
+    for field in ["pub signatures:", "pub representations:", "pub facts:"] {
+        assert!(
+            !expr_shape_context_source.contains(field),
+            "ExprShapeContext should expose constructor/accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(expr_shape_source.contains("pub fn new(\n        signatures:"));
+    assert!(expr_shape_source.contains("pub fn signatures(self)"));
+    assert!(expr_shape_source.contains("pub fn representations(self)"));
+    assert!(expr_shape_source.contains("pub fn facts(self)"));
+    assert!(signature_source.contains("fn idless_compatibility_local(&self, name: &str)"));
+    assert!(signature_source.contains("fn idless_compatibility_local_mut(&mut self, name: &str)"));
+    assert!(
+        !signature_source.contains("fn idless_compatibility_local_index(&self, name: &str)"),
+        "id-less index lookup should stay in the shared helper, not per constraint-set wrappers"
+    );
+    assert!(
+        signature_source.contains("fn param_index_for_constraints"),
+        "parameter-name lookup should live in one helper"
+    );
+    assert_eq!(
+        signature_source
+            .matches("param_names.iter().position(|param| param == name)")
+            .count(),
+        1,
+        "parameter-name lookup should not be duplicated across method and constructor constraints"
+    );
+    assert!(
+        signature_source.contains("fn local_index_for_binding_constraints"),
+        "binding-keyed local lookup should live in one helper"
+    );
+    assert!(
+        signature_source.contains("fn local_for_binding_constraints"),
+        "binding-keyed local reads should live in one helper"
+    );
+    assert!(
+        signature_source.contains("fn local_mut_for_binding_constraints"),
+        "binding-keyed local mutation should live in one helper"
+    );
+    assert_eq!(
+        signature_source
+            .matches("locals.iter().position(|local| local.binding == *binding)")
+            .count(),
+        1,
+        "binding-keyed local lookup should not be duplicated across method and constructor constraints"
+    );
+    assert!(
+        signature_source.contains("fn idless_compatibility_local_index_for_constraints"),
+        "the id-less local-name uniqueness policy should live in one helper"
+    );
+    assert!(
+        signature_source.contains("fn idless_compatibility_local_for_constraints"),
+        "id-less local reads should live in one helper"
+    );
+    assert!(
+        signature_source.contains("fn idless_compatibility_local_mut_for_constraints"),
+        "id-less local mutation should live in one helper"
+    );
+    assert_eq!(
+        signature_source
+            .matches("idless_compatibility_local_index_for_constraints(locals, local_index_by_name, name)\n        .and_then(|index| locals.get(index))")
+            .count(),
+        1,
+        "id-less local read lookup should not be duplicated across method and constructor constraints"
+    );
+    assert_eq!(
+        signature_source
+            .matches("local_index_for_binding_constraints(locals, local_index_by_binding, binding)\n        .and_then(|index| locals.get(index))")
+            .count(),
+        1,
+        "binding-keyed local read lookup should not be duplicated across method and constructor constraints"
+    );
+    let idless_mut_helper = signature_source
+        .split("fn idless_compatibility_local_mut_for_constraints")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn idless_compatibility_local_index_for_constraints")
+                .next()
+        })
+        .expect("id-less mutable local helper should be present");
+    assert_eq!(
+        idless_mut_helper
+            .matches("idless_compatibility_local_index_for_constraints")
+            .count(),
+        1,
+        "id-less mutable local helper should use the shared index policy once"
+    );
+    assert!(idless_mut_helper.contains("locals.get_mut(index)"));
+    let binding_mut_helper = signature_source
+        .split("fn local_mut_for_binding_constraints")
+        .nth(1)
+        .and_then(|tail| tail.split("fn param_index_for_constraints").next())
+        .expect("binding-keyed mutable local helper should be present");
+    assert_eq!(
+        binding_mut_helper
+            .matches("local_index_for_binding_constraints")
+            .count(),
+        1,
+        "binding-keyed mutable local helper should use the shared index policy once"
+    );
+    assert!(binding_mut_helper.contains("locals.get_mut(index)"));
+    assert_eq!(
+        signature_source
+            .matches("locals.iter().filter(|local| local.name == name).count() > 1")
+            .count(),
+        1,
+        "duplicate-name id-less compatibility must fail closed in one shared policy"
+    );
+    assert!(!signature_source.contains("fn local(&self, name: &str)"));
+    assert!(!signature_source.contains("fn local_mut(&mut self, name: &str)"));
+    assert!(!signature_source.contains("fn local_index(&self, name: &str)"));
+    assert!(signature_source.contains("pub(crate) fn source_name(&self) -> &str"));
+    assert!(!signature_source.contains("pub fn source_name(&self) -> &str"));
+    assert!(!signature_source.contains("fn access_name(&self) -> &str"));
 
     assert_eq!(
         signature_source
@@ -1087,30 +2303,84 @@ fn signature_uses_usage_binding_policy_for_legacy_name_fallback() {
         usage_source.contains("fn snapshot_visible_binding_for_scope")
             && usage_source.contains("fn hide_visible_binding_for_scope")
             && usage_source.contains("fn restore_visible_binding_for_scope")
+            && usage_source.contains("fn insert_visible_binding_for_scope")
+            && usage_source.contains("fn insert_visible_binding_facts_for_scope")
+            && usage_source.contains("fn current_visible_binding_facts_for_name")
+            && usage_source.contains("fn current_visible_name_binding_mut_for_scope")
             && usage_source.contains("fn record_visible_binding_use")
             && usage_source.contains("fn record_declared_binding_use")
             && !usage_source.contains("pub(crate) fn snapshot_visible_binding_for_scope")
             && !usage_source.contains("pub(crate) fn hide_visible_binding_for_scope")
             && !usage_source.contains("pub(crate) fn restore_visible_binding_for_scope")
+            && !usage_source.contains("pub(crate) fn insert_visible_binding_for_scope")
+            && !usage_source.contains("pub(crate) fn insert_visible_binding_facts_for_scope")
+            && !usage_source.contains("pub(crate) fn current_visible_binding_facts_for_name")
+            && !usage_source.contains("pub(crate) fn current_visible_name_binding_mut_for_scope")
             && !usage_source.contains("pub(crate) fn record_visible_binding_use")
             && !usage_source.contains("pub(crate) fn record_declared_binding_use")
             && !usage_source.contains("pub fn snapshot_visible_binding_for_scope")
             && !usage_source.contains("pub fn hide_visible_binding_for_scope")
             && !usage_source.contains("pub fn restore_visible_binding_for_scope")
+            && !usage_source.contains("pub fn insert_visible_binding_for_scope")
+            && !usage_source.contains("pub fn insert_visible_binding_facts_for_scope")
+            && !usage_source.contains("pub fn current_visible_binding_facts_for_name")
+            && !usage_source.contains("pub fn current_visible_name_binding_mut_for_scope")
             && !usage_source.contains("pub fn record_visible_binding_use")
             && !usage_source.contains("pub fn record_declared_binding_use"),
         "MethodUsageFacts scope/name-map maintenance helpers should stay private to usage.rs"
     );
+    let idless_binding_lookup = usage_source
+        .split("fn idless_compatibility_binding_facts_for_source_name")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) fn binding_facts_for_param").next())
+        .expect("id-less compatibility binding lookup should remain discoverable");
+    assert!(idless_binding_lookup.contains("self.current_visible_binding_facts_for_name(name)"));
+    assert!(
+        usage_source.matches("current_visible_name_binding_mut_for_scope(name)").count() >= 2
+            && !usage_source
+                .contains("self.name_binding_is_current(name)\n            && let Some(binding) = self.bindings.get_mut(name)"),
+        "visible name-map mutation should route through the private mutable helper"
+    );
+    let visible_fixture_constructor = usage_source
+        .split("fn from_visible_binding_fixture_facts")
+        .nth(1)
+        .and_then(|tail| tail.split("#[cfg(test)]").next())
+        .expect("visible-binding fixture constructor should remain discoverable");
+    assert!(
+        visible_fixture_constructor
+            .contains("facts.insert_visible_binding_facts_for_scope(binding)")
+    );
+    assert!(
+        !visible_fixture_constructor.contains(".bindings.insert(")
+            && !visible_fixture_constructor.contains(".bindings_by_id.insert("),
+        "visible-binding fixture construction should use MethodUsageFacts' private insertion policy"
+    );
+    let insert_helper = usage_source
+        .split("fn insert_binding_use_facts")
+        .nth(1)
+        .and_then(|tail| tail.split("fn restore_binding_use_facts").next())
+        .expect("insert binding helper should remain discoverable");
+    assert!(
+        insert_helper.contains("facts.insert_visible_binding_for_scope(name, binding, java_ty)")
+    );
+    assert!(
+        !insert_helper.contains(".bindings.insert(")
+            && !insert_helper.contains(".bindings_by_id.insert("),
+        "free insertion helper should delegate to MethodUsageFacts instead of mutating maps directly"
+    );
     assert!(
         usage_source.contains("fn visible_binding_id_for_name")
-            && usage_source.contains("pub(crate) fn visible_binding_java_type_for_name")
+            && usage_source.contains("fn visible_binding_java_type_for_name")
+            && usage_source.contains("pub(crate) fn receiver_handle_java_type")
             && usage_source.contains("fn name_binding_is_current")
             && !usage_source.contains("pub(crate) fn visible_binding_id_for_name")
+            && !usage_source.contains("pub(crate) fn visible_binding_java_type_for_name")
             && !usage_source.contains("pub(crate) fn name_binding_is_current")
             && !usage_source.contains("pub fn visible_binding_id_for_name")
             && !usage_source.contains("pub fn visible_binding_java_type_for_name")
+            && !usage_source.contains("pub fn receiver_handle_java_type")
             && !usage_source.contains("pub fn name_binding_is_current"),
-        "remaining visible-name binding compatibility helpers should expose only typed readers needed outside usage.rs"
+        "remaining visible-name binding compatibility helpers should expose only semantic readers needed outside usage.rs"
     );
     assert!(
         !usage_source.contains("fn contains_binding_name"),
@@ -1125,38 +2395,38 @@ fn signature_uses_usage_binding_policy_for_legacy_name_fallback() {
         "name-only assignment scans must not be exposed as a general slot-policy API"
     );
     assert!(
-        slot_policy_source.contains("pub(crate) fn legacy_idless_method_assigns_to_binding"),
-        "the remaining name-only assignment scan should advertise its id-less compatibility scope"
+        slot_policy_source
+            .contains("pub(crate) fn idless_compatibility_exact_returned_param_is_assignment_safe"),
+        "the remaining exported id-less compatibility question should be scoped to the exact-return safety decision"
     );
+    assert!(!slot_policy_source.contains("pub(crate) fn method_assigns_to_binding"));
     assert_eq!(
         slot_policy_source
-            .matches("legacy_idless_method_assigns_to_binding")
+            .matches("idless_compatibility_exact_returned_param_is_assignment_safe")
             .count(),
         2,
-        "slot-policy legacy assignment scan should have one id-less caller and one helper definition"
+        "slot-policy exact-return safety predicate should have one id-less caller and one helper definition"
     );
     assert!(
         slot_policy_source
             .contains("if param.binding.is_some() {\n        if !binding\n            .uses")
             && slot_policy_source.contains(
-                "} else {\n        if !method_exactly_returns_param(method, &param.source_name)"
-            )
-            && slot_policy_source
-                .contains("legacy_idless_method_assigns_to_binding(method, &param.source_name)"),
-        "slot-policy legacy assignment scan must stay behind the id-less parameter branch"
+                "} else {\n        if !idless_compatibility_exact_returned_param_is_assignment_safe"
+            ),
+        "slot-policy exact-return safety predicate must stay behind the id-less parameter branch"
     );
     assert_eq!(
         signature_source
-            .matches("legacy_idless_method_assigns_to_binding")
+            .matches("idless_compatibility_exact_returned_param_is_assignment_safe")
             .count(),
         2,
-        "signature's legacy assignment scan use should stay explicit and localized"
+        "signature's exact-return safety predicate use should stay explicit and localized"
     );
     assert!(
         signature_source.contains(
-            "let compatibility_name_returned = param.binding.is_none()\n            && exactly_returned_param_names.contains(param.source_name.as_str())\n            && !legacy_idless_method_assigns_to_binding(method, &param.source_name);"
+            "let compatibility_name_returned = param.binding.is_none()\n            && idless_compatibility_exact_returned_param_is_assignment_safe("
         ),
-        "signature's legacy assignment scan must stay behind the id-less parameter predicate"
+        "signature's compatibility return predicate must stay behind the id-less parameter predicate"
     );
 }
 
@@ -1176,12 +2446,15 @@ fn slot_policy_uses_java_keyed_source_method_usage_lookup() {
 
 #[test]
 fn declaration_context_usage_lookups_use_java_callable_keys() {
+    let facts_source = include_str!("../src/facts.rs");
     let java_signature_source = include_str!("../src/java_signature.rs");
+    let lib_source = include_str!("../src/lib.rs");
     let resolve_source = include_str!("../src/resolve.rs");
     let main_source = include_str!("../src/main.rs");
     let slot_render_source = include_str!("../src/slot_render.rs");
+    let source_constant_values_source = include_str!("../src/source_constant_values.rs");
     let constant_declaration_source = resolve_source
-        .split("pub struct ConstantDeclaration")
+        .split("pub(crate) struct ConstantDeclaration")
         .nth(1)
         .and_then(|tail| tail.split("/// Folds `declarations`").next())
         .expect("ConstantDeclaration source should remain discoverable");
@@ -1193,11 +2466,114 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
     assert!(
         java_signature_source.contains("pub(crate) fn source_method(method: &MethodDecl) -> Self")
     );
+    assert!(facts_source.contains("pub(crate) fn external_type_name_matches"));
+    assert!(!facts_source.contains("pub fn external_type_name_matches"));
     assert!(!java_signature_source.contains("pub struct JavaOwnerKey"));
     assert!(!java_signature_source.contains("pub fn source_method(method: &MethodDecl) -> Self"));
     assert!(!constant_declaration_source.contains("pub owner: String"));
     assert!(!constant_declaration_source.contains("pub package: Option<String>"));
     assert!(!constant_declaration_source.contains("pub field: crate::java_ir::FieldDecl"));
+    let overload_argument_source = resolve_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct OverloadArgumentApplicability")
+        .nth(1)
+        .and_then(|tail| tail.split("impl OverloadArgumentApplicability").next())
+        .expect("OverloadArgumentApplicability source should remain discoverable");
+    for field in [
+        "pub arg_index: usize",
+        "pub actual: JavaType",
+        "pub target: JavaType",
+        "pub conversion: OverloadArgumentConversion",
+        "pub score: u32",
+    ] {
+        assert!(
+            !overload_argument_source.contains(field),
+            "OverloadArgumentApplicability should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let overload_report_source = resolve_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct OverloadApplicabilityReport")
+        .nth(1)
+        .and_then(|tail| tail.split("impl OverloadApplicabilityReport").next())
+        .expect("OverloadApplicabilityReport source should remain discoverable");
+    for field in [
+        "pub mode: Option<OverloadApplicabilityMode>",
+        "pub score: Option<u32>",
+        "pub arguments: Vec<OverloadArgumentApplicability>",
+        "pub rejections: Vec<OverloadRejectionReason>",
+    ] {
+        assert!(
+            !overload_report_source.contains(field),
+            "OverloadApplicabilityReport should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(resolve_source.contains("pub fn arguments(&self) -> &[OverloadArgumentApplicability]"));
+    assert!(resolve_source.contains("pub fn rejections(&self) -> &[OverloadRejectionReason]"));
+    assert!(
+        resolve_source
+            .contains("pub(crate) fn static_final_constant_declarations(program: &Program)")
+    );
+    assert!(resolve_source.contains("pub(crate) fn constant_value_facts_from_declarations("));
+    assert!(resolve_source.contains("pub(crate) fn fold_constant_declarations("));
+    assert!(!resolve_source.contains("pub fn static_final_constant_declarations("));
+    assert!(!resolve_source.contains("pub fn constant_value_facts_from_declarations("));
+    assert!(!resolve_source.contains("pub fn fold_constant_declarations("));
+    assert!(lib_source.contains("mod source_constant_values;"));
+    assert!(!lib_source.contains("pub mod source_constant_values;"));
+    assert!(lib_source.contains("mod array_default_obligations;"));
+    assert!(!lib_source.contains("pub mod array_default_obligations;"));
+    for module in [
+        "access_lowering",
+        "aliasing",
+        "array_lowering",
+        "array_plan",
+        "callable_analysis",
+        "control_flow_lowering",
+        "conversion_lowering",
+        "fallibility_invariant",
+        "fact_saturation",
+        "graph",
+        "inherited_members",
+        "inner_class_capture",
+        "item_assembly",
+        "java_naming",
+        "java_signature",
+        "javalibs",
+        "lattice",
+        "literal_lowering",
+        "liveness",
+        "loop_plan",
+        "method_reference_lowering",
+        "method_reference_plan",
+        "method_reference_shape",
+        "nullability_plan",
+        "representation_lowering",
+        "statement_render",
+        "string_concat",
+        "string_concat_plan",
+        "string_concat_render",
+    ] {
+        assert!(
+            lib_source.contains(&format!("mod {module};")),
+            "{module} should remain an internal module"
+        );
+        assert!(
+            !lib_source.contains(&format!("pub mod {module};")),
+            "{module} should not be exported as public crate API"
+        );
+    }
+    assert!(source_constant_values_source.contains("pub(crate) enum ConstantValue"));
+    assert!(source_constant_values_source.contains("pub(crate) struct ConstantScope"));
+    assert!(source_constant_values_source.contains("pub(crate) fn fold_constant_expr"));
+    assert!(!source_constant_values_source.contains("pub enum ConstantValue"));
+    assert!(!source_constant_values_source.contains("pub struct ConstantScope"));
+    assert!(!source_constant_values_source.contains("pub fn fold_constant_expr"));
+    let array_default_obligations_source = include_str!("../src/array_default_obligations.rs");
+    assert!(
+        array_default_obligations_source
+            .contains("pub(crate) fn program_allocates_object_array_of")
+    );
+    assert!(!array_default_obligations_source.contains("pub fn object_array_element_type_names"));
+    assert!(!array_default_obligations_source.contains("pub fn program_allocates_object_array_of"));
     assert!(
         slot_render_source.contains("use crate::java_naming::rust_name_for_java_named_type;")
             && !slot_render_source.contains("pub(crate) fn rust_name_for_java_named_type"),
@@ -1209,11 +2585,9 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
         "the CLI facade-owner path receives a simple Java name and should not keep the generic Java type-name projection public"
     );
 
-    let usage_source = include_str!("../src/usage.rs")
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production usage source should be present");
-    assert!(usage_source.contains("pub(crate) fn source_method_usage_for_owner"));
+    let usage_source = include_str!("../src/usage.rs");
+    assert!(usage_source.contains("pub(crate) fn resolved_source_method_usage_for_owner"));
+    assert!(!usage_source.contains("pub(crate) fn source_method_usage_for_owner"));
 
     for (module, source, required) in [
         (
@@ -1251,6 +2625,79 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
         !storage_source.contains(".methods\n                .get(&crate::usage::UsageMethodKey"),
         "storage strategy has TypeDecl/MethodDecl context and should not re-key usage by plain strings"
     );
+    let type_storage_facts_source = storage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct TypeStorageFacts")
+        .nth(1)
+        .and_then(|tail| tail.split("impl Default for TypeStorageFacts").next())
+        .expect("TypeStorageFacts source should remain discoverable");
+    for field in [
+        "pub escape:",
+        "pub locally_aliased:",
+        "pub mutated:",
+        "pub threaded:",
+        "pub surface_forwardable:",
+        "pub mutation_provably_absent:",
+        "pub static_reachable:",
+    ] {
+        assert!(
+            !type_storage_facts_source.contains(field),
+            "TypeStorageFacts should expose evidence accessors/builders, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn escape(&self) -> Escape",
+        "pub fn locally_aliased(&self) -> bool",
+        "pub fn mutated(&self) -> bool",
+        "pub fn threaded(&self) -> bool",
+        "pub fn surface_forwardable(&self) -> bool",
+        "pub fn mutation_provably_absent(&self) -> bool",
+        "pub fn static_reachable(&self) -> bool",
+    ] {
+        assert!(
+            storage_source.contains(accessor),
+            "TypeStorageFacts should keep named evidence accessor: {accessor}"
+        );
+    }
+    for builder in [
+        "pub fn with_escape(mut self, escape: Escape) -> Self",
+        "pub fn with_locally_aliased(mut self, locally_aliased: bool) -> Self",
+        "pub fn with_mutated(mut self, mutated: bool) -> Self",
+        "pub fn with_threaded(mut self, threaded: bool) -> Self",
+        "pub fn with_surface_forwardable(mut self, surface_forwardable: bool) -> Self",
+        "pub fn with_mutation_provably_absent(mut self, mutation_provably_absent: bool) -> Self",
+        "pub fn with_static_reachable(mut self, static_reachable: bool) -> Self",
+    ] {
+        assert!(
+            storage_source.contains(builder),
+            "TypeStorageFacts should keep named evidence builder: {builder}"
+        );
+    }
+    let storage_placement_source = storage_source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]\npub struct StoragePlacement")
+        .nth(1)
+        .and_then(|tail| tail.split("impl StoragePlacement").next())
+        .expect("StoragePlacement source should remain discoverable");
+    for field in ["pub shared:", "pub interior_mutable:", "pub sync:"] {
+        assert!(
+            !storage_placement_source.contains(field),
+            "StoragePlacement should expose axis accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(
+        storage_source
+            .contains("pub fn new(shared: bool, interior_mutable: bool, sync: bool) -> Self"),
+        "StoragePlacement should keep a named constructor for its decision axes"
+    );
+    for accessor in [
+        "pub fn shared(self) -> bool",
+        "pub fn interior_mutable(self) -> bool",
+        "pub fn sync(self) -> bool",
+    ] {
+        assert!(
+            storage_source.contains(accessor),
+            "StoragePlacement should keep named axis accessor: {accessor}"
+        );
+    }
 
     let aliasing_source = include_str!("../src/aliasing.rs")
         .split("#[cfg(test)]")
@@ -1269,10 +2716,7 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
         .split("#[cfg(test)]")
         .next()
         .expect("production facts source should be present");
-    let call_plan_source = include_str!("../src/call_plan.rs")
-        .split("#[cfg(test)]")
-        .next()
-        .expect("production call_plan source should be present");
+    let call_plan_source = include_str!("../src/call_plan.rs");
     let method_reference_lowering_source = include_str!("../src/method_reference_lowering.rs")
         .split("#[cfg(test)]")
         .next()
@@ -1290,6 +2734,8 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
             && call_plan_source.contains(".facade_abi_for_external_call("),
         "external facade ABI planning should route owner/name/arity key construction through FactSet helpers"
     );
+    assert!(call_plan_source.contains("pub(crate) fn facade_abi_argument_plan_for_rust_path"));
+    assert!(!call_plan_source.contains("pub fn facade_abi_argument_plan_for_rust_path"));
     assert!(
         method_reference_lowering_source.contains("fn method_reference_facade_abi_candidates")
             && method_reference_lowering_source.contains(".facade_abi_for_external_method(")
@@ -1300,8 +2746,24 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
 }
 
 #[test]
-fn receiver_fallback_owner_candidates_stay_typed_until_lookup() {
+fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
     let lower_source = include_str!("../src/lower.rs");
+    assert!(
+        !lower_source.contains("fn source_receiver_type_name"),
+        "source receiver owner recovery should keep SourceContextOwnerKey wrapped until lookup"
+    );
+    assert!(
+        !lower_source.contains("fn into_string(self) -> String"),
+        "SourceContextOwnerKey should not expose an eager raw-string downgrade helper"
+    );
+    let owner_key_users = lower_source
+        .split("struct SourceContextOwnerKey(String);")
+        .nth(1)
+        .expect("SourceContextOwnerKey declaration should remain discoverable");
+    assert!(
+        !owner_key_users.contains("SourceContextOwnerKey("),
+        "SourceContextOwnerKey construction should go through SourceContextOwnerKey::new"
+    );
     let helper = lower_source
         .split("fn fallback_receiver_type_name_candidates")
         .nth(1)
@@ -1322,19 +2784,545 @@ fn receiver_fallback_owner_candidates_stay_typed_until_lookup() {
     let signature_fallback = lower_source
         .split("fn fallback_receiver_method_signature")
         .nth(1)
-        .and_then(|tail| tail.split("fn resolved_context_owner_key").next())
+        .and_then(|tail| {
+            tail.split("fn fallback_receiver_is_static_owner_expr")
+                .next()
+        })
         .expect("receiver signature fallback should be present");
-    assert!(signature_fallback.contains("receiver_name.as_str()"));
-    assert!(signature_fallback.contains("resolved_context_owner_key(ctx, receiver_name)"));
+    assert!(signature_fallback.contains("receiver_owner.as_str()"));
+    assert!(signature_fallback.contains("receiver_owner.resolved_context_owner_key(ctx)"));
+    assert!(!signature_fallback.contains("resolved_context_owner_key(ctx, receiver_name)"));
+
+    let static_receiver_check = lower_source
+        .split("fn explicit_static_receiver_matches_resolved_owner")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn non_emitted_static_context_fallback_signature_for_method")
+                .next()
+        })
+        .expect("explicit static receiver match helper should be present");
+    assert!(static_receiver_check.contains("let owner_key = SourceContextOwnerKey::new(owner)"));
+    assert!(static_receiver_check.contains("candidate.resolves_to_owner(ctx, &owner_key)"));
+    assert!(
+        static_receiver_check
+            .contains("SourceContextOwnerKey::new(alias).resolves_to_owner(ctx, &owner_key)")
+    );
+    assert!(
+        !static_receiver_check.contains("context_type_key_resolves_to_owner"),
+        "resolved static receiver matching should keep candidate owner lookup on SourceContextOwnerKey"
+    );
+    assert!(
+        !lower_source.contains("fn context_type_key_resolves_to_owner"),
+        "raw owner-key comparison helper should stay collapsed into SourceContextOwnerKey"
+    );
+    let owner_key_impl = lower_source
+        .split("impl SourceContextOwnerKey")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]")
+                .next()
+        })
+        .expect("SourceContextOwnerKey impl should be present");
+    let resolves_to_owner = owner_key_impl
+        .split("fn resolves_to_owner")
+        .nth(1)
+        .and_then(|tail| tail.split("fn is_static_context_emitted").next())
+        .expect("SourceContextOwnerKey::resolves_to_owner should be present");
+    assert!(resolves_to_owner.contains("owner: &Self"));
+    assert!(resolves_to_owner.contains("owner.find_context_type(ctx)"));
+    assert!(
+        !resolves_to_owner.contains("find_context_type_by_key_in_lower_ctx(ctx, owner"),
+        "SourceContextOwnerKey owner comparison should keep both sides wrapped"
+    );
+    assert!(owner_key_impl.contains("fn find_emitted_context_type_and_program"));
+    for emitted_predicate in [
+        "fn is_static_context_emitted",
+        "fn is_non_program_emitted_context",
+        "fn is_emitted_program_context",
+    ] {
+        let predicate = owner_key_impl
+            .split(emitted_predicate)
+            .nth(1)
+            .and_then(|tail| tail.split("\n    fn ").next())
+            .expect("SourceContextOwnerKey emitted-context predicate should be present");
+        assert!(
+            predicate.contains("find_emitted_context_type_and_program(ctx)"),
+            "{emitted_predicate} should share SourceContextOwnerKey emitted lookup"
+        );
+        assert!(
+            !predicate.contains("find_emitted_context_type_and_program_by_key_in_lower_ctx"),
+            "{emitted_predicate} should not reopen raw emitted owner lookup"
+        );
+    }
+
+    let emitted_context_receiver_check = lower_source
+        .split("fn static_owner_receiver_is_emitted_context")
+        .nth(1)
+        .and_then(|tail| tail.split("fn static_owner_expr_candidates").next())
+        .expect("static owner emitted-context receiver helpers should be present");
+    assert!(emitted_context_receiver_check.contains("owner.is_static_context_emitted(ctx)"));
+    assert!(emitted_context_receiver_check.contains("owner.is_non_program_emitted_context(ctx)"));
+    assert!(
+        !emitted_context_receiver_check.contains("static_owner_key_is_non_program_emitted_context")
+    );
+    assert!(
+        !lower_source.contains("fn static_owner_key_is_non_program_emitted_context"),
+        "non-program emitted-context checks should stay on SourceContextOwnerKey"
+    );
+    let static_context_owner_check = lower_source
+        .split("fn static_context_owner_is_emitted")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_context_receiver_method_fallback_signature")
+                .next()
+        })
+        .expect("static context emitted-owner helpers should remain discoverable");
+    assert!(
+        static_context_owner_check
+            .contains("SourceContextOwnerKey::new(owner).is_static_context_emitted(ctx)")
+    );
+    assert!(
+        static_context_owner_check
+            .contains("SourceContextOwnerKey::new(owner).is_emitted_program_context(ctx)")
+    );
+    assert!(
+        !static_context_owner_check
+            .contains("find_emitted_context_type_and_program_by_key_in_lower_ctx(ctx, owner)"),
+        "static emitted-owner helpers should keep raw emitted lookup behind SourceContextOwnerKey"
+    );
+
+    let current_static_fallback = lower_source
+        .split("fn source_context_current_static_method_fallback_signature")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_context_static_signature_by_name_and_args")
+                .next()
+        })
+        .expect("current static source-context fallback should be present");
+    assert!(
+        current_static_fallback
+            .contains("let current_owner = SourceContextOwnerKey::new(current_type)")
+    );
+    assert!(current_static_fallback.contains("let ty = current_owner.find_context_type(ctx)?"));
+    assert!(
+        !current_static_fallback
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
 
     let source_context_fallback = lower_source
         .split("fn source_context_receiver_method_fallback_signature")
         .nth(1)
         .and_then(|tail| tail.split("fn receiver_expr_uses_dyn_trait_slots").next())
         .expect("source-context receiver fallback should be present");
+    assert!(source_context_fallback.contains("owner.find_context_type(ctx)"));
     assert!(
-        source_context_fallback
+        !source_context_fallback
             .contains("find_context_type_by_key_in_lower_ctx(ctx, owner.as_str())")
+    );
+    let source_call_owner_candidates = lower_source
+        .split("fn source_call_target_owner_candidates")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lowered_source_receiver_type_name").next())
+        .expect("source call target owner candidates should remain discoverable");
+    assert!(source_call_owner_candidates.contains("let owner_key = SourceContextOwnerKey::new"));
+    assert!(source_call_owner_candidates.contains("owner_key.find_context_type(ctx)"));
+    assert!(source_call_owner_candidates.contains(".find_emitted_context_type_and_program(ctx)"));
+    assert!(
+        !source_call_owner_candidates
+            .contains("find_emitted_context_type_by_key_in_lower_ctx(ctx, owner)")
+    );
+    let lowered_receiver_path_owner = lower_source
+        .split("fn lowered_source_receiver_path_type_name")
+        .nth(1)
+        .and_then(|tail| tail.split("fn receiver_shape_java_type").next())
+        .expect("lowered source receiver path owner helper should remain discoverable");
+    assert!(
+        lowered_receiver_path_owner.contains("SourceContextOwnerKey::new(owner.as_str())")
+            && lowered_receiver_path_owner.contains(".find_emitted_context_type_and_program(ctx)")
+    );
+    assert!(
+        !lowered_receiver_path_owner
+            .contains("find_emitted_context_type_by_key_in_lower_ctx(ctx, owner)")
+    );
+    let same_outer_owner = lower_source
+        .split("fn same_outer_inner_constructor_owner")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn find_emitted_context_type_by_rust_use_name")
+                .next()
+        })
+        .expect("same-outer inner-constructor owner helper should remain discoverable");
+    assert!(
+        same_outer_owner.contains("SourceContextOwnerKey::new(owner)")
+            && same_outer_owner.contains(".find_emitted_context_type_and_program(ctx)")
+    );
+    assert!(
+        !same_outer_owner.contains("find_emitted_context_type_by_key_in_lower_ctx(ctx, owner)")
+    );
+
+    let nested_owner_candidates = lower_source
+        .split("fn nested_type_owner_candidates_for_receiver")
+        .nth(1)
+        .and_then(|tail| tail.split("fn collect_nested_type_owner_candidates").next())
+        .expect("nested owner candidate helper should be present");
+    assert!(
+        nested_owner_candidates
+            .contains("let current_owner = SourceContextOwnerKey::new(current_type)")
+    );
+    assert!(nested_owner_candidates.contains("current_owner.find_context_type(ctx)"));
+    assert!(
+        !nested_owner_candidates
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+
+    let receiverless_summary_return_shape = lower_source
+        .split("fn source_summary_declared_receiverless_method_return_shape")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_summary_declared_inherited_method")
+                .next()
+        })
+        .expect("receiverless summary return shape helper should be present");
+    assert!(
+        receiverless_summary_return_shape.contains("current_owner: &SourceContextOwnerKey"),
+        "receiverless summary return-shape lookup should keep current owner identity wrapped"
+    );
+    assert!(receiverless_summary_return_shape.contains("current_owner.find_context_type(ctx)?"));
+    assert!(
+        !receiverless_summary_return_shape
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+
+    let returned_field_lookup = lower_source
+        .split("fn source_method_returned_field_name")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_null_assertion_call_expr_stmt_is_noop")
+                .next()
+        })
+        .expect("source returned-field lookup helper should be present");
+    assert!(
+        returned_field_lookup.contains("receiver_owner: &SourceContextOwnerKey"),
+        "source returned-field lookup should keep owner identity wrapped at the helper boundary"
+    );
+    assert!(returned_field_lookup.contains("receiver_owner.find_context_type(ctx)"));
+    assert!(!returned_field_lookup.contains("find_context_type_by_key_in_lower_ctx(ctx, receiver"));
+
+    for (helper_name, next_helper) in [
+        (
+            "fn static_storage_reference_expr",
+            "fn primitive_rust_cast_type",
+        ),
+        (
+            "fn static_string_storage_reference_expr",
+            "fn static_field_decl_by_name",
+        ),
+        (
+            "fn source_instance_field_rust_name",
+            "fn lower_constructor_field_assignment_value",
+        ),
+        (
+            "fn unsupported_source_constructor_call_expr",
+            "fn substitute_source_constructor_param_expr_vars_by_name_compat",
+        ),
+    ] {
+        let helper = lower_source
+            .split(helper_name)
+            .nth(1)
+            .and_then(|tail| tail.split(next_helper).next())
+            .expect("source owner lookup helper should be present");
+        assert!(
+            helper.contains("SourceContextOwnerKey::new")
+                && helper.contains(".find_context_type(ctx)"),
+            "{helper_name} should keep owner lookup on SourceContextOwnerKey"
+        );
+        assert!(
+            !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, owner")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, type_name"),
+            "{helper_name} should not reopen raw source-owner context lookup"
+        );
+    }
+
+    for (helper_name, next_helper) in [
+        (
+            "fn source_enum_directly_implements_rust_trait_name",
+            "fn source_enum_directly_implements_target_interface",
+        ),
+        (
+            "fn source_enum_directly_implements_target_interface",
+            "fn java_enum_static_field_owner_candidates",
+        ),
+        (
+            "fn retarget_erased_source_static_call_to_free_function",
+            "fn static_call_plan_rust_name",
+        ),
+        (
+            "fn static_field_access_is_associated_const",
+            "fn static_storage_access_name_for_owner",
+        ),
+        (
+            "fn static_storage_access_name_for_owner",
+            "fn static_storage_field_shape_for_owner",
+        ),
+        (
+            "fn find_static_storage_owner_field",
+            "fn lower_static_storage_assignment_value_expr",
+        ),
+        (
+            "fn matches_source_java_enum_type",
+            "fn static_storage_field_shape",
+        ),
+        (
+            "fn static_storage_owner_type_name",
+            "fn source_type_name_from_expr",
+        ),
+        (
+            "fn source_type_name_from_expr",
+            "fn nested_type_decl_by_receiver_alias",
+        ),
+        (
+            "fn context_method_effective_rust_name",
+            "fn context_fallback_signature_for_signature",
+        ),
+        (
+            "fn source_or_jdk_subtype_reaches_in_lower_ctx",
+            "#[cfg(test)]\nfn context_type_simple_name_is_ambiguous",
+        ),
+        (
+            "fn context_type_simple_name_is_ambiguous_in_lower_ctx",
+            "fn is_known_exception_supertype_name",
+        ),
+        (
+            "fn interface_trait_argument_shapes_for_call_owner",
+            "fn method_signature_for_owner_aliases",
+        ),
+        (
+            "fn native_collections_sort_method_reference_returns_result",
+            "fn render_native_system_print_stream_stmt",
+        ),
+        (
+            "fn lower_source_associated_const_field_access",
+            "fn lower_source_nested_type_access",
+        ),
+        (
+            "fn lower_source_nested_type_access",
+            "fn lower_java_array_length_access",
+        ),
+        (
+            "fn source_java_enum_static_owner_from_expr",
+            "fn context_source_enum_type_name_by_key",
+        ),
+        (
+            "fn context_source_enum_type_name_by_key",
+            "fn current_type_nested_enum_name_by_alias",
+        ),
+        (
+            "fn retarget_source_declared_static_overload_name",
+            "fn retarget_source_declared_overload_name",
+        ),
+        (
+            "fn source_declared_instance_method_rust_name",
+            "fn receiver_external_type_key",
+        ),
+        (
+            "fn lower_source_constructor_expr_for_concrete_slot",
+            "fn lower_external_crate_constructor_expr_for_slot",
+        ),
+        (
+            "fn source_class_upcast_hierarchy_names",
+            "fn type_param_source_class_upcast_bound_requiring_hierarchy_lowering",
+        ),
+        (
+            "fn erased_object_source_supertype_instanceof_requires_hierarchy_lowering",
+            "fn erased_object_source_supertype_cast_requires_hierarchy_lowering",
+        ),
+        (
+            "fn erased_object_source_supertype_cast_requires_hierarchy_lowering",
+            "fn source_context_has_class_subtype_reaching",
+        ),
+        (
+            "fn optional_current_method_display_actual_shape",
+            "fn lower_optional_array_expr_for_slice_slot",
+        ),
+        (
+            "fn source_static_field_receiver_method_candidates",
+            "fn source_context_resolved_static_method_fallback_signature",
+        ),
+        (
+            "fn source_context_resolved_static_method_fallback_signature",
+            "fn explicit_static_receiver_matches_resolved_owner",
+        ),
+    ] {
+        let helper = lower_source
+            .split(helper_name)
+            .nth(1)
+            .and_then(|tail| tail.split(next_helper).next())
+            .expect("source owner utility helper should be present");
+        assert!(
+            helper.contains("SourceContextOwnerKey::new")
+                && helper.contains(".find_context_type(ctx)"),
+            "{helper_name} should keep owner lookup on SourceContextOwnerKey"
+        );
+        assert!(
+            !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, owner")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, type_name")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, target_name")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, receiver_name")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, actual_name")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, owner_key")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, &owner")
+                && !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, &owner_key"),
+            "{helper_name} should not reopen raw source-owner context lookup"
+        );
+    }
+}
+
+#[test]
+fn enum_current_owner_lookup_stays_wrapped_until_context_lookup() {
+    let lower_source = include_str!("../src/lower.rs");
+    let static_field_candidates = lower_source
+        .split("fn java_enum_static_field_owner_candidates")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn upper_camel_type_name_from_static_receiver")
+                .next()
+        })
+        .expect("enum static-field owner candidate helper should be present");
+    assert!(
+        static_field_candidates
+            .contains("SourceContextOwnerKey::new(current_type).find_context_type(ctx)")
+    );
+    assert!(
+        !static_field_candidates
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+
+    let nested_enum_owner = lower_source
+        .split("fn current_type_nested_enum_name_by_alias")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn lower_static_value_of_string_name_call")
+                .next()
+        })
+        .expect("current-type nested enum owner helper should be present");
+    assert!(
+        nested_enum_owner
+            .contains("SourceContextOwnerKey::new(current_type).find_context_type(ctx)?")
+    );
+    assert!(
+        !nested_enum_owner.contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+
+    let source_enum_current_type = lower_source
+        .split("fn find_source_enum_type_decl_for_current_type")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn find_source_enum_type_decl_for_java_type")
+                .next()
+        })
+        .expect("source enum current-type lookup helper should be present");
+    assert!(source_enum_current_type.contains("SourceContextOwnerKey::new(current_type)"));
+    assert!(source_enum_current_type.contains(".find_context_type(ctx)"));
+    assert!(
+        !source_enum_current_type
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+}
+
+#[test]
+fn current_field_owner_lookup_stays_wrapped_until_context_lookup() {
+    let lower_source = include_str!("../src/lower.rs");
+    let current_field_shape = lower_source
+        .split("fn current_type_field_shape")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_unary_expr_with_refinements").next())
+        .expect("current field shape helper should be present");
+    assert!(current_field_shape.contains("SourceContextOwnerKey::new(current_type)"));
+    assert!(current_field_shape.contains(".find_context_type(ctx)"));
+    assert!(
+        !current_field_shape.contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+
+    let current_source_field_name = lower_source
+        .split("fn current_type_source_instance_field_rust_name")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn source_java_enum_instance_field_accessor_name")
+                .next()
+        })
+        .expect("current source field-name helper should be present");
+    assert!(current_source_field_name.contains("SourceContextOwnerKey::new(current_type)"));
+    assert!(current_source_field_name.contains(".find_context_type(ctx)"));
+    assert!(
+        !current_source_field_name
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+
+    let static_final_array_field_type = lower_source
+        .split("fn static_final_const_array_field_type")
+        .nth(1)
+        .and_then(|tail| tail.split("fn static_slice_const_array_expr_type").next())
+        .expect("static-final const-array field type helper should be present");
+    assert!(static_final_array_field_type.contains("SourceContextOwnerKey::new(current_type)"));
+    assert!(static_final_array_field_type.contains(".find_context_type(ctx)"));
+    assert!(
+        !static_final_array_field_type
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
+    );
+}
+
+#[test]
+fn current_owner_utility_lookups_stay_wrapped_until_context_lookup() {
+    let lower_source = include_str!("../src/lower.rs");
+    for (helper_name, next_helper) in [
+        (
+            "fn unresolved_current_source_call_is_ambiguous_null_overload",
+            "fn expr_is_null_literal",
+        ),
+        (
+            "fn java_type_is_in_scope_type_parameter",
+            "fn simple_type_parameter_candidate_name",
+        ),
+        (
+            "fn lower_interface_super_default_call",
+            "fn interface_super_implemented_name",
+        ),
+        (
+            "fn current_method_exception_plan",
+            "fn external_facade_target_returns_result",
+        ),
+        (
+            "fn lower_static_initialized_singleton_field_for_slot",
+            "/// Lowers a lambda written directly at a functional-interface parameter",
+        ),
+    ] {
+        let helper = lower_source
+            .split(helper_name)
+            .nth(1)
+            .and_then(|tail| tail.split(next_helper).next())
+            .expect("current-owner utility helper should be present");
+        assert!(
+            helper.contains("SourceContextOwnerKey::new(current_type)")
+                && helper.contains(".find_context_type(ctx)"),
+            "{helper_name} should keep current-owner lookup on SourceContextOwnerKey"
+        );
+        assert!(
+            !helper.contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)"),
+            "{helper_name} should not reopen raw current_type context lookup"
+        );
+    }
+    let production_source = lower_source
+        .split("#[cfg(test)]\nmod tests")
+        .next()
+        .expect("production lower.rs source should precede tests");
+    assert!(
+        !production_source.contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)"),
+        "production current-owner lookups should stay behind SourceContextOwnerKey"
+    );
+    assert!(
+        !production_source
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, ctx.current_type?)"),
+        "production direct ctx.current_type lookups should stay behind SourceContextOwnerKey"
     );
 }
 
@@ -1360,6 +3348,63 @@ fn usage_owns_call_site_boundary_facts() {
         .expect("MethodUsageFacts source should remain discoverable");
 
     assert!(usage_source.contains("pub struct CallSiteUse"));
+    let call_site_use_source = usage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct CallSiteUse")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CallSiteUse").next())
+        .expect("CallSiteUse source should remain discoverable");
+    let constructor_call_site_use_source = usage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ConstructorCallSiteUse")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ConstructorCallSiteUse").next())
+        .expect("ConstructorCallSiteUse source should remain discoverable");
+    let returned_call_result_use_source = usage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ReturnedCallResultUse")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ReturnedCallResultUse").next())
+        .expect("ReturnedCallResultUse source should remain discoverable");
+    for field in [
+        "pub name: String",
+        "pub arg_count: usize",
+        "pub result_returned: bool",
+        "pub receiver_is_self: bool",
+        "pub receiver_targets_self_field: bool",
+        "pub receiver_type: Option<JavaType>",
+        "pub null_arg_indices: Vec<usize>",
+        "pub nullable_source_call_arg_indices: Vec<usize>",
+        "pub boundary: CallArgumentBoundary",
+        "pub resolved: Option<ResolvedCall>",
+    ] {
+        assert!(
+            !call_site_use_source.contains(field),
+            "CallSiteUse should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in [
+        "pub name: String",
+        "pub arg_count: usize",
+        "pub null_arg_indices: Vec<usize>",
+        "pub nullable_source_call_arg_indices: Vec<usize>",
+        "pub boundary: CallArgumentBoundary",
+        "pub resolved: Option<ResolvedConstructor>",
+    ] {
+        assert!(
+            !constructor_call_site_use_source.contains(field),
+            "ConstructorCallSiteUse should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in [
+        "pub name: String",
+        "pub arg_count: usize",
+        "pub receiver_type: Option<JavaType>",
+        "pub boundary: CallArgumentBoundary",
+        "pub resolved: Option<ResolvedCall>",
+    ] {
+        assert!(
+            !returned_call_result_use_source.contains(field),
+            "ReturnedCallResultUse should expose accessors, not raw public fields: {field}"
+        );
+    }
     assert!(!method_usage_source.contains("pub call_sites: Vec<CallSiteUse>"));
     assert!(
         !method_usage_source.contains("pub constructor_call_sites: Vec<ConstructorCallSiteUse>")
@@ -1376,8 +3421,76 @@ fn usage_owns_call_site_boundary_facts() {
     );
     assert!(usage_source.contains("pub fn field_uses(&self) -> &[FieldUse]"));
     assert!(usage_source.contains("pub fn mutates_self(&self) -> bool"));
-    assert!(usage_source.contains("pub fn from_field_uses("));
+    assert!(!usage_source.contains("fn from_field_uses("));
     assert!(usage_source.contains("pub struct MethodApiBoundaryPolicy"));
+    let call_result_policy_source = usage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct CallResultBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CallResultBoundaryPolicy").next())
+        .expect("CallResultBoundaryPolicy source should remain discoverable");
+    let constructor_invocation_policy_source = usage_source
+        .split(
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct ConstructorInvocationBoundaryPolicy",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl ConstructorInvocationBoundaryPolicy").next())
+        .expect("ConstructorInvocationBoundaryPolicy source should remain discoverable");
+    let call_argument_policy_source = usage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct CallArgumentBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CallArgumentBoundaryPolicy").next())
+        .expect("CallArgumentBoundaryPolicy source should remain discoverable");
+    let method_api_policy_source = usage_source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct MethodApiBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl MethodApiBoundaryPolicy").next())
+        .expect("MethodApiBoundaryPolicy source should remain discoverable");
+    for field in [
+        "pub name: String",
+        "pub arg_count: usize",
+        "pub receiver_type: Option<JavaType>",
+        "pub boundary: CallArgumentBoundary",
+        "pub resolved: Option<ResolvedCall>",
+    ] {
+        assert!(
+            !call_result_policy_source.contains(field),
+            "CallResultBoundaryPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in [
+        "pub kind: ConstructorInvocationKind",
+        "pub boundary: CallArgumentBoundary",
+    ] {
+        assert!(
+            !constructor_invocation_policy_source.contains(field),
+            "ConstructorInvocationBoundaryPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in ["pub name: String", "pub boundary: CallArgumentBoundary"] {
+        assert!(
+            !call_argument_policy_source.contains(field),
+            "CallArgumentBoundaryPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in ["pub public_api: bool"] {
+        assert!(
+            !method_api_policy_source.contains(field),
+            "MethodApiBoundaryPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(usage_source.contains("pub fn name(&self) -> &str"));
+    assert!(usage_source.contains("pub fn arg_count(&self) -> usize"));
+    assert!(usage_source.contains("pub fn result_returned(&self) -> bool"));
+    assert!(usage_source.contains("pub fn receiver_is_self(&self) -> bool"));
+    assert!(usage_source.contains("pub fn receiver_targets_self_field(&self) -> bool"));
+    assert!(usage_source.contains("pub fn receiver_type(&self) -> Option<&JavaType>"));
+    assert!(usage_source.contains("pub fn null_arg_indices(&self) -> &[usize]"));
+    assert!(usage_source.contains("pub fn nullable_source_call_arg_indices(&self) -> &[usize]"));
+    assert!(usage_source.contains("pub fn boundary(&self) -> CallArgumentBoundary"));
+    assert!(usage_source.contains("pub fn resolved(&self) -> Option<&ResolvedCall>"));
+    assert!(usage_source.contains("pub fn resolved(&self) -> Option<&ResolvedConstructor>"));
+    assert!(usage_source.contains("pub fn kind(&self) -> ConstructorInvocationKind"));
+    assert!(usage_source.contains("pub fn public_api(&self) -> bool"));
     assert!(usage_source.contains("pub fn method_api_boundary_policy"));
     assert!(usage_source.contains("pub fn call_argument_boundary_policy"));
     assert!(!usage_source.contains("fn method_is_api_boundary"));
@@ -1389,11 +3502,134 @@ fn usage_owns_call_site_boundary_facts() {
 fn semantic_diagnostics_are_plumbed_through_translation_boundary() {
     let lib_source = include_str!("../src/lib.rs");
     let semantic_source = include_str!("../src/semantic_analysis.rs");
+    let rewrite_source = include_str!("../src/rewrite.rs");
+    let facts_source = include_str!("../src/facts.rs");
+    let diagnostics_source = include_str!("../src/diagnostics.rs");
 
     assert!(semantic_source.contains("SemanticDiagnostic"));
     assert!(semantic_source.contains("semantic_external_api_effect_budget_exhausted"));
     assert!(lib_source.contains("for diagnostic in semantic.diagnostics"));
-    assert!(lib_source.contains(".warning(diagnostic.code, diagnostic.message)"));
+    assert!(lib_source.contains(".warning(diagnostic.code(), diagnostic.message().to_string())"));
+    let diagnostic_source = diagnostics_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct Diagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl Diagnostic").next())
+        .expect("diagnostics::Diagnostic source should remain discoverable");
+    for field in [
+        "pub severity: Severity",
+        "pub code: &'static str",
+        "pub message: String",
+        "pub span: Option<Span>",
+    ] {
+        assert!(
+            !diagnostic_source.contains(field),
+            "diagnostics::Diagnostic should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let span_source = diagnostics_source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]\npub struct Span")
+        .nth(1)
+        .and_then(|tail| tail.split("impl Span").next())
+        .expect("diagnostics::Span source should remain discoverable");
+    for field in ["pub start: usize", "pub end: usize"] {
+        assert!(
+            !span_source.contains(field),
+            "diagnostics::Span should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(diagnostics_source.contains("pub fn severity(&self) -> Severity"));
+    assert!(diagnostics_source.contains("pub fn code(&self) -> &'static str"));
+    assert!(diagnostics_source.contains("pub fn message(&self) -> &str"));
+    assert!(diagnostics_source.contains("pub fn span(&self) -> Option<Span>"));
+    assert!(diagnostics_source.contains("pub fn start(&self) -> usize"));
+    assert!(diagnostics_source.contains("pub fn end(&self) -> usize"));
+    let semantic_diagnostic_source = semantic_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SemanticDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SemanticDiagnostic").next())
+        .expect("SemanticDiagnostic source should remain discoverable");
+    assert!(!semantic_diagnostic_source.contains("pub code: &'static str"));
+    assert!(!semantic_diagnostic_source.contains("pub message: String"));
+    assert!(semantic_source.contains("pub fn code(&self) -> &'static str"));
+    assert!(semantic_source.contains("pub fn message(&self) -> &str"));
+    let semantic_iterations_source = semantic_source
+        .split(
+            "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SemanticAnalysisIterations",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl SemanticAnalysisIterations").next())
+        .expect("SemanticAnalysisIterations source should remain discoverable");
+    assert!(!semantic_iterations_source.contains("pub field_nullability: usize"));
+    assert!(semantic_source.contains("pub fn new(field_nullability: usize) -> Self"));
+    assert!(semantic_source.contains("pub fn field_nullability(self) -> usize"));
+    let semantic_config_source = semantic_source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SemanticAnalysisConfig")
+        .nth(1)
+        .and_then(|tail| tail.split("impl Default for SemanticAnalysisConfig").next())
+        .expect("SemanticAnalysisConfig source should remain discoverable");
+    for field in [
+        "pub max_external_guess_iterations: Option<usize>",
+        "pub enable_external_api_guesses: bool",
+        "pub enable_control_flow_facts: bool",
+        "pub enable_builtin_external_packs: bool",
+    ] {
+        assert!(
+            !semantic_config_source.contains(field),
+            "SemanticAnalysisConfig should expose accessors/builders, not raw public fields: {field}"
+        );
+    }
+    assert!(
+        semantic_source.contains("pub fn max_external_guess_iterations(self) -> Option<usize>")
+    );
+    assert!(semantic_source.contains("pub fn external_api_guesses_enabled(self) -> bool"));
+    assert!(semantic_source.contains("pub fn control_flow_facts_enabled(self) -> bool"));
+    assert!(semantic_source.contains("pub fn builtin_external_packs_enabled(self) -> bool"));
+    assert!(semantic_source.contains(
+        "pub fn with_max_external_guess_iterations(mut self, iterations: Option<usize>) -> Self"
+    ));
+    assert!(
+        semantic_source
+            .contains("pub fn with_external_api_guesses_enabled(mut self, enabled: bool) -> Self")
+    );
+    assert!(
+        semantic_source
+            .contains("pub fn with_control_flow_facts_enabled(mut self, enabled: bool) -> Self")
+    );
+    assert!(
+        semantic_source.contains(
+            "pub fn with_builtin_external_packs_enabled(mut self, enabled: bool) -> Self"
+        )
+    );
+    let control_flow_diagnostic_source = rewrite_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ControlFlowRewriteDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ControlFlowRewriteDiagnostic").next())
+        .expect("rewrite::ControlFlowRewriteDiagnostic struct source should be present");
+    assert!(!control_flow_diagnostic_source.contains("pub code: &'static str"));
+    assert!(!control_flow_diagnostic_source.contains("pub message: String"));
+    assert!(
+        rewrite_source.contains("impl ControlFlowRewriteDiagnostic")
+            && rewrite_source
+                .contains("pub fn new(code: &'static str, message: impl Into<String>)")
+            && rewrite_source.contains("pub fn code(&self) -> &'static str")
+            && rewrite_source.contains("pub fn message(&self) -> &str"),
+        "control-flow rewrite diagnostics should expose constructor/accessors, not raw fields"
+    );
+    let fact_diagnostic_source = facts_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct FactDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl FactDiagnostic").next())
+        .expect("facts::FactDiagnostic struct source should be present");
+    assert!(!fact_diagnostic_source.contains("pub code: &'static str"));
+    assert!(!fact_diagnostic_source.contains("pub message: String"));
+    assert!(
+        facts_source.contains("impl FactDiagnostic")
+            && facts_source.contains("pub fn new(code: &'static str, message: impl Into<String>)")
+            && facts_source.contains("pub fn code(&self) -> &'static str")
+            && facts_source.contains("pub fn message(&self) -> &str")
+            && facts_source.contains("pub fn into_parts(self) -> (&'static str, String)"),
+        "fact diagnostics should expose constructor/accessors, not raw fields"
+    );
 }
 
 #[test]
@@ -1526,6 +3762,33 @@ fn stdlib_does_not_grow_non_jdk_domain_package_knowledge() {
 
     assert_eq!(stdlib_source.matches("cloud_storage_").count(), 2);
     assert_eq!(stdlib_source.matches("CloudStorage").count(), 2);
+
+    let javalibs_source = include_str!("../src/javalibs.rs");
+    assert!(javalibs_source.contains("pub(crate) fn is_builtin_external_facade_type"));
+    assert!(javalibs_source.contains("pub(crate) fn broad_utils_dynamic_return_type"));
+    assert!(javalibs_source.contains("pub(crate) fn broad_static_utility_return_type"));
+    assert!(
+        javalibs_source
+            .contains("pub(crate) fn imported_static_method_returns_broad_utils_first_arg")
+    );
+    assert!(javalibs_source.contains("pub(crate) fn is_broad_utils_type_name"));
+    assert!(javalibs_source.contains("pub(crate) fn needs_conversion_constructor_for_facade"));
+    assert!(javalibs_source.contains("pub(crate) fn is_static_facade_method"));
+    assert!(javalibs_source.contains("pub(crate) fn is_jdk_input_stream_facade_type"));
+    assert!(javalibs_source.contains("pub(crate) fn is_known_java_subtype"));
+    assert!(javalibs_source.contains("pub(crate) fn is_known_exception_supertype"));
+    assert!(!javalibs_source.contains("pub fn is_builtin_external_facade_type"));
+    assert!(!javalibs_source.contains("pub fn broad_utils_dynamic_return_type"));
+    assert!(!javalibs_source.contains("pub fn broad_static_utility_return_type"));
+    assert!(
+        !javalibs_source.contains("pub fn imported_static_method_returns_broad_utils_first_arg")
+    );
+    assert!(!javalibs_source.contains("pub fn is_broad_utils_type_name"));
+    assert!(!javalibs_source.contains("pub fn needs_conversion_constructor_for_facade"));
+    assert!(!javalibs_source.contains("pub fn is_static_facade_method"));
+    assert!(!javalibs_source.contains("pub fn is_jdk_input_stream_facade_type"));
+    assert!(!javalibs_source.contains("pub fn is_known_java_subtype"));
+    assert!(!javalibs_source.contains("pub fn is_known_exception_supertype"));
 }
 
 #[test]
@@ -1557,6 +3820,34 @@ fn stdlib_erased_display_downcast_collectors_stay_internal() {
         stdlib_full_source.contains("pub(crate) fn external_facade_receiver_call_is_noop_method")
     );
     assert!(!stdlib_full_source.contains("pub fn external_facade_receiver_call_is_noop_method"));
+    assert!(
+        stdlib_full_source.contains("pub(crate) fn native_collection_method_name_mutates_receiver")
+    );
+    assert!(!stdlib_full_source.contains("pub fn native_collection_method_name_mutates_receiver"));
+    for helper in [
+        "external_api_method_role",
+        "external_constructor_provenance_with_builtin_packs",
+        "external_field_provenance_with_builtin_packs",
+    ] {
+        assert!(stdlib_full_source.contains(&format!("pub(crate) fn {helper}")));
+        assert!(!stdlib_full_source.contains(&format!("pub fn {helper}")));
+    }
+    for helper in [
+        "is_known_receiverless_static_utility_method",
+        "has_receiver_agnostic_external_return_type",
+        "is_known_object_inherited_method",
+        "native_collection_receiver_mutates",
+        "static_collection_argument_mutates",
+    ] {
+        assert!(stdlib_full_source.contains(&format!("pub(crate) fn {helper}")));
+        assert!(!stdlib_full_source.contains(&format!("pub fn {helper}")));
+    }
+    assert!(stdlib_full_source.contains("pub(crate) fn java_type_is_array_blocking_queue"));
+    assert!(!stdlib_full_source.contains("pub fn java_type_is_array_blocking_queue"));
+    assert!(
+        stdlib_full_source.contains("pub(crate) fn program_mentions_java_array_blocking_queue")
+    );
+    assert!(!stdlib_full_source.contains("pub fn program_mentions_java_array_blocking_queue"));
 }
 
 #[test]
@@ -1569,6 +3860,64 @@ fn control_flow_normalization_plans_are_owned_before_lowering() {
     assert!(rewrite_source.contains("pub struct MethodControlFlowPlan"));
     assert!(rewrite_source.contains("AssignmentInConditionPlan"));
     assert!(rewrite_source.contains("TailRecursiveLoopPlan"));
+    let method_control_flow_plan_source = rewrite_source
+        .split("pub struct MethodControlFlowPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub enum ControlFlowRewritePlan").next())
+        .expect("MethodControlFlowPlan should remain discoverable");
+    assert!(method_control_flow_plan_source.contains("pub fn new("));
+    assert!(method_control_flow_plan_source.contains("pub fn method(&self) -> &MethodKey"));
+    assert!(
+        method_control_flow_plan_source
+            .contains("pub fn rewrites(&self) -> &[ControlFlowRewritePlan]")
+    );
+    assert!(!method_control_flow_plan_source.contains("pub method: MethodKey"));
+    assert!(!method_control_flow_plan_source.contains("pub rewrites: Vec<ControlFlowRewritePlan>"));
+    let assignment_plan_source = rewrite_source
+        .split("pub struct AssignmentInConditionPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub enum NullTestKind").next())
+        .expect("AssignmentInConditionPlan should remain discoverable");
+    assert!(assignment_plan_source.contains("pub fn new("));
+    assert!(assignment_plan_source.contains("pub fn local_name(&self) -> &str"));
+    assert!(assignment_plan_source.contains("pub fn source_call(&self) -> &str"));
+    assert!(assignment_plan_source.contains("pub fn null_test(&self) -> NullTestKind"));
+    assert!(
+        assignment_plan_source
+            .contains("pub fn normalized_shape(&self) -> AssignmentConditionNormalizedShape")
+    );
+    for field in [
+        "pub local_name: String",
+        "pub source_call: String",
+        "pub null_test: NullTestKind",
+        "pub normalized_shape: AssignmentConditionNormalizedShape",
+    ] {
+        assert!(
+            !assignment_plan_source.contains(field),
+            "AssignmentInConditionPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let tail_plan_source = rewrite_source
+        .split("pub struct TailRecursiveLoopPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub enum TailRecursiveNormalizedShape").next())
+        .expect("TailRecursiveLoopPlan should remain discoverable");
+    assert!(tail_plan_source.contains("pub fn new("));
+    assert!(tail_plan_source.contains("pub fn method_name(&self) -> &str"));
+    assert!(tail_plan_source.contains("pub fn arg_count(&self) -> usize"));
+    assert!(
+        tail_plan_source.contains("pub fn normalized_shape(&self) -> TailRecursiveNormalizedShape")
+    );
+    for field in [
+        "pub method_name: String",
+        "pub arg_count: usize",
+        "pub normalized_shape: TailRecursiveNormalizedShape",
+    ] {
+        assert!(
+            !tail_plan_source.contains(field),
+            "TailRecursiveLoopPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
     assert!(semantic_source.contains("collect_control_flow_plans"));
     assert!(semantic_source.contains("assignment_in_condition_plan"));
     assert!(semantic_source.contains("tail_recursive_loop_plan"));
@@ -1582,6 +3931,24 @@ fn control_flow_normalization_plans_are_owned_before_lowering() {
     assert!(control_flow_lowering_source.contains("RustStmt::If"));
     assert!(control_flow_lowering_source.contains("RustStmt::Assign"));
     assert!(control_flow_lowering_source.contains("RustStmt::Continue"));
+    let tail_render_source = control_flow_lowering_source
+        .split("pub(crate) struct TailRecursiveLoopRender")
+        .nth(1)
+        .and_then(|tail| tail.split("impl TailRecursiveLoopRender").next())
+        .expect("TailRecursiveLoopRender should remain discoverable");
+    for field in [
+        "pub(crate) params:",
+        "pub(crate) condition:",
+        "pub(crate) base_return:",
+        "pub(crate) next_args:",
+    ] {
+        assert!(
+            !tail_render_source.contains(field),
+            "TailRecursiveLoopRender should expose a constructor, not raw crate fields: {field}"
+        );
+    }
+    assert!(control_flow_lowering_source.contains("pub(crate) fn new("));
+    assert!(control_flow_lowering_source.contains("fn into_parts(self)"));
     assert!(!control_flow_lowering_source.contains("raw_stmt"));
     assert!(!control_flow_lowering_source.contains("emit_expr"));
     assert!(!control_flow_lowering_source.contains("format!(\"let mut"));
@@ -1595,6 +3962,19 @@ fn coercion_plan_owns_instanceof_fallback_policy() {
     let facts_source = include_str!("../src/facts.rs");
 
     assert!(source.contains("pub struct CoercionDiagnostic"));
+    let coercion_diagnostic_source = source
+        .split("pub struct CoercionDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl CoercionDiagnostic").next())
+        .expect("CoercionDiagnostic source should remain discoverable");
+    assert!(
+        !coercion_diagnostic_source.contains("pub code:")
+            && !coercion_diagnostic_source.contains("pub message:"),
+        "CoercionDiagnostic should expose accessors, not raw public fields"
+    );
+    assert!(source.contains("pub fn new(code: &'static str, message: impl Into<String>)"));
+    assert!(source.contains("pub fn code(&self) -> &'static str"));
+    assert!(source.contains("pub fn message(&self) -> &str"));
     assert!(conversion_source.contains("pub enum InstanceOfFallbackPolicy"));
     assert!(conversion_source.contains("pub enum InstanceOfTargetPolicy"));
     assert!(!source.contains("pub enum InstanceOfFallbackPolicy"));
@@ -1608,8 +3988,54 @@ fn coercion_plan_owns_instanceof_fallback_policy() {
     assert!(conversion_source.contains("pub fn instanceof_target_policy"));
     assert!(!conversion_source.contains("pub fn plan_instanceof_check("));
     assert!(conversion_source.contains("pub fn plan_instanceof_check_with_facts"));
+    assert!(conversion_source.contains("pub struct HierarchyInstanceOfPolicy"));
+    let hierarchy_instanceof_policy_source = conversion_source
+        .split("pub struct HierarchyInstanceOfPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn hierarchy_instanceof_policy").next())
+        .unwrap();
+    assert!(conversion_source.contains(
+        "pub(crate) fn new(actual: JavaType, target: JavaType, always_true: bool) -> Self"
+    ));
+    assert!(conversion_source.contains("pub fn actual(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn target(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn always_true(&self) -> bool"));
+    assert!(!hierarchy_instanceof_policy_source.contains("pub actual: JavaType"));
+    assert!(!hierarchy_instanceof_policy_source.contains("pub target: JavaType"));
+    assert!(!hierarchy_instanceof_policy_source.contains("pub always_true: bool"));
     assert!(conversion_source.contains("pub fn hierarchy_instanceof_policy"));
+    assert!(facts_source.contains("pub struct HierarchyReachabilityResult"));
+    let hierarchy_reachability_result_source = facts_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct HierarchyReachabilityResult")
+        .nth(1)
+        .and_then(|tail| tail.split("impl HierarchyReachabilityResult").next())
+        .expect("HierarchyReachabilityResult should remain discoverable");
+    for field in [
+        "pub edges: Vec<HierarchyEdgeFact>",
+        "pub stats: WorklistStats",
+        "pub diagnostics: Vec<HierarchyReachabilityDiagnostic>",
+    ] {
+        assert!(
+            !hierarchy_reachability_result_source.contains(field),
+            "HierarchyReachabilityResult should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(facts_source.contains("pub fn edges(&self) -> &[HierarchyEdgeFact]"));
+    assert!(facts_source.contains("pub fn stats(&self) -> WorklistStats"));
+    assert!(
+        facts_source.contains("pub fn diagnostics(&self) -> &[HierarchyReachabilityDiagnostic]")
+    );
+    assert!(facts_source.contains(
+        "Vec<HierarchyEdgeFact>,\n        WorklistStats,\n        Vec<HierarchyReachabilityDiagnostic>,"
+    ));
     assert!(facts_source.contains("pub struct HierarchySubtypePolicy"));
+    let hierarchy_subtype_policy_source = facts_source
+        .split("pub struct HierarchySubtypePolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl HierarchySubtypePolicy").next())
+        .expect("HierarchySubtypePolicy should remain discoverable");
+    assert!(!hierarchy_subtype_policy_source.contains("pub reaches: bool"));
+    assert!(facts_source.contains("pub fn reaches(&self) -> bool"));
     assert!(facts_source.contains("pub fn hierarchy_subtype_policy"));
     assert!(!source.contains("pub fn plan_instanceof_check("));
     assert!(!source.contains("pub fn instanceof_target_policy"));
@@ -1762,12 +4188,69 @@ fn signature_boundary_policy_is_the_single_boundary_constraint_entrypoint() {
     assert!(source.contains("pub struct SignatureBoundaryKindPriorityPolicy"));
     assert!(source.contains("pub fn signature_boundary_kind_priority_policy"));
     assert!(source.contains("pub fn merge_signature_boundary_kind_policy"));
+    let boundary_kind_priority_source = source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SignatureBoundaryKindPriorityPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureBoundaryKindPriorityPolicy").next())
+        .expect("signature boundary kind priority policy should remain discoverable");
+    assert!(!boundary_kind_priority_source.contains("pub requirement: SignatureBoundaryKind"));
+    assert!(!boundary_kind_priority_source.contains("pub rank: u8"));
+    assert!(source.contains("pub fn requirement(self) -> SignatureBoundaryKind"));
+    assert!(source.contains("pub fn rank(self) -> u8"));
+    let boundary_kind_merge_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureBoundaryKindMerge")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureBoundaryKindMerge").next())
+        .expect("signature boundary kind merge should remain discoverable");
+    assert!(!boundary_kind_merge_source.contains("pub kept: Option<SignatureBoundaryKind>"));
+    assert!(!boundary_kind_merge_source.contains("pub rejected: Option<SignatureBoundaryKind>"));
+    assert!(source.contains("pub fn into_kept(self) -> Option<SignatureBoundaryKind>"));
     assert!(source.contains("pub struct SignatureFlagMerge"));
     assert!(source.contains("pub fn merge_signature_flag_requirement_policy"));
+    let flag_merge_source = source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SignatureFlagMerge")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureFlagMerge").next())
+        .expect("signature flag merge should remain discoverable");
+    assert!(!flag_merge_source.contains("pub kept: bool"));
+    assert!(source.contains("pub fn kept(self) -> bool"));
     assert!(source.contains("pub enum SignatureBoundaryFallback"));
     assert!(source.contains("pub struct SignatureBoundaryRepresentationFactPolicy"));
     assert!(source.contains("pub struct SignatureBoundaryRepresentationPolicy"));
+    let boundary_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureBoundaryPolicy").next())
+        .expect("signature boundary policy should remain discoverable");
+    assert!(!boundary_policy_source.contains("pub kind: SignatureBoundaryKind"));
+    assert!(!boundary_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!boundary_policy_source.contains("pub fallback: SignatureBoundaryFallback"));
+    assert!(!boundary_policy_source.contains("pub constraints: Vec<SignatureConstraint>"));
+    assert!(source.contains("pub fn kind(&self) -> SignatureBoundaryKind"));
+    assert!(source.contains("pub fn fallback(&self) -> SignatureBoundaryFallback"));
+    let representation_fact_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureBoundaryRepresentationFactPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureBoundaryRepresentationFactPolicy").next())
+        .expect("signature boundary representation fact policy should remain discoverable");
+    assert!(!representation_fact_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!representation_fact_policy_source.contains("pub object_representation_facts: bool"));
+    assert!(source.contains("pub fn object_representation_facts(&self) -> bool"));
+    let representation_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureBoundaryRepresentationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureBoundaryRepresentationPolicy").next())
+        .expect("signature boundary representation policy should remain discoverable");
+    assert!(!representation_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!representation_policy_source.contains("pub preserve_object_representation: bool"));
+    assert!(source.contains("pub fn preserve_object_representation(&self) -> bool"));
     assert!(source.contains("pub struct SignatureNativeBoundaryPolicy"));
+    let native_boundary_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureNativeBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureNativeBoundaryPolicy").next())
+        .expect("signature native boundary policy should remain discoverable");
+    assert!(!native_boundary_policy_source.contains("pub constraints: Vec<SignatureConstraint>"));
     assert!(source.contains("PreserveObjectRepresentationEscapingStorage"));
     assert!(source.contains("EscapingNativeStorage"));
     assert!(source.contains("pub fn signature_boundary_policy"));
@@ -1786,19 +4269,67 @@ fn signature_boundary_policy_is_the_single_boundary_constraint_entrypoint() {
     assert!(!source.contains("fn boundary_type_has_object_representation"));
     assert!(!source.contains("fn native_boundary_constraints"));
     assert!(source.contains("pub struct BindingBoundaryPolicy"));
-    assert!(source.contains("pub fn binding_boundary_policy"));
+    let binding_boundary_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct BindingBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BindingBoundaryPolicy").next())
+        .expect("binding boundary policy should remain discoverable");
+    assert!(!binding_boundary_source.contains("pub binding_name: String"));
+    assert!(!binding_boundary_source.contains("pub kind: Option<SignatureBoundaryKind>"));
+    assert!(source.contains("pub(crate) fn binding_boundary_policy"));
+    assert!(!source.contains("pub fn binding_boundary_policy"));
+    assert!(source.contains("pub(crate) fn external_argument_binding_constraints"));
+    assert!(!source.contains("pub fn external_argument_binding_constraints"));
+    assert!(source.contains("pub(crate) fn external_call_return_binding_constraints"));
+    assert!(!source.contains("pub fn external_call_return_binding_constraints"));
+    assert!(source.contains("pub(crate) fn external_receiver_binding_constraints"));
+    assert!(!source.contains("pub fn external_receiver_binding_constraints"));
     assert!(!source.contains("fn binding_boundary_kind"));
     assert!(source.contains("pub struct MethodParamBoundaryPolicy"));
+    let method_param_boundary_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct MethodParamBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl MethodParamBoundaryPolicy").next())
+        .expect("method param boundary policy should remain discoverable");
+    assert!(!method_param_boundary_source.contains("pub type_name: String"));
+    assert!(!method_param_boundary_source.contains("pub method_name: String"));
+    assert!(!method_param_boundary_source.contains("pub param_name: String"));
+    assert!(!method_param_boundary_source.contains("pub kind: Option<SignatureBoundaryKind>"));
     assert!(source.contains("pub fn method_param_boundary_policy"));
     assert!(!source.contains("fn method_param_boundary_kind"));
     assert!(source.contains("pub struct ConstructorParamBoundaryPolicy"));
+    let constructor_param_boundary_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ConstructorParamBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ConstructorParamBoundaryPolicy").next())
+        .expect("constructor param boundary policy should remain discoverable");
+    assert!(!constructor_param_boundary_source.contains("pub type_name: String"));
+    assert!(!constructor_param_boundary_source.contains("pub param_name: String"));
+    assert!(!constructor_param_boundary_source.contains("pub kind: Option<SignatureBoundaryKind>"));
     assert!(source.contains("pub fn constructor_param_boundary_policy"));
     assert!(!source.contains("fn constructor_param_boundary_kind"));
     assert!(source.contains("pub struct FieldBoundaryPolicy"));
+    let field_boundary_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct FieldBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl FieldBoundaryPolicy").next())
+        .expect("field boundary policy should remain discoverable");
+    assert!(!field_boundary_source.contains("pub type_name: String"));
+    assert!(!field_boundary_source.contains("pub field_name: String"));
+    assert!(!field_boundary_source.contains("pub kind: Option<SignatureBoundaryKind>"));
     assert!(source.contains("pub fn field_boundary_policy"));
     assert!(!source.contains("fn field_boundary_kind"));
     assert!(source.contains("pub struct MethodReturnBoundaryPolicy"));
+    let method_return_boundary_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct MethodReturnBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl MethodReturnBoundaryPolicy").next())
+        .expect("method return boundary policy should remain discoverable");
+    assert!(!method_return_boundary_source.contains("pub type_name: String"));
+    assert!(!method_return_boundary_source.contains("pub method_name: String"));
+    assert!(!method_return_boundary_source.contains("pub kind: Option<SignatureBoundaryKind>"));
     assert!(source.contains("pub fn method_return_boundary_policy"));
+    assert!(source.contains("pub fn kind(&self) -> Option<SignatureBoundaryKind>"));
     assert!(!source.contains("fn method_return_boundary_kind"));
     assert!(!source.contains("fn binding_requires_conservative_boundary"));
     assert!(!source.contains("fn field_requires_unknown_boundary"));
@@ -1857,6 +4388,7 @@ fn signature_dispatch_requirement_projection_stays_role_policy_based() {
 #[test]
 fn signature_requirement_merge_policy_owns_axis_priority_symbols() {
     let source = include_str!("../src/signature.rs");
+    let lattice_source = include_str!("../src/lattice.rs");
 
     assert!(source.contains("pub struct SignatureRequirementMerge"));
     assert!(!source.contains("pub struct SignatureOwnershipRequirementPriorityPolicy"));
@@ -1865,13 +4397,39 @@ fn signature_requirement_merge_policy_owns_axis_priority_symbols() {
     assert!(!source.contains("pub fn signature_view_requirement_priority_policy"));
     assert!(!source.contains("pub struct SignatureDispatchRequirementPriorityPolicy"));
     assert!(!source.contains("pub fn signature_dispatch_requirement_priority_policy"));
+    assert!(source.contains("pub struct SignatureRequirementMerge"));
+    let requirement_merge_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureRequirementMerge<T>")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<T> SignatureRequirementMerge<T>").next())
+        .expect("signature requirement merge should remain discoverable");
+    assert!(!requirement_merge_source.contains("pub kept: T"));
+    assert!(!requirement_merge_source.contains("pub rejected: Option<T>"));
+    assert!(source.contains("pub fn kept(&self) -> &T"));
+    assert!(source.contains("pub fn rejected(&self) -> Option<&T>"));
+    assert!(source.contains("pub fn into_parts(self) -> (T, Option<T>)"));
     assert!(source.contains("pub struct SignatureFlagMerge"));
     assert!(source.contains("pub fn merge_signature_flag_requirement_policy"));
+    let flag_merge_source = source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SignatureFlagMerge")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureFlagMerge").next())
+        .expect("signature flag merge should remain discoverable");
+    assert!(!flag_merge_source.contains("pub kept: bool"));
+    assert!(source.contains("pub fn kept(self) -> bool"));
     assert!(source.contains("pub fn merge_ownership_requirement_policy"));
     assert!(source.contains("pub fn merge_view_requirement_policy"));
     assert!(source.contains("pub fn merge_dispatch_requirement_policy"));
     assert!(source.contains("join_ranked_lattice"));
     assert!(source.contains("ownership_lattice_rank"));
+    let ranked_join_source = lattice_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct RankedLatticeJoin<T>")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<T> RankedLatticeJoin<T>").next())
+        .expect("ranked lattice join should remain discoverable");
+    assert!(!ranked_join_source.contains("pub(crate) kept: T"));
+    assert!(!ranked_join_source.contains("pub(crate) rejected: Option<T>"));
+    assert!(lattice_source.contains("pub(crate) fn into_parts(self) -> (T, Option<T>)"));
     assert!(!source.contains("fn ownership_requirement_rank"));
     assert!(!source.contains("fn view_requirement_rank"));
     assert!(!source.contains("fn dispatch_requirement_rank"));
@@ -1884,6 +4442,14 @@ fn signature_owned_recovery_policy_owns_capability_symbols() {
 
     assert!(source.contains("pub enum SignatureOwnedRecoveryPolicy"));
     assert!(source.contains("pub struct SignatureOwnedRecoveryCapabilityPolicy"));
+    let capability_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureOwnedRecoveryCapabilityPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureOwnedRecoveryCapabilityPolicy").next())
+        .expect("signature owned recovery capability policy should remain discoverable");
+    assert!(!capability_policy_source.contains("pub recovery: OwnedRecoveryCapability"));
+    assert!(source.contains("pub fn recovery(&self) -> &OwnedRecoveryCapability"));
+    assert!(source.contains("pub fn into_recovery(self) -> OwnedRecoveryCapability"));
     assert!(source.contains("ProvenByCloneBoxAdapter"));
     assert!(source.contains("ProvenByFactoryCopy"));
     assert!(source.contains("ProvenByImmutableSharedHandle"));
@@ -1907,9 +4473,24 @@ fn signature_capability_and_baseline_policy_symbols_stay_fact_aware() {
     assert!(source.contains("pub fn signature_capability_policy_with_effective_facts"));
     assert_eq!(source.matches("is_copy_type").count(), 1);
     assert!(source.contains("pub struct SignatureSlotBaselinePolicy"));
+    let slot_baseline_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureSlotBaselinePolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureSlotBaselinePolicy").next())
+        .expect("signature slot baseline policy should remain discoverable");
+    assert!(!slot_baseline_policy_source.contains("pub constraints: Vec<SignatureConstraint>"));
     assert!(source.contains("pub fn signature_slot_baseline_policy"));
     assert!(source.contains("pub fn signature_slot_baseline_policy_with_effective_facts"));
     assert!(!source.contains("fn signature_slot_baseline_constraints("));
+    assert!(source.contains("pub struct SignatureSlotDispatchRequirementPolicy"));
+    let dispatch_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureSlotDispatchRequirementPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureSlotDispatchRequirementPolicy").next())
+        .expect("signature slot dispatch requirement policy should remain discoverable");
+    assert!(!dispatch_policy_source.contains("pub constraints: Vec<SignatureConstraint>"));
+    assert!(source.contains("pub fn constraints(&self) -> &[SignatureConstraint]"));
+    assert!(source.contains("pub fn into_constraints(self) -> Vec<SignatureConstraint>"));
 }
 
 #[test]
@@ -1920,6 +4501,19 @@ fn stream_shape_stream_source_semantics_stay_effective_fact_based() {
     assert!(!stream_shape_source.contains("sequence_element_type("));
     assert!(stream_shape_source.contains("use crate::effective_facts::EffectiveFacts"));
     assert!(stream_shape_source.contains("pub struct StreamSourceCapabilityPolicy"));
+    let stream_source_capability_policy_source = stream_shape_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct StreamSourceCapabilityPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl StreamSourceCapabilityPolicy").next())
+        .expect("StreamSourceCapabilityPolicy source should remain discoverable");
+    assert!(
+        stream_source_capability_policy_source.contains("capability_element: Option<JavaType>")
+    );
+    assert!(
+        !stream_source_capability_policy_source
+            .contains("pub capability_element: Option<JavaType>")
+    );
+    assert!(stream_shape_source.contains("pub fn capability_element(&self) -> Option<&JavaType>"));
     assert!(stream_shape_source.contains("pub fn stream_source_capability_policy"));
     assert!(stream_shape_source.contains("stream_source_capability_policy_with_effective_facts"));
     assert!(effective_facts_source.contains("pub fn sequence_element_type_for"));
@@ -1960,10 +4554,84 @@ fn effective_fact_precedence_queries_are_audited_by_consumer_module() {
     let semantic_analysis_source = include_str!("../src/semantic_analysis.rs");
     let facts_source = include_str!("../src/facts.rs");
     let effective_facts_source = include_str!("../src/effective_facts.rs");
+    let slot_shape_source = include_str!("../src/slot_shape.rs");
 
     assert!(effective_facts_source.contains("TypeCapabilities::conservative"));
+    let type_identity_source = slot_shape_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct TypeIdentity")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct TypeCapabilities")
+                .next()
+        })
+        .expect("TypeIdentity should remain discoverable");
+    for field in [
+        "pub declared_java_ty:",
+        "pub runtime_bounds:",
+        "pub generic_args:",
+        "pub erasure:",
+    ] {
+        assert!(
+            !type_identity_source.contains(field),
+            "TypeIdentity should expose accessors instead of raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn declared_java_ty(&self) -> &JavaType",
+        "pub fn runtime_bounds(&self) -> &[JavaType]",
+        "pub fn generic_args(&self) -> &[JavaType]",
+        "pub fn erasure(&self) -> Option<&JavaType>",
+    ] {
+        assert!(
+            slot_shape_source.contains(accessor),
+            "TypeIdentity accessor should remain available: {accessor}"
+        );
+    }
+    let type_capabilities_source = slot_shape_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct TypeCapabilities")
+        .nth(1)
+        .and_then(|tail| tail.split("impl TypeCapabilities").next())
+        .expect("TypeCapabilities should remain discoverable");
+    for field in [
+        "pub copy: bool",
+        "pub clone: bool",
+        "pub string_like: bool",
+        "pub sequence_like: Option<JavaType>",
+        "pub implements: Vec<JavaType>",
+        "pub extends: Option<JavaType>",
+        "pub final_type: bool",
+        "pub object_safe_trait: bool",
+    ] {
+        assert!(
+            !type_capabilities_source.contains(field),
+            "TypeCapabilities should expose accessors instead of raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn is_copy(&self) -> bool",
+        "pub fn is_clone(&self) -> bool",
+        "pub fn is_string_like(&self) -> bool",
+        "pub fn sequence_like(&self) -> Option<&JavaType>",
+        "pub fn implements(&self) -> &[JavaType]",
+        "pub fn extends(&self) -> Option<&JavaType>",
+        "pub fn is_final_type(&self) -> bool",
+        "pub fn is_object_safe_trait(&self) -> bool",
+    ] {
+        assert!(
+            slot_shape_source.contains(accessor),
+            "TypeCapabilities accessor should remain available: {accessor}"
+        );
+    }
     assert!(effective_facts_source.contains("pub struct EffectiveFact<T>"));
-    assert!(effective_facts_source.contains("pub provenance: FactProvenance"));
+    let effective_fact_source = effective_facts_source
+        .split("pub struct EffectiveFact<T>")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<T> EffectiveFact<T>").next())
+        .expect("EffectiveFact should remain discoverable");
+    assert!(!effective_fact_source.contains("pub value: T"));
+    assert!(!effective_fact_source.contains("pub provenance: FactProvenance"));
+    assert!(effective_facts_source.contains("pub fn value(&self) -> &T"));
+    assert!(effective_facts_source.contains("pub fn provenance(&self) -> FactProvenance"));
     assert!(effective_facts_source.contains("fn fact_precedence_key"));
     assert!(effective_facts_source.contains(
         "FactProvenance::BuiltinExternalModel | FactProvenance::ExternalLibraryPack => 2"
@@ -2158,8 +4826,23 @@ fn slot_render_policy_symbols_stay_effective_fact_aware() {
     assert!(source.contains("pub enum NativeJavaRustTypePolicy"));
     assert!(!source.contains("pub fn native_java_rust_type_policy("));
     assert!(source.contains("pub fn native_java_rust_type_policy_with_effective_facts"));
-    assert!(source.contains("pub struct NativeNamedJavaRustTypePolicy"));
-    assert!(source.contains("pub fn native_named_java_rust_type_policy"));
+    assert!(source.contains("pub(crate) struct NativeNamedJavaRustTypePolicy"));
+    assert!(!source.contains("pub struct NativeNamedJavaRustTypePolicy"));
+    let native_named_policy_source = source
+        .split(
+            "#[derive(Debug, Clone, PartialEq)]\npub(crate) struct NativeNamedJavaRustTypePolicy",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl NativeNamedJavaRustTypePolicy").next())
+        .expect("native named Java/Rust type policy source should remain discoverable");
+    assert!(native_named_policy_source.contains("name: String"));
+    assert!(native_named_policy_source.contains("policy: NativeJavaRustTypePolicy"));
+    assert!(!native_named_policy_source.contains("pub name: String"));
+    assert!(!native_named_policy_source.contains("pub policy: NativeJavaRustTypePolicy"));
+    assert!(!source.contains("fn name(&self) -> &str"));
+    assert!(!source.contains("fn policy(&self) -> &NativeJavaRustTypePolicy"));
+    assert!(source.contains("pub(crate) fn native_named_java_rust_type_policy"));
+    assert!(!source.contains("pub fn native_named_java_rust_type_policy"));
     assert!(!source.contains("pub fn render_native_java_rust_type_policy("));
     assert!(
         source.contains("pub(crate) fn render_native_java_rust_type_policy_with_effective_facts")
@@ -2210,6 +4893,12 @@ fn slot_render_default_policy_symbols_stay_effective_fact_aware() {
     assert!(source.contains("pub enum SlotDefaultPolicy"));
     assert!(source.contains("pub enum SlotDefaultValuePolicy"));
     assert!(source.contains("pub struct SlotContentCapabilityPolicy"));
+    assert!(source.contains("    string_content: bool"));
+    assert!(source.contains("    sequence_element: Option<JavaType>"));
+    assert!(!source.contains("pub string_content: bool"));
+    assert!(!source.contains("pub sequence_element: Option<JavaType>"));
+    assert!(source.contains("pub fn string_content(&self) -> bool"));
+    assert!(source.contains("pub fn sequence_element(&self) -> Option<&JavaType>"));
     assert!(!source.contains("pub fn slot_content_capability_policy("));
     assert!(source.contains("pub fn slot_content_capability_policy_with_effective_facts"));
     assert!(source.contains("pub(crate) struct SlotNoDefaultMessagePolicy"));
@@ -2282,6 +4971,15 @@ fn call_target_lowering_uses_shared_projection_helpers() {
     assert!(stdlib_source.contains("pub(crate) fn class_literal_token_plan"));
     assert!(!stdlib_source.contains("pub struct ClassLiteralTokenPlan"));
     assert!(!stdlib_source.contains("pub fn class_literal_token_plan"));
+    let token_plan_source = stdlib_source
+        .split("#[derive(Debug, Clone, PartialEq)]\npub(crate) struct ClassLiteralTokenPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ClassLiteralTokenPlan").next())
+        .expect("class literal token plan should remain discoverable");
+    assert!(!token_plan_source.contains("pub(crate) java_name: String"));
+    assert!(!token_plan_source.contains("pub(crate) rust_type: RustType"));
+    assert!(stdlib_source.contains("pub(crate) fn java_name(&self) -> &str"));
+    assert!(stdlib_source.contains("pub(crate) fn rust_type(&self) -> &RustType"));
     assert!(call_lowering_source.contains("RustExpr::MarkedBlock"));
     assert!(!call_lowering_source.contains("RustExpr::Raw(format!(\n        \"{{ {} {} }}\""));
 }
@@ -2347,8 +5045,35 @@ fn exception_lowering_keeps_exception_paths_structured() {
     assert!(!production_source.contains("pub fn try_catch_stmt"));
     assert!(production_source.contains("pub(crate) fn try_catch_value_fallthrough_stmt"));
     assert!(!production_source.contains("pub fn try_catch_value_fallthrough_stmt"));
+    assert!(production_source.contains("pub(crate) struct CatchRenderArm"));
+    let catch_render_arm_source = production_source
+        .split("#[derive(Debug, Clone, PartialEq)]\npub(crate) struct CatchRenderArm")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]")
+                .next()
+        })
+        .expect("CatchRenderArm should remain discoverable");
+    assert!(!catch_render_arm_source.contains("pub(crate) variable_name: String"));
+    assert!(!catch_render_arm_source.contains("pub(crate) class_names: Vec<String>"));
+    assert!(!catch_render_arm_source.contains("pub(crate) body: Vec<RustStmt>"));
+    assert!(production_source.contains("pub(crate) fn variable_name(&self) -> &str"));
+    assert!(production_source.contains("pub(crate) fn class_names(&self) -> &[String]"));
+    assert!(production_source.contains("pub(crate) fn into_body(self) -> Vec<RustStmt>"));
     assert!(production_source.contains("pub(crate) struct ExternalExceptionConversion"));
     assert!(!production_source.contains("pub struct ExternalExceptionConversion"));
+    let external_conversion_source = production_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]\npub(crate) struct ExternalExceptionConversion")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(crate) fn java_exception_support_item_with_facts")
+                .next()
+        })
+        .expect("ExternalExceptionConversion should remain discoverable");
+    assert!(!external_conversion_source.contains("pub(crate) java_type: String"));
+    assert!(!external_conversion_source.contains("pub(crate) rust_type: String"));
+    assert!(production_source.contains("pub(crate) fn java_type(&self) -> &str"));
+    assert!(production_source.contains("pub(crate) fn rust_type(&self) -> &str"));
     assert!(production_source.contains("pub(crate) fn external_exception_conversions"));
     assert!(!production_source.contains("pub fn external_exception_conversions"));
     let exception_plan_source = include_str!("../src/exception_plan.rs");
@@ -2356,6 +5081,37 @@ fn exception_lowering_keeps_exception_paths_structured() {
     assert!(!exception_plan_source.contains("pub fn try_resource_names"));
     assert!(exception_plan_source.contains("pub(crate) fn try_resources_are_declarations"));
     assert!(!exception_plan_source.contains("pub fn try_resources_are_declarations"));
+    assert!(exception_plan_source.contains("pub struct CallableFallibility"));
+    assert!(exception_plan_source.contains("    returns_result: bool"));
+    assert!(exception_plan_source.contains("    reasons: Vec<FallibilityReason>"));
+    assert!(!exception_plan_source.contains("pub returns_result: bool"));
+    assert!(!exception_plan_source.contains("pub reasons: Vec<FallibilityReason>"));
+    assert!(exception_plan_source.contains("pub fn returns_result(&self) -> bool"));
+    assert!(exception_plan_source.contains("pub fn reasons(&self) -> &[FallibilityReason]"));
+    let java_exception_support_source = production_source
+        .split("pub struct JavaException {")
+        .nth(1)
+        .and_then(|tail| tail.split("impl JavaException").next())
+        .expect("JavaException support source block");
+    assert!(
+        java_exception_support_source.contains("cause: Option<std::boxed::Box<JavaException>>")
+    );
+    assert!(java_exception_support_source.contains("class_name: &'static str"));
+    assert!(java_exception_support_source.contains("message: String"));
+    assert!(java_exception_support_source.contains("suppressed: Vec<JavaException>"));
+    assert!(!java_exception_support_source.contains("pub class_name:"));
+    assert!(!java_exception_support_source.contains("pub message:"));
+    assert!(!java_exception_support_source.contains("pub cause:"));
+    assert!(!java_exception_support_source.contains("pub suppressed:"));
+    assert!(production_source.contains("pub fn class_name(&self) -> &'static str"));
+    assert!(production_source.contains("pub fn message(&self) -> &str"));
+    assert!(production_source.contains("pub fn cause(&self) -> Option<&JavaException>"));
+    assert!(
+        production_source.contains("pub fn add_suppressed(&mut self, exception: JavaException)")
+    );
+    assert!(
+        production_source.contains("pub fn get_suppressed(&self) -> Vec<Option<JavaException>>")
+    );
     assert!(throw_policy_source.contains("RustExpr::MacroCall"));
     assert!(
         !throw_policy_source.contains("RustStmt::Raw(format!")
@@ -2363,14 +5119,14 @@ fn exception_lowering_keeps_exception_paths_structured() {
         "non-result throw lowering should keep the exception expression structured"
     );
     assert!(
-        production_source.contains("parenthesize_raw_postfix_receiver(message)")
-            && production_source.contains("parenthesize_raw_postfix_receiver(wrapper)")
+        production_source.contains("postfix_receiver_projection(message)")
+            && production_source.contains("postfix_receiver_projection(wrapper)")
             && !production_source.contains("fn raw_needs_method_receiver_parentheses")
             && !production_source.contains("RustExpr::Raw(format!(\"({trimmed})\""),
         "exception method receivers should delegate Raw recovery to the central coercion helper"
     );
     let postfix_receiver_source = coercion_source
-        .split("pub(crate) fn parenthesize_raw_postfix_receiver")
+        .split("pub(crate) fn postfix_receiver_projection")
         .nth(1)
         .and_then(|tail| {
             tail.split("pub(crate) fn recover_parseable_raw_operand_projection")
@@ -2382,11 +5138,18 @@ fn exception_lowering_keeps_exception_paths_structured() {
             .contains("raw_receiver_projection(expr, raw_needs_postfix_receiver_parentheses)"),
         "postfix receiver parenthesizing should share the central raw receiver projection"
     );
+    assert!(
+        postfix_receiver_source.contains("raw_contains_top_level_postfix_receiver_operator(raw)")
+            && postfix_receiver_source.contains("rendered_top_level_as_cast_parts(raw).is_some()")
+            && !postfix_receiver_source.contains("char_indices()")
+            && !postfix_receiver_source.contains("raw[idx..].starts_with(\"as\")"),
+        "postfix receiver parenthesizing should reuse shared top-level raw scanners"
+    );
     let raw_receiver_projection_source = coercion_source
         .split("fn raw_receiver_projection")
         .nth(1)
         .and_then(|tail| {
-            tail.split("pub(crate) fn parenthesize_raw_postfix_receiver")
+            tail.split("pub(crate) fn postfix_receiver_projection")
                 .next()
         })
         .expect("central raw receiver projection should remain discoverable");
@@ -2512,6 +5275,53 @@ fn coercion_production_does_not_build_raw_expression_with_format() {
 }
 
 #[test]
+fn raw_leaf_predicates_use_named_ir_helper() {
+    for (path, source) in [
+        (
+            "src/array_lowering.rs",
+            include_str!("../src/array_lowering.rs"),
+        ),
+        (
+            "src/call_lowering.rs",
+            include_str!("../src/call_lowering.rs"),
+        ),
+        ("src/coercion.rs", include_str!("../src/coercion.rs")),
+        (
+            "src/conversion_lowering.rs",
+            include_str!("../src/conversion_lowering.rs"),
+        ),
+        (
+            "src/exception_lowering.rs",
+            include_str!("../src/exception_lowering.rs"),
+        ),
+        (
+            "src/item_assembly.rs",
+            include_str!("../src/item_assembly.rs"),
+        ),
+        ("src/lower.rs", include_str!("../src/lower.rs")),
+        (
+            "src/operator_lowering.rs",
+            include_str!("../src/operator_lowering.rs"),
+        ),
+        (
+            "src/stream_lowering.rs",
+            include_str!("../src/stream_lowering.rs"),
+        ),
+    ] {
+        let production_source = production_source_without_cfg_test_items(source);
+        for forbidden in [
+            ".unshaped(), RustExpr::Raw(_))",
+            "if let RustExpr::Raw(_) = ",
+        ] {
+            assert!(
+                !production_source.contains(forbidden),
+                "{path} should use RustExpr::is_raw_leaf() for raw-leaf predicates instead of open-coding {forbidden:?}"
+            );
+        }
+    }
+}
+
+#[test]
 fn raw_ir_leaf_wrappers_are_not_public_api() {
     let item_assembly_source = include_str!("../src/item_assembly.rs");
     let statement_render_source = include_str!("../src/statement_render.rs");
@@ -2615,6 +5425,39 @@ fn fallback_call_name_adapters_are_not_public_api() {
     assert!(!call_plan_source.contains("pub enum CallTargetSignatureOwner"));
     assert!(call_plan_source.contains("pub(crate) struct OptionalReceiverSlotProjectionPlan"));
     assert!(!call_plan_source.contains("pub struct OptionalReceiverSlotProjectionPlan"));
+    let new_target_plan_source = call_plan_source
+        .split("pub struct NewTargetPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct ExternalCrateNewTarget").next())
+        .expect("NewTargetPlan should remain discoverable");
+    assert!(new_target_plan_source.contains("pub fn new("));
+    assert!(new_target_plan_source.contains("pub fn owner_shape(&self) -> &RustSlotShape"));
+    assert!(new_target_plan_source.contains("pub fn rust_name(&self) -> &str"));
+    assert!(
+        new_target_plan_source
+            .contains("pub fn external_crate(&self) -> Option<&ExternalCrateNewTarget>")
+    );
+    assert!(
+        new_target_plan_source
+            .contains("pub fn native_collection(&self) -> Option<NativeCollectionNewTarget>")
+    );
+    assert!(
+        new_target_plan_source
+            .contains("pub fn native_string(&self) -> Option<NativeStringNewTarget>")
+    );
+    assert!(new_target_plan_source.contains("pub(crate) fn rename_constructor("));
+    for field in [
+        "pub owner_shape: RustSlotShape",
+        "pub rust_name: String",
+        "pub external_crate: Option<ExternalCrateNewTarget>",
+        "pub native_collection: Option<NativeCollectionNewTarget>",
+        "pub native_string: Option<NativeStringNewTarget>",
+    ] {
+        assert!(
+            !new_target_plan_source.contains(field),
+            "NewTargetPlan should expose accessors, not raw public fields: {field}"
+        );
+    }
 }
 
 #[test]
@@ -2674,6 +5517,7 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     let analysis_source = include_str!("../src/callable_analysis.rs");
     let lib_source = include_str!("../src/lib.rs");
     let java_signature_source = include_str!("../src/java_signature.rs");
+    let graph_source = include_str!("../src/graph.rs");
     assert!(java_signature_source.contains("pub(crate) struct JavaCallableKey"));
     assert!(java_signature_source.contains("pub(crate) struct JavaCallableSlotKey"));
     assert!(java_signature_source.contains("pub(crate) enum JavaCallableKind"));
@@ -2709,6 +5553,10 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
         .expect("signature MethodKey source should remain discoverable");
     assert!(!signature_method_key_source.contains("pub type_name: String"));
     assert!(!signature_method_key_source.contains("pub rust_name: String"));
+    assert!(signature_method_key_source.contains("pub(crate) fn type_name(&self) -> &str"));
+    assert!(!signature_method_key_source.contains("pub fn type_name(&self) -> &str"));
+    assert!(!signature_method_key_source.contains("pub fn rust_name(&self) -> &str"));
+    assert!(!signature_method_key_source.contains("fn rust_name(&self) -> &str"));
     let signature_constructor_key_source = signature_source
         .split("pub struct ConstructorKey")
         .nth(1)
@@ -2719,6 +5567,10 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
         .expect("signature ConstructorKey source should remain discoverable");
     assert!(!signature_constructor_key_source.contains("pub type_name: String"));
     assert!(!signature_constructor_key_source.contains("pub rust_name: String"));
+    assert!(signature_constructor_key_source.contains("pub(crate) fn type_name(&self) -> &str"));
+    assert!(signature_constructor_key_source.contains("pub(crate) fn rust_name(&self) -> &str"));
+    assert!(!signature_constructor_key_source.contains("pub fn type_name(&self) -> &str"));
+    assert!(!signature_constructor_key_source.contains("pub fn rust_name(&self) -> &str"));
     let signature_field_key_source = signature_source
         .split("pub struct FieldKey")
         .nth(1)
@@ -2730,6 +5582,12 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!signature_field_key_source.contains("pub fn type_name(&self) -> &str"));
     assert!(!signature_field_key_source.contains("pub fn field_name(&self) -> &str"));
     assert!(!signature_field_key_source.contains("fn field_name(&self) -> &str"));
+    assert!(signature_source.contains("pub fn field_shape_for_declared_field("));
+    assert!(signature_source.contains("pub fn required_declared_field_shape("));
+    assert!(signature_source.contains("pub(crate) fn field_shape("));
+    assert!(signature_source.contains("pub(crate) fn required_field_shape("));
+    assert!(!signature_source.contains("pub fn field_shape("));
+    assert!(!signature_source.contains("pub fn required_field_shape("));
     assert!(signature_source.contains("FieldKey::source_field(ty, field)"));
     assert!(signature_source.contains("FieldKey::rust_identity(type_name, field_name)"));
     let signature_dependency_graph_source = signature_source
@@ -2764,6 +5622,9 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!signature_dependency_edge_source.contains("pub to: SignatureDependencyNode"));
     assert!(!signature_dependency_edge_source.contains("pub kind: SignatureDependencyEdgeKind"));
     assert!(signature_source.contains(
+        "pub(crate) fn new(\n        from: SignatureDependencyNode,\n        to: SignatureDependencyNode,\n        kind: SignatureDependencyEdgeKind,"
+    ));
+    assert!(!signature_source.contains(
         "pub fn new(\n        from: SignatureDependencyNode,\n        to: SignatureDependencyNode,\n        kind: SignatureDependencyEdgeKind,"
     ));
     assert!(signature_source.contains("pub fn from(&self) -> &SignatureDependencyNode"));
@@ -2800,10 +5661,50 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
             "pub fn component_by_node(&self) -> &HashMap<SignatureDependencyNode, usize>"
         )
     );
+    let graph_scc_source = graph_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct StronglyConnectedComponents<N>")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<N> StronglyConnectedComponents<N>").next())
+        .expect("graph SCC result should remain discoverable");
+    assert!(!graph_scc_source.contains("pub(crate) components: Vec<Vec<N>>"));
+    assert!(!graph_scc_source.contains("pub(crate) component_by_node: HashMap<N, usize>"));
+    assert!(!graph_scc_source.contains("pub(crate) component_successors: Vec<Vec<usize>>"));
+    assert!(graph_source.contains("pub(crate) fn components(&self) -> &[Vec<N>]"));
+    assert!(graph_source.contains("pub(crate) fn component_by_node(&self) -> &HashMap<N, usize>"));
+    assert!(graph_source.contains("pub(crate) fn component_successors(&self) -> &[Vec<usize>]"));
     assert!(
         signature_dependency_scc_source
             .contains("pub fn stats(&self) -> SignatureDependencySccStats")
     );
+    let signature_dependency_scc_stats_source = signature_source
+        .split("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct SignatureDependencySccStats")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct SignatureSolverPassPlan")
+                .next()
+        })
+        .expect("signature dependency SCC stats source should remain discoverable");
+    for field in [
+        "pub node_count: usize",
+        "pub edge_count: usize",
+        "pub component_count: usize",
+        "pub cyclic_component_count: usize",
+        "pub max_component_size: usize",
+    ] {
+        assert!(
+            !signature_dependency_scc_stats_source.contains(field),
+            "SignatureDependencySccStats should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn node_count(&self) -> usize",
+        "pub fn edge_count(&self) -> usize",
+        "pub fn component_count(&self) -> usize",
+        "pub fn cyclic_component_count(&self) -> usize",
+        "pub fn max_component_size(&self) -> usize",
+    ] {
+        assert!(signature_dependency_scc_stats_source.contains(accessor));
+    }
     let signature_solver_pass_plan_source = signature_source
         .split("#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct SignatureSolverPassPlan")
         .nth(1)
@@ -2831,15 +5732,48 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
         signature_solver_pass_plan_source
             .contains("pub fn stats(&self) -> SignatureSolverPassStats")
     );
+    let signature_solver_pass_stats_source = signature_source
+        .split("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct SignatureSolverPassStats")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\npub enum SignatureCallableKey")
+                .next()
+        })
+        .expect("signature solver pass stats source should remain discoverable");
+    for field in [
+        "pub planned_components: usize",
+        "pub planned_mutable_components: usize",
+        "pub cyclic_components: usize",
+        "pub max_component_size: usize",
+    ] {
+        assert!(
+            !signature_solver_pass_stats_source.contains(field),
+            "SignatureSolverPassStats should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn planned_components(&self) -> usize",
+        "pub fn planned_mutable_components(&self) -> usize",
+        "pub fn cyclic_components(&self) -> usize",
+        "pub fn max_component_size(&self) -> usize",
+    ] {
+        assert!(signature_solver_pass_stats_source.contains(accessor));
+    }
     assert!(!usage_source.contains("pub(crate) methods_by_java_key: HashMap<JavaCallableKey"));
     assert!(!usage_source.contains("pub methods_by_java_key: HashMap<JavaCallableKey"));
-    assert!(usage_source.contains("pub(crate) fn source_method_usage_by_java_key"));
+    assert!(usage_source.contains("fn source_method_usage_by_java_key"));
+    assert!(!usage_source.contains("pub(crate) fn source_method_usage_by_java_key"));
     assert!(usage_source.contains("pub(crate) fn insert_source_method_usage"));
-    assert!(usage_source.contains("pub(crate) fn source_method_usage_java_keys"));
+    assert!(usage_source.contains("pub(crate) fn source_method_usage_has_collapsed_owner_alias"));
+    assert!(!usage_source.contains("pub(crate) fn source_method_usage_java_keys"));
     assert!(!usage_source.contains("pub methods: HashMap<UsageMethodKey"));
     assert!(!usage_source.contains("pub constructors: HashMap<UsageConstructorKey"));
-    assert!(usage_source.contains("pub(crate) fn method_usage_by_key"));
-    assert!(usage_source.contains("pub(crate) fn constructor_usage_by_key"));
+    assert!(usage_source.contains("fn method_usage_by_key"));
+    assert!(usage_source.contains("fn constructor_usage_by_key"));
+    assert!(!usage_source.contains("pub(crate) fn method_usage_by_key"));
+    assert!(!usage_source.contains("pub(crate) fn constructor_usage_by_key"));
+    assert!(usage_source.contains("pub(crate) fn current_rust_method_usage"));
+    assert!(usage_source.contains("pub(crate) fn current_rust_constructor_usage"));
     assert!(!usage_source.contains("pub fn method_usage_by_key"));
     assert!(!usage_source.contains("pub fn constructor_usage_by_key"));
     assert!(usage_source.contains("#[cfg(test)]\n    pub(crate) fn insert_method_usage"));
@@ -2892,16 +5826,18 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!java_callable_slot_key_source.contains("pub java_name: String"));
     assert!(!java_callable_slot_key_source.contains("pub erased_param_types: Vec<String>"));
     assert!(usage_source.contains("JavaCallableKey::source_method_for_type"));
-    assert!(usage_source.contains("pub(crate) fn source_constructor_usage"));
+    assert!(usage_source.contains("pub fn source_constructor_usage"));
     assert!(usage_source.contains("UsageMethodKey::source_method(ty, method)"));
     assert!(usage_source.contains("UsageMethodKey::legacy_java_name_source_method(ty, method)"));
     assert!(usage_source.contains("pub(crate) fn current_rust_method_name"));
-    assert!(usage_source.contains("pub fn method_usage_by_current_rust_name"));
-    assert!(usage_source.contains("pub fn insert_method_usage_for_current_rust_name"));
+    assert!(!usage_source.contains("method_usage_by_current_rust_name"));
+    assert!(!usage_source.contains("pub fn insert_method_usage_for_current_rust_name"));
+    assert!(!usage_source.contains("insert_method_usage_for_current_rust_name"));
     assert!(usage_source.contains("UsageConstructorKey::source_constructor(ty, ctor)"));
     assert!(usage_source.contains("pub(crate) fn current_rust_constructor_name"));
-    assert!(usage_source.contains("pub fn constructor_usage_by_current_rust_name"));
-    assert!(usage_source.contains("pub fn insert_constructor_usage_for_current_rust_name"));
+    assert!(!usage_source.contains("constructor_usage_by_current_rust_name"));
+    assert!(!usage_source.contains("pub fn insert_constructor_usage_for_current_rust_name"));
+    assert!(!usage_source.contains("insert_constructor_usage_for_current_rust_name"));
     assert!(usage_source.contains("pub(crate) fn source_method_for_type"));
     assert!(usage_source.contains("pub(crate) fn source_method("));
     assert!(usage_source.contains("pub(crate) fn source_constructor_for_type"));
@@ -2910,12 +5846,18 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!usage_source.contains("pub fn source_method("));
     assert!(!usage_source.contains("pub fn source_constructor_for_type"));
     assert!(!usage_source.contains("pub fn source_constructor("));
-    assert!(usage_source.contains("CallableKey::resolved_method(resolved)"));
-    assert!(usage_source.contains("CallableKey::resolved_constructor"));
+    assert!(usage_source.contains("pub(crate) fn resolved_method"));
+    assert!(usage_source.contains("pub(crate) fn resolved_constructor"));
+    assert!(usage_source.contains("pub(crate) fn method_identity"));
+    assert!(usage_source.contains("pub(crate) fn constructor_identity"));
+    assert!(usage_source.contains("pub(crate) fn external_constructor"));
+    assert!(!usage_source.contains("pub fn resolved_method"));
+    assert!(!usage_source.contains("pub fn resolved_constructor"));
+    assert!(!usage_source.contains("pub fn method_identity("));
+    assert!(!usage_source.contains("pub fn constructor_identity("));
+    assert!(!usage_source.contains("pub fn external_constructor("));
     assert!(usage_source.contains("CallableKey::method_identity"));
-    assert!(usage_source.contains("CallableKey::constructor_identity"));
     assert!(usage_source.contains("pub fn external_method("));
-    assert!(usage_source.contains("pub fn external_constructor("));
     assert!(usage_source.contains("pub fn method_identity_parts(&self)"));
     assert!(usage_source.contains("pub fn constructor_identity_parts(&self)"));
     assert!(usage_source.contains("pub fn external_method_parts(&self)"));
@@ -2934,7 +5876,11 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!call_graph_source.contains("pub edges: Vec<CallGraphEdge>"));
     assert!(call_graph_source.contains("pub fn nodes(&self) -> &HashSet<CallableKey>"));
     assert!(call_graph_source.contains("pub fn edges(&self) -> &[CallGraphEdge]"));
-    assert!(call_graph_source.contains("pub fn from_edges(edges: Vec<CallGraphEdge>)"));
+    assert!(
+        call_graph_source
+            .contains("#[cfg(test)]\n    pub(crate) fn from_edges(edges: Vec<CallGraphEdge>)")
+    );
+    assert!(!call_graph_source.contains("pub fn from_edges(edges: Vec<CallGraphEdge>)"));
     assert!(
         call_graph_source
             .contains("pub fn from_nodes(nodes: impl IntoIterator<Item = CallableKey>)")
@@ -2951,6 +5897,9 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!call_graph_edge_source.contains("pub callee: CallableKey"));
     assert!(!call_graph_edge_source.contains("pub kind: CallGraphEdgeKind"));
     assert!(usage_source.contains(
+        "#[cfg(test)]\n    pub(crate) fn new(caller: CallableKey, callee: CallableKey, kind: CallGraphEdgeKind) -> Self"
+    ));
+    assert!(!usage_source.contains(
         "pub fn new(caller: CallableKey, callee: CallableKey, kind: CallGraphEdgeKind) -> Self"
     ));
     assert!(usage_source.contains("pub fn caller(&self) -> &CallableKey"));
@@ -3005,8 +5954,16 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     );
     assert!(analysis_source.contains("pub(crate) fn current_rust_method_usage("));
     assert!(analysis_source.contains("pub(crate) fn current_rust_constructor_usage("));
-    assert!(analysis_source.contains("UsageMethodKey::current_rust_method_name"));
-    assert!(analysis_source.contains("UsageConstructorKey::current_rust_constructor_name"));
+    assert!(usage_source.contains("UsageMethodKey::current_rust_method_name"));
+    assert!(usage_source.contains("UsageConstructorKey::current_rust_constructor_name"));
+    let analysis_production_source = analysis_source
+        .split("\n#[cfg(test)]\nmod tests")
+        .next()
+        .expect("callable analysis production source should be present");
+    assert!(!analysis_production_source.contains("UsageMethodKey::current_rust_method_name"));
+    assert!(
+        !analysis_production_source.contains("UsageConstructorKey::current_rust_constructor_name")
+    );
     assert!(!lower_source.contains("UsageMethodKey::current_rust_method_name"));
     assert!(!lower_source.contains("UsageConstructorKey::current_rust_constructor_name"));
     assert!(!signature_source.contains("usage.methods_by_java_key"));
@@ -3039,15 +5996,28 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     }
     let fallibility_invariant_source = include_str!("../src/fallibility_invariant.rs");
     let fallibility_violation_source = fallibility_invariant_source
-        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct FallibilityViolation")
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub(crate) struct FallibilityViolation")
         .nth(1)
         .and_then(|tail| tail.split("impl FallibilityViolation").next())
         .expect("fallibility violation source should remain discoverable");
     assert!(!fallibility_violation_source.contains("pub caller: CallableKey"));
     assert!(!fallibility_violation_source.contains("pub callee: CallableKey"));
-    assert!(fallibility_invariant_source.contains("pub fn caller(&self) -> &CallableKey"));
-    assert!(fallibility_invariant_source.contains("pub fn callee(&self) -> &CallableKey"));
+    assert!(fallibility_invariant_source.contains("pub(crate) fn caller(&self) -> &CallableKey"));
+    assert!(fallibility_invariant_source.contains("pub(crate) fn callee(&self) -> &CallableKey"));
+    assert!(fallibility_invariant_source.contains("pub(crate) fn fallibility_violations("));
+    assert!(!fallibility_invariant_source.contains("pub struct FallibilityViolation"));
+    assert!(!fallibility_invariant_source.contains("pub fn caller(&self) -> &CallableKey"));
+    assert!(!fallibility_invariant_source.contains("pub fn callee(&self) -> &CallableKey"));
+    assert!(!fallibility_invariant_source.contains("pub fn fallibility_violations("));
     for (path, source) in [
+        (
+            "src/exception_plan.rs",
+            include_str!("../src/exception_plan.rs"),
+        ),
+        (
+            "src/semantic_analysis.rs",
+            include_str!("../src/semantic_analysis.rs"),
+        ),
         (
             "src/fallibility_invariant.rs",
             include_str!("../src/fallibility_invariant.rs"),
@@ -3084,7 +6054,7 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
         );
         assert!(
             !source.contains("CallableKey::Method {"),
-            "{path} should use usage::CallableKey::method_identity or source/resolved constructors instead of direct method key literals"
+            "{path} should use source/resolved constructors or inspect existing keys through accessors instead of direct method key literals"
         );
     }
     for (path, source) in [
@@ -3100,10 +6070,652 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
         );
     }
     let inherited_members_source = include_str!("../src/inherited_members.rs");
+    let external_inherited_instance_field_source = inherited_members_source
+        .split(
+            "#[derive(Debug, Clone, PartialEq)]\npub(crate) struct ExternalInheritedInstanceField",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalInheritedInstanceField").next())
+        .expect("ExternalInheritedInstanceField source should remain discoverable");
+    let external_inherited_instance_method_source = inherited_members_source
+        .split(
+            "#[derive(Debug, Clone, PartialEq)]\npub(crate) struct ExternalInheritedInstanceMethod",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalInheritedInstanceMethod").next())
+        .expect("ExternalInheritedInstanceMethod source should remain discoverable");
+    let external_inherited_static_field_source = inherited_members_source
+        .split("#[derive(Debug, Clone, PartialEq)]\npub(crate) struct ExternalInheritedStaticField")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalInheritedStaticField").next())
+        .expect("ExternalInheritedStaticField source should remain discoverable");
+    let inherited_instance_field_source = inherited_members_source
+        .split("#[derive(Debug, Clone, PartialEq)]\npub(crate) struct InheritedInstanceField")
+        .nth(1)
+        .and_then(|tail| tail.split("impl InheritedInstanceField").next())
+        .expect("InheritedInstanceField source should remain discoverable");
+    let inherited_instance_field_ref_source = inherited_members_source
+        .split(
+            "#[derive(Debug, Clone, Copy, PartialEq)]\npub(crate) struct InheritedInstanceFieldRef",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl<'a> InheritedInstanceFieldRef").next())
+        .expect("InheritedInstanceFieldRef source should remain discoverable");
+    let inherited_instance_method_ref_source = inherited_members_source
+        .split("#[derive(Debug, Clone, PartialEq)]\npub(crate) struct InheritedInstanceMethodRef")
+        .nth(1)
+        .and_then(|tail| tail.split("impl<'a> InheritedInstanceMethodRef").next())
+        .expect("InheritedInstanceMethodRef source should remain discoverable");
+    for field in [
+        "pub declaring_type: String",
+        "pub field_name: String",
+        "pub rust_name: String",
+        "pub field_type: JavaType",
+        "pub field_nullability: Option<NullabilityState>",
+    ] {
+        assert!(
+            !external_inherited_instance_field_source.contains(field),
+            "ExternalInheritedInstanceField should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in [
+        "pub declaring_type: String",
+        "pub method_name: String",
+        "pub rust_name: String",
+        "pub arg_count: usize",
+        "pub fact: ExternalApiEffectFact",
+    ] {
+        assert!(
+            !external_inherited_instance_method_source.contains(field),
+            "ExternalInheritedInstanceMethod should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in [
+        "pub declaring_type: String",
+        "pub field_name: String",
+        "pub field_type: JavaType",
+    ] {
+        assert!(
+            !external_inherited_static_field_source.contains(field),
+            "ExternalInheritedStaticField should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in ["pub declaring_type: String", "pub field: FieldDecl"] {
+        assert!(
+            !inherited_instance_field_source.contains(field),
+            "InheritedInstanceField should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in ["pub declaring_type: &'a str", "pub field: &'a FieldDecl"] {
+        assert!(
+            !inherited_instance_field_ref_source.contains(field),
+            "InheritedInstanceFieldRef should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for field in [
+        "pub declaring_type: &'a str",
+        "pub declaring_ty: &'a TypeDecl",
+        "pub method: &'a crate::java_ir::MethodDecl",
+        "pub rust_name: String",
+    ] {
+        assert!(
+            !inherited_instance_method_ref_source.contains(field),
+            "InheritedInstanceMethodRef should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(inherited_members_source.contains("pub(crate) fn declaring_type(&self) -> &str"));
+    assert!(inherited_members_source.contains("pub(crate) fn rust_name(&self) -> &str"));
+    assert!(inherited_members_source.contains("pub(crate) fn field(&self) -> &FieldDecl"));
+    assert!(
+        inherited_members_source
+            .contains("pub(crate) fn method(&self) -> &'a crate::java_ir::MethodDecl")
+    );
+    assert!(inherited_members_source.contains("pub(crate) fn field_type(&self) -> &JavaType"));
+    assert!(
+        inherited_members_source.contains("pub(crate) fn fact(&self) -> &ExternalApiEffectFact")
+    );
+    for public_surface in [
+        "pub struct ExternalInheritedInstanceField",
+        "pub struct ExternalInheritedStaticField",
+        "pub struct ExternalInheritedInstanceMethod",
+        "pub struct InheritedInstanceField",
+        "pub struct InheritedInstanceFieldRef",
+        "pub struct InheritedInstanceMethodRef",
+        "pub fn inherited_instance_fields_for_type",
+        "pub fn inherited_instance_method_refs_for_type",
+        "pub fn external_inherited_instance_fields_for_type",
+        "pub fn external_inherited_static_final_fields_for_type",
+        "pub fn external_inherited_instance_methods_for_type",
+        "pub fn inherited_instance_field_refs_for_type",
+        "pub fn inherited_instance_field_refs_for_type_in_programs",
+    ] {
+        assert!(
+            !inherited_members_source.contains(public_surface),
+            "inherited-member identity helper should stay crate-local: {public_surface}"
+        );
+    }
     let member_access_plan_source = include_str!("../src/member_access_plan.rs");
+    let constructor_plan_source = include_str!("../src/constructor_plan.rs");
     let external_packs_source = include_str!("../src/external_packs.rs");
     let resolver_benchmark_source = include_str!("../src/resolver_benchmark.rs");
     let stdlib_source = include_str!("../src/stdlib.rs");
+    let resolver_benchmark_source_root_source = resolver_benchmark_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ResolverBenchmarkSourceRoot")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split(
+                "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ResolverBenchmarkFactProvider",
+            )
+            .next()
+        })
+        .expect("ResolverBenchmarkSourceRoot source should remain discoverable");
+    for field in [
+        "pub path: PathBuf",
+        "pub mode: DependencyMode",
+        "pub package_prefixes: Vec<String>",
+        "pub files_seen: usize",
+    ] {
+        assert!(
+            !resolver_benchmark_source_root_source.contains(field),
+            "ResolverBenchmarkSourceRoot should expose accessors, not raw public fields: {field}"
+        );
+    }
+    let resolver_benchmark_fact_provider_source = resolver_benchmark_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ResolverBenchmarkFactProvider")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct UnresolvedTargetSummary")
+                .next()
+        })
+        .expect("ResolverBenchmarkFactProvider source should remain discoverable");
+    for field in [
+        "pub name: String",
+        "pub mode: DependencyMode",
+        "pub facts: usize",
+        "pub external_api_effect_facts: usize",
+        "pub external_api_argument_effect_facts: usize",
+        "pub external_crate_api_mapping_facts: usize",
+        "pub external_crate_constructor_mapping_facts: usize",
+        "pub external_constructor_facts: usize",
+        "pub external_field_facts: usize",
+        "pub hierarchy_override_facts: usize",
+        "pub closed_hierarchy_facts: usize",
+        "pub object_safety_facts: usize",
+        "pub type_capability_facts: usize",
+        "pub field_nullability_facts: usize",
+        "pub exception_facts: usize",
+        "pub constructor_recursion_facts: usize",
+        "pub external_library_pack_facts: usize",
+        "pub unsupported_external_api_facts: usize",
+        "pub unsupported_external_constructor_facts: usize",
+        "pub unsupported_external_field_facts: usize",
+    ] {
+        assert!(
+            !resolver_benchmark_fact_provider_source.contains(field),
+            "ResolverBenchmarkFactProvider should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(resolver_benchmark_source.contains("pub fn path(&self) -> &Path"));
+    assert!(resolver_benchmark_source.contains("pub fn package_prefixes(&self) -> &[String]"));
+    assert!(resolver_benchmark_source.contains("pub fn external_api_effect_facts(&self) -> usize"));
+    let diagnostic_summary_source = resolver_benchmark_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct DiagnosticSummary")
+        .nth(1)
+        .and_then(|tail| tail.split("impl DiagnosticSummary").next())
+        .expect("DiagnosticSummary source should remain discoverable");
+    for field in [
+        "pub code: &'static str",
+        "pub message: String",
+        "pub mode: Option<DependencyMode>",
+        "pub count: usize",
+        "pub sample_files: Vec<String>",
+    ] {
+        assert!(
+            !diagnostic_summary_source.contains(field),
+            "DiagnosticSummary should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn code(&self) -> &'static str",
+        "pub fn message(&self) -> &str",
+        "pub fn mode(&self) -> Option<DependencyMode>",
+        "pub fn count(&self) -> usize",
+        "pub fn sample_files(&self) -> &[String]",
+    ] {
+        assert!(
+            resolver_benchmark_source.contains(accessor),
+            "DiagnosticSummary should keep accessor API: {accessor}"
+        );
+    }
+    let signature_benchmark_count_source = resolver_benchmark_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureBenchmarkCount")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureBenchmarkCount").next())
+        .expect("SignatureBenchmarkCount source should remain discoverable");
+    for field in ["pub label: String", "pub count: usize"] {
+        assert!(
+            !signature_benchmark_count_source.contains(field),
+            "SignatureBenchmarkCount should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(resolver_benchmark_source.contains("pub fn label(&self) -> &str"));
+    assert!(resolver_benchmark_source.contains("pub fn count(&self) -> usize"));
+    let source_summary_recommendation_source = resolver_benchmark_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SourceSummaryRecommendation")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SourceSummaryRecommendation").next())
+        .expect("SourceSummaryRecommendation source should remain discoverable");
+    for field in [
+        "pub package_prefix: String",
+        "pub target_type: String",
+        "pub constructor_guesses: usize",
+        "pub field_guesses: usize",
+        "pub method_guesses: usize",
+        "pub count: usize",
+        "pub sample_files: Vec<String>",
+    ] {
+        assert!(
+            !source_summary_recommendation_source.contains(field),
+            "SourceSummaryRecommendation should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn package_prefix(&self) -> &str",
+        "pub fn target_type(&self) -> &str",
+        "pub fn constructor_guesses(&self) -> usize",
+        "pub fn field_guesses(&self) -> usize",
+        "pub fn method_guesses(&self) -> usize",
+        "pub fn sample_files(&self) -> &[String]",
+    ] {
+        assert!(
+            resolver_benchmark_source.contains(accessor),
+            "SourceSummaryRecommendation should keep accessor API: {accessor}"
+        );
+    }
+    let external_api_guess_summary_source = resolver_benchmark_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ExternalApiGuessSummary")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalApiGuessSummary").next())
+        .expect("ExternalApiGuessSummary source should remain discoverable");
+    for field in [
+        "pub receiver_type: String",
+        "pub method_name: String",
+        "pub count: usize",
+    ] {
+        assert!(
+            !external_api_guess_summary_source.contains(field),
+            "ExternalApiGuessSummary should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn receiver_type(&self) -> &str",
+        "pub fn method_name(&self) -> &str",
+    ] {
+        assert!(
+            resolver_benchmark_source.contains(accessor),
+            "ExternalApiGuessSummary should keep accessor API: {accessor}"
+        );
+    }
+    for (summary_name, forbidden_fields, required_accessors) in [
+        (
+            "UnresolvedTargetSummary",
+            &[
+                "pub kind: UnresolvedTargetKind",
+                "pub target_name: String",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn kind(&self) -> UnresolvedTargetKind",
+                "pub fn target_name(&self) -> &str",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "UnresolvedMethodReceiverSummary",
+            &[
+                "pub target_name: String",
+                "pub receiver_type: String",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn target_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "UnresolvedFieldReceiverSummary",
+            &[
+                "pub field_name: String",
+                "pub receiver_type: String",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn field_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "UnresolvedFieldReceiverFileSummary",
+            &[
+                "pub field_name: String",
+                "pub receiver_type: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn field_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "UnresolvedFieldContextSummary",
+            &[
+                "pub field_name: String",
+                "pub receiver_type: String",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn field_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "UnresolvedConstructorContextSummary",
+            &[
+                "pub target_name: String",
+                "pub receiver_type: String",
+                "pub arg_types: Vec<String>",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn target_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn arg_types(&self) -> &[String]",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "SourceDependencyMethodSummary",
+            &[
+                "pub receiver_type: String",
+                "pub method_name: String",
+                "pub source_mode: DependencyMode",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn method_name(&self) -> &str",
+                "pub fn source_mode(&self) -> DependencyMode",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "SourceDependencyConstructorSummary",
+            &[
+                "pub type_name: String",
+                "pub arity: usize",
+                "pub source_mode: DependencyMode",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn type_name(&self) -> &str",
+                "pub fn arity(&self) -> usize",
+                "pub fn source_mode(&self) -> DependencyMode",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "SourceDependencyFieldSummary",
+            &[
+                "pub type_name: String",
+                "pub field_name: String",
+                "pub source_mode: DependencyMode",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn type_name(&self) -> &str",
+                "pub fn field_name(&self) -> &str",
+                "pub fn source_mode(&self) -> DependencyMode",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "SourceDependencyFieldContextSummary",
+            &[
+                "pub declaring_type: String",
+                "pub field_name: String",
+                "pub receiver_type: String",
+                "pub source_mode: DependencyMode",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn declaring_type(&self) -> &str",
+                "pub fn field_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn source_mode(&self) -> DependencyMode",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "SourceDependencyMethodContextSummary",
+            &[
+                "pub declaring_type: String",
+                "pub method_name: String",
+                "pub source_mode: DependencyMode",
+                "pub arg_count: usize",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn declaring_type(&self) -> &str",
+                "pub fn method_name(&self) -> &str",
+                "pub fn source_mode(&self) -> DependencyMode",
+                "pub fn arg_count(&self) -> usize",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "SourceDependencyConstructorContextSummary",
+            &[
+                "pub declaring_type: String",
+                "pub source_mode: DependencyMode",
+                "pub arg_count: usize",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn declaring_type(&self) -> &str",
+                "pub fn source_mode(&self) -> DependencyMode",
+                "pub fn arg_count(&self) -> usize",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "ExternalApiPackSummary",
+            &[
+                "pub receiver_type: String",
+                "pub method_name: String",
+                "pub mode: ExternalReportMode",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn method_name(&self) -> &str",
+                "pub fn mode(&self) -> ExternalReportMode",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "ExternalApiMethodContextSummary",
+            &[
+                "pub receiver_type: String",
+                "pub method_name: String",
+                "pub mode: ExternalReportMode",
+                "pub arg_count: usize",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn method_name(&self) -> &str",
+                "pub fn mode(&self) -> ExternalReportMode",
+                "pub fn arg_count(&self) -> usize",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "ExternalApiConstructorContextSummary",
+            &[
+                "pub target_name: String",
+                "pub receiver_type: String",
+                "pub mode: ExternalReportMode",
+                "pub arg_types: Vec<String>",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn target_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn mode(&self) -> ExternalReportMode",
+                "pub fn arg_types(&self) -> &[String]",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+        (
+            "ExternalPackConstructorSummary",
+            &[
+                "pub type_name: String",
+                "pub arity: usize",
+                "pub mode: ExternalReportMode",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn type_name(&self) -> &str",
+                "pub fn arity(&self) -> usize",
+                "pub fn mode(&self) -> ExternalReportMode",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "ExternalConstructorGuessSummary",
+            &[
+                "pub type_name: String",
+                "pub arity: usize",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn type_name(&self) -> &str",
+                "pub fn arity(&self) -> usize",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "ExternalFieldGuessSummary",
+            &[
+                "pub type_name: String",
+                "pub field_name: String",
+                "pub mode: ExternalReportMode",
+                "pub count: usize",
+            ][..],
+            &[
+                "pub fn type_name(&self) -> &str",
+                "pub fn field_name(&self) -> &str",
+                "pub fn mode(&self) -> ExternalReportMode",
+                "pub fn count(&self) -> usize",
+            ][..],
+        ),
+        (
+            "ExternalApiFieldContextSummary",
+            &[
+                "pub field_name: String",
+                "pub receiver_type: String",
+                "pub mode: ExternalReportMode",
+                "pub enclosing_type: String",
+                "pub enclosing_member: String",
+                "pub count: usize",
+                "pub sample_files: Vec<String>",
+            ][..],
+            &[
+                "pub fn field_name(&self) -> &str",
+                "pub fn receiver_type(&self) -> &str",
+                "pub fn mode(&self) -> ExternalReportMode",
+                "pub fn enclosing_type(&self) -> &str",
+                "pub fn enclosing_member(&self) -> &str",
+                "pub fn count(&self) -> usize",
+                "pub fn sample_files(&self) -> &[String]",
+            ][..],
+        ),
+    ] {
+        let struct_source = resolver_benchmark_source
+            .split(&format!(
+                "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct {summary_name}"
+            ))
+            .nth(1)
+            .and_then(|tail| tail.split(&format!("impl {summary_name}")).next())
+            .unwrap_or_else(|| panic!("{summary_name} source should remain discoverable"));
+        for field in forbidden_fields {
+            assert!(
+                !struct_source.contains(field),
+                "{summary_name} should expose accessors, not raw public fields: {field}"
+            );
+        }
+        for accessor in required_accessors {
+            assert!(
+                resolver_benchmark_source.contains(accessor),
+                "{summary_name} should keep accessor API: {accessor}"
+            );
+        }
+    }
+    assert!(
+        constructor_plan_source
+            .contains("pub(crate) fn plan_constructor_field_values_with_inherited_field_refs")
+    );
+    assert!(
+        !constructor_plan_source
+            .contains("pub fn plan_constructor_field_values_with_inherited_field_refs")
+    );
     for (path, source) in [
         ("src/inherited_members.rs", inherited_members_source),
         ("src/member_access_plan.rs", member_access_plan_source),
@@ -3202,6 +6814,21 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(facts_source.contains("pub fn erased(type_name: impl Into<String>) -> Self"));
     assert!(!facts_source.contains("TypePattern::Exact(TypeKey {"));
     assert!(!facts_source.contains("TypePattern::Erased(TypeKey {"));
+    let hierarchy_reachability_diagnostic_source = facts_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct HierarchyReachabilityDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl HierarchyReachabilityDiagnostic").next())
+        .expect("facts::HierarchyReachabilityDiagnostic struct source should be present");
+    assert!(!hierarchy_reachability_diagnostic_source.contains("pub code: &'static str"));
+    assert!(!hierarchy_reachability_diagnostic_source.contains("pub message: String"));
+    assert!(
+        facts_source.contains("impl HierarchyReachabilityDiagnostic")
+            && facts_source
+                .contains("pub(crate) fn new(code: &'static str, message: impl Into<String>)")
+            && facts_source.contains("pub fn code(&self) -> &'static str")
+            && facts_source.contains("pub fn message(&self) -> &str"),
+        "hierarchy reachability diagnostics should expose public accessors, not a public constructor or raw fields"
+    );
     let callable_key_constructor_source = facts_source
         .split("impl CallableKey")
         .nth(1)
@@ -3226,8 +6853,33 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(!fact_method_key_source.contains("pub type_name: String"));
     assert!(!fact_method_key_source.contains("pub method_name: String"));
     assert!(facts_source.contains("pub fn source_method("));
-    assert!(facts_source.contains("pub fn with_method_name("));
+    assert!(facts_source.contains("pub(crate) fn with_method_name("));
+    assert!(!facts_source.contains("pub fn with_method_name("));
     assert!(facts_source.contains("pub fn method_name(&self) -> &str"));
+    assert!(
+        facts_source
+            .contains("pub(crate) fn external_api_effect_for_receiver_with_arity_or_rust_name")
+    );
+    assert!(
+        !facts_source.contains("pub fn external_api_effect_for_receiver_with_arity_or_rust_name")
+    );
+    assert!(facts_source.contains("pub(crate) fn external_api_effect_for("));
+    assert!(!facts_source.contains("pub fn external_api_effect_for("));
+    assert!(facts_source.contains("pub(crate) fn external_api_argument_effect_for_key"));
+    assert!(!facts_source.contains("pub fn external_api_argument_effect_for_key"));
+    assert!(!facts_source.contains("fn external_api_effect_for_key"));
+    assert!(!facts_source.contains("pub fn external_api_effect_for_key"));
+    let external_packs_source = include_str!("../src/external_packs.rs");
+    assert!(!external_packs_source.contains("fn external_api_effect_for_key"));
+    assert!(!external_packs_source.contains("pub fn external_api_effect_for_key"));
+    assert!(!external_packs_source.contains("fn external_constructor_for_key"));
+    assert!(!external_packs_source.contains("pub fn external_constructor_for_key"));
+    assert!(!external_packs_source.contains("fn external_field_for_key"));
+    assert!(!external_packs_source.contains("pub fn external_field_for_key"));
+    assert!(!facts_source.contains("fn external_constructor_for_key"));
+    assert!(!facts_source.contains("pub fn external_constructor_for_key"));
+    assert!(!facts_source.contains("fn external_field_for_key"));
+    assert!(!facts_source.contains("pub fn external_field_for_key"));
     let fact_constructor_key_source = facts_source
         .split("#[derive(Debug, Clone, PartialEq, Eq, Hash)]\npub struct ConstructorKey")
         .nth(1)
@@ -3270,6 +6922,41 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(include_str!("../src/stdlib.rs").contains("FieldKey::named(owner, field_name)"));
     assert!(
         include_str!("../src/external_facts.rs").contains("FieldKey::named(type_name, field_name)")
+    );
+    let external_facts_source = include_str!("../src/external_facts.rs");
+    let external_parse_source = external_facts_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ExternalFactsParse")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalFactsParse").next())
+        .expect("ExternalFactsParse source should remain discoverable");
+    assert!(!external_parse_source.contains("pub facts: FactSet"));
+    assert!(!external_parse_source.contains("pub diagnostics: DiagnosticBag"));
+    assert!(external_facts_source.contains("pub fn facts(&self) -> &FactSet"));
+    assert!(external_facts_source.contains("pub fn diagnostics(&self) -> &DiagnosticBag"));
+    assert!(external_facts_source.contains("pub fn into_parts(self) -> (FactSet, DiagnosticBag)"));
+    let external_pack_manifest_parse_source = include_str!("../src/external_packs.rs")
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct ExternalPackManifestParse")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ExternalPackManifestParse").next())
+        .expect("ExternalPackManifestParse source should remain discoverable");
+    assert!(!external_pack_manifest_parse_source.contains("pub facts: FactSet"));
+    assert!(!external_pack_manifest_parse_source.contains("pub diagnostics: DiagnosticBag"));
+    assert!(include_str!("../src/external_packs.rs").contains("pub fn facts(&self) -> &FactSet"));
+    assert!(
+        include_str!("../src/external_packs.rs")
+            .contains("pub fn diagnostics(&self) -> &DiagnosticBag")
+    );
+    assert!(
+        include_str!("../src/external_packs.rs")
+            .contains("pub fn into_parts(self) -> (FactSet, DiagnosticBag)")
+    );
+    assert!(
+        include_str!("../src/external_packs.rs")
+            .contains("pub(crate) fn builtin_external_pack_manifest_slice()")
+    );
+    assert!(
+        include_str!("../src/external_packs.rs")
+            .contains("static MANIFESTS: OnceLock<Vec<ExternalPackManifest>>")
     );
     let external_packs_production = include_str!("../src/external_packs.rs")
         .split("#[cfg(test)]")
@@ -3360,8 +7047,10 @@ fn callable_analysis_shell_reaches_lowering_context() {
     let analysis_source = include_str!("../src/callable_analysis.rs");
     let lower_source = include_str!("../src/lower.rs");
 
-    assert!(lib_source.contains("pub mod callable_analysis;"));
-    assert!(analysis_source.contains("pub struct CallableAnalysis<'a>"));
+    assert!(lib_source.contains("mod callable_analysis;"));
+    assert!(!lib_source.contains("pub mod callable_analysis;"));
+    assert!(analysis_source.contains("pub(crate) struct CallableAnalysis<'a>"));
+    assert!(!analysis_source.contains("pub struct CallableAnalysis<'a>"));
     for field in ["usage", "exceptions", "fallibility"] {
         assert!(
             !analysis_source.contains(&format!("pub {field}:")),
@@ -3370,14 +7059,14 @@ fn callable_analysis_shell_reaches_lowering_context() {
     }
     assert!(!analysis_source.contains("signatures:"));
     assert!(!analysis_source.contains("call_graph:"));
-    assert!(analysis_source.contains("fn method_usage("));
+    assert!(!analysis_source.contains("fn method_usage("));
     assert!(!analysis_source.contains("pub fn method_usage("));
-    assert!(analysis_source.contains("pub(crate) fn method_usage_by_java_key("));
+    assert!(!analysis_source.contains("method_usage_by_java_key("));
     assert!(!analysis_source.contains("pub fn method_usage_by_java_key("));
     assert!(analysis_source.contains("pub(crate) fn binding_use_count_for_rust_method_family("));
     assert!(analysis_source.contains("pub(crate) fn binding_facts_for_rust_method_family("));
     assert!(!analysis_source.contains("method_signature_by_java_key("));
-    assert!(analysis_source.contains("fn constructor_usage("));
+    assert!(!analysis_source.contains("fn constructor_usage("));
     assert!(!analysis_source.contains("pub fn constructor_usage("));
     assert!(analysis_source.contains("pub(crate) fn callable_returns_result("));
     assert!(analysis_source.contains("pub(crate) fn method_exception_plan("));
@@ -3388,7 +7077,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
     assert!(!analysis_source.contains("pub fn method_usage_for_source_method("));
     assert!(!analysis_source.contains("pub fn method_signature_for_source_method("));
     assert!(!analysis_source.contains("pub fn source_method_returns_result("));
-    assert!(analysis_source.contains("JavaCallableKey"));
+    assert!(!analysis_source.contains("JavaCallableKey"));
     assert!(lower_source.contains("callable_analysis: &'a CallableAnalysis<'a>"));
     assert!(lower_source.contains("current_method_decl: Option<&'a MethodDecl>"));
     assert!(
@@ -3399,6 +7088,17 @@ fn callable_analysis_shell_reaches_lowering_context() {
             )
     );
     assert!(lower_source.contains(".callable_analysis\n            .current_rust_method_usage("));
+    let call_plan_source = include_str!("../src/call_plan.rs");
+    assert!(call_plan_source.contains("pub fn external_facade_method_rust_name_for_abi"));
+    assert!(call_plan_source.contains("pub fn external_facade_constructor_rust_name_for_abi"));
+    assert!(call_plan_source.contains("pub(crate) fn unresolved_constructor_rust_name_for_facts"));
+    assert!(call_plan_source.contains("pub(crate) fn external_method_rust_name"));
+    assert!(!call_plan_source.contains("pub fn unresolved_constructor_rust_name_for_facts"));
+    assert!(!call_plan_source.contains("pub fn external_method_rust_name("));
+    assert!(include_str!("../src/main.rs").contains("external_facade_method_rust_name_for_abi"));
+    assert!(
+        include_str!("../src/main.rs").contains("external_facade_constructor_rust_name_for_abi")
+    );
     let resolved_source_arg_plan = lower_source
         .split("fn emitted_source_resolved_call_argument_plan")
         .nth(1)
@@ -3501,14 +7201,39 @@ fn callable_analysis_shell_reaches_lowering_context() {
         !usage_source
             .contains("pub(crate) methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>")
     );
-    assert!(usage_source.contains("pub(crate) fn rust_name_method_entries"));
-    assert!(analysis_source.contains(".rust_name_method_entries()"));
+    assert!(usage_source.contains("pub(crate) fn binding_facts_for_rust_method_family"));
+    assert!(usage_source.contains("fn rust_method_family_key_matches"));
+    assert!(!usage_source.contains("pub(crate) fn rust_name_method_entries"));
+    assert!(analysis_source.contains(".binding_facts_for_rust_method_family("));
+    assert!(!analysis_source.contains(".rust_name_method_entries()"));
     assert!(!usage_source.contains("pub(crate) bindings: HashMap<String, BindingUseFacts>"));
     assert!(
         !usage_source.contains("pub(crate) bindings_by_id: HashMap<BindingId, BindingUseFacts>")
     );
     assert!(!usage_source.contains("pub bindings: HashMap<String, BindingUseFacts>"));
     assert!(!usage_source.contains("pub bindings_by_id: HashMap<BindingId, BindingUseFacts>"));
+    let binding_use_facts_source = usage_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct BindingUseFacts")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BindingUseFacts").next())
+        .expect("BindingUseFacts source should remain discoverable");
+    for field in [
+        "pub name: String",
+        "pub binding: Option<BindingId>",
+        "pub java_ty: JavaType",
+        "pub uses: Vec<BindingUse>",
+    ] {
+        assert!(
+            !binding_use_facts_source.contains(field),
+            "BindingUseFacts should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(usage_source.contains("pub fn name(&self) -> &str"));
+    assert!(usage_source.contains("pub fn binding(&self) -> Option<&BindingId>"));
+    assert!(usage_source.contains("pub fn java_ty(&self) -> &JavaType"));
+    assert!(usage_source.contains("pub fn uses(&self) -> &[BindingUse]"));
+    assert!(usage_source.contains("#[cfg(test)]\n    pub(crate) fn new("));
+    assert!(!usage_source.contains("pub fn new(\n        name: impl Into<String>"));
     assert!(lower_source.contains(
         ".callable_analysis\n        .external_method_returns_result(receiver_type, name, arg_count)"
     ));
@@ -3596,6 +7321,7 @@ fn callable_analysis_shell_reaches_lowering_context() {
         .expect("id-less local plan compatibility helper should be present");
     assert!(idless_local_plan_helper.contains("initializer?;"));
     assert!(idless_local_plan_helper.contains("idless_compatibility_local_plan_for_declared_type"));
+    let facts_source = include_str!("../src/facts.rs");
     let call_plan_source = include_str!("../src/call_plan.rs");
     let resolved_arg_shape_helper = call_plan_source
         .split("fn resolved_call_signature_arg_shapes_by_java_key")
@@ -3650,7 +7376,9 @@ fn callable_analysis_shell_reaches_lowering_context() {
             "{internal_helper} should not be public API"
         );
     }
-    assert!(call_plan_source.contains("facts.facade_abi_for_key(&key)"));
+    assert!(call_plan_source.contains(".facade_abi_for_key(&key)"));
+    assert!(facts_source.contains("pub(crate) fn facade_abi_for_key"));
+    assert!(!facts_source.contains("pub fn facade_abi_for_key"));
     let slot_result_helper = lower_source
         .split("fn slot_expr_needs_result_propagation_from_shape_env")
         .nth(1)
@@ -3779,6 +7507,15 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(conversion_source.contains("pub fn index_slot"));
     assert!(conversion_source.contains("pub fn assignment_slot_for_target"));
     assert!(conversion_source.contains("pub struct AssignmentValuePlan"));
+    let assignment_value_plan_source = conversion_source
+        .split("pub struct AssignmentValuePlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub enum AssignmentStatementPlan").next())
+        .unwrap();
+    assert!(conversion_source.contains("pub(crate) fn new(slot: Slot) -> Self"));
+    assert!(conversion_source.contains("pub fn slot(&self) -> &Slot"));
+    assert!(conversion_source.contains("pub fn into_slot(self) -> Slot"));
+    assert!(!assignment_value_plan_source.contains("pub slot: Slot"));
     assert!(conversion_source.contains("pub fn assignment_value_plan_for_shape"));
     assert!(conversion_source.contains("pub fn assignment_value_plan_for_target"));
     assert!(conversion_source.contains("pub enum AssignmentStatementPlan"));
@@ -3808,6 +7545,20 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!lower_source.contains("assignment_slot("));
     assert!(!lower_source.contains("assignment_slot_for_target"));
     assert!(conversion_source.contains("pub struct SyntaxCoercionPlan"));
+    let syntax_coercion_plan_source = conversion_source
+        .split("pub struct SyntaxCoercionPlan")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn syntax_coercion_plan_with_facts").next())
+        .unwrap();
+    assert!(conversion_source.contains(
+        "pub(crate) fn new(actual: JavaType, slot: Slot, policy: SyntaxSlotCoercionPolicy) -> Self"
+    ));
+    assert!(conversion_source.contains("pub fn actual(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn slot(&self) -> &Slot"));
+    assert!(conversion_source.contains("pub fn policy(&self) -> &SyntaxSlotCoercionPolicy"));
+    assert!(!syntax_coercion_plan_source.contains("pub actual: JavaType"));
+    assert!(!syntax_coercion_plan_source.contains("pub slot: Slot"));
+    assert!(!syntax_coercion_plan_source.contains("pub policy: SyntaxSlotCoercionPolicy"));
     assert!(!source.contains("pub struct SyntaxCoercionPlan"));
     assert!(!conversion_source.contains("pub fn syntax_coercion_plan("));
     assert!(conversion_source.contains("pub fn syntax_coercion_plan_with_facts"));
@@ -3836,13 +7587,43 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(conversion_source.contains("CloneBoxDynTrait"));
     assert!(source.contains("Coercion::CloneBoxDynTrait"));
     assert!(source.contains("pub struct UnsupportedCoercionMessagePolicy"));
+    let unsupported_coercion_message_policy_source = source
+        .split("pub struct UnsupportedCoercionMessagePolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl UnsupportedCoercionMessagePolicy").next())
+        .expect("UnsupportedCoercionMessagePolicy source should remain discoverable");
+    assert!(source.contains("pub fn new(code: &'static str, message: impl Into<String>) -> Self"));
+    assert!(source.contains("pub fn code(&self) -> &'static str"));
+    assert!(source.contains("pub fn message(&self) -> &str"));
+    assert!(!unsupported_coercion_message_policy_source.contains("pub code: &'static str"));
+    assert!(!unsupported_coercion_message_policy_source.contains("pub message: String"));
     let design = include_str!("../docs/rust-slot-shape-and-object-representation.md");
     assert!(design.contains("## Boxed Dyn Clone-Box Requirements"));
     assert!(design.contains("DispatchCoercionPolicy::CloneBoxDynTrait"));
     assert!(design.contains("Coercion::CloneBoxDynTrait"));
     assert!(conversion_source.contains("pub struct CoercionContentPolicy"));
+    let coercion_content_policy_source = conversion_source
+        .split("pub struct CoercionContentPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct CoercionShapeContentPolicy").next())
+        .unwrap();
+    assert!(
+        conversion_source
+            .contains("pub(crate) fn new(java_ty: JavaType, string_content: bool) -> Self")
+    );
+    assert!(conversion_source.contains("pub fn java_ty(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn string_content(&self) -> bool"));
+    assert!(!coercion_content_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!coercion_content_policy_source.contains("pub string_content: bool"));
     assert!(conversion_source.contains("pub fn coercion_content_policy("));
     assert!(conversion_source.contains("pub struct CoercionShapeContentPolicy"));
+    let coercion_shape_content_policy_source = conversion_source
+        .split("pub struct CoercionShapeContentPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub fn rust_nominal_type_name_policy").next())
+        .unwrap();
+    assert!(!coercion_shape_content_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!coercion_shape_content_policy_source.contains("pub string_content: bool"));
     assert!(!conversion_source.contains("pub fn coercion_shape_content_policy("));
     assert!(
         conversion_source.contains("pub fn coercion_shape_content_policy_with_effective_facts")
@@ -3852,10 +7633,135 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub struct CoercionShapeContentPolicy"));
     assert!(!source.contains("pub fn coercion_shape_content_policy("));
     assert!(conversion_source.contains("pub struct OptionalElementTargetMatchPolicy"));
+    let optional_element_match_source = conversion_source
+        .split(
+            "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct OptionalElementTargetMatchPolicy",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl OptionalElementTargetMatchPolicy").next())
+        .expect("OptionalElementTargetMatchPolicy source should remain discoverable");
+    assert!(optional_element_match_source.contains("matches: bool"));
+    assert!(!optional_element_match_source.contains("pub matches: bool"));
+    assert!(conversion_source.contains("impl OptionalElementTargetMatchPolicy"));
     assert!(conversion_source.contains("pub fn optional_element_target_match_policy"));
     assert!(!source.contains("pub struct OptionalElementTargetMatchPolicy"));
     assert!(!source.contains("pub fn optional_element_target_match_policy"));
     assert!(conversion_source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
+    let borrowed_element_slot_adapter_source = conversion_source
+        .split(
+            "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct BorrowedElementSlotAdapterPolicy",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl BorrowedElementSlotAdapterPolicy").next())
+        .expect("BorrowedElementSlotAdapterPolicy source should remain discoverable");
+    let borrowed_element_slot_adapter_impl_source = conversion_source
+        .split("impl BorrowedElementSlotAdapterPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub(crate) fn borrowed_element_adapter_policy_with_unwrap")
+                .next()
+        })
+        .expect("BorrowedElementSlotAdapterPolicy impl source should remain discoverable");
+    assert!(borrowed_element_slot_adapter_impl_source.contains("pub(crate) fn new("));
+    assert!(!borrowed_element_slot_adapter_impl_source.contains("pub fn new("));
+    for field in [
+        "pub target: RustSlotShape",
+        "pub carrier_shape: RustSlotShape",
+        "pub element_shape: RustSlotShape",
+        "pub carrier: BorrowedElementCarrier",
+        "pub matches: bool",
+        "pub adapter: Option<BorrowedElementAdapterPolicy>",
+    ] {
+        assert!(
+            !borrowed_element_slot_adapter_source.contains(field),
+            "BorrowedElementSlotAdapterPolicy should expose policy accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(conversion_source.contains("pub fn target(&self) -> &RustSlotShape"));
+    assert!(conversion_source.contains("pub fn carrier_shape(&self) -> &RustSlotShape"));
+    assert!(conversion_source.contains("pub fn element_shape(&self) -> &RustSlotShape"));
+    assert!(conversion_source.contains("pub fn carrier(&self) -> BorrowedElementCarrier"));
+    assert!(conversion_source.contains("pub fn matches(&self) -> bool"));
+    assert!(
+        conversion_source
+            .contains("pub fn adapter(&self) -> Option<&BorrowedElementAdapterPolicy>")
+    );
+    let borrowed_element_adapter_policy_source = conversion_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct BorrowedElementAdapterPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl BorrowedElementAdapterPolicy").next())
+        .expect("BorrowedElementAdapterPolicy source should remain discoverable");
+    for field in [
+        "pub carrier: BorrowedElementCarrier",
+        "pub element_shape: RustSlotShape",
+        "pub recovery: BorrowedElementRecoveryPolicy",
+        "pub unwrap_carrier: bool",
+    ] {
+        assert!(
+            !borrowed_element_adapter_policy_source.contains(field),
+            "BorrowedElementAdapterPolicy should expose policy accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(conversion_source.contains("pub fn carrier(&self) -> BorrowedElementCarrier"));
+    assert!(conversion_source.contains("pub fn element_shape(&self) -> &RustSlotShape"));
+    assert!(conversion_source.contains("pub fn recovery(&self) -> &BorrowedElementRecoveryPolicy"));
+    assert!(conversion_source.contains("pub fn unwrap_carrier(&self) -> bool"));
+    let borrowed_facade_return_policy_source = conversion_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RustBorrowedFacadeReturnPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split(
+                "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RustOwnedFacadeReturnPolicy",
+            )
+            .next()
+        })
+        .expect("RustBorrowedFacadeReturnPolicy source should remain discoverable");
+    for field in [
+        "pub target: RustSlotShape",
+        "pub recovery: RustBorrowedFacadeReturnRecovery",
+    ] {
+        assert!(
+            !borrowed_facade_return_policy_source.contains(field),
+            "RustBorrowedFacadeReturnPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(borrowed_facade_return_policy_source.contains("pub(crate) fn new("));
+    assert!(!borrowed_facade_return_policy_source.contains("pub fn new("));
+    assert!(
+        borrowed_facade_return_policy_source.contains("pub fn target(&self) -> &RustSlotShape")
+    );
+    assert!(
+        borrowed_facade_return_policy_source
+            .contains("pub fn recovery(&self) -> RustBorrowedFacadeReturnRecovery")
+    );
+    let owned_facade_return_policy_source = conversion_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RustOwnedFacadeReturnPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]")
+                .next()
+        })
+        .expect("RustOwnedFacadeReturnPolicy source should remain discoverable");
+    assert!(!owned_facade_return_policy_source.contains("pub target: RustSlotShape"));
+    assert!(owned_facade_return_policy_source.contains("pub(crate) fn new("));
+    assert!(!owned_facade_return_policy_source.contains("pub fn new("));
+    assert!(owned_facade_return_policy_source.contains("pub fn target(&self) -> &RustSlotShape"));
+    let unsigned_byte_array_return_policy_source = conversion_source
+        .split(
+            "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RustUnsignedByteArrayReturnPolicy",
+        )
+        .nth(1)
+        .and_then(|tail| {
+            tail.split(
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum BorrowedElementCarrier",
+            )
+            .next()
+        })
+        .expect("RustUnsignedByteArrayReturnPolicy source should remain discoverable");
+    assert!(!unsigned_byte_array_return_policy_source.contains("pub optional: bool"));
+    assert!(unsigned_byte_array_return_policy_source.contains("pub(crate) fn new("));
+    assert!(!unsigned_byte_array_return_policy_source.contains("pub fn new("));
+    assert!(unsigned_byte_array_return_policy_source.contains("pub fn optional(&self) -> bool"));
     assert!(!source.contains("pub struct BorrowedElementSlotAdapterPolicy"));
     assert!(conversion_source.contains("pub fn borrowed_element_slot_adapter_policy"));
     assert!(!source.contains("pub fn borrowed_element_slot_adapter_policy"));
@@ -3900,7 +7806,20 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(source.contains("SlotConversionPlan::Syntax"));
     assert!(source.contains("SlotConversionPlan::BorrowedElement"));
     assert!(source.contains("crate::conversion_plan::lowered_slot_conversion_plan_with_facts"));
-    assert!(source.contains("apply_slot_conversion_plan(lowered.expr, &plan)"));
+    let lowered_expr_source = source
+        .split("pub struct LoweredExpr")
+        .nth(1)
+        .and_then(|tail| tail.split("impl LoweredExpr").next())
+        .expect("LoweredExpr source should remain discoverable");
+    assert!(
+        !lowered_expr_source.contains("pub expr:") && !lowered_expr_source.contains("pub actual:"),
+        "LoweredExpr should expose accessors, not raw public fields"
+    );
+    assert!(source.contains("pub fn new(expr: RustExpr, actual: LoweredType) -> Self"));
+    assert!(source.contains("pub fn expr(&self) -> &RustExpr"));
+    assert!(source.contains("pub fn actual(&self) -> &LoweredType"));
+    assert!(source.contains("pub fn into_expr(self) -> RustExpr"));
+    assert!(source.contains("apply_slot_conversion_plan(lowered.into_expr(), &plan)"));
     assert!(conversion_source.contains("pub struct ShapeCoercionPlan"));
     assert!(!source.contains("pub struct ShapeCoercionPlan"));
     assert!(!conversion_source.contains("pub fn shape_coercion_plan("));
@@ -3924,9 +7843,29 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub fn non_identity_coercions"));
     assert!(!source.contains("element_coercions: Vec<Coercion>"));
     assert!(conversion_source.contains("pub struct VecElementTargetMatchPolicy"));
+    let vec_element_match_source = conversion_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct VecElementTargetMatchPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl VecElementTargetMatchPolicy").next())
+        .expect("VecElementTargetMatchPolicy source should remain discoverable");
+    assert!(vec_element_match_source.contains("matches: bool"));
+    assert!(!vec_element_match_source.contains("pub matches: bool"));
+    assert!(conversion_source.contains("impl VecElementTargetMatchPolicy"));
     assert!(conversion_source.contains("pub fn vec_element_target_match_policy"));
     assert!(!source.contains("pub struct VecElementTargetMatchPolicy"));
     assert!(!source.contains("pub fn vec_element_target_match_policy"));
+    assert!(conversion_source.contains("pub struct SetElementTargetMatchPolicy"));
+    let set_element_match_source = conversion_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SetElementTargetMatchPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SetElementTargetMatchPolicy").next())
+        .expect("SetElementTargetMatchPolicy source should remain discoverable");
+    assert!(set_element_match_source.contains("matches: bool"));
+    assert!(!set_element_match_source.contains("pub matches: bool"));
+    assert!(conversion_source.contains("impl SetElementTargetMatchPolicy"));
+    assert!(conversion_source.contains("pub fn set_element_target_match_policy"));
+    assert!(!source.contains("pub struct SetElementTargetMatchPolicy"));
+    assert!(!source.contains("pub fn set_element_target_match_policy"));
     assert!(source.contains("dispatch_coercion_fallback_message_policy"));
     assert!(source.contains("unsupported_dispatch_coercion"));
     assert!(conversion_source.contains("pub enum ViewCoercionPolicy"));
@@ -3941,6 +7880,23 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(conversion_source.contains("pub fn java_cast_semantics_policy_with_facts"));
     assert!(conversion_source.contains("pub enum JavaTypeConversionKind"));
     assert!(conversion_source.contains("pub struct JavaTypeConversionPlan"));
+    let java_type_conversion_plan_source = conversion_source
+        .split("pub struct JavaTypeConversionPlan")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub fn java_type_conversion_plan_from_evidence")
+                .next()
+        })
+        .unwrap();
+    assert!(conversion_source.contains(
+        "pub(crate) fn new(actual: JavaType, target: JavaType, kind: JavaTypeConversionKind) -> Self"
+    ));
+    assert!(conversion_source.contains("pub fn actual(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn target(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn kind(&self) -> &JavaTypeConversionKind"));
+    assert!(!java_type_conversion_plan_source.contains("pub actual: JavaType"));
+    assert!(!java_type_conversion_plan_source.contains("pub target: JavaType"));
+    assert!(!java_type_conversion_plan_source.contains("pub kind: JavaTypeConversionKind"));
     assert!(conversion_source.contains("pub fn java_type_conversion_plan_from_evidence"));
     assert!(conversion_source.contains("pub fn java_cast_type_conversion_plan"));
     assert!(types_source.contains("pub fn is_numeric_primitive_type"));
@@ -3956,6 +7912,20 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub fn java_type_conversion_plan_from_evidence"));
     assert!(!source.contains("pub fn java_cast_type_conversion_plan"));
     assert!(conversion_source.contains("pub struct RustNominalTypeNamePolicy"));
+    let nominal_policy_source = conversion_source
+        .split("pub struct RustNominalTypeNamePolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub enum RuntimeTypeTargetPolicy").next())
+        .unwrap();
+    assert!(
+        conversion_source
+            .contains("pub(crate) fn new(java_ty: JavaType, target_type: Option<String>) -> Self")
+    );
+    assert!(conversion_source.contains("pub fn java_ty(&self) -> &JavaType"));
+    assert!(conversion_source.contains("pub fn target_type(&self) -> Option<&str>"));
+    assert!(conversion_source.contains("pub fn into_target_type(self) -> Option<String>"));
+    assert!(!nominal_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!nominal_policy_source.contains("pub target_type: Option<String>"));
     assert!(conversion_source.contains("pub fn rust_nominal_type_name_policy"));
     assert!(conversion_source.contains("pub enum RuntimeTypeTargetPolicy"));
     assert!(conversion_source.contains("pub fn runtime_type_target_policy"));
@@ -3964,6 +7934,20 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub enum RuntimeTypeTargetPolicy"));
     assert!(!source.contains("pub fn runtime_type_target_policy"));
     assert!(conversion_source.contains("pub struct PrimitiveWideningPolicy"));
+    let primitive_widening_policy_source = conversion_source
+        .split("pub struct PrimitiveWideningPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct CoercionContentPolicy").next())
+        .unwrap();
+    assert!(conversion_source.contains(
+        "pub(crate) fn new(from: PrimitiveType, to: PrimitiveType, widens: bool) -> Self"
+    ));
+    assert!(conversion_source.contains("pub fn from(&self) -> PrimitiveType"));
+    assert!(conversion_source.contains("pub fn to(&self) -> PrimitiveType"));
+    assert!(conversion_source.contains("pub fn widens(&self) -> bool"));
+    assert!(!primitive_widening_policy_source.contains("pub from: PrimitiveType"));
+    assert!(!primitive_widening_policy_source.contains("pub to: PrimitiveType"));
+    assert!(!primitive_widening_policy_source.contains("pub widens: bool"));
     assert!(conversion_source.contains("pub fn primitive_widening_policy"));
     assert!(!conversion_source.contains("pub struct PrimitiveRankPolicy"));
     assert!(!conversion_source.contains("pub fn primitive_rank_policy"));
@@ -3972,6 +7956,14 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(!source.contains("pub struct PrimitiveRankPolicy"));
     assert!(!source.contains("pub fn primitive_rank_policy"));
     assert!(source.contains("pub(crate) struct RustPrimitiveTypeNamePolicy"));
+    let primitive_type_name_policy_source = source
+        .split("pub(crate) struct RustPrimitiveTypeNamePolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl RustPrimitiveTypeNamePolicy").next())
+        .expect("RustPrimitiveTypeNamePolicy source should remain discoverable");
+    assert!(source.contains("pub(crate) fn new(rust_name: &'static str) -> Self"));
+    assert!(source.contains("pub(crate) fn rust_name(&self) -> &'static str"));
+    assert!(!primitive_type_name_policy_source.contains("pub(crate) rust_name: &'static str"));
     assert!(source.contains("pub(crate) fn rust_primitive_type_name_policy"));
     assert!(!source.contains("pub struct RustPrimitiveTypeNamePolicy"));
     assert!(!source.contains("pub fn rust_primitive_type_name_policy"));
@@ -3991,6 +7983,31 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(source.contains("apply_boxed_dyn_trait_downcast"));
     assert!(source.contains("invalid_cast_policy_expr"));
     assert!(conversion_source.contains("semantics: JavaCastSemanticsPolicy"));
+    let scalar_slot_cast_policy_source = conversion_source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RustScalarSlotCastPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split(
+                "#[derive(Debug, Clone, PartialEq, Eq)]\npub struct RustBorrowedFacadeReturnPolicy",
+            )
+            .next()
+        })
+        .expect("RustScalarSlotCastPolicy source should remain discoverable");
+    for field in [
+        "pub rust_type_name: String",
+        "pub target_primitive: PrimitiveType",
+    ] {
+        assert!(
+            !scalar_slot_cast_policy_source.contains(field),
+            "RustScalarSlotCastPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(scalar_slot_cast_policy_source.contains("pub(crate) fn new("));
+    assert!(!scalar_slot_cast_policy_source.contains("pub fn new("));
+    assert!(scalar_slot_cast_policy_source.contains("pub fn rust_type_name(&self) -> &str"));
+    assert!(
+        scalar_slot_cast_policy_source.contains("pub fn target_primitive(&self) -> PrimitiveType")
+    );
     assert!(conversion_source.contains("PrimitiveNumericCast"));
     assert!(conversion_source.contains("CheckedReferenceDowncast"));
     assert!(conversion_source.contains("UncheckedGenericCast"));
@@ -4024,6 +8041,22 @@ fn coercion_plan_owns_clone_recovery_policy() {
         conversion_source
             .contains("coercion_owned_recovery_capability_policy_with_effective_facts")
     );
+    let recovery_policy_source = conversion_source
+        .split("pub struct CoercionOwnedRecoveryCapabilityPolicy")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("pub enum BorrowedElementRecoveryFallbackPolicy")
+                .next()
+        })
+        .expect("owned recovery capability policy source should remain discoverable");
+    for field in ["pub java_ty:", "pub recovery:"] {
+        assert!(
+            !recovery_policy_source.contains(field),
+            "CoercionOwnedRecoveryCapabilityPolicy should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(recovery_policy_source.contains("pub fn java_ty(&self) -> &JavaType"));
+    assert!(recovery_policy_source.contains("pub fn recovery(&self) -> OwnedRecoveryCapability"));
     assert!(facts_source.contains("pub struct OwnedRecoveryCapabilityFact"));
     assert!(facts_source.contains("owned_recovery_capability_facts"));
     assert!(facts_source.contains("CloneBoxAdapter"));
@@ -4061,10 +8094,8 @@ fn coercion_plan_owns_clone_recovery_policy() {
     assert!(source.contains("unsupported_ownership_coercion"));
     assert!(source.contains("unsupported_borrowed_to_owned_non_cloneable"));
     assert!(source.contains("render_clone_recovery_policy"));
-    assert!(source.contains("fn rendered_expr_has_clone_recovery"));
-    assert!(!source.contains("pub fn rendered_expr_has_clone_recovery"));
-    assert!(source.contains("fn rendered_expr_has_direct_clone_recovery"));
-    assert!(!source.contains("pub fn rendered_expr_has_direct_clone_recovery"));
+    assert!(!source.contains("fn rendered_expr_has_clone_recovery"));
+    assert!(!source.contains("fn rendered_expr_has_direct_clone_recovery"));
     assert!(source.contains("pub(crate) fn rust_expr_has_direct_clone_recovery"));
     assert!(
         !source.contains("rendered_expr_has_direct_clone_recovery(&emit::emit_expr(expr))"),
@@ -4217,7 +8248,10 @@ fn coercion_plan_owns_borrowed_element_recovery_fallback_policy() {
     assert!(!source.contains("pub enum BorrowedElementCarrier"));
     assert!(!source.contains("pub struct BorrowedElementAdapterPolicy"));
     assert!(!conversion_source.contains("pub fn borrowed_element_adapter_policy("));
-    assert!(conversion_source.contains("pub fn borrowed_element_adapter_policy_with_unwrap"));
+    assert!(
+        conversion_source.contains("pub(crate) fn borrowed_element_adapter_policy_with_unwrap")
+    );
+    assert!(!conversion_source.contains("pub fn borrowed_element_adapter_policy_with_unwrap"));
     assert!(!source.contains("pub fn borrowed_element_adapter_policy("));
     assert!(source.contains("fn apply_borrowed_element_adapter"));
     assert!(conversion_source.contains("pub fn borrowed_element_recovery_policy"));
@@ -4275,7 +8309,7 @@ fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_fa
         .expect("conversion lowering production source should be present");
 
     assert!(conversion_source.contains("project_java_value_shape(ctx.representations"));
-    assert!(conversion_source.contains("ctx.facts.unwrap_or"));
+    assert!(conversion_source.contains("ctx.facts().unwrap_or(&default_facts)"));
     assert!(
         conversion_source.contains("plan_instanceof_check_with_facts(&actual, &target, facts)")
     );
@@ -4291,8 +8325,9 @@ fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_fa
     assert!(
         cast_instanceof_branch.contains("lower_expr_with_refinements(expr, env, ctx, refinements)")
     );
-    assert!(cast_instanceof_branch.contains("representations: Some(ctx.representations)"));
-    assert!(cast_instanceof_branch.contains("facts: Some(ctx.facts)"));
+    assert!(cast_instanceof_branch.contains("ExprShapeContext::new("));
+    assert!(cast_instanceof_branch.contains("Some(ctx.representations)"));
+    assert!(cast_instanceof_branch.contains("Some(ctx.facts)"));
     assert!(!cast_instanceof_branch.contains("ObjectRepresentation"));
     assert!(!cast_instanceof_branch.contains("representation_for("));
     assert!(!cast_instanceof_branch.contains("dispatch_for("));
@@ -4306,8 +8341,8 @@ fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_fa
     assert!(!cast_instanceof_branch.contains("java_cast_semantics_policy"));
     assert!(!cast_instanceof_branch.contains("InvalidCastPolicy"));
 
-    assert!(lowering_source.contains("apply_shape_coercion_plan(expr, &plan.coercion)"));
-    assert!(lowering_source.contains("instanceof_check_projection(expr, &plan.check)"));
+    assert!(lowering_source.contains("apply_shape_coercion_plan(expr, plan.coercion())"));
+    assert!(lowering_source.contains("instanceof_check_projection(expr, plan.check())"));
     assert!(!lowering_source.contains("ObjectRepresentation"));
     assert!(!lowering_source.contains("HierarchyStrategy"));
     assert!(!lowering_source.contains("hierarchy_subtype_policy"));
@@ -4324,9 +8359,41 @@ fn signature_solver_collects_param_constraints_before_applying_shapes() {
     assert!(source.contains("RequiredDispatch"));
     assert!(source.contains("pub enum SignatureSlotRole"));
     assert!(source.contains("pub struct SignatureCapabilityPolicy"));
+    let capability_policy_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureCapabilityPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureCapabilityPolicy").next())
+        .expect("signature capability policy should remain discoverable");
+    assert!(!capability_policy_source.contains("pub java_ty: JavaType"));
+    assert!(!capability_policy_source.contains("pub capability_ownership: Option<OwnershipShape>"));
+    assert!(!capability_policy_source.contains("pub constraints: Vec<SignatureConstraint>"));
+    assert!(source.contains("pub fn java_ty(&self) -> &JavaType"));
+    assert!(source.contains("pub fn capability_ownership(&self) -> Option<OwnershipShape>"));
+    assert!(source.contains("pub fn constraints(&self) -> &[SignatureConstraint]"));
     assert!(source.contains("pub struct SignatureShapeRequest"));
+    let shape_request_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureShapeRequest")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureShapeRequest").next())
+        .expect("signature shape request should remain discoverable");
+    assert!(!shape_request_source.contains("pub java_ty: JavaType"));
+    assert!(!shape_request_source.contains("pub role: SignatureSlotRole"));
+    assert!(!shape_request_source.contains("pub constraints: Vec<SignatureConstraint>"));
+    assert!(!shape_request_source.contains("pub type_params: Vec<String>"));
+    assert!(source.contains("pub fn into_parts(\n        self,\n    ) -> (\n        JavaType,"));
     assert!(source.contains("pub struct MergedSignatureConstraints"));
     assert!(source.contains("pub struct SignatureConstraintConflict"));
+    let constraint_conflict_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureConstraintConflict")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureConstraintConflict").next())
+        .expect("signature constraint conflict should remain discoverable");
+    assert!(!constraint_conflict_source.contains("pub axis: SignatureConstraintAxis"));
+    assert!(!constraint_conflict_source.contains("pub kept: SignatureConstraint"));
+    assert!(!constraint_conflict_source.contains("pub rejected: SignatureConstraint"));
+    assert!(source.contains("pub fn axis(&self) -> SignatureConstraintAxis"));
+    assert!(source.contains("pub fn kept(&self) -> &SignatureConstraint"));
+    assert!(source.contains("pub fn rejected(&self) -> &SignatureConstraint"));
     assert!(source.contains("pub enum SignatureConstraintAxis"));
     assert!(source.contains("from_constraints"));
     assert!(source.contains("apply_to_shape"));
@@ -4374,6 +8441,10 @@ fn signature_solver_collects_param_constraints_before_applying_shapes() {
         .expect("signature fixpoint result source should remain discoverable");
     assert!(fixpoint_result_source.contains("constraints: SignatureConstraintState"));
     assert!(!fixpoint_result_source.contains("pub constraints: SignatureConstraintState"));
+    assert!(fixpoint_result_source.contains("iterations: usize"));
+    assert!(!fixpoint_result_source.contains("pub iterations: usize"));
+    assert!(fixpoint_result_source.contains("diagnostics: Vec<SignatureDiagnostic>"));
+    assert!(!fixpoint_result_source.contains("pub diagnostics: Vec<SignatureDiagnostic>"));
     assert!(fixpoint_result_source.contains("dependency_sccs: SignatureDependencySccAnalysis"));
     assert!(
         !fixpoint_result_source.contains("pub dependency_sccs: SignatureDependencySccAnalysis")
@@ -4381,21 +8452,344 @@ fn signature_solver_collects_param_constraints_before_applying_shapes() {
     assert!(fixpoint_result_source.contains("pass_plan: SignatureSolverPassPlan"));
     assert!(!fixpoint_result_source.contains("pub pass_plan: SignatureSolverPassPlan"));
     assert!(source.contains("pub fn constraints(&self) -> &SignatureConstraintState"));
+    assert!(source.contains("pub fn iterations(&self) -> usize"));
+    assert!(source.contains("pub fn diagnostics(&self) -> &[SignatureDiagnostic]"));
+    assert!(source.contains("pub fn into_constraints_iterations_diagnostics("));
     assert!(source.contains("pub fn dependency_sccs(&self) -> &SignatureDependencySccAnalysis"));
     assert!(source.contains("pub fn pass_plan(&self) -> &SignatureSolverPassPlan"));
+    assert!(source.contains("pub struct SignatureDiagnostic"));
+    let signature_diagnostic_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureDiagnostic").next())
+        .expect("signature diagnostic should remain discoverable");
+    assert!(!signature_diagnostic_source.contains("pub code: &'static str"));
+    assert!(!signature_diagnostic_source.contains("pub message: String"));
+    assert!(source.contains("pub fn code(&self) -> &'static str"));
+    assert!(source.contains("pub fn message(&self) -> &str"));
+    assert!(source.contains("pub struct SignatureSolverProgressEvent"));
+    let progress_event_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureSolverProgressEvent")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureSolverProgressEvent").next())
+        .expect("signature solver progress event should remain discoverable");
+    assert!(!progress_event_source.contains("pub phase: &'static str"));
+    assert!(!progress_event_source.contains("pub status: &'static str"));
+    assert!(!progress_event_source.contains("pub elapsed_ms: u128"));
+    assert!(!progress_event_source.contains("pub detail: String"));
+    assert!(source.contains("pub fn phase(&self) -> &'static str"));
+    assert!(source.contains("pub fn status(&self) -> &'static str"));
+    assert!(source.contains("pub fn elapsed_ms(&self) -> u128"));
+    assert!(source.contains("pub fn detail(&self) -> &str"));
+    assert!(source.contains("pub struct ProfiledSignaturePlan"));
+    let profiled_plan_source = source
+        .split("#[derive(Debug, Clone)]\npub struct ProfiledSignaturePlan")
+        .nth(1)
+        .and_then(|tail| tail.split("impl ProfiledSignaturePlan").next())
+        .expect("profiled signature plan should remain discoverable");
+    assert!(!profiled_plan_source.contains("pub plan: SignaturePlan"));
+    assert!(!profiled_plan_source.contains("pub profile: SignatureSolverProfile"));
+    assert!(source.contains("pub fn into_parts(self) -> (SignaturePlan, SignatureSolverProfile)"));
     assert!(source.contains("pub struct SignatureSaturationReport"));
+    let saturation_report_source = source
+        .split(
+            "#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct SignatureSaturationReport",
+        )
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureSaturationReport").next())
+        .expect("signature saturation report should remain discoverable");
+    assert!(!saturation_report_source.contains("pub domain_stats: SignatureFixpointDomainStats"));
+    assert!(!saturation_report_source.contains("pub iterations: usize"));
+    assert!(!saturation_report_source.contains("pub diagnostics: usize"));
+    assert!(
+        !saturation_report_source.contains("pub dependency_stats: SignatureDependencySccStats")
+    );
+    assert!(!saturation_report_source.contains("pub pass_stats: SignatureSolverPassStats"));
+    assert!(!saturation_report_source.contains("pub join_conflicts: usize"));
+    assert!(!saturation_report_source.contains("pub top_fallback_reasons"));
+    assert!(!saturation_report_source.contains("pub top_conflict_axes"));
+    assert!(source.contains("pub fn domain_stats(&self) -> SignatureFixpointDomainStats"));
+    assert!(source.contains(
+        "pub fn into_top_counts(self) -> (Vec<SignatureReportCount>, Vec<SignatureReportCount>)"
+    ));
+    assert!(source.contains("pub struct SignaturePropagationArmProfile"));
+    let propagation_arm_profile_source = source
+        .split("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct SignaturePropagationArmProfile")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignaturePropagationArmProfile").next())
+        .expect("signature propagation arm profile should remain discoverable");
+    assert!(!propagation_arm_profile_source.contains("pub sweeps: usize"));
+    assert!(!propagation_arm_profile_source.contains("pub changed_sweeps: usize"));
+    assert!(!propagation_arm_profile_source.contains("pub elapsed_ns: u128"));
+    assert!(source.contains("pub fn sweeps(&self) -> usize"));
+    assert!(source.contains("pub fn changed_sweeps(&self) -> usize"));
+    assert!(source.contains("pub fn elapsed_ns(&self) -> u128"));
+    assert!(source.contains("pub struct SignatureSolverExecutionStats"));
+    let execution_stats_source = source
+        .split("#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct SignatureSolverExecutionStats")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureSolverExecutionStats").next())
+        .expect("signature solver execution stats should remain discoverable");
+    assert!(!execution_stats_source.contains("pub component_sweeps: usize"));
+    assert!(!execution_stats_source.contains("pub changed_component_sweeps: usize"));
+    assert!(!execution_stats_source.contains("pub state_clones: usize"));
+    assert!(!execution_stats_source.contains("pub state_clone_ms: u128"));
+    assert!(!execution_stats_source.contains("pub propagation_sweep_ms: u128"));
+    assert!(!execution_stats_source.contains("pub component_rollback_ms: u128"));
+    assert!(!execution_stats_source.contains("pub component_change_check_ms: u128"));
+    assert!(!execution_stats_source.contains("pub propagation_arms: BTreeMap"));
+    assert!(source.contains("pub struct SignatureSolverProfile"));
+    let solver_profile_source = source
+        .split("#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct SignatureSolverProfile")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureSolverProfile").next())
+        .expect("signature solver profile should remain discoverable");
+    assert!(!solver_profile_source.contains("pub collect_constraints_ms: u128"));
+    assert!(!solver_profile_source.contains("pub dependency_graph_ms: u128"));
+    assert!(!solver_profile_source.contains("pub scc_analysis_ms: u128"));
+    assert!(!solver_profile_source.contains("pub pass_plan_ms: u128"));
+    assert!(!solver_profile_source.contains("pub fixpoint_ms: u128"));
+    assert!(!solver_profile_source.contains("pub plan_build_ms: u128"));
+    assert!(!solver_profile_source.contains("pub propagation_arms: BTreeMap"));
+    assert!(source.contains("pub fn collect_constraints_ms(&self) -> u128"));
+    assert!(source.contains("pub fn propagation_arms(&self) -> &BTreeMap"));
+    let domain_stats_source = source
+        .split("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]\npub struct SignatureFixpointDomainStats")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureFixpointDomainStats").next())
+        .expect("signature fixpoint domain stats should remain discoverable");
+    assert!(!domain_stats_source.contains("pub slot_count: usize"));
+    assert!(!domain_stats_source.contains("pub unique_constraint_count: usize"));
+    assert!(!domain_stats_source.contains("pub iteration_budget: usize"));
+    assert!(source.contains("pub struct SignatureReportCount"));
+    let report_count_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureReportCount")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureReportCount").next())
+        .expect("signature report count should remain discoverable");
+    assert!(!report_count_source.contains("pub label: String"));
+    assert!(!report_count_source.contains("pub count: usize"));
+    assert!(source.contains("pub fn label(&self) -> &str"));
+    assert!(source.contains("pub fn count(&self) -> usize"));
     assert!(source.contains("pub fn signature_saturation_report"));
     assert!(source.contains("pub fn signature_constraint_state_conflict_diagnostics"));
+    assert!(source.contains("pub struct SignatureConstraintConflictDiagnostic"));
+    let conflict_diagnostic_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct SignatureConstraintConflictDiagnostic")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureConstraintConflictDiagnostic").next())
+        .expect("signature constraint conflict diagnostic should remain discoverable");
+    assert!(!conflict_diagnostic_source.contains("pub axis: SignatureConstraintAxis"));
+    assert!(!conflict_diagnostic_source.contains("pub kept: SignatureConstraint"));
+    assert!(!conflict_diagnostic_source.contains("pub rejected: SignatureConstraint"));
+    assert!(
+        !conflict_diagnostic_source.contains("pub kept_provenance: SignatureConstraintProvenance")
+    );
+    assert!(
+        !conflict_diagnostic_source
+            .contains("pub rejected_provenance: SignatureConstraintProvenance")
+    );
+    assert!(!conflict_diagnostic_source.contains("pub message: String"));
+    assert!(source.contains("pub fn axis(&self) -> SignatureConstraintAxis"));
+    assert!(source.contains("pub fn kept(&self) -> &SignatureConstraint"));
+    assert!(source.contains("pub fn rejected(&self) -> &SignatureConstraint"));
+    assert!(source.contains("pub fn message(&self) -> &str"));
     assert!(source.contains("pub struct MethodConstraintSet"));
     assert!(source.contains("pub struct ConstructorConstraintSet"));
+    let method_constraint_set_source = source
+        .split("#[derive(Debug, Clone, Default)]\npub struct MethodConstraintSet")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Default)]\npub struct ConstructorConstraintSet")
+                .next()
+        })
+        .expect("method constraint set source should remain discoverable");
+    for field in [
+        "pub public_api: bool",
+        "pub param_names: Vec<String>",
+        "pub param_index_by_name: HashMap<String, usize>",
+        "pub param_java_types: Vec<JavaType>",
+        "pub params: Vec<Vec<SignatureConstraint>>",
+        "pub return_constraints: Vec<SignatureConstraint>",
+        "pub locals: Vec<LocalConstraintSet>",
+        "pub local_index_by_name: HashMap<String, usize>",
+        "pub local_index_by_binding: HashMap<BindingId, usize>",
+        "pub receiver: Vec<ReceiverConstraint>",
+    ] {
+        assert!(
+            !method_constraint_set_source.contains(field),
+            "MethodConstraintSet should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn param_names(&self) -> &[String]",
+        "pub fn params(&self) -> &[Vec<SignatureConstraint>]",
+        "pub fn return_constraints(&self) -> &[SignatureConstraint]",
+        "pub fn locals(&self) -> &[LocalConstraintSet]",
+        "pub fn with_return_constraints(mut self, constraints: Vec<SignatureConstraint>) -> Self",
+    ] {
+        assert!(source.contains(accessor));
+    }
+    let constructor_constraint_set_source = source
+        .split("#[derive(Debug, Clone, Default)]\npub struct ConstructorConstraintSet")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct LocalConstraintSet")
+                .next()
+        })
+        .expect("constructor constraint set source should remain discoverable");
+    for field in [
+        "pub public_api: bool",
+        "pub param_names: Vec<String>",
+        "pub param_index_by_name: HashMap<String, usize>",
+        "pub params: Vec<Vec<SignatureConstraint>>",
+        "pub locals: Vec<LocalConstraintSet>",
+        "pub local_index_by_name: HashMap<String, usize>",
+        "pub local_index_by_binding: HashMap<BindingId, usize>",
+    ] {
+        assert!(
+            !constructor_constraint_set_source.contains(field),
+            "ConstructorConstraintSet should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn param_names(&self) -> &[String]",
+        "pub fn params(&self) -> &[Vec<SignatureConstraint>]",
+        "pub fn locals(&self) -> &[LocalConstraintSet]",
+    ] {
+        assert!(source.contains(accessor));
+    }
     assert!(source.contains("pub struct SignatureMemberApiBoundaryPolicy"));
     assert!(source.contains("pub fn signature_member_api_boundary_policy"));
+    let member_api_policy_source = source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SignatureMemberApiBoundaryPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureMemberApiBoundaryPolicy").next())
+        .expect("signature member api boundary policy should remain discoverable");
+    assert!(!member_api_policy_source.contains("pub public_api: bool"));
+    assert!(source.contains("pub fn public_api(self) -> bool"));
     assert!(source.contains("public_api: signature_member_api_boundary_policy(&ctor.modifiers)"));
     assert!(source.contains("pub struct LocalConstraintSet"));
-    assert!(source.contains("java_ty: JavaType"));
+    let local_constraint_set_source = source
+        .split("#[derive(Debug, Clone, PartialEq, Eq)]\npub struct LocalConstraintSet")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub enum ReceiverConstraint")
+                .next()
+        })
+        .expect("local constraint set source should remain discoverable");
+    for field in [
+        "pub binding: BindingId",
+        "pub name: String",
+        "pub java_ty: JavaType",
+        "pub constraints: Vec<SignatureConstraint>",
+    ] {
+        assert!(
+            !local_constraint_set_source.contains(field),
+            "LocalConstraintSet should expose accessors, not raw public fields: {field}"
+        );
+    }
+    for accessor in [
+        "pub fn binding(&self) -> &BindingId",
+        "pub fn name(&self) -> &str",
+        "pub fn java_ty(&self) -> &JavaType",
+        "pub fn constraints(&self) -> &[SignatureConstraint]",
+    ] {
+        assert!(source.contains(accessor));
+    }
+    for (struct_header, impl_header, forbidden_fields, required_accessors) in [
+        (
+            "pub struct MethodSignaturePlan",
+            "impl MethodSignaturePlan",
+            &[
+                "pub params: Vec<ParamPlan>",
+                "pub return_shape: Option<RustSlotShape>",
+                "pub locals: Vec<LocalPlan>",
+                "pub receiver: ReceiverPlan",
+            ][..],
+            &[
+                "pub fn new(",
+                "pub fn params(&self) -> &[ParamPlan]",
+                "pub fn return_shape(&self) -> Option<&RustSlotShape>",
+                "pub fn locals(&self) -> &[LocalPlan]",
+                "pub fn receiver(&self) -> ReceiverPlan",
+            ][..],
+        ),
+        (
+            "pub struct ConstructorSignaturePlan",
+            "impl ConstructorSignaturePlan",
+            &["pub params: Vec<ParamPlan>", "pub locals: Vec<LocalPlan>"][..],
+            &[
+                "pub fn new(params: Vec<ParamPlan>, locals: Vec<LocalPlan>) -> Self",
+                "pub fn params(&self) -> &[ParamPlan]",
+                "pub fn locals(&self) -> &[LocalPlan]",
+            ][..],
+        ),
+        (
+            "pub struct ParamPlan",
+            "impl ParamPlan",
+            &[
+                "pub name: String",
+                "pub java_ty: JavaType",
+                "pub is_varargs: bool",
+                "pub shape: RustSlotShape",
+                "pub binding_mutable: bool",
+            ][..],
+            &[
+                "pub fn name(&self) -> &str",
+                "pub fn java_ty(&self) -> &JavaType",
+                "pub fn is_varargs(&self) -> bool",
+                "pub fn shape(&self) -> &RustSlotShape",
+                "pub fn binding_mutable(&self) -> bool",
+            ][..],
+        ),
+        (
+            "pub struct LocalPlan",
+            "impl LocalPlan",
+            &[
+                "pub binding: BindingId",
+                "pub name: String",
+                "pub java_ty: JavaType",
+                "pub shape: RustSlotShape",
+                "pub binding_mutable: bool",
+            ][..],
+            &[
+                "pub fn binding(&self) -> &BindingId",
+                "pub fn name(&self) -> &str",
+                "pub fn java_ty(&self) -> &JavaType",
+                "pub fn shape(&self) -> &RustSlotShape",
+                "pub fn binding_mutable(&self) -> bool",
+            ][..],
+        ),
+    ] {
+        let struct_source = source
+            .split(struct_header)
+            .nth(1)
+            .and_then(|tail| tail.split(impl_header).next())
+            .expect("signature plan struct source should remain discoverable");
+        for field in forbidden_fields {
+            assert!(
+                !struct_source.contains(field),
+                "{struct_header} should expose accessors, not raw public fields: {field}"
+            );
+        }
+        for accessor in required_accessors {
+            assert!(
+                source.contains(accessor),
+                "{struct_header} should keep accessor API: {accessor}"
+            );
+        }
+    }
     assert!(source.contains("pub enum ReceiverConstraint"));
     assert!(source.contains("pub enum SignatureConstraintPropagationKind"));
     assert!(source.contains("pub struct SignatureConstraintPropagationPolicy"));
+    let propagation_policy_source = source
+        .split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]\npub struct SignatureConstraintPropagationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl SignatureConstraintPropagationPolicy").next())
+        .expect("signature constraint propagation policy should remain discoverable");
+    assert!(!propagation_policy_source.contains("pub kind: SignatureConstraintPropagationKind"));
+    assert!(source.contains("pub fn kind(self) -> SignatureConstraintPropagationKind"));
     assert!(source.contains("signature_shape_constraint_propagation_policy"));
     assert!(source.contains("signature_slot_constraint_propagation_policy"));
     assert!(source.contains("collect_signature_constraints"));
@@ -4448,13 +8842,117 @@ fn signature_solver_collects_param_constraints_before_applying_shapes() {
     let slot_policy_source = include_str!("../src/slot_policy.rs");
     assert!(!slot_policy_source.contains("| CallArgumentBoundary::InternalSameType"));
 
+    let lib_source = include_str!("../src/lib.rs");
     let fact_saturation_source = include_str!("../src/fact_saturation.rs");
     assert!(fact_saturation_source.contains("pub struct FiniteFactDomain"));
     assert!(fact_saturation_source.contains("pub struct FiniteSaturationPolicy"));
-    assert!(fact_saturation_source.contains("pub fn finite_fact_iteration_budget"));
-    assert!(fact_saturation_source.contains("pub enum SaturationStep"));
-    assert!(fact_saturation_source.contains("pub struct FiniteSaturationResult"));
-    assert!(fact_saturation_source.contains("pub fn saturate_finite"));
+    let finite_domain_source = fact_saturation_source
+        .split("pub struct FiniteFactDomain")
+        .nth(1)
+        .and_then(|tail| tail.split("pub struct FiniteSaturationPolicy").next())
+        .expect("FiniteFactDomain should remain discoverable");
+    assert!(!finite_domain_source.contains("pub declared_slots: usize"));
+    assert!(!finite_domain_source.contains("pub value_lattice_height: usize"));
+    assert!(fact_saturation_source.contains("pub fn declared_slots(self) -> usize"));
+    assert!(fact_saturation_source.contains("pub fn value_lattice_height(self) -> usize"));
+    let finite_policy_source = fact_saturation_source
+        .split("pub struct FiniteSaturationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("impl FiniteFactDomain").next())
+        .expect("FiniteSaturationPolicy should remain discoverable");
+    assert!(!finite_policy_source.contains("pub domain: FiniteFactDomain"));
+    assert!(fact_saturation_source.contains("pub fn domain(self) -> FiniteFactDomain"));
+    let worklist_policy_source = fact_saturation_source
+        .split("pub(crate) struct WorklistSaturationPolicy")
+        .nth(1)
+        .and_then(|tail| tail.split("pub(crate) struct WorklistInserter").next())
+        .expect("WorklistSaturationPolicy should remain discoverable");
+    assert!(!worklist_policy_source.contains("pub max_processed_items: usize"));
+    assert!(fact_saturation_source.contains("pub(crate) fn max_processed_items(self) -> usize"));
+    assert!(fact_saturation_source.contains("fn finite_fact_iteration_budget"));
+    assert!(!fact_saturation_source.contains("pub fn finite_fact_iteration_budget"));
+    assert!(fact_saturation_source.contains("pub(crate) enum SaturationStep"));
+    assert!(fact_saturation_source.contains("pub(crate) struct FiniteSaturationResult"));
+    let finite_result_source = fact_saturation_source
+        .split("pub(crate) struct FiniteSaturationResult")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]")
+                .next()
+        })
+        .expect("FiniteSaturationResult should remain discoverable");
+    for field in [
+        "pub state: T",
+        "pub iterations: usize",
+        "pub diagnostics: Vec<D>",
+    ] {
+        assert!(
+            !finite_result_source.contains(field),
+            "FiniteSaturationResult should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(fact_saturation_source.contains("pub(crate) fn iterations(&self) -> usize"));
+    assert!(
+        fact_saturation_source.contains("pub(crate) fn into_parts(self) -> (T, usize, Vec<D>)")
+    );
+    let worklist_stats_source = fact_saturation_source
+        .split("pub struct WorklistStats")
+        .nth(1)
+        .and_then(|tail| tail.split("#[derive(Debug, Clone, PartialEq, Eq)]").next())
+        .expect("WorklistStats should remain discoverable");
+    for field in [
+        "pub processed_items: usize",
+        "pub inserted_facts: usize",
+        "pub max_queue_len: usize",
+    ] {
+        assert!(
+            !worklist_stats_source.contains(field),
+            "WorklistStats should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(fact_saturation_source.contains("pub fn processed_items(self) -> usize"));
+    assert!(fact_saturation_source.contains("pub fn inserted_facts(self) -> usize"));
+    assert!(fact_saturation_source.contains("pub fn max_queue_len(self) -> usize"));
+    let worklist_result_source = fact_saturation_source
+        .split("pub(crate) struct WorklistSaturationResult")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("#[derive(Debug, Clone, Copy, PartialEq, Eq)]")
+                .next()
+        })
+        .expect("WorklistSaturationResult should remain discoverable");
+    for field in [
+        "pub state: T",
+        "pub stats: WorklistStats",
+        "pub diagnostics: Vec<D>",
+    ] {
+        assert!(
+            !worklist_result_source.contains(field),
+            "WorklistSaturationResult should expose accessors, not raw public fields: {field}"
+        );
+    }
+    assert!(
+        fact_saturation_source
+            .contains("pub(crate) fn into_parts(self) -> (T, WorklistStats, Vec<D>)")
+    );
+    assert!(fact_saturation_source.contains("pub(crate) fn saturate_finite"));
+    for plain_public in [
+        "pub enum SaturationStep",
+        "pub struct FiniteSaturationResult",
+        "pub struct WorklistSaturationResult",
+        "pub struct WorklistSaturationPolicy",
+        "pub struct WorklistInserter",
+        "pub fn saturate_worklist",
+        "pub fn saturate_worklist_with_seen",
+        "pub fn saturate_finite",
+    ] {
+        assert!(
+            !fact_saturation_source.contains(plain_public),
+            "fact_saturation is a private module; {plain_public} should be crate-local"
+        );
+    }
+    assert!(lib_source.contains("mod fact_saturation;"));
+    assert!(!lib_source.contains("pub mod fact_saturation;"));
 }
 
 #[test]

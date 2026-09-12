@@ -1146,19 +1146,15 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
             let name = field_text(param, "name", source)?;
             let is_varargs =
                 param.kind() == "spread_parameter" || text(param, source).contains("...");
-            let explicit_java_io_ty = parse_param_text_fallback(text(param, source))
-                .map(|param| param.ty)
-                .filter(is_explicit_java_io_stream_type);
-            let ty = explicit_java_io_ty
-                .or_else(|| {
-                    param.child_by_field_name("type").map(|node| {
-                        let mut ty = parse_type_node(node, source);
-                        if is_varargs {
-                            ty = JavaType::Array(Box::new(ty));
-                        }
-                        ty = type_with_declarator_array_dimensions(&ty, text(param, source), &name);
-                        ty
-                    })
+            let ty = param
+                .child_by_field_name("type")
+                .map(|node| {
+                    let mut ty = parse_type_node(node, source);
+                    if is_varargs {
+                        ty = JavaType::Array(Box::new(ty));
+                    }
+                    ty = type_with_declarator_array_dimensions(&ty, text(param, source), &name);
+                    ty
                 })
                 .or_else(|| {
                     is_varargs
@@ -2659,6 +2655,9 @@ fn parse_named_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
 }
 
 fn java_type_name_from_parse_tree_node(node: tree_sitter::Node, raw: &str) -> String {
+    if preserve_explicit_java_io_type_name(raw.trim()) {
+        return raw.trim().to_string();
+    }
     if matches!(node.kind(), "scoped_type_identifier" | "scoped_identifier")
         && explicit_source_package_qualified_type_name(raw)
     {
@@ -3023,14 +3022,6 @@ fn preserve_explicit_java_io_type_name(src: &str) -> bool {
             | "java.io.PushbackInputStream"
             | "java.io.SequenceInputStream"
     )
-}
-
-fn is_explicit_java_io_stream_type(ty: &JavaType) -> bool {
-    match ty {
-        JavaType::Named { name, .. } => preserve_explicit_java_io_type_name(name),
-        JavaType::Array(inner) => is_explicit_java_io_stream_type(inner),
-        _ => false,
-    }
 }
 
 /// Expression-only helper used by unit tests and small resolver tests.

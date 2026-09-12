@@ -7,7 +7,17 @@ use crate::types::{TypeEnv, infer_expr_type, optional_element_type, stream_eleme
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamSourceCapabilityPolicy {
-    pub capability_element: Option<JavaType>,
+    capability_element: Option<JavaType>,
+}
+
+impl StreamSourceCapabilityPolicy {
+    pub fn capability_element(&self) -> Option<&JavaType> {
+        self.capability_element.as_ref()
+    }
+
+    fn into_capability_element(self) -> Option<JavaType> {
+        self.capability_element
+    }
 }
 
 pub fn stream_source_capability_policy(
@@ -141,12 +151,12 @@ fn stream_source_element_type_with_effective_facts(
     let source_ty = infer_expr_type(source, env);
     let capability = stream_source_capability_policy_with_effective_facts(&source_ty, facts);
     stream_element_type(&source_ty)
-        .or(capability.capability_element)
+        .or_else(|| capability.into_capability_element())
         .or_else(|| {
             let element_ty = optional_element_type(&source_ty)?;
             let capability =
                 stream_source_capability_policy_with_effective_facts(&element_ty, facts);
-            stream_element_type(&element_ty).or(capability.capability_element)
+            stream_element_type(&element_ty).or_else(|| capability.into_capability_element())
         })
 }
 

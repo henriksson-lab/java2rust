@@ -85,6 +85,18 @@ Current status 2026-08-29 (Codex audit pass):
   now live beside the owner modules, while integration tests keep only source
   boundary guards. This does not reduce generated `Raw` compatibility by itself,
   but it removes two more public rendered-string helpers from the crate API.
+- Follow-up 2026-09-12: `access_lowering`, `array_lowering`, `array_plan`,
+  `control_flow_lowering`, `conversion_lowering`, `graph`,
+  `literal_lowering`, `method_reference_lowering`, `method_reference_plan`,
+  `method_reference_shape`, `statement_render`, `string_concat`,
+  `string_concat_plan`, and `string_concat_render` are now crate-internal
+  modules. The same helpers remain available to production lowering and
+  same-module tests, but they no longer advertise rendered-string, lowering,
+  and planner internals as public crate surface.
+  Guard: `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+  The same visibility pass narrowed adjacent implementation-support modules
+  `item_assembly`, `lattice`, and `loop_plan`, which are internal building
+  blocks rather than generated Rust API.
 - Follow-up 2026-09-10: `array_plan::ArrayExprPlan`, `child_exprs`, and
   `plan_array_expr` are crate-local, with direct plan-shape assertions moved
   into `array_plan.rs`. Integration coverage now checks the layer boundary
@@ -100,6 +112,11 @@ Current status 2026-08-29 (Codex audit pass):
   break-rewrite, and condition-expression assertions now live beside
   `switch_plan.rs`/`switch_lowering.rs`; integration coverage stays on the
   public whole-switch plan and rendered switch block behavior.
+- Follow-up 2026-09-11: the duplicate raw `as`-cast scanner in `coercion.rs`
+  is gone. Callers that need to know whether opaque text contains a top-level
+  cast now use the existing `rendered_top_level_as_cast_parts` recovery
+  boundary, so comments such as `value /* as usize */` are still ignored by the
+  same parser that owns cast recovery.
 - Follow-up cleanup: `switch_lowering::switch_match_pattern_expr` is crate-local.
   Switch lowering still centralizes the one required match-pattern render at the
   lowering boundary, but external callers cannot use that rendered-expression
@@ -109,6 +126,27 @@ Current status 2026-08-29 (Codex audit pass):
   It is deleting or narrowing one named compatibility consumer at a time, with
   each pass proving that parseable legacy raw leaves are recovered at a boundary
   before semantic predicates run.
+- Codex follow-up 2026-09-12: `RustExpr::is_raw_leaf()` centralizes the
+  "did rendered recovery stay opaque after removing shape tags?" predicate.
+  `item_assembly` raw-statement recovery and several `coercion` rendered
+  recovery paths now use that IR-owned query instead of repeating
+  `matches!(expr.unshaped(), RustExpr::Raw(_))` at each semantic boundary. This
+  is a cleanup step, not a semantic fix; the remaining raw compatibility paths
+  still need to be narrowed one cluster at a time.
+- Follow-up 2026-09-12: `slot_render` no longer carries its own raw collection
+  erasure-name list. Raw genericless collection slots now ask the existing
+  `stdlib::java_collection_kind_for_name` taxonomy, so collection identity is
+  owned by the same canonical classifier used elsewhere instead of a local
+  string list. Regression:
+  `slot_shape_design::external_facade_support_lowers_raw_collection_returns_to_erased_rust_shapes`.
+- Follow-up 2026-09-12: the live JDK string/content method classifiers
+  (`is_content_read_method` and `is_borrowed_string_view_method`) are
+  crate-local, and the unused `is_owned_string_result_method` wrapper was
+  deleted. Their truth-table assertions live beside `stdlib`, while integration
+  coverage checks that downstream layers consume stdlib facts/support items
+  rather than importing the raw name classifiers as public API. Regression:
+  `stdlib::functional_interface_shape_tests::known_jdk_content_method_facts_are_internal`;
+  boundary guard: `slot_shape_design::stdlib_owns_known_jdk_content_method_facts`.
 - Follow-up in this pass: `ensure_borrow_projection_rendered` and
   `render_string_view_argument` are now `#[cfg(test)]`. Production already used
   the structured borrow projection helper, so this removes a rendered-string
@@ -173,7 +211,12 @@ Current status 2026-08-29 (Codex audit pass):
   crate-local, and its `SlotNoDefaultMessagePolicy` carrier is crate-local too.
   The exact compile-error rendering assertion now lives beside the
   implementation; integration coverage still checks the public default policy
-  and resulting default expression.
+  boundary.
+- Codex follow-up 2026-09-11: `UnsupportedCoercionMessagePolicy` is now
+  private-backed behind a constructor, read-only accessors, and the existing
+  compile-error/diagnostic render methods. Coercion planners still expose the
+  unsupported-policy result, but tests and downstream callers cannot assign raw
+  `code`/`message` payloads directly into the rendered-error carrier.
 - Follow-up 2026-09-06: `slot_render::storage_placement_type` is private as
   well. Storage placement rendering is still owned by `slot_render`, but the
   type wrapper helper is no longer exposed as a standalone public API.
@@ -191,17 +234,20 @@ Current status 2026-08-29 (Codex audit pass):
   Rust-type/default probe and static-final predicate are private; cross-module
   callers keep crate-local entry points only where lowering/constructor planning
   need them.
-- Follow-up 2026-09-06: raw IR leaf pass-through wrappers are no longer public
-  APIs. `item_assembly::raw_item` and `statement_render::raw_stmt` were
-  deleted; production callers use crate-local `RustExpr::raw_leaf` /
-  `RustStmt::raw_leaf` only at named compatibility fallbacks, while
-  integration-test raw fixtures use explicit `RustItem::Raw` / `RustStmt::Raw`
-  variants. A layering guard pins that boundary.
+- Follow-up 2026-09-06: raw IR leaf pass-through wrapper functions are no
+  longer public APIs. `item_assembly::raw_item` and `statement_render::raw_stmt`
+  were deleted; production callers use crate-local `RustExpr::raw_leaf` /
+  `RustStmt::raw_leaf` only at named compatibility fallbacks. This does not mean
+  the raw IR variants themselves are private: integration-test raw fixtures can
+  still construct explicit `RustItem::Raw` / `RustStmt::Raw` variants. A
+  layering guard pins that wrapper-vs-variant boundary.
 - Follow-up 2026-09-06: coercion fallback-message constructors are crate-local.
-  The public API still exposes the diagnostic value type, but the four policy
-  renderers for ownership, dispatch, `instanceof`, and borrowed-element
-  recovery are tested inside `coercion.rs` instead of being imported by
-  integration tests.
+  The four policy renderers for ownership, dispatch, `instanceof`, and
+  borrowed-element recovery are tested inside `coercion.rs` instead of being
+  imported by integration tests. Follow-up 2026-09-11: the shared
+  `ConversionDiagnostic` value still crosses the public policy boundary, but
+  its payload fields are private behind `new`, `code`, and `message`, so
+  callers cannot fabricate or pattern-match the diagnostic record layout.
 - Follow-up 2026-09-06: `optional_or_else_owned_value_projection` is crate-local
   as well. It remains shared with `call_lowering`, but is no longer exported as
   public coercion API.
@@ -241,6 +287,13 @@ Current status 2026-08-29 (Codex audit pass):
 - Follow-up 2026-09-06: tail-recursive loop rendering is crate-local as well.
   `lower.rs` still consumes the structured `TailRecursiveLoopRender` plan, but
   the renderer no longer appears as a public crate API.
+- Codex follow-up 2026-09-12: `TailRecursiveLoopRender` is no longer a
+  crate-visible field bag either. Lowering and tests construct it through
+  `TailRecursiveLoopRender::new`, and the renderer consumes it through
+  `into_parts()`. Guard:
+  `layering::control_flow_normalization_plans_are_owned_before_lowering`;
+  focused behavior guard:
+  `cargo test control_flow_lowering::tests::tail_recursive_loop_body_is_structured --lib -- --exact`.
 - Follow-up 2026-09-06: the narrow `None`/`Default::default()` raw
   compatibility parser is private. Cross-module callers now use
   `recover_none_or_default_value`, keeping the crate boundary semantic rather
@@ -251,9 +304,10 @@ Current status 2026-08-29 (Codex audit pass):
   private inside `coercion.rs`.
 - Follow-up 2026-09-06: the broad raw-leaf recovery bridge now follows the same
   rule for cross-module callers. Production `lower.rs`, `slot_render`, and
-  `stream_lowering` call `recover_operator_expr_or_raw_leaf`; the general
-  `recover_expr_or_raw_leaf` wrapper is test-only, and the `rendered_*` parser
-  names are private implementation details in `coercion.rs`.
+  `stream_lowering` call `recover_operator_expr_or_raw_leaf`; the old general
+  `recover_expr_or_raw_leaf` wrapper has since been removed entirely, and the
+  `rendered_*` parser names are private implementation details in
+  `coercion.rs`.
 - Follow-up 2026-09-06: the same-call shared-borrow snapshot API was renamed
   from `snapshot_rendered_shared_borrow_argument` to
   `snapshot_shared_borrow_argument`. Production lowering still accepts legacy
@@ -1068,6 +1122,12 @@ of ~20 assignments to `.java_ty` only a handful refresh it. Recorded here
 because printing `actual` is what made it visible; the fix belongs with that
 survey, not with this file.
 
+Current state: this cross-audit finding is closed in
+`done/0046-slot-shape-type-identity-is-a-hand-refreshed-cache.md`.
+`RustSlotShape` no longer stores `type_identity`; it derives
+`RustSlotShape::type_identity()` from `java_ty`, so the stale-cache failure mode
+described above is no longer representable.
+
 ### Re-measure
 
 ```
@@ -1098,10 +1158,11 @@ the target element. In this API `None` does not mean "already correct"; it means
 "this helper did not handle the expression", so callers could still fall through
 to text-based or broader adapters.
 
-That branch now returns `Some(expr.clone())`. The shape comparison also ignores
-`type_identity`, because this same pass recorded that `type_identity` can be
-stale after changing `java_ty`; optional projection should be idempotent on the
-semantic slot axes, not on that cached identity field.
+That branch now returns `Some(expr.clone())`. At the time, the shape comparison
+also ignored `type_identity` because this same pass recorded that the cached
+identity could be stale after changing `java_ty`; optional projection needed to
+be idempotent on the semantic slot axes, not on that cached identity field.
+0046 later removed the stored cache and now derives `type_identity()` on demand.
 
 One wording correction: the current migration is not purely tag-first with text
 fallback. Some predicates deliberately OR the recorded tag result with rendered
@@ -3109,6 +3170,12 @@ The non-result throw policy helper is crate-local too; `throw_stmt` is now a
 private same-module test fixture, while the uncaught-panic shape is asserted
 beside the implementation.
 
+Codex follow-up 2026-09-12: the classic-for `continue` replay helper
+`loop_lowering::continue_with_updates` is crate-local too. Lowering still uses
+the structured statement builder, but the direct update-before-continue shape
+assertion now lives beside `loop_lowering`; integration coverage checks the
+public loop-lowering behavior and boundary guard.
+
 ## Update 2026-08-12 (Codex follow-up) — primitive char casts keep operand structure
 
 `apply_cast_conversion` still rendered Java primitive casts involving `char` as
@@ -4424,6 +4491,14 @@ Follow-up cleanup narrowed `stdlib::ClassLiteralTokenPlan` and
 planning matrix now lives beside `stdlib`; `slot_shape_design` keeps the public
 `JavaClass<T>` support and slot-type rendering assertions.
 
+Codex follow-up 2026-09-12: `ClassLiteralTokenPlan` is no longer a crate-local
+field bag either. Class-literal planning constructs it through `new(...)`, and
+call lowering/support collection read the selected Java token name and Rust
+token type through accessors. Guard:
+`layering::call_target_lowering_uses_shared_projection_helpers`;
+focused behavior guard:
+`cargo test stdlib::class_literal_token_plan_tests::class_literal_tokens_are_planned_before_lowering --lib -- --exact`.
+
 Follow-up 2026-09-06: three item-assembly policy helpers are crate-local as
 well. Java comparable-bound detection, callable clone-bound detection, and
 type-parameter marker field injection are still shared with lowering, but they
@@ -4729,7 +4804,9 @@ Follow-up 2026-09-07: primitive Rust type-name policy is crate-local too.
 `RustPrimitiveTypeNamePolicy` and `rust_primitive_type_name_policy` still feed
 internal cast/projection builders, but the direct scalar-name assertion moved
 into `coercion.rs`; integration tests now cover primitive widening and invalid
-cast planning through the higher-level conversion boundary.
+cast planning through the higher-level conversion boundary. Codex follow-up
+2026-09-11 private-backed the policy's raw `rust_name` payload as well, leaving
+same-module builders to read it through an accessor instead of field projection.
 
 Follow-up 2026-09-07: the no-facts typed single-input method-reference callback
 builder is crate-local. `lower.rs` still uses it for the legacy unshaped method
@@ -5026,3 +5103,856 @@ emitting a structured call with raw children. This keeps raw Java fragments from
 becoming partial semantic evidence at the source-ingress boundary. Guards:
 `lower::tests::source_raw_expr_lowering_recovers_parseable_projection_before_raw_leaf`
 and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-11: postfix receiver parenthesization no longer owns a second
+hand-rolled top-level raw scanner for strings, comments, delimiters, operators,
+and `as` casts. `raw_needs_postfix_receiver_parentheses` now reuses the shared
+comment-aware top-level operator walker plus `rendered_top_level_as_cast_parts`,
+preserving the wider postfix grouping surface while deleting the duplicate
+loop. Guard:
+`coercion::tests::raw_postfix_receiver_parenthesization_uses_shared_top_level_scanner`
+and `layering::exception_lowering_keeps_exception_paths_structured`.
+
+Follow-up 2026-09-11: receiver and optional-receiver slot plans no longer
+expose their payload fields. `ReceiverSlotPlan`, `OptionalReceiverSlotPlan`,
+and `OptionalReceiverSlotProjectionPlan` now keep ABI/slot/projection/element
+conversion state behind constructors and accessors, so lowering consumes the
+planned receiver projection instead of reaching into plan representation fields.
+Guards:
+`call_plan::tests::facade_receiver_abi_maps_to_receiver_slot_shapes`,
+`call_plan::tests::optional_receiver_slot_plan_maps_mutability_and_projection`,
+`slot_shape_design::optional_element_borrow_carrier_construction_is_centralized`,
+and `layering::fallback_call_name_adapters_are_not_public_api`.
+
+Follow-up 2026-09-11: reused optional unwrap planning no longer exposes its
+lowered actual/projection payload fields. `ReusedOptionalUnwrapPlan` is still
+crate-local, but construction is centralized through its planner and lowering
+now reads the plan through accessors. The slot-shape guard scopes its field
+privacy check to that plan so unrelated public `actual` fields remain visible
+until their own cleanup passes. Guard:
+`slot_shape_design::optional_element_borrow_carrier_construction_is_centralized`.
+
+Follow-up 2026-09-11: slot-expression conversion plans are no longer raw field
+bags. `SlotExprConversionPlan` and `LoweredSlotExprConversionPlan` remain public
+planner result types, but construction now goes through `new` and users read
+`actual`, `slot`, and `conversion` through accessors. Lowering and tests no
+longer depend on the representation layout, and the layering guard now rejects
+public payload fields for both structs. Guards:
+`layering::conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer`,
+`type_coercion::conversion_plan_wraps_slot_conversion_decisions_before_application`,
+and `type_coercion::rust_unsigned_byte_array_return_composes_byte_conversion_pipeline`.
+
+Follow-up 2026-09-11: external-crate constructor target details are no longer
+public payload fields. `ExternalCrateNewTarget` is still carried by the public
+`NewTargetPlan`, but its crate/type/member names now go through `new` and
+accessors, so constructor lowering and tests do not depend on the target record
+layout. Guard:
+`slot_shape_design::call_plan_owns_call_and_new_target_selection_before_argument_lowering`.
+
+Follow-up 2026-09-11: shape-coercion planning is no longer a public payload
+field bag. `ShapeCoercionPlan` still reports the same axis decisions, but
+construction is centralized through `new`, production callers read through
+accessors, and the one crate-local ownership rewrite uses `with_ownership`
+instead of mutating the field directly. Guards:
+`layering::conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer`,
+`type_coercion::shape_coercion_plan_keeps_axis_policy_decisions_inspectable`,
+`type_coercion::owned_to_mutable_borrow_is_an_ownership_coercion`,
+`type_coercion::optional_string_carrier_to_optional_string_view_records_projection_shape`,
+`type_coercion::optional_shape_coercion_wraps_after_erased_element_conversion`,
+`type_coercion::view_coercion_policy_owns_sequence_slice_adapters`,
+`type_coercion::set_to_borrowed_slice_collects_temporary_vec_view`, and
+`type_coercion::borrowed_sequence_ownership_recovery_uses_to_vec`.
+
+The same pass removed the remaining same-module `SyntaxCoercionPlan` struct
+literals from optional-display planning and its unit assertions, so syntax
+coercion plans now consistently go through `new` and `policy()`. Guards:
+`conversion_plan::tests::list_string_concat_uses_java_collection_display_policy`,
+`conversion_plan::tests::map_string_concat_uses_java_map_display_policy`,
+`conversion_plan::tests::set_string_concat_uses_java_set_display_policy`, and
+`conversion_plan::tests::optional_erased_concrete_facade_string_concat_uses_erased_display_policy`.
+
+Follow-up 2026-09-11: constructor target planning no longer exposes
+`NewTargetPlan` payload fields. Constructor lowering reads owner shape, Rust
+constructor name, external-crate target, native-collection target, and native
+string target through accessors, while the outer-this companion rewrite uses the
+named `rename_constructor` mutation point. Guards:
+`layering::fallback_call_name_adapters_are_not_public_api`,
+`layering::call_lowering_renders_constructor_owner_types_with_facts`,
+`slot_shape_design::call_plan_owns_call_and_new_target_selection_before_argument_lowering`,
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+
+Follow-up 2026-09-11: numeric binary promotion planning no longer exposes
+`NumericBinaryPromotionPlan` payload fields. Operator lowering and the fallible
+operand path now read promoted type and operand coercions through accessors, and
+the result-propagating temporary path uses `NumericBinaryPromotionPlan::identity`
+instead of rebuilding a public field literal. Guard:
+`slot_shape_design::operator_lowering_owns_binary_and_unary_rust_spelling`.
+
+Follow-up 2026-09-11: control-flow rewrite plans no longer expose their payload
+fields. `MethodControlFlowPlan`, `AssignmentInConditionPlan`, and
+`TailRecursiveLoopPlan` now go through constructors and accessors, and callers
+ask `ControlFlowRewritePlan` for the specific rewrite payload instead of
+pattern-matching public fields. Guards:
+`layering::control_flow_normalization_plans_are_owned_before_lowering`,
+`semantic_facts::plans_assignment_in_condition_normalization_shape`,
+`semantic_facts::plans_tail_recursive_loop_normalization_shape`, and
+`slot_shape_design::lowering_diagnostics_only_report_unimplemented_control_flow_rewrites`.
+
+Follow-up 2026-09-11: lowering diagnostic aggregation no longer returns a
+public payload field bag. `LoweringDiagnosticPlan` construction is centralized
+inside the diagnostic planner through a crate-local `new`, and lowering/tests
+read severity, code, and message through accessors or consume the plan with
+`into_parts` at the final `DiagnosticBag` boundary. Guard:
+`slot_shape_design::lowering_diagnostics_only_report_unimplemented_control_flow_rewrites`.
+
+Follow-up 2026-09-11: string-concatenation planning no longer exposes its
+format string and dynamic source-argument list as crate-local payload fields.
+`StringConcatPlan` is now built through `new`, while rendering and lowering read
+the format and argument expressions through accessors. Guards:
+`string_concat_plan::tests::string_concat_plan_extracts_format_string_and_dynamic_args`,
+`string_concat_render::tests::string_concat_render_builds_format_macro_with_display_args`,
+and `layering::string_concat_layers_keep_semantics_and_rendering_separate`.
+
+Follow-up 2026-09-11: switch planning no longer exposes whole-switch or
+case-plan payload fields. `SwitchPlan`, `SimpleReturnSwitchPlan`,
+`SwitchCasePlan`, and `SimpleReturnSwitchCasePlan` now keep selector, cases,
+bindings, labels, and return expressions behind accessors or move-only label
+extraction, so switch lowering consumes named planning answers instead of
+struct layout. Guards:
+`switch_plan::tests::simple_return_switch_case_plans_return_cases_not_label_groups`,
+`switch_plan::tests::switch_case_plans_labels_and_rewrites_bare_breaks`,
+`switch_lowering::tests::switch_case_condition_builds_structured_exprs`,
+`layering::switch_plan_keeps_rust_rendering_out_of_plan_layer`, and
+`slot_shape_design::switch_plan_owns_fallthrough_bindings_and_break_rewrite_before_lowering`.
+The same boundary pass also made `SwitchRenderCase` constructor-backed, so the
+switch renderer no longer exposes label-condition and statement payload fields
+as public structure.
+
+Follow-up 2026-09-11: stream element shape planning is no longer a public
+payload field. `StreamElement` now goes through `new` and `shape()`, so stream
+lowering reads the planned element shape through the plan API instead of the
+record layout. This is intentionally only the first narrow stream batch; the
+larger `StreamPlan`/`StreamSource`/lambda payload records remain separate work.
+Guard: `layering::conversion_plan_owns_stream_collect_actual_shape_selection_layering`.
+
+Follow-up 2026-09-11: the larger stream plan records are no longer public field
+bags. `StreamPlan`, `StreamSource`, `LambdaPlan`, `ReducePlan`,
+`ReduceLambdaPlan`, `LambdaCollectionStreamPlan`, and `StreamSubPipeline` now
+hide their payload fields behind accessors, so stream lowering and
+slot-shape tests consume named plan answers rather than representation layout.
+Guard: `layering::conversion_plan_owns_stream_collect_actual_shape_selection_layering`.
+
+The focused stream verification exposed and fixed a neighboring ownership bug:
+borrowed-source `findFirst` now lowers the terminal as `.next().cloned()` and
+reports an owned optional result shape instead of tagging `.next()` as an
+already-projected optional borrow. This keeps `Result<Option<String>, _>`
+returns compile-backed without relying on a later rendered suffix rewrite.
+Guards:
+`fixtures::translates_stream_find_first_and_any_match_through_slot_coercion`
+and `fixtures::stream_find_match_generated_rust_preserves_behavior`.
+
+Follow-up 2026-09-11: stream block-lambda static-owner calls now try the shared
+native Java static call planner before falling back to raw `Owner::method`
+rendering. This keeps `Integer.parseInt(partitionInfo[i])` inside stream
+lambdas on the same nullable-string parse path as ordinary calls, so null
+arguments become Java parse failures instead of `expect("Java null receiver")`
+panics. The same verification pass fixed the checked `Arrays.stream(array,
+from, to)` projection to throw `IllegalArgumentException` for `from > to`,
+matching Java's range contract in both panic and `Result` contexts. Guards:
+`idiom_gaps::stream_block_lambda_string_array_local_clones_owned_index`,
+`idiom_gaps::stream_block_lambda_static_owner_shadow_keeps_source_owner`,
+`idiom_gaps::java_arrays_stream_range_in_try_lowers_to_java_exception_results`,
+and `slot_shape_design::stream_plan_accepts_arrays_stream_range_as_source`.
+
+Follow-up 2026-09-11: the output-marker counters no longer relate macro
+anchors and diagnostic text with separate same-line substring checks. The
+inner-class construction counter now recognizes the actual
+`panic!("unsupported Java inner-class outer capture construction...")` prefix,
+and the stubbed-constant counter recognizes the actual
+`compile_error!("external static constant ...")` prefix after a syntactic
+`pub const` anchor. That keeps the deliberately string-valued diagnostic forms
+visible to the corpus metric without letting unrelated same-line examples move
+the counts. Guards:
+`output_markers::tests::invalid_pattern_count_ignores_literal_marker_text`,
+`output_markers::tests::stubbed_constant_count_requires_syntactic_const_and_compile_error`,
+and `tests/output_markers.rs`.
+
+Follow-up 2026-09-11: `ConversionDiagnostic` is no longer a public field bag.
+Conversion planning still returns diagnostics for unsupported ownership,
+dispatch, borrowed-element, and `instanceof` policies, but construction goes
+through `ConversionDiagnostic::new` and callers read `code()` / `message()`.
+Guard: `layering::conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer`.
+
+Codex follow-up 2026-09-11: `coercion::CoercionDiagnostic` is no longer a
+public field bag either. The coercion layer still reports clone-audit,
+ownership, dispatch, borrowed-element, and `instanceof` diagnostics, but
+construction now goes through `CoercionDiagnostic::new` and callers use
+`code()`, `message()`, or `into_parts()` instead of assigning raw payload
+fields. Guard: `layering::coercion_plan_owns_instanceof_fallback_policy`.
+
+Codex follow-up 2026-09-11: `coercion::LoweredExpr` is no longer a public
+`{ expr, actual }` record. Lowering, stream lowering, conversion lowering, and
+type-coercion fixtures now construct it through `LoweredExpr::new` and consume
+it through `expr()`, `actual()`, `into_expr()`, `into_parts()`, or `map_expr()`.
+This keeps the "lowered Rust expression plus actual slot shape" handoff as a
+named boundary instead of a mutable public field layout. Guard:
+`layering::conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer`.
+
+Codex follow-up 2026-09-11: `SignatureConstraintPropagationPolicy` no longer
+exposes its raw `kind` field. The two propagation-policy constructors remain
+the public entry points, and assertions inspect the selected mode through
+`kind()` before applying `allows(...)`. Guard:
+`layering::signature_constraint_solver_owns_constraint_state`.
+
+Codex follow-up 2026-09-11: `SignatureMemberApiBoundaryPolicy` no longer
+exposes its raw `public_api` field. Member boundary classification still flows
+through `signature_member_api_boundary_policy(...)`, but consumers now inspect
+the result with `public_api()` and tests no longer construct the policy as a
+public field bag. Guard:
+`layering::signature_constraint_solver_owns_constraint_state`.
+
+Codex follow-up 2026-09-11: `SignatureFlagMerge` no longer exposes its raw
+`kept` field. Boolean requirement merging still goes through
+`merge_signature_flag_requirement_policy(...)`, but callers now read the result
+with `kept()` and fixtures no longer construct the merge result as a public
+record. Guards:
+`layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`
+and
+`layering::signature_requirement_merge_policy_owns_axis_priority_symbols`.
+
+Codex follow-up 2026-09-11: `SignatureOwnedRecoveryCapabilityPolicy` no longer
+exposes its raw `recovery` field. Recovery capability classification still
+comes from `signature_owned_recovery_capability_policy_with_effective_facts`,
+but consumers now borrow or consume the capability through `recovery()` /
+`into_recovery()` instead of depending on the record layout. Guard:
+`layering::signature_owned_recovery_policy_owns_capability_symbols`.
+
+Codex follow-up 2026-09-11: `SignatureSlotDispatchRequirementPolicy` no longer
+exposes its raw constraint vector. Dispatch requirement projection still flows
+through the fact-aware policy constructor, but shape solving now consumes the
+vector with `into_constraints()` and tests inspect it with `constraints()`.
+Guard:
+`layering::signature_capability_and_baseline_policy_symbols_stay_fact_aware`.
+
+Codex follow-up 2026-09-11: `SignatureBoundaryRepresentationPolicy` and
+`SignatureBoundaryRepresentationFactPolicy` no longer expose their raw
+`java_ty` / representation-boolean fields. Boundary fallback selection now asks
+the policies for `preserve_object_representation()` and
+`object_representation_facts()`, while tests construct expected values through
+`new(...)` rather than record literals. Guard:
+`layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`.
+
+Codex follow-up 2026-09-11: `SignatureBoundaryKindPriorityPolicy` and
+`SignatureBoundaryKindMerge` no longer expose raw rank/kept/rejected fields.
+Boundary precedence still goes through `signature_boundary_kind_priority_policy`
+and `merge_signature_boundary_kind_policy`, but callers now consume the merge
+through `into_kept()` and tests build expected values with constructors. Guard:
+`layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`.
+
+Codex follow-up 2026-09-11: `SignatureFixpointResult` no longer exposes its raw
+`iterations` and `diagnostics` fields. Solver clients now read them through
+`iterations()` / `diagnostics()` or consume the result through
+`into_constraints_iterations_diagnostics()`, matching the already-private
+constraint graph, SCC, and pass-plan fields. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureConstraintConflictDiagnostic` no longer
+exposes raw axis, constraint, provenance, or message fields. Conflict summary
+reporting and fixtures now use accessors, while construction is centralized
+through `SignatureConstraintConflictDiagnostic::new`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureRequirementMerge<T>` no longer exposes
+raw `kept` / `rejected` fields. Requirement join policies still return the same
+merge result, but constraint application consumes it through `into_parts()`,
+tests use `new(...)` for expected values, and join-law fixtures use
+`into_kept()`. Guard:
+`layering::signature_requirement_merge_policy_owns_axis_priority_symbols`.
+
+Codex follow-up 2026-09-12: the internal ranked-lattice join carrier now
+matches the signature merge boundary. `RankedLatticeJoin<T>` is private-backed,
+constructed through `new(...)`, and adapted with `into_parts()` instead of
+leaking raw kept/rejected storage to `signature.rs`. Guard:
+`layering::signature_requirement_merge_policy_owns_axis_priority_symbols`.
+
+Codex follow-up 2026-09-11: `SignatureReportCount` no longer exposes raw
+`label` / `count` fields. Saturation report aggregation constructs entries
+through `new(...)`, sorts through accessors, and report assertions use
+`label()` / `count()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureConstraintConflict` no longer exposes raw
+axis/kept/rejected fields. Constraint joining constructs conflicts through
+`SignatureConstraintConflict::new`, and conflict diagnostics/tests read them
+through accessors. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: the signature boundary policy carriers for
+bindings, method parameters, constructor parameters, fields, and method returns
+no longer expose raw owner/name/kind fields. Boundary classification still
+flows through the same policy constructors, but lowering and tests now consume
+the selected boundary through accessors and expected values through `new(...)`.
+Guard:
+`layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`.
+
+Codex follow-up 2026-09-11: `SignatureCapabilityPolicy` no longer exposes raw
+`java_ty`, `capability_ownership`, or `constraints` fields. Capability
+classification still flows through the same fact-aware constructor, but callers
+now read the copy-ownership decision through `capability_ownership()` and
+consume generated constraints through `into_constraints()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`
+and `layering::signature_capability_and_baseline_policy_symbols_stay_fact_aware`.
+
+Codex follow-up 2026-09-11: `SignatureNativeBoundaryPolicy` and
+`SignatureSlotBaselinePolicy` no longer expose their raw constraint vectors.
+Native boundary and baseline slot classification still return the same policy
+objects, but callers now borrow constraints through `constraints()` or consume
+them through `into_constraints()` instead of projecting a public record field.
+Guards:
+`layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`
+and `layering::signature_capability_and_baseline_policy_symbols_stay_fact_aware`.
+
+Codex follow-up 2026-09-11: `SignatureBoundaryPolicy` itself is now
+private-backed as well. Boundary classification still reports kind, Java type,
+fallback, and constraints, but callers use `kind()`, `java_ty()`,
+`fallback()`, `constraints()`, or `into_constraints()` instead of depending on
+the public record layout. Guard:
+`layering::signature_boundary_policy_is_the_single_boundary_constraint_entrypoint`.
+
+Codex follow-up 2026-09-11: `SignatureDiagnostic` no longer exposes its raw
+`code` / `message` fields. Signature diagnostics are still passed into lowering
+diagnostic aggregation, but construction goes through `new(...)` and consumers
+read `code()` / `message()` or destructure with `into_parts()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureShapeRequest` no longer exposes its raw
+`java_ty`, role, constraint, or type-parameter fields. Shape solving still
+accepts a single request value, but construction is centralized through
+`new(...)`, dispatch planning reads through accessors, and the extra-constraint
+solver consumes the request with `into_parts()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureSolverProgressEvent` no longer exposes
+its raw progress fields. Signature solver progress still crosses the same
+callback boundary, but construction is centralized through `new(...)` and batch
+bridges read `phase()`, `status()`, `elapsed_ms()`, and `detail()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `ProfiledSignaturePlan` no longer exposes raw
+`plan` / `profile` fields. Profiled signature solving still returns the same
+pair, but construction goes through `new(...)` and the batch context builder
+consumes it with `into_parts()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureFixpointDomainStats` and
+`SignatureSaturationReport` no longer expose their raw metrics fields. Report
+construction goes through `new(...)`; tests and benchmark aggregation read
+scalar values through accessors, while benchmark top-count aggregation consumes
+the two vectors with `into_top_counts()`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignaturePropagationArmProfile` no longer exposes
+raw sweep counters or elapsed time. Solver propagation accounting updates the
+profile through same-module `record_sweep` / `merge_from` helpers, and CLI
+profile rendering reads metrics through accessors. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureSolverExecutionStats` no longer exposes
+its raw aggregation counters or propagation-arm map. The stats value remains an
+internal solver accumulator, and all mutation/reading stays in `signature.rs`
+rather than as a public record contract. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureSolverProfile` no longer exposes its raw
+timing, graph, fixpoint, or propagation-arm fields. Profile construction stays
+inside `signature.rs`, while CLI profile/event rendering reads values through
+accessors. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-11: `SignatureDependencySccStats` and
+`SignatureSolverPassStats` no longer expose raw metric fields. SCC/pass
+analysis still returns copyable stats values, but benchmark aggregation and
+tests now read the graph/component counters through accessors, and construction
+goes through `new(...)`. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-12: the shared Tarjan result carrier now matches that
+signature SCC boundary. `graph::StronglyConnectedComponents<N>` no longer
+exposes raw components, node-index, or successor fields; semantic recursion
+analysis reads through accessors, and signature SCC planning consumes the result
+with `into_parts()` before building its public analysis record. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`;
+focused behavior guard:
+`cargo test graph::tests::strongly_connected_components_groups_mutual_recursion --lib -- --exact`.
+
+Codex follow-up 2026-09-12: the exception rendering carriers are private-backed
+too. `CatchRenderArm` and `ExternalExceptionConversion` remain crate-local, but
+tests and render code no longer depend on their raw field layout. Guard:
+`layering::exception_lowering_keeps_exception_paths_structured`; focused
+behavior guards:
+`cargo test exception_lowering::tests::try_catch_scope_rendering_stays_inside_exception_lowering --lib -- --exact`,
+`cargo test exception_lowering::tests::try_catch_value_fallthrough_rendering_stays_inside_exception_lowering --lib -- --exact`.
+
+Codex follow-up 2026-09-12: `java_exception_support_item_with_facts` is
+crate-local too. Raw support-item text assertions live beside
+`exception_lowering`; integration coverage now reaches that item through public
+program lowering and `emit_file(...)`, so tests no longer keep the raw item
+factory public.
+
+Codex follow-up 2026-09-12: `aliasing::ObservableAlias` is private-backed too.
+The observable-alias diagnostic still reports the same 0002 gap, but production
+reporting and same-module tests now use constructor/accessor APIs instead of the
+raw result layout. Guard:
+`layering::aliasing_uses_binding_fact_view_instead_of_legacy_name_map`; focused
+behavior guard:
+`cargo test aliasing::tests::a_receiver_mutating_call_is_a_mutation_site --lib -- --exact`.
+
+Codex follow-up 2026-09-11: `MethodConstraintSet`,
+`ConstructorConstraintSet`, and `LocalConstraintSet` no longer expose their
+constraint-table payload fields. The solver still mutates those tables inside
+`signature.rs`, but external tests and callers now read public API flags,
+param lists, return/local constraints, and local binding/type metadata through
+accessors; fixture construction uses `with_return_constraints(...)` instead of
+record literals. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-12: `MethodSignaturePlan`,
+`ConstructorSignaturePlan`, `ParamPlan`, and `LocalPlan` no longer expose raw
+plan fields. Signature construction now goes through `new(...)`, callers read
+params, return shapes, locals, receiver plans, local identity, and mutability
+through accessors, and local-shape mutation is explicit through `LocalPlan`
+setters. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`.
+
+Codex follow-up 2026-09-12: the cross-module raw postfix-receiver helper is no
+longer named as a raw parenthesizing operation. Array and exception lowering now
+call `postfix_receiver_projection(...)`; the raw scanner and parenthesizing
+policy remain private implementation detail inside `coercion.rs`. Guard:
+`layering::exception_lowering_keeps_exception_paths_structured`; focused unit:
+`coercion::tests::raw_postfix_receiver_parenthesization_uses_shared_top_level_scanner`.
+
+Codex follow-up 2026-09-12: the test-only
+`coercion::recover_expr_or_raw_leaf` export is gone. The lowerer fixture that
+needs synthetic constructor paths now parses the narrow plain/turbofish path
+shape locally and falls back through `RustExpr::raw_leaf(...)`, leaving
+`rendered_projection_or_raw_leaf` private to `coercion.rs`. Guard:
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`;
+focused unit:
+`lower::tests::same_outer_inner_constructor_raw_rewrite_ignores_literals_and_keeps_real_calls`.
+
+The same guard recheck closed two stale structure leaks in stream lowering:
+stream-source capability now reads slot type through `RustSlotShape::java_ty()`,
+and borrowed-string stream-lambda recovery compares against
+`StreamLambdaRenderedExpr::expr()` instead of reading the rendered-expression
+field directly.
+
+Codex follow-up 2026-09-12: direct `matches!(expr.unshaped(),
+RustExpr::Raw(_))` raw-leaf predicates in `coercion.rs` and `lower.rs` now go
+through `RustExpr::is_raw_leaf()`. This keeps the "did recovery remain an
+opaque raw leaf?" question centralized without changing the separate cases that
+intentionally destructure `RustExpr::Raw(rendered)` to inspect text. Guard:
+`layering::raw_leaf_predicates_use_named_ir_helper`; focused behavior guard:
+`cargo test --lib raw`; compile/format guards: `cargo check`, `cargo fmt
+--check`.
+
+Codex follow-up 2026-09-12: the same raw-leaf predicate guard now covers the
+core lowering modules (`array_lowering`, `call_lowering`,
+`conversion_lowering`, `exception_lowering`, `item_assembly`,
+`operator_lowering`, and `stream_lowering`) in addition to `coercion` and
+`lower`. A production-only scan found no remaining open-coded
+`matches!(..., RustExpr::Raw(_))` or `if let RustExpr::Raw(_)` leaf predicates
+there; future checks now preserve that boundary.
+
+Codex follow-up 2026-09-12: `ControlFlowRewriteDiagnostic` no longer exposes
+raw `code` / `message` fields. Rewrite diagnostics are still constructed in
+`rewrite.rs` and aggregated into lowering diagnostics, but consumers now read
+through `code()` / `message()` accessors. Guard:
+`layering::semantic_diagnostics_are_plumbed_through_translation_boundary`.
+
+The same pass private-backed `object_model::RepresentationDiagnostic`.
+Representation diagnostics still flow from object-model planning into lowering
+diagnostics, but the object-model layer owns construction and consumers read
+`code()` / `message()` instead of matching the payload fields. Guard:
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`.
+
+Codex follow-up 2026-09-12: `unsupported::UnsupportedLoweringMessagePolicy`
+and `unsupported::UnsupportedDiagnosticPolicy` are also private-backed.
+Unsupported lowering still emits the same compile-error placeholders and member
+diagnostics, but lowering/tests read through `message()`, `code()`, and
+`message()` instead of constructing or projecting raw policy fields. The
+unsupported message/body/statement/expression/diagnostic helper factories are
+crate-local too; exact placeholder assertions now live beside `unsupported`.
+Guard: `layering::unsupported_lowering_policy_stays_planned_before_lowering`;
+focused guard:
+`cargo test unsupported::unsupported_lowering_policy_owns_compile_error_placeholders --lib -- --exact`.
+
+Codex follow-up cleanup: all central `compile_error!` helper constructors are
+crate-local now. Expression/statement placeholders still use structured
+`RustExpr::MacroCall` IR, while item/text fallback support stays behind the
+internal stdlib/unsupported boundary. Guard:
+`layering::unsupported_compile_error_literals_are_centralized`; focused guard:
+`cargo test unsupported::unsupported_lowering_policy_owns_compile_error_placeholders --lib -- --exact`.
+
+Codex follow-up 2026-09-12: the central direct borrow producer now tags its
+argument/method-receiver output as `RustExprShape::Borrowed` and its mutable
+slice output as `RustExprShape::MutBorrowed`. The emitted Rust is unchanged, but
+borrow idempotence can use producer-recorded shape before falling back to raw
+text recovery. Map-key and string-view borrowing intentionally stay untagged in
+this pass because those paths answer narrower view-specific questions. Guards:
+`coercion::tests::mutable_slice_projection_uses_the_recorded_shape_not_the_suffix`,
+`type_coercion::owned_to_mutable_borrow_is_an_ownership_coercion`, and
+`type_coercion::optional_owned_to_mutable_borrow_uses_mutable_optional_projection`.
+
+Codex follow-up 2026-09-12: `shape_projection` policy carriers are now
+private-backed. Dispatch, escaping-role dispatch, dispatch-requirement,
+capability, indexed-element, and sequence-element projection policies still
+cross the same planning boundary, but construction goes through named
+constructors and consumers use accessors / consuming accessors instead of
+projecting raw payload fields. Guard:
+`slot_shape_design::shape_projection_owns_java_value_shape_projection`;
+compile guard: `cargo test --lib
+shape_projection::tests::shape_projection_policy_owns_dispatch_axis_effects
+-- --exact`.
+
+Codex follow-up 2026-09-12: object-model policy carriers are no longer public
+field bags. Representation lookup, object-safety facts, hierarchy-edge
+representation/diagnostic policies, hierarchy-override policies, closed-enum
+inference/proof, and object-representation policy now go through constructors
+and accessors, while `representation.rs` and tests consume named policy
+answers instead of raw layout. At that checkpoint, the broader
+`ObjectModelPlan` / `ObjectStrategyPlan` records were still unchanged. Guard:
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`;
+focused behavior guard:
+`cargo test --test object_model object_model_owns_initial_interface_strategy_and_object_safety_fallback -- --exact`.
+
+Codex follow-up 2026-09-12: the broader object-model plan records are no
+longer public field bags either. `ObjectModelPlan`, `ObjectStrategyPlan`, and
+`RejectedObjectStrategy` keep their payloads private; representation planning
+consumes the plan through `into_parts()`, while tests and callers use named
+accessors for strategy, requirements, subtype, provenance, diagnostics, and
+rejection details. Guard:
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: `ObjectHierarchyEdge` is private-backed as well.
+Object-model planning now constructs hierarchy edges through `new(...)`, and
+representation/diagnostic code reads the supertype, subtype, and edge kind
+through accessors rather than reaching into the edge record. Guard:
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`;
+focused behavior guard:
+`cargo test --test object_model object_model_owns_hierarchy_edge_representation_support_policy -- --exact`.
+
+Codex follow-up 2026-09-12: effective-facts cast and `instanceof` capability
+policies are private-backed. `CastTypeCapabilityPolicy` and
+`InstanceOfTargetCapabilityPolicy` still cross the conversion-planning boundary,
+but they are now built with constructors and read through accessors instead of
+public payload fields. Guard:
+`slot_shape_design::shape_projection_owns_java_value_shape_projection`;
+focused behavior guard:
+`cargo test --test type_coercion cast_and_instanceof_type_capability_policy_centralizes_nonprimitive_type_checks -- --exact`.
+
+Codex follow-up 2026-09-12: representation dispatch projection is no longer a
+public field bag. `RepresentationDispatchPolicy` now carries the original
+representation and projected dispatch behind a constructor and accessors, while
+callers consume the projected dispatch through `into_dispatch()`. Guard:
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`;
+focused behavior guard:
+`cargo test --test slot_shape_design representation_plan_keeps_interface_dispatch_as_fallback_policy -- --exact`.
+
+Codex follow-up 2026-09-12: `TypeRepresentation` is no longer a public payload
+field bag either. Representation planning still exposes the same per-type
+answer, but lowering, stdlib support, benchmarks, and tests now consume it
+through `java_name()`, `representation()`, `provenance()`, and
+`direct_subtypes()` instead of projecting raw plan fields. Guard:
+`layering::representation_boundary_policy_carriers_are_not_public_field_bags`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: `SemanticDiagnostic` no longer exposes its `code`
+and `message` payload fields either. Semantic analysis still owns diagnostic
+construction, while translation and tests consume diagnostics through
+`code()`, `message()`, or `into_parts()`. Guard:
+`layering::semantic_diagnostics_are_plumbed_through_translation_boundary`;
+compile guard: `cargo check --tests`.
+
+The same cleanup now covers the semantic iteration metric carrier:
+`SemanticAnalysisIterations` no longer exposes its raw `field_nullability`
+counter. Semantic analysis constructs it through `new(...)`, and tests read the
+metric through `field_nullability()`. Guard:
+`layering::semantic_diagnostics_are_plumbed_through_translation_boundary`;
+focused behavior guard: `cargo test --test semantic_facts field_nullability`.
+
+Codex follow-up 2026-09-12: `facts::FactDiagnostic` is private-backed too.
+Fact validation code now constructs diagnostics through `new(...)`, and tests
+consume fact diagnostics through `code()` / `message()` instead of projecting
+the payload fields. Guard:
+`layering::semantic_diagnostics_are_plumbed_through_translation_boundary`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: `expr_shape::ExprShapeContext` is no longer a
+public field bag. Shape inference callers now build the context through
+`ExprShapeContext::new(...)`; cross-module consumers read optional signatures,
+representation plans, and facts through accessors instead of depending on the
+stored layout. Guard:
+`layering::idless_local_binding_compatibility_surface_stays_explicit`; compile
+guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: output-marker registry entries are no longer public
+field bags. `OutputMarker` is built through a const constructor and read through
+`name()`, `text()`, and `kind()`, so detector/report code no longer depends on
+the registry's storage layout. Guard:
+`layering::output_markers_are_not_public_field_bags`; focused behavior guard:
+`cargo test --test output_markers diagnostic_markers_are_emitted_through_compile_error -- --exact`.
+
+Codex follow-up 2026-09-12: the small saturation and hierarchy-subtype policy
+carriers are no longer public field bags. `WorklistSaturationPolicy`,
+`FiniteFactDomain`, `FiniteSaturationPolicy`, and `HierarchySubtypePolicy` now
+expose named policy answers while result/stat records stay inspectable. Guard:
+`layering::new_feature_responsibility_checklist_is_tracked`; focused behavior
+guard:
+`cargo test fact_saturation::tests::finite_saturation_policy_owns_budgeted_saturation_entrypoint --lib -- --exact`.
+
+Codex follow-up 2026-09-12: the representation boundary carriers for Java enum
+variant paths and source-summary superclass boundary erasure are private-backed.
+Lowering now consumes enum path components through accessors, and source-summary
+boundary tests read the named policy API instead of the stored vectors. Guard:
+`layering::representation_boundary_policy_carriers_are_not_public_field_bags`;
+focused behavior guards:
+`cargo test --test slot_shape_design representation_policy_erases_source_summary_superclass_boundaries -- --exact`,
+`cargo test --test slot_shape_design representation_policy_matches_generic_source_summary_superclass_aliases -- --exact`,
+`cargo test --test slot_shape_design source_summary_boundary_erasure_does_not_replace_parsed_source_type -- --exact`.
+
+Codex follow-up 2026-09-12: `EffectiveFact<T>` is no longer a public value /
+provenance field bag. Effective-fact queries construct it through `new()` and
+callers use `value()`, `provenance()`, or `into_value()` for the intended
+projection. Guard:
+`layering::effective_fact_precedence_queries_are_audited_by_consumer_module`;
+focused behavior guard: `cargo test --test effective_facts`.
+
+Codex follow-up 2026-09-12: `FunctionalInterfaceShape` is no longer a public
+field bag. The java.util.function grammar still derives the same method/input/
+return shape, but callers now consume it through accessors instead of the stored
+vectors/options. Guard:
+`layering::functional_interface_shape_is_not_a_public_field_bag`; focused
+behavior guard:
+`cargo test stdlib::functional_interface_shape_tests::every_derived_shape_is_a_known_functional_interface --lib -- --exact`.
+
+Codex follow-up 2026-09-12: `ExternalApiMethodPolicy` is no longer a public
+field bag. Stdlib policy construction now flows through `new()`, and semantic
+analysis, lowering, and policy-specific tests consume role/mutability/nullability
+and provenance through accessors while fact DTOs remain field-readable. Guard:
+`layering::stdlib_external_api_method_policy_is_not_a_public_field_bag`;
+focused behavior guards:
+`cargo test --test semantic_facts primitive_stream_mapper_and_sum_facts_are_read_only_non_null_builtin -- --exact`,
+`cargo test --test external_packs builtin_external_member_lookup_uses_cached_pack_facts -- --exact`,
+`cargo test --test external_packs pack_owned_domain_getters_take_precedence_over_generic_stdlib_provenance -- --exact`.
+
+Codex follow-up 2026-09-12: `StringConcatParts` is no longer a public field
+bag. String-concat semantic analysis returns a private-backed parts carrier,
+and planning consumes it through `into_parts()` instead of reaching into the
+storage vector. Guard:
+`layering::string_concat_layers_keep_semantics_and_rendering_separate`; focused
+behavior guard:
+`cargo test string_concat::tests::string_concat_detection_flattens_string_add_chains --lib -- --exact`.
+
+Codex follow-up 2026-09-12: `UnconstructableInnerClass` is no longer a public
+field bag. The inner-class diagnostic analysis still reports the same
+`inner_class_construction_panics` gap, but helper code now constructs the carrier
+through `new(...)` and reads the selected names through accessors. Guard:
+`layering::inner_class_construction_diagnostics_stay_internal`; focused behavior
+guard:
+`cargo test inner_class_capture::tests::qualified_inner_construction_is_reported_as_unconstructable --lib -- --exact`.
+
+Codex follow-up 2026-09-12: `lower::LoweredProgram` no longer exposes raw
+`file` / `diagnostics` fields. Translation consumes it through `into_parts()`
+after post-lowering diagnostics, mutable diagnostic append sites use
+`diagnostics_mut()`, and tests inspect the lowered file/diagnostics through
+read-only accessors. Guard:
+`layering::lowered_program_is_not_a_public_field_bag`; compile guard:
+`cargo check --tests`.
+
+Codex follow-up 2026-09-12: dependency-mode configuration records are no longer
+public field bags. `DependencySourceRoot`, `DependencyFactProvider`, and
+`DependencyModeConfig` now keep their path/mode/facts/provider lists behind
+constructors, mutators, collection views, and read-only accessors; CLI setup and
+resolver-benchmark reporting consume the named API instead of reaching into the
+storage layout. Guard:
+`layering::dependency_mode_config_is_not_a_public_field_bag`; focused behavior
+guard: `cargo test --test dependency_mode dependency_mode_config_tracks_roots_and_fact_provider_modes -- --exact`.
+
+Codex follow-up 2026-09-12: the crate-internal saturation result carriers are no
+longer public field bags either. `FiniteSaturationResult`,
+`WorklistSaturationResult`, and `WorklistStats` now expose read-only accessors
+and owned `into_parts()` methods; signature solving, hierarchy reachability, and
+semantic field-nullability consume those APIs instead of reaching into raw
+`state`/`iterations`/`diagnostics`/stat fields. Guard:
+`layering::signature_solver_collects_param_constraints_before_applying_shapes`;
+focused behavior guard:
+`cargo test fact_saturation::tests::finite_saturation_stops_when_step_is_stable --lib -- --exact`.
+Follow-up cleanup also made the private `fact_saturation` module's internal
+engine surface explicitly crate-local: `SaturationStep`, finite/worklist result
+carriers, the worklist policy/inserter, and finite/worklist entry points are
+`pub(crate)` rather than plain `pub` items inside a private module. The public
+DTOs returned by existing public queries (`FiniteFactDomain`,
+`FiniteSaturationPolicy`, and `WorklistStats`) remain public but private-backed.
+
+Codex follow-up 2026-09-12: the public parser/translation diagnostic carriers
+are no longer raw field bags. `diagnostics::Span` and
+`diagnostics::Diagnostic` now keep their storage private and expose named
+accessors; CLI reporting, known-gap checks, fixture diagnostics, and external
+pack manifest tests consume those methods instead of depending on the storage
+layout. Guard:
+`layering::semantic_diagnostics_are_plumbed_through_translation_boundary`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: the test-only borrowed string literal temporary
+plan in `coercion.rs` is private-backed too. The raw-compatibility test helper
+still proves that borrowed string literal raw leaves are recovered into
+structured replacement/initializer expressions, but assertions now inspect the
+plan through accessors instead of reaching into the payload fields. Focused
+guard:
+`cargo test coercion::tests::coercion_owns_borrowed_string_literal_temporary_projection --lib -- --exact`.
+
+Codex follow-up 2026-09-12: `SemanticAnalysisConfig` no longer exposes its
+semantic-analysis knobs as raw public fields. Callers use `Default` plus named
+builder methods for the few opt-out cases, and analysis code reads the same
+state through accessors. Guard:
+`layering::semantic_diagnostics_are_plumbed_through_translation_boundary`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: `ExternalFactsParse` also stopped exporting its
+raw `FactSet`/diagnostic storage. It already had accessors and `into_parts()`;
+the remaining public fields are now private so fact-manifest parsing has the
+same boundary shape as the other narrowed carriers. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`; compile
+guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: the parallel external-pack manifest parse carrier
+was narrowed the same way. `ExternalPackManifestParse` now keeps its parsed
+`FactSet` and diagnostics private; production built-in pack helpers and tests
+consume the existing `facts()`, `diagnostics()`, or `into_parts()` surfaces
+instead of reaching into raw fields. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`.
+
+Codex follow-up 2026-09-12: `slot_shape::TypeCapabilities` is private-backed
+too. Capability facts are still computed by `EffectiveFacts` and `RustSlotShape`
+as before, but production callers and tests read copy/clone/string/sequence/
+hierarchy/object-safety state through named accessors; only the central
+capability merge code has crate-local setters. Guard:
+`layering::slot_shape_design_guardrails`; compile guard:
+`cargo check --tests`.
+
+Codex follow-up 2026-09-12: `slot_shape::TypeIdentity` is private-backed as
+well. The identity remains derived from `RustSlotShape::java_ty` instead of
+being stored on the shape, and tests inspect declared type, runtime bounds,
+generic arguments, and erasure through read-only accessors. Guard:
+`layering::effective_fact_precedence_queries_are_audited_by_consumer_module`;
+focused behavior guard:
+`cargo test --test slot_shape_design type_identity_preserves_generic_erasure_and_wildcard_bounds -- --exact`.
+
+Codex follow-up 2026-09-12: `facts::HierarchyReachabilityResult` is no longer a
+public field bag. Hierarchy reachability callers read edges, saturation stats,
+and diagnostics through accessors or consume the result with `into_parts()`.
+Guard: `layering::coercion_plan_owns_instanceof_fallback_policy`; focused
+behavior guards:
+`cargo test --test slot_shape_design facts_saturate_reachable_hierarchy_edges_through_finite_domain -- --exact` and
+`cargo test --test slot_shape_design facts_saturate_recursive_hierarchy_edges_without_unbounded_expansion -- --exact`.
+
+Codex follow-up 2026-09-12: the batch translation input/control records and
+result report no longer expose raw writable fields for source inputs, options,
+per-file translations, timings, analysis metrics, or progress events.
+`BatchSource`, `BatchTranslation`, `BatchTranslationOptions`, and
+`BatchTranslationEvent` now use constructors and read-only accessors, and
+`BatchTranslationTimings` exposes elapsed metrics through read-only accessors
+instead of a public timing field bag. The simple `BatchAnalysisProfile` counters
+follow the same pattern; the nested signature profile remains the existing
+structured solver profile. `BatchTranslationReport` now exposes
+slices/references for translations, timings, profile, and events.
+Guards:
+`layering::batch_source_is_not_a_public_field_bag`,
+`layering::batch_translation_is_not_a_public_field_bag`,
+`layering::batch_translation_options_is_not_a_public_field_bag`,
+`layering::batch_translation_timings_is_not_a_public_field_bag`, and
+`layering::batch_analysis_profile_is_not_a_public_metrics_field_bag`, and
+`layering::batch_translation_event_is_not_a_public_field_bag`, and
+`layering::batch_translation_report_is_not_a_public_field_bag`; focused behavior
+guard:
+`cargo test --test batch_translation batch_parallel_emission_matches_serial_output_order -- --exact`.
+
+Codex follow-up 2026-09-12: the small resolver-benchmark report row carriers
+are no longer public field bags. `ResolverBenchmarkSourceRoot` and
+`ResolverBenchmarkFactProvider` still let reporting code publish source-root and
+provider counts, but their storage is private and downstream callers read the
+values through accessors. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: member-access policy and plan construction now uses
+`JavaMemberAccessPolicy::new` and `MemberAccessPlan::new` instead of repeating
+raw record literals at each planning branch. The fields were already hidden from
+callers; this narrows the remaining same-module construction surface so the
+member-access boundary consistently flows through named policy/plan builders.
+Guard: `layering::member_access_plan_stays_fact_and_shape_based`; compile
+guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: resolver-benchmark diagnostic, signature-count,
+source-summary recommendation, source-dependency, unresolved-target,
+external-pack, external-API context, and external guess rows no longer expose
+public payload fields for code, message, dependency mode, label, package prefix,
+target type, receiver type, method/field names, arity, report mode, unresolved
+target kind, constructor argument labels, enclosing context, counts, or sample
+files. Report rendering still owns the row layout internally, while tests and
+downstream callers inspect summary rows through read-only accessors. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: the rendered support-item declared-type scanner
+`support_item_declared_type_names` is crate-local. The lowerer still uses it to
+avoid duplicate facade support declarations, but downstream callers cannot
+depend on a helper that infers semantic owners from rendered/raw support items.
+Compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: support-emission predicates such as
+`program_uses_java_platform_facades`, Java class-token detection, string runtime
+helper detection, erased-object runtime support detection, and Java
+`String.format` detection are crate-local. Integration tests now assert emitted
+support and generated behavior rather than importing the lowerer's
+implementation policy for deciding which raw support blocks to include. Guards:
+`slot_shape_design::java_platform_facade_support_covers_path_uri_and_file_boundaries`,
+`slot_shape_design::java_logging_facade_supports_inherited_logger_calls`, and
+compile guard `cargo check --tests`.
+
+Codex follow-up 2026-09-12: `is_java_platform_facade_type_name` is crate-local
+too. Facade membership remains shared between lowering/planning modules, but it
+is no longer exported as a public stdlib query; public coverage stays on emitted
+facade support and generated behavior. Compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: `java_collection_kind_for_name` is crate-local.
+Collection kind classification is still shared by type/render/call/lowering
+modules, but downstream callers no longer see it as a public stdlib API.
+Compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: the external static string constant support-item
+builder
+`external_static_string_constant_support_items_with_context_programs_and_declared_owners`
+is crate-local. The lowerer can still assemble structured facade placeholders,
+but integration tests now assert generated support behavior and reject the
+public helper signature instead of importing the raw support-item builder.
+Guard:
+`slot_shape_design::external_constant_facade_shells_are_defaultable_for_constructor_fallbacks`;
+compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: the external API facade support-item builder
+`external_api_facade_support_items_with_local_type_program` is crate-local too.
+The lowerer still uses it to assemble facade support, and direct support-output
+assertions now live beside `stdlib.rs`; integration tests keep generated
+translation behavior instead of importing the raw support builder. Guard:
+`stdlib::external_facade_support_tests`; compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-12: the remaining raw stdlib support-item builders for
+`JavaClass`, floating-point display, `Comparable`, platform facades, string
+split/deep-array helpers, and `String.format` are crate-local now. The lowerer
+still requests those raw support blocks by policy, but public tests no longer
+import the raw builders; direct support-text assertions live in `stdlib`.
+Guards: `stdlib::stdlib_support_item_tests` and
+`layering::production_formatted_raw_constructors_stay_in_named_boundaries`;
+compile guard: `cargo check --tests`.

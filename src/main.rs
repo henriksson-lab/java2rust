@@ -462,10 +462,7 @@ fn load_batch_sources(path: &str) -> Result<Vec<new_java2rust::BatchSource>, Str
         .into_iter()
         .map(|path| {
             fs::read_to_string(&path)
-                .map(|source| new_java2rust::BatchSource {
-                    path: path.clone(),
-                    source,
-                })
+                .map(|source| new_java2rust::BatchSource::new(path.clone(), source))
                 .map_err(|err| format!("failed to read {path}: {err}"))
         })
         .collect()
@@ -553,14 +550,14 @@ fn run_translate_batch(
             let _guard = event_write_lock
                 .lock()
                 .expect("batch event write lock poisoned");
-            let rust_path = generated_dir.join(batch_stem(event.index, &event.path) + ".rs");
+            let rust_path = generated_dir.join(batch_stem(event.index(), event.path()) + ".rs");
             if let Err(err) = append_batch_worker_event(
                 Some(&event_path),
-                event.phase,
-                event.index,
-                &event.path,
-                event.elapsed_ms,
-                event.status,
+                event.phase(),
+                event.index(),
+                event.path(),
+                event.elapsed_ms(),
+                event.status(),
                 &rust_path,
             ) {
                 eprintln!("{err}");
@@ -574,73 +571,70 @@ fn run_translate_batch(
             &context_summary_sources,
             context_dirs_are_emitted,
             &external_facts,
-            &new_java2rust::BatchTranslationOptions {
-                emission_jobs: jobs,
-                event_sink,
-            },
+            &new_java2rust::BatchTranslationOptions::new(jobs, event_sink),
         );
     append_batch_phase_event(
         phase_events_path,
         "batch_primary_parse",
         "ok",
-        report.timings.primary_parse_ms,
+        report.timings().primary_parse_ms(),
         &format!("{} primary files", primary_sources.len()),
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_context_parse",
         "ok",
-        report.timings.context_parse_ms,
+        report.timings().context_parse_ms(),
         &format!("{} context files", context_sources.len()),
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_summary_parse",
         "ok",
-        report.timings.summary_parse_ms,
+        report.timings().summary_parse_ms(),
         &format!("{} summary files", context_summary_sources.len()),
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_global_analysis",
         "ok",
-        report.timings.global_analysis_ms,
+        report.timings().global_analysis_ms(),
         "resolver/semantic/representation/signature",
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_global_resolve_context",
         "ok",
-        report.timings.global_resolve_ms,
+        report.timings().global_resolve_ms(),
         "resolve_program_with_source_program_and_facts",
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_global_semantic",
         "ok",
-        report.timings.global_semantic_ms,
+        report.timings().global_semantic_ms(),
         "semantic_analysis::analyze_program",
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_global_representation",
         "ok",
-        report.timings.global_representation_ms,
+        report.timings().global_representation_ms(),
         "representation::plan_representations",
     )?;
     append_batch_phase_event(
         phase_events_path,
         "batch_global_signature",
         "ok",
-        report.timings.global_signature_ms,
+        report.timings().global_signature_ms(),
         "signature::solve_signatures",
     )?;
-    append_signature_profile_phase_events(phase_events_path, &report.analysis_profile.signature)?;
+    append_signature_profile_phase_events(phase_events_path, &report.analysis_profile().signature)?;
     append_batch_phase_event(
         phase_events_path,
         "batch_emission",
         "ok",
-        report.timings.emission_ms,
+        report.timings().emission_ms(),
         &format!("jobs={jobs}"),
     )?;
 
@@ -649,9 +643,9 @@ fn run_translate_batch(
     let analysis_profile_path = Path::new(out_dir).join("analysis-profile.tsv");
     write_analysis_profile(
         &analysis_profile_path,
-        &report.analysis_profile,
-        &report.timings,
-        &report.translations,
+        report.analysis_profile(),
+        report.timings(),
+        report.translations(),
     )?;
     let mut status = String::from(
         "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n",
@@ -660,30 +654,32 @@ fn run_translate_batch(
         "index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\tstubbed_constants\n",
     );
     let write_start = Instant::now();
-    for (index, translation) in report.translations.iter().enumerate() {
-        let rust_path = generated_dir.join(batch_stem(index + 1, &translation.path) + ".rs");
-        fs::write(&rust_path, &translation.rust)
+    for (index, translation) in report.translations().iter().enumerate() {
+        let rust_path = generated_dir.join(batch_stem(index + 1, translation.path()) + ".rs");
+        fs::write(&rust_path, translation.rust())
             .map_err(|err| format!("failed to write {}: {err}", rust_path.display()))?;
-        for diagnostic in translation.diagnostics.iter() {
+        for diagnostic in translation.diagnostics().iter() {
             eprintln!(
                 "{:?} {}: {}",
-                diagnostic.severity, diagnostic.code, diagnostic.message
+                diagnostic.severity(),
+                diagnostic.code(),
+                diagnostic.message()
             );
         }
-        let invalid_patterns = output_markers::count_invalid_patterns(&translation.rust);
-        let stubbed_constants = output_markers::count_stubbed_constants(&translation.rust);
+        let invalid_patterns = output_markers::count_invalid_patterns(translation.rust());
+        let stubbed_constants = output_markers::count_stubbed_constants(translation.rust());
         let unsupported_members = translation
-            .diagnostics
+            .diagnostics()
             .iter()
-            .filter(|diagnostic| diagnostic.code == "unsupported_member")
+            .filter(|diagnostic| diagnostic.code() == "unsupported_member")
             .count();
-        let translate_status = translate_status_for_diagnostics(&translation.diagnostics);
+        let translate_status = translate_status_for_diagnostics(translation.diagnostics());
         status.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            translation.path,
+            translation.path(),
             rust_path.display(),
             translate_status,
-            translation.diagnostics.len(),
+            translation.diagnostics().len(),
             invalid_patterns,
             unsupported_members,
             stubbed_constants
@@ -691,24 +687,24 @@ fn run_translate_batch(
         manifest.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
             index + 1,
-            translation.path,
+            translation.path(),
             rust_path.display(),
-            stable_hash_hex(&translation.rust),
-            translation.diagnostics.len(),
+            stable_hash_hex(translation.rust()),
+            translation.diagnostics().len(),
             invalid_patterns,
             stubbed_constants
         ));
     }
     if worker_events_path.is_none() {
-        for event in &report.events {
+        for event in report.events() {
             append_batch_worker_event(
                 worker_events_path,
-                event.phase,
-                event.index,
-                &event.path,
-                event.elapsed_ms,
-                event.status,
-                &generated_dir.join(batch_stem(event.index, &event.path) + ".rs"),
+                event.phase(),
+                event.index(),
+                event.path(),
+                event.elapsed_ms(),
+                event.status(),
+                &generated_dir.join(batch_stem(event.index(), event.path()) + ".rs"),
             )?;
         }
     }
@@ -751,42 +747,42 @@ fn append_signature_profile_phase_events(
         path,
         "batch_global_signature_collect_constraints",
         "ok",
-        profile.collect_constraints_ms,
+        profile.collect_constraints_ms(),
         "signature::collect_signature_constraints",
     )?;
     append_batch_phase_event(
         path,
         "batch_global_signature_dependency_graph",
         "ok",
-        profile.dependency_graph_ms,
+        profile.dependency_graph_ms(),
         "signature::build_signature_dependency_graph",
     )?;
     append_batch_phase_event(
         path,
         "batch_global_signature_scc",
         "ok",
-        profile.scc_analysis_ms,
+        profile.scc_analysis_ms(),
         "signature::analyze_signature_dependency_sccs",
     )?;
     append_batch_phase_event(
         path,
         "batch_global_signature_pass_plan",
         "ok",
-        profile.pass_plan_ms,
+        profile.pass_plan_ms(),
         "signature::plan_signature_solver_passes",
     )?;
     append_batch_phase_event(
         path,
         "batch_global_signature_fixpoint",
         "ok",
-        profile.fixpoint_ms,
+        profile.fixpoint_ms(),
         "signature constraint saturation",
     )?;
     append_batch_phase_event(
         path,
         "batch_global_signature_plan_build",
         "ok",
-        profile.plan_build_ms,
+        profile.plan_build_ms(),
         "signature plan build",
     )
 }
@@ -798,149 +794,161 @@ fn write_analysis_profile(
     translations: &[new_java2rust::BatchTranslation],
 ) -> Result<(), String> {
     let mut out = String::from("metric\tvalue\n");
-    push_profile_metric(&mut out, "primary_files", profile.primary_files);
-    push_profile_metric(&mut out, "context_files", profile.context_files);
-    push_profile_metric(&mut out, "summary_files", profile.summary_files);
-    push_profile_metric(&mut out, "program_types", profile.program_types);
-    push_profile_metric(&mut out, "program_methods", profile.program_methods);
+    push_profile_metric(&mut out, "primary_files", profile.primary_files());
+    push_profile_metric(&mut out, "context_files", profile.context_files());
+    push_profile_metric(&mut out, "summary_files", profile.summary_files());
+    push_profile_metric(&mut out, "program_types", profile.program_types());
+    push_profile_metric(&mut out, "program_methods", profile.program_methods());
     push_profile_metric(
         &mut out,
         "program_constructors",
-        profile.program_constructors,
+        profile.program_constructors(),
     );
-    push_profile_metric(&mut out, "program_fields", profile.program_fields);
-    push_profile_metric(&mut out, "external_fact_count", profile.external_fact_count);
-    push_profile_metric(&mut out, "global_analysis_ms", timings.global_analysis_ms);
-    push_profile_metric(&mut out, "global_resolve_ms", timings.global_resolve_ms);
-    push_profile_metric(&mut out, "global_semantic_ms", timings.global_semantic_ms);
+    push_profile_metric(&mut out, "program_fields", profile.program_fields());
+    push_profile_metric(
+        &mut out,
+        "external_fact_count",
+        profile.external_fact_count(),
+    );
+    push_profile_metric(&mut out, "global_analysis_ms", timings.global_analysis_ms());
+    push_profile_metric(&mut out, "global_resolve_ms", timings.global_resolve_ms());
+    push_profile_metric(&mut out, "global_semantic_ms", timings.global_semantic_ms());
     push_profile_metric(
         &mut out,
         "global_representation_ms",
-        timings.global_representation_ms,
+        timings.global_representation_ms(),
     );
-    push_profile_metric(&mut out, "global_signature_ms", timings.global_signature_ms);
+    push_profile_metric(
+        &mut out,
+        "global_signature_ms",
+        timings.global_signature_ms(),
+    );
     let signature = &profile.signature;
     push_profile_metric(
         &mut out,
         "signature_collect_constraints_ms",
-        signature.collect_constraints_ms,
+        signature.collect_constraints_ms(),
     );
     push_profile_metric(
         &mut out,
         "signature_dependency_graph_ms",
-        signature.dependency_graph_ms,
+        signature.dependency_graph_ms(),
     );
     push_profile_metric(
         &mut out,
         "signature_scc_analysis_ms",
-        signature.scc_analysis_ms,
+        signature.scc_analysis_ms(),
     );
-    push_profile_metric(&mut out, "signature_pass_plan_ms", signature.pass_plan_ms);
-    push_profile_metric(&mut out, "signature_fixpoint_ms", signature.fixpoint_ms);
-    push_profile_metric(&mut out, "signature_plan_build_ms", signature.plan_build_ms);
-    push_profile_metric(&mut out, "signature_slot_count", signature.slot_count);
+    push_profile_metric(&mut out, "signature_pass_plan_ms", signature.pass_plan_ms());
+    push_profile_metric(&mut out, "signature_fixpoint_ms", signature.fixpoint_ms());
+    push_profile_metric(
+        &mut out,
+        "signature_plan_build_ms",
+        signature.plan_build_ms(),
+    );
+    push_profile_metric(&mut out, "signature_slot_count", signature.slot_count());
     push_profile_metric(
         &mut out,
         "signature_unique_constraint_count",
-        signature.unique_constraint_count,
+        signature.unique_constraint_count(),
     );
     push_profile_metric(
         &mut out,
         "signature_iteration_budget",
-        signature.iteration_budget,
+        signature.iteration_budget(),
     );
     push_profile_metric(
         &mut out,
         "signature_graph_node_count",
-        signature.graph_node_count,
+        signature.graph_node_count(),
     );
     push_profile_metric(
         &mut out,
         "signature_graph_edge_count",
-        signature.graph_edge_count,
+        signature.graph_edge_count(),
     );
     push_profile_metric(
         &mut out,
         "signature_component_count",
-        signature.component_count,
+        signature.component_count(),
     );
     push_profile_metric(
         &mut out,
         "signature_cyclic_component_count",
-        signature.cyclic_component_count,
+        signature.cyclic_component_count(),
     );
     push_profile_metric(
         &mut out,
         "signature_max_component_size",
-        signature.max_component_size,
+        signature.max_component_size(),
     );
     push_profile_metric(
         &mut out,
         "signature_planned_components",
-        signature.planned_components,
+        signature.planned_components(),
     );
     push_profile_metric(
         &mut out,
         "signature_planned_mutable_components",
-        signature.planned_mutable_components,
+        signature.planned_mutable_components(),
     );
     push_profile_metric(
         &mut out,
         "signature_fixpoint_iterations",
-        signature.fixpoint_iterations,
+        signature.fixpoint_iterations(),
     );
-    push_profile_metric(&mut out, "signature_diagnostics", signature.diagnostics);
+    push_profile_metric(&mut out, "signature_diagnostics", signature.diagnostics());
     push_profile_metric(
         &mut out,
         "signature_component_sweeps",
-        signature.component_sweeps,
+        signature.component_sweeps(),
     );
     push_profile_metric(
         &mut out,
         "signature_changed_component_sweeps",
-        signature.changed_component_sweeps,
+        signature.changed_component_sweeps(),
     );
-    push_profile_metric(&mut out, "signature_state_clones", signature.state_clones);
+    push_profile_metric(&mut out, "signature_state_clones", signature.state_clones());
     push_profile_metric(
         &mut out,
         "signature_state_clone_ms",
-        signature.state_clone_ms,
+        signature.state_clone_ms(),
     );
     push_profile_metric(
         &mut out,
         "signature_propagation_sweep_ms",
-        signature.propagation_sweep_ms,
+        signature.propagation_sweep_ms(),
     );
     push_profile_metric(
         &mut out,
         "signature_component_rollback_ms",
-        signature.component_rollback_ms,
+        signature.component_rollback_ms(),
     );
     push_profile_metric(
         &mut out,
         "signature_component_change_check_ms",
-        signature.component_change_check_ms,
+        signature.component_change_check_ms(),
     );
-    for (label, arm) in &signature.propagation_arms {
+    for (label, arm) in signature.propagation_arms() {
         push_profile_metric(
             &mut out,
             &format!("signature_propagation_arm_{label}_sweeps"),
-            arm.sweeps,
+            arm.sweeps(),
         );
         push_profile_metric(
             &mut out,
             &format!("signature_propagation_arm_{label}_changed_sweeps"),
-            arm.changed_sweeps,
+            arm.changed_sweeps(),
         );
         push_profile_metric(
             &mut out,
             &format!("signature_propagation_arm_{label}_ms"),
-            arm.elapsed_ns / 1_000_000,
+            arm.elapsed_ns() / 1_000_000,
         );
         push_profile_metric(
             &mut out,
             &format!("signature_propagation_arm_{label}_us"),
-            arm.elapsed_ns / 1_000,
+            arm.elapsed_ns() / 1_000,
         );
     }
     // A compile-error count cannot see silent failures: a no-op facade, an
@@ -955,11 +963,11 @@ fn write_analysis_profile(
     let mut unimplemented_facade_methods = 0;
     let mut compile_error_markers = 0;
     for translation in translations {
-        noop_facade_methods += output_markers::count_noop_facade_methods(&translation.rust);
-        noop_facade_call_sites += output_markers::count_noop_facade_call_sites(&translation.rust);
+        noop_facade_methods += output_markers::count_noop_facade_methods(translation.rust());
+        noop_facade_call_sites += output_markers::count_noop_facade_call_sites(translation.rust());
         unimplemented_facade_methods +=
-            output_markers::count_unimplemented_facade_methods(&translation.rust);
-        compile_error_markers += output_markers::count_compile_error_markers(&translation.rust);
+            output_markers::count_unimplemented_facade_methods(translation.rust());
+        compile_error_markers += output_markers::count_compile_error_markers(translation.rust());
     }
     push_profile_metric(&mut out, "noop_facade_methods", noop_facade_methods);
     push_profile_metric(&mut out, "noop_facade_call_sites", noop_facade_call_sites);
@@ -1144,8 +1152,9 @@ fn load_external_inputs(
         let fact_source = fs::read_to_string(facts_path)
             .map_err(|err| format!("failed to read {facts_path}: {err}"))?;
         let parsed_facts = new_java2rust::external_facts::parse_external_facts(&fact_source);
-        diagnostics.extend(parsed_facts.diagnostics);
-        facts.extend_from(parsed_facts.facts);
+        let (parsed_fact_set, parsed_diagnostics) = parsed_facts.into_parts();
+        diagnostics.extend(parsed_diagnostics);
+        facts.extend_from(parsed_fact_set);
     }
 
     for manifest_path in &external_inputs.pack_manifest_paths {
@@ -1153,8 +1162,8 @@ fn load_external_inputs(
             .map_err(|err| format!("failed to read {manifest_path}: {err}"))?;
         let parsed_manifest =
             new_java2rust::external_packs::parse_external_pack_manifest(&manifest_source);
-        diagnostics.extend(parsed_manifest.diagnostics);
-        let mut manifest_facts = parsed_manifest.facts;
+        let (mut manifest_facts, manifest_diagnostics) = parsed_manifest.into_parts();
+        diagnostics.extend(manifest_diagnostics);
         enrich_external_pack_facade_abi(manifest_path, &manifest_source, &mut manifest_facts);
         facts.extend_from(manifest_facts);
     }
@@ -1178,11 +1187,12 @@ fn load_external_fact_providers(
         let fact_source = fs::read_to_string(facts_path)
             .map_err(|err| format!("failed to read {facts_path}: {err}"))?;
         let parsed_facts = new_java2rust::external_facts::parse_external_facts(&fact_source);
-        diagnostics.extend(parsed_facts.diagnostics);
+        let (parsed_fact_set, parsed_diagnostics) = parsed_facts.into_parts();
+        diagnostics.extend(parsed_diagnostics);
         config.add_fact_provider(
             format!("facts:{facts_path}"),
             new_java2rust::dependency_mode::DependencyMode::ExternalFactModel,
-            parsed_facts.facts,
+            parsed_fact_set,
         );
     }
 
@@ -1191,8 +1201,8 @@ fn load_external_fact_providers(
             .map_err(|err| format!("failed to read {manifest_path}: {err}"))?;
         let parsed_manifest =
             new_java2rust::external_packs::parse_external_pack_manifest(&manifest_source);
-        diagnostics.extend(parsed_manifest.diagnostics);
-        let mut manifest_facts = parsed_manifest.facts;
+        let (mut manifest_facts, manifest_diagnostics) = parsed_manifest.into_parts();
+        diagnostics.extend(manifest_diagnostics);
         enrich_external_pack_facade_abi(manifest_path, &manifest_source, &mut manifest_facts);
         config
             .add_external_pack_provider(format!("manifest:{manifest_path}"), manifest_facts)
@@ -1271,7 +1281,7 @@ fn enrich_external_pack_facade_abi(
             )
             .map(|mapping| mapping.rust_name.clone())
             .unwrap_or_else(|| {
-                new_java2rust::call_plan::external_method_rust_name(
+                new_java2rust::call_plan::external_facade_method_rust_name_for_abi(
                     receiver_type,
                     &effect.method_name,
                     arg_count,
@@ -1329,13 +1339,10 @@ fn enrich_external_pack_facade_abi(
             .external_crate_constructor_mapping_for(&constructor.type_name, arg_count)
             .map(|mapping| mapping.rust_name.clone())
             .unwrap_or_else(|| {
-                new_java2rust::call_plan::unresolved_constructor_rust_name_for_facts(
-                    &new_java2rust::java_ir::JavaType::Named {
-                        name: constructor.type_name.clone(),
-                        args: Vec::new(),
-                    },
-                    facts,
+                new_java2rust::call_plan::external_facade_constructor_rust_name_for_abi(
+                    &constructor.type_name,
                     arg_count,
+                    facts,
                 )
             });
         let Some(abi) = abi_map.fns.get(&(owner, rust_name)) else {
@@ -2043,7 +2050,9 @@ fn print_diagnostics(diagnostics: &new_java2rust::diagnostics::DiagnosticBag) {
     for diagnostic in diagnostics.iter() {
         eprintln!(
             "{:?} {}: {}",
-            diagnostic.severity, diagnostic.code, diagnostic.message
+            diagnostic.severity(),
+            diagnostic.code(),
+            diagnostic.message()
         );
     }
 }
@@ -2543,18 +2552,18 @@ mod tests {
         let diagnostics = load_external_fact_providers(&inputs, &mut config).unwrap();
 
         assert!(diagnostics.is_empty());
-        assert_eq!(config.fact_providers.len(), 3);
+        assert_eq!(config.fact_providers().len(), 3);
         assert_eq!(
-            config.fact_providers[0].mode,
+            config.fact_providers()[0].mode(),
             new_java2rust::dependency_mode::DependencyMode::ExternalFactModel
         );
         assert_eq!(
-            config.fact_providers[1].mode,
+            config.fact_providers()[1].mode(),
             new_java2rust::dependency_mode::DependencyMode::RustCrateMapping
         );
         assert_eq!(
-            config.fact_providers[1]
-                .facts
+            config.fact_providers()[1]
+                .facts()
                 .external_library_pack_for_type("dep.Record")
                 .unwrap()
                 .rust_target
@@ -2562,16 +2571,16 @@ mod tests {
             Some("dep_runtime")
         );
         assert_eq!(
-            config.fact_providers[2].name,
+            config.fact_providers()[2].name(),
             "builtin-pack:hdf5".to_string()
         );
         assert_eq!(
-            config.fact_providers[2].mode,
+            config.fact_providers()[2].mode(),
             new_java2rust::dependency_mode::DependencyMode::RustCrateMapping
         );
         assert!(
-            config.fact_providers[2]
-                .facts
+            config.fact_providers()[2]
+                .facts()
                 .external_library_pack_for_type("HDF5File")
                 .is_some()
         );
@@ -2622,7 +2631,7 @@ mod tests {
             err.contains("split mixed-mode manifests into separate providers"),
             "{err}"
         );
-        assert!(config.fact_providers.is_empty());
+        assert!(config.fact_providers().is_empty());
 
         std::fs::remove_file(manifest_path).unwrap();
         std::fs::remove_dir(temp_dir).unwrap();
@@ -2756,18 +2765,14 @@ mod tests {
                 .parameter_nullability,
             NullabilityState::DefinitelyNonNull
         );
-        let key = new_java2rust::facts::CallableKey::method(
-            "Assert",
-            "getSchema",
-            new_java2rust::facts::Staticness::Unknown,
-            0,
-        );
-        let abi = facts.facade_abi_for_key(&key).unwrap_or_else(|| {
-            panic!(
-                "facade crate signature should generate a structured ABI fact; got {:?}",
-                facts.facade_abi_facts
-            )
-        });
+        let abi = facts
+            .facade_abi_for_external_method("Assert", "getSchema", 0)
+            .unwrap_or_else(|| {
+                panic!(
+                    "facade crate signature should generate a structured ABI fact; got {:?}",
+                    facts.facade_abi_facts
+                )
+            });
         assert_eq!(
             abi.receiver,
             new_java2rust::facts::ReceiverAbi::BorrowedSelf

@@ -439,6 +439,12 @@ impl RustExpr {
         }
     }
 
+    /// Whether this expression is still an opaque raw leaf after removing
+    /// compatibility shape tags.
+    pub(crate) fn is_raw_leaf(&self) -> bool {
+        matches!(self.unshaped(), RustExpr::Raw(_))
+    }
+
     /// [`Self::unshaped`] by value.
     pub fn into_unshaped(self) -> RustExpr {
         match self {

@@ -132,16 +132,18 @@ fn count_by_name(name: &str, rust: &str) -> usize {
 #[test]
 fn every_marker_has_a_fixture() {
     for marker in OUTPUT_MARKERS {
-        let has_fixture = FIXTURES.iter().any(|fixture| fixture.marker == marker.name);
+        let has_fixture = FIXTURES
+            .iter()
+            .any(|fixture| fixture.marker == marker.name());
         let has_dedicated_test = COVERED_BY_DEDICATED_TEST
             .iter()
-            .any(|(name, _)| *name == marker.name);
+            .any(|(name, _)| *name == marker.name());
         assert!(
             has_fixture || has_dedicated_test,
             "marker {} has no fixture in tests/output_markers.rs. A detector nothing \
              exercises is exactly the failure this file guards against: add a fixture \
              that produces it, or remove the detector.",
-            marker.name
+            marker.name()
         );
     }
 }
@@ -173,12 +175,12 @@ fn each_fixture_produces_its_marker_text() {
         let marker = output_markers::marker_by_name(fixture.marker).expect("registered marker");
         let rust = translate_source(fixture.java).rust;
         assert!(
-            rust.contains(marker.text),
+            rust.contains(marker.text()),
             "fixture for marker {} did not emit {:?}.\n\
              Either the lowering stopped emitting the marker or the constant drifted \
              from it — both are silent losses of coverage.\n{rust}",
-            marker.name,
-            marker.text
+            marker.name(),
+            marker.text()
         );
     }
 }
@@ -216,10 +218,10 @@ fn source_summary_method_marker_uses_source_summary_emitter() {
         .expect("registered source-summary marker");
 
     assert!(
-        rust.contains(marker.text),
+        rust.contains(marker.text()),
         "source-summary dependency should emit {:?} through the real summary \
          facade path.\n{rust}",
-        marker.text
+        marker.text()
     );
     assert!(
         count_unimplemented_facade_methods(&rust) > 0,
@@ -274,9 +276,9 @@ fn inner_capture_gap_reports_mutable_shared_storage_work_queue() {
     );
     assert!(
         translation.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "storage_strategy_disagreement"
+            diagnostic.code() == "storage_strategy_disagreement"
                 && diagnostic
-                    .message
+                    .message()
                     .contains("InnerCapture needs SharedLocal")
         }),
         "inner capture should also name the unimplemented SharedLocal storage \
@@ -364,9 +366,9 @@ fn unmodelled_static_constant_is_counted() {
     let marker =
         output_markers::marker_by_name("unmodelled_static_constant").expect("registered marker");
     assert!(
-        rust.contains(marker.text),
+        rust.contains(marker.text()),
         "expected {:?} in the output.\n{rust}",
-        marker.text
+        marker.text()
     );
     assert!(
         count_stubbed_constants(&rust) > 0,
@@ -394,13 +396,13 @@ fn diagnostic_markers_are_emitted_through_compile_error() {
     // comment, so it genuinely does need its own clause — that distinction is
     // what the drifted detector obscured.
     for marker in OUTPUT_MARKERS {
-        if marker.kind != OutputMarkerKind::Diagnostic {
+        if marker.kind() != OutputMarkerKind::Diagnostic {
             continue;
         }
         assert!(
-            !marker.text.is_empty(),
+            !marker.text().is_empty(),
             "diagnostic marker {} has no text",
-            marker.name
+            marker.name()
         );
     }
 }

@@ -16,8 +16,26 @@ use crate::parser::parse_type;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalFactsParse {
-    pub facts: FactSet,
-    pub diagnostics: DiagnosticBag,
+    facts: FactSet,
+    diagnostics: DiagnosticBag,
+}
+
+impl ExternalFactsParse {
+    pub fn new(facts: FactSet, diagnostics: DiagnosticBag) -> Self {
+        Self { facts, diagnostics }
+    }
+
+    pub fn facts(&self) -> &FactSet {
+        &self.facts
+    }
+
+    pub fn diagnostics(&self) -> &DiagnosticBag {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(self) -> (FactSet, DiagnosticBag) {
+        (self.facts, self.diagnostics)
+    }
 }
 
 pub fn parse_external_facts(source: &str) -> ExternalFactsParse {
@@ -737,7 +755,7 @@ pub fn parse_external_facts(source: &str) -> ExternalFactsParse {
         }
     }
 
-    ExternalFactsParse { facts, diagnostics }
+    ExternalFactsParse::new(facts, diagnostics)
 }
 
 fn strip_comment(line: &str) -> &str {

@@ -26,14 +26,34 @@ pub enum BorrowedContentPolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BorrowedContentCapabilityPolicy {
-    pub string_content: bool,
-    pub sequence_element: Option<JavaType>,
+    string_content: bool,
+    sequence_element: Option<JavaType>,
+}
+
+impl BorrowedContentCapabilityPolicy {
+    pub fn string_content(&self) -> bool {
+        self.string_content
+    }
+
+    pub fn sequence_element(&self) -> Option<&JavaType> {
+        self.sequence_element.as_ref()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BorrowedContentTypePolicy {
-    pub java_ty: JavaType,
-    pub policy: Option<BorrowedContentPolicy>,
+    java_ty: JavaType,
+    policy: Option<BorrowedContentPolicy>,
+}
+
+impl BorrowedContentTypePolicy {
+    pub fn java_ty(&self) -> &JavaType {
+        &self.java_ty
+    }
+
+    pub fn policy(&self) -> Option<BorrowedContentPolicy> {
+        self.policy
+    }
 }
 
 impl BorrowedContentPolicy {
@@ -84,7 +104,8 @@ pub fn method_param_borrowed_content_policy_with_effective_facts(
     usage: &UsageFacts,
     facts: &EffectiveFacts<'_>,
 ) -> Option<BorrowedContentPolicy> {
-    let content_policy = borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy;
+    let content_policy =
+        borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy();
     if method_param_allows_borrowed_content(ty, method, param, usage, facts)
         || method_return_allows_borrowed_param_content(ty, method, param, usage, facts)
     {
@@ -120,14 +141,14 @@ pub fn constructor_param_borrowed_content_policy_with_effective_facts(
 ) -> Option<BorrowedContentPolicy> {
     if ctor.modifiers.contains(&Modifier::Public)
         || borrowed_content_type_policy_with_effective_facts(&param.ty, facts)
-            .policy
+            .policy()
             .is_none()
     {
         return None;
     }
     let ctor_usage = usage.source_constructor_usage(ty, ctor)?;
     if usage_allows_borrowed_content(ctor_usage, param) {
-        borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
+        borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy()
     } else {
         None
     }
@@ -171,7 +192,7 @@ pub fn borrowed_return_content_policy_from_param_with_effective_facts(
 ) -> Option<BorrowedContentPolicy> {
     method.params.iter().find_map(|param| {
         if method_return_allows_borrowed_param_content(ty, method, param, usage, facts) {
-            borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy
+            borrowed_content_type_policy_with_effective_facts(&param.ty, facts).policy()
         } else {
             None
         }
@@ -226,9 +247,9 @@ pub fn borrowed_content_type_policy_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> BorrowedContentTypePolicy {
     let capability = borrowed_content_capability_policy_with_effective_facts(java_ty, facts);
-    let policy = if capability.string_content {
+    let policy = if capability.string_content() {
         Some(BorrowedContentPolicy::string_like_view())
-    } else if capability.sequence_element.is_some() {
+    } else if capability.sequence_element().is_some() {
         Some(BorrowedContentPolicy::sequence_like_view())
     } else {
         None
@@ -247,7 +268,7 @@ fn method_param_allows_borrowed_content(
     facts: &EffectiveFacts<'_>,
 ) -> bool {
     if borrowed_content_type_policy_with_effective_facts(&param.ty, facts)
-        .policy
+        .policy()
         .is_none()
     {
         return false;
@@ -266,10 +287,10 @@ fn method_return_allows_borrowed_param_content(
     facts: &EffectiveFacts<'_>,
 ) -> bool {
     if borrowed_content_type_policy_with_effective_facts(&param.ty, facts)
-        .policy
+        .policy()
         .is_none()
         || borrowed_content_type_policy_with_effective_facts(&method.return_type, facts)
-            .policy
+            .policy()
             .is_none()
         || method.modifiers.contains(&Modifier::Public)
         || !method.modifiers.contains(&Modifier::Static)
@@ -284,31 +305,34 @@ fn method_return_allows_borrowed_param_content(
     };
     if param.binding.is_some() {
         if !binding
-            .uses
+            .uses()
             .iter()
             .any(|usage| matches!(usage, BindingUse::Returned))
         {
             return false;
         }
     } else {
-        if !method_exactly_returns_param(method, &param.source_name) {
-            return false;
-        }
-        if legacy_idless_method_assigns_to_binding(method, &param.source_name) {
+        if !idless_compatibility_exact_returned_param_is_assignment_safe(method, &param.source_name)
+        {
             return false;
         }
     }
-    !binding.uses.is_empty()
+    !binding.uses().is_empty()
         && binding
-            .uses
+            .uses()
             .iter()
             .all(|usage| matches!(usage, BindingUse::Returned | BindingUse::ContentRead))
 }
 
-pub(crate) fn legacy_idless_method_assigns_to_binding(
+pub(crate) fn idless_compatibility_exact_returned_param_is_assignment_safe(
     method: &MethodDecl,
     binding_name: &str,
 ) -> bool {
+    method_exactly_returns_param(method, binding_name)
+        && !method_assigns_to_binding(method, binding_name)
+}
+
+fn method_assigns_to_binding(method: &MethodDecl, binding_name: &str) -> bool {
     method
         .body
         .as_ref()
@@ -575,8 +599,8 @@ fn usage_allows_borrowed_content(usage: &MethodUsageFacts, param: &Param) -> boo
     let Some(binding) = usage.binding_facts_for_param(param) else {
         return false;
     };
-    !binding.uses.is_empty()
-        && binding.uses.iter().all(|usage| {
+    !binding.uses().is_empty()
+        && binding.uses().iter().all(|usage| {
             matches!(
                 usage,
                 BindingUse::ContentRead
@@ -699,12 +723,12 @@ mod tests {
         let mut usage = UsageFacts::default();
         let ty = owner_type();
         let method = private_static_returning_param_method(string_param(binding.clone()));
-        let method_usage = MethodUsageFacts::from_exact_binding_facts([BindingUseFacts {
-            name: "value".to_string(),
-            binding: Some(binding),
-            java_ty: JavaType::String,
+        let method_usage = MethodUsageFacts::from_exact_binding_facts([BindingUseFacts::new(
+            "value",
+            Some(binding),
+            JavaType::String,
             uses,
-        }]);
+        )]);
         let legacy_key = UsageMethodKey::current_rust_method_name("Owner", "borrow");
         usage.insert_method_usage(legacy_key, method_usage.clone());
         usage.insert_source_method_usage(&ty, &method, method_usage);
@@ -716,12 +740,13 @@ mod tests {
         uses: Vec<BindingUse>,
     ) -> UsageFacts {
         let mut usage = UsageFacts::default();
-        let method_usage = MethodUsageFacts::from_idless_compatibility_facts([BindingUseFacts {
-            name: "type".to_string(),
-            binding: None,
-            java_ty: JavaType::String,
-            uses,
-        }]);
+        let method_usage =
+            MethodUsageFacts::from_idless_compatibility_facts([BindingUseFacts::new(
+                "type",
+                None,
+                JavaType::String,
+                uses,
+            )]);
         let ty = owner_type();
         let legacy_key = UsageMethodKey::current_rust_method_name("Owner", "borrow");
         usage.insert_method_usage(legacy_key, method_usage.clone());
@@ -731,12 +756,13 @@ mod tests {
 
     fn idless_usage_with_name_facts(method: &MethodDecl, uses: Vec<BindingUse>) -> UsageFacts {
         let mut usage = UsageFacts::default();
-        let method_usage = MethodUsageFacts::from_idless_compatibility_facts([BindingUseFacts {
-            name: "value".to_string(),
-            binding: None,
-            java_ty: JavaType::String,
-            uses,
-        }]);
+        let method_usage =
+            MethodUsageFacts::from_idless_compatibility_facts([BindingUseFacts::new(
+                "value",
+                None,
+                JavaType::String,
+                uses,
+            )]);
         let ty = owner_type();
         let legacy_key = UsageMethodKey::current_rust_method_name("Owner", "borrow");
         usage.insert_method_usage(legacy_key, method_usage.clone());

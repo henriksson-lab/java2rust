@@ -5,21 +5,17 @@ use new_java2rust::coercion::{
     apply_syntax_coercion_plan, plan_coercion_with_facts, plan_shape_coercion_with_facts,
 };
 use new_java2rust::conversion_plan::{
-    AssignmentValuePlan, BorrowedElementAdapterPolicy, BorrowedElementCarrier,
-    BorrowedElementRecoveryFallbackPolicy, BorrowedElementRecoveryPolicy,
-    BorrowedElementSlotAdapterPolicy, CloneRecoveryPolicy, CoercionContentPolicy,
-    CoercionOwnedRecoveryCapabilityPolicy, CoercionShapeContentPolicy, ConversionDiagnostic,
+    BorrowedElementAdapterPolicy, BorrowedElementCarrier, BorrowedElementRecoveryFallbackPolicy,
+    BorrowedElementRecoveryPolicy, CloneRecoveryPolicy, ConversionDiagnostic,
     DispatchCoercionFallbackPolicy, DispatchCoercionPolicy, InstanceOfCheck,
     InstanceOfFallbackPolicy, InstanceOfTargetPolicy, InvalidCastPolicy, JavaCastSemanticsPolicy,
     JavaTypeConversionKind, LoweredSlotExprConversionPlan, LoweredType,
-    OptionalElementTargetMatchPolicy, OptionalPresentConstructionSource,
-    OptionalShapeCoercionPolicy, OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy,
-    PrimitiveWideningPolicy, ReturnValuePlan, RuntimeTypeTargetPolicy, RustNominalTypeNamePolicy,
-    ShapeCoercionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan, SyntaxCoercionPlan,
-    SyntaxSlotCoercionPolicy, VecElementTargetMatchPolicy, ViewCoercionPolicy,
-    actual_shape_for_slot_expr, argument_slot, assignment_slot, assignment_slot_for_target,
-    assignment_value_plan_for_shape, assignment_value_plan_for_target,
-    borrowed_element_adapter_policy_with_unwrap, borrowed_element_recovery_policy,
+    OptionalPresentConstructionSource, OptionalShapeCoercionPolicy,
+    OwnershipCoercionFallbackPolicy, OwnershipCoercionPolicy, ReturnValuePlan,
+    RuntimeTypeTargetPolicy, ShapeCoercionPlan, Slot, SlotConversionPlan, SlotExprConversionPlan,
+    SyntaxSlotCoercionPolicy, ViewCoercionPolicy, actual_shape_for_slot_expr, argument_slot,
+    assignment_slot, assignment_slot_for_target, assignment_value_plan_for_shape,
+    assignment_value_plan_for_target, borrowed_element_recovery_policy,
     borrowed_element_recovery_policy_with_effective_facts, borrowed_element_slot_adapter_policy,
     coercion_content_policy, coercion_content_policy_with_effective_facts,
     coercion_owned_recovery_capability_policy_with_effective_facts,
@@ -54,8 +50,8 @@ use new_java2rust::java_ir::{
     Expr, JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType,
 };
 use new_java2rust::member_access_plan::{
-    JavaMemberAccessKind, JavaMemberAccessPolicy, MemberAccessOp,
-    java_member_access_policy_with_facts, plan_member_access_with_facts,
+    JavaMemberAccessKind, MemberAccessOp, java_member_access_policy_with_facts,
+    plan_member_access_with_facts,
 };
 use new_java2rust::parser::{parse_expr, parse_type};
 use new_java2rust::rust_ir::{
@@ -66,7 +62,6 @@ use new_java2rust::storage_strategy::{Escape, StoragePlan, TypeStorageFacts};
 use new_java2rust::types::{
     TypeEnv, infer_expr_type, list_java_type, optional_java_type, set_java_type,
 };
-use new_java2rust::unsupported;
 
 fn assert_compile_error_block_consuming(
     expr: RustExpr,
@@ -199,13 +194,9 @@ fn runtime_type_target_policy_names_nominal_runtime_targets() {
         args: Vec::new(),
     };
 
-    assert_eq!(
-        rust_nominal_type_name_policy(&named),
-        RustNominalTypeNamePolicy {
-            java_ty: named.clone(),
-            target_type: Some("Dog".to_string()),
-        }
-    );
+    let named_policy = rust_nominal_type_name_policy(&named);
+    assert_eq!(named_policy.java_ty(), &named);
+    assert_eq!(named_policy.target_type(), Some("Dog"));
     assert_eq!(
         runtime_type_target_policy(&named),
         RuntimeTypeTargetPolicy::Nominal {
@@ -232,26 +223,21 @@ fn runtime_type_target_policy_names_nominal_runtime_targets() {
         name: "java.lang.Boolean".to_string(),
         args: Vec::new(),
     };
-    assert_eq!(
-        rust_nominal_type_name_policy(&boxed_boolean),
-        RustNominalTypeNamePolicy {
-            java_ty: boxed_boolean.clone(),
-            target_type: Some("bool".to_string()),
-        }
-    );
+    let boxed_boolean_policy = rust_nominal_type_name_policy(&boxed_boolean);
+    assert_eq!(boxed_boolean_policy.java_ty(), &boxed_boolean);
+    assert_eq!(boxed_boolean_policy.target_type(), Some("bool"));
     assert_eq!(
         runtime_type_target_policy(&boxed_boolean),
         RuntimeTypeTargetPolicy::Nominal {
             target_type: "bool".to_string(),
         }
     );
+    let int_policy = rust_nominal_type_name_policy(&JavaType::Primitive(PrimitiveType::Int));
     assert_eq!(
-        rust_nominal_type_name_policy(&JavaType::Primitive(PrimitiveType::Int)),
-        RustNominalTypeNamePolicy {
-            java_ty: JavaType::Primitive(PrimitiveType::Int),
-            target_type: None,
-        }
+        int_policy.java_ty(),
+        &JavaType::Primitive(PrimitiveType::Int)
     );
+    assert_eq!(int_policy.target_type(), None);
     assert_eq!(
         runtime_type_target_policy(&JavaType::Primitive(PrimitiveType::Int)),
         RuntimeTypeTargetPolicy::MissingNominalTarget {
@@ -262,24 +248,21 @@ fn runtime_type_target_policy_names_nominal_runtime_targets() {
 
 #[test]
 fn primitive_widening_policy_names_numeric_widening_rank() {
-    assert_eq!(
-        primitive_widening_policy(
-            &JavaType::Primitive(PrimitiveType::Int),
-            &JavaType::Primitive(PrimitiveType::Long),
-        ),
-        Some(PrimitiveWideningPolicy {
-            from: PrimitiveType::Int,
-            to: PrimitiveType::Long,
-            widens: true,
-        })
-    );
+    let int_to_long = primitive_widening_policy(
+        &JavaType::Primitive(PrimitiveType::Int),
+        &JavaType::Primitive(PrimitiveType::Long),
+    )
+    .unwrap();
+    assert_eq!(int_to_long.from(), PrimitiveType::Int);
+    assert_eq!(int_to_long.to(), PrimitiveType::Long);
+    assert!(int_to_long.widens());
     assert_eq!(
         primitive_widening_policy(
             &JavaType::Primitive(PrimitiveType::Long),
             &JavaType::Primitive(PrimitiveType::Int),
         )
         .unwrap()
-        .widens,
+        .widens(),
         false
     );
     assert!(
@@ -288,7 +271,7 @@ fn primitive_widening_policy_names_numeric_widening_rank() {
             &JavaType::Primitive(PrimitiveType::Char),
         )
         .unwrap()
-        .widens
+        .widens()
     );
     assert!(
         !primitive_widening_policy(
@@ -296,7 +279,7 @@ fn primitive_widening_policy_names_numeric_widening_rank() {
             &JavaType::Primitive(PrimitiveType::Int),
         )
         .unwrap()
-        .widens
+        .widens()
     );
     assert_eq!(
         primitive_widening_policy(&JavaType::String, &JavaType::Primitive(PrimitiveType::Int)),
@@ -510,8 +493,8 @@ fn conversion_plan_classifies_resolver_coercion_evidence_and_casts() {
         kind: JavaCoercionKind::PrimitiveWidening,
     };
     assert_eq!(
-        java_type_conversion_plan_from_evidence(&widening).kind,
-        JavaTypeConversionKind::PrimitiveWidening {
+        java_type_conversion_plan_from_evidence(&widening).kind(),
+        &JavaTypeConversionKind::PrimitiveWidening {
             from: PrimitiveType::Int,
             to: PrimitiveType::Long,
         }
@@ -527,8 +510,8 @@ fn conversion_plan_classifies_resolver_coercion_evidence_and_casts() {
         kind: JavaCoercionKind::Boxing,
     };
     assert_eq!(
-        java_type_conversion_plan_from_evidence(&boxing).kind,
-        JavaTypeConversionKind::Boxing
+        java_type_conversion_plan_from_evidence(&boxing).kind(),
+        &JavaTypeConversionKind::Boxing
     );
 
     let unboxing = JavaCoercionEvidence {
@@ -541,8 +524,8 @@ fn conversion_plan_classifies_resolver_coercion_evidence_and_casts() {
         kind: JavaCoercionKind::Unboxing,
     };
     assert_eq!(
-        java_type_conversion_plan_from_evidence(&unboxing).kind,
-        JavaTypeConversionKind::Unboxing
+        java_type_conversion_plan_from_evidence(&unboxing).kind(),
+        &JavaTypeConversionKind::Unboxing
     );
 
     let lambda = JavaCoercionEvidence {
@@ -555,8 +538,8 @@ fn conversion_plan_classifies_resolver_coercion_evidence_and_casts() {
         kind: JavaCoercionKind::LambdaAdaptation,
     };
     assert_eq!(
-        java_type_conversion_plan_from_evidence(&lambda).kind,
-        JavaTypeConversionKind::LambdaAdaptation
+        java_type_conversion_plan_from_evidence(&lambda).kind(),
+        &JavaTypeConversionKind::LambdaAdaptation
     );
 
     let actual_list = RustSlotShape::conservative(JavaType::Named {
@@ -571,7 +554,7 @@ fn conversion_plan_classifies_resolver_coercion_evidence_and_casts() {
         }],
     });
     assert!(matches!(
-        java_cast_type_conversion_plan(&actual_list, &target_list, &FactSet::default()).kind,
+        java_cast_type_conversion_plan(&actual_list, &target_list, &FactSet::default()).kind(),
         JavaTypeConversionKind::Cast(JavaCastSemanticsPolicy::UncheckedGenericCast { .. })
     ));
 }
@@ -600,23 +583,11 @@ fn cast_and_instanceof_type_capability_policy_centralizes_nonprimitive_type_chec
 
     assert_eq!(
         effective_facts.cast_type_capability_policy(&list_string, &list_int),
-        CastTypeCapabilityPolicy {
-            actual: list_string.clone(),
-            target: list_int.clone(),
-            optional_or_result: false,
-            raw_or_wildcard: false,
-            unchecked_generic: true,
-        }
+        CastTypeCapabilityPolicy::new(list_string.clone(), list_int.clone(), false, false, true)
     );
     assert_eq!(
         facts.cast_type_capability_policy(&raw_list, &list_string),
-        CastTypeCapabilityPolicy {
-            actual: raw_list.clone(),
-            target: list_string.clone(),
-            optional_or_result: false,
-            raw_or_wildcard: true,
-            unchecked_generic: false,
-        }
+        CastTypeCapabilityPolicy::new(raw_list.clone(), list_string.clone(), false, true, false)
     );
     assert_eq!(
         facts.cast_type_capability_policy(&optional_string, &result_string),
@@ -624,36 +595,26 @@ fn cast_and_instanceof_type_capability_policy_centralizes_nonprimitive_type_chec
     );
     assert_eq!(
         facts.cast_type_capability_policy(&optional_string, &result_string),
-        CastTypeCapabilityPolicy {
-            actual: optional_string,
-            target: result_string,
-            optional_or_result: true,
-            raw_or_wildcard: false,
-            unchecked_generic: false,
-        }
+        CastTypeCapabilityPolicy::new(optional_string, result_string, true, false, false)
     );
 
     assert_eq!(
         facts.instanceof_target_capability_policy(&raw_list),
-        InstanceOfTargetCapabilityPolicy {
-            target: raw_list.clone(),
-            primitive_target: false,
-            raw_or_wildcard_target: true,
-        }
+        InstanceOfTargetCapabilityPolicy::new(raw_list.clone(), false, true)
     );
     assert_eq!(
         facts.instanceof_target_capability_policy(&JavaType::Named {
             name: "List".to_string(),
             args: vec![JavaType::Wildcard(None)],
         }),
-        InstanceOfTargetCapabilityPolicy {
-            target: JavaType::Named {
+        InstanceOfTargetCapabilityPolicy::new(
+            JavaType::Named {
                 name: "List".to_string(),
                 args: vec![JavaType::Wildcard(None)],
             },
-            primitive_target: false,
-            raw_or_wildcard_target: true,
-        }
+            false,
+            true,
+        )
     );
 }
 
@@ -707,16 +668,14 @@ fn type_inference_owns_java_length_type() {
         java_member_access_policy_with_facts(&expr, "length", &env, &FactSet::default()).unwrap();
     let plan = plan_member_access_with_facts(&expr, "length", &env, &FactSet::default()).unwrap();
 
+    assert_eq!(policy.member(), "length");
+    assert_eq!(policy.java_ty(), &JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(policy.kind(), JavaMemberAccessKind::ArrayLength);
+    assert_eq!(plan.op(), &MemberAccessOp::LenAsI32);
     assert_eq!(
-        policy,
-        JavaMemberAccessPolicy {
-            member: "length".to_string(),
-            java_ty: JavaType::Primitive(PrimitiveType::Int),
-            kind: JavaMemberAccessKind::ArrayLength,
-        }
+        plan.shape().java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
     );
-    assert_eq!(plan.op, MemberAccessOp::LenAsI32);
-    assert_eq!(plan.shape.java_ty, JavaType::Primitive(PrimitiveType::Int));
 }
 
 #[test]
@@ -757,21 +716,19 @@ fn member_access_plan_snake_cases_proved_instance_fields() {
     let plan =
         plan_member_access_with_facts(&receiver, "batchCount", &env, &FactSet::default()).unwrap();
 
+    assert_eq!(policy.member(), "batchCount");
+    assert_eq!(policy.java_ty(), &JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(policy.kind(), JavaMemberAccessKind::InstanceField);
     assert_eq!(
-        policy,
-        JavaMemberAccessPolicy {
-            member: "batchCount".to_string(),
-            java_ty: JavaType::Primitive(PrimitiveType::Int),
-            kind: JavaMemberAccessKind::InstanceField,
-        }
-    );
-    assert_eq!(
-        plan.op,
-        MemberAccessOp::RustField {
+        plan.op(),
+        &MemberAccessOp::RustField {
             rust_name: "batch_count".to_string(),
         }
     );
-    assert_eq!(plan.shape.java_ty, JavaType::Primitive(PrimitiveType::Int));
+    assert_eq!(
+        plan.shape().java_ty,
+        JavaType::Primitive(PrimitiveType::Int)
+    );
 }
 
 #[test]
@@ -806,23 +763,18 @@ fn type_inference_owns_known_external_static_string_constants() {
     )
     .unwrap();
 
+    assert_eq!(policy.member(), "RAW_MAPPING_QUALITY_WITH_DEPTH_KEY");
+    assert_eq!(policy.java_ty(), &JavaType::String);
+    assert_eq!(policy.kind(), JavaMemberAccessKind::StaticConstant);
     assert_eq!(
-        policy,
-        JavaMemberAccessPolicy {
-            member: "RAW_MAPPING_QUALITY_WITH_DEPTH_KEY".to_string(),
-            java_ty: JavaType::String,
-            kind: JavaMemberAccessKind::StaticConstant,
-        }
-    );
-    assert_eq!(
-        plan.op,
-        MemberAccessOp::StaticConstant {
+        plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "GATKVCFConstants".to_string()
         }
     );
-    assert_eq!(plan.shape.java_ty, JavaType::String);
-    assert_eq!(plan.shape.ownership, OwnershipShape::SharedBorrow);
-    assert_eq!(plan.shape.view, ViewShape::Str);
+    assert_eq!(plan.shape().java_ty, JavaType::String);
+    assert_eq!(plan.shape().ownership, OwnershipShape::SharedBorrow);
+    assert_eq!(plan.shape().view, ViewShape::Str);
 }
 
 #[test]
@@ -832,8 +784,8 @@ fn member_access_plan_preserves_package_qualified_static_constant_owner() {
     let plan = plan_member_access_with_facts(&receiver, "KIND", &env, &FactSet::default()).unwrap();
 
     assert_eq!(
-        plan.op,
-        MemberAccessOp::StaticConstant {
+        plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "AItem".to_string(),
         }
     );
@@ -859,8 +811,8 @@ fn member_access_plan_preserves_package_qualified_external_static_constant_owner
     let a_plan = plan_member_access_with_facts(&parse_expr("a.Item"), "KIND", &env, &facts)
         .expect("exact external fact should plan as a static constant");
     assert_eq!(
-        a_plan.op,
-        MemberAccessOp::StaticConstant {
+        a_plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "AItem".to_string(),
         }
     );
@@ -868,8 +820,8 @@ fn member_access_plan_preserves_package_qualified_external_static_constant_owner
     let b_plan = plan_member_access_with_facts(&parse_expr("b.Item"), "KIND", &env, &facts)
         .expect("exact external peer fact should plan as a static constant");
     assert_eq!(
-        b_plan.op,
-        MemberAccessOp::StaticConstant {
+        b_plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "BItem".to_string(),
         }
     );
@@ -901,8 +853,8 @@ fn member_access_plan_does_not_use_raw_mapped_field_type_as_static_constant_owne
         .expect("exact external static field fact should still plan as a static constant");
 
     assert_eq!(
-        plan.op,
-        MemberAccessOp::StaticConstant {
+        plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "MappedOwner".to_string(),
         }
     );
@@ -923,8 +875,8 @@ fn member_access_plan_does_not_invent_unknown_uppercase_static_constant_owner() 
     )
     .expect("known source type field should still plan as a static constant");
     assert_eq!(
-        source_plan.op,
-        MemberAccessOp::StaticConstant {
+        source_plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "Item".to_string(),
         }
     );
@@ -937,8 +889,8 @@ fn member_access_plan_does_not_invent_unknown_uppercase_static_constant_owner() 
     )
     .expect("import/static alias should still prove the static owner");
     assert_eq!(
-        alias_plan.op,
-        MemberAccessOp::StaticConstant {
+        alias_plan.op(),
+        &MemberAccessOp::StaticConstant {
             owner: "AConfig".to_string(),
         }
     );
@@ -1088,26 +1040,26 @@ fn shape_coercion_plan_keeps_axis_policy_decisions_inspectable() {
 
     assert_eq!(
         plan,
-        ShapeCoercionPlan {
-            actual: actual.clone(),
-            target: target.clone(),
-            dispatch: DispatchCoercionPolicy::NoDispatchChange,
-            view: ViewCoercionPolicy::NoViewChange,
-            optional: OptionalShapeCoercionPolicy::Wrap {
+        ShapeCoercionPlan::new(
+            actual.clone(),
+            target.clone(),
+            DispatchCoercionPolicy::NoDispatchChange,
+            ViewCoercionPolicy::NoViewChange,
+            OptionalShapeCoercionPolicy::Wrap {
                 element_ty: JavaType::String,
-                element_plan: Box::new(ShapeCoercionPlan {
-                    actual: actual.clone(),
-                    target: target_element,
-                    dispatch: DispatchCoercionPolicy::NoDispatchChange,
-                    view: ViewCoercionPolicy::NoViewChange,
-                    optional: OptionalShapeCoercionPolicy::NoChange,
-                    ownership: OwnershipCoercionPolicy::BorrowOwnedValue,
-                    primitive_widening: None,
-                }),
+                element_plan: Box::new(ShapeCoercionPlan::new(
+                    actual.clone(),
+                    target_element,
+                    DispatchCoercionPolicy::NoDispatchChange,
+                    ViewCoercionPolicy::NoViewChange,
+                    OptionalShapeCoercionPolicy::NoChange,
+                    OwnershipCoercionPolicy::BorrowOwnedValue,
+                    None,
+                )),
             },
-            ownership: OwnershipCoercionPolicy::BorrowOwnedValue,
-            primitive_widening: None,
-        }
+            OwnershipCoercionPolicy::BorrowOwnedValue,
+            None,
+        )
     );
     assert_eq!(
         plan.coercions(),
@@ -1125,12 +1077,11 @@ fn shape_coercion_plan_keeps_axis_policy_decisions_inspectable() {
     let widening = shape_coercion_plan_with_facts(&int_actual, &long_target, &FactSet::default());
 
     assert_eq!(
-        widening.primitive_widening,
-        Some(PrimitiveWideningPolicy {
-            from: PrimitiveType::Int,
-            to: PrimitiveType::Long,
-            widens: true,
-        })
+        widening.primitive_widening(),
+        primitive_widening_policy(
+            &JavaType::Primitive(PrimitiveType::Int),
+            &JavaType::Primitive(PrimitiveType::Long),
+        )
     );
     assert_eq!(
         widening.coercions(),
@@ -1153,7 +1104,10 @@ fn owned_to_mutable_borrow_is_an_ownership_coercion() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
 
-    assert_eq!(plan.ownership, OwnershipCoercionPolicy::BorrowOwnedMutably);
+    assert_eq!(
+        plan.ownership(),
+        &OwnershipCoercionPolicy::BorrowOwnedMutably
+    );
     assert_eq!(plan.coercions(), vec![Coercion::BorrowMut]);
     let borrowed = apply_shape_coercion_plan(RustExpr::Var("config".to_string()), &plan);
     assert_eq!(emit_expr(&borrowed), "&mut config");
@@ -1228,8 +1182,8 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &Slot::Index,
             &facts
         )
-        .policy,
-        SyntaxSlotCoercionPolicy::IndexToUsize
+        .policy(),
+        &SyntaxSlotCoercionPolicy::IndexToUsize
     );
     assert_eq!(
         syntax_coercion_plan_with_facts(
@@ -1237,8 +1191,8 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &Slot::Condition,
             &facts
         )
-        .policy,
-        SyntaxSlotCoercionPolicy::Identity
+        .policy(),
+        &SyntaxSlotCoercionPolicy::Identity
     );
     assert_eq!(
         syntax_coercion_plan_with_facts(
@@ -1246,12 +1200,12 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &Slot::StringConcatSegment,
             &FactSet::default()
         )
-        .policy,
-        SyntaxSlotCoercionPolicy::ToStringForConcat
+        .policy(),
+        &SyntaxSlotCoercionPolicy::ToStringForConcat
     );
     assert_eq!(
-        syntax_coercion_plan_with_facts(&external_id, &Slot::StringConcatSegment, &facts).policy,
-        SyntaxSlotCoercionPolicy::Identity
+        syntax_coercion_plan_with_facts(&external_id, &Slot::StringConcatSegment, &facts).policy(),
+        &SyntaxSlotCoercionPolicy::Identity
     );
     assert_eq!(
         syntax_coercion_plan_with_facts(
@@ -1259,11 +1213,11 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &Slot::Index,
             &FactSet::default(),
         ),
-        SyntaxCoercionPlan {
-            actual: JavaType::Primitive(PrimitiveType::Int),
-            slot: Slot::Index,
-            policy: SyntaxSlotCoercionPolicy::IndexToUsize,
-        }
+        syntax_coercion_plan_with_facts(
+            &JavaType::Primitive(PrimitiveType::Int),
+            &Slot::Index,
+            &FactSet::default(),
+        )
     );
     assert_eq!(
         apply_syntax_coercion_plan(
@@ -1321,11 +1275,7 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
     );
     assert_eq!(
         syntax_coercion_plan_with_facts(&external_id, &Slot::StringConcatSegment, &facts),
-        SyntaxCoercionPlan {
-            actual: external_id.clone(),
-            slot: Slot::StringConcatSegment,
-            policy: SyntaxSlotCoercionPolicy::Identity,
-        }
+        syntax_coercion_plan_with_facts(&external_id, &Slot::StringConcatSegment, &facts)
     );
     assert_eq!(
         apply_syntax_coercion_plan(
@@ -1340,27 +1290,19 @@ fn syntax_slot_coercion_policy_owns_index_condition_and_concat_segments() {
             &Slot::StringConcatSegment,
             &FactSet::default(),
         )
-        .policy,
-        SyntaxSlotCoercionPolicy::ToStringForConcat,
+        .policy(),
+        &SyntaxSlotCoercionPolicy::ToStringForConcat,
     );
-    assert_eq!(
-        coercion_content_policy(&external_id, &facts),
-        CoercionContentPolicy {
-            java_ty: external_id.clone(),
-            string_content: true,
-        }
-    );
+    let content_policy = coercion_content_policy(&external_id, &facts);
+    assert_eq!(content_policy.java_ty(), &external_id);
+    assert!(content_policy.string_content());
     let effective_facts = EffectiveFacts::new(&facts);
-    assert_eq!(
-        coercion_shape_content_policy_with_effective_facts(
-            &RustSlotShape::conservative(external_id.clone()),
-            &effective_facts,
-        ),
-        CoercionShapeContentPolicy {
-            java_ty: external_id,
-            string_content: true,
-        }
+    let shape_content_policy = coercion_shape_content_policy_with_effective_facts(
+        &RustSlotShape::conservative(external_id.clone()),
+        &effective_facts,
     );
+    assert_eq!(shape_content_policy.java_ty(), &external_id);
+    assert!(shape_content_policy.string_content());
 }
 
 #[test]
@@ -1370,11 +1312,11 @@ fn slot_conversion_plan_selects_shape_syntax_and_identity_boundaries() {
 
     assert_eq!(
         slot_conversion_plan_with_facts(&int_shape, &Slot::Index, &FactSet::default()),
-        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-            actual: JavaType::Primitive(PrimitiveType::Int),
-            slot: Slot::Index,
-            policy: SyntaxSlotCoercionPolicy::IndexToUsize,
-        })
+        SlotConversionPlan::Syntax(syntax_coercion_plan_with_facts(
+            &JavaType::Primitive(PrimitiveType::Int),
+            &Slot::Index,
+            &FactSet::default(),
+        ))
     );
     assert_eq!(
         slot_conversion_plan_with_facts(
@@ -1382,19 +1324,18 @@ fn slot_conversion_plan_selects_shape_syntax_and_identity_boundaries() {
             &Slot::Return(long_shape.clone()),
             &FactSet::default(),
         ),
-        SlotConversionPlan::Shape(ShapeCoercionPlan {
-            actual: int_shape,
-            target: long_shape,
-            dispatch: DispatchCoercionPolicy::NoDispatchChange,
-            view: ViewCoercionPolicy::NoViewChange,
-            optional: OptionalShapeCoercionPolicy::NoChange,
-            ownership: OwnershipCoercionPolicy::NoOwnershipChange,
-            primitive_widening: Some(PrimitiveWideningPolicy {
-                from: PrimitiveType::Int,
-                to: PrimitiveType::Long,
-                widens: true,
-            }),
-        })
+        SlotConversionPlan::Shape(ShapeCoercionPlan::new(
+            int_shape,
+            long_shape,
+            DispatchCoercionPolicy::NoDispatchChange,
+            ViewCoercionPolicy::NoViewChange,
+            OptionalShapeCoercionPolicy::NoChange,
+            OwnershipCoercionPolicy::NoOwnershipChange,
+            primitive_widening_policy(
+                &JavaType::Primitive(PrimitiveType::Int),
+                &JavaType::Primitive(PrimitiveType::Long),
+            ),
+        ))
     );
 
     let lowered = LoweredType::optional_element_borrow(JavaType::String);
@@ -1415,7 +1356,7 @@ fn rust_unsigned_byte_array_return_composes_byte_conversion_pipeline() {
     let plan =
         plan_lowered_slot_conversion(&lowered, Slot::Return(target.clone()), &FactSet::default());
     assert!(matches!(
-        plan.conversion,
+        plan.conversion(),
         SlotConversionPlan::RustUnsignedByteArrayReturn(_)
     ));
 
@@ -1427,7 +1368,7 @@ fn rust_unsigned_byte_array_return_composes_byte_conversion_pipeline() {
         &FactSet::default(),
     );
     assert!(matches!(
-        optional_plan.conversion,
+        optional_plan.conversion(),
         SlotConversionPlan::RustUnsignedByteArrayReturn(_)
     ));
 }
@@ -1439,29 +1380,29 @@ fn conversion_plan_wraps_slot_conversion_decisions_before_application() {
 
     assert_eq!(
         slot_plan,
-        SlotExprConversionPlan {
-            actual: int_shape,
-            slot: Slot::Index,
-            conversion: SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-                actual: JavaType::Primitive(PrimitiveType::Int),
-                slot: Slot::Index,
-                policy: SyntaxSlotCoercionPolicy::IndexToUsize,
-            }),
-        }
+        SlotExprConversionPlan::new(
+            int_shape,
+            Slot::Index,
+            SlotConversionPlan::Syntax(syntax_coercion_plan_with_facts(
+                &JavaType::Primitive(PrimitiveType::Int),
+                &Slot::Index,
+                &FactSet::default(),
+            )),
+        )
     );
     let lowered_actual = LoweredType::optional_element_borrow(JavaType::String);
     let lowered_plan =
         plan_lowered_slot_conversion(&lowered_actual, Slot::Index, &FactSet::default());
     assert_eq!(
         lowered_plan,
-        LoweredSlotExprConversionPlan {
-            actual: lowered_actual.clone(),
-            slot: Slot::Index,
-            conversion: SlotConversionPlan::Identity {
+        LoweredSlotExprConversionPlan::new(
+            lowered_actual.clone(),
+            Slot::Index,
+            SlotConversionPlan::Identity {
                 actual: lowered_actual,
                 slot: Slot::Index,
             },
-        }
+        )
     );
 }
 
@@ -1545,17 +1486,13 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
     ));
     assert!(matches!(
         crate_mapped_plan,
-        SlotConversionPlan::Shape(ShapeCoercionPlan {
-            ownership: OwnershipCoercionPolicy::RecoverOwnedWithClone { .. },
-            ..
-        })
+        SlotConversionPlan::Shape(ref shape)
+            if matches!(shape.ownership(), OwnershipCoercionPolicy::RecoverOwnedWithClone { .. })
     ));
     assert!(matches!(
         source_plan,
-        SlotConversionPlan::Shape(ShapeCoercionPlan {
-            ownership: OwnershipCoercionPolicy::RecoverOwnedWithClone { .. },
-            ..
-        })
+        SlotConversionPlan::Shape(ref shape)
+            if matches!(shape.ownership(), OwnershipCoercionPolicy::RecoverOwnedWithClone { .. })
     ));
 }
 
@@ -1578,16 +1515,13 @@ fn borrowed_whole_optional_string_recovery_uses_borrowed_carrier_policy() {
         &FactSet::default(),
     );
 
-    assert!(matches!(
-        plan,
-        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            adapter: Some(BorrowedElementAdapterPolicy {
-                recovery: BorrowedElementRecoveryPolicy::StringViewToOwned,
-                ..
-            }),
-            ..
-        })
-    ));
+    let SlotConversionPlan::BorrowedElement(policy) = plan else {
+        panic!("expected borrowed element policy");
+    };
+    assert_eq!(
+        policy.adapter().map(BorrowedElementAdapterPolicy::recovery),
+        Some(&BorrowedElementRecoveryPolicy::StringViewToOwned)
+    );
 }
 
 #[test]
@@ -1604,13 +1538,13 @@ fn optional_element_borrow_display_projects_the_option_carrier() {
     let plan =
         plan_lowered_slot_conversion(&actual, Slot::StringConcatSegment, &FactSet::default());
 
-    assert!(matches!(
-        plan.conversion,
-        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
-            ..
-        })
-    ));
+    let SlotConversionPlan::Syntax(syntax_plan) = plan.conversion() else {
+        panic!("expected syntax conversion");
+    };
+    assert_eq!(
+        syntax_plan.policy(),
+        &SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+    );
 }
 
 #[test]
@@ -1643,22 +1577,22 @@ fn optional_array_carrier_to_optional_slice_target_uses_view_projection_policy()
         &FactSet::default(),
     );
 
+    let SlotConversionPlan::BorrowedElement(policy) = &plan else {
+        panic!("expected borrowed element policy");
+    };
+    assert_eq!(policy.target(), &target);
+    assert_eq!(policy.carrier_shape(), &option_shape);
+    assert_eq!(policy.element_shape(), &element_shape);
+    assert_eq!(policy.carrier(), BorrowedElementCarrier::Option);
+    assert!(policy.matches());
+    let adapter = policy.adapter().expect("expected borrowed element adapter");
+    assert_eq!(adapter.carrier(), BorrowedElementCarrier::Option);
+    assert_eq!(adapter.element_shape(), &element_shape);
     assert_eq!(
-        plan,
-        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            target: target.clone(),
-            carrier_shape: option_shape,
-            element_shape: element_shape.clone(),
-            carrier: BorrowedElementCarrier::Option,
-            matches: true,
-            adapter: Some(BorrowedElementAdapterPolicy {
-                carrier: BorrowedElementCarrier::Option,
-                element_shape,
-                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
-                unwrap_carrier: false,
-            }),
-        })
+        adapter.recovery(),
+        &BorrowedElementRecoveryPolicy::BorrowElement
     );
+    assert!(!adapter.unwrap_carrier());
     // Compared through `into_unshaped()`: the adapter now records the slot
     // shape it produced, and the tag is invisible to the emitter by design — the
     // generated Rust is byte-identical. This asserts the emitted expression,
@@ -1723,7 +1657,7 @@ fn optional_string_carrier_to_optional_string_view_records_projection_shape() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
     assert!(matches!(
-        plan.optional,
+        plan.optional(),
         OptionalShapeCoercionPolicy::MapElement { .. }
     ));
 
@@ -1778,7 +1712,7 @@ fn optional_shape_map_to_optional_shared_native_records_projection_shape() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
     assert!(matches!(
-        plan.optional,
+        plan.optional(),
         OptionalShapeCoercionPolicy::MapElement { .. }
     ));
 
@@ -1810,7 +1744,7 @@ fn optional_shape_map_to_optional_slice_records_projection_shape() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
     assert!(matches!(
-        plan.optional,
+        plan.optional(),
         OptionalShapeCoercionPolicy::MapElement { .. }
     ));
 
@@ -1858,7 +1792,7 @@ fn optional_shape_map_to_optional_mut_slice_records_projection_shape() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
     assert!(matches!(
-        plan.optional,
+        plan.optional(),
         OptionalShapeCoercionPolicy::MapElement { .. }
     ));
 
@@ -1996,24 +1930,24 @@ fn lowered_slot_conversion_plan_records_borrowed_element_adapter_before_renderin
         &FactSet::default(),
     );
 
+    let SlotConversionPlan::BorrowedElement(policy) = &plan else {
+        panic!("expected borrowed element policy");
+    };
+    assert_eq!(policy.target(), &target);
+    assert_eq!(policy.carrier_shape(), option_shape.as_ref());
+    assert_eq!(policy.element_shape(), element_shape.as_ref());
+    assert_eq!(policy.carrier(), BorrowedElementCarrier::Option);
+    assert!(policy.matches());
+    let adapter = policy.adapter().expect("expected borrowed element adapter");
+    assert_eq!(adapter.carrier(), BorrowedElementCarrier::Option);
+    assert_eq!(adapter.element_shape(), element_shape.as_ref());
     assert_eq!(
-        plan,
-        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            target,
-            carrier_shape: (**option_shape).clone(),
-            element_shape: (**element_shape).clone(),
-            carrier: BorrowedElementCarrier::Option,
-            matches: true,
-            adapter: Some(BorrowedElementAdapterPolicy {
-                carrier: BorrowedElementCarrier::Option,
-                element_shape: (**element_shape).clone(),
-                recovery: BorrowedElementRecoveryPolicy::CloneElements {
-                    policy: CloneRecoveryPolicy::AuditRequired,
-                },
-                unwrap_carrier: false,
-            }),
-        })
+        adapter.recovery(),
+        &BorrowedElementRecoveryPolicy::CloneElements {
+            policy: CloneRecoveryPolicy::AuditRequired,
+        }
     );
+    assert!(!adapter.unwrap_carrier());
     let adapted =
         apply_slot_conversion_plan(RustExpr::Raw("values.iter().next()".to_string()), &plan);
     assert_eq!(
@@ -2140,13 +2074,13 @@ fn shape_coercion_uses_explicit_clone_capability_as_recovery_proof() {
     let target = RustSlotShape::conservative(external.clone());
     let effective_facts = EffectiveFacts::new(&facts);
 
+    let recovery_policy =
+        coercion_owned_recovery_capability_policy_with_effective_facts(&external, &effective_facts);
+    assert_eq!(recovery_policy.java_ty(), &external);
     assert_eq!(
-        coercion_owned_recovery_capability_policy_with_effective_facts(&external, &effective_facts),
-        CoercionOwnedRecoveryCapabilityPolicy {
+        recovery_policy.recovery(),
+        OwnedRecoveryCapability::ExplicitClone {
             java_ty: external.clone(),
-            recovery: OwnedRecoveryCapability::ExplicitClone {
-                java_ty: external.clone(),
-            },
         }
     );
     let policy = ownership_coercion_policy(&actual, &target, &facts);
@@ -2267,12 +2201,11 @@ fn ownership_coercion_policy_owns_borrow_clone_and_unsupported_recovery() {
     );
     assert_eq!(
         clone_recovery.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "clone_audit_required",
-            message:
-                "borrowed-to-owned Java value recovery inserted a clone that requires ownership audit"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "clone_audit_required",
+            "borrowed-to-owned Java value recovery inserted a clone that requires ownership audit"
+                .to_string()
+        )]
     );
     assert_eq!(
         ownership_coercion_policy(&borrowed_handle, &owned_handle, &facts),
@@ -2289,12 +2222,10 @@ fn ownership_coercion_policy_owns_borrow_clone_and_unsupported_recovery() {
     );
     assert_eq!(
         ownership_coercion_policy(&borrowed_handle, &owned_handle, &facts).diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_to_owned_non_cloneable",
-            message:
-                "unsupported Java borrowed-to-owned recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "unsupported_borrowed_to_owned_non_cloneable",
+            "unsupported Java borrowed-to-owned recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }",
+        )]
     );
     let rendered = apply_coercions(
         RustExpr::Var("handle".to_string()),
@@ -2399,7 +2330,7 @@ fn owned_recovery_capability_facts_drive_distinct_coercion_outcomes() {
             &clone_box,
             &EffectiveFacts::new(&facts),
         )
-        .recovery,
+        .recovery(),
         OwnedRecoveryCapability::CloneBoxAdapter {
             java_ty: clone_box.clone(),
         }
@@ -2478,12 +2409,10 @@ fn owned_recovery_capability_facts_drive_distinct_coercion_outcomes() {
     let (actual_ffi, target_ffi) = borrowed_to_owned(&ffi);
     assert_eq!(
         ownership_coercion_policy(&actual_ffi, &target_ffi, &facts).diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_to_ffi_owned_handle",
-            message:
-                "unsupported Java borrowed-to-owned recovery for FFI-owned handle Named { name: \"FfiHandle\", args: [] }; use an explicit FFI ownership transfer"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "unsupported_borrowed_to_ffi_owned_handle",
+            "unsupported Java borrowed-to-owned recovery for FFI-owned handle Named { name: \"FfiHandle\", args: [] }; use an explicit FFI ownership transfer",
+        )]
     );
     assert_eq!(
         plan_shape_coercion_with_facts(&actual_ffi, &target_ffi, &facts),
@@ -2506,9 +2435,9 @@ fn external_pack_manifest_owned_recovery_facts_drive_coercion() {
         "#,
     );
     assert!(
-        parsed.diagnostics.is_empty(),
+        parsed.diagnostics().is_empty(),
         "manifest should parse cleanly: {:?}",
-        parsed.diagnostics
+        parsed.diagnostics()
     );
 
     let variant = JavaType::Named {
@@ -2532,7 +2461,7 @@ fn external_pack_manifest_owned_recovery_facts_drive_coercion() {
 
     assert_eq!(
         parsed
-            .facts
+            .facts()
             .owned_recovery_capability_fact_for(&variant)
             .unwrap()
             .capability,
@@ -2545,7 +2474,7 @@ fn external_pack_manifest_owned_recovery_facts_drive_coercion() {
     );
     let (actual_variant, target_variant) = borrowed_to_owned(&variant);
     assert_eq!(
-        ownership_coercion_policy(&actual_variant, &target_variant, &parsed.facts),
+        ownership_coercion_policy(&actual_variant, &target_variant, parsed.facts()),
         OwnershipCoercionPolicy::RecoverOwnedWithClone {
             policy: CloneRecoveryPolicy::ProvenCloneCapability {
                 java_ty: JavaType::Named {
@@ -2558,19 +2487,17 @@ fn external_pack_manifest_owned_recovery_facts_drive_coercion() {
 
     let (actual_allele, target_allele) = borrowed_to_owned(&allele);
     assert_eq!(
-        ownership_coercion_policy(&actual_allele, &target_allele, &parsed.facts),
+        ownership_coercion_policy(&actual_allele, &target_allele, parsed.facts()),
         OwnershipCoercionPolicy::RecoverOwnedCopyValue
     );
 
     let (actual_reader, target_reader) = borrowed_to_owned(&reader);
     assert_eq!(
-        ownership_coercion_policy(&actual_reader, &target_reader, &parsed.facts).diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_to_ffi_owned_handle",
-            message:
-                "unsupported Java borrowed-to-owned recovery for FFI-owned handle Named { name: \"neutral.gatk.NativeReader\", args: [] }; use an explicit FFI ownership transfer"
-                    .to_string(),
-        }]
+        ownership_coercion_policy(&actual_reader, &target_reader, parsed.facts()).diagnostics(),
+        vec![CoercionDiagnostic::new(
+            "unsupported_borrowed_to_ffi_owned_handle",
+            "unsupported Java borrowed-to-owned recovery for FFI-owned handle Named { name: \"neutral.gatk.NativeReader\", args: [] }; use an explicit FFI ownership transfer",
+        )]
     );
 }
 
@@ -2583,11 +2510,11 @@ fn external_pack_manifest_owned_recovery_rejects_unowned_or_unknown_entries() {
         "#,
     );
     assert!(
-        unowned.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "external_pack_manifest_unowned_owned_recovery_capability_fact"
+        unowned.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == "external_pack_manifest_unowned_owned_recovery_capability_fact"
         }),
         "{:?}",
-        unowned.diagnostics
+        unowned.diagnostics()
     );
 
     let unknown_kind = parse_external_pack_manifest(
@@ -2597,14 +2524,14 @@ fn external_pack_manifest_owned_recovery_rejects_unowned_or_unknown_entries() {
         "#,
     );
     assert!(
-        unknown_kind.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code == "external_pack_manifest_parse_error"
+        unknown_kind.diagnostics().iter().any(|diagnostic| {
+            diagnostic.code() == "external_pack_manifest_parse_error"
                 && diagnostic
-                    .message
+                    .message()
                     .contains("invalid external-pack-owned-recovery capability kind")
         }),
         "{:?}",
-        unknown_kind.diagnostics
+        unknown_kind.diagnostics()
     );
 }
 
@@ -2649,12 +2576,10 @@ fn shape_coercion_rejects_borrowed_to_owned_for_non_cloneable_types() {
     );
     assert_eq!(
         conversion_plan.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_borrowed_to_owned_non_cloneable",
-            message:
-                "unsupported Java borrowed-to-owned recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_borrowed_to_owned_non_cloneable",
+            "unsupported Java borrowed-to-owned recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }"
+        )]
     );
     assert_eq!(
         plan_slot_conversion(actual.clone(), Slot::Argument(target.clone()), &facts)
@@ -2688,15 +2613,15 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
         wrap_policy,
         OptionalShapeCoercionPolicy::Wrap {
             element_ty: JavaType::String,
-            element_plan: Box::new(ShapeCoercionPlan {
-                actual: actual.clone(),
-                target: target_element,
-                dispatch: DispatchCoercionPolicy::NoDispatchChange,
-                view: ViewCoercionPolicy::NoViewChange,
-                optional: OptionalShapeCoercionPolicy::NoChange,
-                ownership: OwnershipCoercionPolicy::BorrowOwnedValue,
-                primitive_widening: None,
-            }),
+            element_plan: Box::new(ShapeCoercionPlan::new(
+                actual.clone(),
+                target_element,
+                DispatchCoercionPolicy::NoDispatchChange,
+                ViewCoercionPolicy::NoViewChange,
+                OptionalShapeCoercionPolicy::NoChange,
+                OwnershipCoercionPolicy::BorrowOwnedValue,
+                None,
+            )),
         }
     );
     assert_eq!(
@@ -2710,20 +2635,20 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
 
     let construction =
         optional_slot_construction_plan_with_facts(&target, JavaType::String, &FactSet::default());
-    assert_eq!(construction.wrapper_ownership, OwnershipShape::Owned);
-    assert_eq!(construction.target, target);
-    assert_eq!(construction.element_shape.java_ty, JavaType::String);
+    assert_eq!(construction.wrapper_ownership(), OwnershipShape::Owned);
+    assert_eq!(construction.target(), &target);
+    assert_eq!(construction.element_shape().java_ty, JavaType::String);
     assert_eq!(
-        construction.element_shape.ownership,
+        construction.element_shape().ownership,
         OwnershipShape::SharedBorrow
     );
     let actual_owned = RustSlotShape::conservative(JavaType::String);
     let construction = optional_slot_construction_plan_for_actual(&actual_owned, &target, &facts);
-    assert_eq!(construction.wrapper_ownership, OwnershipShape::Owned);
-    assert_eq!(construction.target, target);
-    assert_eq!(construction.element_shape, actual_owned);
+    assert_eq!(construction.wrapper_ownership(), OwnershipShape::Owned);
+    assert_eq!(construction.target(), &target);
+    assert_eq!(construction.element_shape(), &actual_owned);
     assert_eq!(
-        construction.element_plan.coercions(),
+        construction.element_plan().coercions(),
         vec![Coercion::Borrow]
     );
     let optional_construction = SlotConversionPlan::OptionalConstruction(construction);
@@ -2740,15 +2665,15 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
     assert_eq!(args[0].recorded_shape(), Some(RustExprShape::Borrowed));
     let preconverted =
         preconverted_optional_slot_construction_plan(&target, JavaType::String, &facts);
-    assert_eq!(preconverted.wrapper_ownership, OwnershipShape::Owned);
-    assert_eq!(preconverted.target, target);
-    assert_eq!(preconverted.element_shape.java_ty, JavaType::String);
+    assert_eq!(preconverted.wrapper_ownership(), OwnershipShape::Owned);
+    assert_eq!(preconverted.target(), &target);
+    assert_eq!(preconverted.element_shape().java_ty, JavaType::String);
     assert_eq!(
-        preconverted.element_shape.ownership,
+        preconverted.element_shape().ownership,
         OwnershipShape::SharedBorrow
     );
     assert_eq!(
-        preconverted.element_plan.coercions(),
+        preconverted.element_plan().coercions(),
         vec![Coercion::Identity]
     );
     let optional_preconverted = SlotConversionPlan::OptionalConstruction(preconverted);
@@ -2779,15 +2704,15 @@ fn optional_shape_coercion_policy_records_structural_element_coercions() {
         unwrap_policy,
         OptionalShapeCoercionPolicy::Unwrap {
             element_ty: JavaType::String,
-            element_plan: Box::new(ShapeCoercionPlan {
-                actual: unwrap_actual_element,
-                target: unwrap_target,
-                dispatch: DispatchCoercionPolicy::NoDispatchChange,
-                view: ViewCoercionPolicy::NoViewChange,
-                optional: OptionalShapeCoercionPolicy::NoChange,
-                ownership: OwnershipCoercionPolicy::NoOwnershipChange,
-                primitive_widening: None,
-            }),
+            element_plan: Box::new(ShapeCoercionPlan::new(
+                unwrap_actual_element,
+                unwrap_target,
+                DispatchCoercionPolicy::NoDispatchChange,
+                ViewCoercionPolicy::NoViewChange,
+                OptionalShapeCoercionPolicy::NoChange,
+                OwnershipCoercionPolicy::NoOwnershipChange,
+                None,
+            )),
         }
     );
     assert_eq!(unwrap_policy.coercions(), vec![Coercion::UnwrapOption]);
@@ -2811,13 +2736,13 @@ fn optional_present_construction_policy_records_indexed_borrow_source() {
         OptionalPresentConstructionSource::IndexedBorrowProjection,
         &facts,
     );
-    assert_eq!(indexed.element_lowering_slot, Slot::Value);
+    assert_eq!(indexed.element_lowering_slot(), &Slot::Value);
     assert_eq!(
-        indexed.construction.element_shape.ownership,
+        indexed.construction().element_shape().ownership,
         OwnershipShape::Owned
     );
     assert_eq!(
-        indexed.construction.element_plan.coercions(),
+        indexed.construction().element_plan().coercions(),
         vec![Coercion::Identity]
     );
 
@@ -2829,11 +2754,11 @@ fn optional_present_construction_policy_records_indexed_borrow_source() {
         &facts,
     );
     assert_eq!(
-        plain.element_lowering_slot,
-        Slot::Assignment(plain.construction.element_shape.clone())
+        plain.element_lowering_slot(),
+        &Slot::Assignment(plain.construction().element_shape().clone())
     );
     assert_eq!(
-        plain.construction.element_shape.ownership,
+        plain.construction().element_shape().ownership,
         OwnershipShape::Owned
     );
 }
@@ -2974,7 +2899,7 @@ fn optional_shape_coercion_wraps_after_erased_element_conversion() {
     assert!(matches!(
         policy,
         OptionalShapeCoercionPolicy::Wrap { ref element_plan, .. }
-            if matches!(element_plan.dispatch, DispatchCoercionPolicy::EraseObject)
+            if matches!(element_plan.dispatch(), DispatchCoercionPolicy::EraseObject)
     ));
     assert_eq!(
         policy.coercions(),
@@ -3036,17 +2961,22 @@ fn coercion_uses_type_capability_facts_for_concat_segments() {
 fn optional_display_segments_use_java_null_string_policy_before_rendering() {
     let optional_string = RustSlotShape::conservative(optional_java_type(JavaType::String));
 
+    let optional_string_conversion = slot_conversion_plan_with_facts(
+        &optional_string,
+        &Slot::DisplaySegment,
+        &FactSet::default(),
+    );
+    let SlotConversionPlan::Syntax(optional_string_syntax) = optional_string_conversion else {
+        panic!("expected syntax conversion");
+    };
     assert_eq!(
-        slot_conversion_plan_with_facts(
-            &optional_string,
-            &Slot::DisplaySegment,
-            &FactSet::default(),
-        ),
-        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-            actual: optional_java_type(JavaType::String),
-            slot: Slot::DisplaySegment,
-            policy: SyntaxSlotCoercionPolicy::OptionalToJavaDisplayString,
-        })
+        optional_string_syntax.actual(),
+        &optional_java_type(JavaType::String)
+    );
+    assert_eq!(optional_string_syntax.slot(), &Slot::DisplaySegment);
+    assert_eq!(
+        optional_string_syntax.policy(),
+        &SyntaxSlotCoercionPolicy::OptionalToJavaDisplayString
     );
     assert_eq!(
         apply_slot_conversion_plan(
@@ -3099,16 +3029,22 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
         args: Vec::new(),
     }));
 
+    let optional_uri_conversion =
+        slot_conversion_plan_with_facts(&optional_uri, &Slot::DisplaySegment, &FactSet::default());
+    let SlotConversionPlan::Syntax(optional_uri_syntax) = optional_uri_conversion else {
+        panic!("expected syntax conversion");
+    };
     assert_eq!(
-        slot_conversion_plan_with_facts(&optional_uri, &Slot::DisplaySegment, &FactSet::default(),),
-        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-            actual: optional_java_type(JavaType::Named {
-                name: "URI".to_string(),
-                args: Vec::new(),
-            }),
-            slot: Slot::DisplaySegment,
-            policy: SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue,
+        optional_uri_syntax.actual(),
+        &optional_java_type(JavaType::Named {
+            name: "URI".to_string(),
+            args: Vec::new(),
         })
+    );
+    assert_eq!(optional_uri_syntax.slot(), &Slot::DisplaySegment);
+    assert_eq!(
+        optional_uri_syntax.policy(),
+        &SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue
     );
     assert_eq!(
         apply_slot_conversion_plan(
@@ -3136,7 +3072,7 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
                     }],
                     body: RustClosureBody::Expr(Box::new(RustExpr::MethodCall {
                         receiver: Box::new(RustExpr::Var("value".to_string())),
-                        method: "to_string".to_string(),
+                        method: "java_arrays_deep_to_string".to_string(),
                         args: Vec::new(),
                     })),
                 }],
@@ -3160,7 +3096,7 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
     );
     assert_eq!(
         emit_expr(&raw_borrowed_display),
-        "values.get(key.as_str()).map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
+        "values.get(key.as_str()).map(|value| value.java_arrays_deep_to_string()).unwrap_or_else(|| \"null\".to_string())"
     );
     assert!(matches!(
         raw_borrowed_display,
@@ -3183,38 +3119,42 @@ fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
             args: Vec::new(),
         }));
 
+    let borrowed_display_conversion = lowered_slot_conversion_plan_with_facts(
+        &actual,
+        &Slot::DisplaySegment,
+        &FactSet::default(),
+    );
+    let SlotConversionPlan::Syntax(borrowed_display_syntax) = borrowed_display_conversion else {
+        panic!("expected syntax conversion");
+    };
     assert_eq!(
-        lowered_slot_conversion_plan_with_facts(
-            &actual,
-            &Slot::DisplaySegment,
-            &FactSet::default(),
-        ),
-        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-            actual: optional_java_type(JavaType::Named {
-                name: "URI".to_string(),
-                args: Vec::new(),
-            }),
-            slot: Slot::DisplaySegment,
-            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
+        borrowed_display_syntax.actual(),
+        &optional_java_type(JavaType::Named {
+            name: "URI".to_string(),
+            args: Vec::new(),
         })
     );
-    assert!(matches!(
-        plan_lowered_slot_conversion(
-            &LoweredType::optional_element_borrow_shape(RustSlotShape::conservative(
-                JavaType::Named {
-                    name: "URI".to_string(),
-                    args: Vec::new(),
-                },
-            )),
-            Slot::StringConcatSegment,
-            &FactSet::default(),
-        )
-        .conversion,
-        SlotConversionPlan::Syntax(SyntaxCoercionPlan {
-            policy: SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
-            ..
-        })
-    ));
+    assert_eq!(borrowed_display_syntax.slot(), &Slot::DisplaySegment);
+    assert_eq!(
+        borrowed_display_syntax.policy(),
+        &SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+    );
+    let borrowed_string_concat_plan = plan_lowered_slot_conversion(
+        &LoweredType::optional_element_borrow_shape(RustSlotShape::conservative(JavaType::Named {
+            name: "URI".to_string(),
+            args: Vec::new(),
+        })),
+        Slot::StringConcatSegment,
+        &FactSet::default(),
+    );
+    let borrowed_string_concat = borrowed_string_concat_plan.conversion();
+    let SlotConversionPlan::Syntax(borrowed_string_concat_syntax) = borrowed_string_concat else {
+        panic!("expected syntax conversion");
+    };
+    assert_eq!(
+        borrowed_string_concat_syntax.policy(),
+        &SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+    );
 }
 
 #[test]
@@ -3238,12 +3178,8 @@ fn coercion_owns_syntax_role_slot_construction() {
         assignment_slot(shape.clone()),
         Slot::Assignment(shape.clone())
     );
-    assert_eq!(
-        assignment_value_plan_for_shape(&shape),
-        AssignmentValuePlan {
-            slot: Slot::Assignment(shape.clone())
-        }
-    );
+    let assignment_value = assignment_value_plan_for_shape(&shape);
+    assert_eq!(assignment_value.slot(), &Slot::Assignment(shape.clone()));
     assert_eq!(
         argument_slot(shape),
         Slot::Argument(RustSlotShape::conservative(JavaType::String))
@@ -3261,11 +3197,11 @@ fn conversion_plan_owns_assignment_target_slot_selection() {
         assignment_slot_for_target(&parse_expr("name"), &env, ExprShapeContext::default(),),
         Slot::Assignment(RustSlotShape::for_storage(JavaType::String))
     );
+    let assignment_value =
+        assignment_value_plan_for_target(&parse_expr("name"), &env, ExprShapeContext::default());
     assert_eq!(
-        assignment_value_plan_for_target(&parse_expr("name"), &env, ExprShapeContext::default(),),
-        AssignmentValuePlan {
-            slot: Slot::Assignment(RustSlotShape::for_storage(JavaType::String))
-        }
+        assignment_value.slot(),
+        &Slot::Assignment(RustSlotShape::for_storage(JavaType::String))
     );
     assert_eq!(
         assignment_slot_for_target(
@@ -3275,14 +3211,12 @@ fn conversion_plan_owns_assignment_target_slot_selection() {
         ),
         Slot::Value
     );
-    assert_eq!(
-        assignment_value_plan_for_target(
-            &parse_expr("unknown.field"),
-            &env,
-            ExprShapeContext::default(),
-        ),
-        AssignmentValuePlan { slot: Slot::Value }
+    let unknown_assignment_value = assignment_value_plan_for_target(
+        &parse_expr("unknown.field"),
+        &env,
+        ExprShapeContext::default(),
     );
+    assert_eq!(unknown_assignment_value.slot(), &Slot::Value);
 }
 
 #[test]
@@ -3437,7 +3371,7 @@ fn view_coercion_policy_owns_sequence_slice_adapters() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
 
-    assert_eq!(plan.view, ViewCoercionPolicy::BorrowSequenceSliceView);
+    assert_eq!(plan.view(), &ViewCoercionPolicy::BorrowSequenceSliceView);
     assert_eq!(
         plan_shape_coercion_with_facts(&actual, &target, &FactSet::default()),
         vec![Coercion::AsSlice]
@@ -3469,7 +3403,7 @@ fn view_coercion_policy_owns_sequence_slice_adapters() {
     let mutable_plan =
         shape_coercion_plan_with_facts(&actual, &mutable_target, &FactSet::default());
     assert_eq!(
-        mutable_plan.view,
+        *mutable_plan.view(),
         ViewCoercionPolicy::BorrowSequenceMutSliceView
     );
     let mutable_projected = apply_coercions(
@@ -3532,7 +3466,7 @@ fn set_to_borrowed_slice_collects_temporary_vec_view() {
 
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
 
-    assert_eq!(plan.view, ViewCoercionPolicy::BorrowSequenceSliceView);
+    assert_eq!(plan.view(), &ViewCoercionPolicy::BorrowSequenceSliceView);
     let projected = apply_expr_to_slot_with_facts(
         RustExpr::Raw("self.lines".to_string()),
         actual.clone(),
@@ -3706,13 +3640,10 @@ fn shape_coercion_uses_type_capability_facts_for_string_views() {
         coercion_content_policy_with_effective_facts(&external_name, &effective_facts),
         coercion_content_policy(&external_name, &facts)
     );
-    assert_eq!(
-        coercion_shape_content_policy_with_effective_facts(&actual, &effective_facts),
-        CoercionShapeContentPolicy {
-            java_ty: external_name.clone(),
-            string_content: true,
-        }
-    );
+    let shape_content_policy =
+        coercion_shape_content_policy_with_effective_facts(&actual, &effective_facts);
+    assert_eq!(shape_content_policy.java_ty(), &external_name);
+    assert!(shape_content_policy.string_content());
     assert_eq!(
         view_coercion_policy_with_effective_facts(&actual, &target, &effective_facts),
         view_coercion_policy(&actual, &target, &facts)
@@ -3918,15 +3849,14 @@ fn optional_erased_instanceof_uses_shared_handle_carrier_for_shared_targets() {
     let mut storage_plan = StoragePlan::default();
     storage_plan.insert(
         "Dog".to_string(),
-        TypeStorageFacts {
-            escape: Escape::Stored,
-            locally_aliased: true,
-            mutated: false,
-            mutation_provably_absent: true,
-            threaded: false,
-            static_reachable: false,
-            surface_forwardable: true,
-        },
+        TypeStorageFacts::default()
+            .with_escape(Escape::Stored)
+            .with_locally_aliased(true)
+            .with_mutated(false)
+            .with_mutation_provably_absent(true)
+            .with_threaded(false)
+            .with_static_reachable(false)
+            .with_surface_forwardable(true),
     );
     let facts = FactSet {
         storage_strategies: storage_plan,
@@ -4010,11 +3940,10 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
         plan_instanceof_check_with_facts(&actual, &primitive, &FactSet::default());
     assert_eq!(
         primitive_check.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_instanceof_primitive_target",
-            message: "unsupported Java instanceof check: primitive target type Primitive(Int)"
-                .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_instanceof_primitive_target",
+            "unsupported Java instanceof check: primitive target type Primitive(Int)",
+        )]
     );
 
     let raw_comparator = RustSlotShape::conservative(JavaType::Named {
@@ -4024,12 +3953,10 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
     let raw_check = plan_instanceof_check_with_facts(&actual, &raw_comparator, &FactSet::default());
     assert_eq!(
         raw_check.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_instanceof_raw_or_wildcard_target",
-            message:
-                "unsupported Java instanceof check: raw or wildcard target type Named { name: \"Comparator\", args: [] }"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_instanceof_raw_or_wildcard_target",
+            "unsupported Java instanceof check: raw or wildcard target type Named { name: \"Comparator\", args: [] }",
+        )]
     );
 
     let wildcard = RustSlotShape::conservative(JavaType::Named {
@@ -4039,12 +3966,10 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
     let wildcard_check = plan_instanceof_check_with_facts(&actual, &wildcard, &FactSet::default());
     assert_eq!(
         wildcard_check.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_instanceof_raw_or_wildcard_target",
-            message:
-                "unsupported Java instanceof check: raw or wildcard target type Named { name: \"Comparator\", args: [Wildcard(None)] }"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_instanceof_raw_or_wildcard_target",
+            "unsupported Java instanceof check: raw or wildcard target type Named { name: \"Comparator\", args: [Wildcard(None)] }",
+        )]
     );
 
     let array_target = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String)));
@@ -4052,12 +3977,10 @@ fn instanceof_rejects_primitive_raw_wildcard_and_missing_runtime_targets() {
         plan_instanceof_check_with_facts(&actual, &array_target, &FactSet::default());
     assert_eq!(
         missing_check.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_instanceof_missing_runtime_target",
-            message:
-                "unsupported Java instanceof check: target type Array(String) has no concrete runtime type"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_instanceof_missing_runtime_target",
+            "unsupported Java instanceof check: target type Array(String) has no concrete runtime type",
+        )]
     );
 }
 
@@ -4126,7 +4049,7 @@ fn instanceof_uses_hierarchy_facts_for_interface_targets_with_closed_implementor
         enum_name: "AnimalValue".to_string(),
     };
     assert_eq!(
-        hierarchy_instanceof_policy(&dog_shape, &animal_closed_shape, &facts).always_true,
+        hierarchy_instanceof_policy(&dog_shape, &animal_closed_shape, &facts).always_true(),
         true
     );
     assert_eq!(
@@ -4171,21 +4094,17 @@ fn coercion_owns_instanceof_fallback_policy() {
     );
     assert_eq!(
         check.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_instanceof_shape",
-            message:
-                "unsupported Java instanceof shape: actual=Concrete, target=ClosedEnum { enum_name: \"AnimalValue\" }"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "unsupported_instanceof_shape",
+            "unsupported Java instanceof shape: actual=Concrete, target=ClosedEnum { enum_name: \"AnimalValue\" }",
+        )]
     );
     assert_eq!(
         check.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_instanceof_shape",
-            message:
-                "unsupported Java instanceof shape: actual=Concrete, target=ClosedEnum { enum_name: \"AnimalValue\" }"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_instanceof_shape",
+            "unsupported Java instanceof shape: actual=Concrete, target=ClosedEnum { enum_name: \"AnimalValue\" }",
+        )]
     );
 }
 
@@ -4235,12 +4154,10 @@ fn concrete_source_supertype_instanceof_subtype_requires_runtime_carrier() {
     );
     assert_eq!(
         check.unsupported_diagnostics(),
-        vec![ConversionDiagnostic {
-            code: "unsupported_instanceof_source_hierarchy_runtime_carrier",
-            message:
-                "unsupported Java instanceof check from source supertype Named { name: \"HeaderLine\", args: [] } to subtype Named { name: \"FormatLine\", args: [] }: a member-preserving runtime carrier is required"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_instanceof_source_hierarchy_runtime_carrier",
+            "unsupported Java instanceof check from source supertype Named { name: \"HeaderLine\", args: [] } to subtype Named { name: \"FormatLine\", args: [] }: a member-preserving runtime carrier is required"
+        )]
     );
 }
 
@@ -4271,12 +4188,8 @@ fn coercion_names_missing_runtime_targets_for_dispatch_downcasts() {
     );
     assert_eq!(
         policy.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_dispatch_missing_runtime_target",
-            message:
-                "unsupported Java dispatch coercion: target type Array(String) has no concrete runtime type"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new("unsupported_dispatch_missing_runtime_target", "unsupported Java dispatch coercion: target type Array(String) has no concrete runtime type"
+                    .to_string())]
     );
     assert_compile_error_block_consuming(
         apply_expr_to_slot_with_facts(
@@ -4317,21 +4230,20 @@ fn instanceof_names_missing_runtime_targets() {
     );
     assert_eq!(
         check.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_instanceof_raw_or_wildcard_target",
-            message:
-                "unsupported Java instanceof check: raw or wildcard target type Wildcard(None)"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "unsupported_instanceof_raw_or_wildcard_target",
+            "unsupported Java instanceof check: raw or wildcard target type Wildcard(None)"
+                .to_string()
+        )]
     );
 }
 
 #[test]
 fn unsupported_coercion_message_policy_escapes_compile_error_text() {
-    let quoted_message = UnsupportedCoercionMessagePolicy {
-        code: "quoted_message",
-        message: "unsupported coercion for \"pkg\\Type\"".to_string(),
-    };
+    let quoted_message = UnsupportedCoercionMessagePolicy::new(
+        "quoted_message",
+        "unsupported coercion for \"pkg\\Type\"",
+    );
     assert_eq!(
         quoted_message.compile_error_expr(),
         RustExpr::MacroCall {
@@ -4340,32 +4252,6 @@ fn unsupported_coercion_message_policy_escapes_compile_error_text() {
                 "\"unsupported coercion for \\\"pkg\\\\Type\\\"\"".to_string()
             )],
         }
-    );
-}
-
-#[test]
-fn dynamic_compile_error_helpers_escape_diagnostic_text() {
-    let message = "unsupported \"quoted\" Java path \\pkg\\Type with {braces} and \"#";
-    assert_eq!(
-        unsupported::compile_error_expr(message),
-        RustExpr::MacroCall {
-            macro_name: "compile_error".to_string(),
-            args: vec![RustExpr::Literal(format!("{message:?}"))],
-        }
-    );
-    assert_eq!(
-        unsupported::compile_error_stmt(message),
-        new_java2rust::rust_ir::RustStmt::Expr(RustExpr::MacroCall {
-            macro_name: "compile_error".to_string(),
-            args: vec![RustExpr::Literal(format!("{message:?}"))],
-        })
-    );
-    assert_eq!(
-        new_java2rust::emit::emit_expr(&unsupported::compile_error_expr_consuming(
-            &RustExpr::Var("value".to_string()),
-            message
-        )),
-        format!("{{ let _ = value; compile_error!({message:?}) }}")
     );
 }
 
@@ -4402,12 +4288,8 @@ fn instanceof_policy_names_erased_object_interface_target_fallbacks() {
     );
     assert_eq!(
         dyn_check.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_erased_object_instanceof_dyn_trait",
-            message:
-                "unsupported Java erased object instanceof borrowed dyn trait check for Animal; a concrete runtime target is required"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new("unsupported_erased_object_instanceof_dyn_trait", "unsupported Java erased object instanceof borrowed dyn trait check for Animal; a concrete runtime target is required"
+                    .to_string())]
     );
     assert_eq!(
         boxed_check,
@@ -4423,12 +4305,8 @@ fn instanceof_policy_names_erased_object_interface_target_fallbacks() {
     );
     assert_eq!(
         boxed_check.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_erased_object_instanceof_boxed_dyn_trait",
-            message:
-                "unsupported Java erased object instanceof owned boxed dyn trait check for Animal; a concrete runtime target is required"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new("unsupported_erased_object_instanceof_boxed_dyn_trait", "unsupported Java erased object instanceof owned boxed dyn trait check for Animal; a concrete runtime target is required"
+                    .to_string())]
     );
 }
 
@@ -4537,12 +4415,10 @@ fn dispatch_coercion_policy_owns_wrapping_trait_downcast_and_unsupported_cases()
     );
     assert_eq!(
         unsupported.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_dispatch_coercion",
-            message:
-                "unsupported Java dispatch coercion: actual=ClosedEnum { enum_name: \"AnimalValue\" }, target=DynTrait { trait_name: \"Animal\" }"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "unsupported_dispatch_coercion",
+            "unsupported Java dispatch coercion: actual=ClosedEnum { enum_name: \"AnimalValue\" }, target=DynTrait { trait_name: \"Animal\" }",
+        )]
     );
 }
 
@@ -4896,21 +4772,18 @@ fn dispatch_coercion_uses_clone_facts_for_borrowed_dyn_to_boxed_dyn_fallback() {
             object_safe_trait: None,
             provenance: FactProvenance::UserOverride,
         });
+    let animal_ty = JavaType::Named {
+        name: "Animal".to_string(),
+        args: Vec::new(),
+    };
+    let recovery_policy = coercion_owned_recovery_capability_policy_with_effective_facts(
+        &animal_ty,
+        &EffectiveFacts::new(&non_clone_facts),
+    );
+    assert_eq!(recovery_policy.java_ty(), &animal_ty);
     assert_eq!(
-        coercion_owned_recovery_capability_policy_with_effective_facts(
-            &JavaType::Named {
-                name: "Animal".to_string(),
-                args: Vec::new(),
-            },
-            &EffectiveFacts::new(&non_clone_facts),
-        ),
-        CoercionOwnedRecoveryCapabilityPolicy {
-            java_ty: JavaType::Named {
-                name: "Animal".to_string(),
-                args: Vec::new(),
-            },
-            recovery: OwnedRecoveryCapability::NonCloneable,
-        }
+        recovery_policy.recovery(),
+        OwnedRecoveryCapability::NonCloneable
     );
     assert_eq!(
         dispatch_coercion_policy_with_facts(
@@ -5086,15 +4959,15 @@ fn erased_object_runtime_contract_covers_carrier_downcast_instanceof_and_recover
     ] {
         assert_eq!(
             slot_conversion_plan_with_facts(&erased, &slot, &FactSet::default()),
-            SlotConversionPlan::Shape(ShapeCoercionPlan {
-                actual: erased.clone(),
-                target: erased_object_decl.clone(),
-                dispatch: DispatchCoercionPolicy::NoDispatchChange,
-                view: ViewCoercionPolicy::NoViewChange,
-                optional: OptionalShapeCoercionPolicy::NoChange,
-                ownership: OwnershipCoercionPolicy::NoOwnershipChange,
-                primitive_widening: None,
-            })
+            SlotConversionPlan::Shape(ShapeCoercionPlan::new(
+                erased.clone(),
+                erased_object_decl.clone(),
+                DispatchCoercionPolicy::NoDispatchChange,
+                ViewCoercionPolicy::NoViewChange,
+                OptionalShapeCoercionPolicy::NoChange,
+                OwnershipCoercionPolicy::NoOwnershipChange,
+                None,
+            ))
         );
         assert_eq!(
             apply_expr_to_slot_with_facts(
@@ -5140,12 +5013,8 @@ fn dispatch_coercion_names_erased_object_trait_recovery_fallbacks() {
     );
     assert_eq!(
         erased_to_borrowed_dyn.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_erased_object_to_dyn_trait",
-            message:
-                "unsupported Java erased object to borrowed dyn trait recovery for Animal; a concrete downcast target is required"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new("unsupported_erased_object_to_dyn_trait", "unsupported Java erased object to borrowed dyn trait recovery for Animal; a concrete downcast target is required"
+                    .to_string())]
     );
     assert_compile_error_block_consuming(
         apply_expr_to_slot_with_facts(
@@ -5182,12 +5051,8 @@ fn dispatch_coercion_names_erased_object_trait_recovery_fallbacks() {
     );
     assert_eq!(
         erased_to_boxed_dyn.diagnostics(),
-        vec![CoercionDiagnostic {
-            code: "unsupported_erased_object_to_boxed_dyn_trait",
-            message:
-                "unsupported Java erased object to owned boxed dyn trait recovery for Animal; a concrete downcast target and ownership proof are required"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new("unsupported_erased_object_to_boxed_dyn_trait", "unsupported Java erased object to owned boxed dyn trait recovery for Animal; a concrete downcast target and ownership proof are required"
+                    .to_string())]
     );
     assert_compile_error_block_consuming(
         apply_expr_to_slot_with_facts(
@@ -5204,10 +5069,10 @@ fn dispatch_coercion_names_erased_object_trait_recovery_fallbacks() {
 #[test]
 fn coercion_owns_borrowed_optional_to_owned_optional_slot() {
     let expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.iter().next()".to_string()),
-            actual: LoweredType::optional_element_borrow(JavaType::String),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.iter().next()".to_string()),
+            LoweredType::optional_element_borrow(JavaType::String),
+        ),
         &Slot::Return(RustSlotShape::conservative(optional_java_type(
             JavaType::String,
         ))),
@@ -5237,31 +5102,27 @@ fn borrowed_element_target_match_policies_name_carrier_and_element_matches() {
     let int_vec_target =
         RustSlotShape::conservative(list_java_type(JavaType::Primitive(PrimitiveType::Int)));
 
-    assert_eq!(
-        optional_element_target_match_policy(&option_target, &option_shape, &string_element),
-        OptionalElementTargetMatchPolicy { matches: true }
+    assert!(
+        optional_element_target_match_policy(&option_target, &option_shape, &string_element)
+            .matches()
     );
-    assert_eq!(
-        optional_element_target_match_policy(&int_option_target, &option_shape, &string_element),
-        OptionalElementTargetMatchPolicy { matches: false }
+    assert!(
+        !optional_element_target_match_policy(&int_option_target, &option_shape, &string_element)
+            .matches()
     );
-    assert_eq!(
-        vec_element_target_match_policy(&vec_target, &vec_shape, &string_element),
-        VecElementTargetMatchPolicy { matches: true }
-    );
-    assert_eq!(
-        vec_element_target_match_policy(&int_vec_target, &vec_shape, &string_element),
-        VecElementTargetMatchPolicy { matches: false }
+    assert!(vec_element_target_match_policy(&vec_target, &vec_shape, &string_element).matches());
+    assert!(
+        !vec_element_target_match_policy(&int_vec_target, &vec_shape, &string_element).matches()
     );
 }
 
 #[test]
 fn coercion_uses_copy_capability_for_borrowed_optional_elements() {
     let expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.iter().next()".to_string()),
-            actual: LoweredType::optional_element_borrow(JavaType::Primitive(PrimitiveType::Int)),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.iter().next()".to_string()),
+            LoweredType::optional_element_borrow(JavaType::Primitive(PrimitiveType::Int)),
+        ),
         &Slot::Return(RustSlotShape::conservative(optional_java_type(
             JavaType::Primitive(PrimitiveType::Int),
         ))),
@@ -5301,10 +5162,10 @@ fn coercion_uses_type_capability_facts_for_borrowed_optional_elements() {
             provenance: FactProvenance::UserOverride,
         });
     let expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.iter().next()".to_string()),
-            actual: LoweredType::optional_element_borrow(external_id.clone()),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.iter().next()".to_string()),
+            LoweredType::optional_element_borrow(external_id.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(optional_java_type(external_id))),
         &facts,
     );
@@ -5409,21 +5270,17 @@ fn borrowed_element_recovery_policy_owns_string_copy_clone_and_unsupported_cases
     );
     assert_eq!(
         unsupported.diagnostics(&handle_shape),
-        vec![CoercionDiagnostic {
-            code: "unsupported_borrowed_element_non_cloneable",
-            message:
-                "unsupported Java borrowed element ownership recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "unsupported_borrowed_element_non_cloneable",
+            "unsupported Java borrowed element ownership recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }",
+        )]
     );
     assert_eq!(
         unsupported.unsupported_diagnostics(&handle_shape),
-        vec![ConversionDiagnostic {
-            code: "unsupported_borrowed_element_non_cloneable",
-            message:
-                "unsupported Java borrowed element ownership recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }"
-                    .to_string(),
-        }]
+        vec![ConversionDiagnostic::new(
+            "unsupported_borrowed_element_non_cloneable",
+            "unsupported Java borrowed element ownership recovery for non-cloneable type Named { name: \"ExternalHandle\", args: [] }"
+        )]
     );
 }
 
@@ -5444,22 +5301,21 @@ fn borrowed_element_clone_recovery_audits_conservative_clone_capability() {
     );
     assert_eq!(
         policy.diagnostics(&element_shape),
-        vec![CoercionDiagnostic {
-            code: "borrowed_element_clone_audit_required",
-            message:
-                "borrowed Java element recovery inserted cloned() and requires ownership audit"
-                    .to_string(),
-        }]
+        vec![CoercionDiagnostic::new(
+            "borrowed_element_clone_audit_required",
+            "borrowed Java element recovery inserted cloned() and requires ownership audit"
+                .to_string()
+        )]
     );
     // Compared through `into_unshaped`: the producer now records
     // `RustExprShape::OwnedRecovery` so consumers can ask the tag instead of
     // matching the emitted comment. The tag is invisible to the emitter, so the
     // generated Rust asserted here is unchanged.
     let adapted = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.iter().next()".to_string()),
-            actual: LoweredType::optional_element_borrow(element_ty.clone()),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.iter().next()".to_string()),
+            LoweredType::optional_element_borrow(element_ty.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(optional_java_type(element_ty))),
         &FactSet::default(),
     );
@@ -5490,7 +5346,7 @@ fn borrowed_sequence_ownership_recovery_uses_to_vec() {
     let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
 
     assert!(matches!(
-        plan.ownership,
+        plan.ownership(),
         OwnershipCoercionPolicy::RecoverOwnedSequenceWithToVec { .. }
     ));
     assert_eq!(
@@ -5500,10 +5356,10 @@ fn borrowed_sequence_ownership_recovery_uses_to_vec() {
         }]
     );
     let recovered = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("Table::VALUES[index as usize]".to_string()),
-            actual: LoweredType::Slot(Box::new(actual.clone())),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("Table::VALUES[index as usize]".to_string()),
+            LoweredType::Slot(Box::new(actual.clone())),
+        ),
         &Slot::Return(target.clone()),
         &FactSet::default(),
     );
@@ -5548,10 +5404,10 @@ fn borrowed_sequence_ownership_recovery_uses_to_vec() {
     );
 
     let already_recovered = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.to_vec()".to_string()),
-            actual: LoweredType::Slot(Box::new(actual)),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.to_vec()".to_string()),
+            LoweredType::Slot(Box::new(actual)),
+        ),
         &Slot::Return(target),
         &FactSet::default(),
     );
@@ -5632,71 +5488,6 @@ fn borrowed_element_recovery_uses_richer_owned_recovery_facts() {
 }
 
 #[test]
-fn borrowed_element_adapter_policy_shares_recovery_across_option_and_vec_carriers() {
-    let mut string_view = RustSlotShape::conservative(JavaType::String);
-    string_view.ownership = OwnershipShape::SharedBorrow;
-    string_view.view = ViewShape::Str;
-    let int_element = RustSlotShape::conservative(JavaType::Primitive(PrimitiveType::Int));
-    let external_value = JavaType::Named {
-        name: "ExternalValue".to_string(),
-        args: Vec::new(),
-    };
-    let external_element = RustSlotShape::conservative(external_value);
-    let facts = FactSet::default();
-
-    assert_eq!(
-        borrowed_element_adapter_policy_with_unwrap(
-            BorrowedElementCarrier::Option,
-            &string_view,
-            &facts,
-            false,
-        ),
-        BorrowedElementAdapterPolicy {
-            carrier: BorrowedElementCarrier::Option,
-            element_shape: string_view.clone(),
-            recovery: BorrowedElementRecoveryPolicy::StringViewToOwned,
-            unwrap_carrier: false,
-        }
-    );
-    assert_eq!(
-        borrowed_element_adapter_policy_with_unwrap(
-            BorrowedElementCarrier::Vec,
-            &string_view,
-            &facts,
-            false,
-        ),
-        BorrowedElementAdapterPolicy {
-            carrier: BorrowedElementCarrier::Vec,
-            element_shape: string_view,
-            recovery: BorrowedElementRecoveryPolicy::StringViewToOwned,
-            unwrap_carrier: false,
-        }
-    );
-    assert_eq!(
-        borrowed_element_adapter_policy_with_unwrap(
-            BorrowedElementCarrier::Option,
-            &int_element,
-            &facts,
-            false,
-        )
-        .recovery,
-        BorrowedElementRecoveryPolicy::CopyElements
-    );
-    assert_eq!(
-        borrowed_element_adapter_policy_with_unwrap(
-            BorrowedElementCarrier::Vec,
-            &external_element,
-            &facts,
-            false,
-        )
-        .recovery,
-        BorrowedElementRecoveryPolicy::CloneElements {
-            policy: CloneRecoveryPolicy::AuditRequired,
-        }
-    );
-}
-
-#[test]
 fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
     let string_element = RustSlotShape::conservative(JavaType::String);
     let option_shape = RustSlotShape::conservative(optional_java_type(JavaType::String));
@@ -5714,17 +5505,12 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
         &string_element,
         &facts,
     );
-    assert_eq!(
-        option_policy,
-        BorrowedElementSlotAdapterPolicy {
-            target: option_target.clone(),
-            carrier_shape: option_shape,
-            element_shape: string_element.clone(),
-            carrier: BorrowedElementCarrier::Option,
-            matches: true,
-            adapter: None,
-        }
-    );
+    assert_eq!(option_policy.target(), &option_target);
+    assert_eq!(option_policy.carrier_shape(), &option_shape);
+    assert_eq!(option_policy.element_shape(), &string_element);
+    assert_eq!(option_policy.carrier(), BorrowedElementCarrier::Option);
+    assert!(option_policy.matches());
+    assert!(option_policy.adapter().is_none());
 
     let concrete_option_policy = borrowed_element_slot_adapter_policy(
         BorrowedElementCarrier::Option,
@@ -5733,12 +5519,11 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
         &string_element,
         &facts,
     );
-    assert_eq!(concrete_option_policy.matches, true);
+    assert_eq!(concrete_option_policy.matches(), true);
     assert_eq!(
         concrete_option_policy
-            .adapter
-            .as_ref()
-            .map(|adapter| adapter.unwrap_carrier),
+            .adapter()
+            .map(BorrowedElementAdapterPolicy::unwrap_carrier),
         Some(true)
     );
 
@@ -5749,9 +5534,9 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
         &string_element,
         &facts,
     );
-    assert_eq!(vec_policy.matches, true);
+    assert_eq!(vec_policy.matches(), true);
     assert_eq!(
-        vec_policy.adapter.as_ref().unwrap().carrier,
+        vec_policy.adapter().unwrap().carrier(),
         BorrowedElementCarrier::Vec
     );
 
@@ -5762,9 +5547,9 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
         &string_element,
         &facts,
     );
-    assert_eq!(set_policy.matches, true);
+    assert_eq!(set_policy.matches(), true);
     assert_eq!(
-        set_policy.adapter.as_ref().unwrap().carrier,
+        set_policy.adapter().unwrap().carrier(),
         BorrowedElementCarrier::Set
     );
 
@@ -5775,8 +5560,8 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
         &string_element,
         &facts,
     );
-    assert_eq!(mismatch.matches, false);
-    assert_eq!(mismatch.adapter, None);
+    assert_eq!(mismatch.matches(), false);
+    assert_eq!(mismatch.adapter(), None);
 }
 
 #[test]
@@ -5801,22 +5586,22 @@ fn optional_borrowed_element_adapter_unwraps_to_concrete_copy_target() {
         &FactSet::default(),
     );
 
+    let SlotConversionPlan::BorrowedElement(policy) = &plan else {
+        panic!("expected borrowed element policy");
+    };
+    assert_eq!(policy.target(), &target);
+    assert_eq!(policy.carrier_shape(), &option_shape);
+    assert_eq!(policy.element_shape(), &element_shape);
+    assert_eq!(policy.carrier(), BorrowedElementCarrier::Option);
+    assert!(policy.matches());
+    let adapter = policy.adapter().expect("expected borrowed element adapter");
+    assert_eq!(adapter.carrier(), BorrowedElementCarrier::Option);
+    assert_eq!(adapter.element_shape(), &element_shape);
     assert_eq!(
-        plan,
-        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            target,
-            carrier_shape: option_shape,
-            element_shape: element_shape.clone(),
-            carrier: BorrowedElementCarrier::Option,
-            matches: true,
-            adapter: Some(BorrowedElementAdapterPolicy {
-                carrier: BorrowedElementCarrier::Option,
-                element_shape,
-                recovery: BorrowedElementRecoveryPolicy::CopyElements,
-                unwrap_carrier: true,
-            }),
-        })
+        adapter.recovery(),
+        &BorrowedElementRecoveryPolicy::CopyElements
     );
+    assert!(adapter.unwrap_carrier());
     let projected =
         apply_slot_conversion_plan(RustExpr::Raw("values.get(&key)".to_string()), &plan);
     assert_eq!(
@@ -5965,22 +5750,22 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
         &facts,
     );
 
+    let SlotConversionPlan::BorrowedElement(policy) = &plan else {
+        panic!("expected borrowed element policy");
+    };
+    assert_eq!(policy.target(), &target);
+    assert_eq!(policy.carrier_shape(), &option_shape);
+    assert_eq!(policy.element_shape(), &element_shape);
+    assert_eq!(policy.carrier(), BorrowedElementCarrier::Option);
+    assert!(policy.matches());
+    let adapter = policy.adapter().expect("expected borrowed element adapter");
+    assert_eq!(adapter.carrier(), BorrowedElementCarrier::Option);
+    assert_eq!(adapter.element_shape(), &expected_element_shape);
     assert_eq!(
-        plan,
-        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            target: target.clone(),
-            carrier_shape: option_shape,
-            element_shape,
-            carrier: BorrowedElementCarrier::Option,
-            matches: true,
-            adapter: Some(BorrowedElementAdapterPolicy {
-                carrier: BorrowedElementCarrier::Option,
-                element_shape: expected_element_shape,
-                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
-                unwrap_carrier: true,
-            }),
-        })
+        adapter.recovery(),
+        &BorrowedElementRecoveryPolicy::BorrowElement
     );
+    assert!(adapter.unwrap_carrier());
     let projected =
         apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan);
     let projected_unshaped = projected.clone().into_unshaped();
@@ -6042,18 +5827,16 @@ fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
         &facts,
     );
 
-    assert!(matches!(
-        plan,
-        SlotConversionPlan::BorrowedElement(BorrowedElementSlotAdapterPolicy {
-            matches: true,
-            adapter: Some(BorrowedElementAdapterPolicy {
-                recovery: BorrowedElementRecoveryPolicy::BorrowElement,
-                unwrap_carrier: true,
-                ..
-            }),
-            ..
-        })
-    ));
+    let SlotConversionPlan::BorrowedElement(policy) = &plan else {
+        panic!("expected borrowed element policy");
+    };
+    assert!(policy.matches());
+    let adapter = policy.adapter().expect("expected borrowed element adapter");
+    assert_eq!(
+        adapter.recovery(),
+        &BorrowedElementRecoveryPolicy::BorrowElement
+    );
+    assert!(adapter.unwrap_carrier());
     let projected =
         apply_slot_conversion_plan(RustExpr::Raw("intervals.get(0)".to_string()), &plan);
     assert_eq!(
@@ -6119,10 +5902,10 @@ fn coercion_rejects_non_cloneable_borrowed_optional_elements() {
             provenance: FactProvenance::UserOverride,
         });
     let expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("handles.iter().next()".to_string()),
-            actual: LoweredType::optional_element_borrow(external_handle.clone()),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("handles.iter().next()".to_string()),
+            LoweredType::optional_element_borrow(external_handle.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(optional_java_type(
             external_handle,
         ))),
@@ -6156,10 +5939,10 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
         args: Vec::new(),
     };
     let expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: borrowed_string_view_vec.clone(),
-            actual: LoweredType::vec_element_borrow(element_shape),
-        },
+        LoweredExpr::new(
+            borrowed_string_view_vec.clone(),
+            LoweredType::vec_element_borrow(element_shape),
+        ),
         &Slot::Return(RustSlotShape::conservative(list_java_type(
             JavaType::String,
         ))),
@@ -6213,10 +5996,10 @@ fn coercion_uses_element_shape_for_borrowed_vec_string_view() {
         args: Vec::new(),
     };
     let copied_set = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: borrowed_int_set.clone(),
-            actual: LoweredType::set_element_borrow(copied_element_shape),
-        },
+        LoweredExpr::new(
+            borrowed_int_set.clone(),
+            LoweredType::set_element_borrow(copied_element_shape),
+        ),
         &Slot::Return(RustSlotShape::conservative(set_java_type(
             JavaType::Primitive(PrimitiveType::Int),
         ))),
@@ -6254,10 +6037,10 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     element_shape.ownership = OwnershipShape::SharedBorrow;
 
     let vec_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("values.iter().collect::<Vec<_>>()".to_string()),
-            actual: LoweredType::vec_element_borrow(element_shape.clone()),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.iter().collect::<Vec<_>>()".to_string()),
+            LoweredType::vec_element_borrow(element_shape.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(list_java_type(
             JavaType::String,
         ))),
@@ -6292,8 +6075,8 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     );
 
     let structured_already_cloned_vec_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::MethodCall {
+        LoweredExpr::new(
+            RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
                         receiver: Box::new(RustExpr::Var("values".to_string())),
@@ -6306,8 +6089,8 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
                 method: "collect::<Vec<_>>".to_string(),
                 args: Vec::new(),
             },
-            actual: LoweredType::vec_element_borrow(element_shape.clone()),
-        },
+            LoweredType::vec_element_borrow(element_shape.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(list_java_type(
             JavaType::String,
         ))),
@@ -6327,13 +6110,13 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     ));
 
     let tagged_vec_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::shaped(
+        LoweredExpr::new(
+            RustExpr::shaped(
                 RustExprShape::OwnedRecovery,
                 RustExpr::Raw("recover_values(values)".to_string()),
             ),
-            actual: LoweredType::vec_element_borrow(element_shape.clone()),
-        },
+            LoweredType::vec_element_borrow(element_shape.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(list_java_type(
             JavaType::String,
         ))),
@@ -6350,13 +6133,10 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     );
 
     let set_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw(
+        LoweredExpr::new(RustExpr::Raw(
                 "groups.iter().flat_map(|item| item.iter()).collect::<std::collections::HashSet<_>>()"
                     .to_string(),
-            ),
-            actual: LoweredType::set_element_borrow(element_shape.clone()),
-        },
+            ), LoweredType::set_element_borrow(element_shape.clone())),
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
         &FactSet::default(),
     );
@@ -6379,12 +6159,10 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     );
 
     let simple_set_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw(
-                "values.iter().collect::<std::collections::HashSet<_>>()".to_string(),
-            ),
-            actual: LoweredType::set_element_borrow(element_shape.clone()),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("values.iter().collect::<std::collections::HashSet<_>>()".to_string()),
+            LoweredType::set_element_borrow(element_shape.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
         &FactSet::default(),
     );
@@ -6410,8 +6188,8 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     ));
 
     let already_cloned_set_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::MethodCall {
+        LoweredExpr::new(
+            RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
                         receiver: Box::new(RustExpr::MethodCall {
@@ -6428,8 +6206,8 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
                 method: "collect::<std::collections::HashSet<_>>".to_string(),
                 args: Vec::new(),
             },
-            actual: LoweredType::set_element_borrow(element_shape.clone()),
-        },
+            LoweredType::set_element_borrow(element_shape.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
         &FactSet::default(),
     );
@@ -6454,8 +6232,8 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
         Some(RustExprShape::OwnedRecovery)
     );
     let structured_already_cloned_set_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::MethodCall {
+        LoweredExpr::new(
+            RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
                         receiver: Box::new(RustExpr::Var("groups".to_string())),
@@ -6468,8 +6246,8 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
                 method: "collect::<std::collections::HashSet<_>>".to_string(),
                 args: Vec::new(),
             },
-            actual: LoweredType::set_element_borrow(element_shape.clone()),
-        },
+            LoweredType::set_element_borrow(element_shape.clone()),
+        ),
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
         &FactSet::default(),
     );
@@ -6483,13 +6261,13 @@ fn coercion_fuses_borrowed_collection_clone_recovery_into_terminal_collect() {
     );
 
     let tagged_set_expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::shaped(
+        LoweredExpr::new(
+            RustExpr::shaped(
                 RustExprShape::OwnedRecovery,
                 RustExpr::Raw("recover_groups(groups)".to_string()),
             ),
-            actual: LoweredType::set_element_borrow(element_shape),
-        },
+            LoweredType::set_element_borrow(element_shape),
+        ),
         &Slot::Return(RustSlotShape::conservative(set_java_type(JavaType::String))),
         &FactSet::default(),
     );
@@ -6529,10 +6307,10 @@ fn coercion_rejects_non_cloneable_borrowed_vec_elements() {
     element_shape.ownership = OwnershipShape::SharedBorrow;
 
     let expr = apply_lowered_expr_to_slot_with_facts(
-        LoweredExpr {
-            expr: RustExpr::Raw("handles.iter().collect::<Vec<_>>()".to_string()),
-            actual: LoweredType::vec_element_borrow(element_shape),
-        },
+        LoweredExpr::new(
+            RustExpr::Raw("handles.iter().collect::<Vec<_>>()".to_string()),
+            LoweredType::vec_element_borrow(element_shape),
+        ),
         &Slot::Return(RustSlotShape::conservative(list_java_type(external_handle))),
         &facts,
     );

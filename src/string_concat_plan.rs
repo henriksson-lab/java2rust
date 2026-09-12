@@ -4,8 +4,25 @@ use crate::types::TypeEnv;
 
 #[derive(Debug, Clone)]
 pub(crate) struct StringConcatPlan<'a> {
-    pub(crate) format_string: String,
-    pub(crate) args: Vec<&'a Expr>,
+    format_string: String,
+    args: Vec<&'a Expr>,
+}
+
+impl<'a> StringConcatPlan<'a> {
+    pub(crate) fn new(format_string: String, args: Vec<&'a Expr>) -> Self {
+        Self {
+            format_string,
+            args,
+        }
+    }
+
+    pub(crate) fn format_string(&self) -> &str {
+        &self.format_string
+    }
+
+    pub(crate) fn args(&self) -> &[&'a Expr] {
+        &self.args
+    }
 }
 
 pub(crate) fn build_string_concat_plan<'a>(
@@ -14,7 +31,7 @@ pub(crate) fn build_string_concat_plan<'a>(
 ) -> Option<StringConcatPlan<'a>> {
     let parts = analyze_string_concat(expr, env)?;
     let format_string = parts
-        .parts
+        .parts()
         .iter()
         .map(|part| match part {
             Expr::Literal(Literal::String(s)) => s.replace('{', "{{").replace('}', "}}"),
@@ -22,14 +39,11 @@ pub(crate) fn build_string_concat_plan<'a>(
         })
         .collect::<String>();
     let args = parts
-        .parts
+        .into_parts()
         .into_iter()
         .filter(|part| !matches!(part, Expr::Literal(Literal::String(_))))
         .collect();
-    Some(StringConcatPlan {
-        format_string,
-        args,
-    })
+    Some(StringConcatPlan::new(format_string, args))
 }
 
 #[cfg(test)]
@@ -47,7 +61,7 @@ mod tests {
         let expr = parse_expr("\"name=\" + name + count");
         let plan = build_string_concat_plan(&expr, &env).unwrap();
 
-        assert_eq!(plan.format_string, "name={}{}");
-        assert_eq!(plan.args.len(), 2);
+        assert_eq!(plan.format_string(), "name={}{}");
+        assert_eq!(plan.args().len(), 2);
     }
 }

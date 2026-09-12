@@ -75,11 +75,11 @@ pub(crate) fn program_uses_broad_ioutils_facade(program: &Program) -> bool {
     }) || program.types.iter().any(type_uses_broad_ioutils_facade)
 }
 
-pub fn is_builtin_external_facade_type(name: &str) -> bool {
+pub(crate) fn is_builtin_external_facade_type(name: &str) -> bool {
     crate::stdlib::canonical_external_receiver_type_key(name) == "IOUtils"
 }
 
-pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
+pub(crate) fn is_known_java_subtype(actual: &str, target: &str) -> bool {
     let actual = crate::stdlib::canonical_external_receiver_type_key(actual);
     let target = crate::stdlib::canonical_external_receiver_type_key(target);
     if actual == target {
@@ -99,14 +99,14 @@ pub fn is_known_java_subtype(actual: &str, target: &str) -> bool {
     )
 }
 
-pub fn needs_conversion_constructor_for_facade(name: &str) -> bool {
+pub(crate) fn needs_conversion_constructor_for_facade(name: &str) -> bool {
     matches!(
         crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
         "Locatable" | "htsjdk.samtools.util.Locatable"
     )
 }
 
-pub fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usize) -> bool {
+pub(crate) fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usize) -> bool {
     let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     if imported_static_method_returns_broad_utils_first_arg(&receiver, method, arg_count) {
         return true;
@@ -307,7 +307,7 @@ pub(crate) fn wildcard_import_static_type_aliases(
     }
 }
 
-pub fn broad_utils_dynamic_return_type(
+pub(crate) fn broad_utils_dynamic_return_type(
     receiver_type: Option<&str>,
     name: &str,
     arg_types: &[JavaType],
@@ -324,7 +324,7 @@ pub fn broad_utils_dynamic_return_type(
     }
 }
 
-pub fn broad_static_utility_return_type(
+pub(crate) fn broad_static_utility_return_type(
     receiver_type: Option<&str>,
     name: &str,
     arg_count: usize,
@@ -357,7 +357,7 @@ pub fn broad_static_utility_return_type(
     None
 }
 
-pub fn imported_static_method_returns_broad_utils_first_arg(
+pub(crate) fn imported_static_method_returns_broad_utils_first_arg(
     owner_key: &str,
     name: &str,
     arg_count: usize,
@@ -367,7 +367,7 @@ pub fn imported_static_method_returns_broad_utils_first_arg(
             || (matches!(name, "flatten") && is_arg_utils_type_name(owner_key)))
 }
 
-pub fn is_broad_utils_type_name(name: &str) -> bool {
+pub(crate) fn is_broad_utils_type_name(name: &str) -> bool {
     matches!(
         name,
         "Utils" | "utils" | "org.broadinstitute.hellbender.utils.Utils"
@@ -705,12 +705,12 @@ const JDK_INPUT_STREAM_FACADE_TYPES: &[&str] = &[
 ];
 
 /// Whether a simple class name is one of the broad JDK exception supertypes.
-pub fn is_known_exception_supertype(simple_name: &str) -> bool {
+pub(crate) fn is_known_exception_supertype(simple_name: &str) -> bool {
     KNOWN_EXCEPTION_SUPERTYPES.contains(&simple_name)
 }
 
 /// Whether a canonical external type key names a JDK input-stream facade type.
-pub fn is_jdk_input_stream_facade_type(canonical_key: &str) -> bool {
+pub(crate) fn is_jdk_input_stream_facade_type(canonical_key: &str) -> bool {
     JDK_INPUT_STREAM_FACADE_TYPES.contains(&canonical_key)
 }
 

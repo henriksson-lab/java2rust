@@ -10,6 +10,11 @@ fixtures named in this file. The audit remains open for the general completion
 carrier and remaining panic-only Java exception surfaces, not for the
 already-promoted fixture set.
 
+Fixture-count numbers below are chronological checkpoints, not live inventory.
+For the current differential inventory, use
+`tests/differential.rs::EXPECTED_DIFFERENTIAL_FIXTURES` rather than prose counts
+recorded during earlier promotion passes.
+
 Follow-up 2026-09-09 source-exception parent pass: generated `JavaException`
 parent lookup now keeps exact package-qualified source exception edges before
 simple-name compatibility. The source parent table emits full child/parent names
@@ -23,6 +28,33 @@ Follow-up 2026-09-07 `List.subList` exception-class pass: catchable
 `from > to` raises `IllegalArgumentException`, while negative/out-of-size bounds
 continue to raise `IndexOutOfBoundsException`. Regression:
 `idiom_gaps::list_sub_list_invalid_range_is_catchable_as_illegal_argument`.
+
+Codex follow-up 2026-09-12 enhanced-for mutation guard: enhanced-for over a
+local collection that is structurally mutated in the loop body no longer emits
+borrow-checker-invalid Rust such as `for s in xs.iter() { xs.push(...) }`.
+That direct shape now fails loudly with
+`compile_error!("unsupported Java enhanced-for over a collection mutated in the loop body")`.
+This keeps the unsupported Java fail-fast iterator contract explicit; it does
+not implement catchable `ConcurrentModificationException`. Guard:
+`idiom_gaps::enhanced_for_mutating_iterated_collection_fails_loudly`.
+
+Codex follow-up 2026-09-12 guard hardening: that enhanced-for mutation fixture
+now also runs the generated crate through the failing cargo-check harness and
+asserts the unsupported message there. The behavior is still intentionally loud,
+but the guard no longer relies only on a rendered-string assertion.
+
+Codex follow-up 2026-09-12 loop-body `try/finally` carrier guard: after the
+known simple-loop fast paths decline a `try/finally`, a loop-body shape whose
+body/catch/finally can `break` or `continue` now emits the existing unsupported
+`try/catch/finally` placeholder instead of closure-crossing `break`/`continue`
+Rust. This does not implement the general completion carrier; it keeps another
+open 0057 shape from becoming invalid generated Rust. Regression:
+`idiom_gaps::try_finally_conditional_return_over_break_fails_loudly_in_loop_body`.
+
+Codex follow-up 2026-09-12 guard hardening: that loop-body `try/finally`
+fixture now also runs the generated crate through the failing cargo-check
+harness and asserts the unsupported message there, so the guard no longer relies
+only on rendered-string matching.
 
 Follow-up 2026-09-08 `BitSet.clear`/`flip` exception pass: the modeled
 `java.util.BitSet` facade now carries mutating, result-returning ABI/effect
@@ -63,6 +95,17 @@ the solved method/callable exception plans instead of reading `method.throws` or
 `plan_call_exception_propagation_with_external_index` is also crate-local now:
 the public boundary remains the no-index wrapper for tests and the
 external-only propagation planner used by lowering.
+Follow-up cleanup narrowed that external-only propagation planner as well:
+`call_plan::plan_external_call_exception_propagation` is now crate-local. The
+public exception-planning API remains `plan_call_exception_propagation`, while
+lowering keeps using the no-source-probe external path internally after the
+solved exception/fallibility plan has answered source-call questions. Guard:
+`slot_shape_design::exception_lowering_policy_owns_result_support_ok_and_err_shapes`.
+Follow-up cleanup 2026-09-12: `fallibility_invariant` is crate-internal too.
+Lowering still runs the invariant reporter before emission, but the diagnostic
+pass and `report_fallibility_violations` entry point are no longer advertised
+as public crate API. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`.
 
 Follow-up 2026-09-06: erased-object downcast failures inside propagating
 `try/catch` lowering now become catchable `ClassCastException`s instead of
@@ -223,6 +266,14 @@ the existing structured stream-range test now pins both panic and result
 rendering paths. The audit remains open for the broader panic-only exception
 surface and general `finally` completion carrier.
 
+Codex correction 2026-09-12: the stream-specific guard now matches the
+documented oracle above for both panic and result carriers:
+`fromIndex > toIndex` is `ArrayIndexOutOfBoundsException` for
+`Arrays.stream(values, from, to)`, while the generic sort/fill range helpers
+continue to use `IllegalArgumentException`. The focused generated-crate
+regression and `tests/differential/ArraysStreamRangeCatch.java` now agree at
+`5,-2,-2,-2`.
+
 Follow-up 2026-08-29 baseline pass: six exception/finally fixtures were still
 listed in `tests/baselines/idiom-gaps-failures.txt` even though current
 lowering covers them. Two assertions were stale after newer result/cleanup
@@ -355,20 +406,21 @@ Updated 2026-08-24: two small `String` compile breaks are fixed and promoted.
 `String.trim()` now lowers as an owned `String` result, so `return s.trim();`
 compiles and matches Java. `String.replace(char, char)` now adapts the
 replacement char literal to Rust's `&str` replacement argument. `TrimInReturn.java`
-and `StringReplaceChar.java` pass the Java oracle as part of the 47-fixture
-differential suite.
+and `StringReplaceChar.java` passed the Java oracle at that checkpoint; the
+current fixture count is owned by `tests/differential.rs`.
 
 Updated 2026-08-24 again: `StringBuilder.append(intLocal)` now keeps primitive
 locals in their copy-value shape. The local-signature shortcut that selects a
 concrete borrowed value is no longer eligible for primitive/copy types, so the
 conflict winner (`CopyValue`/native) agrees with the rendered local type.
-`AppendIntLocal.java` is promoted and passes the Java oracle as part of the
-48-fixture differential suite.
+`AppendIntLocal.java` was promoted and passed the Java oracle at that
+checkpoint; the current fixture count is owned by `tests/differential.rs`.
 
 Updated 2026-08-24 third pass: `Character.isDigit`, `isLetter`,
 `isWhitespace`, `toUpperCase`, and `toLowerCase` are planned as native Java
 static calls. Lowering now emits the corresponding Rust `char` methods, and
-`CharacterStatics.java` is promoted into the 49-fixture differential suite.
+`CharacterStatics.java` was promoted at that checkpoint; the current fixture
+count is owned by `tests/differential.rs`.
 
 Updated 2026-08-24 fourth pass: `new String(String)` no longer resolves to the
 byte-array constructor. The new-target plan records a native String constructor
@@ -404,40 +456,42 @@ no longer the live failures. Keep the audit open for general/nested/labeled
 cross catch boundaries as `JavaException`.
 
 Updated 2026-08-24 eighth pass: `NullInstanceof.java` moved from repro-only
-coverage into `tests/differential/`. The then-59-fixture differential suite gates
+coverage into `tests/differential/`. The differential suite gated
 `null instanceof String == false` and a non-null `String` object matching the same
-check, rather than relying on this file's prose inventory.
+check at that checkpoint, rather than relying on this file's prose inventory.
 
 Updated 2026-08-24 ninth pass: three more verified-correct control/null shapes
 are promoted from repro-only coverage: `DoWhile.java`, `ShortCircuitLocal.java`,
-and `TernaryNull.java`. The then-current differential suite gated 62 fixtures, including
+and `TernaryNull.java`. At that checkpoint the differential suite gated
 do/while execution, observable `&&`/`||` short-circuiting, null-guarded member
 access, ternary null propagation, and guarded division.
 
 Updated 2026-08-24 tenth pass: four verified-correct char/string fixtures are
 promoted from repro-only coverage: `CharOps.java`, `CharArray.java`,
-`StringMethods.java`, and `StringSplit.java`. The differential suite now gates
-66 fixtures, including char arithmetic/casts/comparison, `toCharArray`,
-char compound assignment/increment, `String.valueOf(char)`, string search and
-case methods, and regex-style `String.split`.
+`StringMethods.java`, and `StringSplit.java`. At that checkpoint the
+differential suite gated 66 fixtures, including char arithmetic/casts/comparison,
+`toCharArray`, char compound assignment/increment, `String.valueOf(char)`,
+string search and case methods, and regex-style `String.split`.
 
 Updated 2026-08-24 eleventh pass: three verified-correct control-flow fixtures
 are promoted from repro-only coverage: `EnhancedForArray.java`,
-`EnhancedForCollection.java`, and `LabeledBreakOnly.java`. The differential
-suite now gates 69 fixtures, including enhanced-for over primitive arrays,
-reference arrays and `List<String>`, plus a labeled break out of nested loops.
+`EnhancedForCollection.java`, and `LabeledBreakOnly.java`. At that checkpoint
+the differential suite gated 69 fixtures, including enhanced-for over primitive
+arrays, reference arrays and `List<String>`, plus a labeled break out of nested
+loops.
 
 Updated 2026-08-24 twelfth pass: four verified-correct exception fixtures are
 promoted from repro-only coverage: `ExceptionsCustom.java`,
 `CatchSupertype.java`, `CatchException.java`, and
-`TryCatchReturnFinally.java`. The then-current differential suite gated 73 fixtures,
+`TryCatchReturnFinally.java`. The differential suite gated these cases at that
+checkpoint,
 including user exception construction/message flow, catching a user subclass
 through `RuntimeException`, catching a built-in unchecked exception through
 `Exception`, exception crossing a call boundary, and `finally` after return in
 both `try` and `catch`.
 
 Updated 2026-08-24 thirteenth pass: `SwitchChar.java` is promoted from
-repro-only coverage. The then-current differential suite gated 74 fixtures, including
+repro-only coverage. The differential suite gated, at that checkpoint,
 `switch` on `char`, `switch` on `String`, grouped switch labels, and
 fallthrough.
 
@@ -628,8 +682,11 @@ exception/finally audit. It is still executable coverage via
 `tests/differential/known-gaps/StringEqualsVsEq.java`, where the Java oracle and
 current `java_string_identity` warning are both checked.
 
-**30 areas probed for this audit's exception/control-flow surface, 29 verified
-correct.**
+Historical checkpoint: **30 areas probed for this audit's exception/control-flow
+surface, 29 verified correct.** This count predates the later promoted
+exception/finally differential loops and is no longer the current fixture
+total; use the active fixture lists in `tests/differential.rs` and the README's
+current suite count for present coverage.
 
 ---
 
@@ -934,8 +991,8 @@ Fixed 2026-08-24. `StringBuilder`/`StringBuffer` support now uses
 `Arc<Mutex<String>>`, which is valid behind the global static carrier, and the
 static getter installs the lazy initializer with `get_or_insert_with` before
 cloning it. The generated repro compiles and prints `ab`, and
-`tests/differential/StaticStringBuilder.java` pinned it in the then-53-fixture
-differential suite.
+`tests/differential/StaticStringBuilder.java` pinned it in the differential
+suite at that checkpoint.
 
 ---
 
@@ -1102,10 +1159,10 @@ plan as native Java static calls rather than pack-backed placeholder facade
 methods. `java.util.Optional`/`JavaUtilOptional` canonicalize to the same native
 owner, the return type is inferred as `Optional<T>`, and the value projections
 are `None`, `Some(value)`, and the nullable argument carrier respectively.
-`tests/differential/OptionalFactoryGetCatch.java` is promoted and verifies
+`tests/differential/OptionalFactoryGetCatch.java` was promoted and verifies
 `Optional.empty().get()` reaches `catch (NoSuchElementException)` while
-`Optional.of` and `ofNullable(null)` preserve presence semantics. The
-differential suite is now at 113 fixtures.
+`Optional.of` and `ofNullable(null)` preserve presence semantics. At that
+checkpoint the differential suite gated 113 fixtures.
 
 Update 2026-08-25: `TreeMap.firstKey()` and `TreeMap.lastKey()` are no longer
 panic-only inside propagated `try` scopes. The normal native collection lowering
@@ -1114,8 +1171,8 @@ and unwraps it through the shared uncaught-Java-exception panic adapter, while
 propagated calls use `keys().next()/next_back().ok_or_else(...).map(|value|
 value.clone())?` and raise `NoSuchElementException` for empty maps.
 `tests/differential/TreeMapFirstLastKeyCatch.java` verifies both empty-map
-catches plus the non-empty `a`/`b` key results. The differential suite is now at
-114 fixtures.
+catches plus the non-empty `a`/`b` key results. At that checkpoint the
+differential suite gated 114 fixtures.
 
 Update 2026-08-25: `Arrays.sort(values, from, to)` and
 `Arrays.fill(values, from, to, value)` now have catchable range-check lowering
@@ -1185,7 +1242,7 @@ through `delete_result`/`insert_result`, and the support helpers return
 non-fallible callers unwrap through the shared uncaught-Java-exception panic
 adapter. `tests/differential/StringBuilderDeleteInsertCatch.java` verifies
 normal mutation plus caught delete/insert index failures against the Java
-oracle; the differential suite is now at 110 fixtures.
+oracle. At that checkpoint the differential suite gated 110 fixtures.
 
 Update 2026-08-25: `StringBuilder.setLength(-1)` and
 `StringBuffer.setLength(-1)` no longer silently clamp to zero. The support layer
@@ -1196,7 +1253,7 @@ now exposes `set_length_result`, the built-in and external-pack facts mark
 unwrap through the shared uncaught-Java-exception panic adapter.
 `tests/differential/StringBuilderSetLengthCatch.java` verifies normal
 grow/truncate behavior plus caught negative-length failures against the Java
-oracle; the differential suite is now at 111 fixtures.
+oracle. At that checkpoint the differential suite gated 111 fixtures.
 
 Update 2026-08-25: `List.get(index)` is no longer routed through the ordinary
 `Option` lookup/coercion path when the call is inside a propagated
@@ -1206,8 +1263,8 @@ Update 2026-08-25: `List.get(index)` is no longer routed through the ordinary
 for `< 0` before casting to `usize`; ordinary callers keep the existing
 panic-preserving behavior. `tests/differential/ListGetCatch.java` verifies both
 high and negative out-of-range `ArrayList.get` calls reach
-`catch (IndexOutOfBoundsException)`, and the full differential suite now passes
-115 fixtures.
+`catch (IndexOutOfBoundsException)`. At that checkpoint the full differential
+suite passed 115 fixtures.
 
 Update 2026-08-25: `List.set(index, value)` now has the same catchable
 propagated path. The result projection checks the signed Java index before the
@@ -1215,7 +1272,8 @@ propagated path. The result projection checks the signed Java index before the
 fallible `get_mut(...).ok_or_else(...)` so both negative and high indexes raise
 `IndexOutOfBoundsException` instead of panicking. `tests/differential/
 ListSetCatch.java` verifies the normal return value, mutation, and both caught
-out-of-range cases; the full differential suite now passes 116 fixtures.
+out-of-range cases. At that checkpoint the full differential suite passed 116
+fixtures.
 
 Update 2026-08-27: `List.add(index, value)` now has the same catchable
 propagated path. The result projection evaluates the signed Java index once,
@@ -1231,8 +1289,8 @@ for ordinary non-fallible construction, and propagated constructor lowering
 routes one-argument `BitSet` construction through the result helper so
 `NegativeArraySizeException` can be caught. `tests/differential/
 BitSetCtorCatch.java` verifies the normal sized constructor plus
-`catch (NegativeArraySizeException)` for `new BitSet(-1)`; the full
-differential suite now passes 117 fixtures.
+`catch (NegativeArraySizeException)` for `new BitSet(-1)`. At that checkpoint
+the full differential suite passed 117 fixtures.
 
 Update 2026-08-25: `new String(bytes, offset, len)` no longer silently clamps
 invalid byte ranges. The support helper now has a `java_string_from_byte_range_result`
@@ -1240,8 +1298,8 @@ variant that returns `IndexOutOfBoundsException`, the ordinary helper unwraps it
 through the shared uncaught-Java-exception panic adapter, and propagated
 three-argument `String` constructor lowering applies `?` to the result helper.
 `tests/differential/StringByteRangeCtorCatch.java` verifies the valid slice plus
-high and negative out-of-range catches; the full differential suite now passes
-118 fixtures.
+high and negative out-of-range catches. At that checkpoint the full differential
+suite passed 118 fixtures.
 
 Update 2026-08-25: `new StringBuilder(capacity)` and
 `new StringBuffer(capacity)` no longer silently clamp negative signed capacities
@@ -1251,7 +1309,7 @@ uncaught-Java-exception panic adapter, while propagated constructor lowering
 routes integral one-argument `StringBuilder`/`StringBuffer` construction through
 `new_capacity_result(...) ?`. `tests/differential/StringBuilderCapacityCatch.java`
 verifies normal capacity construction plus both negative-capacity catches; the
-full differential suite now passes 119 fixtures.
+full differential suite passed 119 fixtures at that checkpoint.
 
 Update 2026-08-25: `Math.toIntExact(long)` no longer lowers to truncating
 `as i32`. The native static lowering now uses `i32::try_from(...)` and maps
@@ -1262,17 +1320,17 @@ ABI is result-wrapped and still marked as an associated/static call. The
 external-call propagation planner now treats result-wrapped facade ABI as a
 catchable result source, not only checked thrown-effect facts. `tests/
 differential/MathToIntExactCatch.java` verifies normal values plus caught
-overflow against the Java oracle; the full rebuilt differential suite now
-passes 122 fixtures.
+overflow against the Java oracle. At that checkpoint the full rebuilt
+differential suite passed 122 fixtures.
 
 Update 2026-08-25: `Optional.of(null)` now raises `NullPointerException` through
 the same catchable Java-exception path used for required nullable arguments.
 The slot-aware `Optional.of` lowering unwraps the nullable argument before
 constructing the returned optional, so a caught null no longer becomes
 `Some(None)` and bypasses `catch (NullPointerException)`.
-`tests/differential/OptionalOfNullCatch.java` verifies the Java oracle; with the
-new fixture the differential suite is expected at 123 fixtures after rebuilding
-the release translator.
+`tests/differential/OptionalOfNullCatch.java` verifies the Java oracle. At that
+checkpoint, the fixture was expected to bring the differential suite to 123
+fixtures after rebuilding the release translator.
 
 Update 2026-08-25: nested no-catch/no-resource `try/finally` inside the
 simple loop-body finally fast path no longer emits `continue` inside a closure.
@@ -1280,16 +1338,16 @@ The loop fast-path predicate now admits nested `try/finally` statements whose
 `finally` block falls through, and the existing abrupt-rewrite pass sees loop
 abruptions through that nested body. `FinallyNestedContinue.java` moved out of
 `tests/differential/known-gaps/` into the main differential suite and verifies
-Java's `0ioio2io` oracle. The differential suite now passes 124 fixtures, and
-the known-gap set is down to 6 fixtures.
+Java's `0ioio2io` oracle. At that checkpoint the differential suite passed 124
+fixtures, and the known-gap set had dropped to 6 fixtures.
 
 Update 2026-08-25: `Thread.sleep(-1)` no longer casts the negative Java `long`
 to a huge Rust `u64` duration in catchable contexts. Propagated `Thread.sleep`
 calls now route through a result projection that returns
 `IllegalArgumentException` for negative timeouts before sleeping; ordinary calls
 keep the existing panic/blocking lowering policy. `tests/differential/
-ThreadSleepCatch.java` verifies the Java oracle, and the differential suite now
-passes 125 fixtures.
+ThreadSleepCatch.java` verifies the Java oracle. At that checkpoint the
+differential suite passed 125 fixtures.
 
 Follow-up 2026-08-25: the ordinary `Thread.sleep` projection now shares that
 same signed timeout check and unwraps the result through the existing uncaught
@@ -1303,8 +1361,8 @@ path now preserves and validates the nanos argument. Both ordinary and
 propagated lowering route through the same result projection, which raises
 `IllegalArgumentException` when `nanos < 0 || nanos > 999999` before sleeping.
 `tests/differential/ThreadSleepNanosCatch.java` verifies the Java oracle
-(`iae`) against the translated Rust output; the differential suite is now
-at 218 fixtures.
+(`iae`) against the translated Rust output. At that checkpoint the differential
+suite gated 218 fixtures.
 
 Follow-up 2026-08-25: ordinary primitive parse projections now share the
 `NumberFormatException` result chain and then apply the existing uncaught
@@ -1500,9 +1558,9 @@ the user `finally` body. A throwing `close()` can no longer skip a fall-through
 user `finally`; if cleanup fails, that failure is propagated only after the
 finally body runs. Covered by
 `tests/differential/TryWithResourcesCloseThrowFinally.java` (`tcf:close`); the
-rebuilt differential suite is now 191 fixtures. Suppressed exception attachment,
-throwing `finally`, and the general nested/labeled completion carrier remain
-open.
+rebuilt differential suite gated 191 fixtures at that checkpoint. Suppressed
+exception attachment, throwing `finally`, and the general nested/labeled
+completion carrier remain open.
 
 Follow-up 2026-08-28: resource stream reads inside while-assignment conditions
 now compile through the typed `InputStream.read(byte[])` facade path. The
@@ -1809,7 +1867,8 @@ single argument is an integral capacity. Capacity constructors render
 or the uncaught-Java-exception adapter as appropriate; string/char-sequence
 initializers stay on plain `new_1(...)`. Covered by
 `tests/idiom_gaps.rs::string_builder_capacity_constructor_uses_result_only_for_integral_capacity`.
-The full differential test now passes all 219 checked-in fixtures.
+The maintained full differential fixture count now lives in
+`tests/differential.rs::EXPECTED_DIFFERENTIAL_FIXTURES`.
 
 ---
 
@@ -1928,15 +1987,23 @@ symbols. This does not change the broader Java completion-carrier gap.
 
 Follow-up 2026-09-10 cleanup: `exception_lowering::ExternalExceptionConversion`
 and `external_exception_conversions` are crate-local too. Exact conversion-record
-coverage moved beside `exception_lowering`; integration coverage remains on the
-public `java_exception_support_item_with_facts` output.
+coverage moved beside `exception_lowering`; integration coverage now reaches the
+support item through public program lowering output.
+
+Codex follow-up 2026-09-12 cleanup: `CatchRenderArm` and
+`ExternalExceptionConversion` are no longer crate-local field bags. Try/catch
+rendering constructs catch arms through `new(...)`, reads guard data through
+accessors, and consumes catch bodies with `into_body()` at the render boundary;
+external exception conversion rendering now uses `java_type()` / `rust_type()`.
+This keeps the cleanup scoped to representation layout and does not change the
+open completion-carrier work.
 
 Follow-up 2026-09-10 cleanup: exception construction/rendering helpers
 (`exception_result_type`, `exception_try_ok_type`, `return_stmt`, `throw_stmt`,
 `new_exception_expr*`, `exception_cause_or_self_if_instance_expr`, and
 `exception_expr_from_new*`) are crate-local. Exact helper assertions moved into
-`exception_lowering` unit tests; integration coverage stays on the public
-exception-support item and planning behavior. The Java completion-carrier gap
+`exception_lowering` unit tests; integration coverage stays on public program
+lowering/rendered output and planning behavior. The Java completion-carrier gap
 remains open.
 
 Follow-up 2026-09-10 cleanup: `exception_plan::exception_class_name` is
@@ -1968,13 +2035,12 @@ returning the placeholder EOF value. Negative `off`, negative `len`, and
 coverage lives in
 `idiom_gaps::resource_input_stream_read_and_close_have_typed_facade_support`.
 
-Follow-up 2026-09-10 known-gap oracle: `FinallySwitchBreak.java` now lives in
-`tests/differential/known-gaps/` and is checked by
-`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode`. Java prints
-`zfofdf`; generated Rust is expected to fail loudly at rustc with `E0267`
-(`break` inside the general finally closure carrier). This does not fix the
-completion-carrier design gap, but it makes the remaining switch+finally+break
-shape executable and non-vacuous.
+Follow-up 2026-09-10 known-gap oracle, superseded 2026-09-11: the
+`FinallySwitchBreak` fixture temporarily had a rustc `E0267` expectation for
+`break` inside the general finally closure carrier. The 2026-09-11 promotion
+below moved this fixture into the ordinary Java/Rust differential oracle after
+the narrow switch-inside-loop shape started lowering through the simple
+loop-finally fast path.
 
 Follow-up 2026-09-10 focused finally/TWR oracle: the matching
 try-with-resources/catch/finally `finally { break; }` override shape is now
@@ -1983,9 +2049,66 @@ oracle. `tests/differential/TryWithResourcesFinallyBreakOverridesCatchReturn.jav
 pins cleanup-before-finally and the final break overriding the catch return
 (`trcfd`).
 
-Follow-up 2026-09-10 known-gap harness guard: `FinallySwitchBreak.java` now pins
-more than the Java oracle and rustc `E0267`. Its known-gap expectation also
-requires generated Rust fragments for the general finally closure carrier
-(`|| -> Result`) and the crossing `break;`, so the fixture cannot drift into an
-unrelated rustc failure while still satisfying the broad error-code check. The
-completion-carrier model remains open.
+Follow-up 2026-09-10 known-gap harness guard, superseded 2026-09-11: while
+`FinallySwitchBreak.java` was a known gap, its expectation also required
+generated Rust fragments for the general finally closure carrier (`|| -> Result`)
+and the crossing `break;`. The promoted fixture no longer uses that
+known-gap-only guard. The general completion-carrier model remains open.
+
+Follow-up 2026-09-11 focused finally/switch promotion: the narrow
+switch-inside-loop `try/finally` shape is no longer a known gap.
+`simple_try_finally_loop_body_candidate` now accepts conservative switch bodies:
+non-throwing selector/labels, switch-local bare `break`, and no `continue` or
+labeled switch-case exit that would require the general completion carrier.
+That lets the existing loop-finally fast path lower
+`tests/differential/FinallySwitchBreak.java` without putting the outer loop
+`break` inside the result closure. The fixture is promoted to the Java/Rust
+differential oracle, is included in
+`finally_completion_fixtures_match_java_output`, and still prints `zfofdf`.
+General nested/labeled finally completion remains open.
+
+Follow-up 2026-09-11 native static catchability: JDK static calls that had been
+planned through emitted facade owners are retargeted back to native static
+operations in both the generic expression path and the slot/external-call path.
+This covers static-owner calls such as `Math.floorDiv`, `Math.floorMod`,
+`Math.toIntExact`, and `Optional.empty/of/ofNullable`, plus associated facade
+targets such as `Thread.sleep`. The important verification detail is that the
+differential harness uses `target/release/new-java2rust`; rebuild release before
+trusting the oracle. After rebuilding, `list_exception_fixtures_match_java_output`
+passes.
+
+Rechecked 2026-09-11 after the current dirty-tree audit cleanup:
+`cargo build --release` followed by
+`TMPDIR=$PWD/.tmp/differential-focus cargo test --release --quiet --test differential list_exception_fixtures_match_java_output -- --nocapture`
+passed, covering the promoted `FinallySwitchBreak` and `ArrayBlockingQueue*`
+fixtures in the release translator.
+
+Follow-up cleanup narrowed the public fallibility-record surface:
+`CallableFallibility` still has public read-only `returns_result()` and
+`reasons()` accessors for callers that inspect `ProgramFallibilityPlan`, but its
+stored boolean and reason vector are private. The fallibility solver remains the
+writer for those fields, and layering now guards against re-exposing them as
+mutable public payload. Guard:
+`layering::exception_lowering_keeps_exception_paths_structured`.
+
+Follow-up cleanup applied the same read-only boundary to the exception-plan
+booleans. `JavaExceptionSupportPlan`, `MethodExceptionPlan`, and
+`ProgramExceptionPlan` remain public plan records, but their support/result
+flags are private-backed and exposed through accessors and constructors instead
+of public mutable fields. Guard:
+`layering::exception_lowering_keeps_exception_paths_structured`.
+
+Follow-up cleanup narrowed generated `JavaException` runtime support too:
+`cause` and `suppressed` are now private-backed. Generated code still attaches
+suppressed exceptions through `add_suppressed`, reads them through
+`get_suppressed`, and cause-chain tests use the new read-only `cause()` accessor.
+Guard: `layering::exception_lowering_keeps_exception_paths_structured`.
+
+Follow-up cleanup completed that generated-support fence for the remaining
+runtime payload fields. `class_name` and `message` are now private-backed, while
+generated harnesses and differential runners read them through `class_name()`
+and `message()` accessors. The exception helper methods still own subtype,
+display, and `getMessage()` behavior internally. Guard:
+`layering::exception_lowering_keeps_exception_paths_structured`; a focused
+generated-support guard now also pins the runtime accessors directly:
+`exception_lowering::tests::java_exception_support_exposes_read_only_runtime_accessors`.

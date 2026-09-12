@@ -91,9 +91,35 @@ pub enum NullComparisonMethod {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NumericBinaryPromotionPlan {
-    pub promoted: PrimitiveType,
-    pub left: Vec<Coercion>,
-    pub right: Vec<Coercion>,
+    promoted: PrimitiveType,
+    left: Vec<Coercion>,
+    right: Vec<Coercion>,
+}
+
+impl NumericBinaryPromotionPlan {
+    pub fn new(promoted: PrimitiveType, left: Vec<Coercion>, right: Vec<Coercion>) -> Self {
+        Self {
+            promoted,
+            left,
+            right,
+        }
+    }
+
+    pub fn identity(promoted: PrimitiveType) -> Self {
+        Self::new(promoted, Vec::new(), Vec::new())
+    }
+
+    pub fn promoted(&self) -> PrimitiveType {
+        self.promoted
+    }
+
+    pub fn left(&self) -> &[Coercion] {
+        &self.left
+    }
+
+    pub fn right(&self) -> &[Coercion] {
+        &self.right
+    }
 }
 
 pub fn rust_type_for_java_primitive(primitive: PrimitiveType) -> RustType {
@@ -172,18 +198,18 @@ pub fn plan_numeric_binary_promotion(
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr | BinaryOp::UShr) {
         let promoted_left = shift_left_promoted_primitive(*left);
         let promoted_right = shift_right_promoted_primitive(*right);
-        return Some(NumericBinaryPromotionPlan {
-            promoted: promoted_left,
-            left: primitive_operand_coercions(*left, promoted_left),
-            right: primitive_operand_coercions(*right, promoted_right),
-        });
+        return Some(NumericBinaryPromotionPlan::new(
+            promoted_left,
+            primitive_operand_coercions(*left, promoted_left),
+            primitive_operand_coercions(*right, promoted_right),
+        ));
     }
     let promoted = promoted_numeric_primitive(op, *left, *right);
-    Some(NumericBinaryPromotionPlan {
+    Some(NumericBinaryPromotionPlan::new(
         promoted,
-        left: primitive_operand_coercions(*left, promoted),
-        right: primitive_operand_coercions(*right, promoted),
-    })
+        primitive_operand_coercions(*left, promoted),
+        primitive_operand_coercions(*right, promoted),
+    ))
 }
 
 pub fn lower_numeric_binary_expr(
@@ -200,8 +226,8 @@ pub fn lower_numeric_binary_expr(
     }
     crate::expr_render::binary_expr(
         op,
-        apply_coercions(left, &plan.left),
-        apply_coercions(right, &plan.right),
+        apply_coercions(left, plan.left()),
+        apply_coercions(right, plan.right()),
     )
 }
 
@@ -212,7 +238,7 @@ pub fn lower_checked_java_integer_div_rem_expr(
     plan: NumericBinaryPromotionPlan,
 ) -> Option<RustExpr> {
     if !matches!(op, BinaryOp::Div | BinaryOp::Rem)
-        || !matches!(plan.promoted, PrimitiveType::Int | PrimitiveType::Long)
+        || !matches!(plan.promoted(), PrimitiveType::Int | PrimitiveType::Long)
     {
         return None;
     }
@@ -221,9 +247,9 @@ pub fn lower_checked_java_integer_div_rem_expr(
         BinaryOp::Rem => "wrapping_rem",
         _ => unreachable!("checked above"),
     };
-    let left = integer_wrapping_receiver_expr(apply_coercions(left, &plan.left), plan.promoted);
-    let right = apply_coercions(right, &plan.right);
-    let temp_ty = rust_type_for_java_primitive(plan.promoted);
+    let left = integer_wrapping_receiver_expr(apply_coercions(left, plan.left()), plan.promoted());
+    let right = apply_coercions(right, plan.right());
+    let temp_ty = rust_type_for_java_primitive(plan.promoted());
     Some(checked_java_integer_div_rem_block_leaf(
         temp_ty, left, right, method,
     ))
@@ -281,7 +307,7 @@ fn lower_java_integer_binary_expr(
     right: &RustExpr,
     plan: &NumericBinaryPromotionPlan,
 ) -> Option<RustExpr> {
-    if !matches!(plan.promoted, PrimitiveType::Int | PrimitiveType::Long) {
+    if !matches!(plan.promoted(), PrimitiveType::Int | PrimitiveType::Long) {
         return None;
     }
     let method = match op {
@@ -293,8 +319,8 @@ fn lower_java_integer_binary_expr(
         _ => return None,
     };
     let left =
-        integer_wrapping_receiver_expr(apply_coercions(left.clone(), &plan.left), plan.promoted);
-    let right = apply_coercions(right.clone(), &plan.right);
+        integer_wrapping_receiver_expr(apply_coercions(left.clone(), plan.left()), plan.promoted());
+    let right = apply_coercions(right.clone(), plan.right());
     if matches!(op, BinaryOp::Shl | BinaryOp::Shr) {
         return Some(integer_wrapping_method_projection(
             left,
@@ -367,7 +393,7 @@ pub fn lower_unsigned_right_shift_expr(
     right: RustExpr,
     plan: NumericBinaryPromotionPlan,
 ) -> RustExpr {
-    let (unsigned_ty, signed_ty) = match plan.promoted {
+    let (unsigned_ty, signed_ty) = match plan.promoted() {
         PrimitiveType::Long => ("u64", "i64"),
         _ => ("u32", "i32"),
     };
@@ -375,10 +401,10 @@ pub fn lower_unsigned_right_shift_expr(
     // as `u32` and then negates it; `(-1i32) as u32` is the reinterpretation
     // Java's `>>>` actually means.
     let left = parenthesize_raw_operand_for_prefix_or_call_arg(integer_wrapping_receiver_expr(
-        apply_coercions(left, &plan.left),
-        plan.promoted,
+        apply_coercions(left, plan.left()),
+        plan.promoted(),
     ));
-    let right = apply_coercions(right, &plan.right);
+    let right = apply_coercions(right, plan.right());
     RustExpr::Cast {
         expr: Box::new(receiver_method_call_projection_exact(
             RustExpr::Cast {
@@ -797,7 +823,7 @@ fn shared_handle_identity_path(
         return None;
     }
     let placement = facts.storage_placement_for(name);
-    if !placement.shared || !placement.is_implemented() {
+    if !placement.shared() || !placement.is_implemented() {
         return None;
     }
     placement.handle_path().map(str::to_string)
@@ -994,7 +1020,7 @@ fn custom_equals_erased_arg_handle_path(java_ty: &JavaType, facts: &FactSet) -> 
         return None;
     };
     let placement = facts.storage_placement_for(name);
-    if placement.shared && placement.is_implemented() {
+    if placement.shared() && placement.is_implemented() {
         placement.handle_path().map(str::to_string)
     } else {
         None
@@ -1531,15 +1557,14 @@ mod shared_handle_identity_tests {
         let mut plan = StoragePlan::default();
         plan.insert(
             "Node".to_string(),
-            TypeStorageFacts {
-                escape: Escape::Stored,
-                locally_aliased: true,
-                mutated: false,
-                mutation_provably_absent: true,
-                threaded: false,
-                static_reachable,
-                surface_forwardable: true,
-            },
+            TypeStorageFacts::default()
+                .with_escape(Escape::Stored)
+                .with_locally_aliased(true)
+                .with_mutated(false)
+                .with_mutation_provably_absent(true)
+                .with_threaded(false)
+                .with_static_reachable(static_reachable)
+                .with_surface_forwardable(true),
         );
         FactSet {
             storage_strategies: plan,

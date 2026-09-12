@@ -30,9 +30,26 @@ use std::collections::HashSet;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct UnconstructableInnerClass {
     /// The inner class, as written in Java.
-    pub(crate) inner_type: String,
+    inner_type: String,
     /// The enclosing type it captures.
-    pub(crate) outer_type: String,
+    outer_type: String,
+}
+
+impl UnconstructableInnerClass {
+    pub(crate) fn new(inner_type: String, outer_type: String) -> Self {
+        Self {
+            inner_type,
+            outer_type,
+        }
+    }
+
+    pub(crate) fn inner_type(&self) -> &str {
+        &self.inner_type
+    }
+
+    pub(crate) fn outer_type(&self) -> &str {
+        &self.outer_type
+    }
 }
 
 /// Every inner class in `program` whose construction cannot produce an outer handle.
@@ -42,7 +59,7 @@ pub(crate) fn unconstructable_inner_classes(
 ) -> Vec<UnconstructableInnerClass> {
     constructed_outer_this_inner_classes(program, facts)
         .into_iter()
-        .filter(|inner| !outer_this_constructor_handle_is_implemented(&inner.outer_type, facts))
+        .filter(|inner| !outer_this_constructor_handle_is_implemented(inner.outer_type(), facts))
         .collect()
 }
 
@@ -75,7 +92,9 @@ pub(crate) fn report_unconstructable_inner_classes(
                 "{} captures an enclosing {} instance, but its constructor cannot obtain a \
                     shared handle to it, so `new {}(…)` lowers to an explicit unsupported \
                  feature. Needs the shared object representation (0002b).",
-                inner.inner_type, inner.outer_type, inner.inner_type,
+                inner.inner_type(),
+                inner.outer_type(),
+                inner.inner_type(),
             ),
         );
     }
@@ -89,10 +108,10 @@ fn collect_in_type(
 ) {
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
         if constructed_type_names_include(constructed, &ty.name) {
-            found.push(UnconstructableInnerClass {
-                inner_type: ty.name.clone(),
-                outer_type: outer_type.to_string(),
-            });
+            found.push(UnconstructableInnerClass::new(
+                ty.name.clone(),
+                outer_type.to_string(),
+            ));
         }
     }
     for member in &ty.members {
@@ -369,7 +388,7 @@ fn java_type_name(ty: &JavaType) -> Option<&str> {
 
 fn outer_this_constructor_handle_is_implemented(outer_type: &str, facts: &FactSet) -> bool {
     let placement = facts.storage_placement_for(outer_type);
-    placement.shared && placement.interior_mutable && placement.is_implemented()
+    placement.shared() && placement.interior_mutable() && placement.is_implemented()
 }
 
 #[cfg(test)]
@@ -391,12 +410,10 @@ mod tests {
 
         facts.storage_strategies.insert(
             "Outer".to_string(),
-            TypeStorageFacts {
-                escape: Escape::Stored,
-                mutated: false,
-                mutation_provably_absent: true,
-                ..TypeStorageFacts::default()
-            },
+            TypeStorageFacts::default()
+                .with_escape(Escape::Stored)
+                .with_mutated(false)
+                .with_mutation_provably_absent(true),
         );
         assert!(
             !outer_this_constructor_handle_is_implemented("Outer", &facts),
@@ -405,12 +422,10 @@ mod tests {
 
         facts.storage_strategies.insert(
             "Outer".to_string(),
-            TypeStorageFacts {
-                escape: Escape::Stored,
-                mutated: true,
-                mutation_provably_absent: false,
-                ..TypeStorageFacts::default()
-            },
+            TypeStorageFacts::default()
+                .with_escape(Escape::Stored)
+                .with_mutated(true)
+                .with_mutation_provably_absent(false),
         );
         assert!(
             !outer_this_constructor_handle_is_implemented("Outer", &facts),
@@ -452,10 +467,10 @@ class Outer {
 
         assert_eq!(
             constructed_outer_this_inner_classes(&resolved.program, &resolved.facts),
-            vec![super::UnconstructableInnerClass {
-                inner_type: "Outer.Inner".to_string(),
-                outer_type: "Outer".to_string(),
-            }]
+            vec![super::UnconstructableInnerClass::new(
+                "Outer.Inner".to_string(),
+                "Outer".to_string(),
+            )]
         );
     }
 }

@@ -1,7 +1,7 @@
 use crate::java_ir::{BinaryOp, Expr, Literal};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TernaryNullRefinementPlan<'a> {
+pub(crate) enum TernaryNullRefinementPlan<'a> {
     LocalNullTest {
         local_name: &'a str,
         then_non_null: bool,

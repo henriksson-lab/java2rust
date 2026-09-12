@@ -73,6 +73,13 @@ stores modeled API receiver/method aliases separately from unsupported APIs, so
 the old `ExternalPackManifest::modeled_api` semantics are preserved while moving
 the last cheap manifest scan onto the cached lookup path.
 
+Codex follow-up 2026-09-12: the built-in manifest list itself is cached now.
+`builtin_external_pack_manifest_slice()` owns the `OnceLock<Vec<ExternalPackManifest>>`
+and hot in-crate loops use that borrowed slice; the public
+`builtin_external_pack_manifests() -> Vec<ExternalPackManifest>` remains as a
+compatibility wrapper for tests/callers that expect an owned vector. Guard:
+`layering::external_fact_and_external_pack_parse_results_are_private_backed`.
+
 Severity: **high for performance** (57% of runtime on the measured input),
 **low-medium for correctness** (a gate that six sites bypass; currently
 unobservable through the CLI because the CLI flag is not wired to the gate)

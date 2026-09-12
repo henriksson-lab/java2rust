@@ -41,11 +41,29 @@ pub enum OutputMarkerKind {
 #[derive(Debug, Clone, Copy)]
 pub struct OutputMarker {
     /// Stable identifier for tests and reports. Not emitted.
-    pub name: &'static str,
+    name: &'static str,
     /// The literal a detector matches. Emitters must produce this through the
     /// constant rather than spelling it again.
-    pub text: &'static str,
-    pub kind: OutputMarkerKind,
+    text: &'static str,
+    kind: OutputMarkerKind,
+}
+
+impl OutputMarker {
+    pub const fn new(name: &'static str, text: &'static str, kind: OutputMarkerKind) -> Self {
+        Self { name, text, kind }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    pub fn text(&self) -> &'static str {
+        self.text
+    }
+
+    pub fn kind(&self) -> OutputMarkerKind {
+        self.kind
+    }
 }
 
 /// The `compile_error!` macro itself — the general "refused to translate" mark.
@@ -158,67 +176,63 @@ pub fn untranslated_source_summary_message(owner: &str, method: &str) -> String 
 /// deliberate: an unexercised detector is exactly the failure this module
 /// exists to prevent.
 pub const OUTPUT_MARKERS: &[OutputMarker] = &[
-    OutputMarker {
-        name: "compile_error",
-        text: COMPILE_ERROR_MACRO,
-        kind: OutputMarkerKind::Diagnostic,
-    },
-    OutputMarker {
-        name: "invalid_java_cast",
-        text: INVALID_JAVA_CAST_MESSAGE,
-        kind: OutputMarkerKind::Diagnostic,
-    },
-    OutputMarker {
-        name: "unsupported_java_array_creation",
-        text: UNSUPPORTED_JAVA_ARRAY_CREATION,
-        kind: OutputMarkerKind::Diagnostic,
-    },
-    OutputMarker {
-        name: "unsupported_inner_class_outer_capture",
-        text: UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE,
-        kind: OutputMarkerKind::Diagnostic,
-    },
-    OutputMarker {
-        name: "unmodelled_java_upcast",
-        text: UNMODELLED_JAVA_UPCAST_PREFIX,
-        kind: OutputMarkerKind::Stub,
-    },
-    OutputMarker {
-        name: "unmodelled_static_constant",
-        text: UNMODELLED_STATIC_CONSTANT_SUFFIX,
-        kind: OutputMarkerKind::Stub,
-    },
-    OutputMarker {
-        name: "untranslated_source_summary_method",
-        text: UNTRANSLATED_SOURCE_SUMMARY_SUFFIX,
-        kind: OutputMarkerKind::Stub,
-    },
-    OutputMarker {
-        name: "unimplemented",
-        text: UNIMPLEMENTED_MACRO,
-        kind: OutputMarkerKind::Stub,
-    },
-    OutputMarker {
-        name: "untranslated_add_all",
-        text: UNTRANSLATED_JAVA_ADD_ALL_CALL,
-        kind: OutputMarkerKind::UntranslatedCall,
-    },
-    OutputMarker {
-        name: "untranslated_put",
-        text: UNTRANSLATED_JAVA_PUT_CALL,
-        kind: OutputMarkerKind::UntranslatedCall,
-    },
-    OutputMarker {
-        name: "noop_facade_call_site",
-        text: NOOP_FACADE_METHOD_CALL_SITE,
-        kind: OutputMarkerKind::Stub,
-    },
+    OutputMarker::new(
+        "compile_error",
+        COMPILE_ERROR_MACRO,
+        OutputMarkerKind::Diagnostic,
+    ),
+    OutputMarker::new(
+        "invalid_java_cast",
+        INVALID_JAVA_CAST_MESSAGE,
+        OutputMarkerKind::Diagnostic,
+    ),
+    OutputMarker::new(
+        "unsupported_java_array_creation",
+        UNSUPPORTED_JAVA_ARRAY_CREATION,
+        OutputMarkerKind::Diagnostic,
+    ),
+    OutputMarker::new(
+        "unsupported_inner_class_outer_capture",
+        UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE,
+        OutputMarkerKind::Diagnostic,
+    ),
+    OutputMarker::new(
+        "unmodelled_java_upcast",
+        UNMODELLED_JAVA_UPCAST_PREFIX,
+        OutputMarkerKind::Stub,
+    ),
+    OutputMarker::new(
+        "unmodelled_static_constant",
+        UNMODELLED_STATIC_CONSTANT_SUFFIX,
+        OutputMarkerKind::Stub,
+    ),
+    OutputMarker::new(
+        "untranslated_source_summary_method",
+        UNTRANSLATED_SOURCE_SUMMARY_SUFFIX,
+        OutputMarkerKind::Stub,
+    ),
+    OutputMarker::new("unimplemented", UNIMPLEMENTED_MACRO, OutputMarkerKind::Stub),
+    OutputMarker::new(
+        "untranslated_add_all",
+        UNTRANSLATED_JAVA_ADD_ALL_CALL,
+        OutputMarkerKind::UntranslatedCall,
+    ),
+    OutputMarker::new(
+        "untranslated_put",
+        UNTRANSLATED_JAVA_PUT_CALL,
+        OutputMarkerKind::UntranslatedCall,
+    ),
+    OutputMarker::new(
+        "noop_facade_call_site",
+        NOOP_FACADE_METHOD_CALL_SITE,
+        OutputMarkerKind::Stub,
+    ),
 ];
 
 /// Look a marker up by name. Used by the fixture test to pair a fixture with
 /// the marker it is supposed to produce.
 pub fn marker_by_name(name: &str) -> Option<&'static OutputMarker> {
-    OUTPUT_MARKERS.iter().find(|marker| marker.name == name)
+    OUTPUT_MARKERS.iter().find(|marker| marker.name() == name)
 }
 
 /// Lines that show the translator produced something it could not stand behind.
@@ -234,6 +248,7 @@ pub fn marker_by_name(name: &str) -> Option<&'static OutputMarker> {
 /// is exactly the drift this module exists to prevent.
 pub fn count_invalid_patterns(rust: &str) -> usize {
     let cast_expect = invalid_java_cast_expect();
+    let inner_capture_panic_prefix = format!("panic!(\"{UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE}");
     let mut open_raw_terminator = None;
     rust.lines()
         .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
@@ -245,8 +260,7 @@ pub fn count_invalid_patterns(rust: &str) -> usize {
                 || line_contains_outside_literals(line, UNTRANSLATED_JAVA_PUT_CALL)
                 || line_contains_outside_literals(line, UNSUPPORTED_JAVA_ARRAY_CREATION)
                 || line_contains_outside_literals(line, UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE)
-                || (line_contains_outside_literals(line, "panic!(")
-                    && line.contains(UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE))
+                || line_contains_outside_literals(line, &inner_capture_panic_prefix)
                 || (line_contains_outside_literals(line, "= None;")
                     && !line_contains_outside_literals(line, "let mut ")
                     && !line_contains_outside_literals(line, ": Option<"))
@@ -350,13 +364,14 @@ fn line_with_multiline_raw_strings_elided(
 
 /// External constants emitted with no modelled value.
 pub fn count_stubbed_constants(rust: &str) -> usize {
+    let unmodelled_constant_compile_error_prefix =
+        format!("{COMPILE_ERROR_MACRO_CALL}\"{UNMODELLED_STATIC_CONSTANT_PREFIX}");
     let mut open_raw_terminator = None;
     rust.lines()
         .map(|line| line_with_multiline_raw_strings_elided(line, &mut open_raw_terminator))
         .filter(|line| {
             line_contains_outside_literals(line, "pub const ")
-                && line_contains_outside_literals(line, COMPILE_ERROR_MACRO)
-                && line.contains(UNMODELLED_STATIC_CONSTANT_PREFIX)
+                && line_contains_outside_literals(line, &unmodelled_constant_compile_error_prefix)
                 && line.contains(UNMODELLED_STATIC_CONSTANT_SUFFIX)
         })
         .count()
@@ -758,7 +773,7 @@ mod tests {
 
     #[test]
     fn marker_names_are_unique() {
-        let mut names: Vec<&str> = OUTPUT_MARKERS.iter().map(|marker| marker.name).collect();
+        let mut names: Vec<&str> = OUTPUT_MARKERS.iter().map(OutputMarker::name).collect();
         names.sort_unstable();
         let unique = names.len();
         names.dedup();
@@ -773,9 +788,9 @@ mod tests {
     fn marker_text_is_never_empty() {
         for marker in OUTPUT_MARKERS {
             assert!(
-                !marker.text.is_empty(),
+                !marker.text().is_empty(),
                 "marker {} has empty text, so its detector would match every line",
-                marker.name
+                marker.name()
             );
         }
     }
@@ -816,9 +831,10 @@ mod tests {
              /* {UNTRANSLATED_JAVA_PUT_CALL} */\n\
              /* {UNSUPPORTED_JAVA_ARRAY_CREATION} */\n\
              /* {UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE} */\n\
+             panic!(\"{UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE} for Inner\");\n\
              field = None;\n"
         );
-        assert_eq!(count_invalid_patterns(&real), 6);
+        assert_eq!(count_invalid_patterns(&real), 7);
 
         assert_eq!(
             count_invalid_patterns("let mut field = None;\nlet opt: Option<i32> = None;\n"),
@@ -913,6 +929,12 @@ let ignored = Gadget::new();
             "let text = \"pub const VALUE: i32 = {COMPILE_ERROR_MACRO}({UNMODELLED_STATIC_CONSTANT_PREFIX}Owner.VALUE{UNMODELLED_STATIC_CONSTANT_SUFFIX});\";\n"
         );
         assert_eq!(count_stubbed_constants(&literal), 0);
+
+        let unrelated_compile_error = format!(
+            "pub const VALUE: i32 = {COMPILE_ERROR_MACRO}(\"other\"); \
+             let text = \"{UNMODELLED_STATIC_CONSTANT_PREFIX}Owner.VALUE{UNMODELLED_STATIC_CONSTANT_SUFFIX}\";\n"
+        );
+        assert_eq!(count_stubbed_constants(&unrelated_compile_error), 0);
 
         let real = format!(
             "pub const VALUE: i32 = {COMPILE_ERROR_MACRO}(\"{UNMODELLED_STATIC_CONSTANT_PREFIX}Owner.VALUE{UNMODELLED_STATIC_CONSTANT_SUFFIX}\");\n"

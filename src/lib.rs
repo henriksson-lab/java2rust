@@ -1,16 +1,16 @@
-pub mod access_lowering;
-pub mod aliasing;
-pub mod array_default_obligations;
-pub mod array_lowering;
-pub mod array_plan;
+mod access_lowering;
+mod aliasing;
+mod array_default_obligations;
+mod array_lowering;
+mod array_plan;
 pub mod binding_id;
 pub mod call_lowering;
 pub mod call_plan;
-pub mod callable_analysis;
+mod callable_analysis;
 pub mod coercion;
 pub mod constructor_plan;
-pub mod control_flow_lowering;
-pub mod conversion_lowering;
+mod control_flow_lowering;
+mod conversion_lowering;
 pub mod conversion_plan;
 pub mod dependency_mode;
 pub mod diagnostics;
@@ -22,35 +22,35 @@ pub mod expr_render;
 pub mod expr_shape;
 pub mod external_facts;
 pub mod external_packs;
-pub mod fact_saturation;
+mod fact_saturation;
 pub mod facts;
-pub mod fallibility_invariant;
-pub mod graph;
-pub mod inherited_members;
-pub mod inner_class_capture;
-pub mod item_assembly;
+mod fallibility_invariant;
+mod graph;
+mod inherited_members;
+mod inner_class_capture;
+mod item_assembly;
 pub mod java_ir;
-pub mod java_naming;
-pub mod java_signature;
-pub mod javalibs;
-pub mod lattice;
-pub mod literal_lowering;
-pub mod liveness;
+mod java_naming;
+mod java_signature;
+mod javalibs;
+mod lattice;
+mod literal_lowering;
+mod liveness;
 pub mod loop_lowering;
-pub mod loop_plan;
+mod loop_plan;
 pub mod lower;
 pub mod lowering_diagnostics;
 pub mod member_access_plan;
-pub mod method_reference_lowering;
-pub mod method_reference_plan;
-pub mod method_reference_shape;
-pub mod nullability_plan;
+mod method_reference_lowering;
+mod method_reference_plan;
+mod method_reference_shape;
+mod nullability_plan;
 pub mod object_model;
 pub mod operator_lowering;
 pub mod output_markers;
 pub mod parser;
 pub mod representation;
-pub mod representation_lowering;
+mod representation_lowering;
 pub mod resolve;
 pub mod resolver_benchmark;
 pub mod rewrite;
@@ -61,16 +61,16 @@ pub mod signature;
 pub mod slot_policy;
 pub mod slot_render;
 pub mod slot_shape;
-pub mod source_constant_values;
-pub mod statement_render;
+mod source_constant_values;
+mod statement_render;
 pub mod stdlib;
 pub mod storage_strategy;
 pub mod stream;
 pub mod stream_lowering;
 pub mod stream_shape;
-pub mod string_concat;
-pub mod string_concat_plan;
-pub mod string_concat_render;
+mod string_concat;
+mod string_concat_plan;
+mod string_concat_render;
 pub mod switch_lowering;
 pub mod switch_plan;
 pub mod types;
@@ -94,21 +94,62 @@ pub struct Translation {
 
 #[derive(Debug, Clone)]
 pub struct BatchSource {
-    pub path: String,
-    pub source: String,
+    path: String,
+    source: String,
+}
+
+impl BatchSource {
+    pub fn new(path: impl Into<String>, source: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            source: source.into(),
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn source(&self) -> &str {
+        &self.source
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BatchTranslation {
-    pub path: String,
-    pub rust: String,
-    pub diagnostics: DiagnosticBag,
+    path: String,
+    rust: String,
+    diagnostics: DiagnosticBag,
 }
+
+impl BatchTranslation {
+    pub fn new(path: impl Into<String>, rust: String, diagnostics: DiagnosticBag) -> Self {
+        Self {
+            path: path.into(),
+            rust,
+            diagnostics,
+        }
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn rust(&self) -> &str {
+        &self.rust
+    }
+
+    pub fn diagnostics(&self) -> &DiagnosticBag {
+        &self.diagnostics
+    }
+}
+
+pub type BatchTranslationEventSink = dyn Fn(BatchTranslationEvent) + Send + Sync;
 
 #[derive(Clone)]
 pub struct BatchTranslationOptions {
-    pub emission_jobs: usize,
-    pub event_sink: Option<Arc<dyn Fn(BatchTranslationEvent) + Send + Sync>>,
+    emission_jobs: usize,
+    event_sink: Option<Arc<BatchTranslationEventSink>>,
 }
 
 impl fmt::Debug for BatchTranslationOptions {
@@ -132,47 +173,192 @@ impl Default for BatchTranslationOptions {
     }
 }
 
+impl BatchTranslationOptions {
+    pub fn new(emission_jobs: usize, event_sink: Option<Arc<BatchTranslationEventSink>>) -> Self {
+        Self {
+            emission_jobs,
+            event_sink,
+        }
+    }
+
+    pub fn emission_jobs(&self) -> usize {
+        self.emission_jobs
+    }
+
+    pub fn event_sink(&self) -> Option<&BatchTranslationEventSink> {
+        self.event_sink.as_deref()
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct BatchTranslationTimings {
-    pub primary_parse_ms: u128,
-    pub context_parse_ms: u128,
-    pub summary_parse_ms: u128,
-    pub global_analysis_ms: u128,
-    pub global_resolve_ms: u128,
-    pub global_semantic_ms: u128,
-    pub global_representation_ms: u128,
-    pub global_signature_ms: u128,
-    pub emission_ms: u128,
+    primary_parse_ms: u128,
+    context_parse_ms: u128,
+    summary_parse_ms: u128,
+    global_analysis_ms: u128,
+    global_resolve_ms: u128,
+    global_semantic_ms: u128,
+    global_representation_ms: u128,
+    global_signature_ms: u128,
+    emission_ms: u128,
+}
+
+impl BatchTranslationTimings {
+    pub fn primary_parse_ms(&self) -> u128 {
+        self.primary_parse_ms
+    }
+
+    pub fn context_parse_ms(&self) -> u128 {
+        self.context_parse_ms
+    }
+
+    pub fn summary_parse_ms(&self) -> u128 {
+        self.summary_parse_ms
+    }
+
+    pub fn global_analysis_ms(&self) -> u128 {
+        self.global_analysis_ms
+    }
+
+    pub fn global_resolve_ms(&self) -> u128 {
+        self.global_resolve_ms
+    }
+
+    pub fn global_semantic_ms(&self) -> u128 {
+        self.global_semantic_ms
+    }
+
+    pub fn global_representation_ms(&self) -> u128 {
+        self.global_representation_ms
+    }
+
+    pub fn global_signature_ms(&self) -> u128 {
+        self.global_signature_ms
+    }
+
+    pub fn emission_ms(&self) -> u128 {
+        self.emission_ms
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct BatchAnalysisProfile {
-    pub primary_files: usize,
-    pub context_files: usize,
-    pub summary_files: usize,
-    pub program_types: usize,
-    pub program_methods: usize,
-    pub program_constructors: usize,
-    pub program_fields: usize,
-    pub external_fact_count: usize,
+    primary_files: usize,
+    context_files: usize,
+    summary_files: usize,
+    program_types: usize,
+    program_methods: usize,
+    program_constructors: usize,
+    program_fields: usize,
+    external_fact_count: usize,
     pub signature: signature::SignatureSolverProfile,
+}
+
+impl BatchAnalysisProfile {
+    pub fn primary_files(&self) -> usize {
+        self.primary_files
+    }
+
+    pub fn context_files(&self) -> usize {
+        self.context_files
+    }
+
+    pub fn summary_files(&self) -> usize {
+        self.summary_files
+    }
+
+    pub fn program_types(&self) -> usize {
+        self.program_types
+    }
+
+    pub fn program_methods(&self) -> usize {
+        self.program_methods
+    }
+
+    pub fn program_constructors(&self) -> usize {
+        self.program_constructors
+    }
+
+    pub fn program_fields(&self) -> usize {
+        self.program_fields
+    }
+
+    pub fn external_fact_count(&self) -> usize {
+        self.external_fact_count
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BatchTranslationEvent {
-    pub phase: &'static str,
-    pub index: usize,
-    pub path: String,
-    pub elapsed_ms: u128,
-    pub status: &'static str,
+    phase: &'static str,
+    index: usize,
+    path: String,
+    elapsed_ms: u128,
+    status: &'static str,
+}
+
+impl BatchTranslationEvent {
+    pub fn new(
+        phase: &'static str,
+        index: usize,
+        path: impl Into<String>,
+        elapsed_ms: u128,
+        status: &'static str,
+    ) -> Self {
+        Self {
+            phase,
+            index,
+            path: path.into(),
+            elapsed_ms,
+            status,
+        }
+    }
+
+    pub fn phase(&self) -> &'static str {
+        self.phase
+    }
+
+    pub fn index(&self) -> usize {
+        self.index
+    }
+
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    pub fn elapsed_ms(&self) -> u128 {
+        self.elapsed_ms
+    }
+
+    pub fn status(&self) -> &'static str {
+        self.status
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct BatchTranslationReport {
-    pub translations: Vec<BatchTranslation>,
-    pub timings: BatchTranslationTimings,
-    pub analysis_profile: BatchAnalysisProfile,
-    pub events: Vec<BatchTranslationEvent>,
+    translations: Vec<BatchTranslation>,
+    timings: BatchTranslationTimings,
+    analysis_profile: BatchAnalysisProfile,
+    events: Vec<BatchTranslationEvent>,
+}
+
+impl BatchTranslationReport {
+    pub fn translations(&self) -> &[BatchTranslation] {
+        &self.translations
+    }
+
+    pub fn timings(&self) -> &BatchTranslationTimings {
+        &self.timings
+    }
+
+    pub fn analysis_profile(&self) -> &BatchAnalysisProfile {
+        &self.analysis_profile
+    }
+
+    pub fn events(&self) -> &[BatchTranslationEvent] {
+        &self.events
+    }
 }
 
 pub fn translate_source(source: &str) -> Translation {
@@ -324,7 +510,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     options: &BatchTranslationOptions,
 ) -> BatchTranslationReport {
     let batch_start = Instant::now();
-    let event_sink = options.event_sink.as_deref();
+    let event_sink = options.event_sink();
     let mut timings = BatchTranslationTimings::default();
     let mut parsed_primary = Vec::with_capacity(primary_sources.len());
     let mut parsed_context = Vec::with_capacity(context_sources.len());
@@ -340,7 +526,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     );
     let primary_parse_start = Instant::now();
     for source in primary_sources {
-        let mut parsed = parser::parse_java_source(&source.source);
+        let mut parsed = parser::parse_java_source(source.source());
         qualify_same_package_class_literals(&mut parsed.program);
         // A *primary* file's parse diagnostics belong to that file, and already
         // reach it through `parsed.diagnostics` in
@@ -350,7 +536,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         // `errors`, and was itself counted twice. The bag is for *context* and
         // summary sources, which really are shared; that is the invariant the
         // single-file path above keeps. See claude_audits/0055.
-        parsed_primary.push((source.path.clone(), parsed));
+        parsed_primary.push((source.path().to_string(), parsed));
     }
     timings.primary_parse_ms = primary_parse_start.elapsed().as_millis();
     emit_batch_phase_progress(
@@ -479,15 +665,15 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         "batch_emission",
         "running",
         batch_start.elapsed().as_millis(),
-        &format!("jobs={}", options.emission_jobs.max(1)),
+        &format!("jobs={}", options.emission_jobs().max(1)),
     );
     let emission_start = Instant::now();
     let (translations, events) = emit_batch_translations(
         parsed_primary,
         &context_build.context,
         &context_diagnostics,
-        options.emission_jobs.max(1),
-        options.event_sink.as_deref(),
+        options.emission_jobs().max(1),
+        options.event_sink(),
     );
     timings.emission_ms = emission_start.elapsed().as_millis();
     emit_batch_phase_progress(
@@ -495,7 +681,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         "batch_emission",
         "ok",
         timings.emission_ms,
-        &format!("jobs={}", options.emission_jobs.max(1)),
+        &format!("jobs={}", options.emission_jobs().max(1)),
     );
     let mut analysis_profile = context_build.analysis_profile;
     analysis_profile.primary_files = primary_sources.len();
@@ -656,10 +842,10 @@ fn build_batch_translation_context(
     let signature_progress = |event: signature::SignatureSolverProgressEvent| {
         emit_batch_phase_progress(
             event_sink,
-            signature_solver_batch_phase(event.phase),
-            event.status,
-            event.elapsed_ms,
-            &event.detail,
+            signature_solver_batch_phase(event.phase()),
+            event.status(),
+            event.elapsed_ms(),
+            event.detail(),
         );
     };
     let profiled_signatures =
@@ -672,7 +858,8 @@ fn build_batch_translation_context(
             event_sink.map(|_| &signature_progress as signature::SignatureSolverProgressSink<'_>),
         );
     timings.global_signature_ms = signature_start.elapsed().as_millis();
-    analysis_profile.signature = profiled_signatures.profile;
+    let (signature_plan, signature_profile) = profiled_signatures.into_parts();
+    analysis_profile.signature = signature_profile;
     emit_batch_phase_progress(
         event_sink,
         "batch_global_signature",
@@ -690,7 +877,7 @@ fn build_batch_translation_context(
             external_facts: external_facts.clone(),
             semantic,
             representations,
-            signatures: profiled_signatures.plan,
+            signatures: signature_plan,
         },
         analysis_profile,
         timings,
@@ -705,13 +892,9 @@ fn emit_batch_phase_progress(
     detail: &str,
 ) {
     if let Some(event_sink) = event_sink {
-        event_sink(BatchTranslationEvent {
-            phase,
-            index: 0,
-            path: detail.to_string(),
-            elapsed_ms,
-            status,
-        });
+        event_sink(BatchTranslationEvent::new(
+            phase, 0, detail, elapsed_ms, status,
+        ));
     }
 }
 
@@ -854,20 +1037,18 @@ fn translate_parsed_source_with_batch_context(
     );
     for diagnostic in &context.semantic.diagnostics {
         lowered
-            .diagnostics
-            .warning(diagnostic.code, diagnostic.message.clone());
+            .diagnostics_mut()
+            .warning(diagnostic.code(), diagnostic.message().to_string());
     }
     report_post_lowering_translation_diagnostics(
         &resolved.program,
         &context.semantic.usage,
         &context.semantic.facts,
-        &mut lowered.diagnostics,
+        lowered.diagnostics_mut(),
     );
-    let rust = emit::emit_file(&lowered.file);
-    Translation {
-        rust,
-        diagnostics: lowered.diagnostics,
-    }
+    let (file, diagnostics) = lowered.into_parts();
+    let rust = emit::emit_file(&file);
+    Translation { rust, diagnostics }
 }
 
 fn emit_batch_translations(
@@ -881,13 +1062,8 @@ fn emit_batch_translations(
         let mut events = Vec::with_capacity(parsed_primary.len());
         let mut translations = Vec::with_capacity(parsed_primary.len());
         for (index, (path, parsed)) in parsed_primary.into_iter().enumerate() {
-            let start_event = BatchTranslationEvent {
-                phase: "emit_start",
-                index: index + 1,
-                path: path.clone(),
-                elapsed_ms: 0,
-                status: "running",
-            };
+            let start_event =
+                BatchTranslationEvent::new("emit_start", index + 1, path.clone(), 0, "running");
             if let Some(event_sink) = event_sink {
                 event_sink(start_event.clone());
             }
@@ -896,22 +1072,17 @@ fn emit_batch_translations(
             let mut translation = translate_parsed_source_with_batch_context(parsed, context);
             translation.diagnostics.extend(context_diagnostics.clone());
             let elapsed_ms = file_start.elapsed().as_millis();
-            let end_event = BatchTranslationEvent {
-                phase: "emit_end",
-                index: index + 1,
-                path: path.clone(),
-                elapsed_ms,
-                status: "ok",
-            };
+            let end_event =
+                BatchTranslationEvent::new("emit_end", index + 1, path.clone(), elapsed_ms, "ok");
             if let Some(event_sink) = event_sink {
                 event_sink(end_event.clone());
             }
             events.push(end_event);
-            translations.push(BatchTranslation {
+            translations.push(BatchTranslation::new(
                 path,
-                rust: translation.rust,
-                diagnostics: translation.diagnostics,
-            });
+                translation.rust,
+                translation.diagnostics,
+            ));
         }
         return (translations, events);
     }
@@ -937,13 +1108,13 @@ fn emit_batch_translations(
                     let mut worker_results = Vec::with_capacity(items.len());
                     for (index, path, parsed) in items {
                         let file_start = Instant::now();
-                        let start_event = BatchTranslationEvent {
-                            phase: "emit_start",
-                            index: index + 1,
-                            path: path.clone(),
-                            elapsed_ms: 0,
-                            status: "running",
-                        };
+                        let start_event = BatchTranslationEvent::new(
+                            "emit_start",
+                            index + 1,
+                            path.clone(),
+                            0,
+                            "running",
+                        );
                         if let Some(event_sink) = event_sink {
                             event_sink(start_event.clone());
                         }
@@ -951,23 +1122,19 @@ fn emit_batch_translations(
                             translate_parsed_source_with_batch_context(parsed, context);
                         translation.diagnostics.extend(context_diagnostics.clone());
                         let elapsed_ms = file_start.elapsed().as_millis();
-                        let end_event = BatchTranslationEvent {
-                            phase: "emit_end",
-                            index: index + 1,
-                            path: path.clone(),
+                        let end_event = BatchTranslationEvent::new(
+                            "emit_end",
+                            index + 1,
+                            path.clone(),
                             elapsed_ms,
-                            status: "ok",
-                        };
+                            "ok",
+                        );
                         if let Some(event_sink) = event_sink {
                             event_sink(end_event.clone());
                         }
                         worker_results.push((
                             index,
-                            BatchTranslation {
-                                path,
-                                rust: translation.rust,
-                                diagnostics: translation.diagnostics,
-                            },
+                            BatchTranslation::new(path, translation.rust, translation.diagnostics),
                             vec![start_event, end_event],
                         ));
                     }
@@ -1075,21 +1242,18 @@ fn translate_parsed_source_with_context(
         context_sources_are_emitted,
     );
     for diagnostic in semantic.diagnostics {
-        lowered
-            .diagnostics
-            .warning(diagnostic.code, diagnostic.message);
+        let (code, message) = diagnostic.into_parts();
+        lowered.diagnostics_mut().warning(code, message);
     }
     report_post_lowering_translation_diagnostics(
         &resolved.program,
         &semantic.usage,
         &semantic.facts,
-        &mut lowered.diagnostics,
+        lowered.diagnostics_mut(),
     );
-    let rust = emit::emit_file(&lowered.file);
-    Translation {
-        rust,
-        diagnostics: lowered.diagnostics,
-    }
+    let (file, diagnostics) = lowered.into_parts();
+    let rust = emit::emit_file(&file);
+    Translation { rust, diagnostics }
 }
 
 fn program_with_synthetic_local_capture_types(mut program: Program, facts: &FactSet) -> Program {
@@ -1313,10 +1477,8 @@ fn report_post_lowering_translation_diagnostics(
 fn semantic_analysis_config_from_facts(
     external_facts: &FactSet,
 ) -> semantic_analysis::SemanticAnalysisConfig {
-    semantic_analysis::SemanticAnalysisConfig {
-        enable_builtin_external_packs: !external_facts.disable_builtin_external_packs,
-        ..semantic_analysis::SemanticAnalysisConfig::default()
-    }
+    semantic_analysis::SemanticAnalysisConfig::default()
+        .with_builtin_external_packs_enabled(!external_facts.disable_builtin_external_packs)
 }
 
 fn merge_program_context(target: &mut Program, source: Program) {
@@ -2270,8 +2432,58 @@ fn strip_summary_bodies_from_type(ty: &mut java_ir::TypeDecl) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::java_ir::{JavaType, Member};
+    use crate::java_ir::{JavaType, Member, MethodDecl, TypeDecl};
     use crate::java_signature::JavaCallableKey;
+
+    fn source_who_methods(
+        context: &BatchTranslationContext,
+    ) -> Vec<(&TypeDecl, &MethodDecl, JavaCallableKey)> {
+        let mut methods = context
+            .support_program
+            .types
+            .iter()
+            .filter_map(|ty| {
+                let method = ty.members.iter().find_map(|member| match member {
+                    Member::Method(method) if method.name == "who" => Some(method),
+                    _ => None,
+                })?;
+                Some((
+                    ty,
+                    method,
+                    JavaCallableKey::source_method_for_type(ty, method),
+                ))
+            })
+            .collect::<Vec<_>>();
+        methods.sort_by(|left, right| left.2.owner().cmp(right.2.owner()));
+        methods
+    }
+
+    fn assert_package_peer_who_keys_stay_in_java_owner_space(
+        context: &BatchTranslationContext,
+        methods: &[(&TypeDecl, &MethodDecl, JavaCallableKey)],
+    ) {
+        assert_eq!(
+            methods
+                .iter()
+                .map(|(_, _, key)| key.owner())
+                .collect::<Vec<_>>(),
+            vec!["a.Item", "b.Item"]
+        );
+        assert!(
+            !context
+                .semantic
+                .usage
+                .source_method_usage_has_collapsed_owner_alias(&["Item"], "who"),
+            "same-simple-name package peers must not collapse onto Item::who"
+        );
+        assert!(
+            !context
+                .semantic
+                .usage
+                .source_method_usage_has_collapsed_owner_alias(&["AItem", "BItem"], "who"),
+            "analysis identity should stay in Java owner space, not emitted Rust spelling"
+        );
+    }
 
     #[test]
     fn batch_analysis_keys_keep_same_simple_name_package_peers_distinct() {
@@ -2309,34 +2521,14 @@ public class Item {
         )
         .context;
 
-        let mut keys = context
-            .support_program
-            .types
-            .iter()
-            .filter_map(|ty| {
-                let method = ty.members.iter().find_map(|member| match member {
-                    Member::Method(method) if method.name == "who" => Some(method),
-                    _ => None,
-                })?;
-                Some(JavaCallableKey::source_method_for_type(ty, method))
-            })
-            .collect::<Vec<_>>();
-        keys.sort_by(|left, right| left.owner().cmp(right.owner()));
-
-        assert_eq!(
-            keys.iter().map(|key| key.owner()).collect::<Vec<_>>(),
-            vec!["a.Item", "b.Item"]
-        );
-        let exception_plan = crate::exception_plan::ProgramExceptionPlan::default();
-        let fallibility_plan = crate::exception_plan::ProgramFallibilityPlan::default();
-        let callable_analysis = crate::callable_analysis::CallableAnalysis::new(
-            &context.semantic.usage,
-            &exception_plan,
-            &fallibility_plan,
-        );
-        for key in &keys {
+        let methods = source_who_methods(&context);
+        for (ty, method, key) in &methods {
             assert!(
-                callable_analysis.method_usage_by_java_key(key).is_some(),
+                context
+                    .semantic
+                    .usage
+                    .source_method_usage(ty, method)
+                    .is_some(),
                 "usage facts missing {key:?}"
             );
             assert!(
@@ -2347,22 +2539,7 @@ public class Item {
                 "signature plan missing {key:?}"
             );
         }
-        assert!(
-            !context
-                .semantic
-                .usage
-                .source_method_usage_java_keys()
-                .any(|key| key.owner() == "Item" && key.java_name() == "who"),
-            "same-simple-name package peers must not collapse onto Item::who"
-        );
-        assert!(
-            !context
-                .semantic
-                .usage
-                .source_method_usage_java_keys()
-                .any(|key| matches!(key.owner(), "AItem" | "BItem") && key.java_name() == "who"),
-            "analysis identity should stay in Java owner space, not emitted Rust spelling"
-        );
+        assert_package_peer_who_keys_stay_in_java_owner_space(&context, &methods);
     }
 
     #[test]

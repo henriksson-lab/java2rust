@@ -17,24 +17,102 @@ pub struct EffectiveFacts<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveFact<T> {
-    pub value: T,
-    pub provenance: FactProvenance,
+    value: T,
+    provenance: FactProvenance,
+}
+
+impl<T> EffectiveFact<T> {
+    pub fn new(value: T, provenance: FactProvenance) -> Self {
+        Self { value, provenance }
+    }
+
+    pub fn value(&self) -> &T {
+        &self.value
+    }
+
+    pub fn provenance(&self) -> FactProvenance {
+        self.provenance
+    }
+
+    pub fn into_value(self) -> T {
+        self.value
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CastTypeCapabilityPolicy {
-    pub actual: JavaType,
-    pub target: JavaType,
-    pub optional_or_result: bool,
-    pub raw_or_wildcard: bool,
-    pub unchecked_generic: bool,
+    actual: JavaType,
+    target: JavaType,
+    optional_or_result: bool,
+    raw_or_wildcard: bool,
+    unchecked_generic: bool,
+}
+
+impl CastTypeCapabilityPolicy {
+    pub fn new(
+        actual: JavaType,
+        target: JavaType,
+        optional_or_result: bool,
+        raw_or_wildcard: bool,
+        unchecked_generic: bool,
+    ) -> Self {
+        Self {
+            actual,
+            target,
+            optional_or_result,
+            raw_or_wildcard,
+            unchecked_generic,
+        }
+    }
+
+    pub fn actual(&self) -> &JavaType {
+        &self.actual
+    }
+
+    pub fn target(&self) -> &JavaType {
+        &self.target
+    }
+
+    pub fn optional_or_result(&self) -> bool {
+        self.optional_or_result
+    }
+
+    pub fn raw_or_wildcard(&self) -> bool {
+        self.raw_or_wildcard
+    }
+
+    pub fn unchecked_generic(&self) -> bool {
+        self.unchecked_generic
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InstanceOfTargetCapabilityPolicy {
-    pub target: JavaType,
-    pub primitive_target: bool,
-    pub raw_or_wildcard_target: bool,
+    target: JavaType,
+    primitive_target: bool,
+    raw_or_wildcard_target: bool,
+}
+
+impl InstanceOfTargetCapabilityPolicy {
+    pub fn new(target: JavaType, primitive_target: bool, raw_or_wildcard_target: bool) -> Self {
+        Self {
+            target,
+            primitive_target,
+            raw_or_wildcard_target,
+        }
+    }
+
+    pub fn target(&self) -> &JavaType {
+        &self.target
+    }
+
+    pub fn primitive_target(&self) -> bool {
+        self.primitive_target
+    }
+
+    pub fn raw_or_wildcard_target(&self) -> bool {
+        self.raw_or_wildcard_target
+    }
 }
 
 impl<'a> EffectiveFacts<'a> {
@@ -118,11 +196,11 @@ impl<'a> EffectiveFacts<'a> {
     }
 
     pub fn extends_type_for(&self, java_ty: &JavaType) -> Option<JavaType> {
-        self.type_capabilities_for(java_ty).extends
+        self.type_capabilities_for(java_ty).extends().cloned()
     }
 
     pub fn implemented_types_for(&self, java_ty: &JavaType) -> Vec<JavaType> {
-        self.type_capabilities_for(java_ty).implements
+        self.type_capabilities_for(java_ty).implements().to_vec()
     }
 
     pub fn cast_type_capability_policy(
@@ -130,34 +208,33 @@ impl<'a> EffectiveFacts<'a> {
         actual: &JavaType,
         target: &JavaType,
     ) -> CastTypeCapabilityPolicy {
-        CastTypeCapabilityPolicy {
-            actual: actual.clone(),
-            target: target.clone(),
-            optional_or_result: is_optional_or_result_type(actual)
-                || is_optional_or_result_type(target),
-            raw_or_wildcard: contains_wildcard_type(actual)
+        CastTypeCapabilityPolicy::new(
+            actual.clone(),
+            target.clone(),
+            is_optional_or_result_type(actual) || is_optional_or_result_type(target),
+            contains_wildcard_type(actual)
                 || contains_wildcard_type(target)
                 || is_raw_generic_counterpart(actual, target),
-            unchecked_generic: is_unchecked_generic_counterpart(actual, target),
-        }
+            is_unchecked_generic_counterpart(actual, target),
+        )
     }
 
     pub fn instanceof_target_capability_policy(
         &self,
         target: &JavaType,
     ) -> InstanceOfTargetCapabilityPolicy {
-        InstanceOfTargetCapabilityPolicy {
-            target: target.clone(),
-            primitive_target: matches!(target, JavaType::Primitive(_)),
-            raw_or_wildcard_target: contains_wildcard_type(target)
+        InstanceOfTargetCapabilityPolicy::new(
+            target.clone(),
+            matches!(target, JavaType::Primitive(_)),
+            contains_wildcard_type(target)
                 || matches!(target, JavaType::Wildcard(_))
                 || is_known_raw_generic_type(target),
-        }
+        )
     }
 
     pub fn object_safe_trait_fact_for_name(&self, type_name: &str) -> Option<bool> {
         self.object_safe_trait_fact_for_name_with_provenance(type_name)
-            .map(|fact| fact.value)
+            .map(EffectiveFact::into_value)
     }
 
     pub fn object_safe_trait_fact_for_name_with_provenance(
@@ -172,10 +249,9 @@ impl<'a> EffectiveFacts<'a> {
                 object_safety_type_name_matches(&override_fact.type_name, type_name)
             })
             .filter_map(|override_fact| {
-                override_fact.object_safe_trait.map(|value| EffectiveFact {
-                    value,
-                    provenance: override_fact.provenance,
-                })
+                override_fact
+                    .object_safe_trait
+                    .map(|value| EffectiveFact::new(value, override_fact.provenance))
             })
             .max_by_key(effective_fact_precedence_key);
         let source_fact = self
@@ -183,10 +259,7 @@ impl<'a> EffectiveFacts<'a> {
             .object_safety_facts
             .iter()
             .filter(|fact| object_safety_type_name_matches(&fact.type_name, type_name))
-            .map(|fact| EffectiveFact {
-                value: fact.object_safe,
-                provenance: fact.provenance,
-            })
+            .map(|fact| EffectiveFact::new(fact.object_safe, fact.provenance))
             .max_by_key(effective_fact_precedence_key);
         effective_fact_max_by_precedence(override_fact, source_fact)
     }
@@ -207,14 +280,14 @@ impl<'a> EffectiveFacts<'a> {
         type_name: &str,
     ) -> Option<ObjectSafetyViolation> {
         let object_safe = self.object_safe_trait_fact_for_name_with_provenance(type_name)?;
-        if object_safe.value {
+        if *object_safe.value() {
             return None;
         }
         self.object_safety_fact_for_name_with_effective_precedence(type_name)
-            .filter(|fact| fact.provenance == object_safe.provenance)
+            .filter(|fact| fact.provenance == object_safe.provenance())
             .and_then(|fact| fact.violations.first().cloned())
             .or(Some(ObjectSafetyViolation::ExplicitNonObjectSafeFact {
-                provenance: object_safe.provenance,
+                provenance: object_safe.provenance(),
             }))
     }
 
@@ -229,7 +302,7 @@ impl<'a> EffectiveFacts<'a> {
 
     pub fn closed_hierarchy_fact_for_name(&self, type_name: &str) -> Option<bool> {
         self.closed_hierarchy_fact_for_name_with_provenance(type_name)
-            .map(|fact| fact.value)
+            .map(EffectiveFact::into_value)
     }
 
     pub fn closed_hierarchy_fact_for_name_with_provenance(
@@ -240,10 +313,7 @@ impl<'a> EffectiveFacts<'a> {
             .closed_hierarchy_facts
             .iter()
             .filter(|fact| type_name_matches(&fact.type_name, type_name))
-            .map(|fact| EffectiveFact {
-                value: fact.closed,
-                provenance: fact.provenance,
-            })
+            .map(|fact| EffectiveFact::new(fact.closed, fact.provenance))
             .max_by_key(effective_fact_precedence_key)
     }
 
@@ -255,10 +325,7 @@ impl<'a> EffectiveFacts<'a> {
             .sealed_permits_facts
             .iter()
             .filter(|fact| type_name_matches(&fact.type_name, type_name))
-            .map(|fact| EffectiveFact {
-                value: fact.permitted_subtypes.clone(),
-                provenance: fact.provenance,
-            })
+            .map(|fact| EffectiveFact::new(fact.permitted_subtypes.clone(), fact.provenance))
             .max_by_key(effective_fact_precedence_key)
     }
 
@@ -283,7 +350,7 @@ impl<'a> EffectiveFacts<'a> {
     }
 
     pub fn is_final_type(&self, java_ty: &JavaType) -> bool {
-        self.type_capabilities_for(java_ty).final_type
+        self.type_capabilities_for(java_ty).is_final_type()
     }
 
     pub fn has_object_representation_facts(&self, java_ty: &JavaType) -> bool {
@@ -388,20 +455,20 @@ impl<'a> EffectiveFacts<'a> {
     }
 
     pub fn is_string_like_type(&self, java_ty: &JavaType) -> bool {
-        self.type_capabilities_for(java_ty).string_like
+        self.type_capabilities_for(java_ty).is_string_like()
     }
 
     pub fn is_copy_type(&self, java_ty: &JavaType) -> bool {
-        self.type_capabilities_for(java_ty).copy
+        self.type_capabilities_for(java_ty).is_copy()
     }
 
     pub fn is_clone_type(&self, java_ty: &JavaType) -> bool {
-        self.type_capabilities_for(java_ty).clone
+        self.type_capabilities_for(java_ty).is_clone()
     }
 
     pub fn explicit_clone_capability_for(&self, java_ty: &JavaType) -> Option<bool> {
         self.explicit_clone_capability_for_with_provenance(java_ty)
-            .map(|fact| fact.value)
+            .map(EffectiveFact::into_value)
     }
 
     pub fn explicit_clone_capability_for_with_provenance(
@@ -417,10 +484,9 @@ impl<'a> EffectiveFacts<'a> {
                     .is_some_and(|type_name| type_name_matches(&override_fact.type_name, type_name))
             })
             .filter_map(|override_fact| {
-                override_fact.clone.map(|value| EffectiveFact {
-                    value,
-                    provenance: override_fact.provenance,
-                })
+                override_fact
+                    .clone
+                    .map(|value| EffectiveFact::new(value, override_fact.provenance))
             })
             .max_by_key(effective_fact_precedence_key)
     }
@@ -433,7 +499,7 @@ impl<'a> EffectiveFacts<'a> {
     }
 
     pub fn sequence_element_type_for(&self, java_ty: &JavaType) -> Option<JavaType> {
-        self.type_capabilities_for(java_ty).sequence_like
+        self.type_capabilities_for(java_ty).sequence_like().cloned()
     }
 
     pub fn type_capabilities_for(&self, java_ty: &JavaType) -> TypeCapabilities {
@@ -469,7 +535,7 @@ fn effective_fact_max_by_precedence<T>(
 ) -> Option<EffectiveFact<T>> {
     match (left, right) {
         (Some(left), Some(right)) => {
-            if fact_precedence_key(right.provenance) > fact_precedence_key(left.provenance) {
+            if fact_precedence_key(right.provenance()) > fact_precedence_key(left.provenance()) {
                 Some(right)
             } else {
                 Some(left)
@@ -482,7 +548,7 @@ fn effective_fact_max_by_precedence<T>(
 }
 
 fn effective_fact_precedence_key<T>(fact: &EffectiveFact<T>) -> u8 {
-    fact_precedence_key(fact.provenance)
+    fact_precedence_key(fact.provenance())
 }
 
 fn fact_precedence_key(provenance: FactProvenance) -> u8 {
@@ -538,28 +604,28 @@ fn apply_type_capability_override(
     override_fact: &TypeCapabilityOverride,
 ) {
     if let Some(copy) = override_fact.copy {
-        capabilities.copy = copy;
+        capabilities.set_copy(copy);
     }
     if let Some(clone) = override_fact.clone {
-        capabilities.clone = clone;
+        capabilities.set_clone(clone);
     }
     if let Some(string_like) = override_fact.string_like {
-        capabilities.string_like = string_like;
+        capabilities.set_string_like(string_like);
     }
     if let Some(sequence_like) = &override_fact.sequence_like {
-        capabilities.sequence_like = Some(sequence_like.clone());
+        capabilities.set_sequence_like(sequence_like.clone());
     }
     if !override_fact.implements.is_empty() {
-        capabilities.implements = override_fact.implements.clone();
+        capabilities.set_implements(override_fact.implements.clone());
     }
     if let Some(extends) = &override_fact.extends {
-        capabilities.extends = Some(extends.clone());
+        capabilities.set_extends(extends.clone());
     }
     if let Some(final_type) = override_fact.final_type {
-        capabilities.final_type = final_type;
+        capabilities.set_final_type(final_type);
     }
     if let Some(object_safe_trait) = override_fact.object_safe_trait {
-        capabilities.object_safe_trait = object_safe_trait;
+        capabilities.set_object_safe_trait(object_safe_trait);
     }
 }
 

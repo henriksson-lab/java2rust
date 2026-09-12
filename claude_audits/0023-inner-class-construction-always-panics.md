@@ -578,6 +578,11 @@ crate-local. The translator still reports the same
 longer public crate API while the real SharedLocal/outer-handle construction
 work remains open.
 
+Follow-up 2026-09-12: the `inner_class_capture` module itself is now
+crate-internal as well. The diagnostic path and 0002b work queue are unchanged,
+but the unconstructable-inner-class analysis no longer appears as public crate
+API. Guard: `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+
 Follow-up 2026-09-10: attempted to promote a qualified `outer.new Inner()`
 known-gap fixture, but the current parser/lowering path does not report
 `inner_class_construction_panics` for that shape. It reaches the storage-plan
@@ -602,7 +607,7 @@ same loud runtime handoff and `inner_class_construction_panics` diagnostic as
 ordinary `InnerCapture.java`. This is still coverage only; ordinary construction
 remains blocked on the unimplemented `SharedLocal` outer-handle carrier.
 
-Codex follow-up 2026-09-10: the ordinary `InnerCapture.java` fixture now has a
+Codex follow-up 2026-09-10: the ordinary `InnerCapture.java` shape now has a
 full-translation marker guard tying this gap to the mutable shared-storage work
 queue. `output_markers::inner_capture_gap_reports_mutable_shared_storage_work_queue`
 requires the generated Rust to keep the loud unsupported outer-capture handoff,

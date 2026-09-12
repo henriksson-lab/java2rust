@@ -29,7 +29,7 @@ use crate::types::{
     raw_rust_type_is_option, raw_rust_type_is_result,
 };
 
-pub fn is_content_read_method(name: &str) -> bool {
+pub(crate) fn is_content_read_method(name: &str) -> bool {
     matches!(
         name,
         "length"
@@ -52,23 +52,19 @@ pub fn is_content_read_method(name: &str) -> bool {
     )
 }
 
-pub fn is_borrowed_string_view_method(name: &str, arg_count: usize) -> bool {
+pub(crate) fn is_borrowed_string_view_method(name: &str, arg_count: usize) -> bool {
     name == "trim" && arg_count == 0
 }
 
-pub fn is_owned_string_result_method(name: &str, arg_count: usize) -> bool {
-    matches!(name, "toLowerCase" | "toUpperCase" | "toString") && arg_count == 0
-}
-
-pub fn is_known_receiverless_static_utility_method(name: &str, arg_count: usize) -> bool {
+pub(crate) fn is_known_receiverless_static_utility_method(name: &str, arg_count: usize) -> bool {
     matches!(name, "nonNull" | "isNull") && arg_count == 1
 }
 
-pub fn has_receiver_agnostic_external_return_type(name: &str, arg_count: usize) -> bool {
+pub(crate) fn has_receiver_agnostic_external_return_type(name: &str, arg_count: usize) -> bool {
     known_external_method_return_type(None, name, arg_count).is_some()
 }
 
-pub fn is_known_object_inherited_method(name: &str, arg_count: usize) -> bool {
+pub(crate) fn is_known_object_inherited_method(name: &str, arg_count: usize) -> bool {
     matches!(
         (name, arg_count),
         ("getClass", 0) | ("hashCode", 0) | ("toString", 0) | ("equals", 1)
@@ -88,9 +84,35 @@ pub enum FunctionalTypeSource {
 /// The single abstract method of a `java.util.function`-style interface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FunctionalInterfaceShape {
-    pub method: &'static str,
-    pub inputs: Vec<FunctionalTypeSource>,
-    pub returns: Option<FunctionalTypeSource>,
+    method: &'static str,
+    inputs: Vec<FunctionalTypeSource>,
+    returns: Option<FunctionalTypeSource>,
+}
+
+impl FunctionalInterfaceShape {
+    pub fn new(
+        method: &'static str,
+        inputs: Vec<FunctionalTypeSource>,
+        returns: Option<FunctionalTypeSource>,
+    ) -> Self {
+        Self {
+            method,
+            inputs,
+            returns,
+        }
+    }
+
+    pub fn method(&self) -> &'static str {
+        self.method
+    }
+
+    pub fn inputs(&self) -> &[FunctionalTypeSource] {
+        &self.inputs
+    }
+
+    pub fn returns(&self) -> Option<FunctionalTypeSource> {
+        self.returns
+    }
 }
 
 /// Reads a functional interface's shape out of its **name**.
@@ -112,11 +134,7 @@ pub fn functional_interface_shape(name: &str) -> Option<FunctionalInterfaceShape
     if !is_known_functional_interface(simple) {
         return None;
     }
-    let shape = |method, inputs: Vec<FunctionalTypeSource>, returns| FunctionalInterfaceShape {
-        method,
-        inputs,
-        returns,
-    };
+    let shape = FunctionalInterfaceShape::new;
     use FunctionalTypeSource::{Primitive, TypeArgument};
 
     // `Obj{P}Consumer<T>`: an object and a primitive, no result.
@@ -658,7 +676,7 @@ impl JavaCollectionKind {
     }
 }
 
-pub fn java_collection_kind_for_name(name: &str) -> Option<JavaCollectionKind> {
+pub(crate) fn java_collection_kind_for_name(name: &str) -> Option<JavaCollectionKind> {
     let name = canonical_external_receiver_type_key(name);
     let name = name.rsplit('.').next().unwrap_or(&name);
     if matches!(
@@ -692,7 +710,19 @@ pub fn java_collection_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind
     }
 }
 
-pub fn native_collection_constructor_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind> {
+pub(crate) fn java_type_is_array_blocking_queue(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let canonical = canonical_external_receiver_type_key(name);
+            canonical.rsplit('.').next().unwrap_or(&canonical) == "ArrayBlockingQueue"
+        }
+        _ => false,
+    }
+}
+
+pub(crate) fn native_collection_constructor_kind_for_type(
+    ty: &JavaType,
+) -> Option<JavaCollectionKind> {
     let kind = java_collection_kind_for_type(ty)?;
     match ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
@@ -2530,7 +2560,9 @@ fn rust_stdlib_static_abi(
     }
 }
 
-pub fn native_collection_receiver_kind_for_type(ty: &JavaType) -> Option<JavaCollectionKind> {
+pub(crate) fn native_collection_receiver_kind_for_type(
+    ty: &JavaType,
+) -> Option<JavaCollectionKind> {
     let kind = java_collection_kind_for_type(ty)?;
     match ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
@@ -2546,14 +2578,14 @@ pub fn native_collection_receiver_kind_for_type(ty: &JavaType) -> Option<JavaCol
     }
 }
 
-pub fn native_collection_receiver_mutates(ty: &JavaType, method_name: &str) -> bool {
+pub(crate) fn native_collection_receiver_mutates(ty: &JavaType, method_name: &str) -> bool {
     let Some(kind) = native_collection_receiver_kind_for_type(ty) else {
         return false;
     };
     native_collection_kind_receiver_mutates(kind, method_name)
 }
 
-pub fn native_collection_receiver_method_known(ty: &JavaType, method_name: &str) -> bool {
+pub(crate) fn native_collection_receiver_method_known(ty: &JavaType, method_name: &str) -> bool {
     !matches!(
         native_collection_receiver_method_role_for_type(ty, method_name, 0),
         ExternalApiRole::Unknown
@@ -2661,7 +2693,7 @@ fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name
     }
 }
 
-pub fn native_collection_method_name_mutates_receiver(method_name: &str) -> bool {
+pub(crate) fn native_collection_method_name_mutates_receiver(method_name: &str) -> bool {
     if matches!(
         method_name,
         "next" | "next_element" | "forEachRemaining" | "for_each_remaining"
@@ -2675,7 +2707,7 @@ pub fn native_collection_method_name_mutates_receiver(method_name: &str) -> bool
         || native_collection_kind_receiver_mutates(JavaCollectionKind::SortedMap, method_name)
 }
 
-pub fn static_collection_argument_mutates(
+pub(crate) fn static_collection_argument_mutates(
     receiver_type: Option<&str>,
     method_name: &str,
     arg_count: usize,
@@ -3660,7 +3692,7 @@ fn known_boolean_constant_field_type(receiver: &str, field_name: &str) -> Option
     }
 }
 
-pub fn canonical_external_field_name(field_name: &str) -> String {
+pub(crate) fn canonical_external_field_name(field_name: &str) -> String {
     if field_name.contains('_') || field_name.chars().all(|ch| ch.is_ascii_lowercase()) {
         field_name.to_ascii_uppercase()
     } else {
@@ -5433,8 +5465,25 @@ fn is_known_java_platform_output_stream_receiver(receiver: &str) -> bool {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ClassLiteralTokenPlan {
-    pub(crate) java_name: String,
-    pub(crate) rust_type: RustType,
+    java_name: String,
+    rust_type: RustType,
+}
+
+impl ClassLiteralTokenPlan {
+    pub(crate) fn new(java_name: String, rust_type: RustType) -> Self {
+        Self {
+            java_name,
+            rust_type,
+        }
+    }
+
+    pub(crate) fn java_name(&self) -> &str {
+        &self.java_name
+    }
+
+    pub(crate) fn rust_type(&self) -> &RustType {
+        &self.rust_type
+    }
 }
 
 pub(crate) fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassLiteralTokenPlan {
@@ -5449,10 +5498,7 @@ pub(crate) fn class_literal_token_plan(ty: &JavaType, facts: &FactSet) -> ClassL
         }
         _ => rust_type_for_slot_with_facts(&shape, facts),
     };
-    ClassLiteralTokenPlan {
-        java_name: class_literal_java_name(ty),
-        rust_type,
-    }
+    ClassLiteralTokenPlan::new(class_literal_java_name(ty), rust_type)
 }
 
 #[cfg(test)]
@@ -5463,10 +5509,7 @@ mod class_literal_token_plan_tests {
     fn class_literal_tokens_are_planned_before_lowering() {
         assert_eq!(
             class_literal_token_plan(&JavaType::String, &FactSet::default()),
-            ClassLiteralTokenPlan {
-                java_name: "java.lang.String".to_string(),
-                rust_type: RustType::String,
-            }
+            ClassLiteralTokenPlan::new("java.lang.String".to_string(), RustType::String)
         );
 
         let unresolved = class_literal_token_plan(
@@ -5478,10 +5521,7 @@ mod class_literal_token_plan_tests {
         );
         assert_eq!(
             unresolved,
-            ClassLiteralTokenPlan {
-                java_name: "RegisteredType".to_string(),
-                rust_type: RustType::Unit,
-            }
+            ClassLiteralTokenPlan::new("RegisteredType".to_string(), RustType::Unit)
         );
 
         let mut source_facts = FactSet::default();
@@ -5497,10 +5537,10 @@ mod class_literal_token_plan_tests {
                 },
                 &source_facts,
             ),
-            ClassLiteralTokenPlan {
-                java_name: "RegisteredType".to_string(),
-                rust_type: RustType::Named("RegisteredType".to_string()),
-            }
+            ClassLiteralTokenPlan::new(
+                "RegisteredType".to_string(),
+                RustType::Named("RegisteredType".to_string()),
+            )
         );
 
         let mut package_source_facts = FactSet::default();
@@ -5516,10 +5556,7 @@ mod class_literal_token_plan_tests {
                 },
                 &package_source_facts,
             ),
-            ClassLiteralTokenPlan {
-                java_name: "a.Item".to_string(),
-                rust_type: RustType::Named("AItem".to_string()),
-            }
+            ClassLiteralTokenPlan::new("a.Item".to_string(), RustType::Named("AItem".to_string()),)
         );
 
         let mut merged_simple_source_facts = FactSet::default();
@@ -5535,10 +5572,7 @@ mod class_literal_token_plan_tests {
                 },
                 &merged_simple_source_facts,
             ),
-            ClassLiteralTokenPlan {
-                java_name: "a.Item".to_string(),
-                rust_type: RustType::Named("AItem".to_string()),
-            }
+            ClassLiteralTokenPlan::new("a.Item".to_string(), RustType::Named("AItem".to_string()),)
         );
         assert_eq!(
             class_literal_token_plan(
@@ -5548,10 +5582,7 @@ mod class_literal_token_plan_tests {
                 },
                 &merged_simple_source_facts,
             ),
-            ClassLiteralTokenPlan {
-                java_name: "java.util.Item".to_string(),
-                rust_type: RustType::Unit,
-            }
+            ClassLiteralTokenPlan::new("java.util.Item".to_string(), RustType::Unit)
         );
     }
 }
@@ -5644,11 +5675,12 @@ pub(crate) fn class_literal_java_name(ty: &JavaType) -> String {
     }
 }
 
-pub fn java_class_support_item() -> crate::rust_ir::RustItem {
+#[cfg(test)]
+pub(crate) fn java_class_support_item() -> crate::rust_ir::RustItem {
     java_class_support_item_with_classloader_shim(false)
 }
 
-pub fn java_class_support_item_with_classloader_shim(
+pub(crate) fn java_class_support_item_with_classloader_shim(
     include_classloader_shim: bool,
 ) -> crate::rust_ir::RustItem {
     let classloader_shim = if include_classloader_shim {
@@ -5757,7 +5789,7 @@ impl<T> std::fmt::Display for JavaClass<T> {
 /// `String.valueOf(3.0)` is `"3.0"`, while Rust's `Display` gives `"3"`. String
 /// concatenation is the common path, so the difference shows up as a silent
 /// output mismatch rather than a compile error.
-pub fn java_floating_point_display_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn java_floating_point_display_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub fn java_double_to_string(value: f64) -> String {
     if value.is_nan() {
@@ -5788,7 +5820,7 @@ pub fn java_float_to_string(value: f32) -> String {
     )
 }
 
-pub fn java_comparable_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn java_comparable_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub trait JavaComparable {
     /// Accepts the value either way: a Java `compareTo` argument lowers to an
@@ -5809,7 +5841,7 @@ impl<T: Ord> JavaComparable for T {
     )
 }
 
-pub fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct URL {
@@ -6761,6 +6793,89 @@ impl Enumeration {
 pub struct JavaIterator<T> {
     items: Vec<T>,
     index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct JavaArrayBlockingQueue<T> {
+    entries: Vec<T>,
+    capacity: usize,
+}
+
+impl<T> JavaArrayBlockingQueue<T> {
+    pub fn new() -> JavaArrayBlockingQueue<T> {
+        JavaArrayBlockingQueue::with_capacity(0)
+    }
+
+    pub fn with_capacity(capacity: usize) -> JavaArrayBlockingQueue<T> {
+        JavaArrayBlockingQueue {
+            entries: Vec::with_capacity(capacity),
+            capacity,
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        self.entries.push(value);
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.entries.get(index)
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        self.entries.remove(index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn capacity(&self) -> usize {
+        self.capacity
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.entries.iter()
+    }
+}
+
+impl<T> Default for JavaArrayBlockingQueue<T> {
+    fn default() -> Self {
+        JavaArrayBlockingQueue::new()
+    }
+}
+
+impl<T> AsRef<[T]> for JavaArrayBlockingQueue<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.entries
+    }
+}
+
+impl<T> std::iter::FromIterator<T> for JavaArrayBlockingQueue<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let entries = iter.into_iter().collect::<Vec<_>>();
+        JavaArrayBlockingQueue {
+            capacity: entries.len(),
+            entries,
+        }
+    }
+}
+
+impl<T: JavaArraysDeepToStringElement> std::fmt::Display for JavaArrayBlockingQueue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&java_collection_to_string(&self.entries))
+    }
+}
+
+impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement
+    for JavaArrayBlockingQueue<T>
+{
+    fn java_arrays_deep_to_string(&self) -> String {
+        self.to_string()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -8489,7 +8604,7 @@ fn collect_expr_class_literal_token_types(
 ) {
     match expr {
         Expr::ClassLiteral(ty) => {
-            let rust_type = class_literal_token_plan(ty, facts).rust_type;
+            let rust_type = class_literal_token_plan(ty, facts).rust_type().clone();
             token_types.insert(crate::emit::emit_type(&rust_type));
         }
         Expr::Call { receiver, args, .. } => {
@@ -8682,12 +8797,6 @@ fn external_display_downcast_rust_names(
         {
             names.insert(rust_name.clone());
         }
-        let Some((_package, _simple_name)) = external_type.rsplit_once('.') else {
-            if program_mentions_java_type(program, external_type) {
-                names.insert(rust_name.clone());
-            }
-            continue;
-        };
     }
     names
 }
@@ -8697,6 +8806,10 @@ fn program_mentions_java_type(program: &Program, target_simple_name: &str) -> bo
         .types
         .iter()
         .any(|ty| type_decl_mentions_java_type(ty, target_simple_name))
+}
+
+pub(crate) fn program_mentions_java_array_blocking_queue(program: &Program) -> bool {
+    program_mentions_java_type(program, "ArrayBlockingQueue")
 }
 
 fn type_decl_mentions_java_type(ty: &TypeDecl, target_simple_name: &str) -> bool {
@@ -9116,7 +9229,7 @@ fn source_type_is_erased_alias(
         .and_then(|representations| representations.type_representation(&ty.name))
         .is_some_and(|representation| {
             matches!(
-                representation.representation,
+                representation.representation(),
                 ObjectRepresentation::ErasedObject
             )
         })
@@ -9154,7 +9267,7 @@ fn source_type_has_effective_java_to_string(ty: &TypeDecl, program: &Program) ->
     source_type_declares_java_to_string(ty)
         || crate::inherited_members::inherited_instance_method_refs_for_type(ty, program)
             .iter()
-            .any(|inherited| source_method_is_java_to_string(inherited.method))
+            .any(|inherited| source_method_is_java_to_string(inherited.method()))
 }
 
 fn source_type_declares_java_to_string(ty: &TypeDecl) -> bool {
@@ -9170,7 +9283,7 @@ fn source_method_is_java_to_string(method: &crate::java_ir::MethodDecl) -> bool 
         && matches!(method.return_type, JavaType::String)
 }
 
-pub fn java_string_split_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn java_string_split_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub fn java_string_substring<V: AsRef<str>>(value: V, begin: i32, end: i32) -> String {
     java_string_substring_result(value, begin, end)
@@ -9897,7 +10010,7 @@ fn java_simple_regex_literal(regex: &str) -> &str {
     )
 }
 
-pub fn java_string_format_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn java_string_format_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"pub fn java_string_format<S: AsRef<str>>(template: S, args: Vec<String>) -> String {
     let mut out = String::new();
@@ -9934,7 +10047,7 @@ pub fn java_string_format_support_item() -> crate::rust_ir::RustItem {
     )
 }
 
-pub fn external_api_facade_support_items_with_local_type_program(
+pub(crate) fn external_api_facade_support_items_with_local_type_program(
     program: &Program,
     facts: &FactSet,
     local_type_program: &Program,
@@ -10921,13 +11034,13 @@ impl ExternalApiFacadeSupport {
     ) {
         for representation in representations.type_representations() {
             if matches!(
-                representation.representation,
+                representation.representation(),
                 ObjectRepresentation::ErasedObject
             ) && local_types.contains(&canonical_external_receiver_type_key(
-                &representation.java_name,
+                representation.java_name(),
             )) {
                 self.erased_source_alias_owners
-                    .insert(rust_name_for_java_named_type(&representation.java_name));
+                    .insert(rust_name_for_java_named_type(representation.java_name()));
             }
         }
     }
@@ -11576,7 +11689,7 @@ impl ExternalApiFacadeSupport {
         for inherited in
             crate::inherited_members::inherited_instance_field_refs_for_type(ty, support_program)
         {
-            self.add_declared_java_type(&inherited.field.ty, emitted_local_types);
+            self.add_declared_java_type(&inherited.field().ty, emitted_local_types);
         }
         for member in &ty.members {
             if let Member::Type(nested) = member {
@@ -11620,9 +11733,13 @@ impl ExternalApiFacadeSupport {
             for inherited in
                 crate::inherited_members::external_inherited_instance_methods_for_type(ty, facts)
             {
+                let declaring_type = inherited.declaring_type();
+                let method_name = inherited.method_name();
+                let rust_name = inherited.rust_name();
+                let arg_count = inherited.arg_count();
                 if !used_calls
-                    .get(&inherited.rust_name)
-                    .is_some_and(|arities| arities.contains(&inherited.arg_count))
+                    .get(rust_name)
+                    .is_some_and(|arities| arities.contains(&arg_count))
                 {
                     continue;
                 }
@@ -11633,7 +11750,7 @@ impl ExternalApiFacadeSupport {
                 // subclass — colliding with the members it actually inherits.
                 if find_program_type_by_key(
                     program,
-                    &canonical_external_receiver_type_key(&inherited.declaring_type),
+                    &canonical_external_receiver_type_key(declaring_type),
                 )
                 .is_some()
                 {
@@ -11642,12 +11759,7 @@ impl ExternalApiFacadeSupport {
                 // The real program, not a synthetic one-type program: the
                 // check walks `extends`, so a one-type program could never find
                 // the superclass and always answered "not present".
-                if source_method_hierarchy_contains(
-                    program,
-                    ty,
-                    &inherited.method_name,
-                    inherited.arg_count,
-                ) {
+                if source_method_hierarchy_contains(program, ty, method_name, arg_count) {
                     continue;
                 }
                 let (return_rust, unmodelled_return) =
@@ -11655,30 +11767,25 @@ impl ExternalApiFacadeSupport {
                 let method_body = if unmodelled_return {
                     external_facade_unmodelled_method_with_facts(
                         facts,
-                        &inherited.declaring_type,
-                        &inherited.method_name,
-                        &inherited.rust_name,
-                        inherited.arg_count,
+                        declaring_type,
+                        method_name,
+                        rust_name,
+                        arg_count,
                         &return_rust,
                         false,
                     )
                 } else {
                     external_facade_instance_method_with_facts(
                         facts,
-                        &inherited.declaring_type,
-                        &inherited.method_name,
-                        &inherited.rust_name,
-                        inherited.arg_count,
+                        declaring_type,
+                        method_name,
+                        rust_name,
+                        arg_count,
                         &return_rust,
                     )
                 };
-                if self.has_method_signature(&owner, &inherited.rust_name, inherited.arg_count)
-                    && !self.replace_weak_method_return(
-                        &owner,
-                        &inherited.rust_name,
-                        inherited.arg_count,
-                        &method_body,
-                    )
+                if self.has_method_signature(&owner, rust_name, arg_count)
+                    && !self.replace_weak_method_return(&owner, rust_name, arg_count, &method_body)
                 {
                     continue;
                 }
@@ -11687,6 +11794,10 @@ impl ExternalApiFacadeSupport {
             for inherited in
                 query_backed_external_inherited_methods_for_type(facts, ty, program, used_calls)
             {
+                let declaring_type = inherited.declaring_type();
+                let method_name = inherited.method_name();
+                let rust_name = inherited.rust_name();
+                let arg_count = inherited.arg_count();
                 // A supertype the program declares is not an *external* super,
                 // whatever the fact set says. An unresolved call on a local
                 // class records an external API effect fact for it, so without
@@ -11694,7 +11805,7 @@ impl ExternalApiFacadeSupport {
                 // subclass — colliding with the members it actually inherits.
                 if find_program_type_by_key(
                     program,
-                    &canonical_external_receiver_type_key(&inherited.declaring_type),
+                    &canonical_external_receiver_type_key(declaring_type),
                 )
                 .is_some()
                 {
@@ -11703,12 +11814,7 @@ impl ExternalApiFacadeSupport {
                 // The real program, not a synthetic one-type program: the
                 // check walks `extends`, so a one-type program could never find
                 // the superclass and always answered "not present".
-                if source_method_hierarchy_contains(
-                    program,
-                    ty,
-                    &inherited.method_name,
-                    inherited.arg_count,
-                ) {
+                if source_method_hierarchy_contains(program, ty, method_name, arg_count) {
                     continue;
                 }
                 let (return_rust, unmodelled_return) =
@@ -11716,30 +11822,25 @@ impl ExternalApiFacadeSupport {
                 let method_body = if unmodelled_return {
                     external_facade_unmodelled_method_with_facts(
                         facts,
-                        &inherited.declaring_type,
-                        &inherited.method_name,
-                        &inherited.rust_name,
-                        inherited.arg_count,
+                        declaring_type,
+                        method_name,
+                        rust_name,
+                        arg_count,
                         &return_rust,
                         false,
                     )
                 } else {
                     external_facade_instance_method_with_facts(
                         facts,
-                        &inherited.declaring_type,
-                        &inherited.method_name,
-                        &inherited.rust_name,
-                        inherited.arg_count,
+                        declaring_type,
+                        method_name,
+                        rust_name,
+                        arg_count,
                         &return_rust,
                     )
                 };
-                if self.has_method_signature(&owner, &inherited.rust_name, inherited.arg_count)
-                    && !self.replace_weak_method_return(
-                        &owner,
-                        &inherited.rust_name,
-                        inherited.arg_count,
-                        &method_body,
-                    )
+                if self.has_method_signature(&owner, rust_name, arg_count)
+                    && !self.replace_weak_method_return(&owner, rust_name, arg_count, &method_body)
                 {
                     continue;
                 }
@@ -11765,28 +11866,29 @@ impl ExternalApiFacadeSupport {
         representations: &RepresentationPlan,
         inherited: &crate::inherited_members::ExternalInheritedInstanceMethod,
     ) -> (String, bool) {
-        if let Some(return_type) = &inherited.fact.return_type {
+        let fact = inherited.fact();
+        if let Some(return_type) = &fact.return_type {
             self.add_java_type(return_type);
             return (
                 external_facade_method_return_type_with_facts_and_representations(
                     facts,
                     representations,
-                    Some(&inherited.declaring_type),
-                    &inherited.method_name,
-                    Some(inherited.arg_count),
+                    Some(inherited.declaring_type()),
+                    inherited.method_name(),
+                    Some(inherited.arg_count()),
                     return_type,
-                    inherited.fact.return_nullability,
+                    fact.return_nullability,
                 ),
                 false,
             );
         }
-        if external_api_role_returns_value(inherited.fact.role) {
-            let receiver_key = canonical_external_receiver_type_key(&inherited.declaring_type);
+        if external_api_role_returns_value(fact.role) {
+            let receiver_key = canonical_external_receiver_type_key(inherited.declaring_type());
             let receiver_rust = rust_name_for_java_named_type(&receiver_key);
             let return_rust = external_facade_unmodelled_result_type(
                 &receiver_rust,
-                &inherited.rust_name,
-                inherited.arg_count,
+                inherited.rust_name(),
+                inherited.arg_count(),
             );
             self.add_opaque_type(return_rust.clone());
             (return_rust, true)
@@ -11805,7 +11907,7 @@ impl ExternalApiFacadeSupport {
         for inherited in
             crate::inherited_members::external_inherited_instance_fields_for_type(ty, facts)
         {
-            self.add_java_type(&inherited.field_type);
+            self.add_java_type(inherited.field_type());
         }
         for member in &ty.members {
             if let Member::Type(nested) = member {
@@ -11966,45 +12068,42 @@ impl ExternalApiFacadeSupport {
             for inherited in
                 crate::inherited_members::external_inherited_static_final_fields_for_type(ty, facts)
             {
-                let Some(rust_type) = static_constant_rust_type(&inherited.field_type) else {
+                let declaring_type = inherited.declaring_type();
+                let field_name = inherited.field_name();
+                let field_type = inherited.field_type();
+                let Some(rust_type) = static_constant_rust_type(field_type) else {
                     continue;
                 };
                 let field_value = facts
-                    .external_field_value_for(&inherited.declaring_type, &inherited.field_name)
+                    .external_field_value_for(declaring_type, field_name)
                     .map(|fact| fact.rust_value.clone())
                     .or_else(|| {
-                        crate::external_packs::external_field_value_for(
-                            &inherited.declaring_type,
-                            &inherited.field_name,
-                        )
-                        .map(|fact| fact.rust_value)
+                        crate::external_packs::external_field_value_for(declaring_type, field_name)
+                            .map(|fact| fact.rust_value)
                     });
                 let constant = StaticConstantFact {
-                    field_type: inherited.field_type.clone(),
+                    field_type: field_type.clone(),
                     field_value,
                     field_kind: ExternalFieldKind::StaticFinal,
                     provenance: FactProvenance::BuiltinExternalModel,
                     alias_owner: None,
                 };
                 let declaring_owner = rust_name_for_java_named_type(
-                    &canonical_external_receiver_type_key(&inherited.declaring_type),
+                    &canonical_external_receiver_type_key(declaring_type),
                 );
                 let Some(value) = static_constant_default_value(
                     &declaring_owner,
-                    &inherited.field_name,
+                    field_name,
                     Some(&constant),
-                    &inherited.field_type,
+                    field_type,
                     &BTreeMap::new(),
                 ) else {
                     continue;
                 };
-                if valid_rust_const_ident(&inherited.field_name) {
+                if valid_rust_const_ident(field_name) {
                     self.add_method(
                         owner.clone(),
-                        format!(
-                            "    pub const {}: {rust_type} = {value};",
-                            inherited.field_name
-                        ),
+                        format!("    pub const {field_name}: {rust_type} = {value};"),
                     );
                 }
             }
@@ -12191,6 +12290,8 @@ impl ExternalApiFacadeSupport {
             ) {
                 continue;
             }
+            let receiver_surface_owners =
+                external_facade_receiver_surface_owners(facts, &receiver_key, &receiver_rust);
             let arg_count = fact
                 .arg_count
                 .unwrap_or_else(|| arities.iter().next().copied().unwrap_or_default());
@@ -12254,7 +12355,9 @@ impl ExternalApiFacadeSupport {
                 } else {
                     external_facade_static_method(&rust_base_method, 0, &return_rust)
                 };
-                self.add_method(receiver_rust, method_body);
+                for owner in &receiver_surface_owners {
+                    self.add_method(owner.clone(), method_body.clone());
+                }
             } else if receiver_rust.ends_with("Builder") {
                 continue;
             } else {
@@ -12318,7 +12421,9 @@ impl ExternalApiFacadeSupport {
                     {
                         continue;
                     }
-                    self.add_method(receiver_rust, method_body);
+                    for owner in &receiver_surface_owners {
+                        self.add_method(owner.clone(), method_body.clone());
+                    }
                     continue;
                 }
                 if fact.provenance != FactProvenance::ConservativeFallback
@@ -12378,7 +12483,9 @@ impl ExternalApiFacadeSupport {
                 {
                     continue;
                 }
-                self.add_method(receiver_rust, method_body);
+                for owner in &receiver_surface_owners {
+                    self.add_method(owner.clone(), method_body.clone());
+                }
             }
         }
     }
@@ -16208,7 +16315,7 @@ fn lambda_input_types_for_target(ty: &JavaType) -> Option<Vec<JavaType>> {
         .to_string();
     let shape = functional_interface_shape(&simple)?;
     shape
-        .inputs
+        .inputs()
         .iter()
         .map(|input| match input {
             FunctionalTypeSource::TypeArgument(index) => args.get(*index).cloned(),
@@ -16794,8 +16901,79 @@ class ReportException extends Exception {}
 }
 
 #[cfg(test)]
+mod stdlib_support_item_tests {
+    use super::*;
+
+    fn raw_support_item_text(item: crate::rust_ir::RustItem) -> String {
+        match item {
+            crate::rust_ir::RustItem::Raw(raw) => raw,
+            other => panic!("expected raw support item, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn java_class_support_item_declares_public_token_type() {
+        let support = raw_support_item_text(java_class_support_item());
+        assert!(support.contains("pub struct JavaClass<T>"));
+        assert!(support.contains("impl<T> std::fmt::Display for JavaClass<T>"));
+    }
+
+    #[test]
+    fn java_platform_facade_support_covers_path_uri_and_file_boundaries() {
+        let support = raw_support_item_text(java_platform_facade_support_item());
+        assert!(support.contains("pub struct Path"));
+        assert!(support.contains("pub struct URI"));
+        assert!(support.contains("pub struct File"));
+        assert!(support.contains("pub fn new_1<P: JavaPathArg>(value: P) -> File"));
+        assert!(
+            support.contains(
+                "pub fn new_2<P: JavaPathArg, C: JavaPathArg>(parent: P, child: C) -> File"
+            )
+        );
+        assert!(support.contains("pub mod logger"));
+        assert!(support.contains("pub fn to_uri(&self) -> URI"));
+        assert!(support.contains("pub fn get_raw_path(&self) -> String"));
+        assert!(support.contains("pub fn to_path(&self) -> Path"));
+        assert!(
+            support.contains("pub fn resolve_sibling<P: JavaPathArg>(&self, sibling: P) -> Path")
+        );
+        assert!(support.contains("impl JavaPathArg for Option<Path>"));
+        assert!(support.contains("impl AsRef<std::path::Path> for File"));
+        assert!(support.contains("impl From<&File> for std::path::PathBuf"));
+        assert!(support.contains("impl AsRef<std::path::Path> for Path"));
+        assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
+    }
+
+    #[test]
+    fn java_string_runtime_support_declares_deep_array_traits() {
+        let support = raw_support_item_text(java_string_split_support_item());
+        assert!(support.contains("JavaArraysDeepToStringElement"));
+        assert!(support.contains("JavaArraysDeepEqualsElement"));
+        assert!(support.contains("JavaArraysDeepHashElement"));
+    }
+}
+
+#[cfg(test)]
 mod external_facade_support_tests {
     use super::*;
+
+    fn render_external_api_facade_support_items(
+        program: &Program,
+        facts: &FactSet,
+        local_type_program: &Program,
+        source_summary_type_program: &Program,
+        representations: &RepresentationPlan,
+    ) -> String {
+        crate::emit::emit_file(&crate::rust_ir::RustFile {
+            items: external_api_facade_support_items_with_local_type_program(
+                program,
+                facts,
+                local_type_program,
+                source_summary_type_program,
+                representations,
+            ),
+        })
+    }
 
     #[test]
     fn imported_static_owner_call_before_shadowing_local_is_collected() {
@@ -16889,6 +17067,357 @@ class UseExternalConstructors {
         assert!(support.contains("pub struct BFoo"), "{support}");
         assert!(!support.contains("pub type Foo = AFoo"), "{support}");
         assert!(!support.contains("pub type Foo = BFoo"), "{support}");
+    }
+
+    #[test]
+    fn external_set_return_uses_source_hierarchy_companion_carrier_element() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import htsjdk.variant.vcf.VCFHeader;
+import htsjdk.variant.vcf.VCFHeaderVersion;
+
+class VCFHeaderLine {
+    String name;
+
+    String key() {
+        return name;
+    }
+}
+
+class VCFCompoundHeaderLine extends VCFHeaderLine {}
+class VCFFormatHeaderLine extends VCFCompoundHeaderLine {}
+class VCFInfoHeaderLine extends VCFCompoundHeaderLine {}
+
+class UseHeader {
+    void scan(VCFHeader header) {
+        for (VCFHeaderLine line : header.getMetaDataInInputOrder()) {
+            if (line instanceof VCFFormatHeaderLine) {
+                line.key();
+            }
+        }
+        VCFHeaderVersion version = header.getVCFHeaderVersion();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts.extend_from(crate::external_packs::htsjdk_vcf_pack_facts());
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &facts);
+        let rendered = render_external_api_facade_support_items(
+            &resolved.program,
+            &facts,
+            &resolved.program,
+            &Program::default(),
+            &representations,
+        );
+
+        assert!(
+            rendered.contains(
+                "pub fn get_meta_data_in_input_order(&self) -> Vec<VCFHeaderLineValue>"
+            ) && !rendered.contains(
+                "pub fn get_meta_data_in_input_order(&self) -> std::collections::HashSet<VCFHeaderLine>"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub fn get_v_c_f_header_version(&self) -> VCFHeaderVersion"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("    fn get_v_c_f_header_version(&self) -> VCFHeaderVersion;"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_nested_type_identity_suppresses_simple_external_facade_support() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Base64 {
+    static class OutputStream {
+        int position;
+    }
+}
+"#,
+        );
+        let mut facts = FactSet::default();
+        facts
+            .external_conversion_adapter_facts
+            .push(crate::facts::ExternalConversionAdapterFact {
+                from_type: "Base64OutputStream".to_string(),
+                to_type: "OutputStream".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+
+        let rendered = render_external_api_facade_support_items(
+            &parsed.program,
+            &facts,
+            &parsed.program,
+            &Program::default(),
+            &RepresentationPlan::default(),
+        );
+
+        assert!(
+            !rendered.contains("pub struct Base64OutputStream;"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("impl From<Base64OutputStream> for OutputStream"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn external_enum_variant_fields_do_not_emit_nested_type_aliases() {
+        let facts = crate::external_packs::htsjdk_vcf_pack_facts();
+        let program = Program::default();
+        let rendered = render_external_api_facade_support_items(
+            &program,
+            &facts,
+            &program,
+            &Program::default(),
+            &RepresentationPlan::default(),
+        );
+
+        assert!(
+            !rendered.contains("pub type SupportedHeaderLineTypeFORMAT"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("pub type SupportedHeaderLineTypeINFO"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("pub type VCFHeaderLineCountA"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn emitted_source_method_suppresses_matching_external_facade_stub() {
+        let local = crate::parser::parse_java_source(
+            r#"
+package htsjdk.variant.vcf;
+
+class VCFHeaderLine {
+    public String toString() {
+        return "line";
+    }
+}
+
+class VCFCompoundHeaderLine extends VCFHeaderLine {
+}
+
+class VCFHeaderLineCaller {
+    String render(VCFHeaderLine line) {
+        return line.toString();
+    }
+
+    String renderCompound(VCFCompoundHeaderLine line) {
+        return line.toString();
+    }
+}
+"#,
+        );
+        let current = crate::parser::parse_java_source(
+            r#"
+package htsjdk.variant.vcf;
+
+class VCFCompoundHeaderLine extends VCFHeaderLine {
+}
+
+class VCFHeaderLineCaller {
+    String renderCompound(VCFCompoundHeaderLine line) {
+        return line.toString();
+    }
+}
+"#,
+        );
+        let facts = crate::external_packs::htsjdk_vcf_pack_facts();
+        let rendered = render_external_api_facade_support_items(
+            &current.program,
+            &facts,
+            &local.program,
+            &Program::default(),
+            &RepresentationPlan::default(),
+        );
+
+        assert!(
+            !rendered.contains("impl VCFHeaderLine {\n    pub fn to_string(&self) -> String"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered
+                .contains("impl VCFCompoundHeaderLine {\n    pub fn to_string(&self) -> String"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn erased_source_alias_owner_suppresses_external_facade_inherent_impl() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class ErasedBase {
+}
+
+class ErasedAliasCaller {
+    Object cls(ErasedBase value) {
+        return value.getClass();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts
+            .dispatch_requirement_facts
+            .push(crate::facts::DispatchRequirementFact {
+                type_name: "ErasedBase".to_string(),
+                requirement: crate::facts::DispatchRequirementKind::NeedsUnknownRuntimeObject,
+                provenance: FactProvenance::UserOverride,
+            });
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &facts);
+        assert!(matches!(
+            representations
+                .type_representation("ErasedBase")
+                .map(|representation| representation.representation()),
+            Some(ObjectRepresentation::ConcreteStruct)
+        ));
+
+        let rendered = render_external_api_facade_support_items(
+            &resolved.program,
+            &facts,
+            &resolved.program,
+            &Program::default(),
+            &representations,
+        );
+
+        assert!(
+            !rendered.contains("impl ErasedBase {"),
+            "erased source aliases must not receive inherent facade impls:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn java_platform_input_stream_upcast_support_emits_from_impl() {
+        assert!(
+            crate::external_packs::external_conversion_adapters()
+                .iter()
+                .any(|fact| fact.from_type == "FileInputStream" && fact.to_type == "InputStream"),
+            "java platform conversion adapters should publish FileInputStream -> InputStream"
+        );
+        assert!(
+            crate::external_packs::external_conversion_adapters()
+                .iter()
+                .any(
+                    |fact| fact.from_type == "InputStream" && fact.to_type == "java.io.InputStream"
+                ),
+            "java platform conversion adapters should publish InputStream -> java.io.InputStream"
+        );
+        assert!(
+            crate::external_packs::external_conversion_adapters()
+                .iter()
+                .any(|fact| fact.from_type == "OutputStream"
+                    && fact.to_type == "java.io.OutputStream"),
+            "java platform conversion adapters should publish OutputStream -> java.io.OutputStream"
+        );
+        assert!(
+            crate::external_packs::external_conversion_adapters()
+                .iter()
+                .any(|fact| fact.from_type == "java.io.ByteArrayOutputStream"
+                    && fact.to_type == "java.io.OutputStream"),
+            "java platform conversion adapters should publish java.io.ByteArrayOutputStream -> java.io.OutputStream"
+        );
+
+        let rendered = render_external_api_facade_support_items(
+            &Program::default(),
+            &FactSet::default(),
+            &Program::default(),
+            &Program::default(),
+            &RepresentationPlan::default(),
+        );
+
+        assert!(
+            rendered.contains("impl From<FileInputStream> for InputStream"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl From<InputStream> for JavaIoInputStream"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl From<JavaIoInputStream> for InputStream"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl From<SeekablePathStream> for InputStream"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl From<SeekablePathStream> for JavaIoInputStream"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl From<OutputStream> for JavaIoOutputStream"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl From<JavaIoByteArrayOutputStream> for JavaIoOutputStream"),
+            "{rendered}"
+        );
+
+        let local_stream_program = crate::parser::parse_java_source(
+            r#"
+class Base64 {
+    static class InputStream {}
+    static class UsesExactJavaIoStream {
+        UsesExactJavaIoStream(java.io.InputStream in) {}
+    }
+}
+"#,
+        )
+        .program;
+        let local_rendered = render_external_api_facade_support_items(
+            &local_stream_program,
+            &FactSet::default(),
+            &local_stream_program,
+            &Program::default(),
+            &RepresentationPlan::default(),
+        );
+        assert!(
+            local_rendered.contains("impl From<JavaIoInputStream> for InputStream"),
+            "{local_rendered}"
+        );
+
+        let exact_byte_array_program = crate::parser::parse_java_source(
+            r#"
+class UsesExactByteArrayOutputStream {
+    byte[] bytes(java.io.ByteArrayOutputStream out) {
+        return out.toByteArray();
+    }
+}
+"#,
+        )
+        .program;
+        let byte_array_rendered = render_external_api_facade_support_items(
+            &exact_byte_array_program,
+            &FactSet::default(),
+            &exact_byte_array_program,
+            &Program::default(),
+            &RepresentationPlan::default(),
+        );
+        assert!(
+            byte_array_rendered.contains("impl JavaIoByteArrayOutputStream"),
+            "{byte_array_rendered}"
+        );
+        assert!(
+            byte_array_rendered.contains("pub fn to_byte_array(&self) -> Vec<i8>"),
+            "{byte_array_rendered}"
+        );
     }
 }
 
@@ -17624,6 +18153,9 @@ fn external_typed_erased_facade_return_type(
     if matches!(name, "Object" | "java.lang.Object") {
         return None;
     }
+    if let Some(rust_name) = unique_external_erased_facade_rust_name_for_name(name, facts) {
+        return Some(rust_name);
+    }
     let erased = JavaType::Named {
         name: name.to_string(),
         args: Vec::new(),
@@ -17634,6 +18166,50 @@ fn external_typed_erased_facade_return_type(
         Some(HierarchyStrategy::ErasedObject)
     )
     .then(|| rust_name_for_java_named_type(name))
+}
+
+fn external_facade_receiver_surface_owners(
+    facts: &FactSet,
+    receiver_key: &str,
+    receiver_rust: &str,
+) -> Vec<String> {
+    let mut owners = vec![receiver_rust.to_string()];
+    if let Some(qualified) = unique_external_erased_facade_rust_name_for_name(receiver_key, facts)
+        && qualified != receiver_rust
+        && valid_external_facade_type_ident(&qualified)
+    {
+        owners.push(qualified);
+    }
+    owners
+}
+
+fn unique_external_erased_facade_rust_name_for_name(name: &str, facts: &FactSet) -> Option<String> {
+    let canonical = canonical_external_receiver_type_key(name);
+    let suffix = format!(".{canonical}");
+    let effective_facts = EffectiveFacts::new(facts);
+    let mut matches = facts
+        .hierarchy_overrides
+        .iter()
+        .filter(|override_| override_.strategy == HierarchyStrategy::ErasedObject)
+        .map(|override_| canonical_external_receiver_type_key(&override_.type_name))
+        .filter(|candidate| candidate == &canonical || candidate.ends_with(&suffix))
+        .filter(|candidate| {
+            let java_type = JavaType::Named {
+                name: candidate.clone(),
+                args: Vec::new(),
+            };
+            matches!(
+                effective_facts.object_representation_override_strategy_for(&java_type),
+                Some(HierarchyStrategy::ErasedObject)
+            )
+        })
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [only] if only != &canonical => Some(rust_name_for_java_named_type(only)),
+        _ => None,
+    }
 }
 
 fn external_opaque_final_facade_return_type(
@@ -17793,13 +18369,9 @@ fn explicit_external_facade_result_abi(
 ) -> Option<ResultAbi> {
     let arg_count = arg_count?;
     if let Some(receiver_type) = receiver_type {
-        let key = CallableKey::method(
-            receiver_type.to_string(),
-            method_name.to_string(),
-            Staticness::Unknown,
-            arg_count,
-        );
-        if let Some(abi) = facts.facade_abi_for_key(&key) {
+        if let Some(abi) =
+            facts.facade_abi_for_external_method(receiver_type, method_name, arg_count)
+        {
             return Some(abi.result);
         }
     }
@@ -17823,13 +18395,7 @@ fn external_facade_method_abi_return_type_with_facts(
 ) -> Option<String> {
     let receiver_type = receiver_type?;
     let arg_count = arg_count?;
-    let key = CallableKey::method(
-        receiver_type.to_string(),
-        method_name.to_string(),
-        Staticness::Unknown,
-        arg_count,
-    );
-    let abi = facts.facade_abi_for_key(&key)?;
+    let abi = facts.facade_abi_for_external_method(receiver_type, method_name, arg_count)?;
     external_facade_abi_return_type(facts, receiver_type, abi, java_type)
 }
 
@@ -18214,7 +18780,7 @@ fn external_facade_representation_dispatch_return_type(
     };
     if dispatch == "Box<dyn std::any::Any>"
         && matches!(
-            representation.provenance,
+            representation.provenance(),
             RepresentationProvenance::BuiltinExternalModel
                 | RepresentationProvenance::ConservativeFallback
         )
@@ -19161,16 +19727,17 @@ fn query_backed_external_inherited_methods_for_type(
                 if !seen.insert((rust_name.clone(), *arg_count)) {
                     continue;
                 }
-                methods.push(crate::inherited_members::ExternalInheritedInstanceMethod {
-                    declaring_type: fact
-                        .receiver_type
-                        .clone()
-                        .unwrap_or_else(|| super_name.clone()),
-                    method_name: fact.method_name.clone(),
-                    rust_name,
-                    arg_count: *arg_count,
-                    fact,
-                });
+                methods.push(
+                    crate::inherited_members::ExternalInheritedInstanceMethod::new(
+                        fact.receiver_type
+                            .clone()
+                            .unwrap_or_else(|| super_name.clone()),
+                        fact.method_name.clone(),
+                        rust_name,
+                        *arg_count,
+                        fact,
+                    ),
+                );
             }
         }
     }
@@ -19934,13 +20501,10 @@ fn external_facade_self_args_with_facts(
     method: &str,
     arg_count: usize,
 ) -> String {
-    let key = CallableKey::method(
-        receiver_key.to_string(),
-        method.to_string(),
-        Staticness::Unknown,
-        arg_count,
-    );
-    let prefix = match facts.facade_abi_for_key(&key).map(|abi| abi.receiver) {
+    let prefix = match facts
+        .facade_abi_for_external_method(receiver_key, method, arg_count)
+        .map(|abi| abi.receiver)
+    {
         Some(ReceiverAbi::MutBorrowedSelf) => "&mut self",
         Some(ReceiverAbi::OwnedSelf) => "self",
         _ => "&self",
@@ -19962,13 +20526,10 @@ fn external_facade_self_args_with_facts_and_unmodelled_return(
     arg_count: usize,
     return_type: &str,
 ) -> String {
-    let key = CallableKey::method(
-        receiver_key.to_string(),
-        method.to_string(),
-        Staticness::Unknown,
-        arg_count,
-    );
-    let prefix = match facts.facade_abi_for_key(&key).map(|abi| abi.receiver) {
+    let prefix = match facts
+        .facade_abi_for_external_method(receiver_key, method, arg_count)
+        .map(|abi| abi.receiver)
+    {
         Some(ReceiverAbi::MutBorrowedSelf) => "&mut self",
         Some(ReceiverAbi::OwnedSelf) => "self",
         _ => "&self",
@@ -20753,7 +21314,7 @@ fn external_trait_impl_trait_name_candidates(
     candidates
 }
 
-pub fn external_static_string_constant_support_items_with_context_programs_and_declared_owners(
+pub(crate) fn external_static_string_constant_support_items_with_context_programs_and_declared_owners(
     program: &Program,
     facts: &FactSet,
     local_type_program: &Program,
@@ -20936,7 +21497,9 @@ fn collect_static_constant_java_type_support(
     }
 }
 
-pub fn support_item_declared_type_names(items: &[crate::rust_ir::RustItem]) -> BTreeSet<String> {
+pub(crate) fn support_item_declared_type_names(
+    items: &[crate::rust_ir::RustItem],
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for item in items {
         match item {
@@ -22272,7 +22835,7 @@ fn valid_rust_method_ident(name: &str) -> bool {
     valid_rust_field_ident(name)
 }
 
-pub fn program_uses_java_platform_facades(program: &Program) -> bool {
+pub(crate) fn program_uses_java_platform_facades(program: &Program) -> bool {
     if program_declares_java_platform_facade_support_type(program) {
         return false;
     }
@@ -22313,7 +22876,7 @@ pub fn program_uses_java_platform_facades(program: &Program) -> bool {
     }) || program.types.iter().any(type_uses_java_platform_facades)
 }
 
-pub fn program_external_api_facts_use_java_platform_facades(
+pub(crate) fn program_external_api_facts_use_java_platform_facades(
     program: &Program,
     facts: &FactSet,
 ) -> bool {
@@ -22687,7 +23250,7 @@ fn java_type_uses_java_platform_facade(ty: &JavaType) -> bool {
     }
 }
 
-pub fn is_java_platform_facade_type_name(name: &str) -> bool {
+pub(crate) fn is_java_platform_facade_type_name(name: &str) -> bool {
     if is_known_java_platform_stream_type_name(name) {
         return true;
     }
@@ -22733,7 +23296,7 @@ pub fn is_java_platform_facade_type_name(name: &str) -> bool {
     )
 }
 
-pub fn program_uses_java_class_tokens(program: &Program) -> bool {
+pub(crate) fn program_uses_java_class_tokens(program: &Program) -> bool {
     program.types.iter().any(type_uses_java_class_tokens)
 }
 
@@ -22745,7 +23308,7 @@ fn type_uses_java_class_tokens(ty: &TypeDecl) -> bool {
             .any(|block| block_uses_java_class_tokens(&block.block))
 }
 
-pub fn program_uses_java_string_runtime_helpers(program: &Program) -> bool {
+pub(crate) fn program_uses_java_string_runtime_helpers(program: &Program) -> bool {
     program_mentions_java_type(program, "StringBuilder")
         || program_mentions_java_type(program, "StringBuffer")
         || (program_mentions_java_type(program, "List") && program_contains_string_concat(program))
@@ -22943,7 +23506,7 @@ fn program_uses_java_string_buffer_runtime_surfaces(program: &Program) -> bool {
         || program_mentions_java_type(program, "StringBuffer")
 }
 
-pub fn program_uses_java_erased_object_runtime_support(program: &Program) -> bool {
+pub(crate) fn program_uses_java_erased_object_runtime_support(program: &Program) -> bool {
     program.imports.iter().any(|import| {
         matches!(
             import.path.as_str(),
@@ -22955,7 +23518,7 @@ pub fn program_uses_java_erased_object_runtime_support(program: &Program) -> boo
         .any(type_uses_java_erased_object_runtime_support)
 }
 
-pub fn program_uses_java_string_format(program: &Program) -> bool {
+pub(crate) fn program_uses_java_string_format(program: &Program) -> bool {
     program
         .types
         .iter()
@@ -24077,10 +24640,42 @@ fn strip_java_type_modifiers(mut name: &str) -> &str {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalApiMethodPolicy {
-    pub role: ExternalApiRole,
-    pub receiver_mutability: ReceiverMutabilityFact,
-    pub return_nullability: NullabilityState,
-    pub provenance: FactProvenance,
+    role: ExternalApiRole,
+    receiver_mutability: ReceiverMutabilityFact,
+    return_nullability: NullabilityState,
+    provenance: FactProvenance,
+}
+
+impl ExternalApiMethodPolicy {
+    pub fn new(
+        role: ExternalApiRole,
+        receiver_mutability: ReceiverMutabilityFact,
+        return_nullability: NullabilityState,
+        provenance: FactProvenance,
+    ) -> Self {
+        Self {
+            role,
+            receiver_mutability,
+            return_nullability,
+            provenance,
+        }
+    }
+
+    pub fn role(&self) -> ExternalApiRole {
+        self.role
+    }
+
+    pub fn receiver_mutability(&self) -> ReceiverMutabilityFact {
+        self.receiver_mutability
+    }
+
+    pub fn return_nullability(&self) -> NullabilityState {
+        self.return_nullability
+    }
+
+    pub fn provenance(&self) -> FactProvenance {
+        self.provenance
+    }
 }
 
 pub fn external_api_method_policy_with_builtin_packs(
@@ -24097,32 +24692,32 @@ pub fn external_api_method_policy_with_builtin_packs(
             Some(arg_count),
         )
     {
-        return ExternalApiMethodPolicy {
-            role: effect.role,
-            receiver_mutability: effect.receiver_mutability,
-            return_nullability: effect.return_nullability,
-            provenance: effect.provenance,
-        };
+        return ExternalApiMethodPolicy::new(
+            effect.role,
+            effect.receiver_mutability,
+            effect.return_nullability,
+            effect.provenance,
+        );
     }
     let role = external_api_method_role(receiver_type, name, arg_count);
-    ExternalApiMethodPolicy {
+    ExternalApiMethodPolicy::new(
         role,
-        receiver_mutability: external_api_receiver_mutability(role),
-        return_nullability: external_api_return_nullability(receiver_type, name, arg_count, role),
-        provenance: external_api_method_policy_provenance_with_builtin_packs(
+        external_api_receiver_mutability(role),
+        external_api_return_nullability(receiver_type, name, arg_count, role),
+        external_api_method_policy_provenance_with_builtin_packs(
             receiver_type,
             name,
             arg_count,
             enable_builtin_external_packs,
         ),
-    }
+    )
 }
 
 pub fn external_constructor_provenance(type_name: &str, arg_types: &[JavaType]) -> FactProvenance {
     external_constructor_provenance_with_builtin_packs(type_name, arg_types, true)
 }
 
-pub fn external_constructor_provenance_with_builtin_packs(
+pub(crate) fn external_constructor_provenance_with_builtin_packs(
     type_name: &str,
     arg_types: &[JavaType],
     enable_builtin_external_packs: bool,
@@ -24153,7 +24748,7 @@ pub fn external_field_provenance(type_name: &str, field_name: &str) -> FactProve
     external_field_provenance_with_builtin_packs(type_name, field_name, true)
 }
 
-pub fn external_field_provenance_with_builtin_packs(
+pub(crate) fn external_field_provenance_with_builtin_packs(
     type_name: &str,
     field_name: &str,
     enable_builtin_external_packs: bool,
@@ -24324,7 +24919,7 @@ fn external_api_method_policy_provenance_with_builtin_packs(
     }
 }
 
-pub fn external_api_method_role(
+pub(crate) fn external_api_method_role(
     receiver_type: Option<&str>,
     name: &str,
     arg_count: usize,
@@ -24541,7 +25136,7 @@ fn is_known_apply_functional_interface(receiver: &str) -> bool {
     matches!(receiver, "Function" | "BiFunction")
 }
 
-pub fn external_api_receiver_mutability(role: ExternalApiRole) -> ReceiverMutabilityFact {
+pub(crate) fn external_api_receiver_mutability(role: ExternalApiRole) -> ReceiverMutabilityFact {
     match role {
         ExternalApiRole::Getter
         | ExternalApiRole::BooleanGetter
@@ -24573,7 +25168,7 @@ fn canonical_nullability_receiver(receiver_type: Option<&str>) -> Option<String>
     )
 }
 
-pub fn external_api_return_nullability(
+pub(crate) fn external_api_return_nullability(
     receiver_type: Option<&str>,
     name: &str,
     arg_count: usize,
@@ -24814,7 +25409,7 @@ pub fn external_api_return_nullability(
     }
 }
 
-pub fn is_content_read_argument_method(name: &str, arg_index: usize) -> bool {
+pub(crate) fn is_content_read_argument_method(name: &str, arg_index: usize) -> bool {
     matches!(
         (name, arg_index),
         ("addAll", 0)
@@ -25791,7 +26386,17 @@ mod functional_interface_shape_tests {
     ) {
         let shape = functional_interface_shape(name)
             .unwrap_or_else(|| panic!("no shape derived for {name}"));
-        (shape.method, shape.inputs, shape.returns)
+        (shape.method(), shape.inputs().to_vec(), shape.returns())
+    }
+
+    #[test]
+    fn known_jdk_content_method_facts_are_internal() {
+        assert!(super::is_content_read_method("length"));
+        assert!(super::is_content_read_method("isEmpty"));
+        assert!(super::is_content_read_method("trim"));
+        assert!(super::is_content_read_method("forEach"));
+        assert!(super::is_borrowed_string_view_method("trim", 0));
+        assert!(!super::is_borrowed_string_view_method("trim", 1));
     }
 
     /// The shapes are checked against the real `java.util.function` signatures,
@@ -25929,14 +26534,14 @@ mod functional_interface_shape_tests {
     fn a_zero_argument_interface_still_carries_its_return() {
         for name in ["Supplier", "IntSupplier", "LongSupplier", "BooleanSupplier"] {
             let shape = functional_interface_shape(name).expect(name);
-            assert!(shape.inputs.is_empty(), "{name}");
-            assert!(shape.returns.is_some(), "{name} lost its return type");
+            assert!(shape.inputs().is_empty(), "{name}");
+            assert!(shape.returns().is_some(), "{name} lost its return type");
         }
         // `Runnable` is the genuine void case, and must stay one.
         assert!(
             functional_interface_shape("Runnable")
                 .unwrap()
-                .returns
+                .returns()
                 .is_none()
         );
     }

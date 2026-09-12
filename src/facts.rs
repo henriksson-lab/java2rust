@@ -115,6 +115,7 @@ pub struct ExternalFactLookupIndex<'a> {
     facts: &'a FactSet,
     external_api_by_method_alias: HashMap<String, Vec<usize>>,
     external_field_by_name_alias: HashMap<String, Vec<usize>>,
+    external_field_value_by_name_alias: HashMap<String, Vec<usize>>,
     external_pack_member_by_type_alias: HashMap<String, Vec<usize>>,
 }
 
@@ -147,6 +148,15 @@ impl<'a> ExternalFactLookupIndex<'a> {
         for (index, fact) in facts.external_field_facts.iter().enumerate() {
             for alias in external_field_name_aliases(&fact.field.field_name) {
                 external_field_by_name_alias
+                    .entry(alias)
+                    .or_default()
+                    .push(index);
+            }
+        }
+        let mut external_field_value_by_name_alias = HashMap::<String, Vec<usize>>::new();
+        for (index, fact) in facts.external_field_value_facts.iter().enumerate() {
+            for alias in external_field_name_aliases(&fact.field.field_name) {
+                external_field_value_by_name_alias
                     .entry(alias)
                     .or_default()
                     .push(index);
@@ -232,6 +242,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
             facts,
             external_api_by_method_alias,
             external_field_by_name_alias,
+            external_field_value_by_name_alias,
             external_pack_member_by_type_alias,
         }
     }
@@ -306,6 +317,16 @@ impl<'a> ExternalFactLookupIndex<'a> {
         self.find_exact_external_field_for(type_name, field_name)
             .or_else(|| self.find_external_field_for(type_name, field_name, true))
             .or_else(|| self.find_external_field_for(type_name, field_name, false))
+    }
+
+    pub fn external_field_value_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&'a ExternalFieldValueFact> {
+        self.find_exact_external_field_value_for(type_name, field_name)
+            .or_else(|| self.find_external_field_value_for(type_name, field_name, true))
+            .or_else(|| self.find_external_field_value_for(type_name, field_name, false))
     }
 
     pub fn external_library_pack_for_type(
@@ -726,11 +747,92 @@ impl<'a> ExternalFactLookupIndex<'a> {
         None
     }
 
+    fn find_external_field_value_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+        direct_match_only: bool,
+    ) -> Option<&'a ExternalFieldValueFact> {
+        if !direct_match_only
+            && self.external_field_value_simple_owner_alias_is_ambiguous(type_name, field_name)
+        {
+            return None;
+        }
+        for index in self.external_field_value_candidate_indices(field_name) {
+            let fact = &self.facts.external_field_value_facts[index];
+            let type_matches = if direct_match_only {
+                external_type_name_directly_matches(&fact.field.type_name, type_name)
+            } else {
+                external_type_name_matches(&fact.field.type_name, type_name)
+            };
+            if type_matches && external_field_name_matches(&fact.field.field_name, field_name) {
+                return Some(fact);
+            }
+        }
+        None
+    }
+
+    fn external_field_value_simple_owner_alias_is_ambiguous(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> bool {
+        let mut package_owners = HashSet::new();
+        for index in self.external_field_value_candidate_indices(field_name) {
+            let fact = &self.facts.external_field_value_facts[index];
+            if !external_field_name_matches(&fact.field.field_name, field_name) {
+                continue;
+            }
+            let Some(simple_owner) = package_qualified_simple_alias(&fact.field.type_name) else {
+                continue;
+            };
+            if external_type_name_directly_matches(simple_owner, type_name) {
+                package_owners.insert(fact.field.type_name.as_str());
+                if package_owners.len() > 1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
+    fn find_exact_external_field_value_for(
+        &self,
+        type_name: &str,
+        field_name: &str,
+    ) -> Option<&'a ExternalFieldValueFact> {
+        for index in self.external_field_value_candidate_indices(field_name) {
+            let fact = &self.facts.external_field_value_facts[index];
+            if fact.field.type_name == type_name
+                && external_field_name_matches(&fact.field.field_name, field_name)
+            {
+                return Some(fact);
+            }
+        }
+        None
+    }
+
     fn external_field_candidate_indices(&self, field_name: &str) -> Vec<usize> {
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
         for alias in external_field_name_aliases(field_name) {
             if let Some(alias_indices) = self.external_field_by_name_alias.get(&alias) {
+                for index in alias_indices {
+                    if seen.insert(*index) {
+                        indices.push(*index);
+                    }
+                }
+            }
+        }
+        indices.sort_by(|left, right| right.cmp(left));
+        indices
+    }
+
+    fn external_field_value_candidate_indices(&self, field_name: &str) -> Vec<usize> {
+        let mut seen = HashSet::new();
+        let mut indices = Vec::new();
+        for alias in external_field_name_aliases(field_name) {
+            if let Some(alias_indices) = self.external_field_value_by_name_alias.get(&alias) {
                 for index in alias_indices {
                     if seen.insert(*index) {
                         indices.push(*index);
@@ -858,7 +960,8 @@ impl<'a> HierarchyFactLookupIndex<'a> {
 
     pub fn reachable_hierarchy_edges_for_type(&self, java_ty: &JavaType) -> Vec<HierarchyEdgeFact> {
         self.reachable_hierarchy_edges_for_type_with_stats(java_ty)
-            .edges
+            .into_parts()
+            .0
     }
 
     pub fn hierarchy_subtype_policy(
@@ -870,12 +973,12 @@ impl<'a> HierarchyFactLookupIndex<'a> {
         let reaches = match (java_type_name(subtype), java_type_name(supertype)) {
             (Some(sub_name), Some(super_name)) if sub_name == super_name => true,
             (Some(_), Some(super_name)) => result
-                .edges
+                .edges()
                 .iter()
                 .any(|edge| edge.super_name == super_name),
             _ => false,
         };
-        HierarchySubtypePolicy { reaches }
+        HierarchySubtypePolicy::new(reaches)
     }
 }
 
@@ -915,20 +1018,75 @@ fn index_external_pack_member_type(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyReachabilityResult {
-    pub edges: Vec<HierarchyEdgeFact>,
-    pub stats: WorklistStats,
-    pub diagnostics: Vec<HierarchyReachabilityDiagnostic>,
+    edges: Vec<HierarchyEdgeFact>,
+    stats: WorklistStats,
+    diagnostics: Vec<HierarchyReachabilityDiagnostic>,
+}
+
+impl HierarchyReachabilityResult {
+    pub fn edges(&self) -> &[HierarchyEdgeFact] {
+        &self.edges
+    }
+
+    pub fn stats(&self) -> WorklistStats {
+        self.stats
+    }
+
+    pub fn diagnostics(&self) -> &[HierarchyReachabilityDiagnostic] {
+        &self.diagnostics
+    }
+
+    pub fn into_parts(
+        self,
+    ) -> (
+        Vec<HierarchyEdgeFact>,
+        WorklistStats,
+        Vec<HierarchyReachabilityDiagnostic>,
+    ) {
+        (self.edges, self.stats, self.diagnostics)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchySubtypePolicy {
-    pub reaches: bool,
+    reaches: bool,
+}
+
+impl HierarchySubtypePolicy {
+    pub fn new(reaches: bool) -> Self {
+        Self { reaches }
+    }
+
+    pub fn reaches(&self) -> bool {
+        self.reaches
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HierarchyReachabilityDiagnostic {
-    pub code: &'static str,
-    pub message: String,
+    code: &'static str,
+    message: String,
+}
+
+impl HierarchyReachabilityDiagnostic {
+    pub(crate) fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_parts(self) -> (&'static str, String) {
+        (self.code, self.message)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -1173,7 +1331,7 @@ impl MethodKey {
         Self::named(ty.name.clone(), method.name.clone())
     }
 
-    pub fn with_method_name(&self, method_name: impl Into<String>) -> Self {
+    pub(crate) fn with_method_name(&self, method_name: impl Into<String>) -> Self {
         Self::named(self.type_name.clone(), method_name)
     }
 
@@ -1217,7 +1375,7 @@ pub enum NullabilityState {
     Unknown,
 }
 
-pub fn external_parameter_nullability_policy(state: NullabilityState) -> NullabilityState {
+pub(crate) fn external_parameter_nullability_policy(state: NullabilityState) -> NullabilityState {
     // External parameter slots are required unless a fact provides positive
     // nullable evidence. Future injected facts should enter before this policy.
     match state {
@@ -1873,8 +2031,29 @@ pub struct TypeCapabilityOverride {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactDiagnostic {
-    pub code: &'static str,
-    pub message: String,
+    code: &'static str,
+    message: String,
+}
+
+impl FactDiagnostic {
+    pub fn new(code: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            code,
+            message: message.into(),
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_parts(self) -> (&'static str, String) {
+        (self.code, self.message)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -2225,7 +2404,10 @@ impl FactSet {
             })
     }
 
-    pub fn external_api_effect_for(&self, method_name: &str) -> Option<&ExternalApiEffectFact> {
+    pub(crate) fn external_api_effect_for(
+        &self,
+        method_name: &str,
+    ) -> Option<&ExternalApiEffectFact> {
         self.external_api_effect_facts
             .iter()
             .rev()
@@ -2248,23 +2430,6 @@ impl FactSet {
         self.external_api_effect_for_receiver_with_arity(receiver_type, method_name, None)
     }
 
-    pub fn external_api_effect_for_key(&self, key: &CallableKey) -> Option<&ExternalApiEffectFact> {
-        if key.kind() != CallableKind::Method {
-            return None;
-        }
-        self.external_api_effect_facts
-            .iter()
-            .rev()
-            .find(|fact| fact.callable_key().as_ref() == Some(key))
-            .or_else(|| {
-                self.external_api_effect_for_receiver_with_arity(
-                    Some(key.owner_type()),
-                    key.member_name(),
-                    Some(key.arity()),
-                )
-            })
-    }
-
     pub fn external_api_effect_for_receiver_with_arity(
         &self,
         receiver_type: Option<&str>,
@@ -2275,7 +2440,7 @@ impl FactSet {
         index.external_api_effect_for_receiver_with_arity(receiver_type, method_name, arg_count)
     }
 
-    pub fn external_api_effect_for_receiver_with_arity_or_rust_name(
+    pub(crate) fn external_api_effect_for_receiver_with_arity_or_rust_name(
         &self,
         receiver_type: Option<&str>,
         method_name: &str,
@@ -2523,7 +2688,7 @@ impl FactSet {
         selected
     }
 
-    pub fn external_api_argument_effect_for_key(
+    pub(crate) fn external_api_argument_effect_for_key(
         &self,
         key: &CallableKey,
         parameter_index: usize,
@@ -2628,7 +2793,7 @@ impl FactSet {
         })
     }
 
-    pub fn facade_abi_for_key(&self, key: &CallableKey) -> Option<&FacadeAbiFact> {
+    pub(crate) fn facade_abi_for_key(&self, key: &CallableKey) -> Option<&FacadeAbiFact> {
         self.facade_abi_facts
             .iter()
             .rev()
@@ -2889,23 +3054,6 @@ impl FactSet {
             .or_else(|| self.find_external_constructor_for(type_name, arg_types, false))
     }
 
-    pub fn external_constructor_for_key(
-        &self,
-        key: &CallableKey,
-    ) -> Option<&ExternalConstructorFact> {
-        if key.kind() != CallableKind::Constructor {
-            return None;
-        }
-        self.external_constructor_facts
-            .iter()
-            .rev()
-            .find(|fact| &fact.callable_key() == key)
-            .or_else(|| {
-                let arg_types = vec![JavaType::Unknown("_".to_string()); key.arity()];
-                self.external_constructor_for(key.owner_type(), &arg_types)
-            })
-    }
-
     pub fn external_field_for(
         &self,
         type_name: &str,
@@ -2920,46 +3068,8 @@ impl FactSet {
         type_name: &str,
         field_name: &str,
     ) -> Option<&ExternalFieldValueFact> {
-        self.external_field_value_facts
-            .iter()
-            .rev()
-            .find(|fact| {
-                fact.field.type_name == type_name
-                    && external_field_name_matches(&fact.field.field_name, field_name)
-            })
-            .or_else(|| {
-                self.external_field_value_facts.iter().rev().find(|fact| {
-                    external_type_name_directly_matches(&fact.field.type_name, type_name)
-                        && external_field_name_matches(&fact.field.field_name, field_name)
-                })
-            })
-            .or_else(|| {
-                if external_field_value_simple_owner_alias_is_ambiguous(
-                    &self.external_field_value_facts,
-                    type_name,
-                    field_name,
-                ) {
-                    return None;
-                }
-                self.external_field_value_facts.iter().rev().find(|fact| {
-                    external_type_name_matches(&fact.field.type_name, type_name)
-                        && external_field_name_matches(&fact.field.field_name, field_name)
-                })
-            })
-    }
-
-    pub fn external_field_for_key(&self, key: &CallableKey) -> Option<&ExternalFieldFact> {
-        if !matches!(
-            key.kind(),
-            CallableKind::StaticField | CallableKind::InstanceField
-        ) {
-            return None;
-        }
-        self.external_field_facts
-            .iter()
-            .rev()
-            .find(|fact| &fact.callable_key() == key)
-            .or_else(|| self.external_field_for(key.owner_type(), key.member_name()))
+        let index = ExternalFactLookupIndex::new(self);
+        index.external_field_value_for(type_name, field_name)
     }
 
     fn find_external_constructor_for(
@@ -3432,7 +3542,8 @@ impl FactSet {
 
     pub fn reachable_hierarchy_edges_for_type(&self, java_ty: &JavaType) -> Vec<HierarchyEdgeFact> {
         self.reachable_hierarchy_edges_for_type_with_stats(java_ty)
-            .edges
+            .into_parts()
+            .0
     }
 
     pub fn hierarchy_subtype_policy(
@@ -3444,12 +3555,12 @@ impl FactSet {
         let reaches = match (java_type_name(subtype), java_type_name(supertype)) {
             (Some(sub_name), Some(super_name)) if sub_name == super_name => true,
             (Some(_), Some(super_name)) => result
-                .edges
+                .edges()
                 .iter()
                 .any(|edge| edge.super_name == super_name),
             _ => false,
         };
-        HierarchySubtypePolicy { reaches }
+        HierarchySubtypePolicy::new(reaches)
     }
 
     pub fn reachable_hierarchy_edges_for_type_with_stats(
@@ -3466,7 +3577,7 @@ impl FactSet {
         let initial_edges = self.direct_hierarchy_edges_for_type(java_ty);
         let domain = self.hierarchy_reachability_domain(&sub_name);
         let policy = WorklistSaturationPolicy::new(domain.iteration_budget());
-        let mut result = saturate_worklist(
+        let result = saturate_worklist(
             initial_edges.clone(),
             initial_edges,
             policy,
@@ -3489,23 +3600,26 @@ impl FactSet {
                     }
                 }
             },
-            |stats| HierarchyReachabilityDiagnostic {
-                code: "hierarchy_reachability_budget_exhausted",
-                message: format!(
-                    "hierarchy reachability exceeded finite worklist budget after {} processed items",
-                    stats.processed_items
-                ),
+            |stats| {
+                HierarchyReachabilityDiagnostic::new(
+                    "hierarchy_reachability_budget_exhausted",
+                    format!(
+                        "hierarchy reachability exceeded finite worklist budget after {} processed items",
+                        stats.processed_items()
+                    ),
+                )
             },
         );
-        result.state.sort_by(|left, right| {
+        let (mut edges, stats, diagnostics) = result.into_parts();
+        edges.sort_by(|left, right| {
             left.super_name
                 .cmp(&right.super_name)
                 .then_with(|| left.sub_name.cmp(&right.sub_name))
         });
         HierarchyReachabilityResult {
-            edges: result.state,
-            stats: result.stats,
-            diagnostics: result.diagnostics,
+            edges,
+            stats,
+            diagnostics,
         }
     }
 
@@ -3581,7 +3695,7 @@ impl FactSet {
     pub fn sealed_permitted_subtypes_for(&self, type_name: &str) -> Option<Vec<String>> {
         crate::effective_facts::EffectiveFacts::new(self)
             .sealed_permitted_subtypes_for(type_name)
-            .map(|fact| fact.value)
+            .map(crate::effective_facts::EffectiveFact::into_value)
     }
 
     pub fn type_capability_overrides_for(
@@ -3611,7 +3725,7 @@ fn external_pack_directly_owns_type(pack: &ExternalLibraryPackFact, type_name: &
             .is_some_and(|suffix| suffix.starts_with('.'))
 }
 
-pub fn external_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+pub(crate) fn external_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
     let fact_aliases = external_type_name_aliases(fact_type_name);
     let query_aliases = external_type_name_aliases(query_type_name);
     fact_aliases.iter().any(|fact_alias| {
@@ -4064,20 +4178,6 @@ fn trivial_accessor_simple_owner_alias_is_ambiguous(
             (fact.method.method_name == method_name
                 || crate::parser::to_snake_case(&fact.method.method_name) == method_name)
                 .then_some(fact.method.type_name.as_str())
-        }),
-        type_name,
-    )
-}
-
-fn external_field_value_simple_owner_alias_is_ambiguous(
-    facts: &[ExternalFieldValueFact],
-    type_name: &str,
-    field_name: &str,
-) -> bool {
-    package_simple_owner_alias_is_ambiguous(
-        facts.iter().filter_map(|fact| {
-            external_field_name_matches(&fact.field.field_name, field_name)
-                .then_some(fact.field.type_name.as_str())
         }),
         type_name,
     )
@@ -5039,13 +5139,13 @@ fn collect_type_capability_conflicts(
         && !user_override.implements.is_empty()
         && source_fact.implements != user_override.implements
     {
-        diagnostics.push(FactDiagnostic {
-            code: "type_capability_override_conflict",
-            message: format!(
+        diagnostics.push(FactDiagnostic::new(
+            "type_capability_override_conflict",
+            format!(
                 "type capability override for {} conflicts with source-proven implements facts",
                 user_override.type_name
             ),
-        });
+        ));
     }
 }
 
@@ -5059,13 +5159,13 @@ fn push_bool_conflict(
     if let (Some(source_value), Some(override_value)) = (source_value, override_value)
         && source_value != override_value
     {
-        diagnostics.push(FactDiagnostic {
-            code: "type_capability_override_conflict",
-            message: format!(
+        diagnostics.push(FactDiagnostic::new(
+            "type_capability_override_conflict",
+            format!(
                 "type capability override for {} sets {field}={override_value}, conflicting with source-proven {field}={source_value}",
                 override_fact.type_name
             ),
-        });
+        ));
     }
 }
 
@@ -5079,12 +5179,83 @@ fn push_java_type_conflict(
     if let (Some(source_value), Some(override_value)) = (source_value, override_value)
         && source_value != override_value
     {
-        diagnostics.push(FactDiagnostic {
-            code: "type_capability_override_conflict",
-            message: format!(
+        diagnostics.push(FactDiagnostic::new(
+            "type_capability_override_conflict",
+            format!(
                 "type capability override for {} sets {field}={override_value:?}, conflicting with source-proven {field}={source_value:?}",
                 override_fact.type_name
             ),
-        });
+        ));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::java_ir::PrimitiveType;
+
+    #[test]
+    fn external_api_effect_rust_name_fallback_refuses_ambiguous_simple_owner_alias() {
+        let mut facts = FactSet::default();
+        for (owner, java_method, return_type) in [
+            ("a.Item", "a_java_method", JavaType::String),
+            (
+                "b.Item",
+                "b_java_method",
+                JavaType::Primitive(PrimitiveType::Int),
+            ),
+        ] {
+            facts
+                .external_crate_api_mapping_facts
+                .push(ExternalCrateApiMappingFact {
+                    receiver_type: owner.to_string(),
+                    method_name: java_method.to_string(),
+                    arg_count: Some(1),
+                    rust_name: "shared_rust_name".to_string(),
+                    provenance: FactProvenance::ExternalLibraryPack,
+                });
+            facts.external_api_effect_facts.push(ExternalApiEffectFact {
+                method_name: java_method.to_string(),
+                receiver_type: Some(owner.to_string()),
+                arg_count: Some(1),
+                parameter_patterns: None,
+                role: ExternalApiRole::Getter,
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_type: Some(return_type),
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        }
+
+        assert_eq!(
+            facts
+                .external_api_effect_for_receiver_with_arity_or_rust_name(
+                    Some("a.Item"),
+                    "shared_rust_name",
+                    Some(1),
+                )
+                .and_then(|fact| fact.return_type.as_ref()),
+            Some(&JavaType::String)
+        );
+        assert_eq!(
+            facts
+                .external_api_effect_for_receiver_with_arity_or_rust_name(
+                    Some("b.Item"),
+                    "shared_rust_name",
+                    Some(1),
+                )
+                .and_then(|fact| fact.return_type.as_ref()),
+            Some(&JavaType::Primitive(PrimitiveType::Int))
+        );
+        assert!(
+            facts
+                .external_api_effect_for_receiver_with_arity_or_rust_name(
+                    Some("Item"),
+                    "shared_rust_name",
+                    Some(1),
+                )
+                .is_none()
+        );
     }
 }

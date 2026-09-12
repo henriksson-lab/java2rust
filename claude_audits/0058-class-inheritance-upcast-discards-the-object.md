@@ -11,6 +11,10 @@ work.
 Follow-up cleanup: `RepresentationTypeEmission` is crate-local too. The
 raw-item-vs-concrete-struct decision remains owned by representation lowering;
 external tests guard the boundary instead of importing the enum.
+Follow-up 2026-09-12: `representation_lowering` is now a crate-internal module.
+The generated representation items still flow through the same lowering path,
+but the hierarchy-carrier implementation details are no longer exported as
+public crate API.
 Follow-up 2026-09-10: direct emitted `super.m()` now has Java/Rust oracle
 coverage, not only generated-crate coverage. `tests/differential/SuperMethodCall.java`
 pins `super.base() + 5` dispatching to the superclass implementation while a
@@ -103,15 +107,17 @@ hierarchy representation: a supertype slot must hold subtype values with
 dynamic dispatch and subtype-aware `instanceof`.
 
 Found by differential testing along the JLS Ch. 8/9 axis: abstract classes,
-overriding, virtual dispatch through a supertype reference, `super.method()`,
-shadowed fields, `instanceof` over a chain, polymorphic collections.
+overriding, virtual dispatch through a supertype reference, shadowed fields,
+`instanceof` over a chain, polymorphic collections.
 **19 shapes probed, 7 divergent.** Interfaces are correct for the probed
 top-level and nested dispatch shapes; class `extends` remains open where it
 needs a real source-class hierarchy carrier.
 
 Repros: `claude_audits/repro/InheritanceUpcast.java`,
-`SuperMethodCall.java`, `InstanceofSupertype.java`,
-`NestedInterfaceDispatch.java`.
+`InstanceofSupertype.java`, `NestedInterfaceDispatch.java`. Historical
+positive control: `SuperMethodCall.java` now has differential coverage for the
+direct read-only `super.m()` shape and is not part of the remaining carrier
+gap.
 
 Relation to [0002b](0002b-shared-representation-design.md): that design is about
 *aliasing* — two names for one object. **None of the divergences here are
@@ -123,7 +129,7 @@ to be able to hold a `Sub`) but the missing piece is the hierarchy lowering that
 
 ---
 
-## 1. Upcast to a superclass discards the subclass — silent, and diagnosed
+## 1. Historical upcast-to-superclass slicing — now loud
 
 Current status: fixed to loud for source-class value upcasts. The historical
 evidence below describes the bug that `source_class_upcast_requires_hierarchy_lowering`
@@ -290,7 +296,7 @@ self-call before it was discarded. That diagnostic path is now corrected for
 
 ---
 
-## 3. `instanceof` is an exact-type test, not a subtype test — silent
+## 3. Historical exact-type `instanceof` lowering — now loud
 
 Current status: fixed to loud for ordinary boolean and pattern `instanceof`
 checks from an erased `Object` carrier to a source class with known source
@@ -731,3 +737,21 @@ known gaps use that to reject stale slicing/exact-type shapes such as
 `.is::<A>()`, and exact `downcast_ref::<A>()` paths. This keeps the executable
 known-gap fixtures self-contained while the real class hierarchy carrier
 remains open.
+
+Codex follow-up 2026-09-12: `object_model::ObjectModelInput` is no longer a
+public field bag. Representation planning and object-model tests construct the
+solver entrypoint through `ObjectModelInput::new(...)`, and the solver reads
+program/facts/effective-facts/usage through accessors. This only fences the
+object-model boundary; the source-class hierarchy carrier remains open. Guard:
+`layering::object_representation_policy_source_boundaries_stay_in_object_model`.
+
+Codex follow-up 2026-09-12: hierarchy reachability evidence is fenced the same
+way. `facts::HierarchyReachabilityResult` now exposes edges, worklist stats,
+and diagnostics through accessors/`into_parts()` instead of public mutable
+fields. This does not implement the class hierarchy carrier, but it keeps the
+current reachability saturation boundary from becoming another raw fact bag.
+Guard: `layering::coercion_plan_owns_instanceof_fallback_policy`; focused
+guards:
+`slot_shape_design::facts_saturate_reachable_hierarchy_edges_through_finite_domain`
+and
+`slot_shape_design::facts_saturate_recursive_hierarchy_edges_without_unbounded_expansion`.

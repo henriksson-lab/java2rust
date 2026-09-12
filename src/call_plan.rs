@@ -300,25 +300,78 @@ pub(crate) fn retarget_static_call_to_receiver_if<'a>(
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReceiverSlotPlan {
-    pub receiver_abi: ReceiverAbi,
-    pub slot: Option<Slot>,
+    receiver_abi: ReceiverAbi,
+    slot: Option<Slot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OptionalReceiverSlotPlan {
-    pub receiver_abi: ReceiverAbi,
-    pub slot: Slot,
-    pub projection: OptionalReceiverProjection,
-    pub element_ownership: OwnershipShape,
+    receiver_abi: ReceiverAbi,
+    slot: Slot,
+    projection: OptionalReceiverProjection,
+    element_ownership: OwnershipShape,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct OptionalReceiverSlotProjectionPlan {
-    pub element_shape: Option<RustSlotShape>,
-    pub conversion: Option<LoweredSlotExprConversionPlan>,
+    element_shape: Option<RustSlotShape>,
+    conversion: Option<LoweredSlotExprConversionPlan>,
+}
+
+impl ReceiverSlotPlan {
+    fn new(receiver_abi: ReceiverAbi, slot: Option<Slot>) -> Self {
+        Self { receiver_abi, slot }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receiver_abi(&self) -> ReceiverAbi {
+        self.receiver_abi
+    }
+
+    #[cfg(test)]
+    pub(crate) fn slot(&self) -> Option<&Slot> {
+        self.slot.as_ref()
+    }
+
+    pub(crate) fn into_slot(self) -> Option<Slot> {
+        self.slot
+    }
 }
 
 impl OptionalReceiverSlotPlan {
+    fn new(
+        receiver_abi: ReceiverAbi,
+        slot: Slot,
+        projection: OptionalReceiverProjection,
+        element_ownership: OwnershipShape,
+    ) -> Self {
+        Self {
+            receiver_abi,
+            slot,
+            projection,
+            element_ownership,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn receiver_abi(&self) -> ReceiverAbi {
+        self.receiver_abi
+    }
+
+    #[cfg(test)]
+    pub(crate) fn slot(&self) -> &Slot {
+        &self.slot
+    }
+
+    pub(crate) fn projection(&self) -> OptionalReceiverProjection {
+        self.projection
+    }
+
+    #[cfg(test)]
+    pub(crate) fn element_ownership(&self) -> OwnershipShape {
+        self.element_ownership
+    }
+
     pub(crate) fn projection_plan_for_option_shape(
         &self,
         option_shape: RustSlotShape,
@@ -327,10 +380,7 @@ impl OptionalReceiverSlotPlan {
         let target_shape = match &self.slot {
             Slot::Assignment(shape) | Slot::Return(shape) | Slot::Argument(shape) => shape,
             _ => {
-                return OptionalReceiverSlotProjectionPlan {
-                    element_shape: None,
-                    conversion: None,
-                };
+                return OptionalReceiverSlotProjectionPlan::none();
             }
         };
         let Some(actual) = LoweredType::optional_element_borrow_from_option_shape(
@@ -339,16 +389,10 @@ impl OptionalReceiverSlotPlan {
             Some(self.element_ownership),
             facts,
         ) else {
-            return OptionalReceiverSlotProjectionPlan {
-                element_shape: None,
-                conversion: None,
-            };
+            return OptionalReceiverSlotProjectionPlan::none();
         };
         let LoweredType::OptionalElementBorrow { element_shape, .. } = &actual else {
-            return OptionalReceiverSlotProjectionPlan {
-                element_shape: None,
-                conversion: None,
-            };
+            return OptionalReceiverSlotProjectionPlan::none();
         };
         let element_shape = (**element_shape).clone();
         let conversion = plan_lowered_slot_conversion(&actual, self.slot.clone(), facts);
@@ -361,6 +405,23 @@ impl OptionalReceiverSlotPlan {
             element_shape: Some(element_shape),
             conversion,
         }
+    }
+}
+
+impl OptionalReceiverSlotProjectionPlan {
+    fn none() -> Self {
+        Self {
+            element_shape: None,
+            conversion: None,
+        }
+    }
+
+    pub(crate) fn element_shape(&self) -> Option<&RustSlotShape> {
+        self.element_shape.as_ref()
+    }
+
+    pub(crate) fn conversion(&self) -> Option<&LoweredSlotExprConversionPlan> {
+        self.conversion.as_ref()
     }
 }
 
@@ -386,7 +447,7 @@ pub(crate) fn facade_receiver_slot_plan(
         )),
         ReceiverAbi::AssociatedFunction => None,
     };
-    ReceiverSlotPlan { receiver_abi, slot }
+    ReceiverSlotPlan::new(receiver_abi, slot)
 }
 
 pub(crate) fn optional_receiver_slot_plan(
@@ -401,7 +462,7 @@ pub(crate) fn optional_receiver_slot_plan(
         ReceiverAbi::BorrowedSelf
     };
     let slot = facade_receiver_slot_plan(receiver_abi, java_ty, facts)
-        .slot
+        .into_slot()
         .expect("borrowed receiver ABI has a receiver slot");
     let projection = match (mutable, legacy_unchecked) {
         (false, false) => OptionalReceiverProjection::Shared,
@@ -414,12 +475,7 @@ pub(crate) fn optional_receiver_slot_plan(
     } else {
         OwnershipShape::SharedBorrow
     };
-    OptionalReceiverSlotPlan {
-        receiver_abi,
-        slot,
-        projection,
-        element_ownership,
-    }
+    OptionalReceiverSlotPlan::new(receiver_abi, slot, projection, element_ownership)
 }
 
 pub(crate) fn optional_borrowed_receiver_slot_plan(
@@ -433,19 +489,19 @@ pub(crate) fn optional_borrowed_receiver_slot_plan(
         ReceiverAbi::BorrowedSelf
     };
     let slot = facade_receiver_slot_plan(receiver_abi, java_ty, facts)
-        .slot
+        .into_slot()
         .expect("borrowed receiver ABI has a receiver slot");
     let element_ownership = if mutable {
         OwnershipShape::MutableBorrow
     } else {
         OwnershipShape::SharedBorrow
     };
-    OptionalReceiverSlotPlan {
+    OptionalReceiverSlotPlan::new(
         receiver_abi,
         slot,
-        projection: OptionalReceiverProjection::Borrowed,
+        OptionalReceiverProjection::Borrowed,
         element_ownership,
-    }
+    )
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -455,8 +511,9 @@ pub enum NativeCollectionMethod {
     ListHashCode,
     ListAdd,
     PriorityQueueAdd,
-    ArrayBlockingQueueAddUnsupported,
-    ArrayBlockingQueueOfferUnsupported,
+    ArrayBlockingQueueAdd,
+    ArrayBlockingQueueOffer,
+    ArrayBlockingQueuePutUnsupported,
     ListInsert,
     ListGet,
     ListSubList,
@@ -465,6 +522,8 @@ pub enum NativeCollectionMethod {
     ListRemoveIndex,
     ListRemoveObject,
     QueueElement,
+    QueuePeek,
+    QueuePoll,
     QueueRemove,
     Contains,
     SetHashCode,
@@ -501,12 +560,14 @@ impl NativeCollectionMethod {
         match self {
             NativeCollectionMethod::ListAdd
             | NativeCollectionMethod::PriorityQueueAdd
-            | NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
-            | NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported
+            | NativeCollectionMethod::ArrayBlockingQueueAdd
+            | NativeCollectionMethod::ArrayBlockingQueueOffer
+            | NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
             | NativeCollectionMethod::ListInsert
             | NativeCollectionMethod::ListSet
             | NativeCollectionMethod::ListRemoveIndex
             | NativeCollectionMethod::ListRemoveObject
+            | NativeCollectionMethod::QueuePoll
             | NativeCollectionMethod::QueueRemove
             | NativeCollectionMethod::SetInsert
             | NativeCollectionMethod::SetRemove
@@ -524,6 +585,7 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::ListSubList
             | NativeCollectionMethod::ListIndexOf
             | NativeCollectionMethod::QueueElement
+            | NativeCollectionMethod::QueuePeek
             | NativeCollectionMethod::Contains
             | NativeCollectionMethod::ContainsAll
             | NativeCollectionMethod::SetHashCode
@@ -726,10 +788,13 @@ pub fn native_collection_lowered_type(
         ))),
         NativeCollectionMethod::ListAdd
         | NativeCollectionMethod::PriorityQueueAdd
-        | NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
-        | NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported => Some(
-            LoweredType::from_java(JavaType::Primitive(PrimitiveType::Boolean)),
-        ),
+        | NativeCollectionMethod::ArrayBlockingQueueAdd
+        | NativeCollectionMethod::ArrayBlockingQueueOffer => Some(LoweredType::from_java(
+            JavaType::Primitive(PrimitiveType::Boolean),
+        )),
+        NativeCollectionMethod::ArrayBlockingQueuePutUnsupported => {
+            Some(LoweredType::from_java(JavaType::Void))
+        }
         NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
         | NativeCollectionMethod::ContainsAll
@@ -751,6 +816,18 @@ pub fn native_collection_lowered_type(
         NativeCollectionMethod::QueueElement => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(element_ty.clone()))
+        }
+        NativeCollectionMethod::QueuePeek => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::optional_element_borrow_shape(
+                borrowed_sequence_element_shape(element_ty.clone()),
+            ))
+        }
+        NativeCollectionMethod::QueuePoll => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::from_java(crate::types::optional_java_type(
+                element_ty.clone(),
+            )))
         }
         NativeCollectionMethod::ListRemoveObject => Some(LoweredType::from_java(
             JavaType::Primitive(PrimitiveType::Boolean),
@@ -1111,6 +1188,14 @@ pub(crate) fn external_call_lowered_type_with_external_index(
             )
         })
     else {
+        if receiver_key
+            .as_deref()
+            .is_some_and(external_receiver_key_is_object_erasure)
+            && let Some(lowered) =
+                erased_object_facade_method_return_lowered_type(name, arg_count, facts)
+        {
+            return Some(lowered);
+        }
         let snake_name = crate::parser::to_snake_case(name);
         let (method_name, return_ty) =
             [name, snake_name.as_str()]
@@ -1200,6 +1285,17 @@ pub(crate) fn external_call_lowered_type_with_external_index(
         effect.return_nullability,
         NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
     );
+    if !returns_optional
+        && external_return_type_is_typed_erased_facade(&return_ty, facts)
+        && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return Some(LoweredType::rust_owned_return(
+            return_ty,
+            rust_return_type
+                .map(|fact| fact.rust_type_name.clone())
+                .unwrap_or_default(),
+        ));
+    }
     if java_type_is_erased_object_storage(&return_ty) {
         let semantic_ty = if returns_optional {
             crate::types::optional_java_type(return_ty)
@@ -1568,6 +1664,97 @@ fn rust_return_type_is_unsigned_byte_array(rust_type_name: &str) -> bool {
     compact == "Vec<u8>" || compact == "Option<Vec<u8>>"
 }
 
+fn external_return_type_is_typed_erased_facade(java_type: &JavaType, facts: &FactSet) -> bool {
+    let name = match java_type {
+        JavaType::Named { name, args } if args.is_empty() => name.as_str(),
+        JavaType::Unknown(name) => name.as_str(),
+        _ => return false,
+    };
+    if matches!(name, "Object" | "java.lang.Object") {
+        return false;
+    }
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+    let exact = JavaType::Named {
+        name: canonical.clone(),
+        args: Vec::new(),
+    };
+    let effective_facts = EffectiveFacts::new(facts);
+    if matches!(
+        effective_facts.object_representation_override_strategy_for(&exact),
+        Some(HierarchyStrategy::ErasedObject)
+    ) {
+        return true;
+    }
+    let suffix = format!(".{canonical}");
+    facts.hierarchy_overrides.iter().any(|override_| {
+        if override_.strategy != HierarchyStrategy::ErasedObject {
+            return false;
+        }
+        let candidate = crate::stdlib::canonical_external_receiver_type_key(&override_.type_name);
+        if candidate == canonical || !candidate.ends_with(&suffix) {
+            return false;
+        }
+        let candidate_ty = JavaType::Named {
+            name: candidate,
+            args: Vec::new(),
+        };
+        matches!(
+            effective_facts.object_representation_override_strategy_for(&candidate_ty),
+            Some(HierarchyStrategy::ErasedObject)
+        )
+    })
+}
+
+pub(crate) fn erased_object_facade_method_return_lowered_type(
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> Option<LoweredType> {
+    let rust_name = crate::parser::to_snake_case(name);
+    let mut unique: Option<(JavaType, bool)> = None;
+    for effect in facts
+        .external_api_effect_facts
+        .iter()
+        .filter(|effect| effect.arg_count.is_none_or(|count| count == arg_count))
+        .filter(|effect| crate::parser::to_snake_case(&effect.method_name) == rust_name)
+    {
+        let Some(return_ty) = effect.return_type.clone() else {
+            continue;
+        };
+        if !external_return_type_is_typed_erased_facade(&return_ty, facts) {
+            continue;
+        }
+        let returns_optional = matches!(
+            effect.return_nullability,
+            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+        );
+        let candidate = (return_ty, returns_optional);
+        match &unique {
+            None => unique = Some(candidate),
+            Some(existing) if existing == &candidate => {}
+            Some(_) => return None,
+        }
+    }
+    match unique {
+        Some((return_ty, true)) => Some(LoweredType::optional_rust_owned_return(
+            return_ty.clone(),
+            String::new(),
+        )),
+        Some((return_ty, false)) => Some(LoweredType::rust_owned_return(
+            return_ty.clone(),
+            String::new(),
+        )),
+        None => None,
+    }
+}
+
+fn external_receiver_key_is_object_erasure(receiver_key: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(receiver_key).as_str(),
+        "Object" | "java.lang.Object"
+    )
+}
+
 fn java_type_is_byte_array(java_ty: &JavaType) -> bool {
     matches!(
         java_ty,
@@ -1701,18 +1888,82 @@ fn external_return_borrows_receiver(role: ExternalApiRole, return_ty: &JavaType)
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct NewTargetPlan {
-    pub owner_shape: RustSlotShape,
-    pub rust_name: String,
-    pub external_crate: Option<ExternalCrateNewTarget>,
-    pub native_collection: Option<NativeCollectionNewTarget>,
-    pub native_string: Option<NativeStringNewTarget>,
+    owner_shape: RustSlotShape,
+    rust_name: String,
+    external_crate: Option<ExternalCrateNewTarget>,
+    native_collection: Option<NativeCollectionNewTarget>,
+    native_string: Option<NativeStringNewTarget>,
+}
+
+impl NewTargetPlan {
+    pub fn new(
+        owner_shape: RustSlotShape,
+        rust_name: String,
+        external_crate: Option<ExternalCrateNewTarget>,
+        native_collection: Option<NativeCollectionNewTarget>,
+        native_string: Option<NativeStringNewTarget>,
+    ) -> Self {
+        Self {
+            owner_shape,
+            rust_name,
+            external_crate,
+            native_collection,
+            native_string,
+        }
+    }
+
+    pub fn owner_shape(&self) -> &RustSlotShape {
+        &self.owner_shape
+    }
+
+    pub fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
+
+    pub fn external_crate(&self) -> Option<&ExternalCrateNewTarget> {
+        self.external_crate.as_ref()
+    }
+
+    pub fn native_collection(&self) -> Option<NativeCollectionNewTarget> {
+        self.native_collection
+    }
+
+    pub fn native_string(&self) -> Option<NativeStringNewTarget> {
+        self.native_string
+    }
+
+    pub(crate) fn rename_constructor(&mut self, rust_name: String) {
+        self.rust_name = rust_name;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalCrateNewTarget {
-    pub crate_name: String,
-    pub type_name: String,
-    pub rust_name: String,
+    crate_name: String,
+    type_name: String,
+    rust_name: String,
+}
+
+impl ExternalCrateNewTarget {
+    pub fn new(crate_name: String, type_name: String, rust_name: String) -> Self {
+        Self {
+            crate_name,
+            type_name,
+            rust_name,
+        }
+    }
+
+    pub fn crate_name(&self) -> &str {
+        &self.crate_name
+    }
+
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn rust_name(&self) -> &str {
+        &self.rust_name
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1941,7 +2192,7 @@ pub(crate) fn plan_call_exception_propagation_with_external_index(
 /// Contains no source-method probe, so a caller that has already asked the
 /// solved fallibility plan about source callables cannot have that answer
 /// second-guessed here. This is the entry point lowering uses.
-pub fn plan_external_call_exception_propagation(
+pub(crate) fn plan_external_call_exception_propagation(
     receiver: Option<&Expr>,
     name: &str,
     args: &[Expr],
@@ -2630,15 +2881,15 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
-    if let Some(receiver) = receiver
-        && let Some(target) =
-            plan_external_crate_static_call(receiver, name, arg_count, facts, external_index, types)
+    if let Some(target) =
+        plan_native_java_static_call(receiver, name, arg_count, args, facts, types, resolved)
     {
         return target;
     }
 
-    if let Some(target) =
-        plan_native_java_static_call(receiver, name, arg_count, args, facts, types, resolved)
+    if let Some(receiver) = receiver
+        && let Some(target) =
+            plan_external_crate_static_call(receiver, name, arg_count, facts, external_index, types)
     {
         return target;
     }
@@ -2672,6 +2923,8 @@ fn plan_call_target_with_external_index_impl<'a>(
             receiver,
             name,
             arg_count,
+            args,
+            resolved,
             facts,
             external_index,
             types,
@@ -3214,14 +3467,16 @@ fn java_logging_receiver_name(receiver: &Expr) -> Option<&str> {
     }
 }
 
-fn static_utility_owner_call_target(
-    receiver: &Expr,
+fn static_utility_owner_call_target<'a>(
+    receiver: &'a Expr,
     name: &str,
     arg_count: usize,
+    args: Option<&'a [Expr]>,
+    resolved: Option<&ResolvedCall>,
     facts: &FactSet,
     external_index: &ExternalFactLookupIndex<'_>,
     types: &TypeEnv,
-) -> Option<CallTargetPlan<'static>> {
+) -> Option<CallTargetPlan<'a>> {
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
@@ -3230,6 +3485,23 @@ fn static_utility_owner_call_target(
     }
     if crate::stdlib::is_known_object_inherited_method(name, arg_count) {
         return None;
+    }
+    let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    let native_receiver_key =
+        crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
+    if !unqualified_lowercase_native_static_owner_alias(receiver_name, native_receiver_key)
+        && !resolved_static_owner_shadows_native_owner(
+            resolved,
+            receiver_name,
+            native_receiver_key
+                .rsplit('.')
+                .next()
+                .unwrap_or(native_receiver_key),
+            types,
+        )
+        && let Some(target) = plan_native_java_static_owner_call(receiver_name, name, args, types)
+    {
+        return Some(target);
     }
     if let Some(owner) = types.static_type_alias(receiver_name) {
         return Some(CallTargetPlan::StaticOwner {
@@ -3245,7 +3517,7 @@ fn static_utility_owner_call_target(
             rust_name: external_method_rust_name(&owner_key, name, arg_count, facts),
         });
     }
-    let query_owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    let query_owner = receiver_key;
     if crate::stdlib::external_api_method_role(Some(&query_owner), name, arg_count)
         != ExternalApiRole::Unknown
         && (unproven_simple_receiver_can_be_static_owner(receiver_name)
@@ -3461,7 +3733,11 @@ fn static_owner_expr_type_name(
             if types.local_type(name).is_some() || types.field_type(name).is_some() {
                 return None;
             }
-            Some(rust_static_owner_type_name_with_facts(name, facts))
+            let owner = types
+                .static_type_alias(name)
+                .map(str::to_string)
+                .unwrap_or_else(|| upper_camel_from_snake_or_preserved(name));
+            Some(rust_static_owner_type_name_with_facts(&owner, facts))
         }
         Expr::FieldAccess(inner, field) => {
             if is_static_constant_member(field) {
@@ -3517,7 +3793,7 @@ fn plan_native_collection_static_call<'a>(
     };
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     if receiver_key == "Arrays" {
-        if resolved_static_owner_shadows_native_owner(resolved, "Arrays")
+        if resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Arrays", types)
             || static_type_alias_shadows_native_owner(receiver_name, "Arrays", types)
         {
             return None;
@@ -3540,7 +3816,7 @@ fn plan_native_collection_static_call<'a>(
         return Some(CallTargetPlan::NativeCollectionStatic { method });
     }
     if receiver_key == "Collections" {
-        if resolved_static_owner_shadows_native_owner(resolved, "Collections")
+        if resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Collections", types)
             || static_type_alias_shadows_native_owner(receiver_name, "Collections", types)
         {
             return None;
@@ -3606,7 +3882,7 @@ fn plan_native_collection_receiver_call<'a>(
                 Some(NativeQueueReceiverKind::ArrayBlockingQueue)
             ) && args.is_none_or(|args| args.len() == 1) =>
         {
-            NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
+            NativeCollectionMethod::ArrayBlockingQueueAdd
         }
         (crate::stdlib::JavaCollectionKind::List, "add")
             if matches!(
@@ -3618,9 +3894,12 @@ fn plan_native_collection_receiver_call<'a>(
         }
         (crate::stdlib::JavaCollectionKind::List, "add") => NativeCollectionMethod::ListAdd,
         (crate::stdlib::JavaCollectionKind::List, "put")
-            if native_queue_receiver_kind(&receiver_ty).is_some() =>
+            if matches!(
+                native_queue_receiver_kind(&receiver_ty),
+                Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+            ) && args.is_none_or(|args| args.len() == 1) =>
         {
-            NativeCollectionMethod::ListAdd
+            NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
         }
         (crate::stdlib::JavaCollectionKind::List, "offer")
             if matches!(
@@ -3628,7 +3907,7 @@ fn plan_native_collection_receiver_call<'a>(
                 Some(NativeQueueReceiverKind::ArrayBlockingQueue)
             ) && args.is_none_or(|args| args.len() == 1) =>
         {
-            NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported
+            NativeCollectionMethod::ArrayBlockingQueueOffer
         }
         (crate::stdlib::JavaCollectionKind::List, "offer")
             if matches!(
@@ -3652,6 +3931,20 @@ fn plan_native_collection_receiver_call<'a>(
             NativeCollectionMethod::ListIndexOf
         }
         (crate::stdlib::JavaCollectionKind::List, "set") => NativeCollectionMethod::ListSet,
+        (crate::stdlib::JavaCollectionKind::List, name)
+            if native_queue_receiver_kind(&receiver_ty).is_some()
+                && is_queue_head_peek_method(name)
+                && args.is_some_and(|args| args.is_empty()) =>
+        {
+            NativeCollectionMethod::QueuePeek
+        }
+        (crate::stdlib::JavaCollectionKind::List, name)
+            if native_queue_receiver_kind(&receiver_ty).is_some()
+                && is_queue_head_poll_method(name)
+                && args.is_some_and(|args| args.is_empty()) =>
+        {
+            NativeCollectionMethod::QueuePoll
+        }
         (crate::stdlib::JavaCollectionKind::List, name)
             if native_queue_receiver_kind(&receiver_ty).is_some()
                 && is_queue_head_read_method(name)
@@ -4132,6 +4425,14 @@ fn is_queue_head_read_method(name: &str) -> bool {
     matches!(name, "element" | "getFirst" | "get_first")
 }
 
+fn is_queue_head_peek_method(name: &str) -> bool {
+    matches!(name, "peek" | "peekFirst" | "peek_first")
+}
+
+fn is_queue_head_poll_method(name: &str) -> bool {
+    matches!(name, "poll" | "pollFirst" | "poll_first")
+}
+
 fn is_queue_head_remove_method(name: &str) -> bool {
     matches!(name, "remove" | "removeFirst" | "remove_first" | "pop")
 }
@@ -4158,7 +4459,7 @@ fn plan_native_java_static_call<'a>(
         return None;
     }
     let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
-    if resolved_static_owner_shadows_native_owner(resolved, receiver_simple)
+    if resolved_static_owner_shadows_native_owner(resolved, receiver_name, receiver_simple, types)
         || static_type_alias_shadows_native_owner(receiver_name, receiver_simple, types)
     {
         return None;
@@ -4180,7 +4481,9 @@ fn unqualified_lowercase_native_static_owner_alias(
 
 fn resolved_static_owner_shadows_native_owner(
     resolved: Option<&ResolvedCall>,
+    receiver_name: &str,
     native_owner: &str,
+    types: &TypeEnv,
 ) -> bool {
     let Some(call) = resolved else {
         return false;
@@ -4188,7 +4491,17 @@ fn resolved_static_owner_shadows_native_owner(
     if call.kind != CallKind::Static {
         return false;
     }
+    if native_static_owner_qualified_names(native_owner).contains(&call.declaring_type.as_str()) {
+        return false;
+    }
+    if types
+        .static_type_alias(receiver_name)
+        .is_some_and(|alias| native_static_owner_qualified_names(native_owner).contains(&alias))
+    {
+        return false;
+    }
     !native_static_owner_matches(&call.declaring_type, native_owner)
+        || call.declaring_type == receiver_name
 }
 
 fn static_type_alias_shadows_native_owner(
@@ -4260,7 +4573,7 @@ fn receiver_is_native_static_owner(receiver_name: &str, types: &TypeEnv) -> bool
             && !native_static_owner_qualified_names(receiver_simple).is_empty())
 }
 
-fn plan_native_java_static_owner_call<'a>(
+pub(crate) fn plan_native_java_static_owner_call<'a>(
     receiver_name: &str,
     name: &str,
     args: Option<&'a [Expr]>,
@@ -4643,13 +4956,13 @@ pub fn plan_new_target_with_facts(
     let external_crate = plan_external_crate_constructor(&owner_ty, &rust_name, facts, arg_count);
     let native_collection = plan_native_collection_constructor(&owner_ty, arg_count, facts);
     let native_string = plan_native_string_constructor(&owner_ty, arg_count, None);
-    NewTargetPlan {
-        owner_shape: value_shape_for_java_type(representations, owner_ty),
+    NewTargetPlan::new(
+        value_shape_for_java_type(representations, owner_ty),
         rust_name,
         external_crate,
         native_collection,
         native_string,
-    }
+    )
 }
 
 pub fn plan_new_target_for_args_with_facts(
@@ -4669,13 +4982,13 @@ pub fn plan_new_target_for_args_with_facts(
         plan_native_collection_constructor_for_args(&owner_ty, args, types, facts)
             .or_else(|| plan_native_collection_constructor(&owner_ty, args.len(), facts));
     let native_string = plan_native_string_constructor(&owner_ty, args.len(), Some((args, types)));
-    NewTargetPlan {
-        owner_shape: value_shape_for_java_type(representations, owner_ty),
+    NewTargetPlan::new(
+        value_shape_for_java_type(representations, owner_ty),
         rust_name,
         external_crate,
         native_collection,
         native_string,
-    }
+    )
 }
 
 fn constructor_rust_name(
@@ -4733,7 +5046,28 @@ fn plan_native_string_constructor(
     }
 }
 
-pub fn unresolved_constructor_rust_name_for_facts(
+pub fn external_facade_method_rust_name_for_abi(
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> String {
+    external_method_rust_name(receiver_type, method_name, arg_count, facts)
+}
+
+pub fn external_facade_constructor_rust_name_for_abi(
+    type_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> String {
+    let owner_ty = JavaType::Named {
+        name: type_name.to_string(),
+        args: Vec::new(),
+    };
+    constructor_rust_name(&owner_ty, None, facts, arg_count)
+}
+
+pub(crate) fn unresolved_constructor_rust_name_for_facts(
     owner_ty: &JavaType,
     facts: &FactSet,
     arg_count: usize,
@@ -4741,7 +5075,7 @@ pub fn unresolved_constructor_rust_name_for_facts(
     constructor_rust_name(owner_ty, None, facts, arg_count)
 }
 
-pub fn external_method_rust_name(
+pub(crate) fn external_method_rust_name(
     receiver_type: &str,
     method_name: &str,
     arg_count: usize,
@@ -4979,7 +5313,7 @@ fn plan_native_collection_constructor(
     }
 }
 
-fn plan_native_collection_constructor_for_args(
+pub(crate) fn plan_native_collection_constructor_for_args(
     ty: &JavaType,
     args: &[Expr],
     types: &TypeEnv,
@@ -4998,7 +5332,7 @@ fn plan_native_collection_constructor_for_args(
             if matches!(
                 native_queue_receiver_kind(ty),
                 Some(NativeQueueReceiverKind::PriorityQueue)
-            ) && is_priority_queue_comparator_constructor_arg(arg, types) =>
+            ) && is_priority_queue_comparator_constructor_arg(arg, types, facts) =>
         {
             Some(NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind })
         }
@@ -5056,16 +5390,33 @@ fn is_collection_source_arg(arg: &Expr, types: &TypeEnv) -> bool {
         || crate::types::sequence_element_type(&arg_ty).is_some()
 }
 
-fn is_priority_queue_comparator_constructor_arg(arg: &Expr, types: &TypeEnv) -> bool {
-    match infer_expr_type(arg, types) {
+fn is_priority_queue_comparator_constructor_arg(
+    arg: &Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> bool {
+    let arg_ty = infer_expr_type(arg, types);
+    match &arg_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            crate::stdlib::canonical_external_receiver_type_key(&name)
+            if crate::stdlib::canonical_external_receiver_type_key(name)
                 .rsplit('.')
                 .next()
                 .is_some_and(|simple| simple == "Comparator")
+            {
+                return true;
+            }
         }
-        _ => false,
+        _ => {}
     }
+    facts
+        .hierarchy_subtype_policy(
+            &arg_ty,
+            &JavaType::Named {
+                name: "Comparator".to_string(),
+                args: Vec::new(),
+            },
+        )
+        .reaches()
 }
 
 fn plan_external_crate_constructor(
@@ -5096,9 +5447,9 @@ fn plan_external_crate_constructor(
         .or_else(|| {
             crate::external_packs::external_crate_constructor_mapping_for(&type_name, arg_count)
         });
-    Some(ExternalCrateNewTarget {
-        crate_name: pack.rust_target.clone()?,
-        type_name: mapping
+    Some(ExternalCrateNewTarget::new(
+        pack.rust_target.clone()?,
+        mapping
             .as_ref()
             .and_then(|mapping| mapping.rust_type_name.clone())
             .unwrap_or_else(|| {
@@ -5108,10 +5459,10 @@ fn plan_external_crate_constructor(
                     .unwrap_or(&type_name)
                     .to_string()
             }),
-        rust_name: mapping
+        mapping
             .map(|mapping| mapping.rust_name)
             .unwrap_or_else(|| rust_name.to_string()),
-    })
+    ))
 }
 
 fn java_type_name(ty: &JavaType) -> Option<&str> {
@@ -5143,14 +5494,14 @@ fn resolved_call_signature_arg_shapes(
 ) -> Option<Vec<RustSlotShape>> {
     let signature =
         signatures.method_signature_by_rust_name(&call.declaring_type, &call.rust_name)?;
-    if signature.params.len() != arg_count {
+    if signature.params().len() != arg_count {
         return None;
     }
     Some(
         signature
-            .params
+            .params()
             .iter()
-            .map(|param| param.shape.clone())
+            .map(|param| param.shape().clone())
             .collect(),
     )
 }
@@ -5165,14 +5516,14 @@ fn resolved_call_signature_arg_shapes_by_java_key(
         return None;
     }
     let signature = signatures.resolved_source_method_signature(call, source_name)?;
-    if signature.params.len() != arg_count {
+    if signature.params().len() != arg_count {
         return None;
     }
     Some(
         signature
-            .params
+            .params()
             .iter()
-            .map(|param| param.shape.clone())
+            .map(|param| param.shape().clone())
             .collect(),
     )
 }
@@ -5210,14 +5561,14 @@ fn resolved_call_signature_arg_shapes_by_args(
                 args.len(),
             )
         })?;
-    if signature.params.len() != args.len() {
+    if signature.params().len() != args.len() {
         return None;
     }
     Some(
         signature
-            .params
+            .params()
             .iter()
-            .map(|param| param.shape.clone())
+            .map(|param| param.shape().clone())
             .collect(),
     )
 }
@@ -5376,6 +5727,16 @@ pub fn native_collection_arg_shapes_with_facts(
     let receiver_ty = infer_expr_type(receiver, types);
     let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
     let method = if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_head_peek_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueuePeek
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_head_poll_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueuePoll
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
         && is_queue_head_read_method(name)
         && arg_count == 0
     {
@@ -5412,8 +5773,9 @@ pub(crate) fn native_collection_method_arg_shapes(
     let shapes = match method {
         NativeCollectionMethod::ListAdd
         | NativeCollectionMethod::PriorityQueueAdd
-        | NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
-        | NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported
+        | NativeCollectionMethod::ArrayBlockingQueueAdd
+        | NativeCollectionMethod::ArrayBlockingQueueOffer
+        | NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
         | NativeCollectionMethod::SetInsert
             if arg_count == 1 =>
         {
@@ -5497,7 +5859,10 @@ pub(crate) fn native_collection_method_arg_shapes(
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             vec![borrowed_sequence_element_shape(element_ty.clone())]
         }
-        NativeCollectionMethod::QueueElement | NativeCollectionMethod::QueueRemove
+        NativeCollectionMethod::QueueElement
+        | NativeCollectionMethod::QueuePeek
+        | NativeCollectionMethod::QueuePoll
+        | NativeCollectionMethod::QueueRemove
             if arg_count == 0 =>
         {
             Vec::new()
@@ -5713,7 +6078,7 @@ fn facade_abi_call_arg_plan(
             .facade_abi_for_call(&key, &arg_types)
             .or_else(|| unresolved_primitive_facade_abi_fallback(facts, &key, &arg_types))
     } else {
-        facts.facade_abi_for_key(&key)
+        facts.facade_abi_for_external_method(key.owner_type(), key.member_name(), key.arity())
     }?;
     let collection_arg_types =
         facade_abi_native_collection_arg_java_types(receiver, name, arg_count, types);
@@ -5757,7 +6122,7 @@ fn facade_abi_call_arg_plan_for_resolved(
     abi.and_then(|abi| facade_abi_argument_lowering_plan(abi, arg_count, args, types, None, facts))
 }
 
-pub fn facade_abi_argument_plan_for_rust_path(
+pub(crate) fn facade_abi_argument_plan_for_rust_path(
     rust_path: &str,
     arg_count: usize,
     args: Option<&[Expr]>,
@@ -5904,6 +6269,16 @@ fn facade_abi_native_collection_arg_java_types(
     let receiver_ty = infer_expr_type(receiver, types);
     let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
     let method = if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_head_peek_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueuePeek
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_head_poll_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueuePoll
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
         && is_queue_head_read_method(name)
         && arg_count == 0
     {
@@ -5929,8 +6304,9 @@ fn facade_abi_native_collection_arg_java_types(
     match method {
         NativeCollectionMethod::ListAdd
         | NativeCollectionMethod::PriorityQueueAdd
-        | NativeCollectionMethod::ArrayBlockingQueueAddUnsupported
-        | NativeCollectionMethod::ArrayBlockingQueueOfferUnsupported
+        | NativeCollectionMethod::ArrayBlockingQueueAdd
+        | NativeCollectionMethod::ArrayBlockingQueueOffer
+        | NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
         | NativeCollectionMethod::SetInsert
             if arg_count == 1 =>
         {
@@ -5987,7 +6363,10 @@ fn facade_abi_native_collection_arg_java_types(
         NativeCollectionMethod::ListRemoveObject if arg_count == 1 => {
             crate::types::sequence_element_type(&receiver_ty).map(|element_ty| vec![element_ty])
         }
-        NativeCollectionMethod::QueueElement | NativeCollectionMethod::QueueRemove
+        NativeCollectionMethod::QueueElement
+        | NativeCollectionMethod::QueuePeek
+        | NativeCollectionMethod::QueuePoll
+        | NativeCollectionMethod::QueueRemove
             if arg_count == 0 =>
         {
             Some(Vec::new())
@@ -6612,6 +6991,59 @@ mod tests {
     use crate::types::optional_java_type;
 
     #[test]
+    fn facade_abi_argument_plan_prefers_abi_slot_over_argument_effect() {
+        let mut facts = FactSet::default();
+        facts.facade_abi_facts.push(FacadeAbiFact {
+            key: CallableKey::method_with_params(
+                "FacadeOwner",
+                "accept",
+                Staticness::Unknown,
+                vec![TypePattern::exact("String")],
+            ),
+            rust_path: "facade::FacadeOwner::accept".to_string(),
+            receiver: ReceiverAbi::BorrowedSelf,
+            args: vec![FacadeSlot::Owned],
+            return_slot: FacadeSlot::Owned,
+            result: ResultAbi::Plain,
+            borrow_source: None,
+            borrowed_return_recovery: None,
+            provenance: FactProvenance::UserOverride,
+        });
+        facts
+            .external_api_argument_effect_facts
+            .push(ExternalApiArgumentEffectFact {
+                method_name: "accept".to_string(),
+                receiver_type: Some("FacadeOwner".to_string()),
+                arg_count: Some(1),
+                parameter_index: 0,
+                parameter_type: Some(JavaType::String),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::UserOverride,
+            });
+        let args = vec![Expr::Var("value".to_string())];
+        let mut types = TypeEnv::new();
+        types.insert_local("value", JavaType::String);
+
+        let plan = facade_abi_argument_plan_for_rust_path(
+            "facade::FacadeOwner::accept",
+            1,
+            Some(&args),
+            &types,
+            &facts,
+        )
+        .expect("facade ABI should plan argument slots");
+        let ArgumentLoweringPlan::Shaped(shapes) = plan else {
+            panic!("owned facade argument should produce shaped plan");
+        };
+        assert_eq!(shapes.len(), 1);
+        assert_eq!(shapes[0].java_ty, JavaType::String);
+        assert_eq!(shapes[0].ownership, OwnershipShape::Owned);
+        assert_eq!(shapes[0].view, ViewShape::Native);
+    }
+
+    #[test]
     fn external_call_thrown_effect_receiver_lookup_uses_rust_method_name() {
         let parsed = crate::external_packs::parse_external_pack_manifest(
             r#"
@@ -6621,16 +7053,97 @@ mod tests {
             "#,
         );
         assert!(
-            parsed.diagnostics.is_empty(),
+            parsed.diagnostics().is_empty(),
             "manifest parse should be clean: {:?}",
-            parsed.diagnostics
+            parsed.diagnostics()
         );
 
         assert!(external_call_has_thrown_effect_for_receiver(
-            &parsed.facts,
+            parsed.facts(),
             "dep.io.Reader",
             "read_record",
             0,
+        ));
+    }
+
+    #[test]
+    fn erased_object_facade_method_return_uses_unique_typed_erased_facade() {
+        let mut facts = FactSet::default();
+        facts
+            .hierarchy_overrides
+            .push(crate::facts::HierarchyOverride {
+                type_name: "ExternalFactory.Product.Builder".to_string(),
+                strategy: HierarchyStrategy::ErasedObject,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: "toBuilder".to_string(),
+            receiver_type: Some("Product".to_string()),
+            arg_count: Some(0),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "Product.Builder".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+
+        assert!(matches!(
+            erased_object_facade_method_return_lowered_type("toBuilder", 0, &facts),
+            Some(LoweredType::RustOwned { .. })
+        ));
+    }
+
+    #[test]
+    fn object_receiver_external_call_lowered_type_uses_erased_facade_method_return() {
+        let mut facts = FactSet::default();
+        facts
+            .hierarchy_overrides
+            .push(crate::facts::HierarchyOverride {
+                type_name: "ExternalFactory.Product.Builder".to_string(),
+                strategy: HierarchyStrategy::ErasedObject,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: "toBuilder".to_string(),
+            receiver_type: Some("Product".to_string()),
+            arg_count: Some(0),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "Product.Builder".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        let external_index = facts.external_lookup_index();
+        let mut types = TypeEnv::new();
+        types.insert_local(
+            "value",
+            JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            },
+        );
+
+        assert!(matches!(
+            external_call_lowered_type_with_external_index(
+                Some(&Expr::Var("value".to_string())),
+                "toBuilder",
+                0,
+                &facts,
+                &external_index,
+                &types,
+                None,
+            ),
+            Some(LoweredType::RustOwned { .. })
         ));
     }
 
@@ -6776,7 +7289,8 @@ mod tests {
 
         let borrowed =
             facade_receiver_slot_plan(ReceiverAbi::BorrowedSelf, reader_ty.clone(), &facts);
-        let Some(Slot::Argument(borrowed_shape)) = borrowed.slot else {
+        assert_eq!(borrowed.receiver_abi(), ReceiverAbi::BorrowedSelf);
+        let Some(Slot::Argument(borrowed_shape)) = borrowed.slot() else {
             panic!("borrowed receiver should have an argument slot");
         };
         assert_eq!(borrowed_shape.ownership, OwnershipShape::SharedBorrow);
@@ -6790,7 +7304,8 @@ mod tests {
             },
             &facts,
         );
-        let Some(Slot::Argument(mutable_shape)) = mutable.slot else {
+        assert_eq!(mutable.receiver_abi(), ReceiverAbi::MutBorrowedSelf);
+        let Some(Slot::Argument(mutable_shape)) = mutable.slot() else {
             panic!("mutable receiver should have an argument slot");
         };
         assert_eq!(mutable_shape.ownership, OwnershipShape::MutableBorrow);
@@ -6804,7 +7319,8 @@ mod tests {
             },
             &facts,
         );
-        assert_eq!(associated.slot, None);
+        assert_eq!(associated.receiver_abi(), ReceiverAbi::AssociatedFunction);
+        assert_eq!(associated.slot(), None);
     }
 
     #[test]
@@ -6816,23 +7332,23 @@ mod tests {
         };
 
         let shared = optional_receiver_slot_plan(reader_ty.clone(), false, true, &facts);
-        assert_eq!(shared.receiver_abi, ReceiverAbi::BorrowedSelf);
+        assert_eq!(shared.receiver_abi(), ReceiverAbi::BorrowedSelf);
         assert_eq!(
-            shared.projection,
+            shared.projection(),
             OptionalReceiverProjection::SharedUnchecked
         );
-        let Slot::Argument(shared_shape) = &shared.slot else {
+        let Slot::Argument(shared_shape) = shared.slot() else {
             panic!("shared optional receiver should have an argument slot");
         };
         assert_eq!(shared_shape.java_ty, reader_ty);
         assert_eq!(shared_shape.ownership, OwnershipShape::SharedBorrow);
-        assert_eq!(shared.element_ownership, OwnershipShape::SharedBorrow);
-        let element_shape = shared
-            .projection_plan_for_option_shape(
-                RustSlotShape::conservative(optional_java_type(reader_ty.clone())),
-                &facts,
-            )
-            .element_shape
+        assert_eq!(shared.element_ownership(), OwnershipShape::SharedBorrow);
+        let projection_plan = shared.projection_plan_for_option_shape(
+            RustSlotShape::conservative(optional_java_type(reader_ty.clone())),
+            &facts,
+        );
+        let element_shape = projection_plan
+            .element_shape()
             .expect("shared optional receiver should plan an optional element borrow");
         assert_eq!(element_shape.java_ty, reader_ty);
         assert_eq!(element_shape.ownership, OwnershipShape::SharedBorrow);
@@ -6846,31 +7362,31 @@ mod tests {
             false,
             &facts,
         );
-        assert_eq!(mutable.receiver_abi, ReceiverAbi::MutBorrowedSelf);
-        assert_eq!(mutable.projection, OptionalReceiverProjection::Mutable);
-        let Slot::Argument(mutable_shape) = &mutable.slot else {
+        assert_eq!(mutable.receiver_abi(), ReceiverAbi::MutBorrowedSelf);
+        assert_eq!(mutable.projection(), OptionalReceiverProjection::Mutable);
+        let Slot::Argument(mutable_shape) = mutable.slot() else {
             panic!("mutable optional receiver should have an argument slot");
         };
         assert_eq!(mutable_shape.ownership, OwnershipShape::MutableBorrow);
         assert_eq!(mutable_shape.mutability, MutabilityShape::Mutable);
-        assert_eq!(mutable.element_ownership, OwnershipShape::MutableBorrow);
-        let element_shape = mutable
-            .projection_plan_for_option_shape(
-                RustSlotShape::conservative(optional_java_type(JavaType::Named {
-                    name: "Reader".to_string(),
-                    args: Vec::new(),
-                })),
-                &facts,
-            )
-            .element_shape
+        assert_eq!(mutable.element_ownership(), OwnershipShape::MutableBorrow);
+        let projection_plan = mutable.projection_plan_for_option_shape(
+            RustSlotShape::conservative(optional_java_type(JavaType::Named {
+                name: "Reader".to_string(),
+                args: Vec::new(),
+            })),
+            &facts,
+        );
+        let element_shape = projection_plan
+            .element_shape()
             .expect("mutable optional receiver should plan an optional element borrow");
         assert_eq!(element_shape.ownership, OwnershipShape::MutableBorrow);
 
         let borrowed = optional_borrowed_receiver_slot_plan(reader_ty.clone(), false, &facts);
-        assert_eq!(borrowed.receiver_abi, ReceiverAbi::BorrowedSelf);
-        assert_eq!(borrowed.projection, OptionalReceiverProjection::Borrowed);
-        assert_eq!(borrowed.element_ownership, OwnershipShape::SharedBorrow);
-        let Slot::Argument(borrowed_shape) = &borrowed.slot else {
+        assert_eq!(borrowed.receiver_abi(), ReceiverAbi::BorrowedSelf);
+        assert_eq!(borrowed.projection(), OptionalReceiverProjection::Borrowed);
+        assert_eq!(borrowed.element_ownership(), OwnershipShape::SharedBorrow);
+        let Slot::Argument(borrowed_shape) = borrowed.slot() else {
             panic!("borrowed optional receiver should have an argument slot");
         };
         assert_eq!(borrowed_shape.java_ty, reader_ty);
@@ -6935,6 +7451,44 @@ mod tests {
             plan_native_collection_receiver_call(&receiver, "offer", Some(&args), &types),
             Some(CallTargetPlan::NativeCollectionMethod {
                 method: NativeCollectionMethod::PriorityQueueAdd,
+                ..
+            })
+        ));
+        assert!(matches!(
+            plan_native_collection_receiver_call(&receiver, "poll", Some(&[]), &types),
+            Some(CallTargetPlan::NativeCollectionMethod {
+                method: NativeCollectionMethod::QueuePoll,
+                ..
+            })
+        ));
+        let receiver_ty = JavaType::Named {
+            name: "java.util.PriorityQueue".to_string(),
+            args: vec![JavaType::Primitive(PrimitiveType::Int)],
+        };
+        assert!(matches!(
+            native_collection_method_arg_shapes(
+                &receiver_ty,
+                NativeCollectionMethod::QueuePoll,
+                0,
+                &FactSet::default(),
+            )
+            .as_deref(),
+            Some([])
+        ));
+
+        types.insert_local(
+            "blocking",
+            JavaType::Named {
+                name: "java.util.concurrent.ArrayBlockingQueue".to_string(),
+                args: vec![JavaType::String],
+            },
+        );
+        let blocking = Expr::Var("blocking".to_string());
+        let value_arg = vec![Expr::Literal(Literal::String("x".to_string()))];
+        assert!(matches!(
+            plan_native_collection_receiver_call(&blocking, "put", Some(&value_arg), &types),
+            Some(CallTargetPlan::NativeCollectionMethod {
+                method: NativeCollectionMethod::ArrayBlockingQueuePutUnsupported,
                 ..
             })
         ));
@@ -7029,6 +7583,24 @@ mod tests {
                 method: NativeJavaInstanceMethod::ObjectToString,
                 ..
             }
+        ));
+    }
+
+    #[test]
+    fn fallback_static_owner_receiver_uses_type_spelling_not_value_module() {
+        assert!(matches!(
+            plan_call_target_with_facts_and_arity(
+                Some(&Expr::Var("product".to_string())),
+                "newBuilder",
+                0,
+                None,
+                &FactSet::default(),
+                &TypeEnv::default(),
+            ),
+            CallTargetPlan::StaticOwner {
+                ref owner,
+                ref rust_name,
+            } if owner == "Product" && rust_name == "new_builder"
         ));
     }
 

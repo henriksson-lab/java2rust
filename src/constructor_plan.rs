@@ -303,7 +303,7 @@ pub fn plan_constructor_field_values_with_inherited_context<'a>(
     )
 }
 
-pub fn plan_constructor_field_values_with_inherited_field_refs<'a>(
+pub(crate) fn plan_constructor_field_values_with_inherited_field_refs<'a>(
     ty: &'a TypeDecl,
     body: Option<&'a Block>,
     signatures: &SignaturePlan,
@@ -316,16 +316,16 @@ pub fn plan_constructor_field_values_with_inherited_field_refs<'a>(
         signatures,
         inherited_fields
             .iter()
-            .map(|inherited| inherited.field)
+            .map(|inherited| inherited.field())
             .collect(),
     );
     plans.extend(
         crate::inherited_members::external_inherited_instance_fields_for_type(ty, facts)
             .into_iter()
             .map(|inherited| {
-                let shape = signatures.required_field_shape(&ty.name, &inherited.rust_name);
+                let shape = signatures.required_field_shape(&ty.name, inherited.rust_name());
                 ConstructorFieldValuePlan::Default {
-                    field_name: inherited.rust_name,
+                    field_name: inherited.rust_name().to_string(),
                     shape,
                 }
             }),
@@ -346,7 +346,7 @@ fn plan_constructor_field_values_with_inherited_field_decls<'a>(
         .iter()
         .filter_map(|member| match member {
             Member::Field(field) if !is_static_field(field) => {
-                let shape = signatures.required_field_shape(&ty.name, &field.name);
+                let shape = signatures.required_declared_field_shape(ty, field);
                 Some(plan_constructor_field_value(field, shape, &assigned))
             }
             _ => None,

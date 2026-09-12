@@ -25,17 +25,71 @@ pub enum JavaMemberAccessKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaMemberAccessPolicy {
-    pub member: String,
-    pub java_ty: JavaType,
-    pub kind: JavaMemberAccessKind,
+    member: String,
+    java_ty: JavaType,
+    kind: JavaMemberAccessKind,
+}
+
+impl JavaMemberAccessPolicy {
+    pub fn new(member: impl Into<String>, java_ty: JavaType, kind: JavaMemberAccessKind) -> Self {
+        Self {
+            member: member.into(),
+            java_ty,
+            kind,
+        }
+    }
+
+    pub fn member(&self) -> &str {
+        &self.member
+    }
+
+    pub fn java_ty(&self) -> &JavaType {
+        &self.java_ty
+    }
+
+    pub fn kind(&self) -> JavaMemberAccessKind {
+        self.kind
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MemberAccessPlan {
-    pub member: String,
-    pub java_ty: JavaType,
-    pub shape: RustSlotShape,
-    pub op: MemberAccessOp,
+    member: String,
+    java_ty: JavaType,
+    shape: RustSlotShape,
+    op: MemberAccessOp,
+}
+
+impl MemberAccessPlan {
+    pub fn new(
+        member: impl Into<String>,
+        java_ty: JavaType,
+        shape: RustSlotShape,
+        op: MemberAccessOp,
+    ) -> Self {
+        Self {
+            member: member.into(),
+            java_ty,
+            shape,
+            op,
+        }
+    }
+
+    pub fn member(&self) -> &str {
+        &self.member
+    }
+
+    pub fn java_ty(&self) -> &JavaType {
+        &self.java_ty
+    }
+
+    pub fn shape(&self) -> &RustSlotShape {
+        &self.shape
+    }
+
+    pub fn op(&self) -> &MemberAccessOp {
+        &self.op
+    }
 }
 
 pub fn java_member_access_policy_with_facts(
@@ -48,55 +102,55 @@ pub fn java_member_access_policy_with_facts(
         if (is_static_constant_member(member) || receiver_is_static_type_name(receiver))
             && let Some(java_ty) = external_static_constant_type(receiver, member, facts)
         {
-            return Some(JavaMemberAccessPolicy {
-                member: member.to_string(),
+            return Some(JavaMemberAccessPolicy::new(
+                member,
                 java_ty,
-                kind: JavaMemberAccessKind::StaticConstant,
-            });
+                JavaMemberAccessKind::StaticConstant,
+            ));
         }
         if is_static_constant_member(member)
             && static_constant_owner(receiver, member, env).is_some()
         {
-            return Some(JavaMemberAccessPolicy {
-                member: member.to_string(),
-                java_ty: infer_member_access_type(receiver, member, env)
+            return Some(JavaMemberAccessPolicy::new(
+                member,
+                infer_member_access_type(receiver, member, env)
                     .unwrap_or_else(|| JavaType::Unknown(member.to_string())),
-                kind: JavaMemberAccessKind::StaticConstant,
-            });
+                JavaMemberAccessKind::StaticConstant,
+            ));
         }
         if let Some(java_ty) = external_instance_field_type(receiver, member, env, facts) {
-            return Some(JavaMemberAccessPolicy {
-                member: member.to_string(),
+            return Some(JavaMemberAccessPolicy::new(
+                member,
                 java_ty,
-                kind: JavaMemberAccessKind::InstanceField,
-            });
+                JavaMemberAccessKind::InstanceField,
+            ));
         }
         if let Some(java_ty) = infer_member_access_type(receiver, member, env) {
-            return Some(JavaMemberAccessPolicy {
-                member: member.to_string(),
+            return Some(JavaMemberAccessPolicy::new(
+                member,
                 java_ty,
-                kind: JavaMemberAccessKind::InstanceField,
-            });
+                JavaMemberAccessKind::InstanceField,
+            ));
         }
         if matches!(receiver, Expr::This)
             && let Some(java_ty) = env
                 .field_type(member)
                 .or_else(|| env.field_type(&crate::parser::to_snake_case(member)))
         {
-            return Some(JavaMemberAccessPolicy {
-                member: member.to_string(),
-                java_ty: java_ty.clone(),
-                kind: JavaMemberAccessKind::InstanceField,
-            });
+            return Some(JavaMemberAccessPolicy::new(
+                member,
+                java_ty.clone(),
+                JavaMemberAccessKind::InstanceField,
+            ));
         }
         return None;
     }
     let java_ty = infer_member_access_type(receiver, member, env)?;
-    Some(JavaMemberAccessPolicy {
-        member: member.to_string(),
+    Some(JavaMemberAccessPolicy::new(
+        member,
         java_ty,
-        kind: JavaMemberAccessKind::ArrayLength,
-    })
+        JavaMemberAccessKind::ArrayLength,
+    ))
 }
 
 fn external_instance_field_type(
@@ -123,28 +177,28 @@ pub fn plan_member_access_with_facts(
     facts: &FactSet,
 ) -> Option<MemberAccessPlan> {
     let policy = java_member_access_policy_with_facts(receiver, member, env, facts)?;
-    let op = match policy.kind {
+    let op = match policy.kind() {
         JavaMemberAccessKind::ArrayLength => array_length_member_access_op(receiver, env),
         JavaMemberAccessKind::StaticConstant => MemberAccessOp::StaticConstant {
             owner: external_static_constant_rust_owner(
                 receiver,
-                &policy.member,
-                &policy.java_ty,
+                policy.member(),
+                policy.java_ty(),
                 facts,
             )
-            .or_else(|| static_constant_owner(receiver, &policy.member, env))?,
+            .or_else(|| static_constant_owner(receiver, policy.member(), env))?,
         },
         JavaMemberAccessKind::InstanceField => MemberAccessOp::RustField {
-            rust_name: crate::parser::to_snake_case(&policy.member),
+            rust_name: crate::parser::to_snake_case(policy.member()),
         },
     };
-    let shape = member_access_shape(policy.kind, policy.java_ty.clone());
-    Some(MemberAccessPlan {
-        member: policy.member.clone(),
-        java_ty: policy.java_ty.clone(),
+    let shape = member_access_shape(policy.kind(), policy.java_ty().clone());
+    Some(MemberAccessPlan::new(
+        policy.member(),
+        policy.java_ty().clone(),
         shape,
         op,
-    })
+    ))
 }
 
 fn array_length_member_access_op(receiver: &Expr, env: &TypeEnv) -> MemberAccessOp {

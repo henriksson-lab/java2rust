@@ -1,12 +1,12 @@
 use std::collections::BTreeSet;
 
-use new_java2rust::binding_id::{BindingId, BindingKind};
+use new_java2rust::binding_id::BindingId;
 use new_java2rust::effective_facts::EffectiveFacts;
 use new_java2rust::facts::{
     DispatchRequirementFact, DispatchRequirementKind, FactProvenance, HierarchyOverride,
     HierarchyStrategy,
 };
-use new_java2rust::java_ir::JavaType;
+use new_java2rust::java_ir::{JavaType, Member, MethodDecl, Program, TypeDecl};
 use new_java2rust::object_model::{
     HierarchyEdgeDiagnosticOutcome, ObjectHierarchyEdge, ObjectHierarchyEdgeDiagnosticInput,
     ObjectHierarchyEdgeKind, ObjectModelInput, ObjectRepresentation, ObjectRepresentationRequest,
@@ -37,7 +37,38 @@ fn test_binding_facts_for_id<'a>(
     usage
         .all_binding_facts()
         .into_iter()
-        .find(|facts| facts.binding.as_ref() == Some(binding))
+        .find(|facts| facts.binding() == Some(binding))
+}
+
+fn test_type_decl<'a>(program: &'a Program, name: &str) -> &'a TypeDecl {
+    program
+        .types
+        .iter()
+        .find(|ty| ty.name == name)
+        .unwrap_or_else(|| panic!("missing test type {name}"))
+}
+
+fn test_method_decl_by_java_name<'a>(ty: &'a TypeDecl, name: &str) -> &'a MethodDecl {
+    ty.members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == name => Some(method),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("missing method {name} on {}", ty.name))
+}
+
+fn test_method_usage_by_java_name<'a>(
+    usage: &'a UsageFacts,
+    program: &'a Program,
+    type_name: &str,
+    method_name: &str,
+) -> &'a MethodUsageFacts {
+    let ty = test_type_decl(program, type_name);
+    let method = test_method_decl_by_java_name(ty, method_name);
+    usage
+        .source_method_usage(ty, method)
+        .unwrap_or_else(|| panic!("missing usage for {type_name}.{method_name}"))
 }
 
 fn plan_object_model_for_test(
@@ -75,26 +106,26 @@ interface PredicateLike {
     let predicate = object_plan.strategy_for("PredicateLike").unwrap();
 
     assert_eq!(
-        named.strategy,
+        named.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "Named".to_string(),
         }
     );
     assert_eq!(named.primary_provenance(), FactProvenance::ParsedSource);
-    assert_eq!(named.provenance, vec![FactProvenance::ParsedSource]);
-    assert_eq!(factory.strategy, ObjectRepresentation::ErasedObject);
+    assert_eq!(named.provenance(), vec![FactProvenance::ParsedSource]);
+    assert_eq!(factory.strategy(), ObjectRepresentation::ErasedObject);
     assert_eq!(
-        predicate.strategy,
+        predicate.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "PredicateLike".to_string(),
         }
     );
-    assert!(predicate.diagnostics.is_empty());
-    assert!(factory.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "non_object_safe_trait_fallback"
-            && diagnostic.message.contains("interface Factory")
+    assert!(predicate.diagnostics().is_empty());
+    assert!(factory.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == "non_object_safe_trait_fallback"
+            && diagnostic.message().contains("interface Factory")
             && diagnostic
-                .message
+                .message()
                 .contains("method next returns the interface type")
     }));
 
@@ -142,12 +173,12 @@ interface ReadLike {
     let read_like = object_plan.strategy_for("ReadLike").unwrap();
 
     assert_eq!(
-        read_like.strategy,
+        read_like.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "ReadLike".to_string(),
         }
     );
-    assert!(read_like.diagnostics.is_empty());
+    assert!(read_like.diagnostics().is_empty());
     assert_eq!(
         resolved.facts.object_safe_trait_fact_for_name("ReadLike"),
         Some(true)
@@ -167,11 +198,11 @@ interface Factory {
     let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let factory = object_plan.strategy_for("Factory").unwrap();
 
-    assert_eq!(factory.strategy, ObjectRepresentation::ErasedObject);
-    assert!(factory.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "non_object_safe_trait_fallback"
+    assert_eq!(factory.strategy(), ObjectRepresentation::ErasedObject);
+    assert!(factory.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == "non_object_safe_trait_fallback"
             && diagnostic
-                .message
+                .message()
                 .contains("method next returns the interface type")
     }));
 }
@@ -200,19 +231,19 @@ interface TransformerLike {
     let transformer = object_plan.strategy_for("TransformerLike").unwrap();
 
     assert_eq!(
-        filter.strategy,
+        filter.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "FilterLike".to_string(),
         }
     );
-    assert!(filter.diagnostics.is_empty());
+    assert!(filter.diagnostics().is_empty());
     assert_eq!(
-        transformer.strategy,
+        transformer.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "TransformerLike".to_string(),
         }
     );
-    assert!(transformer.diagnostics.is_empty());
+    assert!(transformer.diagnostics().is_empty());
     assert_eq!(
         resolved.facts.object_safe_trait_fact_for_name("FilterLike"),
         Some(true)
@@ -235,12 +266,12 @@ final class Dog implements Animal {}
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let effective_facts = EffectiveFacts::new(&resolved.facts);
-    let from_input = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: None,
-    });
+    let from_input = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        None,
+    ));
     let from_effective_api = plan_object_model_for_test(&resolved.program, &resolved.facts);
 
     assert_eq!(from_input, from_effective_api);
@@ -262,32 +293,32 @@ class Use {
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let effective_facts = EffectiveFacts::new(&resolved.facts);
     let usage = analyze_usage(&resolved.program);
-    let with_usage = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
-    let without_usage = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: None,
-    });
+    let with_usage = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        Some(&usage),
+    ));
+    let without_usage = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        None,
+    ));
 
     assert_eq!(
-        with_usage.strategy_for("Animal").unwrap().strategy,
-        without_usage.strategy_for("Animal").unwrap().strategy
+        with_usage.strategy_for("Animal").unwrap().strategy(),
+        without_usage.strategy_for("Animal").unwrap().strategy()
     );
     assert_eq!(
-        with_usage.strategy_for("Animal").unwrap().requirements,
+        with_usage.strategy_for("Animal").unwrap().requirements(),
         vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
     );
     assert!(
         without_usage
             .strategy_for("Animal")
             .unwrap()
-            .requirements
+            .requirements()
             .is_empty()
     );
 }
@@ -324,13 +355,11 @@ class Use {
             _ => None,
         })
         .unwrap();
-    let method_usage = usage
-        .method_usage_by_current_rust_name("Use".to_string(), "isInfo".to_string())
-        .expect("usage should include Use.isInfo");
+    let method_usage = test_method_usage_by_java_name(&usage, &resolved.program, "Use", "isInfo");
     assert!(
         test_binding_facts_for_id(method_usage, method.params[0].binding.as_ref().unwrap())
             .expect("line binding should be tracked")
-            .uses
+            .uses()
             .iter()
             .any(
                 |usage| matches!(usage, BindingUse::InstanceOfTarget { target_ty }
@@ -339,15 +368,18 @@ class Use {
         "instanceof should be represented as a dispatch requirement source"
     );
 
-    let object_plan = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
+    let object_plan = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        Some(&usage),
+    ));
 
     assert_eq!(
-        object_plan.strategy_for("HeaderLine").unwrap().requirements,
+        object_plan
+            .strategy_for("HeaderLine")
+            .unwrap()
+            .requirements(),
         vec![DispatchRequirementKind::NeedsInstanceof]
     );
 }
@@ -396,13 +428,12 @@ class Use {
             _ => None,
         })
         .expect("enhanced-for binding should be assigned");
-    let method_usage = usage
-        .method_usage_by_current_rust_name("Use".to_string(), "repairAll".to_string())
-        .expect("usage should include Use.repairAll");
+    let method_usage =
+        test_method_usage_by_java_name(&usage, &resolved.program, "Use", "repairAll");
     assert!(
         test_binding_facts_for_id(method_usage, loop_binding)
             .expect("enhanced-for line binding should be tracked")
-            .uses
+            .uses()
             .iter()
             .any(
                 |usage| matches!(usage, BindingUse::InstanceOfTarget { target_ty }
@@ -411,15 +442,15 @@ class Use {
         "enhanced-for instanceof should be represented as a dispatch requirement source"
     );
 
-    let object_plan = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
+    let object_plan = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        Some(&usage),
+    ));
 
     assert_eq!(
-        object_plan.strategy_for("HeaderLine").unwrap().strategy,
+        object_plan.strategy_for("HeaderLine").unwrap().strategy(),
         ObjectRepresentation::ClosedEnum {
             enum_name: "HeaderLineValue".to_string(),
             variants: vec!["InfoHeaderLine".to_string()],
@@ -455,15 +486,15 @@ fn object_model_policy_keeps_effective_object_safety_decision_separate() {
     );
 
     assert_eq!(
-        policy.object_safety,
+        policy.object_safety(),
         ObjectSafetyPolicy::RejectedNonObjectSafe
     );
-    assert_eq!(policy.representation, ObjectRepresentation::ErasedObject);
+    assert_eq!(policy.representation(), &ObjectRepresentation::ErasedObject);
     assert!(
         policy
-            .diagnostics
+            .diagnostics()
             .iter()
-            .any(|diagnostic| diagnostic.code == "non_object_safe_trait_fallback")
+            .any(|diagnostic| diagnostic.code() == "non_object_safe_trait_fallback")
     );
 }
 
@@ -471,75 +502,68 @@ fn object_model_policy_keeps_effective_object_safety_decision_separate() {
 fn object_model_owns_hierarchy_edge_representation_support_policy() {
     assert!(
         !object_hierarchy_edge_representation_policy(ObjectRepresentation::ConcreteStruct)
-            .represented
+            .represented()
     );
     assert!(
         object_hierarchy_edge_representation_policy(ObjectRepresentation::DynTrait {
             trait_name: "Animal".to_string(),
         })
-        .represented
+        .represented()
     );
     assert!(
         object_hierarchy_edge_representation_policy(ObjectRepresentation::ClosedEnum {
             enum_name: "AnimalValue".to_string(),
             variants: vec!["Dog".to_string()],
         })
-        .represented
+        .represented()
     );
     assert!(
-        object_hierarchy_edge_representation_policy(ObjectRepresentation::ErasedObject).represented
+        object_hierarchy_edge_representation_policy(ObjectRepresentation::ErasedObject)
+            .represented()
     );
 }
 
 #[test]
 fn object_model_owns_hierarchy_edge_diagnostic_policy() {
-    let policy = object_hierarchy_edge_diagnostic_policy(ObjectHierarchyEdgeDiagnosticInput {
-        type_name: "Poodle".to_string(),
-        declared_extends: Some("Dog".to_string()),
-        declared_implements: vec!["Pet".to_string()],
-        edges: vec![
-            ObjectHierarchyEdge {
-                super_name: "Dog".to_string(),
-                sub_name: "Poodle".to_string(),
-                kind: ObjectHierarchyEdgeKind::Extends,
-            },
-            ObjectHierarchyEdge {
-                super_name: "Pet".to_string(),
-                sub_name: "Poodle".to_string(),
-                kind: ObjectHierarchyEdgeKind::Implements,
-            },
+    let policy = object_hierarchy_edge_diagnostic_policy(ObjectHierarchyEdgeDiagnosticInput::new(
+        "Poodle".to_string(),
+        Some("Dog".to_string()),
+        vec!["Pet".to_string()],
+        vec![
+            ObjectHierarchyEdge::new("Dog", "Poodle", ObjectHierarchyEdgeKind::Extends),
+            ObjectHierarchyEdge::new("Pet", "Poodle", ObjectHierarchyEdgeKind::Implements),
         ],
-        represented_super_names: BTreeSet::from(["Pet".to_string()]),
-    });
+        BTreeSet::from(["Pet".to_string()]),
+    ));
 
-    assert_eq!(policy.type_name, "Poodle");
+    assert_eq!(policy.type_name(), "Poodle");
     assert_eq!(
-        policy.outcomes,
-        vec![HierarchyEdgeDiagnosticOutcome::UnsupportedInheritance]
+        policy.outcomes(),
+        &[HierarchyEdgeDiagnosticOutcome::UnsupportedInheritance]
     );
-    assert!(policy.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "unsupported_inheritance" && diagnostic.message.contains("Poodle")
+    assert!(policy.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == "unsupported_inheritance" && diagnostic.message().contains("Poodle")
     }));
 
     let declared_only =
-        object_hierarchy_edge_diagnostic_policy(ObjectHierarchyEdgeDiagnosticInput {
-            type_name: "GhostDog".to_string(),
-            declared_extends: None,
-            declared_implements: vec!["Marker".to_string()],
-            edges: Vec::new(),
-            represented_super_names: BTreeSet::new(),
-        });
+        object_hierarchy_edge_diagnostic_policy(ObjectHierarchyEdgeDiagnosticInput::new(
+            "GhostDog".to_string(),
+            None,
+            vec!["Marker".to_string()],
+            Vec::new(),
+            BTreeSet::new(),
+        ));
 
     assert_eq!(
-        declared_only.outcomes,
-        vec![HierarchyEdgeDiagnosticOutcome::UnsupportedInterfaceImpl {
+        declared_only.outcomes(),
+        &[HierarchyEdgeDiagnosticOutcome::UnsupportedInterfaceImpl {
             interfaces: vec!["Marker".to_string()],
         }]
     );
-    assert!(declared_only.diagnostics.iter().any(|diagnostic| {
-        diagnostic.code == "unsupported_interface_impl"
-            && diagnostic.message.contains("GhostDog")
-            && diagnostic.message.contains("Marker")
+    assert!(declared_only.diagnostics().iter().any(|diagnostic| {
+        diagnostic.code() == "unsupported_interface_impl"
+            && diagnostic.message().contains("GhostDog")
+            && diagnostic.message().contains("Marker")
     }));
 }
 
@@ -569,38 +593,47 @@ fn object_model_owns_unplanned_representation_lookup_fallbacks() {
         None,
     );
 
-    assert_eq!(planned.fallback, RepresentationLookupFallback::PlannedType);
     assert_eq!(
-        planned.representation,
-        ObjectRepresentation::DynTrait {
+        planned.fallback(),
+        RepresentationLookupFallback::PlannedType
+    );
+    assert_eq!(
+        planned.representation(),
+        &ObjectRepresentation::DynTrait {
             trait_name: "Animal".to_string(),
         }
     );
     assert_eq!(
-        missing_named.fallback,
+        missing_named.fallback(),
         RepresentationLookupFallback::ConservativeConcrete
     );
     assert_eq!(
-        missing_named.representation,
-        ObjectRepresentation::ConcreteStruct
+        missing_named.representation(),
+        &ObjectRepresentation::ConcreteStruct
     );
     assert_eq!(
-        unknown.fallback,
+        unknown.fallback(),
         RepresentationLookupFallback::ConservativeErasedObject
     );
-    assert_eq!(unknown.representation, ObjectRepresentation::ErasedObject);
     assert_eq!(
-        wildcard.fallback,
+        unknown.representation(),
+        &ObjectRepresentation::ErasedObject
+    );
+    assert_eq!(
+        wildcard.fallback(),
         RepresentationLookupFallback::ConservativeErasedObject
     );
-    assert_eq!(wildcard.representation, ObjectRepresentation::ErasedObject);
     assert_eq!(
-        primitive.fallback,
+        wildcard.representation(),
+        &ObjectRepresentation::ErasedObject
+    );
+    assert_eq!(
+        primitive.fallback(),
         RepresentationLookupFallback::ConservativeConcrete
     );
     assert_eq!(
-        primitive.representation,
-        ObjectRepresentation::ConcreteStruct
+        primitive.representation(),
+        &ObjectRepresentation::ConcreteStruct
     );
 }
 
@@ -647,7 +680,7 @@ class Dog implements Animal {}
         ]
     );
     assert_eq!(
-        animal.requirements,
+        animal.requirements(),
         vec![
             DispatchRequirementKind::NeedsSubtypeDispatch,
             DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
@@ -664,73 +697,22 @@ interface Stored {}
 interface Borrowed {}
 interface UnknownArg {}
 interface RejectedReceiver {}
+class Use {
+    Object value;
+    void run(Stored stored, Borrowed borrowed, UnknownArg unknown, RejectedReceiver receiver) {
+        this.value = stored;
+        read(borrowed);
+        external(unknown);
+        receiver.external();
+    }
+    void read(Borrowed value) {}
+}
 "#,
     );
     let resolved = resolve_program(&parsed.program, parsed.diagnostics);
     let facts = FactSet::default();
     let effective_facts = EffectiveFacts::new(&facts);
-    let mut usage = UsageFacts::default();
-    usage.insert_method_usage_for_current_rust_name(
-        "Use".to_string(),
-        "run".to_string(),
-        MethodUsageFacts::from_exact_binding_facts([
-            BindingUseFacts {
-                name: "stored".to_string(),
-                binding: Some(BindingId::new(BindingKind::Local, "stored", 0)),
-                java_ty: JavaType::Named {
-                    name: "Stored".to_string(),
-                    args: Vec::new(),
-                },
-                uses: vec![BindingUse::StoredInField {
-                    field_name: "value".to_string(),
-                }],
-            },
-            BindingUseFacts {
-                name: "borrowed".to_string(),
-                binding: Some(BindingId::new(BindingKind::Local, "borrowed", 0)),
-                java_ty: JavaType::Named {
-                    name: "Borrowed".to_string(),
-                    args: Vec::new(),
-                },
-                uses: vec![BindingUse::PassedToCall {
-                    name: "read".to_string(),
-                    receiver_type: None,
-                    arg_count: 1,
-                    arg_index: 0,
-                    boundary: CallArgumentBoundary::InternalSameType,
-                }],
-            },
-            BindingUseFacts {
-                name: "unknown".to_string(),
-                binding: Some(BindingId::new(BindingKind::Local, "unknown", 0)),
-                java_ty: JavaType::Named {
-                    name: "UnknownArg".to_string(),
-                    args: Vec::new(),
-                },
-                uses: vec![BindingUse::PassedToCall {
-                    name: "external".to_string(),
-                    receiver_type: None,
-                    arg_count: 1,
-                    arg_index: 0,
-                    boundary: CallArgumentBoundary::Unknown,
-                }],
-            },
-            BindingUseFacts {
-                name: "receiver".to_string(),
-                binding: Some(BindingId::new(BindingKind::Local, "receiver", 0)),
-                java_ty: JavaType::Named {
-                    name: "RejectedReceiver".to_string(),
-                    args: Vec::new(),
-                },
-                uses: vec![BindingUse::ReceiverForCall {
-                    name: "external".to_string(),
-                    boundary: CallArgumentBoundary::Unknown,
-                    has_literal_null_arg: false,
-                    literal_null_arg_indices: Vec::new(),
-                }],
-            },
-        ]),
-    );
+    let usage = analyze_usage(&resolved.program);
 
     let usage_requirements = dispatch_requirements_from_usage(&usage);
     assert_eq!(
@@ -750,65 +732,123 @@ interface RejectedReceiver {}
         &vec![DispatchRequirementKind::RejectTraitObject]
     );
 
-    let object_plan = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
+    let object_plan = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &facts,
+        &effective_facts,
+        Some(&usage),
+    ));
 
     assert_eq!(
-        object_plan.strategy_for("Stored").unwrap().requirements,
+        object_plan.strategy_for("Stored").unwrap().requirements(),
         vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
     );
     let stored_dispatch = representation_dispatch_policy(
-        object_plan.strategy_for("Stored").unwrap().strategy.clone(),
+        object_plan
+            .strategy_for("Stored")
+            .unwrap()
+            .strategy()
+            .clone(),
     )
-    .dispatch;
+    .into_dispatch();
     assert_eq!(
         dispatch_requirement_projection_policy(
             DispatchRequirementProjectionRole::Storage,
             stored_dispatch,
             DispatchRequirementKind::NeedsOwnedPolymorphicStorage,
         )
-        .projected_dispatch,
+        .into_projected_dispatch(),
         Some(DispatchShape::BoxedDynTrait {
             trait_name: "Stored".to_string(),
         })
     );
     assert_eq!(
-        object_plan.strategy_for("Borrowed").unwrap().requirements,
+        object_plan.strategy_for("Borrowed").unwrap().requirements(),
         vec![DispatchRequirementKind::NeedsBorrowedTraitView]
     );
     let borrowed_dispatch = representation_dispatch_policy(
         object_plan
             .strategy_for("Borrowed")
             .unwrap()
-            .strategy
+            .strategy()
             .clone(),
     )
-    .dispatch;
+    .into_dispatch();
     assert_eq!(
         dispatch_requirement_projection_policy(
             DispatchRequirementProjectionRole::Param,
             borrowed_dispatch,
             DispatchRequirementKind::NeedsBorrowedTraitView,
         )
-        .projected_dispatch,
+        .into_projected_dispatch(),
         Some(DispatchShape::DynTrait {
             trait_name: "Borrowed".to_string(),
         })
     );
     assert_eq!(
-        object_plan.strategy_for("UnknownArg").unwrap().strategy,
+        object_plan.strategy_for("UnknownArg").unwrap().strategy(),
         ObjectRepresentation::ErasedObject
     );
     assert_eq!(
         object_plan
             .strategy_for("RejectedReceiver")
             .unwrap()
-            .strategy,
+            .strategy(),
         ObjectRepresentation::ErasedObject
+    );
+}
+
+#[test]
+fn scoped_type_parameter_unknown_call_argument_does_not_force_erased_runtime_object() {
+    let parsed = parse_java_source(
+        r#"
+class ExternalSink {
+}
+
+class TypeParamUnknownBoundary<T> {
+    void run(T value, ExternalSink sink) {
+        sink.accept(value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+
+    let usage_requirements = dispatch_requirements_from_usage(&usage);
+    assert!(
+        usage_requirements
+            .get("T")
+            .is_none_or(|requirements| !requirements
+                .contains(&DispatchRequirementKind::NeedsUnknownRuntimeObject)),
+        "{usage_requirements:?}"
+    );
+}
+
+#[test]
+fn real_class_sharing_type_parameter_name_still_forces_unknown_runtime_object() {
+    let parsed = parse_java_source(
+        r#"
+class T {
+}
+
+class ExternalSink {
+}
+
+class ConcreteUnknownBoundary {
+    void run(T value, ExternalSink sink) {
+        sink.accept(value);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let usage = analyze_usage(&resolved.program);
+
+    let usage_requirements = dispatch_requirements_from_usage(&usage);
+    assert_eq!(
+        usage_requirements.get("T").unwrap(),
+        &vec![DispatchRequirementKind::NeedsUnknownRuntimeObject]
     );
 }
 
@@ -861,7 +901,7 @@ class InterfaceWriterFactory {
 
     let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     assert_eq!(
-        object_plan.strategy_for("Writer").unwrap().strategy,
+        object_plan.strategy_for("Writer").unwrap().strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "Writer".to_string(),
         }
@@ -883,11 +923,11 @@ final class Num implements Expr {}
     let expr = object_plan.strategy_for("Expr").unwrap();
 
     assert_eq!(
-        expr.direct_subtypes,
+        expr.direct_subtypes(),
         vec!["Add".to_string(), "Num".to_string()]
     );
     assert_eq!(
-        expr.strategy,
+        expr.strategy(),
         ObjectRepresentation::ClosedEnum {
             enum_name: "ExprValue".to_string(),
             variants: vec!["Add".to_string(), "Num".to_string()],
@@ -895,23 +935,15 @@ final class Num implements Expr {}
     );
     assert_eq!(expr.primary_provenance(), FactProvenance::CorpusAnalysis);
     assert_eq!(
-        expr.provenance,
+        expr.provenance(),
         vec![FactProvenance::ParsedSource, FactProvenance::CorpusAnalysis,]
     );
-    assert!(expr.rejected.is_empty());
+    assert!(expr.rejected().is_empty());
     assert_eq!(
-        object_plan.hierarchy_edges,
+        object_plan.hierarchy_edges(),
         vec![
-            ObjectHierarchyEdge {
-                super_name: "Expr".to_string(),
-                sub_name: "Add".to_string(),
-                kind: ObjectHierarchyEdgeKind::Implements,
-            },
-            ObjectHierarchyEdge {
-                super_name: "Expr".to_string(),
-                sub_name: "Num".to_string(),
-                kind: ObjectHierarchyEdgeKind::Implements,
-            },
+            ObjectHierarchyEdge::new("Expr", "Add", ObjectHierarchyEdgeKind::Implements),
+            ObjectHierarchyEdge::new("Expr", "Num", ObjectHierarchyEdgeKind::Implements),
         ]
     );
 }
@@ -939,13 +971,13 @@ final class InfoLine extends HeaderLine {}
     let header_line = object_plan.strategy_for("HeaderLine").unwrap();
 
     assert_eq!(
-        header_line.strategy,
+        header_line.strategy(),
         ObjectRepresentation::ClosedEnum {
             enum_name: "HeaderLineValue".to_string(),
             variants: vec!["FormatLine".to_string(), "InfoLine".to_string()],
         }
     );
-    assert!(header_line.rejected.is_empty());
+    assert!(header_line.rejected().is_empty());
 }
 
 #[test]
@@ -982,14 +1014,14 @@ abstract class ReadKey {
     let read_key = object_plan.strategy_for("ReadKey").unwrap();
 
     assert_eq!(
-        read_key.direct_subtypes,
+        read_key.direct_subtypes(),
         vec![
             "ReadKey.FragmentKey".to_string(),
             "ReadKey.PairKey".to_string()
         ]
     );
     assert_eq!(
-        read_key.strategy,
+        read_key.strategy(),
         ObjectRepresentation::ClosedEnum {
             enum_name: "ReadKeyValue".to_string(),
             variants: vec![
@@ -998,7 +1030,7 @@ abstract class ReadKey {
             ],
         }
     );
-    assert!(read_key.rejected.is_empty());
+    assert!(read_key.rejected().is_empty());
 }
 
 #[test]
@@ -1027,10 +1059,10 @@ abstract class OpenBase {
     let open_base = object_plan.strategy_for("OpenBase").unwrap();
 
     assert_eq!(
-        open_base.direct_subtypes,
+        open_base.direct_subtypes(),
         vec!["OpenBase.OpenChild".to_string()]
     );
-    assert_eq!(open_base.strategy, ObjectRepresentation::ConcreteStruct);
+    assert_eq!(open_base.strategy(), ObjectRepresentation::ConcreteStruct);
 }
 
 #[test]
@@ -1054,7 +1086,7 @@ final class NumberToken implements Token {}
     let token = object_plan.strategy_for("Token").unwrap();
 
     assert_eq!(
-        token.strategy,
+        token.strategy(),
         ObjectRepresentation::ClosedEnum {
             enum_name: "TokenValue".to_string(),
             variants: vec!["NumberToken".to_string(), "Word".to_string()],
@@ -1084,20 +1116,22 @@ class Dog implements Animal {}
     let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
-    assert_eq!(animal.direct_subtypes, vec!["Dog".to_string()]);
+    assert_eq!(animal.direct_subtypes(), vec!["Dog".to_string()]);
     assert_eq!(
-        animal.strategy,
+        animal.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "Animal".to_string(),
         }
     );
-    assert!(animal.rejected.iter().any(|rejected| {
-        rejected.strategy
+    assert!(animal.rejected().iter().any(|rejected| {
+        rejected.strategy()
             == ObjectRepresentation::ClosedEnum {
                 enum_name: "AnimalValue".to_string(),
                 variants: vec!["Dog".to_string()],
             }
-            && rejected.reason.contains("requires a closed hierarchy fact")
+            && rejected
+                .reason()
+                .contains("requires a closed hierarchy fact")
     }));
 }
 
@@ -1121,14 +1155,14 @@ final class Num implements Expr {}
     let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let expr = object_plan.strategy_for("Expr").unwrap();
 
-    assert_eq!(expr.strategy, ObjectRepresentation::ErasedObject);
+    assert_eq!(expr.strategy(), ObjectRepresentation::ErasedObject);
     assert_eq!(expr.primary_provenance(), FactProvenance::UserOverride);
-    assert_eq!(expr.provenance, vec![FactProvenance::UserOverride]);
+    assert_eq!(expr.provenance(), vec![FactProvenance::UserOverride]);
     assert_eq!(
-        expr.direct_subtypes,
+        expr.direct_subtypes(),
         vec!["Add".to_string(), "Num".to_string()]
     );
-    assert!(expr.rejected.is_empty());
+    assert!(expr.rejected().is_empty());
 }
 
 #[test]
@@ -1151,9 +1185,9 @@ class FastqConstants {
     let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let constants = object_plan.strategy_for("FastqConstants").unwrap();
 
-    assert_eq!(constants.strategy, ObjectRepresentation::ConcreteStruct);
+    assert_eq!(constants.strategy(), ObjectRepresentation::ConcreteStruct);
     assert_eq!(constants.primary_provenance(), FactProvenance::ParsedSource);
-    assert_eq!(constants.provenance, vec![FactProvenance::ParsedSource]);
+    assert_eq!(constants.provenance(), vec![FactProvenance::ParsedSource]);
 }
 
 #[test]
@@ -1177,20 +1211,20 @@ final class Num implements Expr {}
     let expr = object_plan.strategy_for("Expr").unwrap();
 
     assert_eq!(
-        expr.strategy,
+        expr.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "Expr".to_string(),
         }
     );
     assert_eq!(expr.primary_provenance(), FactProvenance::ParsedSource);
-    assert_eq!(expr.provenance, vec![FactProvenance::ParsedSource]);
-    assert!(expr.rejected.iter().any(|rejected| {
-        rejected.strategy
+    assert_eq!(expr.provenance(), vec![FactProvenance::ParsedSource]);
+    assert!(expr.rejected().iter().any(|rejected| {
+        rejected.strategy()
             == ObjectRepresentation::ClosedEnum {
                 enum_name: "ExprValue".to_string(),
                 variants: vec!["Add".to_string(), "Num".to_string()],
             }
-            && rejected.reason.contains("public extensible API")
+            && rejected.reason().contains("public extensible API")
     }));
 }
 
@@ -1213,23 +1247,23 @@ class UseLocalized {
     let effective_facts = EffectiveFacts::new(&resolved.facts);
     let usage = analyze_usage(&resolved.program);
 
-    let object_plan = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
+    let object_plan = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        Some(&usage),
+    ));
     let localizable = object_plan.strategy_for("Localizable").unwrap();
 
     assert_eq!(
-        localizable.strategy,
+        localizable.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "Localizable".to_string(),
         }
     );
-    assert!(localizable.rejected.is_empty());
+    assert!(localizable.rejected().is_empty());
     assert_eq!(
-        localizable.requirements,
+        localizable.requirements(),
         vec![DispatchRequirementKind::NeedsBorrowedTraitView]
     );
 }
@@ -1262,34 +1296,33 @@ class ConcreteDistribution extends AbstractDistribution {
     let effective_facts = EffectiveFacts::new(&resolved.facts);
     let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
 
-    let sample_usage = usage
-        .method_usage_by_current_rust_name("RandomSampler".to_string(), "sample".to_string())
-        .expect("sample usage should be recorded");
+    let sample_usage =
+        test_method_usage_by_java_name(&usage, &resolved.program, "RandomSampler", "sample");
     assert!(
         sample_usage.call_sites().iter().any(|call| {
-            call.name == "value" && call.boundary == CallArgumentBoundary::KnownContentRead
+            call.name() == "value" && call.boundary() == CallArgumentBoundary::KnownContentRead
         }),
         "interface receiver calls should be treated as source content reads: {:?}",
         sample_usage.call_sites()
     );
 
-    let object_plan = plan_object_model_from_input(ObjectModelInput {
-        program: &resolved.program,
-        facts: &resolved.facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
+    let object_plan = plan_object_model_from_input(ObjectModelInput::new(
+        &resolved.program,
+        &resolved.facts,
+        &effective_facts,
+        Some(&usage),
+    ));
     let distribution = object_plan.strategy_for("Distribution").unwrap();
 
     assert_eq!(
-        distribution.strategy,
+        distribution.strategy(),
         ObjectRepresentation::DynTrait {
             trait_name: "Distribution".to_string(),
         }
     );
-    assert!(distribution.rejected.is_empty());
+    assert!(distribution.rejected().is_empty());
     assert_eq!(
-        distribution.requirements,
+        distribution.requirements(),
         vec![DispatchRequirementKind::NeedsBorrowedTraitView]
     );
 }
@@ -1313,24 +1346,24 @@ class Dog implements Animal {}
     let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
-    assert_eq!(animal.strategy, ObjectRepresentation::ErasedObject);
+    assert_eq!(animal.strategy(), ObjectRepresentation::ErasedObject);
     assert_eq!(
         animal.primary_provenance(),
         FactProvenance::ConservativeFallback
     );
     assert_eq!(
-        animal.provenance,
+        animal.provenance(),
         vec![
             FactProvenance::ParsedSource,
             FactProvenance::ConservativeFallback,
         ]
     );
-    assert!(animal.rejected.iter().any(|rejected| {
-        rejected.strategy
+    assert!(animal.rejected().iter().any(|rejected| {
+        rejected.strategy()
             == ObjectRepresentation::DynTrait {
                 trait_name: "Animal".to_string(),
             }
-            && rejected.reason.contains("RejectTraitObject")
+            && rejected.reason().contains("RejectTraitObject")
     }));
 }
 
@@ -1353,17 +1386,19 @@ class Dog implements Animal {}
     let object_plan = plan_object_model_for_test(&resolved.program, &facts);
     let animal = object_plan.strategy_for("Animal").unwrap();
 
-    assert_eq!(animal.strategy, ObjectRepresentation::ErasedObject);
-    assert!(animal.rejected.iter().any(|rejected| {
-        rejected.strategy
+    assert_eq!(animal.strategy(), ObjectRepresentation::ErasedObject);
+    assert!(animal.rejected().iter().any(|rejected| {
+        rejected.strategy()
             == ObjectRepresentation::DynTrait {
                 trait_name: "Animal".to_string(),
             }
-            && rejected.reason.contains("unknown runtime object")
+            && rejected.reason().contains("unknown runtime object")
     }));
-    assert!(animal.rejected.iter().any(|rejected| {
-        matches!(rejected.strategy, ObjectRepresentation::ClosedEnum { .. })
-            && rejected.reason.contains("requires a closed hierarchy fact")
+    assert!(animal.rejected().iter().any(|rejected| {
+        matches!(rejected.strategy(), ObjectRepresentation::ClosedEnum { .. })
+            && rejected
+                .reason()
+                .contains("requires a closed hierarchy fact")
     }));
 }
 

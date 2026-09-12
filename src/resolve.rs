@@ -80,22 +80,60 @@ pub enum OverloadRejectionReason {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverloadArgumentApplicability {
-    pub arg_index: usize,
-    pub actual: JavaType,
-    pub target: JavaType,
-    pub conversion: OverloadArgumentConversion,
-    pub score: u32,
+    arg_index: usize,
+    actual: JavaType,
+    target: JavaType,
+    conversion: OverloadArgumentConversion,
+    score: u32,
+}
+
+impl OverloadArgumentApplicability {
+    pub fn arg_index(&self) -> usize {
+        self.arg_index
+    }
+
+    pub fn actual(&self) -> &JavaType {
+        &self.actual
+    }
+
+    pub fn target(&self) -> &JavaType {
+        &self.target
+    }
+
+    pub fn conversion(&self) -> &OverloadArgumentConversion {
+        &self.conversion
+    }
+
+    pub fn score(&self) -> u32 {
+        self.score
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OverloadApplicabilityReport {
-    pub mode: Option<OverloadApplicabilityMode>,
-    pub score: Option<u32>,
-    pub arguments: Vec<OverloadArgumentApplicability>,
-    pub rejections: Vec<OverloadRejectionReason>,
+    mode: Option<OverloadApplicabilityMode>,
+    score: Option<u32>,
+    arguments: Vec<OverloadArgumentApplicability>,
+    rejections: Vec<OverloadRejectionReason>,
 }
 
 impl OverloadApplicabilityReport {
+    pub fn mode(&self) -> Option<OverloadApplicabilityMode> {
+        self.mode
+    }
+
+    pub fn score(&self) -> Option<u32> {
+        self.score
+    }
+
+    pub fn arguments(&self) -> &[OverloadArgumentApplicability] {
+        &self.arguments
+    }
+
+    pub fn rejections(&self) -> &[OverloadRejectionReason] {
+        &self.rejections
+    }
+
     pub fn is_applicable(&self) -> bool {
         self.score.is_some() && self.rejections.is_empty()
     }
@@ -2108,7 +2146,7 @@ impl ProgramSymbols {
         };
         external_facts
             .hierarchy_subtype_policy(&actual_ty, &target_ty)
-            .reaches
+            .reaches()
     }
 
     fn is_source_enum_type(&self, type_name: &str) -> bool {
@@ -6387,7 +6425,7 @@ fn collect_static_final_constant_value_facts(program: &Program, facts: &mut Fact
 /// Exposed so a caller holding several parsed files can pool them: type names
 /// are qualified with each file's *own* package, which a merged program no
 /// longer knows.
-pub fn static_final_constant_declarations(program: &Program) -> Vec<ConstantDeclaration> {
+pub(crate) fn static_final_constant_declarations(program: &Program) -> Vec<ConstantDeclaration> {
     let mut declarations = Vec::new();
     for ty in &program.types {
         collect_static_final_constant_declarations(
@@ -6408,7 +6446,7 @@ pub fn static_final_constant_declarations(program: &Program) -> Vec<ConstantDecl
 /// reference resolves into the wrong package
 /// ([0031](../claude_audits/done/0031-stubbed-constant-census.md)).
 #[derive(Debug, Clone)]
-pub struct ConstantDeclaration {
+pub(crate) struct ConstantDeclaration {
     /// Package-qualified owner, e.g. `pkg1.Constants` or `pkg1.Outer.Inner`.
     owner: String,
     /// The declaring file's package, if any.
@@ -6417,7 +6455,9 @@ pub struct ConstantDeclaration {
 }
 
 /// Folds `declarations` to a fixpoint and reports the values that resolve.
-pub fn constant_value_facts_from_declarations(declarations: &[ConstantDeclaration]) -> FactSet {
+pub(crate) fn constant_value_facts_from_declarations(
+    declarations: &[ConstantDeclaration],
+) -> FactSet {
     let (facts, _) = fold_constant_declarations(declarations);
     facts
 }
@@ -6429,7 +6469,7 @@ pub fn constant_value_facts_from_declarations(declarations: &[ConstantDeclaratio
 /// by another type — `static int[] a = new int[Other.N];`, which is ordinary
 /// Java and which a per-owner scope cannot answer
 /// ([0039](../claude_audits/done/0039-static-array-fields-lose-their-value-and-their-writes.md)).
-pub fn fold_constant_declarations(
+pub(crate) fn fold_constant_declarations(
     declarations: &[ConstantDeclaration],
 ) -> (FactSet, crate::source_constant_values::ConstantScope) {
     let mut facts = FactSet::default();

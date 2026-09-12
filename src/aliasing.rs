@@ -35,23 +35,67 @@ use crate::usage::{MethodUsageFacts, UsageFacts};
 
 /// A clone that Java would not have made, where the difference is observable.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ObservableAlias {
+pub(crate) struct ObservableAlias {
     /// `Type.member`, for the diagnostic message.
-    pub callable: String,
+    callable: String,
     /// The binding whose value is copied because it is still needed.
-    pub original: String,
+    original: String,
     /// The second handle Java would have created.
-    pub alias: String,
+    alias: String,
     /// The handle the observed write goes through.
-    pub mutated_through: String,
+    mutated_through: String,
     /// The handle that still reads the object after that write.
-    pub observed_through: String,
+    observed_through: String,
     /// What the write was, for the message.
-    pub mutation: MutationKind,
+    mutation: MutationKind,
+}
+
+impl ObservableAlias {
+    pub(crate) fn new(
+        callable: String,
+        original: String,
+        alias: String,
+        mutated_through: String,
+        observed_through: String,
+        mutation: MutationKind,
+    ) -> Self {
+        Self {
+            callable,
+            original,
+            alias,
+            mutated_through,
+            observed_through,
+            mutation,
+        }
+    }
+
+    pub(crate) fn callable(&self) -> &str {
+        &self.callable
+    }
+
+    pub(crate) fn original(&self) -> &str {
+        &self.original
+    }
+
+    pub(crate) fn alias(&self) -> &str {
+        &self.alias
+    }
+
+    pub(crate) fn mutated_through(&self) -> &str {
+        &self.mutated_through
+    }
+
+    pub(crate) fn observed_through(&self) -> &str {
+        &self.observed_through
+    }
+
+    pub(crate) fn mutation(&self) -> &MutationKind {
+        &self.mutation
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum MutationKind {
+pub(crate) enum MutationKind {
     /// `x.f = …`
     FieldWrite { field: String },
     /// `x[i] = …`
@@ -73,12 +117,13 @@ impl MutationKind {
 }
 
 /// Every observable alias in the program, in source order per callable.
-pub fn observable_aliases(program: &Program, usage: &UsageFacts) -> Vec<ObservableAlias> {
+#[cfg(test)]
+fn observable_aliases(program: &Program, usage: &UsageFacts) -> Vec<ObservableAlias> {
     observable_aliases_with_facts(program, usage, &FactSet::default())
 }
 
 /// Every observable alias, including fact-backed external receiver mutations.
-pub fn observable_aliases_with_facts(
+pub(crate) fn observable_aliases_with_facts(
     program: &Program,
     usage: &UsageFacts,
     facts: &FactSet,
@@ -93,29 +138,25 @@ pub fn observable_aliases_with_facts(
 /// Report observable aliases as errors. The message names both handles and
 /// the write, because the fix is a source-level or representation-level
 /// decision that a human has to make.
-pub fn report_observable_aliases(
+pub(crate) fn report_observable_aliases(
     program: &Program,
     usage: &UsageFacts,
     facts: &FactSet,
     into: &mut DiagnosticBag,
 ) {
     for alias in observable_aliases_with_facts(program, usage, facts) {
-        let ObservableAlias {
-            callable,
-            original,
-            alias: alias_name,
-            mutated_through,
-            observed_through,
-            mutation,
-        } = alias;
         into.push(
             Severity::Error,
             "observable_alias",
             format!(
-                "{callable}: `{alias_name} = {original}` aliases one object in Java but is \
+                "{}: `{} = {}` aliases one object in Java but is \
                  translated as a copy, and {} is still read through `{observed_through}` \
                  afterwards, so the two sides diverge",
-                mutation.describe(&mutated_through)
+                alias.callable(),
+                alias.alias(),
+                alias.original(),
+                alias.mutation().describe(alias.mutated_through()),
+                observed_through = alias.observed_through(),
             ),
             None,
         );
@@ -244,14 +285,14 @@ fn collect_in_body(
         }) else {
             continue;
         };
-        found.push(ObservableAlias {
-            callable: callable.to_string(),
-            original: point.original.clone(),
-            alias: point.alias.display(),
-            mutated_through: site.handle.clone(),
-            observed_through: other.display(),
-            mutation: site.kind.clone(),
-        });
+        found.push(ObservableAlias::new(
+            callable.to_string(),
+            point.original.clone(),
+            point.alias.display(),
+            site.handle.clone(),
+            other.display(),
+            site.kind.clone(),
+        ));
     }
 }
 
@@ -735,9 +776,7 @@ fn receiver_java_type_for_handle(
     handle: &str,
     method_usage: Option<&MethodUsageFacts>,
 ) -> Option<JavaType> {
-    method_usage?
-        .visible_binding_java_type_for_name(handle)
-        .cloned()
+    method_usage?.receiver_handle_java_type(handle).cloned()
 }
 
 fn collect_statements<'a>(block: &'a Block, out: &mut Vec<&'a Stmt>) {
@@ -1091,21 +1130,21 @@ mod tests {
             "handle".to_string(),
             1,
         );
-        let first_fact = crate::usage::BindingUseFacts {
-            name: "handle".to_string(),
-            binding: Some(first.clone()),
-            java_ty: JavaType::String,
-            uses: Vec::new(),
-        };
-        let second_fact = crate::usage::BindingUseFacts {
-            name: "handle".to_string(),
-            binding: Some(second.clone()),
-            java_ty: JavaType::Named {
+        let first_fact = crate::usage::BindingUseFacts::new(
+            "handle",
+            Some(first.clone()),
+            JavaType::String,
+            Vec::new(),
+        );
+        let second_fact = crate::usage::BindingUseFacts::new(
+            "handle",
+            Some(second.clone()),
+            JavaType::Named {
                 name: "Record".to_string(),
                 args: Vec::new(),
             },
-            uses: Vec::new(),
-        };
+            Vec::new(),
+        );
         let mut usage = MethodUsageFacts::default();
         usage.insert_binding_id_test_fact(first, first_fact);
         usage.insert_binding_id_test_fact(second, second_fact.clone());
@@ -1137,10 +1176,10 @@ mod tests {
             "#,
         );
         assert_eq!(found.len(), 1, "expected one observable alias: {found:?}");
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "b");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "b");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "b");
     }
 
     #[test]
@@ -1170,9 +1209,9 @@ mod tests {
 
         let diagnostic = diagnostics
             .iter()
-            .find(|diagnostic| diagnostic.code == "observable_alias")
+            .find(|diagnostic| diagnostic.code() == "observable_alias")
             .unwrap_or_else(|| panic!("expected observable_alias diagnostic: {diagnostics:?}"));
-        assert_eq!(diagnostic.severity, Severity::Error);
+        assert_eq!(diagnostic.severity(), Severity::Error);
     }
 
     /// Symmetric: writing through the new handle is just as observable.
@@ -1192,8 +1231,8 @@ mod tests {
             "#,
         );
         assert_eq!(found.len(), 1, "expected one observable alias: {found:?}");
-        assert_eq!(found[0].mutated_through, "b");
-        assert_eq!(found[0].observed_through, "a");
+        assert_eq!(found[0].mutated_through(), "b");
+        assert_eq!(found[0].observed_through(), "a");
     }
 
     /// A copy and an alias are indistinguishable when nothing is written
@@ -1277,10 +1316,10 @@ mod tests {
             1,
             "array element assignment should create an observable alias: {found:?}"
         );
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "cell");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "cell");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "cell");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "cell");
     }
 
     #[test]
@@ -1326,10 +1365,10 @@ mod tests {
             1,
             "field storage should create an observable alias: {found:?}"
         );
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "holder");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "holder");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "holder");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "holder");
     }
 
     #[test]
@@ -1375,10 +1414,10 @@ mod tests {
             1,
             "this-field storage should create an observable alias: {found:?}"
         );
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "this.node");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "this.node");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "this.node");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "this.node");
     }
 
     #[test]
@@ -1453,7 +1492,7 @@ mod tests {
             "`bump` writes through its receiver: {found:?}"
         );
         assert!(matches!(
-            found[0].mutation,
+            found[0].mutation(),
             MutationKind::MutatingCall { .. }
         ));
     }
@@ -1505,13 +1544,13 @@ mod tests {
             1,
             "external mutator should create an observable alias: {found:?}"
         );
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "b");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "b");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "b");
         assert_eq!(
-            found[0].mutation,
-            MutationKind::MutatingCall {
+            found[0].mutation(),
+            &MutationKind::MutatingCall {
                 method: "setFlag".to_string()
             }
         );
@@ -1547,10 +1586,10 @@ mod tests {
             1,
             "external mutator should use the type-parameter bound owner: {found:?}"
         );
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "b");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "b");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "b");
     }
 
     #[test]
@@ -1573,10 +1612,10 @@ mod tests {
             1,
             "external mutator should use the shared Array owner key: {found:?}"
         );
-        assert_eq!(found[0].original, "a");
-        assert_eq!(found[0].alias, "b");
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(found[0].original(), "a");
+        assert_eq!(found[0].alias(), "b");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "b");
     }
 
     /// A block-bodied lambda is nested inside an expression statement, so the
@@ -1602,11 +1641,11 @@ mod tests {
             1,
             "block lambda field write should be observable: {found:?}"
         );
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "b");
         assert_eq!(
-            found[0].mutation,
-            MutationKind::FieldWrite {
+            found[0].mutation(),
+            &MutationKind::FieldWrite {
                 field: "v".to_string()
             }
         );
@@ -1654,11 +1693,11 @@ mod tests {
             1,
             "calling a stored runnable should expose its captured write: {found:?}"
         );
-        assert_eq!(found[0].mutated_through, "a");
-        assert_eq!(found[0].observed_through, "b");
+        assert_eq!(found[0].mutated_through(), "a");
+        assert_eq!(found[0].observed_through(), "b");
         assert_eq!(
-            found[0].mutation,
-            MutationKind::FieldWrite {
+            found[0].mutation(),
+            &MutationKind::FieldWrite {
                 field: "v".to_string()
             }
         );

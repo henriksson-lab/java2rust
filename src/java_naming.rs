@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::java_ir::{Member, Modifier, TypeDecl};
+use crate::java_ir::{FieldDecl, Member, Modifier, TypeDecl};
 
 pub(crate) fn java_getter_method_name(name: &str) -> bool {
     java_getter_property_suffix(name).is_some()
@@ -114,30 +114,7 @@ pub(crate) fn source_binding_rust_names<'a>(
 }
 
 pub(crate) fn source_instance_field_rust_names(ty: &TypeDecl) -> HashMap<String, String> {
-    let fields = ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => Some(field),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-    let mut occupied = fields
-        .iter()
-        .filter(|field| !rust_keyword_needs_rename(&field.name))
-        .map(|field| field.name.clone())
-        .collect::<HashSet<_>>();
-    let mut names = HashMap::new();
-    for field in fields {
-        let rust_name = if rust_keyword_needs_rename(&field.name) {
-            allocate_rust_ident(&field.name, &occupied)
-        } else {
-            field.name.clone()
-        };
-        occupied.insert(rust_name.clone());
-        names.insert(field.name.clone(), rust_name);
-    }
-    names
+    source_field_rust_names(ty, |field| !field.modifiers.contains(&Modifier::Static))
 }
 
 pub(crate) fn source_instance_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {
@@ -147,11 +124,18 @@ pub(crate) fn source_instance_field_rust_name(ty: &TypeDecl, field_name: &str) -
 }
 
 pub(crate) fn source_static_field_rust_names(ty: &TypeDecl) -> HashMap<String, String> {
+    source_field_rust_names(ty, |field| field.modifiers.contains(&Modifier::Static))
+}
+
+fn source_field_rust_names(
+    ty: &TypeDecl,
+    include_field: impl Fn(&FieldDecl) -> bool,
+) -> HashMap<String, String> {
     let fields = ty
         .members
         .iter()
         .filter_map(|member| match member {
-            Member::Field(field) if field.modifiers.contains(&Modifier::Static) => Some(field),
+            Member::Field(field) if include_field(field) => Some(field),
             _ => None,
         })
         .collect::<Vec<_>>();
@@ -238,6 +222,34 @@ fn push_unique_alias(aliases: &mut Vec<String>, alias: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::diagnostics::Span;
+    use crate::java_ir::{JavaType, PrimitiveType, TypeKind};
+
+    fn test_field(name: &str, modifiers: Vec<Modifier>) -> Member {
+        Member::Field(FieldDecl {
+            name: name.to_string(),
+            ty: JavaType::Primitive(PrimitiveType::Int),
+            modifiers,
+            initializer: None,
+            span: Span::default(),
+        })
+    }
+
+    fn test_type(members: Vec<Member>) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: "NameCollision".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members,
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
 
     #[test]
     fn java_getter_name_policy_maps_property_suffixes() {
@@ -313,5 +325,50 @@ mod tests {
         let names = source_binding_rust_names(["self", "self__"]);
         assert_eq!(names.get("self").map(String::as_str), Some("self___"));
         assert_eq!(names.get("self__").map(String::as_str), Some("self__"));
+    }
+
+    #[test]
+    fn source_field_allocators_share_keyword_collision_policy() {
+        let ty = test_type(vec![
+            test_field("self", Vec::new()),
+            test_field("self__", Vec::new()),
+            test_field("crate", vec![Modifier::Static]),
+            test_field("crate__", vec![Modifier::Static]),
+        ]);
+
+        let instance_names = source_instance_field_rust_names(&ty);
+        assert_eq!(
+            instance_names.get("self").map(String::as_str),
+            Some("self___")
+        );
+        assert_eq!(
+            instance_names.get("self__").map(String::as_str),
+            Some("self__")
+        );
+
+        let static_names = source_static_field_rust_names(&ty);
+        assert_eq!(
+            static_names.get("crate").map(String::as_str),
+            Some("crate___")
+        );
+        assert_eq!(
+            static_names.get("crate__").map(String::as_str),
+            Some("crate__")
+        );
+    }
+
+    #[test]
+    fn source_single_field_accessors_share_keyword_collision_policy() {
+        let ty = test_type(vec![
+            test_field("self", Vec::new()),
+            test_field("self__", Vec::new()),
+            test_field("crate", vec![Modifier::Static]),
+            test_field("crate__", vec![Modifier::Static]),
+        ]);
+
+        assert_eq!(source_instance_field_rust_name(&ty, "self"), "self___");
+        assert_eq!(source_instance_field_rust_name(&ty, "self__"), "self__");
+        assert_eq!(source_static_field_rust_name(&ty, "crate"), "crate___");
+        assert_eq!(source_static_field_rust_name(&ty, "crate__"), "crate__");
     }
 }

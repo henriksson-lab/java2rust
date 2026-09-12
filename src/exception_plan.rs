@@ -24,17 +24,17 @@ pub(crate) enum ThrowExprPlan<'a> {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct JavaExceptionSupportPlan {
-    pub emit_support_item: bool,
+    emit_support_item: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MethodExceptionPlan {
-    pub wrap_returns_in_result: bool,
+    wrap_returns_in_result: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProgramExceptionPlan {
-    pub support: JavaExceptionSupportPlan,
+    support: JavaExceptionSupportPlan,
     methods: BTreeMap<(String, String), MethodExceptionPlan>,
 }
 
@@ -46,8 +46,8 @@ pub struct ProgramFallibilityPlan {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CallableFallibility {
-    pub returns_result: bool,
-    pub reasons: Vec<FallibilityReason>,
+    returns_result: bool,
+    reasons: Vec<FallibilityReason>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -117,13 +117,41 @@ pub enum TryBlockCompletion {
 }
 
 impl ProgramExceptionPlan {
+    pub fn support(&self) -> JavaExceptionSupportPlan {
+        self.support
+    }
+
+    pub fn emits_support_item(&self) -> bool {
+        self.support.emit_support_item()
+    }
+
     pub fn method_plan(&self, ty: &TypeDecl, method: &MethodDecl) -> MethodExceptionPlan {
         self.methods
             .get(&method_exception_key(ty, method))
             .copied()
-            .unwrap_or(MethodExceptionPlan {
-                wrap_returns_in_result: false,
-            })
+            .unwrap_or_else(|| MethodExceptionPlan::new(false))
+    }
+}
+
+impl JavaExceptionSupportPlan {
+    pub fn new(emit_support_item: bool) -> Self {
+        Self { emit_support_item }
+    }
+
+    pub fn emit_support_item(&self) -> bool {
+        self.emit_support_item
+    }
+}
+
+impl MethodExceptionPlan {
+    pub fn new(wrap_returns_in_result: bool) -> Self {
+        Self {
+            wrap_returns_in_result,
+        }
+    }
+
+    pub fn wrap_returns_in_result(&self) -> bool {
+        self.wrap_returns_in_result
     }
 }
 
@@ -134,7 +162,7 @@ impl ProgramFallibilityPlan {
 
     pub fn returns_result(&self, key: &CallableKey) -> bool {
         self.callable(key)
-            .is_some_and(|fallibility| fallibility.returns_result)
+            .is_some_and(CallableFallibility::returns_result)
     }
 
     pub fn solve_iterations(&self) -> usize {
@@ -149,12 +177,20 @@ impl ProgramFallibilityPlan {
     }
 }
 
+impl CallableFallibility {
+    pub fn returns_result(&self) -> bool {
+        self.returns_result
+    }
+
+    pub fn reasons(&self) -> &[FallibilityReason] {
+        &self.reasons
+    }
+}
+
 impl Default for ProgramExceptionPlan {
     fn default() -> Self {
         Self {
-            support: JavaExceptionSupportPlan {
-                emit_support_item: false,
-            },
+            support: JavaExceptionSupportPlan::new(false),
             methods: BTreeMap::new(),
         }
     }
@@ -170,9 +206,7 @@ pub(crate) fn program_uses_java_exception_with_facts(program: &Program, facts: &
 }
 
 pub fn plan_java_exception_support(program: &Program, facts: &FactSet) -> JavaExceptionSupportPlan {
-    JavaExceptionSupportPlan {
-        emit_support_item: program_uses_java_exception_with_facts(program, facts),
-    }
+    JavaExceptionSupportPlan::new(program_uses_java_exception_with_facts(program, facts))
 }
 
 fn program_has_lowerable_try_scope(program: &Program) -> bool {
@@ -1285,7 +1319,7 @@ fn catch_types_handle_throw_expr(catch_types: &[JavaType], expr: &Expr, facts: &
                     },
                     catch_ty,
                 )
-                .reaches
+                .reaches()
             || crate::stdlib::is_known_java_subtype(&thrown_name, &catch_name)
     })
 }
@@ -1668,33 +1702,28 @@ fn collect_type_decls<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
 }
 
 fn seed_callable_fallibility(key: &CallableKey, facts: &FactSet) -> CallableFallibility {
-    let reason = match key {
-        CallableKey::Method {
-            type_name,
-            method_name,
-        }
-        | CallableKey::Constructor {
-            type_name,
-            rust_name: method_name,
-        } => facts
-            .method_effect_for(type_name, method_name)
-            .is_some_and(|fact| !fact.thrown.is_empty())
-            .then_some(FallibilityReason::MethodThrowFact),
-        CallableKey::ExternalMethod {
-            receiver_type,
-            method_name,
-            arg_count,
-        } => facts
-            .external_api_effect_for_receiver_with_arity_or_rust_name(
-                receiver_type.as_deref(),
-                method_name,
-                Some(*arg_count),
-            )
-            .is_some_and(|fact| !fact.thrown.is_empty())
-            .then_some(FallibilityReason::ExternalThrowFact),
-        CallableKey::ExternalConstructor { .. } => None,
-        CallableKey::Lambda { .. } | CallableKey::AnonymousMethod { .. } => None,
-    };
+    let reason = key
+        .method_identity_parts()
+        .or_else(|| key.constructor_identity_parts())
+        .and_then(|(type_name, method_name)| {
+            facts
+                .method_effect_for(type_name, method_name)
+                .is_some_and(|fact| !fact.thrown.is_empty())
+                .then_some(FallibilityReason::MethodThrowFact)
+        })
+        .or_else(|| {
+            key.external_method_parts()
+                .and_then(|(receiver_type, method_name, arg_count)| {
+                    facts
+                        .external_api_effect_for_receiver_with_arity_or_rust_name(
+                            receiver_type,
+                            method_name,
+                            Some(arg_count),
+                        )
+                        .is_some_and(|fact| !fact.thrown.is_empty())
+                        .then_some(FallibilityReason::ExternalThrowFact)
+                })
+        });
     let mut fallibility = CallableFallibility::default();
     if let Some(reason) = reason {
         fallibility.returns_result = true;
@@ -1964,7 +1993,7 @@ fn catch_assignable_class_names(catch_types: &[JavaType], facts: &FactSet) -> Ve
             exception_class_name(catch_ty) == exception.type_name
                 || facts
                     .hierarchy_subtype_policy(&exception_ty, catch_ty)
-                    .reaches
+                    .reaches()
                 || crate::stdlib::is_known_java_subtype(
                     &exception.type_name,
                     &exception_class_name(catch_ty),
@@ -2052,10 +2081,9 @@ fn collect_method_exception_plans_for_type(
             Member::Method(method) => {
                 // One store. The solved plan already carries the declared
                 // `throws` facts that the deleted second producer re-derived.
-                let plan = MethodExceptionPlan {
-                    wrap_returns_in_result: fallibility
-                        .returns_result(&CallableKey::source_method_for_type(ty, method)),
-                };
+                let plan = MethodExceptionPlan::new(
+                    fallibility.returns_result(&CallableKey::source_method_for_type(ty, method)),
+                );
                 methods.insert(method_exception_key(ty, method), plan);
             }
             Member::Type(nested) => {
@@ -2184,29 +2212,21 @@ mod tests {
         let mut plan = ProgramExceptionPlan::default();
         plan.methods.insert(
             ("Owner".to_string(), "camelCase".to_string()),
-            MethodExceptionPlan {
-                wrap_returns_in_result: true,
-            },
+            MethodExceptionPlan::new(true),
         );
 
         assert_eq!(
             plan.method_plan(&ty, &method),
-            MethodExceptionPlan {
-                wrap_returns_in_result: false,
-            }
+            MethodExceptionPlan::new(false)
         );
 
         plan.methods.insert(
             method_exception_key(&ty, &method),
-            MethodExceptionPlan {
-                wrap_returns_in_result: true,
-            },
+            MethodExceptionPlan::new(true),
         );
         assert_eq!(
             plan.method_plan(&ty, &method),
-            MethodExceptionPlan {
-                wrap_returns_in_result: true,
-            }
+            MethodExceptionPlan::new(true)
         );
     }
 

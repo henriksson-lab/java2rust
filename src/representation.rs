@@ -44,10 +44,42 @@ pub struct RepresentationPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeRepresentation {
-    pub java_name: String,
-    pub representation: ObjectRepresentation,
-    pub provenance: RepresentationProvenance,
-    pub direct_subtypes: Vec<String>,
+    java_name: String,
+    representation: ObjectRepresentation,
+    provenance: RepresentationProvenance,
+    direct_subtypes: Vec<String>,
+}
+
+impl TypeRepresentation {
+    pub fn new(
+        java_name: impl Into<String>,
+        representation: ObjectRepresentation,
+        provenance: RepresentationProvenance,
+        direct_subtypes: Vec<String>,
+    ) -> Self {
+        Self {
+            java_name: java_name.into(),
+            representation,
+            provenance,
+            direct_subtypes,
+        }
+    }
+
+    pub fn java_name(&self) -> &str {
+        &self.java_name
+    }
+
+    pub fn representation(&self) -> &ObjectRepresentation {
+        &self.representation
+    }
+
+    pub fn provenance(&self) -> RepresentationProvenance {
+        self.provenance
+    }
+
+    pub fn direct_subtypes(&self) -> &[String] {
+        &self.direct_subtypes
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,20 +93,75 @@ pub enum RepresentationProvenance {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepresentationDispatchPolicy {
-    pub representation: ObjectRepresentation,
-    pub dispatch: DispatchShape,
+    representation: ObjectRepresentation,
+    dispatch: DispatchShape,
+}
+
+impl RepresentationDispatchPolicy {
+    pub fn new(representation: ObjectRepresentation, dispatch: DispatchShape) -> Self {
+        Self {
+            representation,
+            dispatch,
+        }
+    }
+
+    pub fn representation(&self) -> &ObjectRepresentation {
+        &self.representation
+    }
+
+    pub fn dispatch(&self) -> &DispatchShape {
+        &self.dispatch
+    }
+
+    pub fn into_dispatch(self) -> DispatchShape {
+        self.dispatch
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaEnumVariantPath {
-    pub enum_name: String,
-    pub variant_name: String,
+    enum_name: String,
+    variant_name: String,
+}
+
+impl JavaEnumVariantPath {
+    pub fn new(enum_name: impl Into<String>, variant_name: impl Into<String>) -> Self {
+        Self {
+            enum_name: enum_name.into(),
+            variant_name: variant_name.into(),
+        }
+    }
+
+    pub fn enum_name(&self) -> &str {
+        &self.enum_name
+    }
+
+    pub fn variant_name(&self) -> &str {
+        &self.variant_name
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSummarySuperclassBoundaryPolicy {
-    pub boundary_types: Vec<String>,
-    pub facts: Vec<HierarchyOverride>,
+    boundary_types: Vec<String>,
+    facts: Vec<HierarchyOverride>,
+}
+
+impl SourceSummarySuperclassBoundaryPolicy {
+    pub fn new(boundary_types: Vec<String>, facts: Vec<HierarchyOverride>) -> Self {
+        Self {
+            boundary_types,
+            facts,
+        }
+    }
+
+    pub fn boundary_types(&self) -> &[String] {
+        &self.boundary_types
+    }
+
+    pub fn facts(&self) -> &[HierarchyOverride] {
+        &self.facts
+    }
 }
 
 pub fn plan_representations(program: &Program, facts: &FactSet) -> RepresentationPlan {
@@ -83,33 +170,47 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     let usage = crate::usage::analyze_usage_with_facts(program, facts);
     plan.storage =
         crate::storage_strategy::plan_storage_strategies_from_facts(program, &usage, facts);
-    let object_plan = plan_object_model_from_input(ObjectModelInput {
+    let object_plan = plan_object_model_from_input(ObjectModelInput::new(
         program,
         facts,
-        effective_facts: &effective_facts,
-        usage: Some(&usage),
-    });
-    plan.diagnostics.extend(object_plan.diagnostics);
-    for strategy in object_plan.strategies.into_values() {
-        let primary_provenance = strategy.primary_provenance();
+        &effective_facts,
+        Some(&usage),
+    ));
+    let (strategies, hierarchy_edges, diagnostics) = object_plan.into_parts();
+    plan.diagnostics.extend(diagnostics);
+    for strategy in strategies.into_values() {
+        let (
+            root,
+            strategy_representation,
+            _requirements,
+            direct_subtypes,
+            _source_methods_access_instance_fields,
+            _rejected,
+            provenance_chain,
+            _diagnostics,
+        ) = strategy.into_parts();
+        let primary_provenance = provenance_chain
+            .last()
+            .copied()
+            .unwrap_or(FactProvenance::ConservativeFallback);
         let provenance = representation_provenance_for_fact(primary_provenance);
         let representation = representation_for_strategy_with_external_final_facade_policy(
-            &strategy.root,
-            strategy.strategy,
+            &root,
+            strategy_representation,
             primary_provenance,
             &effective_facts,
         );
         plan.types.insert(
-            strategy.root.clone(),
+            root.clone(),
             TypeRepresentation {
-                java_name: strategy.root,
+                java_name: root,
                 representation,
                 provenance,
-                direct_subtypes: strategy.direct_subtypes,
+                direct_subtypes,
             },
         );
     }
-    for edge in object_plan.hierarchy_edges {
+    for edge in hierarchy_edges {
         record_hierarchy_edge(&mut plan, edge);
     }
     keep_source_platform_facade_subclasses_concrete(program, &mut plan);
@@ -250,7 +351,9 @@ impl RepresentationPlan {
     }
 
     pub fn representation_for(&self, java_ty: &JavaType) -> ObjectRepresentation {
-        self.representation_lookup_policy(java_ty).representation
+        self.representation_lookup_policy(java_ty)
+            .representation()
+            .clone()
     }
 
     pub fn representation_lookup_policy(&self, java_ty: &JavaType) -> RepresentationLookupPolicy {
@@ -270,7 +373,7 @@ impl RepresentationPlan {
     }
 
     pub fn dispatch_for(&self, java_ty: &JavaType) -> DispatchShape {
-        representation_dispatch_policy(self.representation_for(java_ty)).dispatch
+        representation_dispatch_policy(self.representation_for(java_ty)).into_dispatch()
     }
 
     pub fn java_enum_variant_path_for_label(
@@ -291,10 +394,7 @@ impl RepresentationPlan {
         variants
             .iter()
             .any(|known| known == &variant)
-            .then(|| JavaEnumVariantPath {
-                enum_name: rust_enum_name,
-                variant_name: variant,
-            })
+            .then(|| JavaEnumVariantPath::new(rust_enum_name, variant))
     }
 
     fn unique_type_representation_by_simple_name(
@@ -326,7 +426,7 @@ impl RepresentationPlan {
     }
 
     pub fn diagnostics_for_type(&self, ty: &TypeDecl) -> Vec<RepresentationDiagnostic> {
-        hierarchy_edge_diagnostic_policy(ty, self).diagnostics
+        hierarchy_edge_diagnostic_policy(ty, self).into_diagnostics()
     }
 
     fn hierarchy_edges_for_subtype(&self, type_name: &str) -> Vec<ObjectHierarchyEdge> {
@@ -336,7 +436,7 @@ impl RepresentationPlan {
         self.hierarchy_edges_by_subtype
             .values()
             .flat_map(|edges| edges.iter())
-            .filter(|edge| crate::facts::external_type_name_matches(&edge.sub_name, type_name))
+            .filter(|edge| crate::facts::external_type_name_matches(edge.sub_name(), type_name))
             .cloned()
             .collect()
     }
@@ -353,7 +453,7 @@ impl RepresentationPlan {
 
     fn hierarchy_type_is_represented(&self, type_name: &str) -> bool {
         self.type_representation(type_name).is_some_and(|entry| {
-            object_hierarchy_edge_representation_policy(entry.representation.clone()).represented
+            object_hierarchy_edge_representation_policy(entry.representation.clone()).represented()
         })
     }
 
@@ -377,8 +477,8 @@ impl RepresentationPlan {
         self.hierarchy_edges_for_subtype(type_name)
             .into_iter()
             .any(|edge| {
-                self.hierarchy_type_is_user_closed_enum(&edge.super_name)
-                    || self.hierarchy_type_has_user_closed_enum_ancestor(&edge.super_name, visited)
+                self.hierarchy_type_is_user_closed_enum(edge.super_name())
+                    || self.hierarchy_type_has_user_closed_enum_ancestor(edge.super_name(), visited)
             })
     }
 
@@ -386,19 +486,19 @@ impl RepresentationPlan {
         let edges = self.hierarchy_edges_for_subtype(&ty.name);
         let represented_super_names = edges
             .iter()
-            .map(|edge| &edge.super_name)
-            .chain(ty.extends.iter())
-            .chain(ty.implements.iter())
+            .map(|edge| edge.super_name())
+            .chain(ty.extends.iter().map(String::as_str))
+            .chain(ty.implements.iter().map(String::as_str))
             .filter(|super_name| self.hierarchy_edge_is_represented(super_name))
-            .cloned()
+            .map(str::to_string)
             .collect::<BTreeSet<_>>();
-        ObjectHierarchyEdgeDiagnosticInput {
-            type_name: ty.name.clone(),
-            declared_extends: ty.extends.clone(),
-            declared_implements: ty.implements.clone(),
+        ObjectHierarchyEdgeDiagnosticInput::new(
+            ty.name.clone(),
+            ty.extends.clone(),
+            ty.implements.clone(),
             edges,
             represented_super_names,
-        }
+        )
     }
 }
 
@@ -421,10 +521,7 @@ pub fn representation_dispatch_policy(
         }
         ObjectRepresentation::ErasedObject => DispatchShape::ErasedObject,
     };
-    RepresentationDispatchPolicy {
-        representation,
-        dispatch: projected_dispatch,
-    }
+    RepresentationDispatchPolicy::new(representation, projected_dispatch)
 }
 
 pub fn hierarchy_edge_diagnostic_policy(
@@ -443,7 +540,7 @@ pub fn extend_representation_facts_for_source_summary_superclass_boundaries<'a>(
         source_summary_superclass_boundary_policy(emitted_programs, source_type_modes, facts);
     facts
         .hierarchy_overrides
-        .extend(policy.facts.iter().cloned());
+        .extend(policy.facts().iter().cloned());
     policy
 }
 
@@ -476,10 +573,7 @@ pub fn source_summary_superclass_boundary_policy<'a>(
             provenance: FactProvenance::CorpusAnalysis,
         })
         .collect::<Vec<_>>();
-    SourceSummarySuperclassBoundaryPolicy {
-        boundary_types: boundary_types.into_iter().collect(),
-        facts,
-    }
+    SourceSummarySuperclassBoundaryPolicy::new(boundary_types.into_iter().collect(), facts)
 }
 
 fn collect_source_summary_superclasses_for_type(
@@ -773,13 +867,13 @@ fn collect_anonymous_class_diagnostics_for_expr(
                 collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
             }
             if body.is_some() && !anonymous_class_target_is_erased_boundary(ty, plan) {
-                diagnostics.push(RepresentationDiagnostic {
-                    code: "unsupported_anonymous_class",
-                    message: format!(
+                diagnostics.push(RepresentationDiagnostic::new(
+                    "unsupported_anonymous_class",
+                    format!(
                         "anonymous Java class for {:?} requires object representation lowering",
                         ty
                     ),
-                });
+                ));
             }
         }
         Expr::InstanceOf { expr, .. } => {
@@ -813,10 +907,10 @@ fn anonymous_class_target_is_erased_boundary(
     };
     let policy = plan.representation_lookup_policy(ty);
     matches!(
-        (&policy.fallback, &policy.representation),
+        (policy.fallback(), policy.representation()),
         (
             RepresentationLookupFallback::PlannedType,
-            ObjectRepresentation::ErasedObject
+            &ObjectRepresentation::ErasedObject
         )
     )
 }
@@ -1163,10 +1257,10 @@ pub fn object_hierarchy_context(plan: &RepresentationPlan) -> ObjectHierarchyCon
 }
 
 fn record_hierarchy_edge(plan: &mut RepresentationPlan, edge: ObjectHierarchyEdge) {
-    add_direct_subtype(plan, &edge.super_name, &edge.sub_name);
+    add_direct_subtype(plan, edge.super_name(), edge.sub_name());
     let edges = plan
         .hierarchy_edges_by_subtype
-        .entry(edge.sub_name.clone())
+        .entry(edge.sub_name().to_string())
         .or_default();
     if !edges.contains(&edge) {
         edges.push(edge);

@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use crate::coercion::{
-    function_call_projection, macro_call_projection, parenthesize_raw_postfix_receiver,
+    function_call_projection, macro_call_projection, postfix_receiver_projection,
     receiver_method_call_projection_exact,
 };
 use crate::facts::{ExternalLibraryMode, FactSet};
@@ -12,18 +12,61 @@ use crate::slot_shape::RustSlotShape;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct CatchRenderArm {
-    pub(crate) variable_name: String,
-    pub(crate) class_names: Vec<String>,
-    pub(crate) body: Vec<RustStmt>,
+    variable_name: String,
+    class_names: Vec<String>,
+    body: Vec<RustStmt>,
+}
+
+impl CatchRenderArm {
+    pub(crate) fn new(
+        variable_name: String,
+        class_names: Vec<String>,
+        body: Vec<RustStmt>,
+    ) -> Self {
+        Self {
+            variable_name,
+            class_names,
+            body,
+        }
+    }
+
+    pub(crate) fn variable_name(&self) -> &str {
+        &self.variable_name
+    }
+
+    pub(crate) fn class_names(&self) -> &[String] {
+        &self.class_names
+    }
+
+    pub(crate) fn into_body(self) -> Vec<RustStmt> {
+        self.body
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct ExternalExceptionConversion {
-    pub(crate) java_type: String,
-    pub(crate) rust_type: String,
+    java_type: String,
+    rust_type: String,
 }
 
-pub fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
+impl ExternalExceptionConversion {
+    pub(crate) fn new(java_type: String, rust_type: String) -> Self {
+        Self {
+            java_type,
+            rust_type,
+        }
+    }
+
+    pub(crate) fn java_type(&self) -> &str {
+        &self.java_type
+    }
+
+    pub(crate) fn rust_type(&self) -> &str {
+        &self.rust_type
+    }
+}
+
+pub(crate) fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
     let source_parent_arms = source_exception_parent_match_arms(facts);
     let mut item = r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -37,10 +80,10 @@ impl std::fmt::Display for InputStream {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
-    pub class_name: &'static str,
-    pub message: String,
-    pub cause: Option<std::boxed::Box<JavaException>>,
-    pub suppressed: Vec<JavaException>,
+    class_name: &'static str,
+    message: String,
+    cause: Option<std::boxed::Box<JavaException>>,
+    suppressed: Vec<JavaException>,
 }
 
 impl JavaException {
@@ -65,6 +108,14 @@ impl JavaException {
         JavaException { class_name, message: err.to_string(), cause: None, suppressed: Vec::new() }
     }
 
+    pub fn class_name(&self) -> &'static str {
+        self.class_name
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
     pub fn is_instance(&self, class_names: &[&str]) -> bool {
         class_names
             .iter()
@@ -87,12 +138,20 @@ impl JavaException {
         self.get_message()
     }
 
+    pub fn cause(&self) -> Option<&JavaException> {
+        self.cause.as_deref()
+    }
+
     pub fn add_suppressed(&mut self, exception: JavaException) {
         self.suppressed.push(exception);
     }
 
     pub fn get_suppressed(&self) -> Vec<Option<JavaException>> {
         self.suppressed.iter().cloned().map(Some).collect()
+    }
+
+    pub fn get_class(&self) -> JavaClass<()> {
+        JavaClass::<()>::for_name(self.class_name)
     }
 }
 
@@ -171,7 +230,9 @@ impl std::fmt::Display for JavaException {
         item.push_str("\n\n");
         item.push_str(&format!(
             "impl From<{}> for JavaException {{\n    fn from(err: {}) -> JavaException {{\n        JavaException::from_display({:?}, err)\n    }}\n}}",
-            conversion.rust_type, conversion.rust_type, conversion.java_type
+            conversion.rust_type(),
+            conversion.rust_type(),
+            conversion.java_type()
         ));
     }
     RustItem::Raw(item)
@@ -264,10 +325,10 @@ pub(crate) fn external_exception_conversions(facts: &FactSet) -> Vec<ExternalExc
         else {
             continue;
         };
-        conversions.insert(ExternalExceptionConversion {
-            java_type: exception.type_name.clone(),
-            rust_type: format!("{crate_name}::{simple}"),
-        });
+        conversions.insert(ExternalExceptionConversion::new(
+            exception.type_name.clone(),
+            format!("{crate_name}::{simple}"),
+        ));
     }
     conversions.into_iter().collect()
 }
@@ -359,9 +420,9 @@ pub(crate) fn try_catch_stmt(
     for catch in catches {
         let pattern = catch_guard_pattern(&catch);
         let body = if outer_returns_result {
-            catch.body
+            catch.into_body()
         } else {
-            plain_return_catch_body(catch.body)
+            plain_return_catch_body(catch.into_body())
         };
         arms.push(RustMatchArm {
             pattern,
@@ -432,10 +493,11 @@ pub(crate) fn try_catch_value_fallthrough_stmt(
     });
     for catch in catches {
         let pattern = catch_guard_pattern(&catch);
+        let body = catch.into_body();
         arms.push(RustMatchArm {
             pattern,
             body: RustExpr::Block {
-                stmts: catch.body,
+                stmts: body,
                 tail: None,
             },
         });
@@ -539,14 +601,16 @@ fn rust_expr_is_path_name(expr: &RustExpr, segments: &[&str]) -> bool {
 
 fn catch_guard_pattern(catch: &CatchRenderArm) -> String {
     let classes = catch
-        .class_names
+        .class_names()
         .iter()
         .map(|name| format!("{name:?}"))
         .collect::<Vec<_>>()
         .join(", ");
     format!(
         "Err({}) if {}.is_instance(&[{}])",
-        catch.variable_name, catch.variable_name, classes
+        catch.variable_name(),
+        catch.variable_name(),
+        classes
     )
 }
 
@@ -1031,7 +1095,7 @@ pub(crate) fn try_catch_finally_scope_stmt(
     });
     for catch in catches {
         let pattern = catch_guard_pattern(&catch);
-        let mut catch_body = catch.body;
+        let mut catch_body = catch.into_body();
         if ok_falls_through {
             catch_body.push(return_stmt(None, true));
         }
@@ -1121,7 +1185,7 @@ fn java_exception_with_cause_projection(
 
 fn exception_message_expr(message: RustExpr) -> RustExpr {
     receiver_method_call_projection_exact(
-        parenthesize_raw_postfix_receiver(message),
+        postfix_receiver_projection(message),
         "to_string",
         Vec::new(),
     )
@@ -1147,7 +1211,7 @@ pub(crate) fn exception_cause_or_self_if_instance_expr(
         .map(|name| RustExpr::Literal(format!("{name:?}")))
         .collect();
     RustExpr::MethodCall {
-        receiver: Box::new(parenthesize_raw_postfix_receiver(wrapper)),
+        receiver: Box::new(postfix_receiver_projection(wrapper)),
         method: "cause_or_self_if_instance".to_string(),
         args: vec![RustExpr::Unary {
             op: "&".to_string(),
@@ -1232,15 +1296,16 @@ mod tests {
             external-pack-exception java.sql java.sql.SQLException checked
             "#,
         )
-        .facts;
+        .facts().clone();
 
         let conversions = external_exception_conversions(&facts);
         assert!(conversions.iter().any(|conversion| {
-            conversion.java_type == "HDF5Error" && conversion.rust_type == "hdf5_facade::HDF5Error"
+            conversion.java_type() == "HDF5Error"
+                && conversion.rust_type() == "hdf5_facade::HDF5Error"
         }));
         assert!(conversions.iter().any(|conversion| {
-            conversion.java_type == "java.sql.SQLException"
-                && conversion.rust_type == "sqlite_facade::SQLException"
+            conversion.java_type() == "java.sql.SQLException"
+                && conversion.rust_type() == "sqlite_facade::SQLException"
         }));
     }
 
@@ -1445,16 +1510,16 @@ mod tests {
                 function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Raw("1".to_string())],
             }))],
-            vec![CatchRenderArm {
-                variable_name: "e".to_string(),
-                class_names: vec!["IOException".to_string()],
-                body: vec![RustStmt::Return(Some(RustExpr::Call {
+            vec![CatchRenderArm::new(
+                "e".to_string(),
+                vec!["IOException".to_string()],
+                vec![RustStmt::Return(Some(RustExpr::Call {
                     function: Box::new(RustExpr::path(["Err"])),
                     args: vec![RustExpr::Raw(
                         "JavaException::new(\"WrappedProblem\", e.to_string())".to_string(),
                     )],
                 }))],
-            }],
+            )],
             false,
             false,
         );
@@ -1476,14 +1541,14 @@ mod tests {
                 function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Literal("7".to_string())],
             }))],
-            vec![CatchRenderArm {
-                variable_name: "ex".to_string(),
-                class_names: vec!["IllegalArgumentException".to_string()],
-                body: vec![RustStmt::Return(Some(RustExpr::Call {
+            vec![CatchRenderArm::new(
+                "ex".to_string(),
+                vec!["IllegalArgumentException".to_string()],
+                vec![RustStmt::Return(Some(RustExpr::Call {
                     function: Box::new(RustExpr::path(["Ok"])),
                     args: vec![RustExpr::Literal("1".to_string())],
                 }))],
-            }],
+            )],
             true,
             false,
         );
@@ -1524,14 +1589,14 @@ mod tests {
                 function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Literal("7".to_string())],
             }))],
-            vec![CatchRenderArm {
-                variable_name: "ex".to_string(),
-                class_names: vec!["IOException".to_string()],
-                body: vec![RustStmt::Return(Some(RustExpr::Call {
+            vec![CatchRenderArm::new(
+                "ex".to_string(),
+                vec!["IOException".to_string()],
+                vec![RustStmt::Return(Some(RustExpr::Call {
                     function: Box::new(RustExpr::path(["Ok"])),
                     args: vec![RustExpr::Literal("1".to_string())],
                 }))],
-            }],
+            )],
             true,
             false,
         );
@@ -1706,6 +1771,31 @@ mod tests {
     }
 
     #[test]
+    fn java_exception_support_exposes_read_only_runtime_accessors() {
+        let RustItem::Raw(rendered) = java_exception_support_item_with_facts(&FactSet::default())
+        else {
+            panic!("Java exception support should render as a raw support item");
+        };
+
+        assert!(
+            rendered.contains("class_name: &'static str,")
+                && rendered.contains("message: String,")
+                && rendered.contains("pub fn class_name(&self) -> &'static str")
+                && rendered.contains("pub fn message(&self) -> &str")
+                && rendered.contains("pub fn cause(&self) -> Option<&JavaException>")
+                && rendered.contains("pub fn get_suppressed(&self) -> Vec<Option<JavaException>>"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("pub class_name:")
+                && !rendered.contains("pub message:")
+                && !rendered.contains("pub cause:")
+                && !rendered.contains("pub suppressed:"),
+            "JavaException runtime payload fields should stay private-backed: {rendered}"
+        );
+    }
+
+    #[test]
     fn try_with_resources_cleanup_accumulates_multiple_close_failures() {
         let stmt = try_with_resources_scope_stmt(
             RustType::Unit,
@@ -1790,13 +1880,13 @@ mod tests {
             vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
                 "\"try\".to_string()".to_string(),
             ))))],
-            vec![CatchRenderArm {
-                variable_name: "ex".to_string(),
-                class_names: vec!["RuntimeException".to_string()],
-                body: vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
+            vec![CatchRenderArm::new(
+                "ex".to_string(),
+                vec!["RuntimeException".to_string()],
+                vec![RustStmt::Return(Some(ok_expr(RustExpr::Literal(
                     "\"catch\".to_string()".to_string(),
                 ))))],
-            }],
+            )],
             vec![RustStmt::Return(Some(RustExpr::Call {
                 function: Box::new(RustExpr::path(["Err"])),
                 args: vec![new_exception_expr(
@@ -1846,14 +1936,14 @@ mod tests {
                 function: Box::new(RustExpr::path(["Ok"])),
                 args: vec![RustExpr::Literal("7".to_string())],
             }))],
-            vec![CatchRenderArm {
-                variable_name: "ex".to_string(),
-                class_names: vec!["IllegalArgumentException".to_string()],
-                body: vec![RustStmt::Return(Some(RustExpr::Call {
+            vec![CatchRenderArm::new(
+                "ex".to_string(),
+                vec!["IllegalArgumentException".to_string()],
+                vec![RustStmt::Return(Some(RustExpr::Call {
                     function: Box::new(RustExpr::path(["Ok"])),
                     args: vec![RustExpr::Literal("1".to_string())],
                 }))],
-            }],
+            )],
             vec![RustStmt::Raw("cleanup();".to_string())],
             true,
             true,

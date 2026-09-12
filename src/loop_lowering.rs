@@ -28,13 +28,29 @@ pub fn assemble_for_loop(
     }
 }
 
-pub fn continue_with_updates(update_exprs: &[RustExpr]) -> Vec<RustStmt> {
+pub(crate) fn continue_with_updates(update_exprs: &[RustExpr]) -> Vec<RustStmt> {
     update_exprs
         .iter()
         .cloned()
         .map(RustStmt::Expr)
         .chain(std::iter::once(RustStmt::Continue(None)))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn continue_with_updates_replays_updates_before_continue() {
+        assert_eq!(
+            continue_with_updates(&[RustExpr::Var("i += 1".to_string())]),
+            vec![
+                RustStmt::Expr(RustExpr::Var("i += 1".to_string())),
+                RustStmt::Continue(None),
+            ]
+        );
+    }
 }
 
 pub fn assignment_condition_loop(

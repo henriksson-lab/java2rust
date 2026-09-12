@@ -2,51 +2,51 @@ use std::collections::{HashSet, VecDeque};
 use std::hash::Hash;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SaturationStep {
+pub(crate) enum SaturationStep {
     Changed,
     Stable,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FiniteSaturationResult<T, D> {
-    pub state: T,
-    pub iterations: usize,
-    pub diagnostics: Vec<D>,
+pub(crate) struct FiniteSaturationResult<T, D> {
+    state: T,
+    iterations: usize,
+    diagnostics: Vec<D>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct WorklistStats {
-    pub processed_items: usize,
-    pub inserted_facts: usize,
-    pub max_queue_len: usize,
+    processed_items: usize,
+    inserted_facts: usize,
+    max_queue_len: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorklistSaturationResult<T, D> {
-    pub state: T,
-    pub stats: WorklistStats,
-    pub diagnostics: Vec<D>,
+pub(crate) struct WorklistSaturationResult<T, D> {
+    state: T,
+    stats: WorklistStats,
+    diagnostics: Vec<D>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct WorklistSaturationPolicy {
-    pub max_processed_items: usize,
+pub(crate) struct WorklistSaturationPolicy {
+    max_processed_items: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct WorklistInserter<I> {
+pub(crate) struct WorklistInserter<I> {
     pending: Vec<I>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FiniteFactDomain {
-    pub declared_slots: usize,
-    pub value_lattice_height: usize,
+    declared_slots: usize,
+    value_lattice_height: usize,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FiniteSaturationPolicy {
-    pub domain: FiniteFactDomain,
+    domain: FiniteFactDomain,
 }
 
 impl FiniteFactDomain {
@@ -62,6 +62,14 @@ impl FiniteFactDomain {
             .saturating_mul(self.value_lattice_height)
             .saturating_add(1)
     }
+
+    pub fn declared_slots(self) -> usize {
+        self.declared_slots
+    }
+
+    pub fn value_lattice_height(self) -> usize {
+        self.value_lattice_height
+    }
 }
 
 impl FiniteSaturationPolicy {
@@ -75,7 +83,11 @@ impl FiniteSaturationPolicy {
         self.domain.iteration_budget()
     }
 
-    pub fn saturate<T, D>(
+    pub fn domain(self) -> FiniteFactDomain {
+        self.domain
+    }
+
+    pub(crate) fn saturate<T, D>(
         self,
         state: T,
         step: impl FnMut(&mut T) -> SaturationStep,
@@ -85,31 +97,88 @@ impl FiniteSaturationPolicy {
     }
 }
 
+impl<T, D> FiniteSaturationResult<T, D> {
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &T {
+        &self.state
+    }
+
+    pub(crate) fn iterations(&self) -> usize {
+        self.iterations
+    }
+
+    pub(crate) fn diagnostics(&self) -> &[D] {
+        &self.diagnostics
+    }
+
+    pub(crate) fn into_parts(self) -> (T, usize, Vec<D>) {
+        (self.state, self.iterations, self.diagnostics)
+    }
+}
+
 impl WorklistStats {
+    pub fn processed_items(self) -> usize {
+        self.processed_items
+    }
+
+    pub fn inserted_facts(self) -> usize {
+        self.inserted_facts
+    }
+
+    pub fn max_queue_len(self) -> usize {
+        self.max_queue_len
+    }
+
     fn saw_queue_len(&mut self, len: usize) {
         self.max_queue_len = self.max_queue_len.max(len);
     }
 }
 
+impl<T, D> WorklistSaturationResult<T, D> {
+    #[cfg(test)]
+    pub(crate) fn state(&self) -> &T {
+        &self.state
+    }
+
+    #[cfg(test)]
+    pub(crate) fn stats(&self) -> WorklistStats {
+        self.stats
+    }
+
+    #[cfg(test)]
+    pub(crate) fn diagnostics(&self) -> &[D] {
+        &self.diagnostics
+    }
+
+    pub(crate) fn into_parts(self) -> (T, WorklistStats, Vec<D>) {
+        (self.state, self.stats, self.diagnostics)
+    }
+}
+
 impl WorklistSaturationPolicy {
-    pub fn new(max_processed_items: usize) -> Self {
+    pub(crate) fn new(max_processed_items: usize) -> Self {
         Self {
             max_processed_items,
         }
     }
+
+    pub(crate) fn max_processed_items(self) -> usize {
+        self.max_processed_items
+    }
 }
 
 impl<I> WorklistInserter<I> {
-    pub fn insert(&mut self, item: I) {
+    pub(crate) fn insert(&mut self, item: I) {
         self.pending.push(item);
     }
 }
 
-pub fn finite_fact_iteration_budget(declared_slots: usize, value_lattice_height: usize) -> usize {
+#[cfg(test)]
+fn finite_fact_iteration_budget(declared_slots: usize, value_lattice_height: usize) -> usize {
     FiniteFactDomain::new(declared_slots, value_lattice_height).iteration_budget()
 }
 
-pub fn saturate_worklist<T, I, D>(
+pub(crate) fn saturate_worklist<T, I, D>(
     state: T,
     initial_items: impl IntoIterator<Item = I>,
     policy: WorklistSaturationPolicy,
@@ -122,7 +191,7 @@ where
     saturate_worklist_with_seen(state, initial_items, policy, step, budget_diagnostic)
 }
 
-pub fn saturate_worklist_with_seen<T, I, D>(
+pub(crate) fn saturate_worklist_with_seen<T, I, D>(
     mut state: T,
     initial_items: impl IntoIterator<Item = I>,
     policy: WorklistSaturationPolicy,
@@ -146,7 +215,7 @@ where
 
     while let Some(item) = queue.pop_front() {
         stats.processed_items += 1;
-        if stats.processed_items > policy.max_processed_items {
+        if stats.processed_items > policy.max_processed_items() {
             return WorklistSaturationResult {
                 state,
                 stats,
@@ -175,7 +244,7 @@ where
     }
 }
 
-pub fn saturate_finite<T, D>(
+pub(crate) fn saturate_finite<T, D>(
     mut state: T,
     max_iterations: usize,
     mut step: impl FnMut(&mut T) -> SaturationStep,
@@ -228,8 +297,8 @@ mod tests {
     fn finite_fact_domain_budget_bounds_declared_slots_times_lattice_height() {
         let domain = FiniteFactDomain::new(3, 4);
 
-        assert_eq!(domain.declared_slots, 3);
-        assert_eq!(domain.value_lattice_height, 4);
+        assert_eq!(domain.declared_slots(), 3);
+        assert_eq!(domain.value_lattice_height(), 4);
         assert_eq!(domain.iteration_budget(), 13);
         assert_eq!(finite_fact_iteration_budget(0, 4), 1);
         assert_eq!(finite_fact_iteration_budget(3, 0), 1);
@@ -252,9 +321,9 @@ mod tests {
         );
 
         assert_eq!(policy.iteration_budget(), 7);
-        assert_eq!(result.state, 4);
-        assert_eq!(result.iterations, 5);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(*result.state(), 4);
+        assert_eq!(result.iterations(), 5);
+        assert!(result.diagnostics().is_empty());
     }
 
     #[test]
@@ -273,9 +342,9 @@ mod tests {
             |budget| format!("budget {budget}"),
         );
 
-        assert_eq!(result.state, 2);
-        assert_eq!(result.iterations, 3);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(*result.state(), 2);
+        assert_eq!(result.iterations(), 3);
+        assert!(result.diagnostics().is_empty());
     }
 
     #[test]
@@ -290,9 +359,9 @@ mod tests {
             |budget| format!("budget {budget}"),
         );
 
-        assert_eq!(result.state, 3);
-        assert_eq!(result.iterations, 3);
-        assert_eq!(result.diagnostics, vec!["budget 3".to_string()]);
+        assert_eq!(*result.state(), 3);
+        assert_eq!(result.iterations(), 3);
+        assert_eq!(result.diagnostics(), &["budget 3".to_string()]);
     }
 
     #[test]
@@ -312,14 +381,14 @@ mod tests {
                     out.insert(*next);
                 }
             },
-            |stats| format!("budget after {}", stats.processed_items),
+            |stats| format!("budget after {}", stats.processed_items()),
         );
 
-        assert_eq!(result.state, HashSet::from(["a", "b", "c", "d"]));
-        assert_eq!(result.stats.processed_items, 4);
-        assert_eq!(result.stats.inserted_facts, 4);
-        assert!(result.stats.max_queue_len >= 1);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.state(), &HashSet::from(["a", "b", "c", "d"]));
+        assert_eq!(result.stats().processed_items(), 4);
+        assert_eq!(result.stats().inserted_facts(), 4);
+        assert!(result.stats().max_queue_len() >= 1);
+        assert!(result.diagnostics().is_empty());
     }
 
     #[test]
@@ -339,14 +408,14 @@ mod tests {
                     out.insert(*next);
                 }
             },
-            |stats| format!("budget after {}", stats.processed_items),
+            |stats| format!("budget after {}", stats.processed_items()),
         );
 
-        assert_eq!(result.state, vec!["root", "left", "right", "joined"]);
-        assert_eq!(result.stats.processed_items, 4);
-        assert_eq!(result.stats.inserted_facts, 4);
-        assert_eq!(result.stats.max_queue_len, 2);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.state(), &vec!["root", "left", "right", "joined"]);
+        assert_eq!(result.stats().processed_items(), 4);
+        assert_eq!(result.stats().inserted_facts(), 4);
+        assert_eq!(result.stats().max_queue_len(), 2);
+        assert!(result.diagnostics().is_empty());
     }
 
     #[test]
@@ -366,13 +435,13 @@ mod tests {
                     out.insert(*next);
                 }
             },
-            |stats| format!("budget after {}", stats.processed_items),
+            |stats| format!("budget after {}", stats.processed_items()),
         );
 
-        assert_eq!(result.state, HashSet::from(["a", "b", "c"]));
-        assert_eq!(result.stats.processed_items, 3);
-        assert_eq!(result.stats.inserted_facts, 3);
-        assert!(result.diagnostics.is_empty());
+        assert_eq!(result.state(), &HashSet::from(["a", "b", "c"]));
+        assert_eq!(result.stats().processed_items(), 3);
+        assert_eq!(result.stats().inserted_facts(), 3);
+        assert!(result.diagnostics().is_empty());
     }
 
     #[test]
@@ -385,12 +454,12 @@ mod tests {
                 visited.push(*item);
                 out.insert(item + 1);
             },
-            |stats| format!("budget after {}", stats.processed_items),
+            |stats| format!("budget after {}", stats.processed_items()),
         );
 
-        assert_eq!(result.state, vec![0, 1]);
-        assert_eq!(result.stats.processed_items, 3);
-        assert_eq!(result.stats.inserted_facts, 3);
-        assert_eq!(result.diagnostics, vec!["budget after 3".to_string()]);
+        assert_eq!(result.state(), &vec![0, 1]);
+        assert_eq!(result.stats().processed_items(), 3);
+        assert_eq!(result.stats().inserted_facts(), 3);
+        assert_eq!(result.diagnostics(), &["budget after 3".to_string()]);
     }
 }

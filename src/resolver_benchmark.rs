@@ -231,161 +231,573 @@ pub struct ResolverBenchmarkReport {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverBenchmarkSourceRoot {
-    pub path: PathBuf,
-    pub mode: DependencyMode,
-    pub package_prefixes: Vec<String>,
-    pub files_seen: usize,
+    path: PathBuf,
+    mode: DependencyMode,
+    package_prefixes: Vec<String>,
+    files_seen: usize,
+}
+
+impl ResolverBenchmarkSourceRoot {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    pub fn mode(&self) -> DependencyMode {
+        self.mode
+    }
+
+    pub fn package_prefixes(&self) -> &[String] {
+        &self.package_prefixes
+    }
+
+    pub fn files_seen(&self) -> usize {
+        self.files_seen
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolverBenchmarkFactProvider {
-    pub name: String,
-    pub mode: DependencyMode,
-    pub facts: usize,
-    pub external_api_effect_facts: usize,
-    pub external_api_argument_effect_facts: usize,
-    pub external_crate_api_mapping_facts: usize,
-    pub external_crate_constructor_mapping_facts: usize,
-    pub external_constructor_facts: usize,
-    pub external_field_facts: usize,
-    pub hierarchy_override_facts: usize,
-    pub closed_hierarchy_facts: usize,
-    pub object_safety_facts: usize,
-    pub type_capability_facts: usize,
-    pub field_nullability_facts: usize,
-    pub exception_facts: usize,
-    pub constructor_recursion_facts: usize,
-    pub external_library_pack_facts: usize,
-    pub unsupported_external_api_facts: usize,
-    pub unsupported_external_constructor_facts: usize,
-    pub unsupported_external_field_facts: usize,
+    name: String,
+    mode: DependencyMode,
+    facts: usize,
+    external_api_effect_facts: usize,
+    external_api_argument_effect_facts: usize,
+    external_crate_api_mapping_facts: usize,
+    external_crate_constructor_mapping_facts: usize,
+    external_constructor_facts: usize,
+    external_field_facts: usize,
+    hierarchy_override_facts: usize,
+    closed_hierarchy_facts: usize,
+    object_safety_facts: usize,
+    type_capability_facts: usize,
+    field_nullability_facts: usize,
+    exception_facts: usize,
+    constructor_recursion_facts: usize,
+    external_library_pack_facts: usize,
+    unsupported_external_api_facts: usize,
+    unsupported_external_constructor_facts: usize,
+    unsupported_external_field_facts: usize,
+}
+
+impl ResolverBenchmarkFactProvider {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn mode(&self) -> DependencyMode {
+        self.mode
+    }
+
+    pub fn facts(&self) -> usize {
+        self.facts
+    }
+
+    pub fn external_api_effect_facts(&self) -> usize {
+        self.external_api_effect_facts
+    }
+
+    pub fn external_api_argument_effect_facts(&self) -> usize {
+        self.external_api_argument_effect_facts
+    }
+
+    pub fn external_crate_api_mapping_facts(&self) -> usize {
+        self.external_crate_api_mapping_facts
+    }
+
+    pub fn external_crate_constructor_mapping_facts(&self) -> usize {
+        self.external_crate_constructor_mapping_facts
+    }
+
+    pub fn external_constructor_facts(&self) -> usize {
+        self.external_constructor_facts
+    }
+
+    pub fn external_field_facts(&self) -> usize {
+        self.external_field_facts
+    }
+
+    pub fn hierarchy_override_facts(&self) -> usize {
+        self.hierarchy_override_facts
+    }
+
+    pub fn closed_hierarchy_facts(&self) -> usize {
+        self.closed_hierarchy_facts
+    }
+
+    pub fn object_safety_facts(&self) -> usize {
+        self.object_safety_facts
+    }
+
+    pub fn type_capability_facts(&self) -> usize {
+        self.type_capability_facts
+    }
+
+    pub fn field_nullability_facts(&self) -> usize {
+        self.field_nullability_facts
+    }
+
+    pub fn exception_facts(&self) -> usize {
+        self.exception_facts
+    }
+
+    pub fn constructor_recursion_facts(&self) -> usize {
+        self.constructor_recursion_facts
+    }
+
+    pub fn external_library_pack_facts(&self) -> usize {
+        self.external_library_pack_facts
+    }
+
+    pub fn unsupported_external_api_facts(&self) -> usize {
+        self.unsupported_external_api_facts
+    }
+
+    pub fn unsupported_external_constructor_facts(&self) -> usize {
+        self.unsupported_external_constructor_facts
+    }
+
+    pub fn unsupported_external_field_facts(&self) -> usize {
+        self.unsupported_external_field_facts
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedTargetSummary {
-    pub kind: UnresolvedTargetKind,
-    pub target_name: String,
-    pub count: usize,
+    kind: UnresolvedTargetKind,
+    target_name: String,
+    count: usize,
+}
+
+impl UnresolvedTargetSummary {
+    pub fn kind(&self) -> UnresolvedTargetKind {
+        self.kind
+    }
+
+    pub fn target_name(&self) -> &str {
+        &self.target_name
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedMethodReceiverSummary {
-    pub target_name: String,
-    pub receiver_type: String,
-    pub count: usize,
+    target_name: String,
+    receiver_type: String,
+    count: usize,
+}
+
+impl UnresolvedMethodReceiverSummary {
+    pub fn target_name(&self) -> &str {
+        &self.target_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedFieldReceiverSummary {
-    pub field_name: String,
-    pub receiver_type: String,
-    pub count: usize,
+    field_name: String,
+    receiver_type: String,
+    count: usize,
+}
+
+impl UnresolvedFieldReceiverSummary {
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedFieldReceiverFileSummary {
-    pub field_name: String,
-    pub receiver_type: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    field_name: String,
+    receiver_type: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl UnresolvedFieldReceiverFileSummary {
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedFieldContextSummary {
-    pub field_name: String,
-    pub receiver_type: String,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    field_name: String,
+    receiver_type: String,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl UnresolvedFieldContextSummary {
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnresolvedConstructorContextSummary {
-    pub target_name: String,
-    pub receiver_type: String,
-    pub arg_types: Vec<String>,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    target_name: String,
+    receiver_type: String,
+    arg_types: Vec<String>,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl UnresolvedConstructorContextSummary {
+    pub fn target_name(&self) -> &str {
+        &self.target_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn arg_types(&self) -> &[String] {
+        &self.arg_types
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDependencyMethodContextSummary {
-    pub declaring_type: String,
-    pub method_name: String,
-    pub source_mode: DependencyMode,
-    pub arg_count: usize,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    declaring_type: String,
+    method_name: String,
+    source_mode: DependencyMode,
+    arg_count: usize,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl SourceDependencyMethodContextSummary {
+    pub fn declaring_type(&self) -> &str {
+        &self.declaring_type
+    }
+
+    pub fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub fn source_mode(&self) -> DependencyMode {
+        self.source_mode
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDependencyConstructorContextSummary {
-    pub declaring_type: String,
-    pub source_mode: DependencyMode,
-    pub arg_count: usize,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    declaring_type: String,
+    source_mode: DependencyMode,
+    arg_count: usize,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl SourceDependencyConstructorContextSummary {
+    pub fn declaring_type(&self) -> &str {
+        &self.declaring_type
+    }
+
+    pub fn source_mode(&self) -> DependencyMode {
+        self.source_mode
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDependencyFieldContextSummary {
-    pub declaring_type: String,
-    pub field_name: String,
-    pub receiver_type: String,
-    pub source_mode: DependencyMode,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    declaring_type: String,
+    field_name: String,
+    receiver_type: String,
+    source_mode: DependencyMode,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl SourceDependencyFieldContextSummary {
+    pub fn declaring_type(&self) -> &str {
+        &self.declaring_type
+    }
+
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn source_mode(&self) -> DependencyMode {
+        self.source_mode
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDependencyMethodSummary {
-    pub receiver_type: String,
-    pub method_name: String,
-    pub source_mode: DependencyMode,
-    pub count: usize,
+    receiver_type: String,
+    method_name: String,
+    source_mode: DependencyMode,
+    count: usize,
+}
+
+impl SourceDependencyMethodSummary {
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub fn source_mode(&self) -> DependencyMode {
+        self.source_mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDependencyConstructorSummary {
-    pub type_name: String,
-    pub arity: usize,
-    pub source_mode: DependencyMode,
-    pub count: usize,
+    type_name: String,
+    arity: usize,
+    source_mode: DependencyMode,
+    count: usize,
+}
+
+impl SourceDependencyConstructorSummary {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn arity(&self) -> usize {
+        self.arity
+    }
+
+    pub fn source_mode(&self) -> DependencyMode {
+        self.source_mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceDependencyFieldSummary {
-    pub type_name: String,
-    pub field_name: String,
-    pub source_mode: DependencyMode,
-    pub count: usize,
+    type_name: String,
+    field_name: String,
+    source_mode: DependencyMode,
+    count: usize,
+}
+
+impl SourceDependencyFieldSummary {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn source_mode(&self) -> DependencyMode {
+        self.source_mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceSummaryRecommendation {
-    pub package_prefix: String,
-    pub target_type: String,
-    pub constructor_guesses: usize,
-    pub field_guesses: usize,
-    pub method_guesses: usize,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    package_prefix: String,
+    target_type: String,
+    constructor_guesses: usize,
+    field_guesses: usize,
+    method_guesses: usize,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl SourceSummaryRecommendation {
+    pub fn package_prefix(&self) -> &str {
+        &self.package_prefix
+    }
+
+    pub fn target_type(&self) -> &str {
+        &self.target_type
+    }
+
+    pub fn constructor_guesses(&self) -> usize {
+        self.constructor_guesses
+    }
+
+    pub fn field_guesses(&self) -> usize {
+        self.field_guesses
+    }
+
+    pub fn method_guesses(&self) -> usize {
+        self.method_guesses
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiGuessSummary {
-    pub receiver_type: String,
-    pub method_name: String,
-    pub count: usize,
+    receiver_type: String,
+    method_name: String,
+    count: usize,
+}
+
+impl ExternalApiGuessSummary {
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -405,83 +817,281 @@ impl From<Option<ExternalLibraryMode>> for ExternalReportMode {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiPackSummary {
-    pub receiver_type: String,
-    pub method_name: String,
-    pub mode: ExternalReportMode,
-    pub count: usize,
+    receiver_type: String,
+    method_name: String,
+    mode: ExternalReportMode,
+    count: usize,
+}
+
+impl ExternalApiPackSummary {
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub fn mode(&self) -> ExternalReportMode {
+        self.mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiMethodContextSummary {
-    pub receiver_type: String,
-    pub method_name: String,
-    pub mode: ExternalReportMode,
-    pub arg_count: usize,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    receiver_type: String,
+    method_name: String,
+    mode: ExternalReportMode,
+    arg_count: usize,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl ExternalApiMethodContextSummary {
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn method_name(&self) -> &str {
+        &self.method_name
+    }
+
+    pub fn mode(&self) -> ExternalReportMode {
+        self.mode
+    }
+
+    pub fn arg_count(&self) -> usize {
+        self.arg_count
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiConstructorContextSummary {
-    pub target_name: String,
-    pub receiver_type: String,
-    pub mode: ExternalReportMode,
-    pub arg_types: Vec<String>,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    target_name: String,
+    receiver_type: String,
+    mode: ExternalReportMode,
+    arg_types: Vec<String>,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl ExternalApiConstructorContextSummary {
+    pub fn target_name(&self) -> &str {
+        &self.target_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn mode(&self) -> ExternalReportMode {
+        self.mode
+    }
+
+    pub fn arg_types(&self) -> &[String] {
+        &self.arg_types
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalPackConstructorSummary {
-    pub type_name: String,
-    pub arity: usize,
-    pub mode: ExternalReportMode,
-    pub count: usize,
+    type_name: String,
+    arity: usize,
+    mode: ExternalReportMode,
+    count: usize,
+}
+
+impl ExternalPackConstructorSummary {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn arity(&self) -> usize {
+        self.arity
+    }
+
+    pub fn mode(&self) -> ExternalReportMode {
+        self.mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalConstructorGuessSummary {
-    pub type_name: String,
-    pub arity: usize,
-    pub count: usize,
+    type_name: String,
+    arity: usize,
+    count: usize,
+}
+
+impl ExternalConstructorGuessSummary {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn arity(&self) -> usize {
+        self.arity
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalFieldGuessSummary {
-    pub type_name: String,
-    pub field_name: String,
-    pub mode: ExternalReportMode,
-    pub count: usize,
+    type_name: String,
+    field_name: String,
+    mode: ExternalReportMode,
+    count: usize,
+}
+
+impl ExternalFieldGuessSummary {
+    pub fn type_name(&self) -> &str {
+        &self.type_name
+    }
+
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn mode(&self) -> ExternalReportMode {
+        self.mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalApiFieldContextSummary {
-    pub field_name: String,
-    pub receiver_type: String,
-    pub mode: ExternalReportMode,
-    pub enclosing_type: String,
-    pub enclosing_member: String,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    field_name: String,
+    receiver_type: String,
+    mode: ExternalReportMode,
+    enclosing_type: String,
+    enclosing_member: String,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl ExternalApiFieldContextSummary {
+    pub fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
+    pub fn receiver_type(&self) -> &str {
+        &self.receiver_type
+    }
+
+    pub fn mode(&self) -> ExternalReportMode {
+        self.mode
+    }
+
+    pub fn enclosing_type(&self) -> &str {
+        &self.enclosing_type
+    }
+
+    pub fn enclosing_member(&self) -> &str {
+        &self.enclosing_member
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiagnosticSummary {
-    pub code: &'static str,
-    pub message: String,
-    pub mode: Option<DependencyMode>,
-    pub count: usize,
-    pub sample_files: Vec<String>,
+    code: &'static str,
+    message: String,
+    mode: Option<DependencyMode>,
+    count: usize,
+    sample_files: Vec<String>,
+}
+
+impl DiagnosticSummary {
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn mode(&self) -> Option<DependencyMode> {
+        self.mode
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
+
+    pub fn sample_files(&self) -> &[String] {
+        &self.sample_files
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SignatureBenchmarkCount {
-    pub label: String,
-    pub count: usize,
+    label: String,
+    count: usize,
+}
+
+impl SignatureBenchmarkCount {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+
+    pub fn count(&self) -> usize {
+        self.count
+    }
 }
 
 pub fn benchmark_java_resolver_dir(root: &Path) -> std::io::Result<ResolverBenchmarkReport> {
@@ -496,67 +1106,61 @@ pub fn benchmark_java_resolver_config(
         .primary_source_roots()
         .next()
         .or_else(|| config.source_roots_for_resolution().next())
-        .map(|root| root.path.clone())
+        .map(|root| root.path().to_path_buf())
         .unwrap_or_default();
     let mut report = ResolverBenchmarkReport {
         root,
         source_roots: config
-            .source_roots
+            .source_roots()
             .iter()
             .map(|root| ResolverBenchmarkSourceRoot {
-                path: root.path.clone(),
-                mode: root.mode,
-                package_prefixes: root.package_prefixes.clone(),
+                path: root.path().to_path_buf(),
+                mode: root.mode(),
+                package_prefixes: root.package_prefixes().to_vec(),
                 files_seen: 0,
             })
             .collect(),
         fact_providers: config
-            .fact_providers
+            .fact_providers()
             .iter()
-            .map(|provider| ResolverBenchmarkFactProvider {
-                name: provider.name.clone(),
-                mode: provider.mode,
-                facts: fact_count(&provider.facts),
-                external_api_effect_facts: provider.facts.external_api_effect_facts.len(),
-                external_api_argument_effect_facts: provider
-                    .facts
-                    .external_api_argument_effect_facts
-                    .len(),
-                external_crate_api_mapping_facts: provider
-                    .facts
-                    .external_crate_api_mapping_facts
-                    .len(),
-                external_crate_constructor_mapping_facts: provider
-                    .facts
-                    .external_crate_constructor_mapping_facts
-                    .len(),
-                external_constructor_facts: provider.facts.external_constructor_facts.len(),
-                external_field_facts: provider.facts.external_field_facts.len(),
-                hierarchy_override_facts: provider.facts.hierarchy_overrides.len(),
-                closed_hierarchy_facts: provider.facts.closed_hierarchy_facts.len(),
-                object_safety_facts: provider.facts.object_safety_facts.len(),
-                type_capability_facts: provider.facts.type_capability_overrides.len(),
-                field_nullability_facts: provider.facts.field_nullability_facts.len(),
-                exception_facts: provider.facts.exception_facts.len(),
-                constructor_recursion_facts: provider.facts.constructor_recursion_facts.len(),
-                external_library_pack_facts: provider.facts.external_library_packs.len(),
-                unsupported_external_api_facts: provider.facts.unsupported_external_api_facts.len(),
-                unsupported_external_constructor_facts: provider
-                    .facts
-                    .unsupported_external_constructor_facts
-                    .len(),
-                unsupported_external_field_facts: provider
-                    .facts
-                    .unsupported_external_field_facts
-                    .len(),
+            .map(|provider| {
+                let facts = provider.facts();
+                ResolverBenchmarkFactProvider {
+                    name: provider.name().to_string(),
+                    mode: provider.mode(),
+                    facts: fact_count(facts),
+                    external_api_effect_facts: facts.external_api_effect_facts.len(),
+                    external_api_argument_effect_facts: facts
+                        .external_api_argument_effect_facts
+                        .len(),
+                    external_crate_api_mapping_facts: facts.external_crate_api_mapping_facts.len(),
+                    external_crate_constructor_mapping_facts: facts
+                        .external_crate_constructor_mapping_facts
+                        .len(),
+                    external_constructor_facts: facts.external_constructor_facts.len(),
+                    external_field_facts: facts.external_field_facts.len(),
+                    hierarchy_override_facts: facts.hierarchy_overrides.len(),
+                    closed_hierarchy_facts: facts.closed_hierarchy_facts.len(),
+                    object_safety_facts: facts.object_safety_facts.len(),
+                    type_capability_facts: facts.type_capability_overrides.len(),
+                    field_nullability_facts: facts.field_nullability_facts.len(),
+                    exception_facts: facts.exception_facts.len(),
+                    constructor_recursion_facts: facts.constructor_recursion_facts.len(),
+                    external_library_pack_facts: facts.external_library_packs.len(),
+                    unsupported_external_api_facts: facts.unsupported_external_api_facts.len(),
+                    unsupported_external_constructor_facts: facts
+                        .unsupported_external_constructor_facts
+                        .len(),
+                    unsupported_external_field_facts: facts.unsupported_external_field_facts.len(),
+                }
             })
             .collect(),
         ..ResolverBenchmarkReport::default()
     };
-    collect_configured_provider_fact_counts(&config.fact_providers, &mut report);
-    collect_source_summary_provider_fact_counts(&config.fact_providers, &mut report);
+    collect_configured_provider_fact_counts(config.fact_providers(), &mut report);
+    collect_source_summary_provider_fact_counts(config.fact_providers(), &mut report);
     collect_external_pack_provider_boundary_audits(config, &mut report);
-    if config.enable_builtin_external_packs {
+    if config.enable_builtin_external_packs() {
         collect_builtin_external_pack_manifest_coverage_audit(&mut report);
     }
     let mut external_facts = FactSet::default();
@@ -568,11 +1172,11 @@ pub fn benchmark_java_resolver_config(
     let parse_started_at = Instant::now();
     for source_root in config.source_roots_for_source_index() {
         let source_root_index = config
-            .source_roots
+            .source_roots()
             .iter()
             .position(|root| root == source_root);
-        for path in java_files_under(&source_root.path)? {
-            if config.mode_for_source_path(&path) != Some(source_root.mode) {
+        for path in java_files_under(source_root.path())? {
+            if config.mode_for_source_path(&path) != Some(source_root.mode()) {
                 continue;
             }
             let source = fs::read_to_string(&path)?;
@@ -595,9 +1199,9 @@ pub fn benchmark_java_resolver_config(
             }
             parsed_files.push(ParsedJavaFile {
                 parsed,
-                mode: source_root.mode,
+                mode: source_root.mode(),
                 file_label: path
-                    .strip_prefix(&source_root.path)
+                    .strip_prefix(source_root.path())
                     .unwrap_or(&path)
                     .display()
                     .to_string(),
@@ -635,7 +1239,7 @@ pub fn benchmark_java_resolver_config(
         &source_type_modes,
         &mut representation_facts,
     );
-    if config.enable_builtin_external_packs {
+    if config.enable_builtin_external_packs() {
         extend_representation_facts_for_builtin_anonymous_targets(
             parsed_files
                 .iter()
@@ -697,7 +1301,7 @@ pub fn benchmark_java_resolver_config(
             &source_type_names,
             Some(&source_index),
             &external_facts,
-            config.enable_builtin_external_packs,
+            config.enable_builtin_external_packs(),
             &mut report,
             &parsed_file.file_label,
             parsed_file.mode,
@@ -1998,17 +2602,17 @@ fn benchmark_parsed_java_file(
     report.resolver_diagnostics += resolved
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .filter(|diagnostic| diagnostic.severity() == Severity::Error)
         .count();
     for diagnostic in resolved
         .diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.severity == Severity::Error)
+        .filter(|diagnostic| diagnostic.severity() == Severity::Error)
     {
         push_diagnostic_summary(
             &mut report.top_resolver_diagnostics,
-            diagnostic.code,
-            &diagnostic.message,
+            diagnostic.code(),
+            &diagnostic.message(),
             file_label,
             None,
         );
@@ -2029,17 +2633,15 @@ fn benchmark_parsed_java_file(
         &resolved.program,
         &resolved.facts,
         external_facts,
-        crate::semantic_analysis::SemanticAnalysisConfig {
-            enable_builtin_external_packs,
-            ..crate::semantic_analysis::SemanticAnalysisConfig::default()
-        },
+        crate::semantic_analysis::SemanticAnalysisConfig::default()
+            .with_builtin_external_packs_enabled(enable_builtin_external_packs),
     );
     report.semantic_diagnostics += semantic.diagnostics.len();
     for diagnostic in &semantic.diagnostics {
         push_diagnostic_summary(
             &mut report.top_semantic_diagnostics,
-            diagnostic.code,
-            &diagnostic.message,
+            diagnostic.code(),
+            diagnostic.message(),
             file_label,
             None,
         );
@@ -3155,36 +3757,34 @@ fn collect_signature_solver_counts(
     report: &mut ResolverBenchmarkReport,
 ) {
     let signature_report = crate::signature::signature_saturation_report(program, usage, facts);
-    let domain_stats = signature_report.domain_stats;
-    let dependency_stats = signature_report.dependency_stats;
-    let pass_stats = signature_report.pass_stats;
+    let domain_stats = signature_report.domain_stats();
+    let dependency_stats = *signature_report.dependency_stats();
+    let pass_stats = signature_report.pass_stats().clone();
 
-    report.signature_constraint_slots += domain_stats.slot_count;
-    report.signature_unique_constraints += domain_stats.unique_constraint_count;
-    report.signature_fixpoint_iteration_budget += domain_stats.iteration_budget;
-    report.signature_fixpoint_iterations += signature_report.iterations;
-    report.signature_fixpoint_diagnostics += signature_report.diagnostics;
-    report.signature_join_conflicts += signature_report.join_conflicts;
+    report.signature_constraint_slots += domain_stats.slot_count();
+    report.signature_unique_constraints += domain_stats.unique_constraint_count();
+    report.signature_fixpoint_iteration_budget += domain_stats.iteration_budget();
+    report.signature_fixpoint_iterations += signature_report.iterations();
+    report.signature_fixpoint_diagnostics += signature_report.diagnostics();
+    report.signature_join_conflicts += signature_report.join_conflicts();
+    let (top_fallback_reasons, top_conflict_axes) = signature_report.into_top_counts();
     merge_signature_benchmark_counts(
         &mut report.top_signature_fallback_reasons,
-        signature_report.top_fallback_reasons,
+        top_fallback_reasons,
     );
-    merge_signature_benchmark_counts(
-        &mut report.top_signature_conflict_axes,
-        signature_report.top_conflict_axes,
-    );
-    report.signature_dependency_graph_nodes += dependency_stats.node_count;
-    report.signature_dependency_graph_edges += dependency_stats.edge_count;
-    report.signature_dependency_sccs += dependency_stats.component_count;
-    report.signature_dependency_cyclic_sccs += dependency_stats.cyclic_component_count;
+    merge_signature_benchmark_counts(&mut report.top_signature_conflict_axes, top_conflict_axes);
+    report.signature_dependency_graph_nodes += dependency_stats.node_count();
+    report.signature_dependency_graph_edges += dependency_stats.edge_count();
+    report.signature_dependency_sccs += dependency_stats.component_count();
+    report.signature_dependency_cyclic_sccs += dependency_stats.cyclic_component_count();
     report.signature_dependency_max_scc_size = report
         .signature_dependency_max_scc_size
-        .max(dependency_stats.max_component_size);
-    report.signature_solver_planned_components += pass_stats.planned_components;
-    report.signature_solver_cyclic_components += pass_stats.cyclic_components;
+        .max(dependency_stats.max_component_size());
+    report.signature_solver_planned_components += pass_stats.planned_components();
+    report.signature_solver_cyclic_components += pass_stats.cyclic_components();
     report.signature_solver_max_component_size = report
         .signature_solver_max_component_size
-        .max(pass_stats.max_component_size);
+        .max(pass_stats.max_component_size());
 }
 
 fn collect_hierarchy_worklist_counts(
@@ -3209,14 +3809,14 @@ fn collect_type_hierarchy_worklist_counts(
     };
     let reachability = facts.reachable_hierarchy_edges_for_type_with_stats(&java_ty);
 
-    report.hierarchy_worklist_domain_slots += domain.declared_slots;
-    report.hierarchy_worklist_value_lattice_height += domain.value_lattice_height;
-    report.hierarchy_worklist_processed_items += reachability.stats.processed_items;
-    report.hierarchy_worklist_inserted_facts += reachability.stats.inserted_facts;
+    report.hierarchy_worklist_domain_slots += domain.declared_slots();
+    report.hierarchy_worklist_value_lattice_height += domain.value_lattice_height();
+    report.hierarchy_worklist_processed_items += reachability.stats().processed_items();
+    report.hierarchy_worklist_inserted_facts += reachability.stats().inserted_facts();
     report.hierarchy_worklist_max_queue_size = report
         .hierarchy_worklist_max_queue_size
-        .max(reachability.stats.max_queue_len);
-    report.hierarchy_worklist_budget_diagnostics += reachability.diagnostics.len();
+        .max(reachability.stats().max_queue_len());
+    report.hierarchy_worklist_budget_diagnostics += reachability.diagnostics().len();
 
     for member in &ty.members {
         if let Member::Type(nested) = member {
@@ -3288,8 +3888,8 @@ fn collect_object_representation_counts_for_program(
         for diagnostic in diagnostics {
             push_diagnostic_summary(
                 &mut report.top_object_representation_diagnostics,
-                diagnostic.code,
-                &diagnostic.message,
+                diagnostic.code(),
+                diagnostic.message(),
                 program_label,
                 mode,
             );
@@ -3299,7 +3899,7 @@ fn collect_object_representation_counts_for_program(
         return;
     }
     for representation in representations.type_representations() {
-        match &representation.representation {
+        match representation.representation() {
             crate::representation::ObjectRepresentation::ConcreteStruct => {
                 report.object_concrete_struct_representations += 1;
             }
@@ -5170,50 +5770,54 @@ fn collect_configured_provider_fact_counts(
     report: &mut ResolverBenchmarkReport,
 ) {
     for provider in providers {
-        report.configured_provider_facts += fact_count(&provider.facts);
+        report.configured_provider_facts += fact_count(&provider.facts());
         report.configured_provider_external_api_effect_facts +=
-            provider.facts.external_api_effect_facts.len();
+            provider.facts().external_api_effect_facts.len();
         report.configured_provider_external_api_argument_effect_facts +=
-            provider.facts.external_api_argument_effect_facts.len();
-        report.configured_provider_capture_facts += provider.facts.captures.owners.len();
+            provider.facts().external_api_argument_effect_facts.len();
+        report.configured_provider_capture_facts += provider.facts().captures.owners.len();
         report.configured_provider_trivial_accessor_facts +=
-            provider.facts.trivial_accessor_facts.len();
-        report.configured_provider_method_effect_facts += provider.facts.method_effect_facts.len();
-        report.configured_provider_recursion_facts += provider.facts.recursion_facts.len();
+            provider.facts().trivial_accessor_facts.len();
+        report.configured_provider_method_effect_facts +=
+            provider.facts().method_effect_facts.len();
+        report.configured_provider_recursion_facts += provider.facts().recursion_facts.len();
         report.configured_provider_constructor_recursion_facts +=
-            provider.facts.constructor_recursion_facts.len();
-        report.configured_provider_control_flow_facts += provider.facts.control_flow_facts.len();
+            provider.facts().constructor_recursion_facts.len();
+        report.configured_provider_control_flow_facts += provider.facts().control_flow_facts.len();
         report.configured_provider_dispatch_requirement_facts +=
-            provider.facts.dispatch_requirement_facts.len();
-        report.configured_provider_catch_facts += provider.facts.catch_facts.len();
+            provider.facts().dispatch_requirement_facts.len();
+        report.configured_provider_catch_facts += provider.facts().catch_facts.len();
         report.configured_provider_external_crate_api_mapping_facts +=
-            provider.facts.external_crate_api_mapping_facts.len();
+            provider.facts().external_crate_api_mapping_facts.len();
         report.configured_provider_external_crate_constructor_mapping_facts += provider
-            .facts
+            .facts()
             .external_crate_constructor_mapping_facts
             .len();
         report.configured_provider_external_constructor_facts +=
-            provider.facts.external_constructor_facts.len();
+            provider.facts().external_constructor_facts.len();
         report.configured_provider_external_field_facts +=
-            provider.facts.external_field_facts.len();
+            provider.facts().external_field_facts.len();
         report.configured_provider_hierarchy_override_facts +=
-            provider.facts.hierarchy_overrides.len();
+            provider.facts().hierarchy_overrides.len();
         report.configured_provider_closed_hierarchy_facts +=
-            provider.facts.closed_hierarchy_facts.len();
-        report.configured_provider_object_safety_facts += provider.facts.object_safety_facts.len();
+            provider.facts().closed_hierarchy_facts.len();
+        report.configured_provider_object_safety_facts +=
+            provider.facts().object_safety_facts.len();
         report.configured_provider_type_capability_facts +=
-            provider.facts.type_capability_overrides.len();
+            provider.facts().type_capability_overrides.len();
         report.configured_provider_field_nullability_facts +=
-            provider.facts.field_nullability_facts.len();
-        report.configured_provider_exception_facts += provider.facts.exception_facts.len();
+            provider.facts().field_nullability_facts.len();
+        report.configured_provider_exception_facts += provider.facts().exception_facts.len();
         report.configured_provider_external_library_pack_facts +=
-            provider.facts.external_library_packs.len();
+            provider.facts().external_library_packs.len();
         report.configured_provider_unsupported_external_api_facts +=
-            provider.facts.unsupported_external_api_facts.len();
-        report.configured_provider_unsupported_external_constructor_facts +=
-            provider.facts.unsupported_external_constructor_facts.len();
+            provider.facts().unsupported_external_api_facts.len();
+        report.configured_provider_unsupported_external_constructor_facts += provider
+            .facts()
+            .unsupported_external_constructor_facts
+            .len();
         report.configured_provider_unsupported_external_field_facts +=
-            provider.facts.unsupported_external_field_facts.len();
+            provider.facts().unsupported_external_field_facts.len();
     }
 }
 
@@ -5223,55 +5827,57 @@ fn collect_source_summary_provider_fact_counts(
 ) {
     for provider in providers
         .iter()
-        .filter(|provider| provider.mode == DependencyMode::SourceSummary)
+        .filter(|provider| provider.mode() == DependencyMode::SourceSummary)
     {
-        report.source_summary_provider_facts += fact_count(&provider.facts);
+        report.source_summary_provider_facts += fact_count(&provider.facts());
         report.source_summary_provider_external_api_effect_facts +=
-            provider.facts.external_api_effect_facts.len();
+            provider.facts().external_api_effect_facts.len();
         report.source_summary_provider_external_api_argument_effect_facts +=
-            provider.facts.external_api_argument_effect_facts.len();
-        report.source_summary_provider_capture_facts += provider.facts.captures.owners.len();
+            provider.facts().external_api_argument_effect_facts.len();
+        report.source_summary_provider_capture_facts += provider.facts().captures.owners.len();
         report.source_summary_provider_trivial_accessor_facts +=
-            provider.facts.trivial_accessor_facts.len();
+            provider.facts().trivial_accessor_facts.len();
         report.source_summary_provider_method_effect_facts +=
-            provider.facts.method_effect_facts.len();
-        report.source_summary_provider_recursion_facts += provider.facts.recursion_facts.len();
+            provider.facts().method_effect_facts.len();
+        report.source_summary_provider_recursion_facts += provider.facts().recursion_facts.len();
         report.source_summary_provider_constructor_recursion_facts +=
-            provider.facts.constructor_recursion_facts.len();
+            provider.facts().constructor_recursion_facts.len();
         report.source_summary_provider_control_flow_facts +=
-            provider.facts.control_flow_facts.len();
+            provider.facts().control_flow_facts.len();
         report.source_summary_provider_dispatch_requirement_facts +=
-            provider.facts.dispatch_requirement_facts.len();
-        report.source_summary_provider_catch_facts += provider.facts.catch_facts.len();
+            provider.facts().dispatch_requirement_facts.len();
+        report.source_summary_provider_catch_facts += provider.facts().catch_facts.len();
         report.source_summary_provider_external_crate_api_mapping_facts +=
-            provider.facts.external_crate_api_mapping_facts.len();
+            provider.facts().external_crate_api_mapping_facts.len();
         report.source_summary_provider_external_crate_constructor_mapping_facts += provider
-            .facts
+            .facts()
             .external_crate_constructor_mapping_facts
             .len();
         report.source_summary_provider_external_constructor_facts +=
-            provider.facts.external_constructor_facts.len();
+            provider.facts().external_constructor_facts.len();
         report.source_summary_provider_external_field_facts +=
-            provider.facts.external_field_facts.len();
+            provider.facts().external_field_facts.len();
         report.source_summary_provider_hierarchy_override_facts +=
-            provider.facts.hierarchy_overrides.len();
+            provider.facts().hierarchy_overrides.len();
         report.source_summary_provider_closed_hierarchy_facts +=
-            provider.facts.closed_hierarchy_facts.len();
+            provider.facts().closed_hierarchy_facts.len();
         report.source_summary_provider_object_safety_facts +=
-            provider.facts.object_safety_facts.len();
+            provider.facts().object_safety_facts.len();
         report.source_summary_provider_type_capability_facts +=
-            provider.facts.type_capability_overrides.len();
+            provider.facts().type_capability_overrides.len();
         report.source_summary_provider_field_nullability_facts +=
-            provider.facts.field_nullability_facts.len();
-        report.source_summary_provider_exception_facts += provider.facts.exception_facts.len();
+            provider.facts().field_nullability_facts.len();
+        report.source_summary_provider_exception_facts += provider.facts().exception_facts.len();
         report.source_summary_provider_external_library_pack_facts +=
-            provider.facts.external_library_packs.len();
+            provider.facts().external_library_packs.len();
         report.source_summary_provider_unsupported_external_api_facts +=
-            provider.facts.unsupported_external_api_facts.len();
-        report.source_summary_provider_unsupported_external_constructor_facts +=
-            provider.facts.unsupported_external_constructor_facts.len();
+            provider.facts().unsupported_external_api_facts.len();
+        report.source_summary_provider_unsupported_external_constructor_facts += provider
+            .facts()
+            .unsupported_external_constructor_facts
+            .len();
         report.source_summary_provider_unsupported_external_field_facts +=
-            provider.facts.unsupported_external_field_facts.len();
+            provider.facts().unsupported_external_field_facts.len();
     }
 }
 
@@ -7164,13 +7770,13 @@ fn merge_signature_benchmark_counts(
     for count in counts {
         if let Some(summary) = summaries
             .iter_mut()
-            .find(|summary| summary.label == count.label)
+            .find(|summary| summary.label == count.label())
         {
-            summary.count += count.count;
+            summary.count += count.count();
         } else {
             summaries.push(SignatureBenchmarkCount {
-                label: count.label,
-                count: count.count,
+                label: count.label().to_string(),
+                count: count.count(),
             });
         }
     }
@@ -8072,7 +8678,7 @@ fn push_diagnostic_summary(
 }
 
 fn collect_builtin_external_pack_manifest_coverage_audit(report: &mut ResolverBenchmarkReport) {
-    for manifest in crate::external_packs::builtin_external_pack_manifests() {
+    for manifest in crate::external_packs::builtin_external_pack_manifest_slice() {
         let Some(facts) = crate::external_packs::builtin_external_pack_facts(manifest.pack_name)
         else {
             continue;
@@ -8097,28 +8703,28 @@ fn collect_external_pack_provider_boundary_audits(
     config: &DependencyModeConfig,
     report: &mut ResolverBenchmarkReport,
 ) {
-    for provider in &config.fact_providers {
-        if provider.facts.external_library_packs.is_empty() {
+    for provider in config.fact_providers() {
+        if provider.facts().external_library_packs.is_empty() {
             continue;
         }
         if let Some(manifest) =
-            crate::external_packs::builtin_external_pack_manifest_for_provider_name(&provider.name)
+            crate::external_packs::builtin_external_pack_manifest_for_provider_name(provider.name())
         {
             push_external_pack_manifest_audit(
                 report,
-                &provider.name,
-                Some(provider.mode),
+                provider.name(),
+                Some(provider.mode()),
                 crate::external_packs::audit_external_pack_manifest_coverage(
                     &manifest,
-                    &provider.facts,
+                    provider.facts(),
                 ),
             );
         }
         push_external_pack_manifest_audit(
             report,
-            &provider.name,
-            Some(provider.mode),
-            crate::external_packs::audit_external_pack_fact_boundaries(&provider.facts),
+            provider.name(),
+            Some(provider.mode()),
+            crate::external_packs::audit_external_pack_fact_boundaries(provider.facts()),
         );
     }
 }
@@ -8133,8 +8739,8 @@ fn push_external_pack_manifest_audit(
     for diagnostic in audit.iter() {
         push_diagnostic_summary(
             &mut report.top_external_pack_manifest_coverage_diagnostics,
-            diagnostic.code,
-            &diagnostic.message,
+            diagnostic.code(),
+            &diagnostic.message(),
             source_name,
             mode,
         );

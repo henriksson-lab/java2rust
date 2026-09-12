@@ -55,29 +55,54 @@ Current tree update:
   field was deleted rather than kept as a dead public handle.
 * Follow-up 2026-09-10: `UsageFacts.methods_by_java_key` is now private to
   the usage module.
-  Non-owner code reads it through `source_method_usage_by_java_key`, and the
-  same-simple-name package-peer regression now asserts usage identity through
-  that query boundary instead of directly iterating the backing map. This does
-  not replace owner strings with a first-class key, but it removes one more
-  direct Java-key table access outside the owning module. Regression:
+  The broad `source_method_usage_by_java_key` reader is private too; non-owner
+  code uses source declarations, resolved-owner helpers, or narrower test-only
+  predicates instead of arbitrary Java-key lookup. The same-simple-name
+  package-peer regression asserts usage identity through that declaration
+  boundary instead of directly iterating the backing map. This does not replace
+  owner strings with a first-class key, but it removes one more direct Java-key
+  table access outside the owning module. Regression:
   `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`
   and `batch_analysis_keys_keep_same_simple_name_package_peers_distinct`.
-  Follow-up cleanup moved that package-peer regression's usage assertion through
-  `CallableAnalysis::method_usage_by_java_key`, so the test no longer bypasses
-  the shell to reach `UsageFacts::source_method_usage_by_java_key` directly.
-  That Java-key usage shell method is test-only/crate-local now; production
-  callers use declaration/resolved-owner helpers instead of exposing a broad
-  non-injective usage lookup.
+  Follow-up cleanup briefly moved that package-peer regression's usage
+  assertion through `CallableAnalysis::method_usage_by_java_key`, then removed
+  that broad test-only shell method as well. The fixture now checks usage through
+  `UsageFacts::source_method_usage(ty, method)` on the recovered source
+  declarations; production and tests use declaration/resolved-owner helpers
+  instead of exposing an arbitrary Java-key usage lookup through the shell.
+  Follow-up cleanup also made the arbitrary `source_method_usage_for_owner`
+  helper private to `usage.rs`; cross-module resolved-owner queries now use the
+  narrower `resolved_source_method_usage_for_owner(owner, method)` wrapper.
   `CallableAnalysis` no longer stores `SignaturePlan` either; the only
   remaining package-peer signature assertion now queries the signature plan
   directly, and the callable shell is limited to usage, exception, and
   fallibility questions.
-  The broad `method_usage` and `constructor_usage` key wrappers are private
-  implementation details now; callers outside the shell use the named
-  current/source usage questions instead of reaching for arbitrary usage keys.
+  Follow-up cleanup confined the package-peer fixture's remaining raw
+  `JavaCallableKey` owner/name predicates to named test helpers, so the test
+  body states the Java-owner-space invariant instead of open-coding alias
+  checks at each assertion site.
+  Codex follow-up 2026-09-12: `facts::external_type_name_matches` is now
+  crate-local. This does not replace normalized external type-name matching
+  with a first-class identity key, but it removes another public ad hoc
+  equivalence hook. Guard:
+  `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+  Follow-up cleanup pushed the negative alias check behind
+  `UsageFacts::source_method_usage_has_collapsed_owner_alias`, deleting the
+  test-only raw `source_method_usage_java_keys()` iterator. The fixture still
+  checks for `Item`/`AItem`/`BItem` collapse, but it no longer iterates the
+  backing Java-key map outside `usage.rs`.
+  The broad `method_usage`, `constructor_usage`, `method_usage_by_key`, and
+  `constructor_usage_by_key` wrappers are private implementation details now;
+  callers use named current/source/resolved usage questions instead of reaching
+  for arbitrary usage keys. Current-Rust-name compatibility remains explicit as
+  `UsageFacts::current_rust_method_usage` and
+  `UsageFacts::current_rust_constructor_usage`.
   The remaining result/exception `CallableAnalysis` questions are crate-local
   too, matching their actual lowerer-only caller set instead of making the shell
   a public API.
+  Follow-up cleanup made the `CallableAnalysis` shell type and constructor
+  crate-local as well. Lowering still receives the same analysis handle, but
+  external callers cannot treat the compatibility shell as public crate API.
   Test-only usage seeding now goes through
   `UsageFacts::insert_source_method_usage` instead of mutating the backing map
   from `signature.rs` and `slot_policy.rs`.
@@ -85,6 +110,16 @@ Current tree update:
   `CallableKey::method_identity` instead of a direct `CallableKey::Method`
   literal, and the raw-key guard covers that test module while still allowing
   legitimate production pattern matches.
+  Follow-up cleanup narrowed `signature::MethodKey::type_name` and
+  `signature::ConstructorKey::{type_name,rust_name}` to crate-local callers and
+  deleted the unused `MethodKey::rust_name` accessor. External tests that need
+  to assert signature dependency identity now compare whole keys built through
+  `rust_identity(...)` instead of inspecting the owner/name tuple.
+  Signature field-shape queries also now expose declaration-shaped public
+  helpers, `field_shape_for_declared_field` and
+  `required_declared_field_shape`; raw `(type_name, field_name)` lookup is
+  crate-local compatibility surface for lowerers that still operate on rendered
+  owner/name pairs.
 * Follow-up 2026-09-10: the same-simple-name package-peer regression now also
   asserts emitted source-item cardinality for the distinct `AItem` and `BItem`
   owners. This closes the test-surface hole where the fixture proved the names
@@ -107,6 +142,12 @@ Current tree update:
   Follow-up cleanup narrowed `facts::CallableKey::with_owner_type` to
   crate-local too. It remains available to builtin external-pack alias expansion
   but is no longer a public owner-rewriting API over raw strings.
+  Codex follow-up 2026-09-11 narrowed the inherited-member result carriers as
+  well: source inherited field/method refs and external inherited field/method
+  records now keep their owner/name payloads private behind read-only
+  accessors. This does not replace the remaining string owner model, but it
+  prevents downstream callers from treating inherited-member discovery results
+  as mutable identity structs.
 * Follow-up 2026-09-10: `resolve::ConstantDeclaration` no longer exposes its
   package-qualified owner, package, or field payload publicly. Constant folding
   still constructs declarations centrally from `TypeDecl` traversal and keeps
@@ -141,9 +182,10 @@ Current tree update:
   full traversal now uses owner-provided entry/value iterators, direct lookups go
   through key query methods, and fixture seeding goes through
   `insert_method_usage` instead of replacing the backing map.
-  The legacy Rust-name compatibility map is private too; `callable_analysis`
-  reads it through `UsageFacts::rust_name_method_entries` for the remaining
-  family lookup.
+  The legacy Rust-name compatibility map is private too. The remaining
+  Rust-name family binding lookup is now owned by
+  `UsageFacts::binding_facts_for_rust_method_family`, so `callable_analysis`
+  asks the narrow binding question instead of iterating the non-injective map.
   Follow-up cleanup narrowed the current-Rust-name usage-key constructors to
   crate-local and added `UsageFacts` owner-level lookup/insert helpers for the
   compatibility cases that still seed or query by emitted Rust names. Integration
@@ -153,6 +195,27 @@ Current tree update:
   well, so external tests and downstream users cannot treat those compatibility
   strings as public semantic identity. Guard:
   `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  Codex follow-up 2026-09-12 narrowed
+  `usage::CallableKey::{resolved_method,resolved_constructor,constructor_identity,external_constructor}`
+  to crate-local constructors. Public callers still get the source-method and
+  external-method identity surfaces needed by the integration call-graph tests,
+  plus read-only `*_parts` inspection, but downstream code can no longer build
+  constructor or resolved-call graph keys from arbitrary owner/name strings.
+  Guard: `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+  Follow-up cleanup also narrowed `CallGraph::from_edges` and
+  `CallGraphEdge::new` to cfg-test crate-local callers. Public users can still
+  inspect nodes/edges and build node-only synthetic graphs through `from_nodes`,
+  but arbitrary edge construction over `CallableKey` identity is no longer a
+  production or public crate API. Guard:
+  `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+  Codex follow-up 2026-09-12 replaced remaining direct
+  `usage::CallableKey::{Method,Constructor,ExternalMethod}` field
+  destructuring in `semantic_analysis` and `exception_plan` with the named
+  `method_identity_parts`, `constructor_identity_parts`, and
+  `external_method_parts` query methods. The callable-key layering guard now
+  covers those production modules too, so non-owner code cannot casually reopen
+  the raw owner/name enum payload while traversing call graph edges or seeding
+  fallibility.
 * Follow-up 2026-09-09: usage collection and signature planning no longer build
   declaration-backed source method/constructor keys with local struct literals.
   The canonical source-method key, source-constructor key, and legacy Java-name
@@ -202,6 +265,15 @@ Current tree update:
   fallback also pairs argument shapes with the overload selected by argument
   types instead of borrowing `matching_methods[0]`. Regression:
   `lower::tests::source_context_receiver_fallback_pairs_selected_signature_with_selected_overload`.
+
+  Codex follow-up 2026-09-12: the source-receiver recovery path no longer
+  unwraps `SourceContextOwnerKey` through `source_receiver_type_name(...)`.
+  Output/input stream special cases, source declared overload retargeting,
+  Object `toString` fallback, and trivial-accessor return-shape lookup now keep
+  the `SourceContextOwnerKey` wrapper through the exact signature/type lookup
+  boundary instead of eagerly downgrading to a raw string. This is still a
+  string-backed compatibility wrapper, not first-class package-aware owner
+  identity. Guard: `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
   The same pass removed two sorted-owner fallbacks that could erase resolver
   priority: optional current-method display shape lookup and returned-field
   accessor shape lookup now try the resolved declaring owner before the
@@ -212,7 +284,76 @@ Current tree update:
   Follow-up cleanup: the immediate receiver fallback candidate helper now keeps
   `SourceContextOwnerKey` values through lookup callers instead of downgrading
   to plain `String` at the API boundary. Guard:
-  `layering::receiver_fallback_owner_candidates_stay_typed_until_lookup`.
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+  Follow-up cleanup: nested receiver-owner candidates, receiver fallback
+  ambiguity resolution, source-context receiver fallback lookup, and
+  source-call owner lookup now ask `SourceContextOwnerKey` for nested owners,
+  resolved owner identity, or context type lookup instead of open-coding
+  `find_context_type_by_key_in_lower_ctx(ctx, owner.as_str())` /
+  `resolved_context_owner_key(ctx, ...)` beside the wrapper. This still does not
+  make the key first-class or package-aware, but it narrows another raw-string
+  escape hatch at the fallback boundary. Guards:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup` and
+  `lower::tests::nested_owner_candidates_refuse_ambiguous_current_owner`.
+  Follow-up cleanup: the source returned-field lookup helper used by
+  receiverless calls and trivial accessor return-shape recovery now accepts a
+  `SourceContextOwnerKey` and asks it for context type lookup, rather than
+  taking an already-downgraded `&str` owner. The signature-field lookup still
+  consumes the legacy string key, so this is another wrapper-boundary cleanup
+  rather than first-class owner identity. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+  Follow-up cleanup: resolved static receiver matching now asks
+  `SourceContextOwnerKey::resolves_to_owner(...)` for both parsed static-owner
+  candidates and static import aliases instead of routing through a free
+  `context_type_key_resolves_to_owner(ctx, type_key, owner)` helper over raw
+  strings. This keeps the comparison at the wrapper boundary; the owner payload
+  is still string-backed. Guards:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup` and
+  `lower::tests::resolved_static_fallback_uses_resolved_context_owner_not_declaring_spelling`.
+  Follow-up cleanup: `SourceContextOwnerKey::resolves_to_owner` now takes the
+  target owner as `&SourceContextOwnerKey` too, so the resolved-owner comparison
+  no longer reopens a raw owner string lookup inside the wrapper method.
+  Follow-up cleanup: static-owner emitted-context checks now keep
+  `SourceContextOwnerKey` candidates through the emitted/source-summary
+  predicate too. `SourceContextOwnerKey::{is_static_context_emitted,
+  is_non_program_emitted_context,is_emitted_program_context}` replace the
+  free `static_owner_key_is_non_program_emitted_context(owner, ctx)` helper for
+  the static-owner receiver and fallback-signature paths. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+  Follow-up cleanup: those three predicates now share
+  `SourceContextOwnerKey::find_emitted_context_type_and_program(...)`, keeping
+  the raw emitted-context lookup at one owner-key boundary.
+  Follow-up cleanup: the remaining static emitted-owner helpers for
+  source-program alias checks now delegate to
+  `SourceContextOwnerKey::{is_static_context_emitted,is_emitted_program_context}`
+  instead of calling the raw emitted-context lookup directly. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+  Follow-up cleanup: the receiverless current static source-context fallback now
+  wraps `ctx.current_type` as a `SourceContextOwnerKey` before resolving the
+  current declaration, instead of reopening
+  `find_context_type_by_key_in_lower_ctx(ctx, current_type)` inside the fallback
+  helper. The signature-plan probes still use legacy string owners, so this is
+  a boundary cleanup, not first-class owner identity. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+  Follow-up cleanup: nested receiver-owner recovery now wraps
+  `ctx.current_type` as `SourceContextOwnerKey` before resolving the current
+  declaration. This keeps the nested-type owner helper on the same wrapper
+  boundary as receiver-owner lookup instead of reopening
+  `find_context_type_by_key_in_lower_ctx(ctx, current_type)` locally. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`;
+  behavior probe:
+  `lower::tests::nested_owner_candidates_refuse_ambiguous_current_owner`.
+  Follow-up cleanup: receiverless summary return-shape lookup now accepts
+  `&SourceContextOwnerKey` for the current owner and resolves through
+  `current_owner.find_context_type(ctx)?`. Both production callers wrap
+  `ctx.current_type` before crossing the helper boundary, and the ambiguity
+  behavior remains covered by
+  `lower::tests::receiverless_summary_return_shape_refuses_ambiguous_current_owner`.
+  Follow-up cleanup: the remaining direct tuple-struct construction sites for
+  `SourceContextOwnerKey` now go through `SourceContextOwnerKey::new(...)`.
+  This does not change the string-backed model, but it keeps all owner-key
+  construction behind the named wrapper boundary. Guard:
+  `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
 * Follow-up 2026-09-09: fact-level method and constructor keys now have named
   constructors. Parsed-source semantic/resolve facts use
   `facts::MethodKey::source_method`, external/user override facts use
@@ -273,9 +414,16 @@ Current tree update:
   `#[non_exhaustive]`. Internal analysis can still pattern-match the current
   enum while the real opaque-key model remains open, but downstream crates can
   no longer construct raw `CallableKey::Method { type_name, method_name }` or
-  sibling struct-like variants directly. Public construction must go through
-  the named constructor surface. Guard:
+  sibling struct-like variants directly. Public construction is limited to the
+  remaining non-source surfaces such as external methods; source/resolved
+  method and constructor identity constructors stay crate-local. Guard:
   `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+  This paragraph is about `usage::CallableKey`, the call-graph/fallibility
+  identity key. It does not claim that `facts::CallableKey::resolved_method` or
+  `facts::CallableKey::resolved_constructor` are crate-local; those remain
+  public fact-query constructors by design, and
+  `layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`
+  intentionally guards that public boundary.
   Follow-up cleanup added public read-only query methods for call-graph
   assertions (`method_identity_parts`, `constructor_identity_parts`,
   `external_method_parts`, `external_constructor_parts`, `is_lambda`, and
@@ -283,6 +431,10 @@ Current tree update:
   `new_java2rust::usage::CallableKey::* { ... }` field patterns. The same
   layering guard now rejects reintroducing those public raw enum-field reads in
   that integration-test surface.
+  Follow-up cleanup also narrowed `CallableKey::method_identity` itself to
+  crate-local. Integration tests that need source method keys now find existing
+  call-graph nodes through `nodes()` plus `method_identity_parts()` instead of
+  constructing owner/name identity from arbitrary strings.
   Follow-up cleanup also moved fallibility-invariant diagnostic rendering behind
   `CallableKey::diagnostic_label`, so that module no longer pattern-matches the
   public callable enum just to recover owner/name strings. The existing layering
@@ -365,7 +517,8 @@ Current tree update:
   leaving direct key literals in `src/signature.rs` only at the key definitions.
   A later pass did the same for direct `usage::CallableKey::Method` construction
   in the slot-shape integration tests; those call-graph/fallibility fixtures now
-  use `CallableKey::method_identity(...)`, and the layering guard rejects direct
+  inspect existing graph nodes through `method_identity_parts()` rather than
+  constructing source method keys, and the layering guard rejects direct
   method-key literals on that integration-test surface. A follow-up pass moved
   `src/usage.rs`'s own source-key constructor regression off raw
   `UsageMethodKey { ... }` / `UsageConstructorKey { ... }` expected values too;
@@ -584,6 +737,11 @@ Current tree update:
   package peers are present. Unique simple-name compatibility remains accepted.
   Regression:
   `array_default_obligations::tests::package_qualified_object_array_default_obligation_does_not_mark_package_peer`.
+  Follow-up cleanup made the `array_default_obligations` module private, kept
+  `program_allocates_object_array_of` crate-local, and made the raw
+  `object_array_element_type_names` collector private. Item assembly can still
+  ask the obligation question, but downstream users cannot treat the
+  simple-name compatibility collector as public owner-identity API.
 * Follow-up 2026-09-07: fact-backed external static constant planning now
   renders the owner from the exact external field fact instead of stripping the
   queried receiver to its simple name after lookup. Package peers such as
@@ -657,6 +815,9 @@ Current tree update:
   context peer is searched first when `a.Holder` and `b.Holder` are both
   visible; exact `a.Holder` remains accepted. Regression:
   `lower::tests::static_singleton_initializer_refuses_ambiguous_current_owner`.
+  Follow-up cleanup: this current-owner lookup now resolves through
+  `SourceContextOwnerKey` as well. Guard:
+  `layering::current_owner_utility_lookups_stay_wrapped_until_context_lookup`.
 * Unsupported source-constructor call handoff now resolves the constructed
   source type through the combined context lookup. A bare `new Item()` no longer
   emits the unsupported-super-constructor handoff from `a.Item` when another
@@ -668,6 +829,12 @@ Current tree update:
   ambiguous `Holder` no longer contributes `a.Holder.Mode` as a candidate for
   `mode`, while exact `a.Holder` still does. Regression:
   `lower::tests::enum_static_field_owner_candidates_refuse_ambiguous_current_owner`.
+  Follow-up cleanup: the nested enum static-field and current-type enum alias
+  helpers now perform that current-owner lookup through
+  `SourceContextOwnerKey::new(current_type).find_context_type(ctx)` instead of
+  reopening the raw `find_context_type_by_key_in_lower_ctx(ctx, current_type)`
+  call locally. Guard:
+  `layering::enum_current_owner_lookup_stays_wrapped_until_context_lookup`.
 * Source constructor lowering for a concrete destination slot now uses the
   combined context lookup for the constructed type guard. `new Item()` fails
   closed when `Item` is ambiguous across `a.Item` and `b.Item`, while exact
@@ -682,6 +849,20 @@ Current tree update:
   Regressions:
   `lower::tests::current_type_field_shape_refuses_ambiguous_context_owner` and
   `lower::tests::static_final_const_array_field_type_refuses_ambiguous_current_owner`.
+  Follow-up cleanup: both current-field helpers now route the current-owner
+  context lookup through `SourceContextOwnerKey` before asking for field
+  details, instead of reopening the raw current-type string lookup locally.
+  Guard: `layering::current_field_owner_lookup_stays_wrapped_until_context_lookup`.
+  The same wrapper-boundary cleanup was applied to current source field-name
+  recovery (`current_type_source_instance_field_rust_name`), with behavior still
+  covered by
+  `lower::tests::current_type_source_field_name_refuses_cross_context_simple_owner`.
+  Follow-up cleanup: the remaining direct `ctx.current_type?` context lookups
+  in source parameter shape recovery and `this` receiver generic return-shape
+  recovery now also route through `SourceContextOwnerKey::find_context_type`.
+  This keeps the current owner wrapped at the lookup boundary without changing
+  the broader string-owner model. Guard:
+  `layering::current_owner_utility_lookups_stay_wrapped_until_context_lookup`.
 * Source-summary receiver method return-shape recovery no longer checks
   `source_summary_type_program` directly before the combined context lookup. A
   `this.value()` call under a bare ambiguous current type no longer borrows the
@@ -696,6 +877,9 @@ Current tree update:
   same-simple package peers fail closed while exact and unique emitted aliases
   still resolve. Regression:
   `lower::tests::source_enum_type_decl_lookup_refuses_cross_program_ambiguous_simple_owner`.
+  Follow-up cleanup: the current-type enum lookup helper now uses
+  `SourceContextOwnerKey` for that context lookup boundary as well. Guard:
+  `layering::enum_current_owner_lookup_stays_wrapped_until_context_lookup`.
 * Signature-plan required method/field fallbacks no longer cross distinct
   qualified owners after an exact lookup misses. The compatibility fallback for
   a unique bare `Item` owner remains, but `a.Item::who` and `a.Item::value` no
@@ -764,6 +948,18 @@ allocator and many package-ambiguity guards, but the type/method identity model
 is still expressed through strings at many boundaries instead of one resolved
 entity map.
 
+Codex follow-up 2026-09-12 field-name allocator cleanup: the instance/static
+field rows above still expose separate crate-local entry points because callers
+ask different semantic questions, but both now delegate to one private
+`source_field_rust_names(...)` allocator. That keeps the keyword/user-suffix
+collision policy single-valued for fields while preserving separate static and
+instance namespaces. Guards:
+`java_naming::tests::source_field_allocators_share_keyword_collision_policy`
+and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
+The singular accessors used by lowering call sites are pinned by
+`java_naming::tests::source_single_field_accessors_share_keyword_collision_policy`
+so they cannot drift back to allocating against an empty occupancy set.
+
 `allocate_rust_ident` (`src/java_naming.rs`) remains the right primitive: it
 takes a base name and an occupancy set and appends `_` until free. The remaining
 gap is where that allocation result is not yet the only source of truth.
@@ -776,16 +972,17 @@ actually indexes are still string-keyed:
 
 ```rust
 // src/facts.rs
-pub struct MethodKey { pub type_name: String, pub method_name: String }   // Java name
+pub struct MethodKey { type_name: String, method_name: String }   // Java name
 // src/signature.rs / src/usage.rs
 // Method keys now hide their fields behind constructors/accessors, but still
 // carry owner/name strings rather than one first-class owner key.
 ```
 
-The live state is better fenced than the original, but it still keys owner
-identity on type-name strings in multiple surfaces. `src/lower.rs` also still
-has many direct `.name ==` comparisons. Some are harmless syntax checks, but the
-type system cannot distinguish them.
+The live state is now private-backed, and helper APIs that only serve internal
+renaming are crate-local, but it still keys owner identity on type-name strings
+in multiple surfaces. `src/lower.rs` also still has many direct `.name ==`
+comparisons. Some are harmless syntax checks, but the type system cannot
+distinguish them.
 
 ---
 
@@ -1098,9 +1295,10 @@ Current tree status: stale. The current `boxed_dyn_trait_projection` goes throug
 the historical notes below as evidence of the original recurrence, not as an
 open symptom.
 
-0009's 2026-08-03 update introduced `normalize_emitted_java_type_name`
-(`src/coercion.rs:11188`) with the comment *"Every position that emits a Java
-type name as Rust goes through this."* Three do:
+0009's 2026-08-03 update introduced `normalize_emitted_java_type_name` (now in
+`src/coercion.rs`; line numbers in the historical notes below have drifted) with
+the comment *"Every position that emits a Java type name as Rust goes through
+this."* Three did at the time:
 
 ```rust
 borrow_as_dyn_trait            (src/coercion.rs:1970)  -> normalize_emitted_java_type_name
@@ -1108,7 +1306,7 @@ borrow_boxed_as_dyn_trait      (src/coercion.rs:1981)  -> normalize_emitted_java
 anonymous_dyn_trait_projection (src/coercion.rs:2006)  -> normalize_emitted_java_type_name
 ```
 
-`boxed_dyn_trait_projection` (`src/coercion.rs:7447`) does not:
+At the time, `boxed_dyn_trait_projection` did not:
 
 ```rust
 pub fn boxed_dyn_trait_projection(value: RustExpr, trait_name: &str) -> RustExpr {
@@ -1311,6 +1509,14 @@ combined context lookup to support `a.Util`; the fallback signature now returns
 on that resolved declaration owner. Regression:
 `lower::tests::source_context_receiver_fallback_uses_resolved_owner_not_receiver_type_spelling`.
 
+Codex follow-up 2026-09-12: constructor field-name recovery now also enters
+context lookup through `SourceContextOwnerKey`, preserving the exact-vs-bare
+owner behavior while removing another raw owner lookup from
+`source_instance_field_rust_name`. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`;
+behavior guard:
+`lower::tests::source_field_name_refuses_ambiguous_context_owner`.
+
 Follow-up 2026-08-25: resolved static source-context fallback now also
 canonicalizes through the resolved context declaration. If both the explicit
 receiver spelling and `ResolvedCall.declaring_type` are bare names, they are
@@ -1321,6 +1527,15 @@ Regression:
 `lower::tests::resolved_static_fallback_uses_resolved_context_owner_not_declaring_spelling`;
 guarded by `lower::tests::explicit_static_receiver_refuses_ambiguous_simple_package_peer`.
 
+Codex follow-up 2026-09-12: unsupported constructor handoff lookup now wraps the
+named `JavaType` owner in `SourceContextOwnerKey` before resolving the context
+type. The existing ambiguous-bare-owner behavior is unchanged, but the helper no
+longer reopens a raw `find_context_type_by_key_in_lower_ctx(ctx, type_name)`
+path. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`;
+behavior guard:
+`lower::tests::unsupported_source_constructor_handoff_refuses_ambiguous_context_owner`.
+
 Follow-up 2026-08-25: static primitive/string storage reference folding now
 resolves explicit owners through the combined context lookup and renders from
 the resolved declaration owner. `AItem.KIND` and `a.Item.KIND` therefore both
@@ -1329,6 +1544,13 @@ of priority-chaining to whichever package peer appears first or falling back to
 the current type. Regressions:
 `lower::tests::static_storage_reference_uses_resolved_context_owner_identity`
 and `lower::tests::static_storage_reference_refuses_ambiguous_simple_owner`.
+
+Codex follow-up 2026-09-12: the static primitive/string storage folds now keep
+their explicit owner query wrapped as `SourceContextOwnerKey` until the context
+lookup boundary. This is behavior-preserving against the combined lookup above,
+but removes two more local raw `find_context_type_by_key_in_lower_ctx(ctx,
+owner)` call sites. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
 
 Follow-up 2026-08-26: static-array element writes now use the same combined
 context lookup. `Item.VALUES[i] = value` no longer priority-chains
@@ -1345,6 +1567,53 @@ shapes for lowering; ambiguous package peers fail closed before signature lookup
 Regression:
 `lower::tests::interface_argument_shapes_refuse_cross_program_ambiguous_simple_owner`.
 
+Codex follow-up 2026-09-12: enum-interface checks now also keep owner and target
+owner queries wrapped as `SourceContextOwnerKey` until context lookup. This
+preserves the combined lookup and ambiguous-owner behavior, but removes local
+raw owner lookup calls from `source_enum_directly_implements_*` and
+`matches_source_java_enum_type`. Guards:
+`lower::tests::enum_trait_lookup_refuses_cross_program_ambiguous_simple_owner`,
+`lower::tests::enum_target_interface_lookup_uses_summary_and_refuses_ambiguous_target`,
+and `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+
+Codex follow-up 2026-09-12: the same wrapper-boundary cleanup was applied to
+static-storage owner recovery, source/nested type recovery, context-method
+effective-name lookup, lower-context subtype recursion, and interface trait
+argument shape lookup. The helpers still use the legacy string-backed owner
+payload, but raw context lookup is no longer reopened locally for those owner
+questions. Guards:
+`lower::tests::interface_argument_shapes_refuse_cross_program_ambiguous_simple_owner`,
+`lower::tests::source_class_upcast_hierarchy_guard_refuses_ambiguous_context_owner`,
+`lower::tests::static_storage_element_assignment_refuses_ambiguous_simple_owner`,
+and `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+
+Codex follow-up 2026-09-12: collections-sort method-reference result checks,
+source associated-const/nested-type access, source enum static-owner recovery,
+source declared static overload retargeting, and source declared instance method
+lookup now use `SourceContextOwnerKey` for their local context owner lookups as
+well. Guards:
+`lower::tests::source_declared_instance_method_lookup_refuses_cross_program_ambiguous_owner`,
+`slot_shape_design::collections_sort_throwing_method_reference_comparator_propagates_result`,
+`lower::tests::enum_trait_lookup_refuses_cross_program_ambiguous_simple_owner`,
+and `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+
+Codex follow-up 2026-09-12: the remaining concrete-constructor, source-class
+upcast, erased-object hierarchy guard, optional current-method display,
+static-field receiver method candidate, and resolved static fallback owner
+queries in `lower.rs` now cross the context boundary through
+`SourceContextOwnerKey` too. This clears the local
+`find_context_type_by_key_in_lower_ctx(ctx, owner/type_name/target_name/...)`
+pattern from production lowerer code for the 0064 wrapper-boundary pass; broader
+first-class owner identity is still open. Guards:
+`lower::tests::source_constructor_concrete_slot_refuses_ambiguous_context_owner`,
+`lower::tests::erased_instanceof_hierarchy_guard_refuses_ambiguous_context_target`,
+`lower::tests::erased_cast_hierarchy_guard_uses_resolved_target_alias`,
+`lower::tests::erased_instanceof_hierarchy_guard_refuses_ambiguous_bare_super_edge`,
+`lower::tests::erased_cast_hierarchy_guard_refuses_ambiguous_bare_super_edge`,
+`lower::tests::optional_current_method_display_shape_refuses_ambiguous_current_owner`,
+`lower::tests::resolved_static_fallback_uses_resolved_context_owner_not_declaring_spelling`,
+and `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+
 Follow-up 2026-08-26: the erased-name hierarchy helper and source enum/interface
 bridges now use the combined context lookup as well. Generic spellings are
 erased before lookup (`Item<T>`), exact/package-qualified and emitted owner names
@@ -1358,6 +1627,8 @@ type and named interface lookup through the combined helper. Regressions:
 `lower::tests::enum_trait_lookup_refuses_cross_program_ambiguous_simple_owner`,
 and
 `lower::tests::enum_target_interface_lookup_uses_summary_and_refuses_ambiguous_target`.
+Follow-up cleanup: `lower_interface_super_default_call` now keeps the current
+owner wrapped through `SourceContextOwnerKey` until the context lookup boundary.
 
 Follow-up 2026-08-26: source interface supertrait bounds now use the same
 combined erased-name context lookup. `interface Child extends Parent` fails
@@ -1466,6 +1737,11 @@ longer falls back through program/support/summary emitted-name searches, and a
 lowered receiver path such as `Item::...` is not treated as an arbitrary first
 package peer when both `a.Item` and `b.Item` are in context. Regressions:
 `lower::tests::source_call_owner_candidates_refuse_ambiguous_emitted_owner`.
+Follow-up cleanup: the source-call static-owner and lowered-receiver owner
+recovery helpers now route emitted owner lookup through
+`SourceContextOwnerKey::find_emitted_context_type_and_program(...)` instead of
+calling the raw emitted-context lookup directly. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
 
 Follow-up 2026-08-26, revised 2026-09-06: same-outer inner-constructor
 rewriting uses the combined emitted-context lookup before its remaining narrow
@@ -1477,6 +1753,10 @@ policy as `unique_context_type_match`, so two context programs that both expose
 the same Java owner do not fail closed just because the owner was seen twice.
 Regression:
 `lower::tests::same_outer_inner_constructor_owner_refuses_ambiguous_emitted_owner`.
+Follow-up cleanup: the combined emitted-context half of that same-outer owner
+helper now goes through `SourceContextOwnerKey`; the narrow rendered Rust-use
+compatibility helper remains as the documented fallback. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
 
 Follow-up 2026-08-26: the `java.util.Objects.equals` recognizer no longer has
 its own current-program-only emitted-name escape hatch. A translated/support
@@ -1545,6 +1825,10 @@ same combined context lookup before rewriting `Self::method`/fallback-self
 calls to owner-qualified free helpers. This removes another current-program-only
 owner check from the erased-static path. Regression:
 `lower::tests::erased_source_static_self_call_uses_combined_context_lookup`.
+Follow-up cleanup: that current-owner lookup now resolves through
+`SourceContextOwnerKey::new(current_type).find_context_type(ctx)` rather than
+reopening a raw current-type context lookup inside
+`apply_call_target_with_lower_context`.
 
 Follow-up 2026-08-26: the remaining "emitted but not current-program" static
 owner predicate is now centralized as
@@ -1656,6 +1940,11 @@ text at the fact boundary. Regressions:
 `signature::tests::required_method_signature_does_not_borrow_distinct_package_peer`,
 `signature::tests::required_field_shape_does_not_borrow_distinct_package_peer`,
 and `lower::tests::static_owner_receiver_program_type_check_uses_emitted_owner_lookup`.
+Follow-up cleanup 2026-09-12: the `java_signature` module itself is
+crate-internal. Its key constructors and overload-slot helpers remain the
+central implementation boundary for usage/signature/lowering, but they are no
+longer exported as public crate API while the first-class owner model remains
+open.
 
 Follow-up 2026-08-26: the remaining direct `JavaCallableKey { ... }`
 construction outside `java_signature.rs` was collapsed behind
@@ -1798,6 +2087,11 @@ program. A support-local current type such as `a.Box<T>` is recognized when the
 source program is empty, while a bare ambiguous `Box` owner still fails closed
 when support and summary programs contain package peers. Regression:
 `lower::tests::in_scope_type_parameter_lookup_uses_combined_context_and_refuses_ambiguous_owner`.
+Follow-up cleanup: the in-scope type-parameter helper now performs that current
+owner lookup through `SourceContextOwnerKey`, and the same wrapper-boundary
+pattern is used for unresolved null-overload ambiguity and current-method
+exception planning. Guard:
+`layering::current_owner_utility_lookups_stay_wrapped_until_context_lookup`.
 
 Follow-up 2026-08-28: derive-support checks in `item_assembly.rs` no longer
 recover a source declaration by taking the first Java owner whose emitted Rust
@@ -1833,13 +2127,15 @@ path. Regression:
 
 Follow-up 2026-08-29: declaration-scoped usage lookups moved another step away
 from `UsageMethodKey { type_name, method_name }` string reconstruction.
-`UsageFacts` now has a crate-local
-`source_method_usage_for_owner(JavaOwnerKey, method)` query; `storage_strategy`,
+`UsageFacts` now keeps the arbitrary `source_method_usage_for_owner` helper
+private; declaration callers use `source_method_usage(ty, method)` and
+cross-module resolved-owner callers use
+`resolved_source_method_usage_for_owner(owner, method)`. `storage_strategy`,
 `semantic_analysis`, and `signature` use Java-callable keys when they already
-have `TypeDecl`/`MethodDecl` context. `aliasing` now uses
-`JavaCallableKey::resolved_source_method` for resolved receiver-mutating calls,
-so overload identity, erased argument types, and staticness decide whether the
-call mutates its receiver. This fixes the live case where a read-only overload
+have `TypeDecl`/`MethodDecl` context. `aliasing` now uses resolved-source usage
+queries for resolved receiver-mutating calls, so overload identity, erased
+argument types, and staticness decide whether the call mutates its receiver.
+This fixes the live case where a read-only overload
 could inherit mutability from a same-name mutating overload via the legacy
 Java-name map. Regressions:
 `aliasing::tests::receiver_mutation_lookup_uses_resolved_overload_identity`,
@@ -1955,15 +2251,17 @@ Regressions:
 and
 `lower::tests::static_owner_receiver_program_type_check_uses_emitted_owner_lookup`.
 
-Follow-up 2026-08-29: usage-side resolved receiver boundary classification no
-longer treats a bare static receiver type as matching a package-qualified
-resolved declaring type by simple name. `receiver_static_type_matches_declaring_type`
-now accepts exact matches and legacy bare-vs-bare matches, but fails closed for
-`Item` vs `a.Item` in either direction unless an upstream package-aware layer
-has already resolved the owner. Regressions:
-`usage::tests::receiver_static_type_match_fails_closed_for_package_qualified_simple_name`
+Follow-up 2026-08-29, tightened 2026-09-11 and 2026-09-12: usage-side receiver
+boundary classification no longer treats receiver/declaring type-name equality
+as proof that an arbitrary call is content-only. The
+`receiver_static_type_matches_declaring_type` shortcut was removed. Explicitly
+resolved source instance calls are now classified as source content reads,
+while unresolved helper calls still need modeled external facts or
+source-summary capability facts to prove a read-only/content-read boundary.
+Regressions:
+`usage::tests::resolved_receiver_boundary_treats_source_instance_calls_as_content_reads`
 and
-`usage::tests::resolved_receiver_boundary_refuses_package_qualified_simple_name_match`.
+`slot_shape_design::usage_classifies_unknown_call_results_assigned_to_constructor_locals_as_boundaries`.
 
 Follow-up 2026-08-29: member-access static constant planning no longer treats a
 bare capitalized owner as sufficient proof of a Java static owner. The fallback
@@ -2207,12 +2505,12 @@ regressions:
 `slot_shape_design::cotranslated_same_simple_name_package_peers_keep_package_identity`,
 and `slot_shape_design::context_static_string_constant_owner_stays_sibling_source_type`.
 
-Follow-up 2026-09-07, updated 2026-09-10: the legacy Rust-name usage-family map
+Follow-up 2026-09-07, updated 2026-09-12: the legacy Rust-name usage-family map
 is private to `usage.rs`. `UsageFacts::methods_by_rust_name` is still
-maintained for internal compatibility scans, but `CallableAnalysis` reaches it
-through `UsageFacts::rust_name_method_entries`, and integration tests/external
-callers must use Java-keyed source-method accessors instead of depending on the
-non-injective map directly.
+maintained for internal compatibility scans, but the remaining family binding
+lookup lives behind `UsageFacts::binding_facts_for_rust_method_family`, and
+integration tests/external callers must use Java-keyed source-method accessors
+instead of depending on the non-injective map directly.
 
 Follow-up 2026-09-10: `call_plan::external_call_has_thrown_effect_for_receiver`
 is crate-local. The exact rust-name-mapped external-pack predicate is tested
@@ -2275,6 +2573,11 @@ recompute type identity from arbitrary text.
 Follow-up cleanup also narrowed the source binding and source field Rust-name
 allocators in `java_naming` to crate-local, keeping source-name collision policy
 centralized without exporting those string-projection helpers as crate API.
+Follow-up 2026-09-12 made the `callable_analysis`, `java_naming`, and
+`inherited_members` modules crate-internal as well. The same package/name
+compatibility policies remain available to analysis and lowering, but they no
+longer appear as public crate modules while first-class owner identity remains
+open.
 
 Follow-up 2026-09-09: context type-key lookup no longer keeps parallel
 type-only and type-plus-program collector trees. Ordinary and emitted context
@@ -2391,3 +2694,211 @@ callable-analysis fallibility queries, and the external fallibility integration
 fixture off raw external callable enum literals. Pattern matches that inspect
 existing graph nodes still destructure the enum; key creation now has a named
 boundary for the external-callable string fields.
+Follow-up cleanup fixed a source/JDK native static owner collision introduced
+while prioritizing native static helpers. A resolved source class named `Math`
+with `static floorDiv(...)` was being planned as `java.lang.Math.floorDiv`,
+changing `"42"` into a catchable divide-by-zero path. Native static planning and
+the lower-side facade/static-owner retarget now fail closed when the resolved
+owner or static alias points at a source-program owner; known qualified JDK
+owners such as `java.lang.Math` still use the native helpers. Guards:
+`slot_shape_design::resolved_source_static_owner_shadows_native_jdk_static_owner`
+and
+`idiom_gaps::source_math_static_owner_shadows_native_jdk_math_helpers`.
+Follow-up cleanup moved direct source-declared field consumers in constructor
+planning, shape-env seeding, struct assembly, and static-storage lowering from
+raw `(type_name, field_name)` signature lookups to
+`SignaturePlan::required_declared_field_shape(ty, field)`. Inherited and
+external inherited fields still use the lowered-owner compatibility lookup
+because those signatures are intentionally keyed under the child owner.
+Follow-up cleanup narrowed the dirty-tree `ArrayBlockingQueue` helper
+predicates in `stdlib.rs` to crate-local:
+`java_type_is_array_blocking_queue` and
+`program_mentions_java_array_blocking_queue`. They are implementation details
+of the current native-collection lowering/slot-rendering path, not public
+type-identity queries. Guard:
+`layering::stdlib_erased_display_downcast_collectors_stay_internal`.
+Follow-up cleanup removed the remaining public `UsageFacts` rust-name method
+compatibility helpers. `method_usage_by_current_rust_name` call sites in
+integration tests now resolve `TypeDecl`/`MethodDecl` and query
+`source_method_usage(ty, method)`, while synthetic insertion cases were replaced
+with source fixtures analyzed through the normal usage walker. Guard:
+`layering::usage_keys_hide_raw_owner_and_name_fields`.
+Follow-up cleanup narrowed the public external facade ABI naming boundary.
+`call_plan::external_method_rust_name` and
+`unresolved_constructor_rust_name_for_facts` are crate-local implementation
+details now; the binary reaches them through
+`external_facade_method_rust_name_for_abi` and
+`external_facade_constructor_rust_name_for_abi`, which state the external-pack
+ABI probing question instead of exposing arbitrary unresolved Rust-name
+projection as public API. Guard:
+`layering::callable_analysis_shell_reaches_lowering_context`.
+Follow-up cleanup narrowed the external API effect rust-name fallback too.
+`FactSet::external_api_effect_for_receiver_with_arity_or_rust_name` is
+crate-local now; production callers in aliasing, usage, and exception planning
+can still use the compatibility bridge, while integration tests no longer get a
+public owner/Rust-name fallback query. The exact simple-owner ambiguity
+assertion moved beside `facts.rs`. Guard:
+`layering::usage_keys_hide_raw_owner_and_name_fields`.
+
+Follow-up cleanup narrowed the keyed external argument-effect lookup. The only
+production caller is the in-crate call-planning bridge, so
+`FactSet::external_api_argument_effect_for_key` is crate-local now instead of a
+public API for ad hoc `CallableKey` construction. A later cleanup removed the
+remaining exact-key `FactSet` lookup helpers after integration tests moved to
+call-shaped, constructor-shaped, or field-shaped public lookups; this
+argument-effect helper was the first internal call-planning bridge narrowed.
+Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+
+Follow-up cleanup narrowed `SignatureDependencyEdge::new` to crate-local. The
+dependency graph still exposes public read-only `nodes()`, `edges()`, and edge
+accessors, but external callers can no longer construct arbitrary dependency
+edges from raw callable/type identity nodes. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+
+Follow-up cleanup narrowed the local fallibility-invariant violation surface
+too. `report_fallibility_violations` is now an internal diagnostic entry point
+through the crate-internal `fallibility_invariant` module; `FallibilityViolation`,
+its accessors, and the raw `fallibility_violations` query are crate-local
+implementation details. Guard: `layering::usage_keys_hide_raw_owner_and_name_fields`
+and `layering::declaration_context_usage_lookups_use_java_callable_keys`.
+
+Follow-up cleanup narrowed the inherited-member result/query surface to
+crate-local callers. Source inherited field/method refs and external inherited
+field/method records still cross internal module boundaries, but their declaring
+owner, Java member name, emitted Rust name, type/nullability, arity, and fact
+payloads are private behind crate-local constructors and accessors. Constructor
+planning, item assembly, lowering, signature planning, and stdlib facade/static
+final emission now consume those answers through the inherited-member API
+without exporting inherited owner/name identity as public crate API. Guard:
+`layering::usage_keys_hide_raw_owner_and_name_fields`.
+The constructor-plan helper that accepts raw inherited field refs is crate-local
+too, matching the visibility of the ref carrier.
+
+Follow-up cleanup narrowed the static-final constant folding surface. The
+multi-file pooling path still uses `static_final_constant_declarations`,
+`constant_value_facts_from_declarations`, and `fold_constant_declarations`
+inside the crate, but the public `resolve` module no longer exposes
+`ConstantDeclaration` or those raw folding helpers as downstream API. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`.
+Follow-up cleanup also made the `source_constant_values` module private and
+narrowed its `ConstantValue`, `ConstantScope`, and `fold_constant_expr` API to
+crate-local callers. `resolve` and `lower` can still share the constant folding
+implementation, but downstream users cannot depend on the raw constant-scope
+owner/name compatibility model as public crate API.
+
+Follow-up cleanup narrowed the member-access planning records. Public callers
+still get `java_member_access_policy_with_facts` and
+`plan_member_access_with_facts`, but `JavaMemberAccessPolicy` and
+`MemberAccessPlan` no longer expose raw member/type/shape/op fields for direct
+construction or mutation. Access-lowering, shape inference, stream lowering,
+and tests now read the plan through accessors. Guards:
+`layering::member_access_plan_stays_fact_and_shape_based` and
+`slot_shape_design::access_lowering_owns_bare_field_and_member_access_fallbacks`.
+
+Follow-up cleanup removed the remaining exact-key lookup helpers from `FactSet`:
+`external_api_effect_for_key`, `external_constructor_for_key`, and
+`external_field_for_key`. Integration tests now use call-shaped,
+constructor-shaped, or field-shaped public lookups on parsed facts. A later pass
+also deleted the builtin-pack exact-key probes
+`external_packs::external_api_effect_for_key`,
+`external_packs::external_constructor_for_key`, and
+`external_packs::external_field_for_key`. Builtin-pack tests now assert through
+the shaped constructor and field lookups too. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+
+Follow-up test-surface cleanup moved the external-pack facade ABI override test
+off direct `FactSet::facade_abi_for_key` lookup and onto the shaped
+`facade_abi_for_external_method(owner, method, arity)` query. The raw key lookup
+still exists for production paths that already have exact resolved/source
+callable identity, but this removes one integration-test dependency on ad hoc
+key construction.
+
+Follow-up cleanup moved the stdlib Optional, collection, and known JDK
+content-method facade ABI integration checks off temporary
+`CallableKey::method(...)` handles too. Those tests now query
+`facade_abi_for_external_method(owner, method, arity)` directly for simple
+owner/method/arity facts. Typed overload checks that require
+`method_with_params` still use `facade_abi_for_call`.
+
+Follow-up cleanup applied the same boundary to simple production facade ABI
+queries in `stdlib` and the unresolved call-argument path in `call_plan`.
+Callers that already have only `(owner, method, arity)` now ask
+`facade_abi_for_external_method` instead of fabricating a `CallableKey` for
+lookup. Resolved-source and typed-overload paths still use exact key/call
+lookups because they carry more identity than the shaped external-method query.
+
+Follow-up cleanup narrowed `FactSet::facade_abi_for_key` to crate-local. Public
+callers keep the shaped `facade_abi_for_external_method` query and the typed
+`facade_abi_for_call` overload query; only in-crate resolved/source call
+planning can use the exact-key fallback now. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+
+Follow-up cleanup narrowed `call_plan::facade_abi_argument_plan_for_rust_path`
+to crate-local too. The rendered Rust path remains an internal bridge used by
+lowering after a facade target is selected; integration coverage moved beside
+the planner so public callers are not encouraged to query ABI facts by emitted
+path spelling. Guard:
+`call_plan::tests::facade_abi_argument_plan_prefers_abi_slot_over_argument_effect`.
+
+Follow-up cleanup narrowed `slot_render::native_named_java_rust_type_policy`
+and its `NativeNamedJavaRustTypePolicy` carrier to crate-local. Public callers
+keep the fact-aware `native_java_rust_type_policy_with_effective_facts` and
+rendered-type APIs; tests no longer query the Java-name-to-Rust-name projection
+through the raw named-type helper. Guard:
+`layering::slot_render_policy_symbols_stay_effective_fact_aware`.
+
+Follow-up cleanup private-backed `RustNominalTypeNamePolicy`. The nominal
+runtime target projection is still exposed for planner inspection through
+read-only `java_ty()`, `target_type()`, and owned `into_target_type()`
+accessors, but callers no longer construct or mutate the raw Java-type/name
+payload. Guard:
+`layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup narrowed the Broad/IO facade support predicates in
+`javalibs`: `is_builtin_external_facade_type`,
+`broad_utils_dynamic_return_type`, `broad_static_utility_return_type`,
+`imported_static_method_returns_broad_utils_first_arg`,
+`is_broad_utils_type_name`, `needs_conversion_constructor_for_facade`,
+`is_static_facade_method`, `is_jdk_input_stream_facade_type`,
+`is_known_java_subtype`, and `is_known_exception_supertype` are crate-local now,
+and the `javalibs` module itself is crate-internal. The facade construction,
+return-type, static-method, subtype, exception-supertype, and stream-facade
+compatibility probes are internal translator hooks. Guard:
+`layering::stdlib_does_not_grow_non_jdk_domain_package_knowledge`.
+
+Codex follow-up 2026-09-12 private-backed
+`facts::HierarchyReachabilityDiagnostic`. Hierarchy reachability still reports
+the same budget-exhaustion diagnostic, and semantic analysis still bridges it
+into `SemanticDiagnostic`, but downstream callers can only read `code()` and
+`message()`; construction stays inside the crate and the raw `{ code, message }`
+payload is private at the hierarchy/facts boundary. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`.
+
+Codex follow-up 2026-09-12 private-backed resolver overload applicability
+reports. `resolve.rs` still owns report mutation while scoring candidates, but
+`OverloadArgumentApplicability` and `OverloadApplicabilityReport` now expose
+mode, score, argument conversions, and rejection reasons through accessors
+instead of public record fields. This fences another overload-decision surface;
+it does not claim to replace the remaining string owner model. Guard:
+`layering::declaration_context_usage_lookups_use_java_callable_keys`; focused
+behavior guard:
+`cargo test --test resolve_calls overload_applicability_reports`.
+
+Codex follow-up 2026-09-12 narrowed the ownerless
+`FactSet::external_api_effect_for(method)` compatibility lookup to crate-local.
+External callers and integration tests now use the shaped public
+`external_api_effect_for_receiver(receiver, method)` query, passing `None` only
+for intentionally receiverless external facts. The internal ownerless helper
+still exists for compatibility paths that already know there is no receiver,
+but it is no longer advertised as a public method-name-only fact API. Guard:
+`layering::callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating`.
+
+Codex follow-up 2026-09-12 moved the `external_field_value_for` lookup logic
+onto `ExternalFactLookupIndex` as well. `FactSet::external_field_value_for`
+remains as a shaped compatibility wrapper, but it now delegates to the index.
+Static external field values therefore share the same alias-indexed
+exact/direct/fallback owner matching shape as external fields instead of
+carrying a separate raw scan in `FactSet`. Guards:
+`slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`
+and `semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.

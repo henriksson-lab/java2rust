@@ -14,12 +14,11 @@ Kind: behavioural (differential), JDK facades / collections / enums.
 Follow-up 2026-09-09 focused triage: rechecked this audit together with 0056.
 The collection-order, queue, map-view, enum, source-object, platform-object, and
 modeled-external display repros are now covered by focused fixtures. The
-smallest remaining code area is `src/stdlib.rs::java_erased_any_to_string` plus
-the downcast collectors it embeds (`source_erased_object_to_string_downcasts`,
-`platform_erased_object_to_string_downcasts`, and
-`external_erased_object_to_string_downcasts`). That path cannot correctly handle
-an arbitrary external value erased behind `Object` without source/platform/fact
-evidence, and the current guards intentionally keep that case loud rather than
+remaining code area is `src/stdlib.rs::java_erased_any_to_string`'s
+unknown-erased fallback/model boundary. The source/platform/external downcast
+collector arms are centralized through `erased_display_to_string_downcast_arms`
+and guarded for parity; the open path is what to do when no source/platform/fact
+evidence exists. Current guards intentionally keep that case loud rather than
 guessing. A low-risk next patch would need a concrete missing carrier fixture;
 otherwise the real remaining fix is a typed-erasure/display-capability model,
 not another broad fallback.
@@ -41,6 +40,17 @@ longer re-derives receiver type identity to decide whether insertion must
 restore natural order. Guard:
 `call_plan::tests::native_queue_receiver_kind_is_the_single_queue_capability_answer`.
 
+Codex follow-up 2026-09-12 `ArrayBlockingQueue.put` guard: `put(value)` no
+longer reuses the generic `List.add`/`push` lowering. Java `put` has blocking
+bounded-queue semantics that the current carrier does not model, so the planner
+now routes it to a dedicated unsupported native collection method and lowering
+emits
+`compile_error!("unsupported Java ArrayBlockingQueue.put requires blocking queue semantics")`.
+This preserves the already-modeled `add`/`offer` capacity behavior without
+silently treating `put` as unbounded insertion. Guards:
+`call_plan::tests::native_queue_receiver_kind_is_the_single_queue_capability_answer`
+and `idiom_gaps::array_blocking_queue_put_requires_blocking_queue_semantics`.
+
 Follow-up 2026-09-07 `String.join` null delimiter pass: the focused
 String.join null-display oracle now covers both null elements and a null
 delimiter. The delimiter keeps Java's required non-null contract and raises
@@ -60,19 +70,22 @@ the queue receiver classification already used for `Deque`, `ArrayDeque`, and
 through to unmodelled facade calls. Differential fixture:
 `tests/differential/LinkedListQueueHeadCatch.java` (`true,true:aabb:caught`).
 
-Follow-up 2026-09-09 bounded/ordered-queue `offer` correction: the native
-`offer(value)` alias is deliberately limited to queue implementations whose
-current carrier can preserve the method's observable contract.
-`ArrayBlockingQueue.offer(value)` is not routed through `Vec::push(...); true`
-until bounded-capacity state is modeled, because Java returns `false` rather
-than inserting when the queue is full. It now fails loudly with `compile_error!`
-rather than falling through to an unmodelled facade/default path. Focused
-generated-crate fixture:
-`idiom_gaps::array_blocking_queue_offer_requires_bounded_queue_support`.
-Known-gap differential fixture:
-`tests/differential/known-gaps/ArrayBlockingQueueOffer.java` (`true,false,a`).
-Custom-comparator `PriorityQueue` instances still need a real priority-queue
-carrier.
+Follow-up 2026-09-11 bounded `ArrayBlockingQueue` carrier: `ArrayBlockingQueue`
+slots now render as `JavaArrayBlockingQueue<T>` rather than plain `Vec<T>`, and
+the capacity constructor stores the Java capacity separately from Rust's
+allocator capacity. `offer(value)` inserts while `len() < capacity()` and
+returns `false` when full; `add(value)` uses the same bounded check and raises
+`IllegalStateException` when full. The non-throwing `peek()` queue-head method
+now lowers to `get(0).cloned()`, preserving Java's null-on-empty contract.
+Focused generated-crate fixtures:
+`idiom_gaps::array_blocking_queue_offer_uses_bounded_carrier_and_returns_false_when_full`
+and
+`idiom_gaps::array_blocking_queue_add_uses_bounded_carrier_and_throws_when_full`.
+Differential fixtures promoted:
+`tests/differential/ArrayBlockingQueueOffer.java` (`true,false,a`) and
+`tests/differential/ArrayBlockingQueueAdd.java`
+(`true,a,IllegalStateException`). Custom-comparator `PriorityQueue` instances
+still need a real priority-queue carrier.
 
 Follow-up 2026-09-09 comparator-backed priority queue constructor correction:
 `new PriorityQueue<>(comparator)` now fails loudly with `compile_error!` instead
@@ -84,18 +97,19 @@ Known-gap differential fixture:
 `tests/differential/known-gaps/PriorityQueueComparatorConstructor.java`
 (`3,2,1`).
 Comparator-backed queue ordering still needs a real carrier before it can be
-lowered correctly.
-
-Follow-up 2026-09-09 bounded-queue `add` correction:
-`ArrayBlockingQueue.add(value)` now fails loudly with `compile_error!` instead
-of sharing the `Vec::push(...); true` lowering used by unbounded queue/list
-carriers. This keeps the current carrier from silently accepting an insert that
-Java would reject when the queue is full. Focused generated-crate fixture:
-`idiom_gaps::array_blocking_queue_add_requires_bounded_queue_support`.
-Known-gap differential fixture:
-`tests/differential/known-gaps/ArrayBlockingQueueAdd.java`
-(`true,a,IllegalStateException`). True bounded-capacity queue state remains
-unmodelled.
+lowered correctly; the checked-in anonymous-comparator shape also reports
+`unsupported_anonymous_class`, so promoting that fixture needs both anonymous
+comparator object lowering and a priority-queue comparator carrier. Guard:
+`idiom_gaps::priority_queue_anonymous_comparator_constructor_reports_both_missing_carriers`.
+Follow-up fixture split 2026-09-12:
+`tests/differential/known-gaps/PriorityQueueNamedComparatorConstructor.java`
+uses a named `Comparator` implementation and expects the same Java result and
+the same loud `unsupported_priority_queue_comparator_constructor` diagnostic,
+without depending on anonymous-class lowering. This isolates the carrier work
+from the older combined fixture. The constructor planner now recognizes both a
+literal `Comparator` argument type and source types that reach `Comparator`
+through hierarchy facts, so named comparator implementations no longer fall
+through to the natural-order `Vec` constructor path.
 
 Follow-up 2026-09-09 `PriorityQueue.add`/`offer` natural-order pass: the native
 `Vec<T>` carrier now sorts after `add(value)` and `offer(value)`, so `element()`
@@ -103,6 +117,19 @@ and `remove()` see the Java natural-order head instead of FIFO insertion order
 for comparable values. Differential fixtures:
 `tests/differential/PriorityQueueHeadOrder.java` and
 `tests/differential/PriorityQueueOfferHeadOrder.java` (`true:true:1:1:5`).
+
+Codex follow-up 2026-09-12 queue `poll()` pass: queue-like native collection
+receivers now classify `poll()`/`pollFirst()` separately from throwing
+`remove()`. Lowering emits `None` for an empty receiver and `Some(remove(0))`
+otherwise, preserving Java's null-on-empty contract while still mutating the
+queue. Focused generated-crate fixture:
+`idiom_gaps::queue_poll_removes_head_and_returns_null_on_empty`. The companion
+fixture `idiom_gaps::queue_poll_aliases_remove_head_and_return_null_on_empty`
+pins the same lowering for `ArrayDeque.pollFirst()` and `ArrayBlockingQueue.poll()`.
+Differential fixtures: `tests/differential/QueuePollNull.java` (`a:null:true`)
+and `tests/differential/QueuePollAliases.java` (`a:null:b:null:c:null`).
+Comparator-backed `PriorityQueue` remains open: the checked-in known-gap fixture
+also needs anonymous comparator lowering and a real comparator carrier.
 
 Follow-up 2026-09-09 focused map-view contract oracle: the dedicated
 `map_view_contract_fixtures_match_java_output` loop now groups existing
@@ -1523,6 +1550,13 @@ JDK carrier behavior while making the platform exception policy explicit
 instead of embedding it in the downcast loop. Covered by
 `stdlib::functional_interface_shape_tests::platform_erased_display_support_is_explicit`
 and the existing platform erased-display generated-crate tests.
+Follow-up 2026-09-11: the optional platform-facade display policy expectation
+now matches the shared Java display helper used by lowering. Nullable platform
+facade values such as `URI` are still planned as
+`OptionalToJavaDisplayValue`, and both owned and borrowed optional projections
+render `value.java_arrays_deep_to_string()` before the Java `"null"` fallback
+instead of asserting the stale direct `to_string()` spelling. Guard:
+`type_coercion::optional_platform_facade_display_segments_use_display_value_policy`.
 
 Follow-up 2026-08-29 atomic erased-display parity:
 `java.util.concurrent.atomic.AtomicLong` and `AtomicBoolean` now have the same
@@ -1859,3 +1893,228 @@ template for the supported `T`, `&T`, `Rc<T>`, and `Arc<T>` carriers. This
 keeps the carrier parity policy in one place without changing the intentionally
 loud unknown-erased fallback. Guard:
 `layering::stdlib_erased_display_downcast_collectors_stay_internal`.
+
+Follow-up 2026-09-11 `ArrayBlockingQueue` contract tightening: the bounded
+carrier now preserves the Java ordering for the small contract surface covered
+by promoted fixtures. `offer` uses a result-shaped projection internally so a
+literal `null` argument throws catchable `NullPointerException` before the full
+queue check; `add` applies the same null-before-capacity ordering while still
+throwing `IllegalStateException` when full. The catchable constructor path for
+`new ArrayBlockingQueue<T>(capacity)` validates signed `capacity <= 0` before
+casting to `usize`, producing `IllegalArgumentException` in `try/catch`.
+Promoted differential fixtures: `ArrayBlockingQueueBadCapacity.java` and
+`ArrayBlockingQueueNull.java`, alongside the existing `ArrayBlockingQueueAdd`
+and `ArrayBlockingQueueOffer` fixtures. Guards:
+`idiom_gaps::array_blocking_queue_capacity_constructor_is_catchable_illegal_argument`
+and
+`idiom_gaps::array_blocking_queue_literal_null_add_and_offer_throw_null_pointer`.
+Rechecked 2026-09-11 after the current dirty-tree audit cleanup:
+`cargo build --release` followed by
+`TMPDIR=$PWD/.tmp/differential-focus cargo test --release --quiet --test differential list_exception_fixtures_match_java_output -- --nocapture`
+passed, covering all four promoted `ArrayBlockingQueue*` fixtures in the release
+translator.
+
+Follow-up triage 2026-09-11 comparator-backed `PriorityQueue`: this is not a
+simple extension of the natural-order `Vec<T>` carrier. `Collections.sort` can
+use a comparator expression statement-locally, but a priority queue must store
+the comparator across later `add`/`offer`/`peek`/`poll` calls. Rechecked
+2026-09-12: the checked-in fixture also depends on anonymous comparator body
+lowering, and current translation reports both `unsupported_anonymous_class` and
+`unsupported_priority_queue_comparator_constructor`. A correct promotion
+therefore needs a representation decision for comparator storage, trait derives,
+and the anonymous comparator object lowering path before promoting
+`known-gaps/PriorityQueueComparatorConstructor.java`. The named-comparator
+fixture isolates the carrier half, but still should stay known-gap until that
+stored-comparator representation exists. Keep the current loud
+`PriorityQueueComparatorUnsupported` path until that design is chosen.
+
+Follow-up cleanup narrowed `SlotContentCapabilityPolicy` to a read-only
+private-backed record. String-content and sequence-element facts still flow
+through `slot_content_capability_policy_with_effective_facts`, but callers use
+accessors instead of public fields. This keeps the display/sequence capability
+question owned by slot rendering while preserving the existing public policy
+entry point. Guard:
+`layering::slot_render_default_policy_symbols_stay_effective_fact_aware`.
+
+Follow-up cleanup did the same for `NativeNamedJavaRustTypePolicy`: the policy
+projection remains public, but its raw Java name and selected Rust-type policy
+are read through accessors instead of public fields. The internal type renderer
+consumes the policy through an owned helper, so production no longer reaches
+through `.policy`. Guard:
+`layering::slot_render_policy_symbols_stay_effective_fact_aware`.
+
+Follow-up cleanup narrowed `StreamSourceCapabilityPolicy` too. Sequence-like
+stream-source capability is still computed by `stream_shape` from
+`EffectiveFacts`, but the one stored `capability_element` is private-backed and
+read through an accessor rather than exposed as a public mutable field. Guard:
+`layering::stream_shape_stream_source_semantics_stay_effective_fact_based`.
+
+Follow-up cleanup narrowed `BorrowedContentCapabilityPolicy` and
+`BorrowedContentTypePolicy` to read-only private-backed records. Borrowed
+string/sequence decisions still flow through the fact-aware `slot_policy`
+functions, but callers assert through accessors instead of constructing raw
+policy payloads. Guards:
+`slot_shape_design::slot_policy_owns_borrowed_content_param_and_return_rules`
+and `slot_shape_design::slot_policy_and_signature_solver_use_type_capability_facts`.
+
+Follow-up cleanup removed a redundant no-package branch from
+`external_display_downcast_rust_names`; the same `program_mentions_java_type`
+condition had already inserted the Rust name before the package split. A related
+visibility audit was checked and left unchanged:
+`platform_type_has_erased_display_support` is still used by `call_plan`, and
+`program_mentions_java_array_blocking_queue` by `lower`. Guard:
+`stdlib::functional_interface_shape_tests::external_display_capability_query_keeps_package_peers_distinct`.
+
+Follow-up cleanup narrowed the tiny borrowed-element target-match policy records
+in `conversion_plan`: optional, vec, and set element target matches now expose
+only a read-only `matches()` query instead of a public boolean payload. This
+keeps the borrowed-element adapter decision as a conversion-plan question rather
+than a caller-owned mutable fact. Guards:
+`type_coercion::borrowed_element_target_match_policies_name_carrier_and_element_matches`
+and `layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup narrowed `BorrowedElementSlotAdapterPolicy` to a
+private-backed conversion-plan record. The target slot, carrier slot, element
+slot, carrier kind, match bit, and optional adapter are now reached through
+constructor/accessor methods rather than public mutable fields. This keeps
+borrowed-element slot adaptation as one policy answer owned by
+`conversion_plan`, while lowering only consumes the plan. Guards:
+`type_coercion::borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery`
+and `layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed the nested `BorrowedElementAdapterPolicy` too.
+The carrier, element slot shape, recovery policy, and unwrap bit now flow through
+read-only accessors; integration tests assert against planner-produced policies
+instead of constructing raw adapter payloads. Guard:
+`layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup narrowed the remaining borrowed-element adapter construction
+surface. `BorrowedElementSlotAdapterPolicy::new` and
+`borrowed_element_adapter_policy_with_unwrap` are crate-local now; the
+helper-specific recovery assertions moved into `conversion_plan` unit tests,
+while integration tests use the public planner and policy accessors.
+
+Follow-up cleanup private-backed `CoercionOwnedRecoveryCapabilityPolicy`. The
+owned-recovery capability answer still remains inspectable through read-only
+`java_ty()` and `recovery()` accessors, but callers can no longer construct or
+mutate the raw `{ java_ty, recovery }` payload. Guard:
+`layering::coercion_plan_owns_clone_recovery_policy`.
+
+Follow-up cleanup private-backed the facade-return coercion policies too.
+`RustBorrowedFacadeReturnPolicy` and `RustOwnedFacadeReturnPolicy` are still
+public plan variants for inspection, but their raw target/recovery payloads are
+read through accessors and constructed only inside the crate. Guard:
+`layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `RustScalarSlotCastPolicy` as well. The Rust
+scalar type name and Java primitive target are now read through accessors and
+constructed only by conversion planning, keeping scalar return adaptation out of
+caller-owned mutable policy payloads. Guard:
+`layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `RustUnsignedByteArrayReturnPolicy`. The
+optional-return bit now has a read-only accessor and is constructed only by
+conversion planning, matching the other return-adaptation policy carriers.
+Guard: `layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `PrimitiveWideningPolicy`. The primitive
+source, target, and widening decision remain readable through accessors, but
+callers can no longer synthesize or mutate the raw `{ from, to, widens }`
+payload outside conversion planning. Guard:
+`layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `CoercionContentPolicy` and
+`CoercionShapeContentPolicy`. String-content classification still remains
+inspectable through `java_ty()` and `string_content()`, but callers no longer
+own or mutate the raw `{ java_ty, string_content }` payloads. Guard:
+`layering::dispatch_coercion_plan_owns_trait_box_and_clone_recovery`.
+
+Follow-up cleanup private-backed `AssignmentValuePlan`. Assignment slot
+selection still remains public through `slot()` and owned `into_slot()`, but
+lowering and tests no longer reach into or construct the raw `{ slot }` payload.
+Guard: `layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `JavaTypeConversionPlan`. Resolver/cast
+conversion classification still exposes read-only `actual()`, `target()`, and
+`kind()` accessors, but callers can no longer synthesize or mutate the raw
+`{ actual, target, kind }` payload outside conversion planning. Guard:
+`layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `SyntaxCoercionPlan`. Syntax coercion lowering
+still reads `actual()`, `slot()`, and `policy()`, but integration tests and
+callers no longer construct or mutate the raw `{ actual, slot, policy }`
+payload. Guard: `layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `CastConversionPlan` and `InstanceOfPlan`.
+Cast and instanceof lowering now consume `actual()`, `target()`, `semantics()`,
+`coercion()`, and `check()` instead of raw public fields; same-crate fixtures use
+crate-local constructors for targeted plan setup. Guards:
+`layering::conversion_plan_keeps_rust_expression_rendering_out_of_plan_layer`
+and `layering::coercion_plan_owns_invalid_cast_runtime_policy`.
+
+Follow-up cleanup private-backed `HierarchyInstanceOfPolicy`. Hierarchy
+instanceof planning still exposes read-only `actual()`, `target()`, and
+`always_true()`, while callers can no longer construct or mutate the raw
+`{ actual, target, always_true }` payload. Guard:
+`layering::cast_and_instanceof_planning_owns_runtime_check_policy`.
+
+Follow-up cleanup private-backed `OptionalSlotConstructionPlan` and
+`OptionalPresentConstructionPlan`. Optional construction lowering now consumes
+read-only accessors for the target, element shape, element coercion, wrapper
+ownership, element handle, construction plan, and element-lowering slot instead
+of public mutable payload fields. Guard:
+`slot_shape_design::optional_present_construction_policy_lives_in_conversion_plan`.
+
+Follow-up cleanup narrowed the remaining stdlib method/classification helpers
+that only serve translator internals:
+`is_known_receiverless_static_utility_method`,
+`has_receiver_agnostic_external_return_type`,
+`is_known_object_inherited_method`, `native_collection_receiver_mutates`,
+`native_collection_method_name_mutates_receiver`, and
+`static_collection_argument_mutates` are crate-local now. Signature, lowering,
+semantic analysis, call planning, and resolve can still share the name-only
+legacy predicates, but downstream callers cannot treat them as a public
+collection/JDK semantics API. Guard:
+`layering::stdlib_erased_display_downcast_collectors_stay_internal`.
+Follow-up cleanup also narrowed `native_collection_receiver_method_known` to
+crate-local. Signature planning still uses the centralized typed collection
+receiver query, but it is no longer exported as public API. In the same pass,
+`canonical_external_field_name` was made crate-local; external field-name
+normalization remains an internal compatibility detail for stdlib/external-pack
+modeling rather than a public identity helper. Guard:
+`slot_shape_design::slot_shape_design_guardrails`.
+The native collection constructor/receiver kind classifiers were narrowed to
+crate-local too. Public callers keep the generic
+`java_collection_kind_for_type` query, while the native-carrier eligibility
+rules used by call planning and lowering stay inside the crate. Guard:
+`slot_shape_design::slot_shape_design_guardrails`.
+The argument-level content-read table, `is_content_read_argument_method`, is
+crate-local now as well. The public/test-facing boundary remains
+`usage::call_argument_use_boundary_policy`, so callers ask the usage policy
+question instead of depending on the raw stdlib classifier. Guard:
+`slot_shape_design::slot_shape_design_guardrails`.
+The external API receiver-mutability and return-nullability policy helpers were
+narrowed to crate-local in the same cleanup family. Call planning and signature
+planning can still share the solved JDK/external-role facts, but those
+mutability/nullability classifiers are no longer exported as public stdlib
+policy APIs. Guard: `slot_shape_design::slot_shape_design_guardrails`.
+Follow-up cleanup also narrowed `external_api_method_role` to crate-local. The
+public boundary remains `external_api_method_policy_with_builtin_packs`, which
+returns the full role/mutability/nullability/provenance policy, while the
+lower-level role classifier is kept as an internal shared primitive. Guard:
+`slot_shape_design::slot_shape_design_guardrails`.
+Follow-up cleanup narrowed the constructor/field provenance builtin-pack
+switches as well:
+`external_constructor_provenance_with_builtin_packs` and
+`external_field_provenance_with_builtin_packs` are crate-local now. Public
+callers keep the ordinary `external_constructor_provenance` and
+`external_field_provenance` facades; semantic analysis remains the only caller
+that needs to disable builtin external-pack facts for a controlled pass. Guard:
+`layering::stdlib_erased_display_downcast_collectors_stay_internal`.
+
+Follow-up cleanup private-backed `TypeCapabilities`. The copy/clone,
+string-like, sequence-like, hierarchy, final-type, and object-safety capability
+payload no longer exposes public mutable fields; slot/render/signature/stream
+callers use accessors, and `EffectiveFacts` remains the central writer through
+crate-local setters. Guard: `slot_shape_design::slot_shape_design_guardrails`;
+compile guard: `cargo check --tests`.

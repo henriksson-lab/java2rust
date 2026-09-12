@@ -1,21 +1,18 @@
 use crate::binding_id::BindingId;
 use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan, ProgramFallibilityPlan};
 use crate::java_ir::{ConstructorDecl, MethodDecl, ResolvedCall, ResolvedConstructor, TypeDecl};
-#[cfg(test)]
-use crate::java_signature::JavaCallableKey;
-use crate::java_signature::JavaOwnerKey;
 use crate::usage::BindingUseFacts;
-use crate::usage::{MethodUsageFacts, UsageConstructorKey, UsageFacts, UsageMethodKey};
+use crate::usage::{MethodUsageFacts, UsageFacts};
 
 #[derive(Debug, Clone, Copy)]
-pub struct CallableAnalysis<'a> {
+pub(crate) struct CallableAnalysis<'a> {
     usage: &'a UsageFacts,
     exceptions: &'a ProgramExceptionPlan,
     fallibility: &'a ProgramFallibilityPlan,
 }
 
 impl<'a> CallableAnalysis<'a> {
-    pub fn new(
+    pub(crate) fn new(
         usage: &'a UsageFacts,
         exceptions: &'a ProgramExceptionPlan,
         fallibility: &'a ProgramFallibilityPlan,
@@ -27,27 +24,12 @@ impl<'a> CallableAnalysis<'a> {
         }
     }
 
-    fn method_usage(&self, key: &UsageMethodKey) -> Option<&'a MethodUsageFacts> {
-        self.usage.method_usage_by_key(key)
-    }
-
     pub(crate) fn current_rust_method_usage(
         &self,
         type_name: &str,
         method_name: &str,
     ) -> Option<&'a MethodUsageFacts> {
-        self.method_usage(&UsageMethodKey::current_rust_method_name(
-            type_name,
-            method_name,
-        ))
-    }
-
-    #[cfg(test)]
-    pub(crate) fn method_usage_by_java_key(
-        &self,
-        key: &JavaCallableKey,
-    ) -> Option<&'a MethodUsageFacts> {
-        self.usage.source_method_usage_by_java_key(key)
+        self.usage.current_rust_method_usage(type_name, method_name)
     }
 
     pub(crate) fn source_method_usage_for_resolved_owner(
@@ -56,7 +38,7 @@ impl<'a> CallableAnalysis<'a> {
         method: &MethodDecl,
     ) -> Option<&'a MethodUsageFacts> {
         self.usage
-            .source_method_usage_for_owner(JavaOwnerKey::resolved_source(owner), method)
+            .resolved_source_method_usage_for_owner(owner, method)
     }
 
     pub(crate) fn binding_use_count_for_rust_method_family(
@@ -65,8 +47,9 @@ impl<'a> CallableAnalysis<'a> {
         method_name: &str,
         binding_id: &BindingId,
     ) -> Option<usize> {
-        unique_binding_facts_for_rust_method_family(self.usage, type_name, method_name, binding_id)
-            .map(|binding| binding.uses.len())
+        self.usage
+            .binding_facts_for_rust_method_family(type_name, method_name, binding_id)
+            .map(|binding| binding.uses().len())
     }
 
     pub(crate) fn binding_facts_for_rust_method_family(
@@ -75,11 +58,8 @@ impl<'a> CallableAnalysis<'a> {
         method_name: &str,
         binding_id: &BindingId,
     ) -> Option<&'a BindingUseFacts> {
-        unique_binding_facts_for_rust_method_family(self.usage, type_name, method_name, binding_id)
-    }
-
-    fn constructor_usage(&self, key: &UsageConstructorKey) -> Option<&'a MethodUsageFacts> {
-        self.usage.constructor_usage_by_key(key)
+        self.usage
+            .binding_facts_for_rust_method_family(type_name, method_name, binding_id)
     }
 
     pub(crate) fn current_rust_constructor_usage(
@@ -87,9 +67,8 @@ impl<'a> CallableAnalysis<'a> {
         type_name: &str,
         rust_name: &str,
     ) -> Option<&'a MethodUsageFacts> {
-        self.constructor_usage(&UsageConstructorKey::current_rust_constructor_name(
-            type_name, rust_name,
-        ))
+        self.usage
+            .current_rust_constructor_usage(type_name, rust_name)
     }
 
     pub(crate) fn callable_returns_result(&self, key: &crate::usage::CallableKey) -> bool {
@@ -152,55 +131,21 @@ impl<'a> CallableAnalysis<'a> {
     }
 }
 
-fn unique_binding_facts_for_rust_method_family<'a>(
-    usage: &'a UsageFacts,
-    type_name: &str,
-    method_name: &str,
-    binding_id: &BindingId,
-) -> Option<&'a BindingUseFacts> {
-    let mut matches = usage
-        .rust_name_method_entries()
-        .filter_map(|(key, method)| {
-            rust_method_family_key_matches(key, type_name, method_name)
-                .then(|| method.binding_facts_for_id(binding_id))
-                .flatten()
-        });
-    let first = matches.next()?;
-    matches.next().is_none().then_some(first)
-}
-
-fn rust_method_family_key_matches(
-    key: &UsageMethodKey,
-    type_name: &str,
-    method_name: &str,
-) -> bool {
-    if key.type_name() != type_name {
-        return false;
-    }
-    let rust_base = crate::parser::to_snake_case(method_name);
-    let overload_prefix = format!("{rust_base}_");
-    key.method_name() == rust_base || key.method_name().starts_with(&overload_prefix)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::binding_id::BindingKind;
     use crate::exception_plan::{ProgramExceptionPlan, ProgramFallibilityPlan};
     use crate::java_ir::{JavaType, PrimitiveType};
-    use crate::usage::{BindingUse, BindingUseFacts, MethodUsageFacts, UsageFacts};
+    use crate::usage::{BindingUse, BindingUseFacts, MethodUsageFacts, UsageFacts, UsageMethodKey};
 
     fn binding_facts(
         binding: BindingId,
         java_ty: JavaType,
         uses: Vec<BindingUse>,
     ) -> BindingUseFacts {
-        BindingUseFacts {
-            name: binding.name().to_string(),
-            binding: Some(binding),
-            java_ty,
-            uses,
-        }
+        let name = binding.name().to_string();
+        BindingUseFacts::new(name, Some(binding), java_ty, uses)
     }
 
     #[test]

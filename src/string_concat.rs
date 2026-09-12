@@ -3,7 +3,21 @@ use crate::types::{TypeEnv, infer_expr_type};
 
 #[derive(Debug, Clone)]
 pub(crate) struct StringConcatParts<'a> {
-    pub(crate) parts: Vec<&'a Expr>,
+    parts: Vec<&'a Expr>,
+}
+
+impl<'a> StringConcatParts<'a> {
+    pub(crate) fn new(parts: Vec<&'a Expr>) -> Self {
+        Self { parts }
+    }
+
+    pub(crate) fn parts(&self) -> &[&'a Expr] {
+        &self.parts
+    }
+
+    pub(crate) fn into_parts(self) -> Vec<&'a Expr> {
+        self.parts
+    }
 }
 
 pub(crate) fn analyze_string_concat<'a>(
@@ -13,7 +27,7 @@ pub(crate) fn analyze_string_concat<'a>(
     let mut parts = Vec::new();
     flatten_string_concat(expr, env, &mut parts);
     if parts.len() > 1 && binary_add_is_string_concat(expr, env) {
-        Some(StringConcatParts { parts })
+        Some(StringConcatParts::new(parts))
     } else {
         None
     }
@@ -89,7 +103,7 @@ mod tests {
         let parts = analyze_string_concat(&expr, &env).unwrap();
 
         assert!(is_string_concat(&expr, &env));
-        assert_eq!(parts.parts.len(), 3);
+        assert_eq!(parts.parts().len(), 3);
         assert!(!is_string_concat(&parse_expr("count + 1"), &env));
     }
 }

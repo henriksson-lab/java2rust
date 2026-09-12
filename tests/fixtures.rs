@@ -852,8 +852,8 @@ mod generated_tests {
         let checker = ThrowOnly {};
         assert_eq!(checker.require_positive(3).unwrap(), 3);
         let err = checker.require_positive(-1).unwrap_err();
-        assert_eq!(err.class_name, "IllegalArgumentException");
-        assert_eq!(err.message, "negative");
+        assert_eq!(err.class_name(), "IllegalArgumentException");
+        assert_eq!(err.message(), "negative");
     }
 }
 "#,
@@ -1518,7 +1518,7 @@ fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
             translation
                 .diagnostics
                 .iter()
-                .any(|d| matches!(d.severity, Severity::Unsupported))
+                .any(|d| matches!(d.severity(), Severity::Unsupported))
         );
     }
 }

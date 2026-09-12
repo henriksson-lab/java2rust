@@ -26,23 +26,23 @@ use crate::usage::{CallGraph, CallGraphEdgeKind, CallableKey};
 
 /// A call edge whose callee is fallible but whose caller is not.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FallibilityViolation {
+pub(crate) struct FallibilityViolation {
     caller: CallableKey,
     callee: CallableKey,
 }
 
 impl FallibilityViolation {
-    pub fn caller(&self) -> &CallableKey {
+    pub(crate) fn caller(&self) -> &CallableKey {
         &self.caller
     }
 
-    pub fn callee(&self) -> &CallableKey {
+    pub(crate) fn callee(&self) -> &CallableKey {
         &self.callee
     }
 }
 
 /// Every edge that breaks the invariant.
-pub fn fallibility_violations(
+pub(crate) fn fallibility_violations(
     call_graph: &CallGraph,
     fallibility: &ProgramFallibilityPlan,
 ) -> Vec<FallibilityViolation> {
@@ -78,7 +78,7 @@ pub fn fallibility_violations(
 /// analysis is inconsistent, and refusing to emit anything would hide the rest
 /// of a file's output behind one solver bug. Naming it is what makes it
 /// attributable.
-pub fn report_fallibility_violations(
+pub(crate) fn report_fallibility_violations(
     call_graph: &CallGraph,
     fallibility: &ProgramFallibilityPlan,
     into: &mut DiagnosticBag,

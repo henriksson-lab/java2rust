@@ -24,15 +24,15 @@ use crate::java_ir::{Block, Expr, Stmt};
 /// share it. The declaration id distinguishes them, so a live set can never
 /// claim an inner binding keeps an outer one alive.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct Binding {
-    pub name: String,
+struct Binding {
+    name: String,
     /// Declaration site, or `OUTER_DECL` for anything declared outside the
     /// analyzed body (parameters, fields).
-    pub decl: usize,
+    decl: usize,
 }
 
 /// Declaration id for names that enter from outside the analyzed body.
-pub const OUTER_DECL: usize = 0;
+const OUTER_DECL: usize = 0;
 
 impl Binding {
     fn new(name: &str, decl: usize) -> Self {
@@ -59,7 +59,7 @@ enum Pass {
 }
 
 #[derive(Debug, Default, Clone)]
-pub struct LivenessAnalysis {
+pub(crate) struct LivenessAnalysis {
     live_out: HashMap<usize, HashSet<Binding>>,
     /// May-be-written-after: the same backward fixpoint as `live_out`, but
     /// generating on `def` instead of `use`. Also a *may* analysis — an
@@ -87,7 +87,7 @@ fn declared_binding_name(stmt: &Stmt) -> Option<&str> {
 
 impl LivenessAnalysis {
     /// Analyze a callable body. Nothing is live on normal exit.
-    pub fn for_body(body: &Block) -> Self {
+    pub(crate) fn for_body(body: &Block) -> Self {
         let mut analysis = Self::default();
         analysis.record_scopes_block(body, &mut ScopeMap::new());
         let exit = HashSet::new();
@@ -105,7 +105,11 @@ impl LivenessAnalysis {
     ///
     /// `rebound` names (the lambda parameters) are fresh on each iteration, so
     /// reads of them are not carried across the back edge.
-    pub fn for_loop_body(block: &Block, rebound: &[String], enclosing_live: &[String]) -> Self {
+    pub(crate) fn for_loop_body(
+        block: &Block,
+        rebound: &[String],
+        enclosing_live: &[String],
+    ) -> Self {
         let mut analysis = Self::default();
         analysis.record_scopes_block(block, &mut ScopeMap::new());
         let enclosing = enclosing_live
@@ -133,7 +137,7 @@ impl LivenessAnalysis {
     /// Not a dataflow relation — within-statement multiplicity — but it answers
     /// "how is this binding used here", so it belongs to the same owner rather
     /// than being a separate context field computed at each call site.
-    pub fn use_counts_in(&self, stmt: &Stmt) -> HashMap<String, usize> {
+    pub(crate) fn use_counts_in(&self, stmt: &Stmt) -> HashMap<String, usize> {
         let mut counts = HashMap::new();
         crate::lower::collect_stmt_read_counts_for_liveness(stmt, &mut counts);
         counts
@@ -144,13 +148,13 @@ impl LivenessAnalysis {
     /// Resolves the name to the binding in scope at that point and compares
     /// bindings, so a same-named variable from another scope cannot answer for
     /// it. `None` means the statement was not analyzed.
-    pub fn binding_is_live_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
+    pub(crate) fn binding_is_live_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
         let bindings = self.live_out.get(&stmt_id(stmt))?;
         Some(bindings.contains(&self.binding_at(stmt, name)))
     }
 
     /// The write-side equivalent of [`Self::binding_is_live_after`].
-    pub fn binding_is_mutated_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
+    pub(crate) fn binding_is_mutated_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
         let bindings = self.mutated_after.get(&stmt_id(stmt))?;
         Some(bindings.contains(&self.binding_at(stmt, name)))
     }
@@ -179,7 +183,8 @@ impl LivenessAnalysis {
     }
 
     /// Names that may be *written* after `stmt` completes.
-    pub fn mutated_after_for(&self, stmt: &Stmt) -> Option<HashSet<String>> {
+    #[cfg(test)]
+    fn mutated_after_for(&self, stmt: &Stmt) -> Option<HashSet<String>> {
         self.mutated_after.get(&stmt_id(stmt)).map(|bindings| {
             bindings
                 .iter()
@@ -189,7 +194,8 @@ impl LivenessAnalysis {
     }
 
     /// Bindings that may be read after `stmt` completes.
-    pub fn live_out_bindings_for(&self, stmt: &Stmt) -> Option<&HashSet<Binding>> {
+    #[cfg(test)]
+    fn live_out_bindings_for(&self, stmt: &Stmt) -> Option<&HashSet<Binding>> {
         self.live_out.get(&stmt_id(stmt))
     }
 
@@ -202,7 +208,7 @@ impl LivenessAnalysis {
     ///
     /// `None` means the statement was not part of the analyzed body (for
     /// example a synthesized statement), and the caller should fall back.
-    pub fn live_out_for(&self, stmt: &Stmt) -> Option<HashSet<String>> {
+    pub(crate) fn live_out_for(&self, stmt: &Stmt) -> Option<HashSet<String>> {
         self.live_out.get(&stmt_id(stmt)).map(|bindings| {
             bindings
                 .iter()

@@ -86,14 +86,14 @@ pub enum Escape {
 /// The evidence behind one type's decision, kept so the report can say *why*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeStorageFacts {
-    pub escape: Escape,
+    escape: Escape,
     /// `T b = a;` with `a` a bare handle — the shape that makes lowering clone.
-    pub locally_aliased: bool,
+    locally_aliased: bool,
     /// Any field write through a value of the type, or a method that writes
     /// through its receiver.
-    pub mutated: bool,
+    mutated: bool,
     /// Reachable from a thread entry point.
-    pub threaded: bool,
+    threaded: bool,
     /// Whether every trait this type is reached through can forward a handle.
     ///
     /// A generated trait with a `&mut self` method has no
@@ -102,13 +102,13 @@ pub struct TypeStorageFacts {
     /// **precondition of the tier**, not a consequence: without it the wrap
     /// produces `doesn't satisfy Rc<FormatLine>: HeaderLineBound`.
     /// See [0002b](../claude_audits/0002b-shared-representation-design.md).
-    pub surface_forwardable: bool,
+    surface_forwardable: bool,
     /// Whether the absence of mutation could be *proved*.
     ///
     /// `mutated` says a mutation was seen; this says the walk was able to see
     /// them all. A field write through a receiver it cannot type clears this,
     /// and without it a type cannot be `SharedImmutable` however clean it looks.
-    pub mutation_provably_absent: bool,
+    mutation_provably_absent: bool,
     /// Reachable from a Java `static` field.
     ///
     /// Independent of `threaded`, and it forces the same answer for a different
@@ -117,7 +117,7 @@ pub struct TypeStorageFacts {
     /// `static` in Rust must be `Sync` — so a type a Java `static` can reach
     /// must be `Send + Sync` **in a single-threaded program with no `Thread`
     /// anywhere**. `Rc` is neither; `Arc` is both.
-    pub static_reachable: bool,
+    static_reachable: bool,
 }
 
 impl Default for TypeStorageFacts {
@@ -139,6 +139,69 @@ impl Default for TypeStorageFacts {
 }
 
 impl TypeStorageFacts {
+    pub fn escape(&self) -> Escape {
+        self.escape
+    }
+
+    pub fn locally_aliased(&self) -> bool {
+        self.locally_aliased
+    }
+
+    pub fn mutated(&self) -> bool {
+        self.mutated
+    }
+
+    pub fn threaded(&self) -> bool {
+        self.threaded
+    }
+
+    pub fn surface_forwardable(&self) -> bool {
+        self.surface_forwardable
+    }
+
+    pub fn mutation_provably_absent(&self) -> bool {
+        self.mutation_provably_absent
+    }
+
+    pub fn static_reachable(&self) -> bool {
+        self.static_reachable
+    }
+
+    pub fn with_escape(mut self, escape: Escape) -> Self {
+        self.escape = escape;
+        self
+    }
+
+    pub fn with_locally_aliased(mut self, locally_aliased: bool) -> Self {
+        self.locally_aliased = locally_aliased;
+        self
+    }
+
+    pub fn with_mutated(mut self, mutated: bool) -> Self {
+        self.mutated = mutated;
+        self
+    }
+
+    pub fn with_threaded(mut self, threaded: bool) -> Self {
+        self.threaded = threaded;
+        self
+    }
+
+    pub fn with_surface_forwardable(mut self, surface_forwardable: bool) -> Self {
+        self.surface_forwardable = surface_forwardable;
+        self
+    }
+
+    pub fn with_mutation_provably_absent(mut self, mutation_provably_absent: bool) -> Self {
+        self.mutation_provably_absent = mutation_provably_absent;
+        self
+    }
+
+    pub fn with_static_reachable(mut self, static_reachable: bool) -> Self {
+        self.static_reachable = static_reachable;
+        self
+    }
+
     /// Conservative merge of two observations for the same source type.
     pub fn join(&mut self, other: TypeStorageFacts) {
         self.escape = self.escape.max(other.escape);
@@ -176,7 +239,7 @@ impl TypeStorageFacts {
     pub fn placement(&self) -> StoragePlacement {
         let shared =
             matches!(self.escape, Escape::Stored | Escape::UnknownBoundary) || self.locally_aliased;
-        StoragePlacement {
+        StoragePlacement::new(
             shared,
             // `SharedImmutable` must be *proved*, not merely unobserved: a
             // missed mutation gives `Rc<T>` for a type that is written through,
@@ -184,10 +247,9 @@ impl TypeStorageFacts {
             // A non-forwardable surface falls back to holding the value inline,
             // through the same `is_implemented()` path an unproved mutation
             // takes: wrong in a known and reported way rather than not compiling.
-            interior_mutable: shared
-                && (self.mutated || !self.mutation_provably_absent || !self.surface_forwardable),
-            sync: self.threaded || self.static_reachable,
-        }
+            shared && (self.mutated || !self.mutation_provably_absent || !self.surface_forwardable),
+            self.threaded || self.static_reachable,
+        )
     }
 
     /// Which pointer this type's shared handle must be.
@@ -273,28 +335,48 @@ pub struct StoragePlacement {
     /// The value has an identity that outlives one owner: it needs a pointer.
     ///
     /// From `escape ∈ {Stored, UnknownBoundary} ∨ locally_aliased`.
-    pub shared: bool,
+    shared: bool,
     /// It is mutated *after* being shared, so the pointer needs a cell.
     ///
     /// From `mutated`, and only meaningful when `shared`.
-    pub interior_mutable: bool,
+    interior_mutable: bool,
     /// The handle must be `Send + Sync`.
     ///
     /// From `threaded ∨ static_reachable` — a Rust `static` must be `Sync`, and
     /// [0030](../claude_audits/done/0030-java-statics-are-thread-local.md) makes
     /// every Java `static` a real one, so this is reachable with no `Thread` in
     /// the program.
-    pub sync: bool,
+    sync: bool,
 }
 
 impl StoragePlacement {
+    pub fn new(shared: bool, interior_mutable: bool, sync: bool) -> Self {
+        Self {
+            shared,
+            interior_mutable,
+            sync,
+        }
+    }
+
+    pub fn shared(self) -> bool {
+        self.shared
+    }
+
+    pub fn interior_mutable(self) -> bool {
+        self.interior_mutable
+    }
+
+    pub fn sync(self) -> bool {
+        self.sync
+    }
+
     /// Join per axis. Monotone, so the plan's fixpoint terminates.
     pub fn join(self, other: Self) -> Self {
-        Self {
-            shared: self.shared || other.shared,
-            interior_mutable: self.interior_mutable || other.interior_mutable,
-            sync: self.sync || other.sync,
-        }
+        Self::new(
+            self.shared || other.shared,
+            self.interior_mutable || other.interior_mutable,
+            self.sync || other.sync,
+        )
     }
 
     /// The cell a mutated shared value needs, if any.
@@ -660,7 +742,7 @@ fn collect_inner_outer_capture_storage_requirements(
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     for inner in crate::inner_class_capture::constructed_outer_this_inner_classes(program, facts) {
-        if let Some(outer_type) = declared_type_name_from_name(&inner.outer_type, declared)
+        if let Some(outer_type) = declared_type_name_from_name(inner.outer_type(), declared)
             && let Some(storage) = into.get_mut(&outer_type)
         {
             storage.escape = storage.escape.max(Escape::Stored);
@@ -854,7 +936,7 @@ fn collect_unknown_boundary_escapes(
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     for binding in method_usage.all_binding_facts() {
-        let crosses_unknown_boundary = binding.uses.iter().any(|use_site| {
+        let crosses_unknown_boundary = binding.uses().iter().any(|use_site| {
             matches!(
                 use_site,
                 BindingUse::PassedToCall {
@@ -864,7 +946,7 @@ fn collect_unknown_boundary_escapes(
             )
         });
         if crosses_unknown_boundary {
-            for name in declared_storage_type_names(&binding.java_ty, &owner.name, declared) {
+            for name in declared_storage_type_names(binding.java_ty(), &owner.name, declared) {
                 if let Some(facts) = into.get_mut(&name) {
                     facts.escape = facts.escape.max(Escape::UnknownBoundary);
                 }
@@ -1407,14 +1489,7 @@ mod tests {
         };
 
         assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
-        assert_eq!(
-            facts.placement(),
-            StoragePlacement {
-                shared: true,
-                interior_mutable: true,
-                sync: false,
-            }
-        );
+        assert_eq!(facts.placement(), StoragePlacement::new(true, true, false));
         assert!(!facts.placement().is_implemented());
     }
 
@@ -1429,14 +1504,7 @@ mod tests {
 
         assert_eq!(facts.strategy(), StorageStrategy::SharedSync);
         assert_eq!(facts.handle(), SharedHandle::Sync);
-        assert_eq!(
-            facts.placement(),
-            StoragePlacement {
-                shared: true,
-                interior_mutable: true,
-                sync: true,
-            }
-        );
+        assert_eq!(facts.placement(), StoragePlacement::new(true, true, true));
     }
 
     #[test]
@@ -1817,46 +1885,15 @@ public class Outer {
 
     #[test]
     fn storage_placement_implementation_gate_stays_explicit() {
+        assert!(StoragePlacement::new(false, false, false).is_implemented());
+        assert!(StoragePlacement::new(true, false, false).is_implemented());
+        assert!(StoragePlacement::new(true, false, true).is_implemented());
         assert!(
-            StoragePlacement {
-                shared: false,
-                interior_mutable: false,
-                sync: false,
-            }
-            .is_implemented()
-        );
-        assert!(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: false,
-                sync: false,
-            }
-            .is_implemented()
-        );
-        assert!(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: false,
-                sync: true,
-            }
-            .is_implemented()
-        );
-        assert!(
-            !StoragePlacement {
-                shared: true,
-                interior_mutable: true,
-                sync: false,
-            }
-            .is_implemented(),
+            !StoragePlacement::new(true, true, false).is_implemented(),
             "SharedLocal remains blocked until Rc<RefCell<T>> lowering is implemented"
         );
         assert!(
-            !StoragePlacement {
-                shared: true,
-                interior_mutable: true,
-                sync: true,
-            }
-            .is_implemented(),
+            !StoragePlacement::new(true, true, true).is_implemented(),
             "SharedSync remains blocked until Arc<Mutex<T>> lowering is implemented"
         );
     }
@@ -2044,11 +2081,7 @@ mod placement_law_tests {
         for shared in [false, true] {
             for interior_mutable in [false, true] {
                 for sync in [false, true] {
-                    out.push(StoragePlacement {
-                        shared,
-                        interior_mutable,
-                        sync,
-                    });
+                    out.push(StoragePlacement::new(shared, interior_mutable, sync));
                 }
             }
         }
@@ -2071,9 +2104,9 @@ mod placement_law_tests {
                 assert_eq!(a.join(b), b.join(a), "commutative");
                 // Extensive: joining can only add requirements.
                 let j = a.join(b);
-                assert!(j.shared >= a.shared && j.shared >= b.shared);
-                assert!(j.interior_mutable >= a.interior_mutable);
-                assert!(j.sync >= a.sync && j.sync >= b.sync);
+                assert!(j.shared() >= a.shared() && j.shared() >= b.shared());
+                assert!(j.interior_mutable() >= a.interior_mutable());
+                assert!(j.sync() >= a.sync() && j.sync() >= b.sync());
                 for c in all_placements() {
                     assert_eq!(a.join(b).join(c), a.join(b.join(c)), "associative");
                 }
@@ -2091,26 +2124,26 @@ mod placement_law_tests {
 
             assert_eq!(
                 wrapped.contains("Rc<") || wrapped.contains("Arc<"),
-                placement.shared,
+                placement.shared(),
                 "a handle appears exactly when the value is shared: {placement:?} -> {wrapped}"
             );
             assert_eq!(
                 wrapped.contains("RefCell<") || wrapped.contains("Mutex<"),
-                placement.shared && placement.interior_mutable,
+                placement.shared() && placement.interior_mutable(),
                 "a cell appears exactly when a shared value is mutated: {placement:?} -> {wrapped}"
             );
             // One `sync` bit picks both, so they can never disagree.
-            if placement.shared {
+            if placement.shared() {
                 assert_eq!(
                     wrapped.contains("std::sync::Arc<"),
-                    placement.sync,
+                    placement.sync(),
                     "the atomic handle is used exactly when sync is required"
                 );
             }
-            if placement.shared && placement.interior_mutable {
+            if placement.shared() && placement.interior_mutable() {
                 assert_eq!(
                     wrapped.contains("std::sync::Mutex<"),
-                    placement.sync,
+                    placement.sync(),
                     "the lock and the handle agree on sync by construction"
                 );
             }
@@ -2155,7 +2188,7 @@ mod placement_law_tests {
                 );
             }
             // An unshared value is constructed exactly as written.
-            if !placement.shared {
+            if !placement.shared() {
                 assert_eq!(value, "v");
             }
         }
@@ -2164,7 +2197,7 @@ mod placement_law_tests {
     /// An unshared value is never wrapped, whatever the other axes say.
     #[test]
     fn an_unshared_value_is_held_inline() {
-        for placement in all_placements().into_iter().filter(|p| !p.shared) {
+        for placement in all_placements().into_iter().filter(|p| !p.shared()) {
             assert_eq!(placement.wrap("T".to_string()), "T");
             assert_eq!(placement.handle_path(), None);
             assert_eq!(placement.cell_path(), None);

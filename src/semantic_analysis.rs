@@ -22,7 +22,7 @@ use crate::rewrite::{
     MethodControlFlowPlan, NullTestKind, TailRecursiveLoopPlan, TailRecursiveNormalizedShape,
 };
 use crate::types::{TypeEnv, infer_expr_type};
-use crate::usage::{self, CallGraphEdgeKind, CallableKey, UsageFacts};
+use crate::usage::{self, CallGraphEdgeKind, UsageFacts};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticFacts {
@@ -35,21 +35,45 @@ pub struct SemanticFacts {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SemanticDiagnostic {
-    pub code: &'static str,
-    pub message: String,
+    code: &'static str,
+    message: String,
+}
+
+impl SemanticDiagnostic {
+    pub fn code(&self) -> &'static str {
+        self.code
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn into_parts(self) -> (&'static str, String) {
+        (self.code, self.message)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticAnalysisIterations {
-    pub field_nullability: usize,
+    field_nullability: usize,
+}
+
+impl SemanticAnalysisIterations {
+    pub fn new(field_nullability: usize) -> Self {
+        Self { field_nullability }
+    }
+
+    pub fn field_nullability(self) -> usize {
+        self.field_nullability
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SemanticAnalysisConfig {
-    pub max_external_guess_iterations: Option<usize>,
-    pub enable_external_api_guesses: bool,
-    pub enable_control_flow_facts: bool,
-    pub enable_builtin_external_packs: bool,
+    max_external_guess_iterations: Option<usize>,
+    enable_external_api_guesses: bool,
+    enable_control_flow_facts: bool,
+    enable_builtin_external_packs: bool,
 }
 
 impl Default for SemanticAnalysisConfig {
@@ -60,6 +84,44 @@ impl Default for SemanticAnalysisConfig {
             enable_control_flow_facts: true,
             enable_builtin_external_packs: true,
         }
+    }
+}
+
+impl SemanticAnalysisConfig {
+    pub fn max_external_guess_iterations(self) -> Option<usize> {
+        self.max_external_guess_iterations
+    }
+
+    pub fn external_api_guesses_enabled(self) -> bool {
+        self.enable_external_api_guesses
+    }
+
+    pub fn control_flow_facts_enabled(self) -> bool {
+        self.enable_control_flow_facts
+    }
+
+    pub fn builtin_external_packs_enabled(self) -> bool {
+        self.enable_builtin_external_packs
+    }
+
+    pub fn with_max_external_guess_iterations(mut self, iterations: Option<usize>) -> Self {
+        self.max_external_guess_iterations = iterations;
+        self
+    }
+
+    pub fn with_external_api_guesses_enabled(mut self, enabled: bool) -> Self {
+        self.enable_external_api_guesses = enabled;
+        self
+    }
+
+    pub fn with_control_flow_facts_enabled(mut self, enabled: bool) -> Self {
+        self.enable_control_flow_facts = enabled;
+        self
+    }
+
+    pub fn with_builtin_external_packs_enabled(mut self, enabled: bool) -> Self {
+        self.enable_builtin_external_packs = enabled;
+        self
     }
 }
 
@@ -86,39 +148,45 @@ pub fn analyze_program_with_config(
     facts.extend_from(external_facts.clone());
     let mut diagnostics = Vec::new();
 
-    collect_builtin_external_representation_facts(&mut facts, config.enable_builtin_external_packs);
+    collect_builtin_external_representation_facts(
+        &mut facts,
+        config.builtin_external_packs_enabled(),
+    );
     collect_trivial_accessor_facts(program, &mut facts);
     collect_source_equals_override_facts(program, &mut facts);
-    if config.enable_external_api_guesses {
+    if config.external_api_guesses_enabled() {
         collect_java_platform_api_argument_effect_facts(&mut facts);
         collect_builtin_external_api_argument_effect_facts(
             &mut facts,
-            config.enable_builtin_external_packs,
+            config.builtin_external_packs_enabled(),
         );
     }
     let usage = usage::analyze_usage_with_facts(program, &facts);
     collect_usage_dispatch_requirement_facts(&usage, &mut facts);
     let field_nullability_iterations =
         collect_field_nullability_facts(program, &mut facts, &mut diagnostics);
-    if config.enable_external_api_guesses {
+    if config.external_api_guesses_enabled() {
         collect_external_api_effect_facts(program, &mut facts, &config, &mut diagnostics);
         collect_java_platform_api_argument_effect_facts(&mut facts);
         collect_java_platform_exception_facts(&mut facts);
-        collect_builtin_external_exception_facts(&mut facts, config.enable_builtin_external_packs);
+        collect_builtin_external_exception_facts(
+            &mut facts,
+            config.builtin_external_packs_enabled(),
+        );
         collect_builtin_external_api_argument_effect_facts(
             &mut facts,
-            config.enable_builtin_external_packs,
+            config.builtin_external_packs_enabled(),
         );
         collect_external_constructor_facts(
             program,
             &mut facts,
-            config.enable_builtin_external_packs,
+            config.builtin_external_packs_enabled(),
             &mut diagnostics,
         );
         collect_external_field_facts(
             program,
             &mut facts,
-            config.enable_builtin_external_packs,
+            config.builtin_external_packs_enabled(),
             &mut diagnostics,
         );
     }
@@ -126,7 +194,7 @@ pub fn analyze_program_with_config(
     propagate_source_call_thrown_effects(program, &mut facts);
     collect_recursion_facts(program, &mut facts);
     collect_dispatch_requirement_facts(program, &mut facts);
-    let control_flow_plans = if config.enable_control_flow_facts {
+    let control_flow_plans = if config.control_flow_facts_enabled() {
         collect_control_flow_facts(program, &mut facts);
         collect_control_flow_plans(program)
     } else {
@@ -149,9 +217,7 @@ pub fn analyze_program_with_config(
         usage,
         control_flow_plans,
         diagnostics,
-        iterations: SemanticAnalysisIterations {
-            field_nullability: field_nullability_iterations,
-        },
+        iterations: SemanticAnalysisIterations::new(field_nullability_iterations),
     }
 }
 
@@ -341,8 +407,8 @@ fn collect_external_api_effect_facts(
             &external_superclasses,
             facts,
             &mut seen,
-            config.max_external_guess_iterations,
-            config.enable_builtin_external_packs,
+            config.max_external_guess_iterations(),
+            config.builtin_external_packs_enabled(),
             &mut guessed_count,
             &mut budget_exhausted,
             diagnostics,
@@ -352,8 +418,8 @@ fn collect_external_api_effect_facts(
         program,
         facts,
         &mut seen,
-        config.max_external_guess_iterations,
-        config.enable_builtin_external_packs,
+        config.max_external_guess_iterations(),
+        config.builtin_external_packs_enabled(),
         &mut guessed_count,
         &mut budget_exhausted,
         diagnostics,
@@ -2281,12 +2347,12 @@ fn seed_typed_external_call_effect(
         receiver_type: receiver_type_key,
         arg_count: Some(args.len()),
         parameter_patterns: None,
-        role: policy.role,
-        receiver_mutability: policy.receiver_mutability,
+        role: policy.role(),
+        receiver_mutability: policy.receiver_mutability(),
         return_type: Some(expected_return_type.clone()),
-        return_nullability: policy.return_nullability,
+        return_nullability: policy.return_nullability(),
         thrown: Vec::new(),
-        provenance: policy.provenance,
+        provenance: policy.provenance(),
     });
     *guessed_count += 1;
 }
@@ -2538,7 +2604,7 @@ fn push_chained_external_fluent_effect_guess(
         arg_count,
         enable_builtin_external_packs,
     );
-    if !external_api_role_can_be_fluent_from_context(policy.role, allow_unknown_role) {
+    if !external_api_role_can_be_fluent_from_context(policy.role(), allow_unknown_role) {
         return;
     }
     if let Some(pack_fact) = builtin_external_api_effect_for_receiver(
@@ -2570,7 +2636,7 @@ fn push_chained_external_fluent_effect_guess(
                 name: receiver_key,
                 args: Vec::new(),
             });
-            existing.return_nullability = policy.return_nullability;
+            existing.return_nullability = policy.return_nullability();
         }
         return;
     }
@@ -2589,9 +2655,9 @@ fn push_chained_external_fluent_effect_guess(
             name: receiver_key.clone(),
             args: Vec::new(),
         }),
-        return_nullability: policy.return_nullability,
+        return_nullability: policy.return_nullability(),
         thrown: Vec::new(),
-        provenance: policy.provenance,
+        provenance: policy.provenance(),
     });
     *guessed_count += 1;
 }
@@ -2814,18 +2880,18 @@ fn push_external_api_effect_guess(
         arg_count,
         enable_builtin_external_packs,
     );
-    if policy.provenance == FactProvenance::BuiltinExternalModel {
+    if policy.provenance() == FactProvenance::BuiltinExternalModel {
         facts.external_api_effect_facts.push(ExternalApiEffectFact {
             method_name: name.to_string(),
             receiver_type: receiver_type_key,
             arg_count: Some(arg_count),
             parameter_patterns: None,
-            role: policy.role,
-            receiver_mutability: policy.receiver_mutability,
+            role: policy.role(),
+            receiver_mutability: policy.receiver_mutability(),
             return_type: None,
-            return_nullability: policy.return_nullability,
+            return_nullability: policy.return_nullability(),
             thrown: Vec::new(),
-            provenance: policy.provenance,
+            provenance: policy.provenance(),
         });
         *guessed_count += 1;
         return;
@@ -2880,12 +2946,12 @@ fn push_external_api_effect_guess(
         receiver_type: receiver_type_key,
         arg_count: Some(arg_count),
         parameter_patterns: None,
-        role: policy.role,
-        receiver_mutability: policy.receiver_mutability,
+        role: policy.role(),
+        receiver_mutability: policy.receiver_mutability(),
         return_type: None,
-        return_nullability: policy.return_nullability,
+        return_nullability: policy.return_nullability(),
         thrown: Vec::new(),
-        provenance: policy.provenance,
+        provenance: policy.provenance(),
     });
     *guessed_count += 1;
 }
@@ -3209,17 +3275,10 @@ fn propagate_source_call_thrown_effects(program: &Program, facts: &mut FactSet) 
             if edge.kind() != CallGraphEdgeKind::DirectMethodCall {
                 continue;
             }
-            let (
-                CallableKey::Method {
-                    type_name: caller_type,
-                    method_name: caller_method,
-                },
-                CallableKey::Method {
-                    type_name: callee_type,
-                    method_name: callee_method,
-                },
-            ) = (edge.caller(), edge.callee())
-            else {
+            let Some((caller_type, caller_method)) = edge.caller().method_identity_parts() else {
+                continue;
+            };
+            let Some((callee_type, callee_method)) = edge.callee().method_identity_parts() else {
                 continue;
             };
             let callee_thrown = facts
@@ -4023,7 +4082,7 @@ fn collect_method_recursion_facts_for_type(
     for (caller, callee) in edges {
         let kind = if caller == callee {
             Some(RecursionKind::Direct)
-        } else if scc.component_by_node.get(&caller) == scc.component_by_node.get(&callee) {
+        } else if scc.component_by_node().get(&caller) == scc.component_by_node().get(&callee) {
             Some(RecursionKind::Mutual)
         } else {
             None
@@ -4081,7 +4140,7 @@ fn collect_constructor_recursion_facts_for_type(
     for (caller, callee) in edges {
         let kind = if caller == callee {
             Some(RecursionKind::Direct)
-        } else if scc.component_by_node.get(&caller) == scc.component_by_node.get(&callee) {
+        } else if scc.component_by_node().get(&caller) == scc.component_by_node().get(&callee) {
             Some(RecursionKind::Mutual)
         } else {
             None
@@ -4108,22 +4167,14 @@ fn same_type_method_call_graph_edges(
         .iter()
         .filter(|edge| edge.kind() == CallGraphEdgeKind::DirectMethodCall)
         .filter_map(|edge| {
-            let CallableKey::Method {
-                type_name: caller_type,
-                method_name: caller_method,
-            } = edge.caller()
-            else {
+            let Some((caller_type, caller_method)) = edge.caller().method_identity_parts() else {
                 return None;
             };
-            let CallableKey::Method {
-                type_name: callee_type,
-                method_name: callee_method,
-            } = edge.callee()
-            else {
+            let Some((callee_type, callee_method)) = edge.callee().method_identity_parts() else {
                 return None;
             };
             if caller_type == type_name && callee_type == type_name {
-                Some((caller_method.clone(), callee_method.clone()))
+                Some((caller_method.to_string(), callee_method.to_string()))
             } else {
                 None
             }
@@ -4145,22 +4196,21 @@ fn same_type_constructor_call_graph_edges(
             )
         })
         .filter_map(|edge| {
-            let CallableKey::Constructor {
-                type_name: caller_type,
-                rust_name: caller_constructor,
-            } = edge.caller()
+            let Some((caller_type, caller_constructor)) =
+                edge.caller().constructor_identity_parts()
             else {
                 return None;
             };
-            let CallableKey::Constructor {
-                type_name: callee_type,
-                rust_name: callee_constructor,
-            } = edge.callee()
+            let Some((callee_type, callee_constructor)) =
+                edge.callee().constructor_identity_parts()
             else {
                 return None;
             };
             if caller_type == type_name && callee_type == type_name {
-                Some((caller_constructor.clone(), callee_constructor.clone()))
+                Some((
+                    caller_constructor.to_string(),
+                    callee_constructor.to_string(),
+                ))
             } else {
                 None
             }
@@ -4490,10 +4540,10 @@ fn collect_type_control_flow_plans(ty: &TypeDecl, plans: &mut Vec<MethodControlF
                         rewrites.push(ControlFlowRewritePlan::TailRecursiveLoop(tail_plan));
                     }
                     if !rewrites.is_empty() {
-                        plans.push(MethodControlFlowPlan {
-                            method: MethodKey::source_method(ty, method),
+                        plans.push(MethodControlFlowPlan::new(
+                            MethodKey::source_method(ty, method),
                             rewrites,
-                        });
+                        ));
                     }
                 }
             }
@@ -4811,17 +4861,13 @@ fn method_has_safe_tail_loop_plan(
     method_name: &str,
 ) -> bool {
     control_flow_plans.iter().any(|plan| {
-        plan.method.type_name() == type_name
-            && plan.method.method_name() == method_name
-            && plan.rewrites.iter().any(|rewrite| {
-                matches!(
-                    rewrite,
-                    ControlFlowRewritePlan::TailRecursiveLoop(TailRecursiveLoopPlan {
-                        normalized_shape:
-                            TailRecursiveNormalizedShape::LoopWithParameterReassignment,
-                        ..
-                    })
-                )
+        plan.method().type_name() == type_name
+            && plan.method().method_name() == method_name
+            && plan.rewrites().iter().any(|rewrite| {
+                rewrite.tail_recursive_loop().is_some_and(|tail| {
+                    tail.normalized_shape()
+                        == TailRecursiveNormalizedShape::LoopWithParameterReassignment
+                })
             })
     })
 }
@@ -5020,12 +5066,12 @@ fn assignment_fragment_plan(
     let Expr::Call { name, .. } = right.as_ref() else {
         return None;
     };
-    Some(AssignmentInConditionPlan {
-        local_name: local_name.clone(),
-        source_call: name.clone(),
+    Some(AssignmentInConditionPlan::new(
+        local_name.clone(),
+        name.clone(),
         null_test,
-        normalized_shape: AssignmentConditionNormalizedShape::LoopAssignThenBreak,
-    })
+        AssignmentConditionNormalizedShape::LoopAssignThenBreak,
+    ))
 }
 
 fn tail_recursive_loop_plan(body: &Block, method_name: &str) -> Option<TailRecursiveLoopPlan> {
@@ -5043,11 +5089,11 @@ fn tail_recursive_loop_plan(body: &Block, method_name: &str) -> Option<TailRecur
     if name != method_name || !block_is_single_value_return(then_block) {
         return None;
     }
-    Some(TailRecursiveLoopPlan {
-        method_name: name.clone(),
-        arg_count: args.len(),
-        normalized_shape: TailRecursiveNormalizedShape::LoopWithParameterReassignment,
-    })
+    Some(TailRecursiveLoopPlan::new(
+        name.clone(),
+        args.len(),
+        TailRecursiveNormalizedShape::LoopWithParameterReassignment,
+    ))
 }
 
 fn block_is_single_value_return(block: &Block) -> bool {
@@ -6172,11 +6218,12 @@ fn collect_constructor_field_assignments(
         },
     );
 
-    diagnostics.extend(result.diagnostics.clone());
+    diagnostics.extend(result.diagnostics().iter().cloned());
+    let (assignments, iterations, result_diagnostics) = result.into_parts();
     ConstructorAssignmentSaturation {
-        assignments: result.state,
-        iterations: result.iterations,
-        diagnostics: result.diagnostics,
+        assignments,
+        iterations,
+        diagnostics: result_diagnostics,
     }
 }
 
@@ -6406,15 +6453,15 @@ fn type_reaches(
     let reachability = hierarchy_index.reachable_hierarchy_edges_for_type_with_stats(&java_ty);
     diagnostics.extend(
         reachability
-            .diagnostics
-            .into_iter()
+            .diagnostics()
+            .iter()
             .map(|diagnostic| SemanticDiagnostic {
-                code: diagnostic.code,
-                message: diagnostic.message,
+                code: diagnostic.code(),
+                message: diagnostic.message().to_string(),
             }),
     );
     reachability
-        .edges
+        .edges()
         .iter()
         .any(|edge| edge.sub_name == type_name && edge.super_name == super_name)
 }

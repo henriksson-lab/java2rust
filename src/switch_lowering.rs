@@ -3,8 +3,21 @@ use crate::switch_plan::{SwitchCaseLabelPlan, SwitchCasePlan, SwitchPlan};
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SwitchRenderCase {
-    pub label_condition: RustExpr,
-    pub statements: Vec<RustStmt>,
+    label_condition: RustExpr,
+    statements: Vec<RustStmt>,
+}
+
+impl SwitchRenderCase {
+    pub fn new(label_condition: RustExpr, statements: Vec<RustStmt>) -> Self {
+        Self {
+            label_condition,
+            statements,
+        }
+    }
+
+    fn into_parts(self) -> (RustExpr, Vec<RustStmt>) {
+        (self.label_condition, self.statements)
+    }
 }
 
 pub(crate) fn switch_case_condition(
@@ -13,7 +26,7 @@ pub(crate) fn switch_case_condition(
     label_exprs: Vec<RustExpr>,
 ) -> RustExpr {
     if case_plan
-        .labels
+        .labels()
         .iter()
         .any(|label| matches!(label, SwitchCaseLabelPlan::Default))
     {
@@ -36,14 +49,14 @@ pub(crate) fn switch_case_condition(
 fn switch_unmatched_expr(plan: &SwitchPlan<'_>) -> RustExpr {
     RustExpr::Unary {
         op: "!".to_string(),
-        expr: Box::new(RustExpr::Var(plan.matched_binding.to_string())),
+        expr: Box::new(RustExpr::Var(plan.matched_binding().to_string())),
     }
 }
 
 fn switch_value_equals_label_expr(plan: &SwitchPlan<'_>, label: RustExpr) -> RustExpr {
     RustExpr::Binary {
         op: "==".to_string(),
-        left: Box::new(RustExpr::Var(plan.value_binding.to_string())),
+        left: Box::new(RustExpr::Var(plan.value_binding().to_string())),
         right: Box::new(label),
     }
 }
@@ -66,40 +79,41 @@ pub fn lower_switch_block_stmts(
 ) -> Vec<RustStmt> {
     let mut loop_body = Vec::new();
     for case in cases {
+        let (label_condition, statements) = case.into_parts();
         loop_body.push(RustStmt::If {
-            condition: case.label_condition,
+            condition: label_condition,
             then_body: vec![RustStmt::Assign {
-                target: RustExpr::Var(plan.matched_binding.to_string()),
+                target: RustExpr::Var(plan.matched_binding().to_string()),
                 value: RustExpr::Literal("true".to_string()),
             }],
             else_body: Vec::new(),
         });
         loop_body.push(RustStmt::If {
-            condition: RustExpr::Var(plan.matched_binding.to_string()),
-            then_body: case.statements,
+            condition: RustExpr::Var(plan.matched_binding().to_string()),
+            then_body: statements,
             else_body: Vec::new(),
         });
     }
     loop_body.push(RustStmt::BreakValue {
-        label: Some(plan.break_label.to_string()),
+        label: Some(plan.break_label().to_string()),
         value: RustExpr::Tuple(Vec::new()),
     });
     let mut out = vec![RustStmt::Expr(RustExpr::Block {
         stmts: vec![
             RustStmt::Let {
                 mutable: false,
-                name: plan.value_binding.to_string(),
+                name: plan.value_binding().to_string(),
                 ty: None,
                 value: Some(selector),
             },
             RustStmt::Let {
                 mutable: true,
-                name: plan.matched_binding.to_string(),
+                name: plan.matched_binding().to_string(),
                 ty: None,
                 value: Some(RustExpr::Literal("false".to_string())),
             },
             RustStmt::Loop {
-                label: Some(plan.break_label.to_string()),
+                label: Some(plan.break_label().to_string()),
                 body: loop_body,
             },
         ],
@@ -141,7 +155,7 @@ mod tests {
         let cases = vec![expr_case, default_case];
         let plan = plan_switch(&selector, &cases);
 
-        assert_eq!(plan.break_label, SWITCH_LABEL);
+        assert_eq!(plan.break_label(), SWITCH_LABEL);
         assert_eq!(
             emit::emit_expr(&switch_case_condition(
                 &plan,

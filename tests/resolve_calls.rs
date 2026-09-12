@@ -66,10 +66,10 @@ fn overload_applicability_reports_primitive_boxing_unboxing_and_rejections() {
         &[JavaType::Primitive(PrimitiveType::Int)],
         &symbols,
     );
-    assert_eq!(widening.mode, Some(OverloadApplicabilityMode::FixedArity));
+    assert_eq!(widening.mode(), Some(OverloadApplicabilityMode::FixedArity));
     assert_eq!(
-        widening.arguments[0].conversion,
-        OverloadArgumentConversion::PrimitiveWidening
+        widening.arguments()[0].conversion(),
+        &OverloadArgumentConversion::PrimitiveWidening
     );
 
     let boxing = overload_applicability_report(
@@ -84,8 +84,8 @@ fn overload_applicability_reports_primitive_boxing_unboxing_and_rejections() {
         &symbols,
     );
     assert_eq!(
-        boxing.arguments[0].conversion,
-        OverloadArgumentConversion::Boxing
+        boxing.arguments()[0].conversion(),
+        &OverloadArgumentConversion::Boxing
     );
 
     let unboxing = overload_applicability_report(
@@ -97,8 +97,8 @@ fn overload_applicability_reports_primitive_boxing_unboxing_and_rejections() {
         &symbols,
     );
     assert_eq!(
-        unboxing.arguments[0].conversion,
-        OverloadArgumentConversion::Unboxing
+        unboxing.arguments()[0].conversion(),
+        &OverloadArgumentConversion::Unboxing
     );
 
     let null_to_primitive = overload_applicability_report(
@@ -107,7 +107,7 @@ fn overload_applicability_reports_primitive_boxing_unboxing_and_rejections() {
         &symbols,
     );
     assert!(matches!(
-        null_to_primitive.rejections.as_slice(),
+        null_to_primitive.rejections(),
         [OverloadRejectionReason::NullToPrimitive { arg_index: 0, .. }]
     ));
 }
@@ -126,7 +126,10 @@ fn overload_applicability_reports_varargs_generics_and_ambiguous_scores() {
         &[JavaType::String, JavaType::String, JavaType::String],
         &symbols,
     );
-    assert_eq!(varargs.mode, Some(OverloadApplicabilityMode::VariableArity));
+    assert_eq!(
+        varargs.mode(),
+        Some(OverloadApplicabilityMode::VariableArity)
+    );
     assert!(varargs.is_applicable(), "{varargs:?}");
 
     let generic = overload_applicability_report(
@@ -141,8 +144,8 @@ fn overload_applicability_reports_varargs_generics_and_ambiguous_scores() {
         &symbols,
     );
     assert_eq!(
-        generic.arguments[0].conversion,
-        OverloadArgumentConversion::GenericInference
+        generic.arguments()[0].conversion(),
+        &OverloadArgumentConversion::GenericInference
     );
 
     let integer_candidate = overload_applicability_report(
@@ -167,7 +170,7 @@ fn overload_applicability_reports_varargs_generics_and_ambiguous_scores() {
         &[JavaType::Primitive(PrimitiveType::Int)],
         &symbols,
     );
-    assert_eq!(integer_candidate.score, another_integer_candidate.score);
+    assert_eq!(integer_candidate.score(), another_integer_candidate.score());
     assert!(integer_candidate.is_applicable());
     assert!(another_integer_candidate.is_applicable());
 }
@@ -196,8 +199,8 @@ class Plain {}
         &symbols,
     );
     assert_eq!(
-        lambda.arguments[0].conversion,
-        OverloadArgumentConversion::LambdaToFunctionalInterface
+        lambda.arguments()[0].conversion(),
+        &OverloadArgumentConversion::LambdaToFunctionalInterface
     );
 
     let method_reference = overload_applicability_report(
@@ -212,8 +215,8 @@ class Plain {}
         &symbols,
     );
     assert_eq!(
-        method_reference.arguments[0].conversion,
-        OverloadArgumentConversion::MethodReferenceToFunctionalInterface
+        method_reference.arguments()[0].conversion(),
+        &OverloadArgumentConversion::MethodReferenceToFunctionalInterface
     );
 
     let rejected_lambda = overload_applicability_report(
@@ -228,7 +231,7 @@ class Plain {}
         &symbols,
     );
     assert!(matches!(
-        rejected_lambda.rejections.as_slice(),
+        rejected_lambda.rejections(),
         [OverloadRejectionReason::LambdaTargetNotFunctionalInterface { arg_index: 0, .. }]
     ));
 }
@@ -875,7 +878,7 @@ class UsesUnknownTargets {
         resolved.diagnostics
     );
 
-    let facts = &resolved.facts.unresolved_target_facts;
+    let facts = resolved.facts.unresolved_target_facts;
     assert!(facts.iter().any(|fact| {
         fact.kind == UnresolvedTargetKind::MethodCall
             && fact.target_name == "missingLocal"
@@ -5227,10 +5230,10 @@ class Source {
     assert_eq!(report.unexplained_field_accesses, 1, "{rendered}");
     assert_eq!(report.top_unexplained_field_contexts.len(), 1);
     let context = &report.top_unexplained_field_contexts[0];
-    assert_eq!(context.field_name, "missing");
-    assert_eq!(context.receiver_type, "Source");
-    assert_eq!(context.enclosing_type, "Source");
-    assert_eq!(context.enclosing_member, "compute");
+    assert_eq!(context.field_name(), "missing");
+    assert_eq!(context.receiver_type(), "Source");
+    assert_eq!(context.enclosing_type(), "Source");
+    assert_eq!(context.enclosing_member(), "compute");
     assert!(rendered.contains("top_unexplained_field_contexts"));
     assert!(rendered.contains("missing\tSource\tSource\tcompute\t1\tContextSample.java"));
 }
@@ -6174,11 +6177,11 @@ class SourceCtor {
     assert_eq!(report.unexplained_constructors, 1);
     assert_eq!(report.top_unexplained_constructor_contexts.len(), 1);
     let context = &report.top_unexplained_constructor_contexts[0];
-    assert_eq!(context.target_name, "SourceCtor");
-    assert_eq!(context.receiver_type, "SourceCtor");
-    assert_eq!(context.arg_types, vec!["String", "String"]);
-    assert_eq!(context.enclosing_type, "SourceCtor");
-    assert_eq!(context.enclosing_member, "run");
+    assert_eq!(context.target_name(), "SourceCtor");
+    assert_eq!(context.receiver_type(), "SourceCtor");
+    assert_eq!(context.arg_types(), ["String", "String"]);
+    assert_eq!(context.enclosing_type(), "SourceCtor");
+    assert_eq!(context.enclosing_member(), "run");
     assert!(rendered.contains("top_unexplained_constructor_targets"));
     assert!(rendered.contains("ConstructorCall\tSourceCtor\t1"));
     assert!(rendered.contains("top_unexplained_constructor_contexts"));
@@ -6284,11 +6287,11 @@ class CollisionBoxUse {
     assert_eq!(report.source_constructor_guesses, 0, "{rendered}");
     assert_eq!(report.top_external_constructor_guess_contexts.len(), 1);
     let context = &report.top_external_constructor_guess_contexts[0];
-    assert_eq!(context.target_name, "CollisionBox");
-    assert_eq!(context.receiver_type, "CollisionBox");
-    assert_eq!(context.arg_types, vec!["String", "String"]);
-    assert_eq!(context.enclosing_type, "CollisionBoxUse");
-    assert_eq!(context.enclosing_member, "run");
+    assert_eq!(context.target_name(), "CollisionBox");
+    assert_eq!(context.receiver_type(), "CollisionBox");
+    assert_eq!(context.arg_types(), ["String", "String"]);
+    assert_eq!(context.enclosing_type(), "CollisionBoxUse");
+    assert_eq!(context.enclosing_member(), "run");
     assert!(rendered.contains("top_external_constructor_guess_types"));
     assert!(rendered.contains("CollisionBox\t2\t1"));
     assert!(rendered.contains("top_external_constructor_guess_contexts"));
@@ -6334,11 +6337,11 @@ class UseGeneratedRecord {
     assert_eq!(report.source_constructor_guesses, 0, "{rendered}");
     assert_eq!(report.top_project_constructor_guess_contexts.len(), 1);
     let context = &report.top_project_constructor_guess_contexts[0];
-    assert_eq!(context.target_name, "GeneratedRecord");
-    assert_eq!(context.receiver_type, "GeneratedRecord");
-    assert_eq!(context.arg_types, vec!["String", "Int"]);
-    assert_eq!(context.enclosing_type, "UseGeneratedRecord");
-    assert_eq!(context.enclosing_member, "run");
+    assert_eq!(context.target_name(), "GeneratedRecord");
+    assert_eq!(context.receiver_type(), "GeneratedRecord");
+    assert_eq!(context.arg_types(), ["String", "Int"]);
+    assert_eq!(context.enclosing_type(), "UseGeneratedRecord");
+    assert_eq!(context.enclosing_member(), "run");
     assert!(rendered.contains("project_constructor_guesses\t1"));
     assert!(rendered.contains("top_project_constructor_guess_types"));
     assert!(rendered.contains("GeneratedRecord\t2\t1"));
@@ -10873,15 +10876,15 @@ external-api getPhredScaledQual VariantRecord getter read-only definitely-non-nu
 "#,
     );
     assert!(
-        external_facts.diagnostics.is_empty(),
+        external_facts.diagnostics().is_empty(),
         "{:?}",
-        external_facts.diagnostics
+        external_facts.diagnostics()
     );
     let resolved = resolve_program_with_source_program_and_facts(
         &parsed.program,
         parsed.diagnostics,
         &parsed.program,
-        &external_facts.facts,
+        external_facts.facts(),
     );
     assert!(
         !resolved.diagnostics.has_errors(),
@@ -14060,15 +14063,15 @@ field ReadLikelihoodCalculationEngine.DEFAULT_EXPECTED_ERROR_RATE_PER_BASE doubl
 "#,
     );
     assert!(
-        field_facts.diagnostics.is_empty(),
+        field_facts.diagnostics().is_empty(),
         "{:?}",
-        field_facts.diagnostics
+        field_facts.diagnostics()
     );
     let resolved = resolve_program_with_source_program_and_facts(
         &parsed.program,
         parsed.diagnostics,
         &parsed.program,
-        &field_facts.facts,
+        field_facts.facts(),
     );
     assert!(
         !resolved.diagnostics.has_errors(),
@@ -14187,15 +14190,15 @@ field HelperHolder.name String
 "#,
     );
     assert!(
-        field_facts.diagnostics.is_empty(),
+        field_facts.diagnostics().is_empty(),
         "{:?}",
-        field_facts.diagnostics
+        field_facts.diagnostics()
     );
     let resolved = resolve_program_with_source_program_and_facts(
         &parsed.program,
         parsed.diagnostics,
         &parsed.program,
-        &field_facts.facts,
+        field_facts.facts(),
     );
     assert!(
         !resolved.diagnostics.has_errors(),
@@ -14990,7 +14993,7 @@ public class RecursiveSignatures {
         report
             .top_signature_fallback_reasons
             .iter()
-            .any(|entry| entry.label == "owned" && entry.count > 0),
+            .any(|entry| entry.label() == "owned" && entry.count() > 0),
         "{rendered}"
     );
     assert!(report.signature_dependency_graph_nodes > 0, "{rendered}");

@@ -45,25 +45,33 @@ pub enum MutabilityShape {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeIdentity {
-    pub declared_java_ty: JavaType,
-    pub runtime_bounds: Vec<JavaType>,
-    pub generic_args: Vec<JavaType>,
-    pub erasure: Option<JavaType>,
+    declared_java_ty: JavaType,
+    runtime_bounds: Vec<JavaType>,
+    generic_args: Vec<JavaType>,
+    erasure: Option<JavaType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypeCapabilities {
-    pub copy: bool,
-    pub clone: bool,
-    pub string_like: bool,
-    pub sequence_like: Option<JavaType>,
-    pub implements: Vec<JavaType>,
-    pub extends: Option<JavaType>,
-    pub final_type: bool,
-    pub object_safe_trait: bool,
+    copy: bool,
+    clone: bool,
+    string_like: bool,
+    sequence_like: Option<JavaType>,
+    implements: Vec<JavaType>,
+    extends: Option<JavaType>,
+    final_type: bool,
+    object_safe_trait: bool,
 }
 
 impl RustSlotShape {
+    pub fn java_ty(&self) -> JavaType {
+        self.java_ty.clone()
+    }
+
+    pub fn java_ty_mut(&mut self) -> &mut JavaType {
+        &mut self.java_ty
+    }
+
     pub fn conservative(java_ty: JavaType) -> Self {
         Self {
             ownership: conservative_ownership(&java_ty),
@@ -90,6 +98,10 @@ impl RustSlotShape {
 
     pub fn sequence_element_type(&self) -> Option<JavaType> {
         sequence_element_type(&self.java_ty)
+    }
+
+    pub fn has_generic_or_sequence_detail(&self) -> bool {
+        java_type_has_generic_or_sequence_detail(&self.java_ty)
     }
 
     pub fn optional_element_type(&self) -> Option<JavaType> {
@@ -134,6 +146,22 @@ impl TypeIdentity {
             erasure,
         }
     }
+
+    pub fn declared_java_ty(&self) -> &JavaType {
+        &self.declared_java_ty
+    }
+
+    pub fn runtime_bounds(&self) -> &[JavaType] {
+        &self.runtime_bounds
+    }
+
+    pub fn generic_args(&self) -> &[JavaType] {
+        &self.generic_args
+    }
+
+    pub fn erasure(&self) -> Option<&JavaType> {
+        self.erasure.as_ref()
+    }
 }
 
 fn java_type_erasure(java_ty: &JavaType) -> Option<JavaType> {
@@ -169,10 +197,74 @@ impl TypeCapabilities {
             object_safe_trait: false,
         }
     }
+
+    pub fn is_copy(&self) -> bool {
+        self.copy
+    }
+
+    pub fn is_clone(&self) -> bool {
+        self.clone
+    }
+
+    pub fn is_string_like(&self) -> bool {
+        self.string_like
+    }
+
+    pub fn sequence_like(&self) -> Option<&JavaType> {
+        self.sequence_like.as_ref()
+    }
+
+    pub fn implements(&self) -> &[JavaType] {
+        &self.implements
+    }
+
+    pub fn extends(&self) -> Option<&JavaType> {
+        self.extends.as_ref()
+    }
+
+    pub fn is_final_type(&self) -> bool {
+        self.final_type
+    }
+
+    pub fn is_object_safe_trait(&self) -> bool {
+        self.object_safe_trait
+    }
+
+    pub(crate) fn set_copy(&mut self, copy: bool) {
+        self.copy = copy;
+    }
+
+    pub(crate) fn set_clone(&mut self, clone: bool) {
+        self.clone = clone;
+    }
+
+    pub(crate) fn set_string_like(&mut self, string_like: bool) {
+        self.string_like = string_like;
+    }
+
+    pub(crate) fn set_sequence_like(&mut self, sequence_like: JavaType) {
+        self.sequence_like = Some(sequence_like);
+    }
+
+    pub(crate) fn set_implements(&mut self, implements: Vec<JavaType>) {
+        self.implements = implements;
+    }
+
+    pub(crate) fn set_extends(&mut self, extends: JavaType) {
+        self.extends = Some(extends);
+    }
+
+    pub(crate) fn set_final_type(&mut self, final_type: bool) {
+        self.final_type = final_type;
+    }
+
+    pub(crate) fn set_object_safe_trait(&mut self, object_safe_trait: bool) {
+        self.object_safe_trait = object_safe_trait;
+    }
 }
 
 pub fn conservative_ownership(java_ty: &JavaType) -> OwnershipShape {
-    if TypeCapabilities::conservative(java_ty).copy {
+    if TypeCapabilities::conservative(java_ty).is_copy() {
         OwnershipShape::CopyValue
     } else {
         OwnershipShape::Owned
@@ -211,6 +303,21 @@ impl RustSlotShape {
     }
 }
 
+/// Whether two Java types name the same runtime type after generic erasure.
+pub(crate) fn java_types_have_same_erased_identity(left: &JavaType, right: &JavaType) -> bool {
+    match (left, right) {
+        (JavaType::Named { name: left, .. }, JavaType::Named { name: right, .. }) => left == right,
+        _ => left == right,
+    }
+}
+
+pub(crate) fn java_type_has_generic_or_sequence_detail(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::Named { args, .. } if !args.is_empty() => true,
+        _ => sequence_element_type(java_ty).is_some(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -230,5 +337,39 @@ mod tests {
 
         assert!(list_string.has_more_generic_detail_than(&raw_list));
         assert!(!list_string.has_more_generic_detail_than(&raw_map));
+    }
+
+    #[test]
+    fn erased_identity_ignores_named_generic_arguments_only() {
+        let list_string = named("List", vec![JavaType::String]);
+        let raw_list = named("List", Vec::new());
+        let map_string = named("Map", vec![JavaType::String]);
+
+        assert!(java_types_have_same_erased_identity(
+            &list_string,
+            &raw_list
+        ));
+        assert!(!java_types_have_same_erased_identity(
+            &list_string,
+            &map_string
+        ));
+        assert!(java_types_have_same_erased_identity(
+            &JavaType::String,
+            &JavaType::String
+        ));
+    }
+
+    #[test]
+    fn generic_or_sequence_detail_covers_named_args_and_facade_sequences() {
+        let list_string = named("List", vec![JavaType::String]);
+        let raw_list = named("List", Vec::new());
+        let string_array = JavaType::Array(Box::new(JavaType::String));
+        let plain_string = JavaType::String;
+
+        assert!(java_type_has_generic_or_sequence_detail(&list_string));
+        assert!(!java_type_has_generic_or_sequence_detail(&raw_list));
+        assert!(java_type_has_generic_or_sequence_detail(&string_array));
+        assert!(!java_type_has_generic_or_sequence_detail(&plain_string));
+        assert!(RustSlotShape::for_storage(list_string).has_generic_or_sequence_detail());
     }
 }

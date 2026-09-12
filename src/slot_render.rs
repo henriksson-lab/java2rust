@@ -106,15 +106,42 @@ pub enum NativeSequenceContainer {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct NativeNamedJavaRustTypePolicy {
-    pub name: String,
-    pub policy: NativeJavaRustTypePolicy,
+pub(crate) struct NativeNamedJavaRustTypePolicy {
+    name: String,
+    policy: NativeJavaRustTypePolicy,
+}
+
+impl NativeNamedJavaRustTypePolicy {
+    fn into_policy(self) -> NativeJavaRustTypePolicy {
+        self.policy
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SlotContentCapabilityPolicy {
-    pub string_content: bool,
-    pub sequence_element: Option<JavaType>,
+    string_content: bool,
+    sequence_element: Option<JavaType>,
+}
+
+impl SlotContentCapabilityPolicy {
+    pub fn new(string_content: bool, sequence_element: Option<JavaType>) -> Self {
+        Self {
+            string_content,
+            sequence_element,
+        }
+    }
+
+    pub fn string_content(&self) -> bool {
+        self.string_content
+    }
+
+    pub fn sequence_element(&self) -> Option<&JavaType> {
+        self.sequence_element.as_ref()
+    }
+
+    fn into_sequence_element(self) -> Option<JavaType> {
+        self.sequence_element
+    }
 }
 
 pub fn rust_type_for_slot(shape: &RustSlotShape) -> RustType {
@@ -229,7 +256,7 @@ fn shared_handle_slot_rust_type(
         return rendered;
     };
     let placement = facts.storage_placement_for(name);
-    if !placement.is_implemented() || !placement.shared {
+    if !placement.is_implemented() || !placement.shared() {
         return rendered;
     }
     storage_placement_type(placement, rendered)
@@ -269,14 +296,14 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
                 trait_name: trait_name.clone(),
             }
         }
-        (ViewShape::Str, _, _) if content.string_content => SlotValueRustTypePolicy::StringView,
+        (ViewShape::Str, _, _) if content.string_content() => SlotValueRustTypePolicy::StringView,
         (ViewShape::Slice, _, java_ty)
             if crate::types::ndarray_array2_element_type(java_ty).is_some() =>
         {
             slot_dispatch_rust_type_policy(shape)
         }
         (ViewShape::Slice, _, _) => {
-            if let Some(element_ty) = content.sequence_element {
+            if let Some(element_ty) = content.into_sequence_element() {
                 SlotValueRustTypePolicy::SliceView {
                     element_ty: rust_storage_sequence_element_java_type(
                         &shape.java_ty,
@@ -474,7 +501,7 @@ pub(crate) fn shared_handle_construction_expr(
         return rendered;
     };
     let placement = facts.storage_placement_for(name);
-    if !placement.is_implemented() || !placement.shared {
+    if !placement.is_implemented() || !placement.shared() {
         return rendered;
     }
     storage_placement_construction_expr(placement, rendered)
@@ -602,7 +629,7 @@ pub fn slot_default_value_policy_with_effective_facts(
 ) -> SlotDefaultValuePolicy {
     let content = slot_content_capability_policy_with_effective_facts(&shape.java_ty, facts);
     match (&shape.ownership, &shape.view, &shape.java_ty) {
-        (OwnershipShape::SharedBorrow, ViewShape::Str, _) if content.string_content => {
+        (OwnershipShape::SharedBorrow, ViewShape::Str, _) if content.string_content() => {
             SlotDefaultValuePolicy::EmptyStringView
         }
         (OwnershipShape::SharedBorrow, ViewShape::Slice, _) => {
@@ -631,7 +658,7 @@ pub fn slot_default_value_policy_with_effective_facts(
         {
             SlotDefaultValuePolicy::DefaultTrait
         }
-        (OwnershipShape::Owned, ViewShape::Native, _) if content.sequence_element.is_some() => {
+        (OwnershipShape::Owned, ViewShape::Native, _) if content.sequence_element().is_some() => {
             SlotDefaultValuePolicy::EmptySequence
         }
         _ => SlotDefaultValuePolicy::DefaultTrait,
@@ -715,10 +742,28 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
 ) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
     if let JavaType::Named { name, args } = ty
-        && (!args.is_empty() || raw_java_collection_erasure_name(name))
+        && (!args.is_empty() || crate::stdlib::java_collection_kind_for_name(name).is_some())
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
     {
         match kind {
+            crate::stdlib::JavaCollectionKind::List
+                if crate::stdlib::java_type_is_array_blocking_queue(ty) =>
+            {
+                let element_ty = rust_storage_collection_element_java_type(
+                    args.first()
+                        .cloned()
+                        .unwrap_or_else(erased_object_java_type),
+                    &effective_facts,
+                );
+                return rust_generic_type(
+                    "JavaArrayBlockingQueue",
+                    vec![rust_type_for_java_generic_arg_with_representations(
+                        &element_ty,
+                        &effective_facts,
+                        representations,
+                    )],
+                );
+            }
             crate::stdlib::JavaCollectionKind::List => {
                 let element_ty = rust_storage_collection_element_java_type(
                     args.first()
@@ -858,10 +903,28 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         };
     }
     if let JavaType::Named { name, args } = ty
-        && (!args.is_empty() || raw_java_collection_erasure_name(name))
+        && (!args.is_empty() || crate::stdlib::java_collection_kind_for_name(name).is_some())
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
     {
         match kind {
+            crate::stdlib::JavaCollectionKind::List
+                if crate::stdlib::java_type_is_array_blocking_queue(ty) =>
+            {
+                return NativeJavaRustTypePolicy::Direct {
+                    ty: rust_generic_type(
+                        "JavaArrayBlockingQueue",
+                        vec![rust_type_for_java_generic_arg_with_effective_facts(
+                            &rust_storage_collection_element_java_type(
+                                args.first()
+                                    .cloned()
+                                    .unwrap_or_else(erased_object_java_type),
+                                facts,
+                            ),
+                            facts,
+                        )],
+                    ),
+                };
+            }
             crate::stdlib::JavaCollectionKind::List => {
                 return NativeJavaRustTypePolicy::Sequence {
                     container: NativeSequenceContainer::Vec,
@@ -924,7 +987,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         }
     }
     if let Some(element_ty) =
-        slot_content_capability_policy_with_effective_facts(ty, facts).sequence_element
+        slot_content_capability_policy_with_effective_facts(ty, facts).into_sequence_element()
     {
         return NativeJavaRustTypePolicy::Sequence {
             container: NativeSequenceContainer::Vec,
@@ -1043,7 +1106,7 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             {
                 NativeJavaRustTypePolicy::Direct { ty }
             } else {
-                native_named_java_rust_type_policy(name).policy
+                native_named_java_rust_type_policy(name).into_policy()
             }
         }
         JavaType::Wildcard(_) => NativeJavaRustTypePolicy::WildcardObject,
@@ -1097,13 +1160,13 @@ pub fn slot_content_capability_policy_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> SlotContentCapabilityPolicy {
-    SlotContentCapabilityPolicy {
-        string_content: facts.is_string_like_type(java_ty),
-        sequence_element: facts.sequence_element_type_for(java_ty),
-    }
+    SlotContentCapabilityPolicy::new(
+        facts.is_string_like_type(java_ty),
+        facts.sequence_element_type_for(java_ty),
+    )
 }
 
-pub fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustTypePolicy {
+pub(crate) fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaRustTypePolicy {
     let rust_name = rust_name_for_java_named_type(name);
     let policy = match name {
         "Integer" => NativeJavaRustTypePolicy::Direct { ty: RustType::I32 },
@@ -1146,29 +1209,6 @@ fn erased_object_java_type() -> JavaType {
         name: "Object".to_string(),
         args: Vec::new(),
     }
-}
-
-fn raw_java_collection_erasure_name(name: &str) -> bool {
-    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
-    let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
-    matches!(
-        simple,
-        "Collection"
-            | "Iterable"
-            | "List"
-            | "ArrayList"
-            | "LinkedList"
-            | "Set"
-            | "HashSet"
-            | "LinkedHashSet"
-            | "SortedSet"
-            | "TreeSet"
-            | "Map"
-            | "HashMap"
-            | "LinkedHashMap"
-            | "SortedMap"
-            | "TreeMap"
-    )
 }
 
 fn external_final_facade_should_keep_named_type(ty: &JavaType, facts: &EffectiveFacts<'_>) -> bool {
@@ -1244,7 +1284,7 @@ fn rust_type_for_java_generic_arg_with_effective_facts(
         return rendered;
     };
     let placement = facts.storage_placement_for(name);
-    if !placement.is_implemented() || !placement.shared {
+    if !placement.is_implemented() || !placement.shared() {
         return rendered;
     }
     storage_placement_type(placement, rendered)
@@ -1460,7 +1500,7 @@ fn closed_runtime_case_split_enum_name(
     }) {
         return None;
     }
-    let permitted = facts.sealed_permitted_subtypes_for(name)?.value;
+    let permitted = facts.sealed_permitted_subtypes_for(name)?.into_value();
     if permitted.is_empty()
         || !permitted.iter().all(|subtype| {
             facts.is_final_type(&JavaType::Named {
@@ -1580,7 +1620,7 @@ fn java_set_element_uses_hash_free_carrier(
         crate::signature::signature_boundary_representation_policy_with_effective_facts(
             element_ty, facts,
         );
-    representation_policy.preserve_object_representation
+    representation_policy.preserve_object_representation()
         && !external_final_facade_should_keep_named_type(element_ty, facts)
         && !crate::javalibs::generic_facade_interface_erases_to_named_rust_type(element_ty)
 }
@@ -1615,7 +1655,7 @@ fn builtin_or_conservative_erased_external_representation(
         representations.dispatch_for(ty),
         DispatchShape::ErasedObject
     ) && matches!(
-        representation.provenance,
+        representation.provenance(),
         RepresentationProvenance::BuiltinExternalModel
             | RepresentationProvenance::ConservativeFallback
     )
@@ -1675,11 +1715,7 @@ mod tests {
     #[test]
     fn storage_placement_construction_builds_nested_calls_structurally() {
         let expr = storage_placement_construction_expr(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: true,
-                sync: false,
-            },
+            StoragePlacement::new(true, true, false),
             RustExpr::Var("value".to_string()),
         );
 
@@ -1699,11 +1735,7 @@ mod tests {
         );
 
         let already_wrapped = storage_placement_construction_expr(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: false,
-                sync: true,
-            },
+            StoragePlacement::new(true, false, true),
             RustExpr::Call {
                 function: Box::new(RustExpr::path(["std", "sync", "Arc", "new"])),
                 args: vec![RustExpr::Var("value".to_string())],
@@ -1718,11 +1750,7 @@ mod tests {
         );
 
         let raw_already_wrapped = storage_placement_construction_expr(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: false,
-                sync: false,
-            },
+            StoragePlacement::new(true, false, false),
             RustExpr::Raw("std::rc::Rc::new(value)".to_string()),
         );
         assert_eq!(
@@ -1734,11 +1762,7 @@ mod tests {
         );
 
         let generic_already_wrapped = storage_placement_construction_expr(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: false,
-                sync: false,
-            },
+            StoragePlacement::new(true, false, false),
             RustExpr::Call {
                 function: Box::new(RustExpr::GenericPath {
                     base: vec!["std".to_string(), "rc".to_string(), "Rc".to_string()],
@@ -1754,11 +1778,7 @@ mod tests {
         );
 
         let opaque_raw_payload = storage_placement_construction_expr(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: false,
-                sync: false,
-            },
+            StoragePlacement::new(true, false, false),
             RustExpr::Raw("left + right".to_string()),
         );
         assert_eq!(
@@ -1773,11 +1793,7 @@ mod tests {
     #[test]
     fn storage_placement_type_builds_nested_generics_structurally() {
         let ty = storage_placement_type(
-            StoragePlacement {
-                shared: true,
-                interior_mutable: true,
-                sync: false,
-            },
+            StoragePlacement::new(true, true, false),
             RustType::Named("Value".to_string()),
         );
 

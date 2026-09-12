@@ -6,9 +6,34 @@ pub(crate) struct StronglyConnectedComponents<N>
 where
     N: Eq + Hash,
 {
-    pub(crate) components: Vec<Vec<N>>,
-    pub(crate) component_by_node: HashMap<N, usize>,
-    pub(crate) component_successors: Vec<Vec<usize>>,
+    components: Vec<Vec<N>>,
+    component_by_node: HashMap<N, usize>,
+    component_successors: Vec<Vec<usize>>,
+}
+
+impl<N> StronglyConnectedComponents<N>
+where
+    N: Eq + Hash,
+{
+    pub(crate) fn components(&self) -> &[Vec<N>] {
+        &self.components
+    }
+
+    pub(crate) fn component_by_node(&self) -> &HashMap<N, usize> {
+        &self.component_by_node
+    }
+
+    pub(crate) fn component_successors(&self) -> &[Vec<usize>] {
+        &self.component_successors
+    }
+
+    pub(crate) fn into_parts(self) -> (Vec<Vec<N>>, HashMap<N, usize>, Vec<Vec<usize>>) {
+        (
+            self.components,
+            self.component_by_node,
+            self.component_successors,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -156,18 +181,18 @@ mod tests {
         let scc = strongly_connected_components(["a"], |node| edges[node].clone());
 
         assert_eq!(
-            component_sets(scc.components),
+            component_sets(scc.components().to_vec()),
             HashSet::from([vec!["a"], vec!["b"], vec!["c"]])
         );
-        assert_ne!(scc.component_by_node["a"], scc.component_by_node["b"]);
-        assert_ne!(scc.component_by_node["b"], scc.component_by_node["c"]);
+        assert_ne!(scc.component_by_node()["a"], scc.component_by_node()["b"]);
+        assert_ne!(scc.component_by_node()["b"], scc.component_by_node()["c"]);
         assert_eq!(
-            scc.component_successors[scc.component_by_node["a"]],
-            vec![scc.component_by_node["b"]]
+            scc.component_successors()[scc.component_by_node()["a"]],
+            vec![scc.component_by_node()["b"]]
         );
         assert_eq!(
-            scc.component_successors[scc.component_by_node["b"]],
-            vec![scc.component_by_node["c"]]
+            scc.component_successors()[scc.component_by_node()["b"]],
+            vec![scc.component_by_node()["c"]]
         );
     }
 
@@ -176,9 +201,9 @@ mod tests {
         let edges = HashMap::from([("loop", vec!["loop"])]);
         let scc = strongly_connected_components(["loop"], |node| edges[node].clone());
 
-        assert_eq!(scc.components, vec![vec!["loop"]]);
-        assert_eq!(scc.component_by_node["loop"], 0);
-        assert_eq!(scc.component_successors, vec![vec![]]);
+        assert_eq!(scc.components(), &[vec!["loop"]]);
+        assert_eq!(scc.component_by_node()["loop"], 0);
+        assert_eq!(scc.component_successors(), &[Vec::<usize>::new()]);
     }
 
     #[test]
@@ -191,19 +216,22 @@ mod tests {
         let scc = strongly_connected_components(["entry"], |node| edges[node].clone());
 
         assert_eq!(
-            component_sets(scc.components),
+            component_sets(scc.components().to_vec()),
             HashSet::from([vec!["entry"], vec!["even", "odd"]])
         );
-        assert_eq!(scc.component_by_node["even"], scc.component_by_node["odd"]);
+        assert_eq!(
+            scc.component_by_node()["even"],
+            scc.component_by_node()["odd"]
+        );
         assert_ne!(
-            scc.component_by_node["entry"],
-            scc.component_by_node["even"]
+            scc.component_by_node()["entry"],
+            scc.component_by_node()["even"]
         );
         assert_eq!(
-            scc.component_successors[scc.component_by_node["entry"]],
-            vec![scc.component_by_node["even"]]
+            scc.component_successors()[scc.component_by_node()["entry"]],
+            vec![scc.component_by_node()["even"]]
         );
-        assert!(scc.component_successors[scc.component_by_node["even"]].is_empty());
+        assert!(scc.component_successors()[scc.component_by_node()["even"]].is_empty());
     }
 
     #[test]
@@ -212,9 +240,9 @@ mod tests {
         let scc = strongly_connected_components(["a"], |node| edges[node].clone());
 
         assert_eq!(
-            component_sets(scc.components),
+            component_sets(scc.components().to_vec()),
             HashSet::from([vec!["a"], vec!["b", "c"]])
         );
-        assert_eq!(scc.component_by_node["b"], scc.component_by_node["c"]);
+        assert_eq!(scc.component_by_node()["b"], scc.component_by_node()["c"]);
     }
 }
