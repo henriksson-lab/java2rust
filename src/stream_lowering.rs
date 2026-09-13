@@ -13,8 +13,9 @@ use crate::coercion::{
     receiver_method_call_projection, receiver_method_call_projection_exact,
     rust_string_literal_projection, self_associated_path_projection,
     sequence_iteration_source_projection, sequence_iteration_source_projection_with_result_context,
-    stream_collect_to_map_projection, stream_filter_op_projection, stream_flat_map_op_projection,
-    stream_join_terminal_projection, stream_lambda_argument_slot_plan, stream_lambda_param_expr,
+    shared_borrow_expr, stream_collect_to_map_projection, stream_filter_op_projection,
+    stream_flat_map_op_projection, stream_join_terminal_projection,
+    stream_lambda_argument_slot_plan, stream_lambda_param_expr,
     stream_map_op_projection_with_param, stream_match_terminal_projection,
     stream_prefixed_flat_map_op_projection, stream_reduce_terminal_projection,
     unwrap_java_null_receiver_projection,
@@ -303,6 +304,16 @@ fn emit_stream_lambda_shared_native_call(
         | crate::call_plan::CallTargetPlan::NativeJavaInstance { .. } => 11,
         _ => return None,
     };
+    let native_equals_receiver_is_stream_param = matches!(
+        (&target, receiver),
+        (
+            crate::call_plan::CallTargetPlan::NativeJavaInstance {
+                method: crate::call_plan::NativeJavaInstanceMethod::Equals,
+                ..
+            },
+            Expr::Var(receiver_name)
+        ) if receiver_name == param && !matches!(value, StreamLambdaValue::OwnedItem)
+    );
     let lowered_receiver = emit_stream_lambda_receiver_with_locals_expr(
         receiver,
         param,
@@ -325,8 +336,23 @@ fn emit_stream_lambda_shared_native_call(
         param_shape,
     )?
     .into_iter()
-    .map(|arg| arg.expr)
+    .enumerate()
+    .map(|(index, arg)| {
+        if native_equals_receiver_is_stream_param && index == 0 {
+            shared_borrow_expr(arg.expr)
+        } else {
+            arg.expr
+        }
+    })
     .collect();
+    let lowered_receiver = if native_equals_receiver_is_stream_param {
+        Some(stream_lambda_value_expr(
+            StreamLambdaValue::BorrowedItem,
+            param_rust,
+        ))
+    } else {
+        lowered_receiver
+    };
     let expr = stream_call_target_projection(&target, lowered_receiver, lowered_args);
     Some(stream_lambda_expr(expr, precedence))
 }

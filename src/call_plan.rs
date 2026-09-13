@@ -513,7 +513,7 @@ pub enum NativeCollectionMethod {
     PriorityQueueAdd,
     ArrayBlockingQueueAdd,
     ArrayBlockingQueueOffer,
-    ArrayBlockingQueuePutUnsupported,
+    ArrayBlockingQueuePut,
     ListInsert,
     ListGet,
     ListSubList,
@@ -522,9 +522,11 @@ pub enum NativeCollectionMethod {
     ListRemoveIndex,
     ListRemoveObject,
     QueueElement,
+    QueueLastElement,
     QueuePeek,
     QueuePoll,
     QueueRemove,
+    QueueLastRemove,
     Contains,
     SetHashCode,
     SetInsert,
@@ -552,6 +554,7 @@ pub enum NativeCollectionMethod {
     MapCeilingKey,
     MapHigherKey,
     Iterator,
+    ListIterator,
     ToArray,
 }
 
@@ -562,13 +565,14 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::PriorityQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueOffer
-            | NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
+            | NativeCollectionMethod::ArrayBlockingQueuePut
             | NativeCollectionMethod::ListInsert
             | NativeCollectionMethod::ListSet
             | NativeCollectionMethod::ListRemoveIndex
             | NativeCollectionMethod::ListRemoveObject
             | NativeCollectionMethod::QueuePoll
             | NativeCollectionMethod::QueueRemove
+            | NativeCollectionMethod::QueueLastRemove
             | NativeCollectionMethod::SetInsert
             | NativeCollectionMethod::SetRemove
             | NativeCollectionMethod::AddAll
@@ -585,6 +589,7 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::ListSubList
             | NativeCollectionMethod::ListIndexOf
             | NativeCollectionMethod::QueueElement
+            | NativeCollectionMethod::QueueLastElement
             | NativeCollectionMethod::QueuePeek
             | NativeCollectionMethod::Contains
             | NativeCollectionMethod::ContainsAll
@@ -604,6 +609,7 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::MapCeilingKey
             | NativeCollectionMethod::MapHigherKey
             | NativeCollectionMethod::Iterator
+            | NativeCollectionMethod::ListIterator
             | NativeCollectionMethod::ToArray => false,
         }
     }
@@ -670,6 +676,7 @@ pub enum NativeJavaInstanceMethod {
     StringToCharArray,
     StringHashCode,
     StringGetBytes,
+    StringGetBytesWithCharset,
     StringIndexOf,
     StringLastIndexOf,
     StringCharAt,
@@ -734,6 +741,8 @@ pub enum NativeJavaStaticMethod {
     ByteParseByte,
     ShortParseShort,
     IntegerParseInt,
+    IntegerDecode,
+    IntegerValueOfString,
     LongParseLong,
     FloatParseFloat,
     DoubleParseDouble,
@@ -792,7 +801,7 @@ pub fn native_collection_lowered_type(
         | NativeCollectionMethod::ArrayBlockingQueueOffer => Some(LoweredType::from_java(
             JavaType::Primitive(PrimitiveType::Boolean),
         )),
-        NativeCollectionMethod::ArrayBlockingQueuePutUnsupported => {
+        NativeCollectionMethod::ArrayBlockingQueuePut => {
             Some(LoweredType::from_java(JavaType::Void))
         }
         NativeCollectionMethod::AddAll
@@ -813,7 +822,15 @@ pub fn native_collection_lowered_type(
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(element_ty.clone()))
         }
+        NativeCollectionMethod::QueueLastRemove => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::from_java(element_ty.clone()))
+        }
         NativeCollectionMethod::QueueElement => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::from_java(element_ty.clone()))
+        }
+        NativeCollectionMethod::QueueLastElement => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(element_ty.clone()))
         }
@@ -903,6 +920,13 @@ pub fn native_collection_lowered_type(
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(JavaType::Named {
                 name: "Iterator".to_string(),
+                args: vec![element_ty.clone()],
+            }))
+        }
+        NativeCollectionMethod::ListIterator => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::from_java(JavaType::Named {
+                name: "ListIterator".to_string(),
                 args: vec![element_ty.clone()],
             }))
         }
@@ -3489,6 +3513,21 @@ fn static_utility_owner_call_target<'a>(
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let native_receiver_key =
         crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
+    if crate::javalibs::native_java_static_owner_alias(&receiver_key).is_some()
+        && let Some(target) = plan_native_java_static_owner_call(receiver_name, name, args, types)
+    {
+        return Some(target);
+    }
+    if matches!(name, "valueOf" | "value_of")
+        && receiver_key.rsplit('.').next().unwrap_or(&receiver_key) == "Integer"
+        && args
+            .and_then(|args| args.first())
+            .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String))
+    {
+        return Some(CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::IntegerValueOfString,
+        });
+    }
     if !unqualified_lowercase_native_static_owner_alias(receiver_name, native_receiver_key)
         && !resolved_static_owner_shadows_native_owner(
             resolved,
@@ -3899,7 +3938,7 @@ fn plan_native_collection_receiver_call<'a>(
                 Some(NativeQueueReceiverKind::ArrayBlockingQueue)
             ) && args.is_none_or(|args| args.len() == 1) =>
         {
-            NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
+            NativeCollectionMethod::ArrayBlockingQueuePut
         }
         (crate::stdlib::JavaCollectionKind::List, "offer")
             if matches!(
@@ -3954,10 +3993,24 @@ fn plan_native_collection_receiver_call<'a>(
         }
         (crate::stdlib::JavaCollectionKind::List, name)
             if native_queue_receiver_kind(&receiver_ty).is_some()
+                && is_queue_tail_read_method(name)
+                && args.is_some_and(|args| args.is_empty()) =>
+        {
+            NativeCollectionMethod::QueueLastElement
+        }
+        (crate::stdlib::JavaCollectionKind::List, name)
+            if native_queue_receiver_kind(&receiver_ty).is_some()
                 && is_queue_head_remove_method(name)
                 && args.is_some_and(|args| args.is_empty()) =>
         {
             NativeCollectionMethod::QueueRemove
+        }
+        (crate::stdlib::JavaCollectionKind::List, name)
+            if native_queue_receiver_kind(&receiver_ty).is_some()
+                && is_queue_tail_remove_method(name)
+                && args.is_some_and(|args| args.is_empty()) =>
+        {
+            NativeCollectionMethod::QueueLastRemove
         }
         (crate::stdlib::JavaCollectionKind::List, "remove")
             if list_remove_argument_is_index(args, types) =>
@@ -4037,6 +4090,9 @@ fn plan_native_collection_receiver_call<'a>(
             NativeCollectionMethod::MapHigherKey
         }
         (crate::stdlib::JavaCollectionKind::List, "iterator") => NativeCollectionMethod::Iterator,
+        (crate::stdlib::JavaCollectionKind::List, "listIterator" | "list_iterator") => {
+            NativeCollectionMethod::ListIterator
+        }
         (kind, "iterator") if kind.is_set_like() => NativeCollectionMethod::Iterator,
         _ => return None,
     };
@@ -4266,7 +4322,8 @@ pub(crate) fn native_java_string_instance_method(
         ("substring", 1 | 2) => NativeJavaInstanceMethod::StringSubstring,
         ("toCharArray" | "to_char_array", 0) => NativeJavaInstanceMethod::StringToCharArray,
         ("hashCode" | "hash_code", 0) => NativeJavaInstanceMethod::StringHashCode,
-        ("getBytes" | "get_bytes", 0 | 1) => NativeJavaInstanceMethod::StringGetBytes,
+        ("getBytes" | "get_bytes", 0) => NativeJavaInstanceMethod::StringGetBytes,
+        ("getBytes" | "get_bytes", 1) => NativeJavaInstanceMethod::StringGetBytesWithCharset,
         ("indexOf" | "index_of", 1 | 2) => NativeJavaInstanceMethod::StringIndexOf,
         ("lastIndexOf" | "last_index_of", 1 | 2) => NativeJavaInstanceMethod::StringLastIndexOf,
         ("charAt" | "char_at", 1) => NativeJavaInstanceMethod::StringCharAt,
@@ -4425,6 +4482,10 @@ fn is_queue_head_read_method(name: &str) -> bool {
     matches!(name, "element" | "getFirst" | "get_first")
 }
 
+fn is_queue_tail_read_method(name: &str) -> bool {
+    matches!(name, "getLast" | "get_last")
+}
+
 fn is_queue_head_peek_method(name: &str) -> bool {
     matches!(name, "peek" | "peekFirst" | "peek_first")
 }
@@ -4435,6 +4496,10 @@ fn is_queue_head_poll_method(name: &str) -> bool {
 
 fn is_queue_head_remove_method(name: &str) -> bool {
     matches!(name, "remove" | "removeFirst" | "remove_first" | "pop")
+}
+
+fn is_queue_tail_remove_method(name: &str) -> bool {
+    matches!(name, "removeLast" | "remove_last")
 }
 
 fn plan_native_java_static_call<'a>(
@@ -4497,6 +4562,12 @@ fn resolved_static_owner_shadows_native_owner(
     if types
         .static_type_alias(receiver_name)
         .is_some_and(|alias| native_static_owner_qualified_names(native_owner).contains(&alias))
+    {
+        return false;
+    }
+    let declaring_key = crate::stdlib::canonical_external_receiver_type_key(&call.declaring_type);
+    if let Some(alias) = crate::javalibs::native_java_static_owner_alias(&declaring_key)
+        && native_static_owner_matches(alias, native_owner)
     {
         return false;
     }
@@ -4627,6 +4698,14 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         ("Byte", "parseByte" | "parse_byte") => NativeJavaStaticMethod::ByteParseByte,
         ("Short", "parseShort" | "parse_short") => NativeJavaStaticMethod::ShortParseShort,
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
+        ("Integer", "decode") => NativeJavaStaticMethod::IntegerDecode,
+        ("Integer", "valueOf" | "value_of")
+            if args
+                .and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::IntegerValueOfString
+        }
         ("Long", "parseLong" | "parse_long") => NativeJavaStaticMethod::LongParseLong,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
         ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,
@@ -5133,7 +5212,7 @@ fn java_platform_method_uses_suffix_only_for_multi_arg_overloads(
     receiver_key: &str,
     method_name: &str,
 ) -> bool {
-    matches!(method_name, "read" | "write")
+    matches!(method_name, "read" | "write" | "sleep")
         && java_platform_method_arities_for(receiver_key, method_name).contains(&1)
 }
 
@@ -5742,10 +5821,20 @@ pub fn native_collection_arg_shapes_with_facts(
     {
         NativeCollectionMethod::QueueElement
     } else if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_tail_read_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueueLastElement
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
         && is_queue_head_remove_method(name)
         && arg_count == 0
     {
         NativeCollectionMethod::QueueRemove
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_tail_remove_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueueLastRemove
     } else if matches!(
         crate::stdlib::native_collection_receiver_kind_for_type(&receiver_ty),
         Some(crate::stdlib::JavaCollectionKind::List)
@@ -5775,7 +5864,7 @@ pub(crate) fn native_collection_method_arg_shapes(
         | NativeCollectionMethod::PriorityQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueOffer
-        | NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
+        | NativeCollectionMethod::ArrayBlockingQueuePut
         | NativeCollectionMethod::SetInsert
             if arg_count == 1 =>
         {
@@ -5904,6 +5993,12 @@ pub(crate) fn native_collection_method_arg_shapes(
         }
         NativeCollectionMethod::ToArray if matches!(arg_count, 0 | 1) => Vec::new(),
         NativeCollectionMethod::Iterator if arg_count == 0 => Vec::new(),
+        NativeCollectionMethod::ListIterator if arg_count == 0 => Vec::new(),
+        NativeCollectionMethod::ListIterator if arg_count == 1 => {
+            vec![RustSlotShape::for_storage(JavaType::Primitive(
+                PrimitiveType::Int,
+            ))]
+        }
         _ => return None,
     };
     Some(shapes)
@@ -6284,10 +6379,20 @@ fn facade_abi_native_collection_arg_java_types(
     {
         NativeCollectionMethod::QueueElement
     } else if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_tail_read_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueueLastElement
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
         && is_queue_head_remove_method(name)
         && arg_count == 0
     {
         NativeCollectionMethod::QueueRemove
+    } else if native_queue_receiver_kind(&receiver_ty).is_some()
+        && is_queue_tail_remove_method(name)
+        && arg_count == 0
+    {
+        NativeCollectionMethod::QueueLastRemove
     } else if matches!(
         crate::stdlib::native_collection_receiver_kind_for_type(&receiver_ty),
         Some(crate::stdlib::JavaCollectionKind::List)
@@ -6306,7 +6411,7 @@ fn facade_abi_native_collection_arg_java_types(
         | NativeCollectionMethod::PriorityQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueOffer
-        | NativeCollectionMethod::ArrayBlockingQueuePutUnsupported
+        | NativeCollectionMethod::ArrayBlockingQueuePut
         | NativeCollectionMethod::SetInsert
             if arg_count == 1 =>
         {
@@ -6410,6 +6515,10 @@ fn facade_abi_native_collection_arg_java_types(
             vec![receiver_ty]
         }),
         NativeCollectionMethod::Iterator if arg_count == 0 => Some(Vec::new()),
+        NativeCollectionMethod::ListIterator if arg_count == 0 => Some(Vec::new()),
+        NativeCollectionMethod::ListIterator if arg_count == 1 => {
+            Some(vec![JavaType::Primitive(PrimitiveType::Int)])
+        }
         _ => None,
     }
 }
@@ -7488,7 +7597,7 @@ mod tests {
         assert!(matches!(
             plan_native_collection_receiver_call(&blocking, "put", Some(&value_arg), &types),
             Some(CallTargetPlan::NativeCollectionMethod {
-                method: NativeCollectionMethod::ArrayBlockingQueuePutUnsupported,
+                method: NativeCollectionMethod::ArrayBlockingQueuePut,
                 ..
             })
         ));

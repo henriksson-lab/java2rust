@@ -1249,11 +1249,18 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                     return false;
                 }
                 if let Some(resolved) = &call_site.resolved {
-                    return contains_resolved_source_method_key(
+                    if contains_resolved_source_method_key(
                         &mutating_source_methods,
                         resolved,
                         &call_site.name,
-                    );
+                    ) {
+                        return true;
+                    }
+                    let rust_name = crate::parser::to_snake_case(&call_site.name);
+                    return mutating_compat_methods
+                        .contains(&(resolved.declaring_type.clone(), call_site.name.clone()))
+                        || mutating_compat_methods
+                            .contains(&(resolved.declaring_type.clone(), rust_name));
                 }
                 if call_site
                     .receiver_type
@@ -3580,6 +3587,13 @@ fn record_call_arg_use(
     arg_index: usize,
     boundary: CallArgumentBoundary,
 ) {
+    let mutates_argument = call_argument_effect_mutates_argument(
+        semantic_facts,
+        receiver_type.as_ref(),
+        call_name,
+        arg_count,
+        arg_index,
+    );
     if let Some(field_name) = trivial_getter_self_field(arg, current_type, semantic_facts) {
         facts.field_uses.push(FieldUse::PassedToCall {
             field_name,
@@ -3593,6 +3607,9 @@ fn record_call_arg_use(
     }
     match arg {
         Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
+            if mutates_argument {
+                facts.mutates_self = true;
+            }
             facts.field_uses.push(FieldUse::PassedToCall {
                 field_name: name.clone(),
                 name: call_name.to_string(),
@@ -3602,18 +3619,26 @@ fn record_call_arg_use(
                 boundary,
             });
         }
-        Expr::Var(binding) => record_use(
-            facts,
-            binding,
-            BindingUse::PassedToCall {
-                name: call_name.to_string(),
-                receiver_type,
-                arg_count,
-                arg_index,
-                boundary,
-            },
-        ),
+        Expr::Var(binding) => {
+            if mutates_argument {
+                record_use(facts, binding, BindingUse::Mutated);
+            }
+            record_use(
+                facts,
+                binding,
+                BindingUse::PassedToCall {
+                    name: call_name.to_string(),
+                    receiver_type,
+                    arg_count,
+                    arg_index,
+                    boundary,
+                },
+            );
+        }
         Expr::FieldAccess(receiver, field_name) if matches!(receiver.as_ref(), Expr::This) => {
+            if mutates_argument {
+                facts.mutates_self = true;
+            }
             facts.field_uses.push(FieldUse::PassedToCall {
                 field_name: field_name.clone(),
                 name: call_name.to_string(),
@@ -3625,6 +3650,48 @@ fn record_call_arg_use(
         }
         _ => {}
     }
+}
+
+fn call_argument_effect_mutates_argument(
+    facts: &FactSet,
+    receiver_type: Option<&JavaType>,
+    call_name: &str,
+    arg_count: usize,
+    arg_index: usize,
+) -> bool {
+    if let Some(receiver_key) = receiver_type.and_then(java_type_name_for_usage)
+        && (facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some(receiver_key),
+                call_name,
+                Some(arg_count),
+                arg_index,
+            )
+            .is_some_and(|effect| {
+                effect.argument_mutability == crate::facts::ReceiverMutabilityFact::MutatesReceiver
+            })
+            || crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                Some(receiver_key),
+                call_name,
+                Some(arg_count),
+                arg_index,
+            )
+            .is_some_and(|effect| {
+                effect.argument_mutability == crate::facts::ReceiverMutabilityFact::MutatesReceiver
+            }))
+    {
+        return true;
+    }
+    facts
+        .external_api_argument_effect_facts
+        .iter()
+        .any(|effect| {
+            effect.method_name == call_name
+                && effect.arg_count == Some(arg_count)
+                && effect.parameter_index == arg_index
+                && effect.argument_mutability
+                    == crate::facts::ReceiverMutabilityFact::MutatesReceiver
+        })
 }
 
 fn call_mut_borrow_arg_targets_self_field(

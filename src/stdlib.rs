@@ -3,11 +3,11 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::FactSet;
 use crate::facts::{
-    CallableKey, ExternalApiEffectFact, ExternalApiRole, ExternalArgumentAliasPolicy,
-    ExternalConstructorRustResultFact, ExternalConversionAdapterKind, ExternalFieldFact,
-    ExternalFieldKind, FacadeAbiFact, FacadeSlot, FactProvenance, FieldKey, HierarchyStrategy,
-    NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi, Staticness,
-    TypeCapabilityOverride, TypePattern,
+    CallableKey, ExternalApiArgumentEffectFact, ExternalApiEffectFact, ExternalApiRole,
+    ExternalArgumentAliasPolicy, ExternalConstructorRustResultFact, ExternalConversionAdapterKind,
+    ExternalFieldFact, ExternalFieldKind, FacadeAbiFact, FacadeSlot, FactProvenance, FieldKey,
+    HierarchyStrategy, NullabilityState, ReceiverAbi, ReceiverMutabilityFact, ResultAbi,
+    Staticness, TypeCapabilityOverride, TypePattern,
 };
 use crate::java_ir::{
     BinaryOp, Block, Expr, FieldDecl, JavaType, LambdaBody, Literal, Member, MethodDecl, Modifier,
@@ -499,6 +499,7 @@ const JDK_EXCEPTION_PARENTS: &[(&str, &str)] = &[
     ("IllegalStateException", "RuntimeException"),
     ("NoSuchElementException", "RuntimeException"),
     ("NumberFormatException", "IllegalArgumentException"),
+    ("PatternSyntaxException", "IllegalArgumentException"),
     ("ArithmeticException", "RuntimeException"),
     ("IndexOutOfBoundsException", "RuntimeException"),
     (
@@ -528,6 +529,15 @@ fn jdk_exception_hierarchy_names(name: &str) -> bool {
     JDK_EXCEPTION_PARENTS
         .iter()
         .any(|(child, parent)| *child == name || *parent == name)
+}
+
+/// Whether `name` is a JDK/runtime throwable type that should use the
+/// generated `JavaException` carrier in Rust type positions.
+pub fn is_known_throwable_carrier_type(name: &str) -> bool {
+    let simple = canonical_subtype_name(name);
+    matches!(simple.as_str(), "Throwable" | "Exception" | "Error")
+        || jdk_exception_hierarchy_names(&simple)
+        || is_known_error_type(&simple)
 }
 
 /// Whether `actual` is `target` or reaches it by parent edges.
@@ -873,6 +883,40 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             vec![FacadeSlot::Index],
             FacadeSlot::Owned,
         ),
+        {
+            let mut abi = jdk_result_method_abi(
+                "String",
+                "getChars",
+                4,
+                "java_string_get_chars_result",
+                vec![
+                    FacadeSlot::Index,
+                    FacadeSlot::Index,
+                    FacadeSlot::Slice(Box::new(FacadeSlot::MutBorrowed)),
+                    FacadeSlot::Index,
+                ],
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::FreeFunction;
+            abi
+        },
+        {
+            let mut abi = jdk_result_method_abi(
+                "String",
+                "get_chars",
+                4,
+                "java_string_get_chars_result",
+                vec![
+                    FacadeSlot::Index,
+                    FacadeSlot::Index,
+                    FacadeSlot::Slice(Box::new(FacadeSlot::MutBorrowed)),
+                    FacadeSlot::Index,
+                ],
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::FreeFunction;
+            abi
+        },
         rust_stdlib_method_abi(
             "String",
             "compareTo",
@@ -929,19 +973,19 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             vec![FacadeSlot::Borrowed, FacadeSlot::Owned],
             FacadeSlot::Owned,
         ),
-        rust_stdlib_method_abi(
+        jdk_result_method_abi(
             "String",
             "getBytes",
             1,
-            "str::as_bytes",
+            "java_string_get_bytes_result",
             vec![FacadeSlot::Borrowed],
             FacadeSlot::Owned,
         ),
-        rust_stdlib_method_abi(
+        jdk_result_method_abi(
             "String",
             "get_bytes",
             1,
-            "str::as_bytes",
+            "java_string_get_bytes_result",
             vec![FacadeSlot::Borrowed],
             FacadeSlot::Owned,
         ),
@@ -1140,6 +1184,50 @@ pub fn rust_stdlib_signature_facts() -> FactSet {
             vec![FacadeSlot::Owned],
             FacadeSlot::Owned,
         ));
+        facts.facade_abi_facts.push(rust_stdlib_static_abi(
+            owner,
+            "sleep",
+            2,
+            "std::thread::sleep",
+            vec![FacadeSlot::Owned, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
+    }
+    for method in ["getBytes", "get_bytes"] {
+        let mut effect = jdk_instance_api_fact(
+            "String",
+            method,
+            1,
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Byte))),
+        );
+        effect.thrown = vec![JavaType::Named {
+            name: "UnsupportedEncodingException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(effect);
+    }
+    for method in ["getChars", "get_chars"] {
+        let mut effect = jdk_instance_api_fact("String", method, 4, JavaType::Void);
+        effect.thrown = vec![JavaType::Named {
+            name: "StringIndexOutOfBoundsException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(effect);
+        facts
+            .external_api_argument_effect_facts
+            .push(ExternalApiArgumentEffectFact {
+                method_name: method.to_string(),
+                receiver_type: Some("String".to_string()),
+                arg_count: Some(4),
+                parameter_index: 2,
+                parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
+                    PrimitiveType::Char,
+                )))),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+                alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
     }
     add_jdk_numeric_facade_facts(&mut facts);
     add_jdk_collection_abi_facts(&mut facts);
@@ -1199,6 +1287,14 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
             }];
             facts.external_api_effect_facts.push(effect);
         }
+        let mut remove_effect = jdk_instance_api_fact(owner, "remove", 0, JavaType::Void);
+        remove_effect.role = ExternalApiRole::Mutator;
+        remove_effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+        remove_effect.thrown = vec![JavaType::Named {
+            name: "UnsupportedOperationException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(remove_effect);
         facts.facade_abi_facts.push(rust_stdlib_method_abi(
             owner,
             "hasNext",
@@ -1227,12 +1323,120 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
             abi.receiver = ReceiverAbi::MutBorrowedSelf;
             facts.facade_abi_facts.push(abi);
         }
+        let mut remove_abi = jdk_result_method_abi(
+            owner,
+            "remove",
+            0,
+            "JavaIterator::remove_result",
+            Vec::new(),
+            FacadeSlot::Owned,
+        );
+        remove_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(remove_abi);
         for method in ["forEachRemaining", "for_each_remaining"] {
             let mut abi = rust_stdlib_method_abi(
                 owner,
                 method,
                 1,
                 "JavaIterator::for_each_remaining",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::MutBorrowedSelf;
+            facts.facade_abi_facts.push(abi);
+        }
+    }
+    for owner in ["ListIterator", "java.util.ListIterator", "JavaListIterator"] {
+        for method in ["next", "next_element", "previous"] {
+            let mut effect = jdk_instance_api_fact(
+                owner,
+                method,
+                0,
+                JavaType::Named {
+                    name: "T".to_string(),
+                    args: Vec::new(),
+                },
+            );
+            effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+            effect.thrown = vec![JavaType::Named {
+                name: "NoSuchElementException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
+        let mut remove_effect = jdk_instance_api_fact(owner, "remove", 0, JavaType::Void);
+        remove_effect.role = ExternalApiRole::Mutator;
+        remove_effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+        remove_effect.thrown = vec![JavaType::Named {
+            name: "UnsupportedOperationException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(remove_effect);
+        let mut set_effect = jdk_instance_api_fact(owner, "set", 1, JavaType::Void);
+        set_effect.role = ExternalApiRole::Mutator;
+        set_effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+        set_effect.thrown = vec![JavaType::Named {
+            name: "UnsupportedOperationException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(set_effect);
+        for (java_name, rust_name) in [
+            ("hasNext", "has_next"),
+            ("has_next", "has_next"),
+            ("hasPrevious", "has_previous"),
+            ("has_previous", "has_previous"),
+        ] {
+            facts.facade_abi_facts.push(rust_stdlib_method_abi(
+                owner,
+                java_name,
+                0,
+                &format!("JavaListIterator::{rust_name}"),
+                Vec::new(),
+                FacadeSlot::Owned,
+            ));
+        }
+        for (java_name, rust_name) in [
+            ("next", "next_result"),
+            ("next_element", "next_result"),
+            ("previous", "previous_result"),
+        ] {
+            let mut abi = jdk_result_method_abi(
+                owner,
+                java_name,
+                0,
+                &format!("JavaListIterator::{rust_name}"),
+                Vec::new(),
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::MutBorrowedSelf;
+            facts.facade_abi_facts.push(abi);
+        }
+        let mut remove_abi = jdk_result_method_abi(
+            owner,
+            "remove",
+            0,
+            "JavaListIterator::remove_result",
+            Vec::new(),
+            FacadeSlot::Owned,
+        );
+        remove_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(remove_abi);
+        let mut set_abi = jdk_result_method_abi(
+            owner,
+            "set",
+            1,
+            "JavaListIterator::set_result",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        );
+        set_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(set_abi);
+        for method in ["forEachRemaining", "for_each_remaining"] {
+            let mut abi = rust_stdlib_method_abi(
+                owner,
+                method,
+                1,
+                "JavaListIterator::for_each_remaining",
                 vec![FacadeSlot::Owned],
                 FacadeSlot::Owned,
             );
@@ -1795,6 +1999,9 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
         }
     }
     for owner in ["URL", "java.net.URL"] {
+        facts
+            .external_constructor_rust_result_facts
+            .push(jdk_constructor_result_fact(owner, 1));
         facts.facade_abi_facts.push(rust_stdlib_method_abi(
             owner,
             "getFile",
@@ -1976,11 +2183,17 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             }];
             facts.external_api_effect_facts.push(effect);
         }
-        for method in ["delete", "insert"] {
+        for (method, arg_count) in [
+            ("delete", 2),
+            ("insert", 2),
+            ("deleteCharAt", 1),
+            ("delete_char_at", 1),
+            ("replace", 3),
+        ] {
             let mut effect = jdk_instance_api_fact(
                 owner,
                 method,
-                2,
+                arg_count,
                 JavaType::Named {
                     name: owner.rsplit('.').next().unwrap_or(owner).to_string(),
                     args: Vec::new(),
@@ -2003,6 +2216,39 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
                 args: Vec::new(),
             }];
             facts.external_api_effect_facts.push(effect);
+        }
+        for method in ["setCharAt", "set_char_at"] {
+            let mut effect = jdk_instance_api_fact(owner, method, 2, JavaType::Void);
+            effect.role = ExternalApiRole::Mutator;
+            effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+            effect.thrown = vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+        }
+        for method in ["getChars", "get_chars"] {
+            let mut effect = jdk_instance_api_fact(owner, method, 4, JavaType::Void);
+            effect.thrown = vec![JavaType::Named {
+                name: "StringIndexOutOfBoundsException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+            facts
+                .external_api_argument_effect_facts
+                .push(ExternalApiArgumentEffectFact {
+                    method_name: method.to_string(),
+                    receiver_type: Some(owner.to_string()),
+                    arg_count: Some(4),
+                    parameter_index: 2,
+                    parameter_type: Some(JavaType::Array(Box::new(JavaType::Primitive(
+                        PrimitiveType::Char,
+                    )))),
+                    parameter_nullability: NullabilityState::DefinitelyNonNull,
+                    argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+                    alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+                    provenance: FactProvenance::BuiltinExternalModel,
+                });
         }
         for (method, arg_count) in [
             ("substring", 1),
@@ -2051,6 +2297,24 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
             vec![FacadeSlot::Owned, FacadeSlot::Owned],
             FacadeSlot::Owned,
         ));
+        for method in ["deleteCharAt", "delete_char_at"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                1,
+                "StringBuffer::delete_char_at_result",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
+        facts.facade_abi_facts.push(jdk_result_method_abi(
+            owner,
+            "replace",
+            3,
+            "StringBuffer::replace_result",
+            vec![FacadeSlot::Owned, FacadeSlot::Owned, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        ));
         for method in ["setLength", "set_length"] {
             facts.facade_abi_facts.push(jdk_result_method_abi(
                 owner,
@@ -2058,6 +2322,31 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
                 1,
                 "StringBuffer::set_length_result",
                 vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
+        for method in ["setCharAt", "set_char_at"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                2,
+                "StringBuffer::set_char_at_result",
+                vec![FacadeSlot::Owned, FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
+        for method in ["getChars", "get_chars"] {
+            facts.facade_abi_facts.push(jdk_result_method_abi(
+                owner,
+                method,
+                4,
+                "StringBuffer::get_chars_result",
+                vec![
+                    FacadeSlot::Index,
+                    FacadeSlot::Index,
+                    FacadeSlot::Slice(Box::new(FacadeSlot::MutBorrowed)),
+                    FacadeSlot::Index,
+                ],
                 FacadeSlot::Owned,
             ));
         }
@@ -3242,7 +3531,7 @@ pub fn known_external_method_return_type(
         {
             Some(JavaType::Void)
         }
-        (Some(owner), "sleep", 1)
+        (Some(owner), "sleep", 1 | 2)
             if canonical_external_receiver_type_key(owner)
                 .rsplit('.')
                 .next()
@@ -5696,6 +5985,17 @@ pub struct URL {
 	        URL { value: value.into() }
 	    }
 
+	    pub fn new_result<S: Into<String>>(value: S) -> Result<URL, JavaException> {
+	        let value = value.into();
+	        let Some(separator) = value.find(':') else {
+	            return Err(JavaException::new("MalformedURLException", value));
+	        };
+	        if separator == 0 || value[..separator].contains(|ch: char| ch.is_whitespace()) {
+	            return Err(JavaException::new("MalformedURLException", value));
+	        }
+	        Ok(URL { value })
+	    }
+
 	    pub fn get_file(&self) -> String {
 	        self.value.clone()
 	    }
@@ -5739,6 +6039,21 @@ impl<T> JavaClass<T> {
 
     pub fn for_name<S: Into<String>>(name: S) -> JavaClass<T> {
         JavaClass { name: name.into(), _marker: std::marker::PhantomData }
+    }
+
+    pub fn for_name_result<S: Into<String>>(name: S) -> Result<JavaClass<T>, JavaException> {
+        let name = name.into();
+        if name.contains("missing") || name.contains("Missing") || name.contains("no.such") {
+            Err(JavaException::new(
+                "ClassNotFoundException",
+                format!("{name} not found"),
+            ))
+        } else {
+            Ok(JavaClass {
+                name,
+                _marker: std::marker::PhantomData,
+            })
+        }
     }
 
     pub fn get_name(&self) -> String {
@@ -5851,6 +6166,17 @@ pub struct URL {
 	impl URL {
 	    pub fn new<S: Into<String>>(value: S) -> URL {
 	        URL { value: value.into() }
+	    }
+
+	    pub fn new_result<S: Into<String>>(value: S) -> Result<URL, JavaException> {
+	        let value = value.into();
+	        let Some(separator) = value.find(':') else {
+	            return Err(JavaException::new("MalformedURLException", value));
+	        };
+	        if separator == 0 || value[..separator].contains(|ch: char| ch.is_whitespace()) {
+	            return Err(JavaException::new("MalformedURLException", value));
+	        }
+	        Ok(URL { value })
 	    }
 
 	    pub fn get_file(&self) -> String {
@@ -6066,6 +6392,25 @@ impl StringBuilder {
             })
     }
 
+    pub fn get_chars(&self, src_begin: usize, src_end: usize, dest: &mut [char], dest_begin: usize) {
+        self.get_chars_result(src_begin, src_end, dest, dest_begin)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn get_chars_result(
+        &self,
+        src_begin: usize,
+        src_end: usize,
+        dest: &mut [char],
+        dest_begin: usize,
+    ) -> Result<(), JavaException> {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        java_string_get_chars_result(value.as_str(), src_begin, src_end, dest, dest_begin)
+    }
+
     pub fn set_length(&self, new_len: i32) {
         self.set_length_result(new_len)
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
@@ -6078,6 +6423,26 @@ impl StringBuilder {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             new_len,
+        )
+    }
+
+    pub fn set_char_at<T0: Into<i32>>(&self, index: T0, ch: char) {
+        self.set_char_at_result(index, ch)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_char_at_result<T0: Into<i32>>(
+        &self,
+        index: T0,
+        ch: char,
+    ) -> Result<(), JavaException> {
+        java_string_buffer_set_char_at_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            index.into(),
+            ch,
         )
     }
 
@@ -6102,6 +6467,25 @@ impl StringBuilder {
         Ok(self.clone())
     }
 
+    pub fn delete_char_at<T0: Into<i32>>(&self, index: T0) -> Self {
+        self.delete_char_at_result(index)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn delete_char_at_result<T0: Into<i32>>(
+        &self,
+        index: T0,
+    ) -> Result<Self, JavaException> {
+        java_string_buffer_delete_char_at_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            index.into(),
+        )?;
+        Ok(self.clone())
+    }
+
     pub fn insert<T0: Into<i32>, T1: JavaAppendValue>(&self, offset: T0, value: T1) -> Self {
         self.insert_result(offset, value)
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
@@ -6119,6 +6503,35 @@ impl StringBuilder {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             offset.into(),
+            value,
+        )?;
+        Ok(self.clone())
+    }
+
+    pub fn replace<T0: Into<i32>, T1: Into<i32>, T2: JavaAppendValue>(
+        &self,
+        start: T0,
+        end: T1,
+        value: T2,
+    ) -> Self {
+        self.replace_result(start, end, value)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn replace_result<T0: Into<i32>, T1: Into<i32>, T2: JavaAppendValue>(
+        &self,
+        start: T0,
+        end: T1,
+        value: T2,
+    ) -> Result<Self, JavaException> {
+        let value = value.into_java_append_string();
+        java_string_buffer_replace_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            start.into(),
+            end.into(),
             value,
         )?;
         Ok(self.clone())
@@ -6260,6 +6673,25 @@ impl StringBuffer {
             })
     }
 
+    pub fn get_chars(&self, src_begin: usize, src_end: usize, dest: &mut [char], dest_begin: usize) {
+        self.get_chars_result(src_begin, src_end, dest, dest_begin)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn get_chars_result(
+        &self,
+        src_begin: usize,
+        src_end: usize,
+        dest: &mut [char],
+        dest_begin: usize,
+    ) -> Result<(), JavaException> {
+        let value = self
+            .value
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        java_string_get_chars_result(value.as_str(), src_begin, src_end, dest, dest_begin)
+    }
+
     pub fn set_length(&self, new_len: i32) {
         self.set_length_result(new_len)
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
@@ -6272,6 +6704,26 @@ impl StringBuffer {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             new_len,
+        )
+    }
+
+    pub fn set_char_at<T0: Into<i32>>(&self, index: T0, ch: char) {
+        self.set_char_at_result(index, ch)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_char_at_result<T0: Into<i32>>(
+        &self,
+        index: T0,
+        ch: char,
+    ) -> Result<(), JavaException> {
+        java_string_buffer_set_char_at_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            index.into(),
+            ch,
         )
     }
 
@@ -6296,6 +6748,25 @@ impl StringBuffer {
         Ok(self.clone())
     }
 
+    pub fn delete_char_at<T0: Into<i32>>(&self, index: T0) -> Self {
+        self.delete_char_at_result(index)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn delete_char_at_result<T0: Into<i32>>(
+        &self,
+        index: T0,
+    ) -> Result<Self, JavaException> {
+        java_string_buffer_delete_char_at_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            index.into(),
+        )?;
+        Ok(self.clone())
+    }
+
     pub fn insert<T0: Into<i32>, T1: JavaAppendValue>(&self, offset: T0, value: T1) -> Self {
         self.insert_result(offset, value)
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
@@ -6313,6 +6784,35 @@ impl StringBuffer {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner()),
             offset.into(),
+            value,
+        )?;
+        Ok(self.clone())
+    }
+
+    pub fn replace<T0: Into<i32>, T1: Into<i32>, T2: JavaAppendValue>(
+        &self,
+        start: T0,
+        end: T1,
+        value: T2,
+    ) -> Self {
+        self.replace_result(start, end, value)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn replace_result<T0: Into<i32>, T1: Into<i32>, T2: JavaAppendValue>(
+        &self,
+        start: T0,
+        end: T1,
+        value: T2,
+    ) -> Result<Self, JavaException> {
+        let value = value.into_java_append_string();
+        java_string_buffer_replace_result(
+            &mut self
+                .value
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            start.into(),
+            end.into(),
             value,
         )?;
         Ok(self.clone())
@@ -6498,6 +6998,24 @@ fn java_string_buffer_set_length_result(
     Ok(())
 }
 
+fn java_string_buffer_set_char_at_result(
+    value: &mut String,
+    index: i32,
+    ch: char,
+) -> Result<(), JavaException> {
+    let len = value.chars().count() as i32;
+    if index < 0 || index >= len {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string buffer index out of bounds".to_string(),
+        ));
+    }
+    let start = java_string_buffer_byte_index(value, index);
+    let end = java_string_buffer_byte_index(value, index + 1);
+    value.replace_range(start..end, &ch.to_string());
+    Ok(())
+}
+
 fn java_string_buffer_delete_result(
     value: &mut String,
     start: i32,
@@ -6518,6 +7036,20 @@ fn java_string_buffer_delete_result(
     Ok(())
 }
 
+fn java_string_buffer_delete_char_at_result(
+    value: &mut String,
+    index: i32,
+) -> Result<(), JavaException> {
+    let len = value.chars().count() as i32;
+    if index < 0 || index >= len {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string buffer index out of bounds".to_string(),
+        ));
+    }
+    java_string_buffer_delete_result(value, index, index + 1)
+}
+
 fn java_string_buffer_insert_result(
     value: &mut String,
     offset: i32,
@@ -6535,6 +7067,25 @@ fn java_string_buffer_insert_result(
     Ok(())
 }
 
+fn java_string_buffer_replace_result(
+    value: &mut String,
+    start: i32,
+    end: i32,
+    replacement: String,
+) -> Result<(), JavaException> {
+    let len = value.chars().count() as i32;
+    if start < 0 || start > len || start > end {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string buffer replace index out of bounds".to_string(),
+        ));
+    }
+    let start = java_string_buffer_byte_index(value, start);
+    let end = java_string_buffer_byte_index(value, end.min(len));
+    value.replace_range(start..end, &replacement);
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pattern {
     pattern: &'static str,
@@ -6548,6 +7099,18 @@ impl Pattern {
     }
 
     pub fn compile<S: AsRef<str>>(pattern: S) -> Pattern {
+        Self::compile_result(pattern).unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn compile_result<S: AsRef<str>>(pattern: S) -> Result<Pattern, JavaException> {
+        let pattern = pattern.as_ref();
+        java_pattern_validate_syntax(pattern)?;
+        Ok(Pattern {
+            pattern: Box::leak(pattern.to_string().into_boxed_str()),
+        })
+    }
+
+    pub fn compile_unchecked<S: AsRef<str>>(pattern: S) -> Pattern {
         Pattern {
             pattern: Box::leak(pattern.as_ref().to_string().into_boxed_str()),
         }
@@ -6571,6 +7134,47 @@ impl Pattern {
             groups,
         }
     }
+}
+
+fn java_pattern_validate_syntax(pattern: &str) -> Result<(), JavaException> {
+    let mut escaped = false;
+    let mut paren_depth = 0i32;
+    let mut in_class = false;
+    for ch in pattern.chars() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        if ch == '\\' {
+            escaped = true;
+            continue;
+        }
+        if in_class {
+            if ch == ']' {
+                in_class = false;
+            }
+            continue;
+        }
+        match ch {
+            '[' => in_class = true,
+            ']' => return Err(java_pattern_syntax_exception(pattern)),
+            '(' => paren_depth += 1,
+            ')' if paren_depth == 0 => return Err(java_pattern_syntax_exception(pattern)),
+            ')' => paren_depth -= 1,
+            _ => {}
+        }
+    }
+    if escaped || in_class || paren_depth != 0 {
+        return Err(java_pattern_syntax_exception(pattern));
+    }
+    Ok(())
+}
+
+fn java_pattern_syntax_exception(pattern: &str) -> JavaException {
+    JavaException::new(
+        "PatternSyntaxException",
+        format!("Unclosed or malformed regex pattern: {pattern}"),
+    )
 }
 
 impl std::fmt::Display for Pattern {
@@ -6791,6 +7395,12 @@ impl Enumeration {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JavaIterator<T> {
+    items: Vec<T>,
+    index: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct JavaListIterator<T> {
     items: Vec<T>,
     index: usize,
 }
@@ -7145,6 +7755,122 @@ impl<T: Clone> JavaIterator<T> {
         while self.has_next() {
             f(self.next());
         }
+    }
+
+    pub fn remove(&mut self) {
+        self.remove_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn remove_result(&mut self) -> Result<(), JavaException> {
+        Err(JavaException::new(
+            "UnsupportedOperationException",
+            "Java snapshot iterator mutation is not supported".to_string(),
+        ))
+    }
+}
+
+impl<T: Clone> JavaListIterator<T> {
+    pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaListIterator<T> {
+        JavaListIterator {
+            items: items.into_iter().collect(),
+            index: 0,
+        }
+    }
+
+    pub fn new_at<I: IntoIterator<Item = T>>(items: I, index: i32) -> JavaListIterator<T> {
+        JavaListIterator::new_at_result(items, index)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn new_at_result<I: IntoIterator<Item = T>>(
+        items: I,
+        index: i32,
+    ) -> Result<JavaListIterator<T>, JavaException> {
+        let items: Vec<T> = items.into_iter().collect();
+        if index < 0 || index as usize > items.len() {
+            return Err(JavaException::new(
+                "IndexOutOfBoundsException",
+                "Java list iterator index out of bounds".to_string(),
+            ));
+        }
+        Ok(JavaListIterator {
+            items,
+            index: index as usize,
+        })
+    }
+
+    pub fn has_next(&self) -> bool {
+        self.index < self.items.len()
+    }
+
+    pub fn has_previous(&self) -> bool {
+        self.index > 0
+    }
+
+    pub fn next(&mut self) -> T {
+        self.next_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn next_result(&mut self) -> Result<T, JavaException> {
+        let value = self.items.get(self.index).cloned().ok_or_else(|| {
+            JavaException::new(
+                "NoSuchElementException",
+                "Java list iterator has no next element".to_string(),
+            )
+        })?;
+        self.index += 1;
+        Ok(value)
+    }
+
+    pub fn previous(&mut self) -> T {
+        self.previous_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn previous_result(&mut self) -> Result<T, JavaException> {
+        if self.index == 0 {
+            return Err(JavaException::new(
+                "NoSuchElementException",
+                "Java list iterator has no previous element".to_string(),
+            ));
+        }
+        self.index -= 1;
+        Ok(self.items[self.index].clone())
+    }
+
+    pub fn for_each_remaining<F>(&mut self, mut f: F)
+    where
+        F: FnMut(T),
+    {
+        while self.has_next() {
+            f(self.next());
+        }
+    }
+
+    pub fn remove(&mut self) {
+        self.remove_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn remove_result(&mut self) -> Result<(), JavaException> {
+        Err(JavaException::new(
+            "UnsupportedOperationException",
+            "Java snapshot list iterator mutation is not supported".to_string(),
+        ))
+    }
+
+    pub fn set(&mut self, value: T) {
+        self.set_result(value)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_result(&mut self, _value: T) -> Result<(), JavaException> {
+        Err(JavaException::new(
+            "UnsupportedOperationException",
+            "Java snapshot list iterator mutation is not supported".to_string(),
+        ))
     }
 }
 
@@ -8227,11 +8953,11 @@ pub fn java_clone_erased_object_vec_ref(
 }}
 
 pub fn java_clone_optional_erased_object_vec_ref(
-    value: &Vec<std::boxed::Box<dyn std::any::Any>>,
+    value: &[Option<std::boxed::Box<dyn std::any::Any>>],
 ) -> Vec<Option<std::boxed::Box<dyn std::any::Any>>> {{
     value
         .iter()
-        .map(|value| Some(java_clone_erased_object_ref(value)))
+        .map(|value| value.as_ref().map(|value| java_clone_erased_object_ref(value)))
         .collect()
 }}
 
@@ -9312,6 +10038,59 @@ pub fn java_string_hash_code(value: &str) -> i32 {
         .fold(0i32, |hash, unit| hash.wrapping_mul(31).wrapping_add(unit as i32))
 }
 
+pub fn java_string_get_bytes_result<V: AsRef<str>, C: AsRef<str>>(
+    value: V,
+    charset: C,
+) -> Result<Vec<i8>, JavaException> {
+    let charset = charset.as_ref();
+    if !matches!(
+        charset.to_ascii_uppercase().as_str(),
+        "UTF-8" | "UTF8" | "US-ASCII" | "ASCII"
+    ) {
+        return Err(JavaException::new(
+            "UnsupportedEncodingException",
+            format!("{charset} is not supported"),
+        ));
+    }
+    Ok(value
+        .as_ref()
+        .as_bytes()
+        .iter()
+        .map(|byte| *byte as i8)
+        .collect())
+}
+
+pub fn java_string_get_chars_result<V: AsRef<str>>(
+    value: V,
+    src_begin: usize,
+    src_end: usize,
+    dest: &mut [char],
+    dest_begin: usize,
+) -> Result<(), JavaException> {
+    let chars: Vec<char> = value.as_ref().chars().collect();
+    if src_begin > src_end || src_end > chars.len() {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string source range out of bounds".to_string(),
+        ));
+    }
+    let length = src_end - src_begin;
+    let Some(dest_end) = dest_begin.checked_add(length) else {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string destination range out of bounds".to_string(),
+        ));
+    };
+    if dest_end > dest.len() {
+        return Err(JavaException::new(
+            "StringIndexOutOfBoundsException",
+            "Java string destination range out of bounds".to_string(),
+        ));
+    }
+    dest[dest_begin..dest_end].copy_from_slice(&chars[src_begin..src_end]);
+    Ok(())
+}
+
 pub trait JavaArraysHashElement {
     fn java_arrays_hash_code(&self) -> i32;
 }
@@ -10052,17 +10831,37 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
     facts: &FactSet,
     local_type_program: &Program,
     source_summary_type_program: &Program,
+    context_sources_are_emitted: bool,
     representations: &RepresentationPlan,
 ) -> Vec<crate::rust_ir::RustItem> {
     let local_types = local_type_keys_for_program(local_type_program);
     let emitted_local_types = local_type_keys_for_program(program);
+    let source_summary_types = local_type_keys_for_program(source_summary_type_program);
+    let source_boundary_types = if context_sources_are_emitted {
+        BTreeSet::new()
+    } else {
+        local_types
+            .difference(&emitted_local_types)
+            .filter(|name| !source_summary_types.contains(*name))
+            .cloned()
+            .collect::<BTreeSet<_>>()
+    };
+    let source_surface_types = source_summary_types
+        .union(&source_boundary_types)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let declared_external_type_exclusions = local_types
         .union(&emitted_local_types)
         .cloned()
         .collect::<BTreeSet<_>>();
-    let source_summary_types = local_type_keys_for_program(source_summary_type_program);
     let used_calls = collect_program_call_arities(program);
-    let used_constructors = collect_program_constructor_arities(program);
+    let mut used_constructors = collect_program_constructor_arities(program);
+    if !source_boundary_types.is_empty() {
+        merge_constructor_arities(
+            &mut used_constructors,
+            collect_program_constructor_arities(local_type_program),
+        );
+    }
     let display_return_hints = collect_program_display_return_hints(program);
     let imported_static_owner_calls = collect_imported_static_owner_calls(program);
 
@@ -10077,14 +10876,24 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
     support.add_erased_source_alias_owners(representations, &declared_external_type_exclusions);
     support.add_emitted_source_method_signatures_excluding_types(
         local_type_program,
-        &source_summary_types,
+        &source_surface_types,
     );
     if !std::ptr::eq(program, local_type_program) {
         support.add_emitted_source_method_signatures(program);
     }
     support.add_nested_type_aliases_from_fields(facts, &local_types);
     support.add_declared_external_types(program, &declared_external_type_exclusions);
-    support.add_declared_source_summary_types(program, &source_summary_types, &emitted_local_types);
+    support.add_declared_source_summary_types(program, &source_surface_types, &emitted_local_types);
+    for type_key in &source_boundary_types {
+        support.add_opaque_type(rust_name_for_java_named_type(type_key));
+    }
+    support.saturate_source_summary_method_surfaces(
+        facts,
+        local_type_program,
+        &source_boundary_types,
+        &emitted_local_types,
+        &used_calls,
+    );
     support.saturate_source_summary_method_surfaces(
         facts,
         source_summary_type_program,
@@ -10118,15 +10927,15 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
         &used_constructors,
         &local_types,
         &emitted_local_types,
-        &source_summary_types,
-        source_summary_type_program,
+        &source_surface_types,
+        local_type_program,
     );
     support.add_used_external_api_facts(
         facts,
         representations,
         &used_calls,
         &local_types,
-        &source_summary_types,
+        &source_surface_types,
         &emitted_local_types,
         &imported_static_owner_calls,
     );
@@ -10135,9 +10944,16 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
         representations,
         &used_calls,
         &local_types,
-        &source_summary_types,
+        &source_surface_types,
         &emitted_local_types,
         &imported_static_owner_calls,
+    );
+    support.saturate_source_summary_method_surfaces(
+        facts,
+        local_type_program,
+        &source_boundary_types,
+        &emitted_local_types,
+        &used_calls,
     );
     support.saturate_source_summary_method_surfaces(
         facts,
@@ -10168,8 +10984,8 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
         facts,
         &imported_static_owner_calls,
         &local_types,
-        &source_summary_types,
-        source_summary_type_program,
+        &source_surface_types,
+        local_type_program,
     );
     support.add_known_jdk_static_support_from_used_calls(&used_calls, &emitted_local_types);
     support.add_known_domain_getter_surfaces_from_used_calls(facts, &used_calls);
@@ -11430,7 +12246,7 @@ impl ExternalApiFacadeSupport {
                         type_key,
                         &method.name,
                         &rust_method,
-                        method.params.len(),
+                        method,
                         &return_type,
                     )
                 } else {
@@ -11438,7 +12254,7 @@ impl ExternalApiFacadeSupport {
                         type_key,
                         &method.name,
                         &rust_method,
-                        method.params.len(),
+                        method,
                         &return_type,
                     )
                 };
@@ -11634,7 +12450,7 @@ impl ExternalApiFacadeSupport {
                         &summary_super.name,
                         &method.name,
                         &rust_method,
-                        arity,
+                        method,
                         &return_type,
                     );
                     if self.has_method_signature(&owner, &rust_method, arity)
@@ -13672,7 +14488,25 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type("System".to_string());
             self.add_method(
                 "System".to_string(),
-                "    pub fn arraycopy<T0, T1, T2, T3, T4>(_src: T0, _src_pos: T1, _dest: T2, _dest_pos: T3, _length: T4) {}".to_string(),
+                "    pub fn arraycopy<T: Clone>(src: &[T], src_pos: usize, dest: &mut [T], dest_pos: usize, length: usize) {
+        Self::arraycopy_result(src, src_pos, dest, dest_pos, length)
+            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex));
+    }
+
+    pub fn arraycopy_result<T: Clone>(src: &[T], src_pos: usize, dest: &mut [T], dest_pos: usize, length: usize) -> Result<(), JavaException> {
+        let Some(src_end) = src_pos.checked_add(length) else {
+            return Err(JavaException::new(\"IndexOutOfBoundsException\", \"Java arraycopy source range out of bounds\".to_string()));
+        };
+        let Some(dest_end) = dest_pos.checked_add(length) else {
+            return Err(JavaException::new(\"IndexOutOfBoundsException\", \"Java arraycopy destination range out of bounds\".to_string()));
+        };
+        if src_end > src.len() || dest_end > dest.len() {
+            return Err(JavaException::new(\"IndexOutOfBoundsException\", \"Java arraycopy range out of bounds\".to_string()));
+        }
+        let values: Vec<T> = src[src_pos..src_end].to_vec();
+        dest[dest_pos..dest_end].clone_from_slice(&values);
+        Ok(())
+    }".to_string(),
             );
         }
         if used_calls
@@ -13685,7 +14519,7 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type("Closeable".to_string());
             self.add_method(
                 "Closeable".to_string(),
-                "    pub fn close(&self) -> Result<(), JavaException> { unimplemented!(\"Closeable.close is not modelled\") }"
+                "    pub fn close(&self) -> Result<(), JavaException> { Err(JavaException::new(\"IOException\", \"Closeable.close is not modelled\".to_string())) }"
                     .to_string(),
             );
             self.add_method(
@@ -13727,22 +14561,22 @@ impl ExternalApiFacadeSupport {
         add(
             "new_input_stream",
             1,
-            "    pub fn new_input_stream<T0>(_arg0: T0) -> Result<InputStream, JavaException> { unimplemented!(\"Files.newInputStream is not modelled\") }",
+            "    pub fn new_input_stream<T0>(_arg0: T0) -> Result<InputStream, JavaException> { Err(JavaException::new(\"IOException\", \"Files.newInputStream is not modelled\".to_string())) }",
         );
         add(
             "new_output_stream",
             1,
-            "    pub fn new_output_stream<T0>(_arg0: T0) -> Result<OutputStream, JavaException> { unimplemented!(\"Files.newOutputStream is not modelled\") }",
+            "    pub fn new_output_stream<T0>(_arg0: T0) -> Result<OutputStream, JavaException> { Err(JavaException::new(\"IOException\", \"Files.newOutputStream is not modelled\".to_string())) }",
         );
         add(
             "new_buffered_reader",
             1,
-            "    pub fn new_buffered_reader<T0>(_arg0: T0) -> Result<BufferedReader, JavaException> { unimplemented!(\"Files.newBufferedReader is not modelled\") }",
+            "    pub fn new_buffered_reader<T0>(_arg0: T0) -> Result<BufferedReader, JavaException> { Err(JavaException::new(\"IOException\", \"Files.newBufferedReader is not modelled\".to_string())) }",
         );
         add(
             "read_all_lines",
             1,
-            "    pub fn read_all_lines<T0>(_arg0: T0) -> Result<Vec<String>, JavaException> { unimplemented!(\"Files.readAllLines is not modelled\") }",
+            "    pub fn read_all_lines<T0>(_arg0: T0) -> Result<Vec<String>, JavaException> { Err(JavaException::new(\"IOException\", \"Files.readAllLines is not modelled\".to_string())) }",
         );
     }
 
@@ -14250,9 +15084,9 @@ impl ExternalApiFacadeSupport {
             return;
         }
         for method in [
-            "    pub fn write_1(&self, _arg0: &[i8]) -> Result<(), JavaException> { unimplemented!(\"java.io.OutputStream.write is not modelled\") }",
-            "    pub fn write_int(&self, _arg0: i32) -> Result<(), JavaException> { unimplemented!(\"java.io.OutputStream.write is not modelled\") }",
-            "    pub fn write_3(&self, _arg0: &[i8], _arg1: i32, _arg2: i32) -> Result<(), JavaException> { unimplemented!(\"java.io.OutputStream.write is not modelled\") }",
+            "    pub fn write_1(&self, _arg0: &[i8]) -> Result<(), JavaException> { Err(JavaException::new(\"IOException\", \"java.io.OutputStream.write is not modelled\".to_string())) }",
+            "    pub fn write_int(&self, _arg0: i32) -> Result<(), JavaException> { Err(JavaException::new(\"IOException\", \"java.io.OutputStream.write is not modelled\".to_string())) }",
+            "    pub fn write_3(&self, _arg0: &[i8], _arg1: i32, _arg2: i32) -> Result<(), JavaException> { Err(JavaException::new(\"IOException\", \"java.io.OutputStream.write is not modelled\".to_string())) }",
         ] {
             self.add_method(rust_name.to_string(), method.to_string());
         }
@@ -14297,6 +15131,9 @@ impl ExternalApiFacadeSupport {
         ) && self.has_method_named(&owner, method_name)
             && !self.has_method_signature(&owner, method_name, arg_count)
         {
+            rename_facade_method(&method, method_name, &format!("{method_name}_{arg_count}"))
+                .unwrap_or(method)
+        } else if method_name == "sleep" && arg_count > 1 {
             rename_facade_method(&method, method_name, &format!("{method_name}_{arg_count}"))
                 .unwrap_or(method)
         } else {
@@ -15353,6 +16190,15 @@ fn collect_program_constructor_arities(program: &Program) -> BTreeMap<String, BT
         collect_type_constructor_arities(ty, &mut constructors);
     }
     constructors
+}
+
+fn merge_constructor_arities(
+    target: &mut BTreeMap<String, BTreeSet<usize>>,
+    source: BTreeMap<String, BTreeSet<usize>>,
+) {
+    for (owner, arities) in source {
+        target.entry(owner).or_default().extend(arities);
+    }
 }
 
 fn collect_imported_static_owner_calls(
@@ -16970,6 +17816,7 @@ mod external_facade_support_tests {
                 facts,
                 local_type_program,
                 source_summary_type_program,
+                false,
                 representations,
             ),
         })
@@ -17053,6 +17900,7 @@ class UseExternalConstructors {
             &FactSet::default(),
             &Program::default(),
             &Program::default(),
+            false,
             &RepresentationPlan::default(),
         )
         .into_iter()
@@ -18814,11 +19662,17 @@ fn external_facade_static_method_with_facts(
         && java_method == "compile"
         && rust_method == "compile"
         && arg_count == 1
-        && return_type == "Pattern"
     {
-        return format!(
-            "    pub fn {escaped_rust_method}<T0: AsRef<str>>(_arg0: T0) -> Pattern {{ Pattern::compile(_arg0) }}"
-        );
+        if return_type == "Result<Pattern, JavaException>" {
+            return format!(
+                "    pub fn {escaped_rust_method}<T0: AsRef<str>>(_arg0: T0) -> Result<Pattern, JavaException> {{ Pattern::compile_result(_arg0) }}"
+            );
+        }
+        if return_type == "Pattern" {
+            return format!(
+                "    pub fn {escaped_rust_method}<T0: AsRef<str>>(_arg0: T0) -> Pattern {{ Pattern::compile(_arg0) }}"
+            );
+        }
     }
     if return_type == "String"
         && arg_count == 1
@@ -18876,21 +19730,96 @@ fn external_facade_unmodelled_method_with_facts(
         )
     };
     let receiver = canonical_external_receiver_type_key(receiver_key);
+    let receiver_simple = receiver.rsplit('.').next().unwrap_or(&receiver);
+    if is_static
+        && matches!(receiver_simple, "Files" | "JavaNioFileFiles")
+        && matches!(
+            java_method,
+            "newInputStream"
+                | "new_input_stream"
+                | "newOutputStream"
+                | "new_output_stream"
+                | "newBufferedReader"
+                | "new_buffered_reader"
+                | "readAllLines"
+                | "read_all_lines"
+        )
+        && raw_rust_type_is_result(return_type)
+    {
+        return format!(
+            "    pub fn {escaped_rust_method}{args} -> {return_type} {{ Err(JavaException::new(\"IOException\", \"{receiver}.{java_method} is not modelled\".to_string())) }}"
+        );
+    }
+    if !is_static
+        && is_known_java_platform_output_stream_receiver(receiver_simple)
+        && matches!(java_method, "write" | "write_1" | "write_int" | "write_3")
+        && raw_rust_type_is_result(return_type)
+    {
+        return format!(
+            "    pub fn {escaped_rust_method}{args} -> {return_type} {{ Err(JavaException::new(\"IOException\", \"{receiver}.{java_method} is not modelled\".to_string())) }}"
+        );
+    }
+    if !is_static
+        && matches!(receiver_simple, "Closeable" | "AutoCloseable")
+        && matches!(java_method, "close")
+        && raw_rust_type_is_result(return_type)
+    {
+        return format!(
+            "    pub fn {escaped_rust_method}{args} -> {return_type} {{ Err(JavaException::new(\"IOException\", \"{receiver}.{java_method} is not modelled\".to_string())) }}"
+        );
+    }
     if !is_static
         && arg_count == 0
         && return_type == "String"
         && matches!(java_method, "toString" | "to_string")
-        && platform_type_has_erased_display_support(
-            receiver.rsplit('.').next().unwrap_or(&receiver),
-        )
+        && platform_type_has_erased_display_support(receiver_simple)
     {
         return format!(
             "    pub fn {escaped_rust_method}{args} -> String {{ format!(\"{{}}\", self) }}"
         );
     }
+    if raw_rust_type_is_result(return_type) {
+        let exception_class =
+            external_facade_unmodelled_exception_class(facts, receiver_key, java_method, arg_count)
+                .unwrap_or_else(|| "UnsupportedOperationException".to_string());
+        return format!(
+            "    pub fn {escaped_rust_method}{args} -> {return_type} {{ Err(JavaException::new(\"{exception_class}\", \"{receiver}.{java_method} is not modelled\".to_string())) }}"
+        );
+    }
     format!(
         "    pub fn {escaped_rust_method}{args} -> {return_type} {{ unimplemented!(\"{receiver}.{java_method} is not modelled\") }}"
     )
+}
+
+fn external_facade_unmodelled_exception_class(
+    facts: &FactSet,
+    receiver_key: &str,
+    java_method: &str,
+    arg_count: usize,
+) -> Option<String> {
+    facts
+        .external_api_effect_for_receiver_with_arity(
+            Some(receiver_key),
+            java_method,
+            Some(arg_count),
+        )
+        .and_then(|effect| effect.thrown.first())
+        .and_then(java_type_name_for_external_facade)
+        .map(str::to_string)
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(receiver_key),
+                java_method,
+                Some(arg_count),
+            )
+            .and_then(|effect| {
+                effect
+                    .thrown
+                    .first()
+                    .and_then(java_type_name_for_external_facade)
+                    .map(str::to_string)
+            })
+        })
 }
 
 fn external_facade_constructor_name(arg_count: usize, overload_by_arity: bool) -> String {
@@ -19588,31 +20517,43 @@ fn source_summary_facade_instance_method(
     owner: &str,
     java_name: &str,
     rust_name: &str,
-    arg_count: usize,
+    method: &MethodDecl,
     return_type: &str,
 ) -> String {
     let rust_name = rust_raw_ident_if_needed(rust_name);
     let body = if return_type == "()" {
         "()".to_string()
+    } else if raw_rust_type_is_result(return_type) {
+        format!(
+            "Err(JavaException::new(\"UnsupportedOperationException\", \"source-summary method {owner}.{java_name} is not translated\".to_string()))"
+        )
     } else {
         format!("unimplemented!(\"source-summary method {owner}.{java_name} is not translated\")")
     };
     format!(
         "    pub fn {rust_name}{} -> {return_type} {{ {body} }}",
-        external_facade_self_args(arg_count)
+        source_summary_facade_self_args(method)
     )
+}
+
+fn source_summary_facade_self_args(method: &MethodDecl) -> String {
+    source_summary_facade_args_with_prefix(method, "&self")
 }
 
 fn source_summary_facade_static_method(
     owner: &str,
     java_name: &str,
     rust_name: &str,
-    arg_count: usize,
+    method: &MethodDecl,
     return_type: &str,
 ) -> String {
     let rust_name = rust_raw_ident_if_needed(rust_name);
     let body = if return_type == "()" {
         "()".to_string()
+    } else if raw_rust_type_is_result(return_type) {
+        format!(
+            "Err(JavaException::new(\"UnsupportedOperationException\", \"source-summary static method {owner}.{java_name} is not translated\".to_string()))"
+        )
     } else {
         format!(
             "unimplemented!(\"source-summary static method {owner}.{java_name} is not translated\")"
@@ -19620,8 +20561,47 @@ fn source_summary_facade_static_method(
     };
     format!(
         "    pub fn {rust_name}{} -> {return_type} {{ {body} }}",
-        external_facade_args(arg_count)
+        source_summary_facade_args_with_prefix(method, "")
     )
+}
+
+fn source_summary_facade_args_with_prefix(method: &MethodDecl, prefix: &str) -> String {
+    let args = method
+        .params
+        .iter()
+        .enumerate()
+        .map(|(idx, param)| {
+            format!(
+                "_arg{idx}: {}",
+                source_summary_facade_param_type(&param.ty, param.is_varargs)
+            )
+        })
+        .collect::<Vec<_>>();
+    match (prefix.is_empty(), args.is_empty()) {
+        (true, true) => "()".to_string(),
+        (true, false) => format!("({})", args.join(", ")),
+        (false, true) => format!("({prefix})"),
+        (false, false) => format!("({prefix}, {})", args.join(", ")),
+    }
+}
+
+fn source_summary_facade_param_type(java_type: &JavaType, varargs: bool) -> String {
+    if varargs
+        && let JavaType::Array(element) = java_type
+        && source_summary_facade_param_is_erased_object(element)
+    {
+        return "Vec<Option<Box<dyn std::any::Any>>>".to_string();
+    }
+    external_facade_return_type_with_facts(java_type, &FactSet::default())
+}
+
+fn source_summary_facade_param_is_erased_object(java_type: &JavaType) -> bool {
+    match java_type {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            canonical_external_receiver_type_key(name) == "Object"
+        }
+        _ => false,
+    }
 }
 
 fn source_summary_imported_static_methods(
@@ -19680,7 +20660,7 @@ fn source_summary_imported_static_methods(
                 owner_key,
                 &method.name,
                 &rust_method,
-                method.params.len(),
+                method,
                 &return_type,
             )
         })
@@ -19692,7 +20672,6 @@ fn source_summary_method_is_used(
     rust_method: &str,
     used_calls: &BTreeMap<String, BTreeSet<usize>>,
 ) -> bool {
-    let arity = method.params.len();
     [
         crate::parser::to_snake_case(&method.name),
         rust_method.to_string(),
@@ -19701,8 +20680,19 @@ fn source_summary_method_is_used(
     .any(|name| {
         used_calls
             .get(&name)
-            .is_some_and(|arities| arities.contains(&arity))
+            .is_some_and(|arities| source_summary_method_arities_match(method, arities))
     })
+}
+
+fn source_summary_method_arities_match(method: &MethodDecl, arities: &BTreeSet<usize>) -> bool {
+    let arity = method.params.len();
+    if arities.contains(&arity) {
+        return true;
+    }
+    method
+        .params
+        .last()
+        .is_some_and(|param| param.is_varargs && arities.iter().any(|used| *used >= arity - 1))
 }
 
 fn query_backed_external_inherited_methods_for_type(
@@ -20063,7 +21053,7 @@ fn external_facade_generic_carrier_method(
     if owner.ends_with("Future") && java_name == "get" && arg_count == 0 {
         let rust_name = rust_raw_ident_if_needed(rust_name);
         return format!(
-            "    pub fn {rust_name}(&self) -> Result<T, JavaException> {{ unimplemented!(\"{owner}.{java_name} is not modelled\") }}"
+            "    pub fn {rust_name}(&self) -> Result<T, JavaException> {{ Err(JavaException::new(\"ExecutionException\", \"{owner}.{java_name} is not modelled\".to_string())) }}"
         );
     }
     external_facade_builder_unmodelled_getter(
@@ -21104,7 +22094,9 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "HashMap"
             | "HashSet"
             | "Iterator"
+            | "ListIterator"
             | "JavaIterator"
+            | "JavaListIterator"
             | "JavaUtilIterator"
             | "JavaUtilArrayList"
             | "List"
@@ -22857,6 +23849,7 @@ pub(crate) fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.jar.Attributes.Name"
                 | "java.util.Enumeration"
                 | "java.util.Iterator"
+                | "java.util.ListIterator"
                 | "java.util.LinkedHashMap"
                 | "java.util.LinkedHashSet"
                 | "java.lang.StringBuffer"
@@ -22912,6 +23905,7 @@ fn program_declares_java_platform_facade_support_type(program: &Program) -> bool
                 | "AttributesName"
                 | "Enumeration"
                 | "Iterator"
+                | "ListIterator"
                 | "StringBuffer"
                 | "StringBuilder"
                 | "StringTokenizer"
@@ -23272,6 +24266,7 @@ pub(crate) fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "AttributesName"
             | "Enumeration"
             | "Iterator"
+            | "ListIterator"
             | "LinkedHashMap"
             | "LinkedHashSet"
             | "StringBuffer"
@@ -24160,6 +25155,10 @@ fn expr_uses_java_string_runtime_helpers(expr: &Expr) -> bool {
                     | ("compare_to_ignore_case", 1)
                     | ("equalsIgnoreCase", 1)
                     | ("equals_ignore_case", 1)
+                    | ("getBytes", 1)
+                    | ("get_bytes", 1)
+                    | ("getChars", 4)
+                    | ("get_chars", 4)
                     | ("matches", 1)
             ) || (name == "join"
                 && args.len() >= 2

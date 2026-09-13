@@ -3,7 +3,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::facts::FactSet;
 use crate::java_ir::{
     BinaryOp, Block, CatchClause, Expr, JavaType, Member, MethodDecl, Modifier, Program, Stmt,
-    TypeDecl,
+    SwitchCase, SwitchLabel, TypeDecl,
 };
 use crate::java_signature::{JavaCallableSlotKey, source_method_rust_name};
 use crate::usage::{CallGraph, CallableKey};
@@ -2031,7 +2031,7 @@ fn stmt_terminates_with_exception_boundary(stmt: &Stmt) -> bool {
                     .as_ref()
                     .is_some_and(block_terminates_with_exception_boundary)
         }
-        Stmt::Switch { .. } => true,
+        Stmt::Switch { cases, .. } => switch_all_paths_reach_exception_boundary(cases),
         Stmt::Try {
             resources,
             body,
@@ -2068,6 +2068,75 @@ pub(crate) fn plan_block_exception_completion(block: &Block) -> TryBlockCompleti
         return TryBlockCompletion::Terminates;
     }
     TryBlockCompletion::FallsThroughUnit
+}
+
+fn switch_all_paths_reach_exception_boundary(cases: &[SwitchCase]) -> bool {
+    if cases.is_empty()
+        || !cases.iter().any(|case| {
+            case.labels
+                .iter()
+                .any(|label| matches!(label, SwitchLabel::Default))
+        })
+    {
+        return false;
+    }
+    (0..cases.len()).all(|start| switch_path_reaches_exception_boundary(cases, start))
+}
+
+fn switch_path_reaches_exception_boundary(cases: &[SwitchCase], start: usize) -> bool {
+    cases[start..]
+        .iter()
+        .flat_map(|case| &case.statements)
+        .find_map(|stmt| match stmt {
+            Stmt::Return(_) | Stmt::Throw(_) => Some(true),
+            Stmt::Break(_) => Some(false),
+            Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. }
+                if block_terminates_with_exception_boundary(block) =>
+            {
+                Some(true)
+            }
+            Stmt::If {
+                then_block,
+                else_block: Some(else_block),
+                ..
+            } if block_terminates_with_exception_boundary(then_block)
+                && block_terminates_with_exception_boundary(else_block) =>
+            {
+                Some(true)
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } if matches!(
+                plan_try_stmt(resources, body, catches, finally_block.as_ref()),
+                TryStmtPlan::CatchOnly {
+                    completion: TryBlockCompletion::Terminates,
+                    ..
+                } | TryStmtPlan::WithResources {
+                    completion: TryBlockCompletion::Terminates,
+                    ..
+                } | TryStmtPlan::WithResourcesFinally {
+                    completion: TryBlockCompletion::Terminates,
+                    ..
+                } | TryStmtPlan::WithResourcesCatchFinally {
+                    completion: TryBlockCompletion::Terminates,
+                    ..
+                } | TryStmtPlan::FinallyOnly {
+                    completion: TryBlockCompletion::Terminates,
+                    ..
+                } | TryStmtPlan::CatchFinally {
+                    completion: TryBlockCompletion::Terminates,
+                    ..
+                }
+            ) =>
+            {
+                Some(true)
+            }
+            _ => None,
+        })
+        .unwrap_or(false)
 }
 
 fn collect_method_exception_plans_for_type(

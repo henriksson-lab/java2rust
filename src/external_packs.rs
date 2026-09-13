@@ -30185,7 +30185,33 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(JavaType::Primitive(PrimitiveType::Int)),
             return_nullability: NullabilityState::DefinitelyNonNull,
-            thrown: Vec::new(),
+            thrown: vec![JavaType::Named {
+                name: "IllegalArgumentException".to_string(),
+                args: Vec::new(),
+            }],
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(
+        simple_receiver,
+        "Thread" | "JavaLangThread" | "java.lang.Thread"
+    ) && matches!(method_name, "sleep")
+        && (matches_arg_count(1) || matches_arg_count(2))
+    {
+        let arg_count = if matches_arg_count(1) { 1 } else { 2 };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(arg_count),
+            parameter_patterns: None,
+            role: ExternalApiRole::SideEffect,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Void),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: vec![JavaType::Named {
+                name: "InterruptedException".to_string(),
+                args: Vec::new(),
+            }],
             provenance: FactProvenance::BuiltinExternalModel,
         });
     }
@@ -30219,7 +30245,14 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
             return_nullability: NullabilityState::DefinitelyNonNull,
-            thrown: Vec::new(),
+            thrown: if method_name == "compile" {
+                vec![JavaType::Named {
+                    name: "PatternSyntaxException".to_string(),
+                    args: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            },
             provenance: FactProvenance::BuiltinExternalModel,
         });
     }
@@ -30972,11 +31005,12 @@ fn java_platform_io_api_effect(
             args: Vec::new(),
         }]
     };
-    let receiver_mutability = if role == ExternalApiRole::FluentMutator {
-        ReceiverMutabilityFact::MutatesReceiver
-    } else {
-        ReceiverMutabilityFact::ReadOnly
-    };
+    let receiver_mutability =
+        if role == ExternalApiRole::FluentMutator && !matches!(simple_receiver, "Appendable") {
+            ReceiverMutabilityFact::MutatesReceiver
+        } else {
+            ReceiverMutabilityFact::ReadOnly
+        };
     let return_nullability = if matches!(simple_receiver, "Reader" | "BufferedReader")
         && matches!(method_name, "readLine" | "read_line")
         && expected_args == 0
@@ -31159,8 +31193,6 @@ pub fn java_platform_constructor_argument_effect_for(
     if arg_count == 1
         && parameter_index == 0
         && [
-            "java.io.PrintStream",
-            "JavaIoPrintStream",
             "java.io.BufferedOutputStream",
             "JavaIoBufferedOutputStream",
             "java.io.DataOutputStream",
@@ -31220,7 +31252,11 @@ pub fn java_platform_constructor_argument_effect_for_actual_arg(
     }
     if arg_count == 1
         && parameter_index == 0
-        && crate::facts::external_type_name_matches(type_name, "java.io.FileOutputStream")
+        && (crate::facts::external_type_name_matches(type_name, "java.io.FileInputStream")
+            || crate::facts::external_type_name_matches(type_name, "java.io.FileOutputStream")
+            || crate::facts::external_type_name_matches(type_name, "java.io.FileReader")
+            || crate::facts::external_type_name_matches(type_name, "java.io.FileWriter")
+            || crate::facts::external_type_name_matches(type_name, "java.io.PrintStream"))
     {
         if matches!(
             &actual_arg_type,
@@ -31250,6 +31286,24 @@ pub fn java_platform_constructor_argument_effect_for_actual_arg(
                 parameter_nullability: NullabilityState::DefinitelyNonNull,
                 argument_mutability: ReceiverMutabilityFact::ReadOnly,
                 alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
+        if crate::facts::external_type_name_matches(type_name, "java.io.PrintStream")
+            && matches!(
+                &actual_arg_type,
+                JavaType::Named { name, .. }
+                    if crate::facts::external_type_name_matches(name, "java.io.OutputStream")
+            )
+        {
+            return Some(ExternalConstructorArgumentEffectFact {
+                type_name: type_name.to_string(),
+                arg_count,
+                parameter_index,
+                parameter_type: Some(actual_arg_type.clone()),
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Escapes,
                 provenance: FactProvenance::BuiltinExternalModel,
             });
         }
@@ -31297,6 +31351,12 @@ fn java_platform_concurrent_api_effect(
                 JavaType::Unknown("Object".to_string()),
             )
         }
+        (
+            "CountDownLatch"
+            | "JavaUtilConcurrentCountDownLatch"
+            | "java.util.concurrent.CountDownLatch",
+            "await" | "r#await",
+        ) if matches_arg_count(0) => (0, ExternalApiRole::SideEffect, JavaType::Void),
         _ => return None,
     };
     let thrown = if matches!(
@@ -31304,18 +31364,28 @@ fn java_platform_concurrent_api_effect(
         (
             "Future" | "JavaUtilConcurrentFuture" | "java.util.concurrent.Future",
             "get"
+        ) | (
+            "CountDownLatch"
+                | "JavaUtilConcurrentCountDownLatch"
+                | "java.util.concurrent.CountDownLatch",
+            "await" | "r#await",
         )
     ) {
-        vec![
-            JavaType::Named {
-                name: "InterruptedException".to_string(),
-                args: Vec::new(),
-            },
-            JavaType::Named {
+        let mut thrown = vec![JavaType::Named {
+            name: "InterruptedException".to_string(),
+            args: Vec::new(),
+        }];
+        if matches!(
+            simple_receiver,
+            "Future" | "JavaUtilConcurrentFuture" | "java.util.concurrent.Future"
+        ) && method_name == "get"
+        {
+            thrown.push(JavaType::Named {
                 name: "ExecutionException".to_string(),
                 args: Vec::new(),
-            },
-        ]
+            });
+        }
+        thrown
     } else {
         Vec::new()
     };

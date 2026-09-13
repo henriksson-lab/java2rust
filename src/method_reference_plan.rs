@@ -67,7 +67,10 @@ fn looks_like_type_name(target: &str) -> bool {
 }
 
 fn looks_like_accessor_method(method: &str) -> bool {
-    method.starts_with('_') || method.starts_with("get_") || method.starts_with("is_")
+    method.starts_with('_')
+        || method.starts_with("get_")
+        || method.starts_with("is_")
+        || matches!(method, "name" | "ordinal")
 }
 
 fn source_owner_path(target: &str) -> String {
@@ -112,6 +115,12 @@ mod tests {
             plan_method_reference("a.Mapper", "new"),
             MethodReferencePlan::Constructor {
                 type_name: "a.Mapper".to_string(),
+            }
+        );
+        assert_eq!(
+            plan_method_reference("K.Kind", "name"),
+            MethodReferencePlan::UnboundAccessor {
+                method: "name".to_string(),
             }
         );
     }

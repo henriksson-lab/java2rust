@@ -40,16 +40,21 @@ longer re-derives receiver type identity to decide whether insertion must
 restore natural order. Guard:
 `call_plan::tests::native_queue_receiver_kind_is_the_single_queue_capability_answer`.
 
-Codex follow-up 2026-09-12 `ArrayBlockingQueue.put` guard: `put(value)` no
-longer reuses the generic `List.add`/`push` lowering. Java `put` has blocking
-bounded-queue semantics that the current carrier does not model, so the planner
-now routes it to a dedicated unsupported native collection method and lowering
-emits
-`compile_error!("unsupported Java ArrayBlockingQueue.put requires blocking queue semantics")`.
-This preserves the already-modeled `add`/`offer` capacity behavior without
-silently treating `put` as unbounded insertion. Guards:
+Codex follow-up 2026-09-13 `ArrayBlockingQueue.put` bounded-carrier pass:
+`put(value)` no longer reuses generic `List.add`/`push` lowering and no longer
+emits a hard `compile_error!`. The planner routes it to a dedicated native
+collection method. Lowering uses the bounded `JavaArrayBlockingQueue<T>`
+carrier: a non-null value is pushed while `len() < capacity()`, literal null
+raises `NullPointerException`, and a full queue returns a catchable
+`InterruptedException` rather than blocking the translated single-threaded
+runtime. This is still not a full Java blocking-queue implementation, but it
+keeps the checked-exception surface usable and preserves the already-modeled
+`add`/`offer` capacity behavior. Guards:
 `call_plan::tests::native_queue_receiver_kind_is_the_single_queue_capability_answer`
-and `idiom_gaps::array_blocking_queue_put_requires_blocking_queue_semantics`.
+and
+`idiom_gaps::array_blocking_queue_put_pushes_or_returns_interrupted_exception`.
+Differential fixture `tests/differential/ArrayBlockingQueuePut.java` covers the
+ordinary non-blocking success path against the Java oracle.
 
 Follow-up 2026-09-07 `String.join` null delimiter pass: the focused
 String.join null-display oracle now covers both null elements and a null

@@ -12,7 +12,8 @@ use crate::coercion::{
     arrays_copy_of_range_projection, arrays_deep_equals_projection,
     arrays_deep_hash_code_projection, arrays_deep_to_string_projection, arrays_equals_projection,
     arrays_equals_range_projection, arrays_hash_code_projection, arrays_mismatch_projection,
-    arrays_mismatch_range_projection, arrays_to_string_projection, collection_remove_if_projection,
+    arrays_mismatch_range_projection, arrays_to_string_projection,
+    clone_optional_erased_object_vec_ref_once, collection_remove_if_projection,
     collections_empty_list_projection, collections_empty_map_projection,
     collections_empty_set_projection, collections_empty_sorted_set_projection,
     collections_n_copies_projection, collections_singleton_list_projection,
@@ -24,10 +25,12 @@ use crate::coercion::{
     function_call_projection, index_to_usize_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_integral_parse_null_argument_as_number_format,
     java_iterator_from_collection_projection, java_list_hash_code_projection,
-    java_map_hash_code_projection, java_plain_object_constructor_projection,
-    java_set_hash_code_projection, java_value_hash_code_projection, len_i32_projection,
-    math_abs_projection, math_floor_div_projection, math_floor_mod_projection, math_max_projection,
-    math_min_projection, math_pow_projection, math_round_projection, math_to_int_exact_projection,
+    java_list_iterator_from_collection_at_projection,
+    java_list_iterator_from_collection_projection, java_map_hash_code_projection,
+    java_plain_object_constructor_projection, java_set_hash_code_projection,
+    java_value_hash_code_projection, len_i32_projection, math_abs_projection,
+    math_floor_div_projection, math_floor_mod_projection, math_max_projection, math_min_projection,
+    math_pow_projection, math_round_projection, math_to_int_exact_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
     native_collection_from_source_projection, native_collection_with_capacity_projection,
     objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
@@ -44,11 +47,11 @@ use crate::coercion::{
     string_compare_to_ignore_case_projection, string_compare_to_projection,
     string_equals_ignore_case_projection, string_format_projection,
     string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
-    string_hash_code_projection, string_index_of_projection, string_join_collection_projection,
-    string_join_varargs_projection, string_last_index_of_projection,
-    string_literal_from_rust_char_literal_expr, string_matches_projection,
-    string_replace_all_projection, string_replace_first_projection, string_split_projection,
-    string_substring_projection, string_to_char_array_projection,
+    string_get_bytes_result_projection, string_hash_code_projection, string_index_of_projection,
+    string_join_collection_projection, string_join_varargs_projection,
+    string_last_index_of_projection, string_literal_from_rust_char_literal_expr,
+    string_matches_projection, string_replace_all_projection, string_replace_first_projection,
+    string_split_projection, string_substring_projection, string_to_char_array_projection,
     strip_redundant_java_null_expect_after_unwrap, system_exit_projection, thread_sleep_projection,
     unwrap_result_or_panic_uncaught_java_exception,
 };
@@ -385,6 +388,15 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::StringToCharArray => string_to_char_array_projection(receiver),
         NativeJavaInstanceMethod::StringHashCode => string_hash_code_projection(receiver),
         NativeJavaInstanceMethod::StringGetBytes => string_get_bytes_projection(receiver),
+        NativeJavaInstanceMethod::StringGetBytesWithCharset => {
+            let charset = args
+                .into_iter()
+                .next()
+                .unwrap_or_else(|| RustExpr::Literal("\"UTF-8\"".to_string()));
+            unwrap_result_or_panic_uncaught_java_exception(string_get_bytes_result_projection(
+                receiver, charset,
+            ))
+        }
         NativeJavaInstanceMethod::StringIndexOf => apply_string_index_of(receiver, args),
         NativeJavaInstanceMethod::StringLastIndexOf => apply_string_last_index_of(receiver, args),
         NativeJavaInstanceMethod::StringCharAt => apply_string_char_at(receiver, args),
@@ -723,6 +735,13 @@ fn apply_native_java_static_method(
                 Some(radix) => primitive_parse_radix_projection(arg, radix, PrimitiveType::Int),
                 None => primitive_parse_projection(arg, PrimitiveType::Int),
             }
+        }
+        NativeJavaStaticMethod::IntegerDecode | NativeJavaStaticMethod::IntegerValueOfString => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Integer.decode/valueOf requires one argument");
+            };
+            let arg = java_integral_parse_null_argument_as_number_format(arg);
+            primitive_parse_projection(arg, PrimitiveType::Int)
         }
         NativeJavaStaticMethod::ByteParseByte => {
             let mut args = args.into_iter();
@@ -1131,6 +1150,12 @@ fn apply_native_collection_method(
     if matches!(method, NativeCollectionMethod::Iterator) {
         return java_iterator_from_collection_projection(receiver);
     }
+    if matches!(method, NativeCollectionMethod::ListIterator) {
+        if let Some(index) = args.pop() {
+            return java_list_iterator_from_collection_at_projection(receiver, index);
+        }
+        return java_list_iterator_from_collection_projection(receiver);
+    }
     if native_collection_mutation_needs_erased_object_arg(receiver_ty, method)
         && let Some(arg) = args.get_mut(0)
     {
@@ -1154,8 +1179,8 @@ fn apply_native_collection_method(
         NativeCollectionMethod::ArrayBlockingQueueOffer => {
             return apply_array_blocking_queue_offer(receiver, args);
         }
-        NativeCollectionMethod::ArrayBlockingQueuePutUnsupported => {
-            return apply_array_blocking_queue_put_unsupported(args);
+        NativeCollectionMethod::ArrayBlockingQueuePut => {
+            return apply_array_blocking_queue_put(receiver, args);
         }
         NativeCollectionMethod::ListInsert => {
             return apply_list_insert(receiver, args);
@@ -1181,6 +1206,9 @@ fn apply_native_collection_method(
         NativeCollectionMethod::QueueElement => {
             return queue_element_projection(receiver);
         }
+        NativeCollectionMethod::QueueLastElement => {
+            return queue_last_element_projection(receiver);
+        }
         NativeCollectionMethod::QueuePeek => {
             return queue_peek_projection(receiver);
         }
@@ -1189,6 +1217,9 @@ fn apply_native_collection_method(
         }
         NativeCollectionMethod::QueueRemove => {
             return queue_remove_projection(receiver);
+        }
+        NativeCollectionMethod::QueueLastRemove => {
+            return queue_last_remove_projection(receiver);
         }
         NativeCollectionMethod::Contains => "contains",
         NativeCollectionMethod::SetHashCode => {
@@ -1239,6 +1270,9 @@ fn apply_native_collection_method(
             unreachable!("sorted-map navigation keys are rendered from ranges")
         }
         NativeCollectionMethod::Iterator => unreachable!("Iterator is rendered as JavaIterator"),
+        NativeCollectionMethod::ListIterator => {
+            unreachable!("ListIterator is rendered as JavaListIterator")
+        }
         NativeCollectionMethod::ToArray => unreachable!("ToArray is rendered as an owned Vec"),
     };
     receiver_method_call_projection_exact(receiver, rust_name, args)
@@ -1462,13 +1496,15 @@ fn apply_array_blocking_queue_offer(receiver: RustExpr, args: Vec<RustExpr>) -> 
     ))
 }
 
-fn apply_array_blocking_queue_put_unsupported(args: Vec<RustExpr>) -> RustExpr {
+fn apply_array_blocking_queue_put(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 1 {
         return compile_error_call(
             "Java ArrayBlockingQueue.put(value) requires one value argument",
         );
     }
-    compile_error_call("unsupported Java ArrayBlockingQueue.put requires blocking queue semantics")
+    unwrap_result_or_panic_uncaught_java_exception(array_blocking_queue_put_result_projection(
+        receiver, args,
+    ))
 }
 
 pub(crate) fn array_blocking_queue_add_result_projection(
@@ -1544,11 +1580,64 @@ pub(crate) fn array_blocking_queue_offer_result_projection(
     }
 }
 
+pub(crate) fn array_blocking_queue_put_result_projection(
+    receiver: RustExpr,
+    mut args: Vec<RustExpr>,
+) -> RustExpr {
+    if args.len() != 1 {
+        return function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![crate::exception_lowering::new_exception_expr(
+                "InterruptedException",
+                rust_string_literal_projection(
+                    "Java ArrayBlockingQueue.put(value) requires one value argument",
+                ),
+            )],
+        );
+    }
+    let value = args.pop().expect("len checked");
+    if array_blocking_queue_value_is_literal_null(&value) {
+        return function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![array_blocking_queue_null_element_exception_expr()],
+        );
+    }
+    RustExpr::If {
+        condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
+        then_expr: Box::new(RustExpr::Block {
+            stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                receiver,
+                "push",
+                vec![value],
+            ))],
+            tail: Some(Box::new(function_call_projection(
+                ok_unit_java_exception_path_projection(),
+                vec![RustExpr::Tuple(Vec::new())],
+            ))),
+        }),
+        else_expr: Box::new(function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![array_blocking_queue_would_block_exception_expr()],
+        )),
+    }
+}
+
 fn ok_bool_java_exception_path_projection() -> RustExpr {
     RustExpr::generic_path(
         ["Ok"],
         vec![
             RustType::Named("bool".to_string()),
+            RustType::Named("JavaException".to_string()),
+        ],
+        Option::<&str>::None,
+    )
+}
+
+fn ok_unit_java_exception_path_projection() -> RustExpr {
+    RustExpr::generic_path(
+        ["Ok"],
+        vec![
+            RustType::Tuple(Vec::new()),
             RustType::Named("JavaException".to_string()),
         ],
         Option::<&str>::None,
@@ -1593,6 +1682,13 @@ fn array_blocking_queue_full_exception_expr(method: &str) -> RustExpr {
     crate::exception_lowering::new_exception_expr(
         "IllegalStateException",
         rust_string_literal_projection(&format!("Java ArrayBlockingQueue.{method} on full queue")),
+    )
+}
+
+fn array_blocking_queue_would_block_exception_expr() -> RustExpr {
+    crate::exception_lowering::new_exception_expr(
+        "InterruptedException",
+        rust_string_literal_projection("Java ArrayBlockingQueue.put would block on full queue"),
     )
 }
 
@@ -1717,6 +1813,71 @@ pub(crate) fn list_get_result_projection(receiver: RustExpr, index: RustExpr) ->
         }],
     );
     let value = receiver_method_call_projection_exact(value, "cloned", Vec::new());
+    let out_of_bounds = crate::exception_lowering::new_exception_expr(
+        "IndexOutOfBoundsException",
+        rust_string_literal_projection("Java list index out of bounds"),
+    );
+    let missing_value = receiver_method_call_projection_exact(
+        value,
+        "ok_or_else",
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: Vec::new(),
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(out_of_bounds.clone())),
+        }],
+    );
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: index_name.to_string(),
+            ty: None,
+            value: Some(index),
+        }],
+        tail: Some(Box::new(RustExpr::If {
+            condition: Box::new(RustExpr::Binary {
+                op: "<".to_string(),
+                left: Box::new(index_var),
+                right: Box::new(RustExpr::Literal("0".to_string())),
+            }),
+            then_expr: Box::new(function_call_projection(
+                RustExpr::Var("Err".to_string()),
+                vec![out_of_bounds],
+            )),
+            else_expr: Box::new(missing_value),
+        })),
+    }
+}
+
+pub(crate) fn list_get_optional_erased_object_vec_result_projection(
+    receiver: RustExpr,
+    index: RustExpr,
+) -> RustExpr {
+    let index_name = "__java_list_get_index";
+    let index_var = RustExpr::Var(index_name.to_string());
+    let value = receiver_method_call_projection_exact(
+        receiver,
+        "get",
+        vec![RustExpr::Cast {
+            expr: Box::new(index_var.clone()),
+            ty: "usize".to_string(),
+        }],
+    );
+    let value = receiver_method_call_projection_exact(
+        value,
+        "map",
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: vec![RustClosureParam {
+                pattern: "value".to_string(),
+                ty: None,
+            }],
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(clone_optional_erased_object_vec_ref_once(
+                RustExpr::Var("value".to_string()),
+            ))),
+        }],
+    );
     let out_of_bounds = crate::exception_lowering::new_exception_expr(
         "IndexOutOfBoundsException",
         rust_string_literal_projection("Java list index out of bounds"),
@@ -2089,8 +2250,16 @@ fn queue_remove_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(queue_remove_result_projection(receiver))
 }
 
+fn queue_last_remove_projection(receiver: RustExpr) -> RustExpr {
+    unwrap_result_or_panic_uncaught_java_exception(queue_last_remove_result_projection(receiver))
+}
+
 fn queue_element_projection(receiver: RustExpr) -> RustExpr {
     unwrap_result_or_panic_uncaught_java_exception(queue_element_result_projection(receiver))
+}
+
+fn queue_last_element_projection(receiver: RustExpr) -> RustExpr {
+    unwrap_result_or_panic_uncaught_java_exception(queue_last_element_result_projection(receiver))
 }
 
 fn queue_peek_projection(receiver: RustExpr) -> RustExpr {
@@ -2137,6 +2306,15 @@ pub(crate) fn queue_element_result_projection(receiver: RustExpr) -> RustExpr {
     ok_or_else_java_exception_projection(value, queue_no_such_element_exception_expr("element"))
 }
 
+pub(crate) fn queue_last_element_result_projection(receiver: RustExpr) -> RustExpr {
+    let value = receiver_method_call_projection_exact(
+        receiver_method_call_projection_exact(receiver, "last", Vec::new()),
+        "cloned",
+        Vec::new(),
+    );
+    ok_or_else_java_exception_projection(value, queue_no_such_element_exception_expr("getLast"))
+}
+
 pub(crate) fn queue_remove_result_projection(receiver: RustExpr) -> RustExpr {
     let no_such_element = queue_no_such_element_exception_expr("remove");
     RustExpr::If {
@@ -2158,6 +2336,13 @@ pub(crate) fn queue_remove_result_projection(receiver: RustExpr) -> RustExpr {
             )],
         )),
     }
+}
+
+pub(crate) fn queue_last_remove_result_projection(receiver: RustExpr) -> RustExpr {
+    ok_or_else_java_exception_projection(
+        receiver_method_call_projection_exact(receiver, "pop", Vec::new()),
+        queue_no_such_element_exception_expr("removeLast"),
+    )
 }
 
 fn queue_no_such_element_exception_expr(method: &str) -> RustExpr {

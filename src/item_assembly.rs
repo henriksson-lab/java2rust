@@ -2353,7 +2353,8 @@ fn struct_derives_for_type(
     // the derive. Restricting it to the types that need it keeps the change off
     // every other struct's derive line — the "derive obligation" 0034 asks for,
     // the same shape as the `Clone` obligation 0002a needed.
-    if crate::array_default_obligations::program_allocates_object_array_of(support_program, ty)
+    if (crate::array_default_obligations::program_allocates_object_array_of(support_program, ty)
+        || program_needs_constructor_placeholder_default_for_type(support_program, ty))
         && ty.type_params.is_empty()
         && fields.iter().all(|field| {
             rust_type_supports_struct_derive_default(
@@ -2380,6 +2381,135 @@ fn struct_derives_for_type(
         derives.push("Hash".to_string());
     }
     derives
+}
+
+fn program_needs_constructor_placeholder_default_for_type(
+    support_program: &Program,
+    target: &TypeDecl,
+) -> bool {
+    support_program.types.iter().any(|owner| {
+        let fields = owner
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Field(field) => Some(field),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        owner.members.iter().any(|member| {
+            let Member::Constructor(ctor) = member else {
+                return false;
+            };
+            ctor.body.as_ref().is_some_and(|body| {
+                body.statements.iter().any(|stmt| {
+                    constructor_stmt_assigns_self_dependent_field_of_type(stmt, &fields, target)
+                })
+            })
+        })
+    })
+}
+
+fn constructor_stmt_assigns_self_dependent_field_of_type(
+    stmt: &Stmt,
+    fields: &[&FieldDecl],
+    target: &TypeDecl,
+) -> bool {
+    match stmt {
+        Stmt::Assign { target: lhs, value } => {
+            let Some(field_name) = assigned_instance_field_name(lhs) else {
+                return false;
+            };
+            fields.iter().any(|field| {
+                field.name == field_name
+                    && java_type_names_same_after_optional(
+                        &field.ty,
+                        &JavaType::Named {
+                            name: target.name.clone(),
+                            args: Vec::new(),
+                        },
+                    )
+            }) && constructor_expr_reads_self(value)
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            then_block.statements.iter().any(|stmt| {
+                constructor_stmt_assigns_self_dependent_field_of_type(stmt, fields, target)
+            }) || else_block.as_ref().is_some_and(|block| {
+                block.statements.iter().any(|stmt| {
+                    constructor_stmt_assigns_self_dependent_field_of_type(stmt, fields, target)
+                })
+            })
+        }
+        _ => false,
+    }
+}
+
+fn assigned_instance_field_name(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Var(field) => Some(field),
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            Some(field)
+        }
+        _ => None,
+    }
+}
+
+fn constructor_expr_reads_self(expr: &Expr) -> bool {
+    match expr {
+        Expr::This | Expr::Super => true,
+        Expr::FieldAccess(receiver, _) => constructor_expr_reads_self(receiver),
+        Expr::Call { receiver, args, .. } => {
+            receiver.as_deref().is_some_and(constructor_expr_reads_self)
+                || args.iter().any(constructor_expr_reads_self)
+        }
+        Expr::New { args, .. } | Expr::ArrayInitializer(args) => {
+            args.iter().any(constructor_expr_reads_self)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(constructor_expr_reads_self)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(constructor_expr_reads_self))
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            constructor_expr_reads_self(expr)
+        }
+        Expr::ArrayAccess(array, index) => {
+            constructor_expr_reads_self(array) || constructor_expr_reads_self(index)
+        }
+        Expr::Binary { left, right, .. } => {
+            constructor_expr_reads_self(left) || constructor_expr_reads_self(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            constructor_expr_reads_self(condition)
+                || constructor_expr_reads_self(then_expr)
+                || constructor_expr_reads_self(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            constructor_expr_reads_self(selector)
+                || cases
+                    .iter()
+                    .any(|case| constructor_expr_reads_self(&case.value))
+        }
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::Lambda { .. }
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+    }
 }
 
 fn source_type_declares_java_hash_equality(ty: &TypeDecl) -> bool {

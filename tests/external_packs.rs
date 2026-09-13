@@ -7708,6 +7708,51 @@ fn java_platform_concurrent_static_factory_declares_precise_return_type() {
             "{receiver}.get/0 should declare its checked InterruptedException"
         );
     }
+
+    for receiver in [
+        "CountDownLatch",
+        "java.util.concurrent.CountDownLatch",
+        "JavaUtilConcurrentCountDownLatch",
+    ] {
+        let effect = external_api_effect_for_receiver_with_arity(Some(receiver), "await", Some(0))
+            .unwrap_or_else(|| panic!("{receiver}.await/0 should be platform-modeled"));
+        assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+        assert_eq!(effect.arg_count, Some(0));
+        assert_eq!(effect.role, ExternalApiRole::SideEffect);
+        assert_eq!(effect.return_type, Some(JavaType::Void));
+        assert!(
+            effect.thrown.iter().any(
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "InterruptedException")
+            ),
+            "{receiver}.await/0 should declare its checked InterruptedException"
+        );
+    }
+
+    for receiver in ["Thread", "java.lang.Thread", "JavaLangThread"] {
+        let effect = external_api_effect_for_receiver_with_arity(Some(receiver), "sleep", Some(1))
+            .unwrap_or_else(|| panic!("{receiver}.sleep/1 should be platform-modeled"));
+        assert_eq!(effect.provenance, FactProvenance::BuiltinExternalModel);
+        assert_eq!(effect.arg_count, Some(1));
+        assert_eq!(effect.role, ExternalApiRole::SideEffect);
+        assert_eq!(effect.return_type, Some(JavaType::Void));
+        assert!(
+            effect.thrown.iter().any(
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "InterruptedException")
+            ),
+            "{receiver}.sleep/1 should declare its checked InterruptedException"
+        );
+
+        let nanos_effect =
+            external_api_effect_for_receiver_with_arity(Some(receiver), "sleep", Some(2))
+                .unwrap_or_else(|| panic!("{receiver}.sleep/2 should be platform-modeled"));
+        assert_eq!(nanos_effect.arg_count, Some(2));
+        assert!(
+            nanos_effect.thrown.iter().any(
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "InterruptedException")
+            ),
+            "{receiver}.sleep/2 should declare its checked InterruptedException"
+        );
+    }
 }
 
 #[test]

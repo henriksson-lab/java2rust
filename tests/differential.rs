@@ -20,7 +20,7 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 277;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 280;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 15;
 
 #[test]
@@ -484,6 +484,7 @@ fn list_exception_fixtures_match_java_output() {
         "ArrayBlockingQueueBadCapacity",
         "ArrayBlockingQueueNull",
         "ArrayBlockingQueueOffer",
+        "ArrayBlockingQueuePut",
         "ArrayDequeFirstPopCatch",
         "ArrayDequeOffer",
         "BitSetClearFlipCatch",
@@ -495,6 +496,7 @@ fn list_exception_fixtures_match_java_output() {
         "CatchSupertype",
         "CollectionsSortComparatorThrowCatch",
         "CollectionsNCopiesCatch",
+        "EnhancedForConcurrentModification",
         "ExceptionHierarchy",
         "Exceptions",
         "ExceptionsCustom",
@@ -594,6 +596,7 @@ fn finally_completion_fixtures_match_java_output() {
         "FinallyOnContinue",
         "FinallyPaths",
         "FinallySwitchBreak",
+        "FinallySwitchFallsThrough",
         "FinallyThrowOverride",
         "FinallyWhileContinue",
         "CatchFinallyLabeledContinue",
@@ -1197,6 +1200,10 @@ fn fixture_paths() -> Vec<PathBuf> {
 }
 
 fn translator_binary() -> Option<PathBuf> {
+    if let Some(path) = option_env!("CARGO_BIN_EXE_new-java2rust") {
+        return Some(PathBuf::from(path));
+    }
+
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     ["release", "debug"]
         .iter()

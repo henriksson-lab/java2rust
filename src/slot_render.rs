@@ -1058,6 +1058,26 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 ),
             }
         }
+        JavaType::Named { name, args }
+            if matches!(
+                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                "ListIterator" | "java.util.ListIterator"
+            ) =>
+        {
+            let element_ty = args
+                .first()
+                .cloned()
+                .unwrap_or_else(erased_object_java_type);
+            NativeJavaRustTypePolicy::Direct {
+                ty: rust_generic_type(
+                    "JavaListIterator",
+                    vec![rust_type_for_java_generic_arg_with_effective_facts(
+                        &element_ty,
+                        facts,
+                    )],
+                ),
+            }
+        }
         JavaType::Named { .. } if crate::stdlib::java_map_type_args(ty).is_some() => {
             let (key, value) = crate::stdlib::java_map_type_args(ty).unwrap();
             let kind = crate::stdlib::java_collection_kind_for_type(ty)
@@ -1198,10 +1218,7 @@ pub(crate) fn native_named_java_rust_type_policy(name: &str) -> NativeNamedJavaR
 }
 
 fn java_exception_like_type_name(name: &str) -> bool {
-    let simple = name.rsplit('.').next().unwrap_or(name);
-    matches!(simple, "Throwable" | "Exception" | "Error")
-        || simple.ends_with("Exception")
-        || simple.ends_with("Error")
+    crate::stdlib::is_known_throwable_carrier_type(name)
 }
 
 fn erased_object_java_type() -> JavaType {
@@ -1969,6 +1986,13 @@ mod tests {
             RustType::Vec(Box::new(RustType::Option(Box::new(RustType::Named(
                 "JavaException".to_string()
             )))))
+        );
+        assert_eq!(
+            rust_type_for_java_type(&JavaType::Named {
+                name: "CauseStateException".to_string(),
+                args: Vec::new(),
+            }),
+            RustType::Named("CauseStateException".to_string())
         );
     }
 }

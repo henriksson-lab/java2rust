@@ -967,13 +967,27 @@ class ExternalFacadeKeywordMethodNames {
     void waitFor(CountDownLatch latch) throws InterruptedException {
         latch.await();
     }
+
+    String catchAwait(CountDownLatch latch) {
+        try {
+            latch.await();
+            return "ok";
+        } catch (InterruptedException ex) {
+            return "interrupted";
+        }
+    }
 }
 "#,
     );
 
     assert!(
-        translation.rust.contains("pub fn r#await(&self)")
-            && translation.rust.contains("latch.r#await()")
+        translation
+            .rust
+            .contains("pub fn r#await(&self) -> Result<(), JavaException>")
+            && translation.rust.contains("latch.r#await()?")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"InterruptedException\"])")
             && !translation.rust.contains("pub fn await(")
             && !translation.rust.contains("latch.await()"),
         "{}",
@@ -1260,6 +1274,130 @@ mod generated_tests {
             iterator.next();
         }))
         .is_err());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_list_iterator_previous_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.ListIterator;
+import java.util.NoSuchElementException;
+
+class JavaListIteratorPreviousCatch {
+    static String run() {
+        ArrayList<String> values = new ArrayList<String>();
+        values.add("a");
+        values.add("b");
+        ListIterator<String> iter = values.listIterator();
+        String first = iter.next();
+        String back = iter.previous();
+        try {
+            iter.previous();
+            return "miss";
+        } catch (NoSuchElementException ex) {
+            return first + ":" + back + ":" + iter.hasPrevious() + ":" + iter.hasNext();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut iter: JavaListIterator<String> = JavaListIterator::new(values.iter().cloned());")
+            && translation.rust.contains("iter.next_result()?")
+            && translation.rust.contains("iter.previous_result()?")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"NoSuchElementException\"])")
+            && !translation.rust.contains("let mut iter: ListIterator<String>")
+            && !translation.rust.contains(".list_iterator("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_list_iterator_previous_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn previous_exhaustion_is_catchable() {
+        assert_eq!(
+            JavaListIteratorPreviousCatch::run().unwrap(),
+            "a:a:false:true".to_string()
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_list_iterator_index_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.ListIterator;
+
+class JavaListIteratorIndexCatch {
+    static String run(int index) {
+        ArrayList<String> values = new ArrayList<String>();
+        values.add("a");
+        try {
+            ListIterator<String> iter = values.listIterator(index);
+            return iter.hasPrevious() ? iter.previous() : "start";
+        } catch (IndexOutOfBoundsException ex) {
+            return "bounds";
+        } catch (java.util.NoSuchElementException ex) {
+            return "wrong";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaListIterator::new_at_result(values.iter().cloned(), index)?")
+            && !translation
+                .rust
+                .contains("JavaListIterator::new(values.iter().cloned())")
+            && !translation.rust.contains(".list_iterator("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_list_iterator_index_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn indexed_cursor_bounds_are_catchable() {
+        assert_eq!(JavaListIteratorIndexCatch::run(0), "start");
+        assert_eq!(JavaListIteratorIndexCatch::run(1), "a");
+        assert_eq!(JavaListIteratorIndexCatch::run(2), "bounds");
+        assert_eq!(JavaListIteratorIndexCatch::run(-1), "bounds");
     }
 }
 "#,
@@ -2916,6 +3054,9 @@ class JavaStringBytesAndIndex {
             .contains("value.as_bytes().iter().map(|byte| (*byte) as i8).collect::<Vec<i8>>()")
             && translation
                 .rust
+                .contains("java_string_get_bytes_result(&value, \"UTF-8\")?")
+            && translation
+                .rust
                 .contains("java_string_index_of(&value, \"&\")")
             && translation
                 .rust
@@ -2946,6 +3087,193 @@ class JavaStringBytesAndIndex {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_string_get_bytes_charset_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.io.UnsupportedEncodingException;
+
+class JavaStringGetBytesCharsetCatch {
+    static String run(String value) {
+        try {
+            return "" + value.getBytes("NO_SUCH_CHARSET").length;
+        } catch (UnsupportedEncodingException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_string_get_bytes_result(&value, \"NO_SUCH_CHARSET\")?.len()")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"UnsupportedEncodingException\"")
+            && !translation.rust.contains("value.as_bytes()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_string_get_bytes_charset_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn unsupported_charset_is_catchable() {
+        assert_eq!(JavaStringGetBytesCharsetCatch::run("abc").unwrap(), "caught");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn java_string_get_chars_helpers_are_catchable_and_copy_chars() {
+    let translation = translate_source(
+        r#"
+class JavaStringGetCharsCatch {
+    static String copyString(String value) {
+        char[] out = new char[] {'_', '_', '_', '_'};
+        value.getChars(1, 3, out, 1);
+        return "" + out[0] + out[1] + out[2] + out[3];
+    }
+
+    static String copyBuilder() {
+        char[] out = new char[] {'_', '_', '_'};
+        new StringBuilder("abcd").getChars(0, 2, out, 1);
+        return "" + out[0] + out[1] + out[2];
+    }
+
+    static String catchBadDest(String value) {
+        try {
+            char[] out = new char[1];
+            value.getChars(0, 2, out, 0);
+            return "no";
+        } catch (StringIndexOutOfBoundsException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("java_string_get_chars_result")
+            && translation
+                .rust
+                .contains(".get_chars_result(0 as usize, 2 as usize")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"StringIndexOutOfBoundsException\""),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_string_get_chars_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn copies_and_catches_ranges() {
+        assert_eq!(JavaStringGetCharsCatch::copy_string("abcd").unwrap(), "_bc_");
+        assert_eq!(JavaStringGetCharsCatch::copy_builder().unwrap(), "_ab");
+        assert_eq!(JavaStringGetCharsCatch::catch_bad_dest("abcd").unwrap(), "caught");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn iterator_snapshot_mutators_are_catchable_unsupported_operations() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.ListIterator;
+
+class JavaIteratorMutationCatch {
+    static String removeIt() {
+        ArrayList<String> values = new ArrayList<String>();
+        values.add("a");
+        Iterator<String> iter = values.iterator();
+        iter.next();
+        try {
+            iter.remove();
+            return "miss";
+        } catch (UnsupportedOperationException ex) {
+            return "remove";
+        }
+    }
+
+    static String setIt() {
+        ArrayList<String> values = new ArrayList<String>();
+        values.add("a");
+        ListIterator<String> iter = values.listIterator();
+        iter.next();
+        try {
+            iter.set("b");
+            return "miss";
+        } catch (UnsupportedOperationException ex) {
+            return "set";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("iter.remove_result()?")
+            && translation
+                .rust
+                .contains("iter.set_result(\"b\".to_string())?")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"UnsupportedOperationException\"])")
+            && !translation.rust.contains("iter.remove();")
+            && !translation.rust.contains("iter.set(\"b\""),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_iterator_mutation_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn snapshot_mutators_are_catchable() {
+        assert_eq!(JavaIteratorMutationCatch::remove_it().unwrap(), "remove");
+        assert_eq!(JavaIteratorMutationCatch::set_it().unwrap(), "set");
+    }
+}
+"#,
         }],
     );
 }
@@ -5996,6 +6324,59 @@ class OptionalSequenceGetConcreteSlot {
 }
 
 #[test]
+fn sequence_get_in_try_slot_coercion_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.IndexOutOfBoundsException;
+import java.util.List;
+
+class SequenceGetCatchSlotCoercion {
+    static String run() {
+        List<String> values = new ArrayList<String>();
+        try {
+            String value = values.get(0);
+            return value;
+        } catch (IndexOutOfBoundsException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("IndexOutOfBoundsException")
+            && translation.rust.contains("values.get(__java_list_get_index as usize).cloned().ok_or_else")
+            && translation.rust.contains("}?)")
+            && !translation
+                .rust
+                .contains("values.get(__java_list_get_index as usize).cloned().ok_or_else(|| JavaException::new(\"IndexOutOfBoundsException\", \"Java list index out of bounds\".to_string())).unwrap_or_else"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "sequence_get_catch_slot_coercion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_list_get_bounds_failure() {
+        assert_eq!(SequenceGetCatchSlotCoercion::run(), Some("caught".to_string()));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn integer_parse_int_unwraps_sequence_get_argument() {
     let translation = translate_source(
         r#"
@@ -6039,6 +6420,178 @@ class IntegerParseSequenceGet {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn integer_radix_parse_string_argument_is_catchable() {
+    let translation = translate_source(
+        r#"
+class IntegerRadixParseCatch {
+    static String run() {
+        try {
+            return "" + Integer.parseInt("z", 10);
+        } catch (NumberFormatException ex) {
+            try {
+                return "" + Long.parseLong("z", 10);
+            } catch (NumberFormatException inner) {
+                try {
+                    return "" + Short.parseShort("40000", 10);
+                } catch (NumberFormatException narrow) {
+                    try {
+                        return "" + Byte.parseByte("128", 10);
+                    } catch (NumberFormatException narrowByte) {
+                        return "caught";
+                    }
+                }
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("i32::from_str_radix(&\"z\".to_string(), __java_parse_radix as u32)")
+            && translation
+                .rust
+                .contains("i64::from_str_radix(&\"z\".to_string(), __java_parse_radix as u32)")
+            && translation
+                .rust
+                .contains("i16::from_str_radix(&\"40000\".to_string(), __java_parse_radix as u32)")
+            && translation
+                .rust
+                .contains("i8::from_str_radix(&\"128\".to_string(), __java_parse_radix as u32)")
+            && !translation
+                .rust
+                .contains("from_str_radix(\"z\".to_string()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "integer_radix_parse_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn radix_parse_failures_are_catchable() {
+        assert_eq!(IntegerRadixParseCatch::run(), "caught");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn class_for_name_missing_class_is_catchable() {
+    let translation = translate_source(
+        r#"
+class ClassForNameMissingCatch {
+    static String run() {
+        try {
+            return Class.forName("definitely.missing.Clazz").getName();
+        } catch (ClassNotFoundException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaClass::<()>::for_name_result(\"definitely.missing.Clazz\")?.get_name()")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"ClassNotFoundException\"")
+            && translation
+                .rust
+                .contains("\"java.lang.ClassNotFoundException\"")
+            && !translation
+                .rust
+                .contains("JavaClass::<()>::for_name(\"definitely.missing.Clazz\".to_string())?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "class_for_name_missing_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn missing_class_is_catchable() {
+        assert_eq!(ClassForNameMissingCatch::run(), "caught");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn integer_decode_and_value_of_string_are_catchable() {
+    let translation = translate_source(
+        r#"
+class IntegerDecodeValueOfCatch {
+    static String run() {
+        try {
+            return "" + Integer.decode("not-int");
+        } catch (NumberFormatException ex) {
+            try {
+                return "" + Integer.valueOf("also-bad");
+            } catch (NumberFormatException inner) {
+                return "caught";
+            }
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("java_parse_i32")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"NumberFormatException\"])")
+            && !translation.rust.contains("Integer::decode")
+            && !translation.rust.contains("<Integer>::value_of"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "integer_decode_value_of_string_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_integer_decoders_are_catchable() {
+        assert_eq!(IntegerDecodeValueOfCatch::run(), "caught".to_string());
+    }
+}
+"#,
         }],
     );
 }
@@ -9826,7 +10379,7 @@ class SystemArraycopyParameterFields {
         translation.rust.contains(
             "pub fn copy(source: &SystemArraycopyParameterFields, dest: &mut SystemArraycopyParameterFields) -> Result<(), JavaException>"
         ) && translation.rust.contains(
-            "System::arraycopy(source.values.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_slice(), 0"
+            "System::arraycopy_result(source.values.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_slice(), 0"
         ) && translation.rust.contains(
             "dest.values.as_mut().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_mut_slice(), 0"
         ) && !translation.rust.contains("System::arraycopy(source.values, 0, dest.values,"),
@@ -9869,12 +10422,78 @@ class SystemArraycopyOptionalLocalDest {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "system_arraycopy_mutable_optional_local_dest_does_not_clone_slice",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn copies_array_elements() {
+        assert_eq!(
+            SystemArraycopyOptionalLocalDest {}
+                .copy(vec![1, 2, 3, 4], 3),
+            Some(vec![1, 2, 3])
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn system_arraycopy_bounds_failure_is_catchable() {
+    let translation = translate_source(
+        r#"
+class SystemArraycopyBoundsCatch {
+    static String run(int n) {
+        byte[] source = new byte[] {1, 2};
+        byte[] dest = new byte[] {0};
+        try {
+            System.arraycopy(source, 0, dest, 0, n);
+            return "copied";
+        } catch (IndexOutOfBoundsException ex) {
+            return "bounds";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("System::arraycopy_result(source.as_slice(), 0 as usize")
+            && translation.rust.contains("n as usize)?")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"IndexOutOfBoundsException\"])"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "system_arraycopy_bounds_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn arraycopy_bounds_are_catchable() {
+        assert_eq!(SystemArraycopyBoundsCatch::run(1), "copied");
+        assert_eq!(SystemArraycopyBoundsCatch::run(2), "bounds");
+    }
+}
+"#,
         }],
     );
 }
@@ -12389,36 +13008,72 @@ class Kmer {
 }
 
 #[test]
-fn array_blocking_queue_put_requires_blocking_queue_semantics() {
+fn array_blocking_queue_put_pushes_or_returns_interrupted_exception() {
     let translation = translate_source(
         r#"
 import java.util.concurrent.ArrayBlockingQueue;
+import java.lang.InterruptedException;
 
-class QueuePutUse {
-    static void send(ArrayBlockingQueue<String> queue, String value) throws InterruptedException {
-        queue.put(value);
+class ArrayBlockingQueuePutUse {
+    static String run(boolean second) {
+        ArrayBlockingQueue<String> queue = new ArrayBlockingQueue<String>(1);
+        try {
+            queue.put("a");
+            if (second) {
+                queue.put("b");
+            }
+            return "ok:" + queue.peek();
+        } catch (InterruptedException ex) {
+            return "caught:" + queue.peek() + ":" + ex.getClass().getSimpleName();
+        }
     }
 }
 "#,
     );
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java ArrayBlockingQueue.put requires blocking queue semantics\")"
-        ) && !translation.rust.contains("queue.push(value);")
+        translation
+            .rust
+            .contains("let mut queue: JavaArrayBlockingQueue<String>")
+            && translation
+                .rust
+                .contains("JavaArrayBlockingQueue::with_capacity(1 as usize)")
+            && translation.rust.contains("queue.len() < queue.capacity()")
+            && translation.rust.contains("queue.push(")
+            && translation.rust.contains("Ok::<(), JavaException>(())")
+            && translation
+                .rust
+                .contains("JavaException::new(\"InterruptedException\"")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"InterruptedException\"])")
+            && !translation.rust.contains("compile_error!")
             && !translation.rust.contains(".put("),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "array_blocking_queue_put_requires_blocking_queue_semantics",
+    cargo_test_generated_modules(
+        "array_blocking_queue_put_pushes_or_returns_interrupted_exception",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn put_success_and_translated_would_block_path() {
+        assert_eq!(ArrayBlockingQueuePutUse::run(false), "ok:a".to_string());
+        assert_eq!(
+            ArrayBlockingQueuePutUse::run(true),
+            "caught:a:InterruptedException".to_string()
+        );
+    }
+}
+"#,
         }],
-        "unsupported Java ArrayBlockingQueue.put requires blocking queue semantics",
     );
 }
 
@@ -12463,12 +13118,25 @@ class ArrayBlockingQueueAddUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "array_blocking_queue_add_uses_bounded_carrier_and_throws_when_full",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn full_add_throws_illegal_state_exception() {
+        assert_eq!(
+            ArrayBlockingQueueAddUse::run(),
+            "true,a,IllegalStateException".to_string()
+        );
+    }
+}
+"#,
         }],
     );
 }
@@ -12509,12 +13177,22 @@ class ArrayBlockingQueueOfferUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "array_blocking_queue_offer_uses_bounded_carrier_and_returns_false_when_full",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn full_offer_returns_false_without_throwing() {
+        assert_eq!(ArrayBlockingQueueOfferUse::run(), "true,false,a".to_string());
+    }
+}
+"#,
         }],
     );
 }
@@ -12555,12 +13233,26 @@ class ArrayBlockingQueueBadCapacityUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "array_blocking_queue_capacity_constructor_is_catchable_illegal_argument",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn nonpositive_capacity_is_catchable() {
+        assert_eq!(ArrayBlockingQueueBadCapacityUse::run(1), "made".to_string());
+        assert_eq!(
+            ArrayBlockingQueueBadCapacityUse::run(0),
+            "IllegalArgumentException".to_string()
+        );
+    }
+}
+"#,
         }],
     );
 }
@@ -12613,12 +13305,25 @@ class ArrayBlockingQueueNullUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "array_blocking_queue_literal_null_add_and_offer_throw_null_pointer",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn literal_null_add_and_offer_are_catchable() {
+        assert_eq!(
+            ArrayBlockingQueueNullUse::run(),
+            "NullPointerException,NullPointerException".to_string()
+        );
+    }
+}
+"#,
         }],
     );
 }
@@ -12837,6 +13542,63 @@ class QueuePollAliasUse {
 }
 
 #[test]
+fn array_deque_last_aliases_are_catchable_and_compile() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayDeque;
+import java.util.NoSuchElementException;
+
+class ArrayDequeLastCatch {
+    static String run(boolean empty) {
+        ArrayDeque<String> q = new ArrayDeque<String>();
+        if (!empty) {
+            q.add("a");
+            q.add("b");
+        }
+        try {
+            return q.getLast() + ":" + q.removeLast() + ":" + q.isEmpty();
+        } catch (NoSuchElementException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(".last().cloned()")
+            && translation.rust.contains(".pop()")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"NoSuchElementException\"])")
+            && !translation.rust.contains(".get_last(")
+            && !translation.rust.contains(".remove_last("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "array_deque_last_aliases_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn last_aliases_match_deque_tail_contract() {
+        assert_eq!(ArrayDequeLastCatch::run(false), "b:b:false".to_string());
+        assert_eq!(ArrayDequeLastCatch::run(true), "caught".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn byte_and_char_buffer_put_are_modeled_statement_facade_calls() {
     let translation = translate_source(
         r#"
@@ -12949,6 +13711,116 @@ class ByteIntWidenUse {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn output_stream_write_unmodelled_facade_throws_catchable_io_exception() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+import java.io.OutputStream;
+
+class OutputStreamWriteCatch {
+    static String write(OutputStream out) {
+        try {
+            out.write(7);
+            return "ok";
+        } catch (IOException ex) {
+            return "io";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("out.write_int(7)?;")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"IOException\"])")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"IOException\"")
+            && !translation.rust.contains(
+                "pub fn write_int(&self, _arg0: i32) -> Result<(), JavaException> { unimplemented!"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "output_stream_write_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_unmodelled_output_stream_write() {
+        assert_eq!(OutputStreamWriteCatch::write(&OutputStream), Ok("io".to_string()));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn closeable_close_unmodelled_facade_throws_catchable_io_exception() {
+    let translation = translate_source(
+        r#"
+import java.io.Closeable;
+import java.io.IOException;
+
+class CloseableCloseCatch {
+    static String close(Closeable value) {
+        try {
+            value.close();
+            return "ok";
+        } catch (IOException ex) {
+            return "io";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("value.close()?;")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"IOException\"])")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"IOException\"")
+            && !translation
+                .rust
+                .contains("pub fn close(&self) -> Result<(), JavaException> { unimplemented!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "closeable_close_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_unmodelled_closeable_close() {
+        assert_eq!(CloseableCloseCatch::close(&Closeable), Ok("io".to_string()));
+    }
+}
+"#,
         }],
     );
 }
@@ -13381,12 +14253,22 @@ class MapGetTernaryPrimitiveNullCatch {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_get_ternary_primitive_null_catch",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_null_unboxing_from_map_get_branch() {
+        assert_eq!(MapGetTernaryPrimitiveNullCatch::run(), "npe".to_string());
+    }
+}
+"#,
         }],
     );
 }
@@ -14398,6 +15280,12 @@ class CatchFinallyLocalPlans {
     assert!(
         translation.rust.contains("let s: Option<String>")
             && translation.rust.contains("let t: Option<String>")
+            && translation
+                .rust
+                .contains("t.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\")")
+            && !translation
+                .rust
+                .contains("t.as_ref().map(|value| value.java_arrays_deep_to_string())")
             && !translation.rust.contains("let mut s: Vec<String>")
             && !translation.rust.contains("let mut t: Vec<String>"),
         "{}",
@@ -17640,6 +18528,16 @@ class FutureGetUse {
     assert!(
         translation
             .rust
+            .contains("Err(JavaException::new(\"ExecutionException\"")
+            && !translation
+                .rust
+                .contains("unimplemented!(\"Future.get is not modelled\")"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
             .contains("self.future.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.get()?"),
         "{}",
         translation.rust
@@ -18534,12 +19432,32 @@ class Reader {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "foreach_lambda_throw_wraps_enclosing_method_in_result",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_unmodelled_future_get_and_wraps_cause() {
+        let fixture = FutureGetForEachCatchThrow {};
+        let mut futures = std::collections::HashMap::new();
+        futures.insert("sample".to_string(), Future::<Reader>::default());
+        let err = match fixture.run(&futures) {
+            Ok(_) => panic!("expected Future.get to raise ExecutionException"),
+            Err(err) => err,
+        };
+        assert_eq!(err.class_name(), "UserException");
+        let cause = err.cause().unwrap();
+        assert_eq!(cause.class_name(), "ExecutionException");
+        assert!(cause.is_instance(&["Exception"]));
+    }
+}
+"#,
         }],
     );
 }
@@ -18705,7 +19623,13 @@ class IOException extends Exception {
 
     assert!(!translation.rust.contains("super."), "{}", translation.rust);
     assert!(
-        translation.rust.contains("Ok::<(), JavaException>(())?;")
+        !translation.rust.contains("SummaryBase::label(&SummaryBase")
+            && translation.rust.contains(
+                "Err(JavaException::new(\"UnsupportedOperationException\", \"source-summary method SummaryBase.startup is not translated\""
+            )
+            && translation.rust.contains(
+                "Err(JavaException::new(\"UnsupportedOperationException\", \"source-summary method SummaryBase.ready is not translated\""
+            )
             && translation.rust.contains(
                 "return unimplemented!(\"source-summary method SummaryBase.label is not translated\");"
             ),
@@ -18733,6 +19657,121 @@ mod generated_tests {
         let fixture = SummarySuperCaller {};
         let _: Result<bool, JavaException> = fixture.check_ready();
         let _: String = fixture.inherited_label();
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn source_summary_super_returning_throwing_method_is_not_double_wrapped() {
+    let caller = r#"
+class SummarySuperReturnCaller extends SummaryReturnBase {
+    int run() throws Exception {
+        return super.value();
+    }
+}
+"#;
+    let summary = r#"
+class SummaryReturnBase {
+    int value() throws Exception {
+        return 7;
+    }
+}
+"#;
+    let translation = translate_source_with_context_summary_sources(
+        caller,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("pub fn run(&self) -> Result<i32, JavaException>")
+            && translation.rust.contains(
+                "return Err(JavaException::new(\"UnsupportedOperationException\", \"source-summary method SummaryReturnBase.value is not translated\""
+            )
+            && !translation.rust.contains("return Ok(Err(JavaException::new"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_summary_super_returning_throwing_method",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_summary_throwing_method_fallback_is_catchable() {
+    let caller = r#"
+class SourceSummaryThrowingFallbackCatch {
+    SummaryWorker worker;
+
+    String run() {
+        try {
+            worker.validate();
+            return "ok";
+        } catch (Exception ex) {
+            return "caught";
+        }
+    }
+}
+"#;
+    let summary = r#"
+class SummaryWorker {
+    void validate() throws Exception {
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "validate".to_string(),
+        receiver_type: Some("SummaryWorker".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some(JavaType::Void),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: vec![JavaType::Unknown("Exception".to_string())],
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation =
+        translate_source_with_context_summary_sources(caller, &[summary.to_string()], &facts);
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"UnsupportedOperationException\"")
+            && translation
+                .rust
+                .contains("source-summary method SummaryWorker.validate is not translated")
+            && !translation
+                .rust
+                .contains("unimplemented!(\"source-summary method SummaryWorker.validate"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "source_summary_throwing_method_fallback_is_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_fallible_summary_fallback() {
+        let fixture = SourceSummaryThrowingFallbackCatch { worker: Some(std::rc::Rc::new(SummaryWorker)) };
+        assert_eq!(fixture.run(), "caught".to_string());
     }
 }
 "#,
@@ -20336,14 +21375,13 @@ class ExceptionContext {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "source_super_constructor_preserves_trailing_method_result_call",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "no method named `add_message` found for enum `Option<T>`",
     );
 }
 
@@ -20389,7 +21427,9 @@ class ExceptionContext {
             && translation
                 .rust
                 .contains("let mut __java_self = NumberProblem")
-            && translation.rust.contains("argument: Some((*wrong.clone()")
+            && translation.rust.contains(
+                "argument: Some((*java_clone_erased_object_ref(&(wrong)).downcast::<Number>()"
+            )
             && !translation
                 .rust
                 .contains("super(...) requires inheritance lowering")
@@ -20398,14 +21438,13 @@ class ExceptionContext {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "source_super_constructor_matches_varargs_super_arity",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "no associated function or constant named `new` found for struct `ExceptionContext`",
     );
 }
 
@@ -20460,7 +21499,7 @@ class ExceptionContext {
             && !translation.rust.contains("context: Default::default()")
             && translation
                 .rust
-                .contains("context: ExceptionContext::new()")
+                .contains("context: std::rc::Rc::new(ExceptionContext::new())")
             && translation.rust.contains("__java_self.context")
             && !translation.rust.contains("__java_self.get_context()")
             && translation.rust.contains(".add_message")
@@ -20473,14 +21512,13 @@ class ExceptionContext {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "implicit_source_super_constructor_initializes_inherited_fields",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "no associated function or constant named `new` found for struct `ExceptionContext`",
     );
 }
 
@@ -20513,11 +21551,23 @@ class ExceptionContext {
     assert!(
         translation
             .rust
-            .contains(".add_message(pattern, args.clone()")
+            .contains("pub fn run(&mut self")
+            && translation
+                .rust
+                .contains(
+                    ".add_message(java_clone_erased_object_ref(&(pattern)), java_clone_optional_erased_object_vec_ref(&(args))",
+                )
+            && translation
+                .rust
+                .contains(
+                    ".add_message(java_clone_erased_object_ref(&(pattern)), { let mut __java_varargs",
+                )
             && translation
                 .rust
                 .contains("let mut __java_varargs = vec![Some(Box::new(max")
-            && translation.rust.contains("__java_varargs.extend(args)")
+            && translation
+                .rust
+                .contains("__java_varargs.extend(java_clone_optional_erased_object_vec_ref(&(args)))")
             && !translation.rust.contains("args.as_slice()")
             && !translation.rust.contains("vec![max, args]")
             && !translation.rust.contains("compile_error!"),
@@ -20525,14 +21575,13 @@ class ExceptionContext {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "source_object_varargs_forward_and_append_erased_arguments",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "method `clone` exists for struct `Vec<Option<Box<(dyn Any + 'static)>>>`, but its trait bounds were not satisfied",
     );
 }
 
@@ -20581,11 +21630,13 @@ class ExceptionContext {
 
     assert!(
         translation.rust.contains("__java_self.context.add_message")
-            && translation.rust.contains("max: Some((*max.clone()")
+            && translation.rust.contains("max: Some(max.clone()")
             && translation
                 .rust
-                .contains("let mut __java_varargs = vec![Some(max)]")
-            && translation.rust.contains("__java_varargs.extend(args)")
+                .contains("let mut __java_varargs = vec![Some(Box::new(max)")
+            && translation.rust.contains(
+                "__java_varargs.extend(java_clone_optional_erased_object_vec_ref(&(args)))"
+            )
             && !translation.rust.contains("__java_self.get_context()")
             && !translation.rust.contains("vec![max, args]")
             && !translation.rust.contains("compile_error!"),
@@ -20593,14 +21644,13 @@ class ExceptionContext {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "the method `clone` exists for struct `Box<(dyn Any + 'static)>`, but its trait bounds were not satisfied",
     );
 }
 
@@ -20641,9 +21691,9 @@ class ExceptionContext {
                 .rust
                 .contains("let mut __java_self = CauseStateException")
             && translation.rust.contains(
-                "__java_self.context = ExceptionContext::new(__java_self.clone().clone()"
+                "__java_self.context = std::rc::Rc::new(ExceptionContext::new(__java_self.clone().clone()"
             )
-            && translation.rust.contains(".add_message(&message")
+            && translation.rust.contains(".add_message(message")
             && !translation
                 .rust
                 .contains("super(...) requires inheritance lowering")
@@ -20652,19 +21702,18 @@ class ExceptionContext {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "external_standard_exception_super_with_trailing_body_lowers_subclass_state",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "the trait bound `ExceptionContext: Default` is not satisfied",
     );
 }
 
 #[test]
-fn exception_self_as_throwable_context_argument_is_loud_upcast_gap() {
+fn exception_self_as_throwable_context_argument_uses_exception_carrier() {
     let translation = translate_source(
         r#"
 class FacadeContextException extends IllegalArgumentException {
@@ -20683,33 +21732,34 @@ class ExceptionContext {
     );
 
     assert!(
-        translation.rust.contains("context: ExceptionContext")
-            && translation.rust.contains(
-                "ExceptionContext::new(compile_error!(\"unsupported Java class upcast: FacadeContextException to Throwable requires class hierarchy lowering\"))"
-            )
-            && !translation.rust.contains("Default::default()")
+        translation
+            .rust
+            .contains("context: std::rc::Rc<ExceptionContext>")
+            && translation
+                .rust
+                .contains("ExceptionContext::new(JavaException::new(\"FacadeContextException\"")
             && !translation
                 .rust
                 .contains("Java exception self-as-supertype facade boundary")
             && !translation.rust.contains("downcast::<Throwable>")
-            && !translation.rust.contains("invalid Java cast"),
+            && !translation.rust.contains("invalid Java cast")
+            && !translation.rust.contains("unsupported Java class upcast"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "exception_self_throwable_context_argument",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "unsupported Java class upcast: FacadeContextException to Throwable requires class hierarchy lowering",
     );
 }
 
 #[test]
-fn explicit_cast_exception_self_as_throwable_context_argument_is_loud_upcast_gap() {
+fn explicit_cast_exception_self_as_throwable_context_argument_uses_exception_carrier() {
     let translation = translate_source(
         r#"
 class ExplicitCastException extends IllegalArgumentException {
@@ -20728,24 +21778,26 @@ class ExceptionContext {
     );
 
     assert!(
-        translation.rust.contains("context: ExceptionContext")
-            && translation.rust.contains(
-                "ExceptionContext::new(compile_error!(\"unsupported Java class upcast: ExplicitCastException to Throwable requires class hierarchy lowering\"))"
-            )
+        translation
+            .rust
+            .contains("context: std::rc::Rc<ExceptionContext>")
+            && translation
+                .rust
+                .contains("ExceptionContext::new(JavaException::new(\"ExplicitCastException\"")
             && !translation.rust.contains("downcast::<Throwable>")
-            && !translation.rust.contains("invalid Java cast"),
+            && !translation.rust.contains("invalid Java cast")
+            && !translation.rust.contains("unsupported Java class upcast"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "explicit_cast_exception_self_throwable_context_argument",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "unsupported Java class upcast: ExplicitCastException to Throwable requires class hierarchy lowering",
     );
 }
 
@@ -23044,22 +24096,22 @@ class AppendableFluentChain {
 
     assert!(
         translation.rust.contains(
-            "pub fn write(out: &mut Appendable, value: String) -> Result<Appendable, JavaException>"
+            "pub fn write(out: &Appendable, value: &String) -> Result<Appendable, JavaException>"
         ) && (translation
             .rust
-            .contains("Self::write(&mut StringBuilder::new_1(16).into(), value)")
+            .contains("Self::write(&StringBuilder::new_1(16).into(), value)")
             || translation
                 .rust
                 .contains("Self::write(StringBuilder::new_1(16).into(), value)")
-            || translation.rust.contains(
-                "Self::write(&mut StringBuilder::new_capacity_result(16)?.into(), value)?"
-            )
+            || translation
+                .rust
+                .contains("Self::write(&StringBuilder::new_capacity_result(16)?.into(), value)?")
             || translation
                 .rust
                 .contains("Self::write(StringBuilder::new_capacity_result(16)?.into(), value)?"))
             && translation
                 .rust
-                .contains(".append(\"a\".to_string())?.append(value)?.append('\\n')?")
+                .contains(".append(\"a\".to_string())?.append(value.clone())?.append('\\n')?")
             && translation.rust.contains(")?.to_string()")
             && !translation
                 .rust
@@ -23905,6 +24957,111 @@ fn pattern_erased_display_uses_pattern_text() {
 }
 
 #[test]
+fn pattern_compile_invalid_regex_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.util.regex.Pattern;
+import java.util.regex.PatternSyntaxException;
+
+class PatternCompileInvalidCatch {
+    static String run() {
+        try {
+            Pattern.compile("[");
+            return "miss";
+        } catch (PatternSyntaxException ex) {
+            return "syntax";
+        } catch (IllegalArgumentException ex) {
+            return "illegal";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Pattern::compile_result")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"PatternSyntaxException\"])")
+            && !translation.rust.contains("Pattern::compile(\"[\")"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "pattern_compile_invalid_regex_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn invalid_pattern_is_catchable() {
+        assert_eq!(PatternCompileInvalidCatch::run(), "syntax".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn url_constructor_malformed_spec_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.net.MalformedURLException;
+import java.net.URL;
+
+class UrlConstructorMalformedCatch {
+    static String run(String value) {
+        try {
+            new URL(value);
+            return "miss";
+        } catch (MalformedURLException ex) {
+            return "malformed";
+        } catch (java.io.IOException ex) {
+            return "io";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("URL::new_result")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"MalformedURLException\"])")
+            && !translation.rust.contains("URL::new(value)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "url_constructor_malformed_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn malformed_url_is_catchable() {
+        assert_eq!(UrlConstructorMalformedCatch::run("missing-protocol".to_string()), "malformed".to_string());
+        assert_eq!(UrlConstructorMalformedCatch::run("http://example.com".to_string()), "miss".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn display_capable_external_enum_constant_does_not_emit_placeholder_display() {
     let mut facts = FactSet::default();
     facts.external_field_facts.push(ExternalFieldFact {
@@ -24237,23 +25394,27 @@ class AppendableHelper {
 
     assert!(
         translation.rust.contains(
-            "AppendableHelper::write(&mut { let _java_value = self.writer.as_mut().ok_or_else"
-        ) && !translation
-            .rust
-            .contains("AppendableHelper::write(self.writer.into(), value)?;")
+            "AppendableHelper::write({ let _java_value = self.writer.as_ref().ok_or_else"
+        ) && translation.rust.contains(
+            "pub fn write(out: &Appendable, value: &String) -> Result<Appendable, JavaException>"
+        ) && !translation.rust.contains("self.writer.as_mut().ok_or_else")
+            && !translation.rust.contains("&Appendable }, value)?;")
+            && !translation.rust.contains("&mut { let _java_value")
+            && !translation
+                .rust
+                .contains("AppendableHelper::write(self.writer.into(), value)?;")
             && !translation.rust.contains(".into().clone()"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "appendable_field_conversion",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "expected `Appendable`, found `&Appendable`",
     );
 }
 
@@ -24293,7 +25454,7 @@ class PrintStreamCheckErrorUse {
 }
 
 #[test]
-fn print_stream_output_stream_constructor_has_typed_support_arg() {
+fn print_stream_output_stream_constructor_uses_actual_overload_slot() {
     let translation = translate_source(
         r#"
 import java.io.OutputStream;
@@ -24311,13 +25472,14 @@ class PrintStreamOutputStreamConstructorUse {
         translation.rust.contains("pub struct OutputStream;")
             && translation
                 .rust
-                .contains("pub fn new(_arg0: JavaIoOutputStream) -> Self")
-            && translation
-                .rust
-                .contains("return PrintStream::new(out.into());")
+                .contains("pub fn new(_arg0: OutputStream) -> Self")
+            && translation.rust.contains("return PrintStream::new(out);")
             && !translation
                 .rust
-                .contains("pub fn new<T0>(_arg0: T0) -> Self"),
+                .contains("return PrintStream::new(out.into())")
+            && !translation
+                .rust
+                .contains("pub fn new(_arg0: JavaIoOutputStream) -> Self"),
         "{}",
         translation.rust
     );
@@ -24539,6 +25701,252 @@ fn file_output_stream_constructor_selects_file_and_string_overload_slots() {
 }
 
 #[test]
+fn file_input_stream_constructor_selects_file_and_string_overload_slots() {
+    let translation = translate_source(
+        r#"
+	import java.io.File;
+	import java.io.FileInputStream;
+
+	class FileInputStreamOverloadSlot {
+	    private File file = null;
+
+	    FileInputStreamOverloadSlot(File input) {
+	        this.file = input;
+	    }
+
+	    FileInputStream fromFileField() throws Exception {
+	        return new FileInputStream(file);
+	    }
+
+	    FileInputStream fromStringPath(String path) throws Exception {
+	        return new FileInputStream(path);
+	    }
+	}
+	"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Ok(FileInputStream::new(self.file.as_ref().cloned()")
+            && translation
+                .rust
+                .contains(".ok_or_else(|| JavaException::new(\"NullPointerException\"")
+            && !translation
+                .rust
+                .contains("FileInputStream::new(self.file.clone()")
+            && !translation
+                .rust
+                .contains("FileInputStream::new(self.file.expect(")
+            && (translation
+                .rust
+                .contains("return Ok(FileInputStream::new(path)")
+                || translation
+                    .rust
+                    .contains("return Ok(FileInputStream::new(&path)"))
+            && !translation
+                .rust
+                .contains("FileInputStream::new(File::new(path"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_input_stream_overload_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn file_reader_constructor_selects_file_and_string_overload_slots() {
+    let translation = translate_source(
+        r#"
+	import java.io.File;
+	import java.io.FileReader;
+
+	class FileReaderOverloadSlot {
+	    private File file = null;
+
+	    FileReaderOverloadSlot(File input) {
+	        this.file = input;
+	    }
+
+	    FileReader fromFileField() throws Exception {
+	        return new FileReader(file);
+	    }
+
+	    FileReader fromStringPath(String path) throws Exception {
+	        return new FileReader(path);
+	    }
+	}
+	"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Ok(FileReader::new(self.file.as_ref().cloned()")
+            && translation
+                .rust
+                .contains(".ok_or_else(|| JavaException::new(\"NullPointerException\"")
+            && !translation
+                .rust
+                .contains("FileReader::new(self.file.clone()")
+            && !translation
+                .rust
+                .contains("FileReader::new(self.file.expect(")
+            && (translation.rust.contains("return Ok(FileReader::new(path)")
+                || translation
+                    .rust
+                    .contains("return Ok(FileReader::new(&path)"))
+            && !translation.rust.contains("FileReader::new(File::new(path"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_reader_overload_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn file_writer_constructor_selects_file_and_string_overload_slots() {
+    let translation = translate_source(
+        r#"
+	import java.io.File;
+	import java.io.FileWriter;
+
+	class FileWriterOverloadSlot {
+	    private File file = null;
+
+	    FileWriterOverloadSlot(File input) {
+	        this.file = input;
+	    }
+
+	    FileWriter fromFileField() throws Exception {
+	        return new FileWriter(file);
+	    }
+
+	    FileWriter fromStringPath(String path) throws Exception {
+	        return new FileWriter(path);
+	    }
+	}
+	"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Ok(FileWriter::new(self.file.as_ref().cloned()")
+            && translation
+                .rust
+                .contains(".ok_or_else(|| JavaException::new(\"NullPointerException\"")
+            && !translation
+                .rust
+                .contains("FileWriter::new(self.file.clone()")
+            && !translation
+                .rust
+                .contains("FileWriter::new(self.file.expect(")
+            && (translation.rust.contains("return Ok(FileWriter::new(path)")
+                || translation
+                    .rust
+                    .contains("return Ok(FileWriter::new(&path)"))
+            && !translation.rust.contains("FileWriter::new(File::new(path"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "file_writer_overload_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn print_stream_constructor_selects_file_string_and_output_stream_slots() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.io.OutputStream;
+import java.io.PrintStream;
+
+class PrintStreamOverloadSlot {
+    private File file = null;
+
+    PrintStreamOverloadSlot(File input) {
+        this.file = input;
+    }
+
+    PrintStream fromFileField() throws Exception {
+        return new PrintStream(file);
+    }
+
+    PrintStream fromStringPath(String path) throws Exception {
+        return new PrintStream(path);
+    }
+
+    PrintStream fromOutputStream(OutputStream out) {
+        return new PrintStream(out);
+    }
+}
+"#,
+    );
+
+    let file_slot = translation
+        .rust
+        .contains("return Ok(PrintStream::new(self.file.as_ref().cloned()");
+    let file_null_check = translation
+        .rust
+        .contains(".ok_or_else(|| JavaException::new(\"NullPointerException\"");
+    let string_slot = translation
+        .rust
+        .contains("return Ok(PrintStream::new(path)")
+        || translation
+            .rust
+            .contains("return Ok(PrintStream::new(&path)");
+    let output_stream_slot = translation.rust.contains("return PrintStream::new(out);");
+    let no_optional_file_clone = !translation
+        .rust
+        .contains("PrintStream::new(self.file.clone()");
+    let no_file_from_string = !translation.rust.contains("PrintStream::new(File::new(path");
+    let no_string_as_output_stream = !translation.rust.contains("PrintStream::new(path.into())");
+    let no_output_stream_into = !translation.rust.contains("PrintStream::new(out.into())");
+    assert!(
+        file_slot
+            && file_null_check
+            && string_slot
+            && output_stream_slot
+            && no_optional_file_clone
+            && no_file_from_string
+            && no_string_as_output_stream
+            && no_output_stream_into,
+        "file_slot={file_slot}, file_null_check={file_null_check}, string_slot={string_slot}, output_stream_slot={output_stream_slot}, no_optional_file_clone={no_optional_file_clone}, no_file_from_string={no_file_from_string}, no_string_as_output_stream={no_string_as_output_stream}, no_output_stream_into={no_output_stream_into}"
+    );
+
+    cargo_check_generated_modules(
+        "print_stream_overload_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn zip_output_stream_converts_to_output_stream_slot() {
     let translation = translate_source(
         r#"
@@ -24690,6 +26098,92 @@ class SystemInAndThreadSleepUse {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn thread_sleep_interrupted_exception_is_catchable() {
+    let translation = translate_source(
+        r#"
+class ThreadSleepCatch {
+    static String run() {
+        try {
+            Thread.sleep(1);
+            return "ok";
+        } catch (InterruptedException ex) {
+            return "interrupted";
+        }
+    }
+
+    static String runNanos() {
+        try {
+            Thread.sleep(1, 2);
+            return "ok";
+        } catch (InterruptedException ex) {
+            return "interrupted";
+        }
+    }
+
+    static String negativeMillis() {
+        try {
+            Thread.sleep(-1);
+            return "bad";
+        } catch (IllegalArgumentException ex) {
+            return "illegal";
+        }
+    }
+
+    static String badNanos() {
+        try {
+            Thread.sleep(1, 1000000);
+            return "bad";
+        } catch (IllegalArgumentException ex) {
+            return "illegal";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("__java_thread_sleep_millis")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"InterruptedException\"])")
+            && translation
+                .rust
+                .contains("}?; return Ok(\"ok\".to_string());")
+            && translation.rust.contains("__java_thread_sleep_nanos")
+            && translation.rust.contains("pub fn sleep<T0>(")
+            && translation.rust.contains("pub fn sleep_2<T0, T1>(")
+            && !translation.rust.contains("pub fn sleep<T0, T1>")
+            && !translation
+                .rust
+                .contains("unwrap_or_else(|ex| panic!(\"uncaught Java exception"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "thread_sleep_interrupted_exception_catch",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn sleep_success_path_returns_ok() {
+        assert_eq!(ThreadSleepCatch::run(), "ok".to_string());
+        assert_eq!(ThreadSleepCatch::run_nanos(), "ok".to_string());
+        assert_eq!(
+            ThreadSleepCatch::negative_millis(),
+            Ok("illegal".to_string())
+        );
+        assert_eq!(ThreadSleepCatch::bad_nanos(), Ok("illegal".to_string()));
+    }
+}
+"#,
     );
 }
 
@@ -25588,6 +27082,80 @@ class TypedExternalCallDeclaredGenericLocal {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_nio_files_unmodelled_facade_throws_catchable_io_exception() {
+    let translation = translate_source(
+        r#"
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.List;
+
+class JavaNioFilesReadAllLinesCatch {
+    static String read(Path path) {
+        try {
+            List<String> lines = Files.readAllLines(path);
+            return "ok:" + lines.size();
+        } catch (IOException ex) {
+            return "io";
+        }
+    }
+
+    static String readWithSuperCatch(Path path) {
+        try {
+            List<String> lines = Files.readAllLines(path);
+            return "ok:" + lines.size();
+        } catch (Exception ex) {
+            return "exception";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaNioFileFiles::read_all_lines(path)?")
+            && translation.rust.contains("Err(ex) if ex.is_instance(&[\"IOException\"])")
+            && translation
+                .rust
+                .contains("Err(ex) if ex.is_instance(&[\"ClassNotFoundException\"")
+            && translation.rust.contains("\"Exception\"")
+            && translation
+                .rust
+                .contains("Err(JavaException::new(\"IOException\"")
+            && !translation.rust.contains(
+                "pub fn read_all_lines<T0>(_arg0: T0) -> Result<Vec<String>, JavaException> { unimplemented!"
+            ),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "java_nio_files_read_all_lines_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_unmodelled_files_read_all_lines() {
+        assert_eq!(JavaNioFilesReadAllLinesCatch::read(&Path::new("missing.txt")), "io".to_string());
+        assert_eq!(
+            JavaNioFilesReadAllLinesCatch::read_with_super_catch(&Path::new("missing.txt")),
+            Ok("exception".to_string())
+        );
+    }
+}
+"#,
         }],
     );
 }
@@ -27576,7 +29144,7 @@ mod generated_tests {
 }
 
 #[test]
-fn try_finally_conditional_return_over_break_fails_loudly_in_loop_body() {
+fn try_finally_conditional_return_over_break_runs_finally_return() {
     let translation = translate_source(
         r#"
 class FinallyReturnOverridesBreakConditional {
@@ -27602,26 +29170,344 @@ class FinallyReturnOverridesBreakConditional {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("unsupported Java statement: try/catch/finally"),
-        "{}",
-        translation.rust
-    );
-    assert!(
         !translation.rust.contains("|| -> Result<(), JavaException>"),
         "loop-abrupt try/finally should not lower into a closure-crossing break:\n{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "try_finally_conditional_return_over_break_fails_loudly_in_loop_body",
+    cargo_check_generated_modules(
+        "try_finally_conditional_return_over_break_runs_finally_return",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn runs_finally_return_over_break() {
+        assert_eq!(
+            FinallyReturnOverridesBreakConditional::run(),
+            "tftf:fin".to_string()
+        );
+    }
+}
+"#,
         }],
-        "unsupported Java statement: try/catch/finally",
+    );
+}
+
+#[test]
+fn try_finally_switch_break_falls_through_after_finally() {
+    let translation = translate_source(
+        r#"
+class FinallySwitchFallsThrough {
+    static String log = "";
+
+    static String run(int x) {
+        log = "";
+        try {
+            switch (x) {
+                case 0:
+                    log = log + "b";
+                    break;
+                default:
+                    return log + "r";
+            }
+        } finally {
+            log = log + "f";
+        }
+        return log + "a";
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java statement: try/catch/finally")
+            && translation
+                .rust
+                .contains("let __java_try_result = (|| -> Result<Option<String>, JavaException>")
+            && translation.rust.contains("return Ok(Some(format!")
+            && translation
+                .rust
+                .contains("if let Some(value) = __java_try_result"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_finally_switch_break_falls_through_after_finally",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn switch_break_runs_finally_then_falls_through() {
+        assert_eq!(FinallySwitchFallsThrough::run(0), "bfa".to_string());
+        assert_eq!(FinallySwitchFallsThrough::run(1), "r".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn nested_try_finally_return_wraps_optional_carrier_value() {
+    let translation = translate_source(
+        r#"
+class FinallyNestedTryReturn {
+    static void boom() {
+        throw new RuntimeException("boom");
+    }
+
+    static String run() {
+        StringBuilder sb = new StringBuilder();
+        try {
+            try {
+                try {
+                    sb.append("a");
+                    boom();
+                } finally {
+                    sb.append("b");
+                }
+            } finally {
+                sb.append("c");
+                return sb.toString() + ":inner";
+            }
+        } catch (RuntimeException ex) {
+            return sb.toString() + ":outer";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Result<Option<String>, JavaException>")
+            && translation.rust.contains("return Ok(Some(format!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "nested_try_finally_return_wraps_optional_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finally_return_overrides_nested_throw_before_outer_catch() {
+        assert_eq!(FinallyNestedTryReturn::run(), Ok("abc:inner".to_string()));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_finally_conditional_labeled_break_over_return_preserves_fallthrough_return() {
+    let translation = translate_source(
+        r#"
+class FinallyLabeledBreakOverridesPendingReturn {
+    static String run(boolean flag) {
+        String s = "";
+        outer:
+        for (int i = 0; i < 2; i++) {
+            for (int j = 0; j < 2; j++) {
+                try {
+                    s = s + "T";
+                    return s + "R";
+                } finally {
+                    s = s + "F";
+                    if (flag) {
+                        break outer;
+                    }
+                }
+            }
+            s = s + "I";
+        }
+        return s + "A";
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java statement: try/catch/finally")
+            && translation.rust.contains("__java_pending_return")
+            && translation.rust.contains("break 'outer;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_finally_labeled_break_over_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finalizer_break_overrides_pending_return_only_on_break_path() {
+        assert_eq!(FinallyLabeledBreakOverridesPendingReturn::run(true), "TFA".to_string());
+        assert_eq!(FinallyLabeledBreakOverridesPendingReturn::run(false), "TR".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_catch_finally_conditional_break_over_catch_return_preserves_fallthrough_return() {
+    let translation = translate_source(
+        r#"
+class MinCatchFinallyBreakReturn {
+    static String run(boolean flag) {
+        for (;;) {
+            try {
+                throw new RuntimeException();
+            } catch (RuntimeException ex) {
+                return "r";
+            } finally {
+                if (flag) {
+                    break;
+                }
+            }
+        }
+        return "b";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Ok(Some(\"r\".to_string()))")
+            && translation
+                .rust
+                .contains("if let Some(value) = __java_try_result")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_catch_finally_conditional_break_over_catch_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finalizer_break_overrides_pending_catch_return_only_on_break_path() {
+        assert_eq!(MinCatchFinallyBreakReturn::run(true), "b".to_string());
+        assert_eq!(MinCatchFinallyBreakReturn::run(false), "r".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_catch_finally_mixed_throw_return_overrides_catch_break() {
+    let translation = translate_source(
+        r#"
+class CatchFinallyMixedReturnThrowOverBreak {
+    static String out = "";
+
+    static void fail() {
+        throw new RuntimeException("body");
+    }
+
+    static String run() {
+        out = "";
+        try {
+            for (int i = 0; i < 2; i++) {
+                try {
+                    out = out + "t";
+                    fail();
+                } catch (RuntimeException ex) {
+                    out = out + "c";
+                    break;
+                } finally {
+                    out = out + "f";
+                    if (i == 0) {
+                        throw new IllegalStateException("fin");
+                    }
+                    return out + ":return";
+                }
+            }
+            return out + ":after";
+        } catch (IllegalStateException ex) {
+            return out + ":caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Self::__set_static_out(format!(\"{}c\", Self::__static_out()))")
+            && translation
+                .rust
+                .contains("return Err(JavaException::new(\"IllegalStateException\"")
+            && translation.rust.contains("return Ok(format!(\"{}:return\"")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_catch_finally_mixed_throw_return_over_break",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_finally_throw_return_overrides_catch_break() {
+        assert_eq!(
+            CatchFinallyMixedReturnThrowOverBreak::run(),
+            Ok("tcf:caught".to_string())
+        );
+    }
+}
+"#,
+        }],
     );
 }
 
@@ -27669,9 +29555,11 @@ class TryWithResourcesFinallyBreakOverridesCatchReturn {
         translation.rust
     );
     assert!(
-        translation.rust.contains("__java_twr_loop_result")
+        translation.rust.contains("Ok(Some(\"bad\".to_string()))")
+            && translation
+                .rust
+                .contains("if let Some(value) = __java_try_result")
             && translation.rust.contains("resource.close();")
-            && translation.rust.contains("\"bad\".to_string();")
             && !translation
                 .rust
                 .contains("unsupported Java statement: try/catch/finally"),
@@ -27696,6 +29584,329 @@ mod generated_tests {
     }
 }
 "#,
+    );
+}
+
+#[test]
+fn try_with_resources_finally_throw_overrides_catch_return_after_cleanup() {
+    let translation = translate_source(
+        r#"
+class TwrFinallyThrowOverCatchReturn {
+    static String out = "";
+
+    static class Resource implements AutoCloseable {
+        public void close() {
+            out = out + "r";
+        }
+    }
+
+    static void fail() {
+        throw new RuntimeException("body");
+    }
+
+    static String run() {
+        out = "";
+        try {
+            for (int i = 0; i < 2; i++) {
+                try (Resource resource = new Resource()) {
+                    out = out + "t";
+                    fail();
+                } catch (RuntimeException ex) {
+                    out = out + "c";
+                    return "bad";
+                } finally {
+                    out = out + "f";
+                    if (i == 0) {
+                        throw new IllegalStateException("fin");
+                    }
+                }
+            }
+            return out + ":after";
+        } catch (IllegalStateException ex) {
+            return out + ":caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Ok(Some(\"bad\".to_string()))")
+            && translation
+                .rust
+                .contains("if let Some(value) = __java_try_result?")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_with_resources_finally_throw_over_catch_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finally_throw_overrides_catch_return_after_cleanup() {
+        assert_eq!(
+            TwrFinallyThrowOverCatchReturn::run(),
+            Ok("trcf:caught".to_string())
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_with_resources_finally_return_overrides_body_break_after_cleanup() {
+    let translation = translate_source(
+        r#"
+class MinTwrFinallyReturnOverBodyBreak {
+    static class R implements AutoCloseable {
+        public void close() {
+        }
+    }
+
+    static String run(boolean flag) {
+        for (int i = 0; i < 1; i++) {
+            try (R r = new R()) {
+                break;
+            } finally {
+                if (flag) {
+                    return "R";
+                }
+            }
+        }
+        return "A";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r.close();")
+            && translation.rust.contains("if flag")
+            && translation.rust.contains("return \"R\".to_string();")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_with_resources_finally_return_over_body_break",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finally_return_overrides_body_break_after_cleanup() {
+        assert_eq!(MinTwrFinallyReturnOverBodyBreak::run(true), "R".to_string());
+        assert_eq!(MinTwrFinallyReturnOverBodyBreak::run(false), "A".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_with_resources_finally_break_overrides_catch_return_after_cleanup_when_conditional() {
+    let translation = translate_source(
+        r#"
+class MinTwrFinallyBreakOverCatchReturn {
+    static class R implements AutoCloseable {
+        public void close() {
+        }
+    }
+
+    static String run(boolean flag) {
+        for (int i = 0; i < 1; i++) {
+            try (R r = new R()) {
+                throw new RuntimeException("x");
+            } catch (RuntimeException ex) {
+                return "R";
+            } finally {
+                if (flag) {
+                    break;
+                }
+            }
+        }
+        return "A";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r.close();")
+            && translation.rust.contains("Ok(Some(\"R\".to_string()))")
+            && translation
+                .rust
+                .contains("if let Some(value) = __java_try_result")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_with_resources_finally_break_over_catch_return_conditional",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finally_break_overrides_catch_return_after_cleanup_when_conditional() {
+        assert_eq!(MinTwrFinallyBreakOverCatchReturn::run(true), "A".to_string());
+        assert_eq!(MinTwrFinallyBreakOverCatchReturn::run(false), "R".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_with_resources_finally_throw_overrides_body_continue_after_cleanup() {
+    let translation = translate_source(
+        r#"
+class MinTwrFinallyThrowOverBodyContinue {
+    static class R implements AutoCloseable {
+        public void close() {
+        }
+    }
+
+    static String run(boolean flag) {
+        try {
+            for (int i = 0; i < 1; i++) {
+                try (R r = new R()) {
+                    continue;
+                } finally {
+                    if (flag) {
+                        throw new RuntimeException("E");
+                    }
+                }
+            }
+            return "A";
+        } catch (RuntimeException ex) {
+            return ex.getMessage();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r.close();")
+            && translation
+                .rust
+                .contains("return Err(JavaException::new(\"RuntimeException\"")
+            && translation.rust.contains("continue;")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_with_resources_finally_throw_over_body_continue",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finally_throw_overrides_body_continue_after_cleanup() {
+        assert_eq!(MinTwrFinallyThrowOverBodyContinue::run(true), Some("E".to_string()));
+        assert_eq!(MinTwrFinallyThrowOverBodyContinue::run(false), Some("A".to_string()));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_with_resources_finally_labeled_continue_overrides_catch_return_after_cleanup() {
+    let translation = translate_source(
+        r#"
+class MinTwrFinallyLabeledContinueOverCatchReturn {
+    static class R implements AutoCloseable {
+        public void close() {
+        }
+    }
+
+    static String run(boolean flag) {
+        outer:
+        for (int i = 0; i < 2; i++) {
+            try (R r = new R()) {
+                throw new RuntimeException("x");
+            } catch (RuntimeException ex) {
+                return "R";
+            } finally {
+                if (flag && i == 0) {
+                    continue outer;
+                }
+            }
+        }
+        return "A";
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("r.close();")
+            && translation.rust.contains("Ok(Some(\"R\".to_string()))")
+            && translation.rust.contains("continue 'outer;")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_with_resources_finally_labeled_continue_over_catch_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn finally_labeled_continue_overrides_catch_return_after_cleanup() {
+        assert_eq!(MinTwrFinallyLabeledContinueOverCatchReturn::run(true), "R".to_string());
+        assert_eq!(MinTwrFinallyLabeledContinueOverCatchReturn::run(false), "R".to_string());
+    }
+}
+"#,
+        }],
     );
 }
 
@@ -27743,7 +29954,10 @@ class TryWithResourcesFinallyContinueOverridesCatchReturn {
         translation.rust
     );
     assert!(
-        translation.rust.contains("__java_twr_loop_result")
+        translation.rust.contains("Ok(Some(\"bad\".to_string()))")
+            && translation
+                .rust
+                .contains("if let Some(value) = __java_try_result")
             && translation.rust.contains("resource.close();")
             && translation.rust.contains("continue;")
             && !translation
@@ -29349,7 +31563,7 @@ class ReassignedStringEnhancedFor {
 }
 
 #[test]
-fn enhanced_for_mutating_iterated_collection_fails_loudly() {
+fn enhanced_for_mutating_iterated_collection_throws_concurrent_modification() {
     let translation = translate_source(
         r#"
 import java.util.ArrayList;
@@ -29373,21 +31587,94 @@ class EnhancedForMutatesIteratedCollection {
     );
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java enhanced-for over a collection mutated in the loop body\")"
-        ) && !translation.rust.contains("for s in xs.iter()"),
+        !translation.rust.contains("for s in xs.iter()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("JavaException::new(\"ConcurrentModificationException\"")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "enhanced_for_mutating_iterated_collection_fails_loudly",
+    cargo_test_generated_modules(
+        "enhanced_for_mutating_iterated_collection_throws_concurrent_modification",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_concurrent_modification() {
+        assert_eq!(EnhancedForMutatesIteratedCollection::run(), "cme".to_string());
+    }
+}
+"#,
         }],
-        "unsupported Java enhanced-for over a collection mutated in the loop body",
+    );
+}
+
+#[test]
+fn enhanced_for_mutating_iterated_collection_with_continue_throws_concurrent_modification() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class EnhancedForMutatesIteratedCollectionWithContinue {
+    static String run() {
+        List<String> xs = new ArrayList<String>();
+        xs.add("a");
+        try {
+            for (String s : xs) {
+                xs.add(s);
+                continue;
+            }
+            return "no";
+        } catch (java.util.ConcurrentModificationException e) {
+            return "cme";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaException::new(\"ConcurrentModificationException\"")
+            && translation.rust.contains("continue;")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "enhanced_for_mutating_iterated_collection_with_continue",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_concurrent_modification_before_continue_repeats() {
+        assert_eq!(
+            EnhancedForMutatesIteratedCollectionWithContinue::run(),
+            "cme".to_string()
+        );
+    }
+}
+"#,
+        }],
     );
 }
 
@@ -32399,6 +34686,237 @@ mod generated_tests {
 }
 
 #[test]
+fn string_buffer_mutating_helpers_in_try_are_catchable() {
+    let translation = translate_source(
+        r#"
+class StringBufferHelperCatch {
+    static String run(int mode) {
+        StringBuffer buffer = new StringBuffer("abc");
+        try {
+            if (mode == 0) {
+                return "" + buffer.charAt(9);
+            }
+            if (mode == 1) {
+                buffer.setLength(-1);
+                return "bad";
+            }
+            if (mode == 2) {
+                buffer.delete(3, 1);
+                return "bad";
+            }
+            if (mode == 3) {
+                buffer.setCharAt(9, 'x');
+                return "bad";
+            }
+            if (mode == 4) {
+                buffer.setCharAt(1, 'Z');
+            }
+            if (mode == 5) {
+                buffer.deleteCharAt(9);
+                return "bad";
+            }
+            if (mode == 6) {
+                buffer.replace(3, 1, "x");
+                return "bad";
+            }
+            if (mode == 7) {
+                buffer.deleteCharAt(1);
+            }
+            if (mode == 8) {
+                buffer.replace(1, 3, "ZZ");
+            }
+            return buffer.toString();
+        } catch (StringIndexOutOfBoundsException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("buffer.char_at_result(9 as usize)?")
+            && translation.rust.contains("buffer.set_length_result(-1)?;")
+            && translation.rust.contains("buffer.delete_result(3, 1)?;")
+            && translation
+                .rust
+                .contains("buffer.set_char_at_result(9, 'x')?;")
+            && translation
+                .rust
+                .contains("buffer.set_char_at_result(1, 'Z')?;")
+            && translation
+                .rust
+                .contains("buffer.delete_char_at_result(9)?;")
+            && translation
+                .rust
+                .contains("buffer.replace_result(3, 1, \"x\".to_string())?;")
+            && translation
+                .rust
+                .contains("buffer.delete_char_at_result(1)?;")
+            && translation
+                .rust
+                .contains("buffer.replace_result(1, 3, \"ZZ\".to_string())?;")
+            && !translation.rust.contains("buffer.char_at(9")
+            && !translation.rust.contains("buffer.set_length(-1")
+            && !translation.rust.contains("buffer.delete(3, 1")
+            && !translation.rust.contains("buffer.set_char_at(9")
+            && !translation.rust.contains("buffer.set_char_at(1")
+            && !translation.rust.contains("buffer.delete_char_at(9")
+            && !translation.rust.contains("buffer.delete_char_at(1")
+            && !translation.rust.contains("buffer.replace(3, 1")
+            && !translation.rust.contains("buffer.replace(1, 3"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "string_buffer_helper_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn helper_exceptions_are_catchable() {
+        assert_eq!(StringBufferHelperCatch::run(0), "caught");
+        assert_eq!(StringBufferHelperCatch::run(1), "caught");
+        assert_eq!(StringBufferHelperCatch::run(2), "caught");
+        assert_eq!(StringBufferHelperCatch::run(3), "caught");
+        assert_eq!(StringBufferHelperCatch::run(4), "aZc");
+        assert_eq!(StringBufferHelperCatch::run(5), "caught");
+        assert_eq!(StringBufferHelperCatch::run(6), "caught");
+        assert_eq!(StringBufferHelperCatch::run(7), "ac");
+        assert_eq!(StringBufferHelperCatch::run(8), "aZZ");
+        assert_eq!(StringBufferHelperCatch::run(9), "abc");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn string_builder_insert_and_substring_helpers_in_try_are_catchable() {
+    let translation = translate_source(
+        r#"
+class StringBuilderHelperCatch {
+    static String run(int mode) {
+        StringBuilder builder = new StringBuilder("abc");
+        try {
+            if (mode == 0) {
+                builder.insert(8, "x");
+                return "bad";
+            }
+            if (mode == 1) {
+                return builder.substring(8);
+            }
+            if (mode == 2) {
+                return builder.substring(2, 1);
+            }
+            if (mode == 3) {
+                builder.setCharAt(9, 'x');
+                return "bad";
+            }
+            if (mode == 4) {
+                builder.setCharAt(1, 'Z');
+            }
+            if (mode == 5) {
+                builder.deleteCharAt(9);
+                return "bad";
+            }
+            if (mode == 6) {
+                builder.replace(3, 1, "x");
+                return "bad";
+            }
+            if (mode == 7) {
+                builder.deleteCharAt(1);
+            }
+            if (mode == 8) {
+                builder.replace(1, 3, "ZZ");
+            }
+            return builder.toString();
+        } catch (StringIndexOutOfBoundsException ex) {
+            return "caught";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("builder.insert_result(8, \"x\".to_string())?;")
+            && translation.rust.contains("builder.substring_1_result(8)?")
+            && translation
+                .rust
+                .contains("builder.substring_2_result(2, 1)?")
+            && translation
+                .rust
+                .contains("builder.set_char_at_result(9, 'x')?;")
+            && translation
+                .rust
+                .contains("builder.set_char_at_result(1, 'Z')?;")
+            && translation
+                .rust
+                .contains("builder.delete_char_at_result(9)?;")
+            && translation
+                .rust
+                .contains("builder.replace_result(3, 1, \"x\".to_string())?;")
+            && translation
+                .rust
+                .contains("builder.delete_char_at_result(1)?;")
+            && translation
+                .rust
+                .contains("builder.replace_result(1, 3, \"ZZ\".to_string())?;")
+            && !translation.rust.contains("builder.insert(8")
+            && !translation.rust.contains("builder.substring_1(8")
+            && !translation.rust.contains("builder.substring_2(2, 1")
+            && !translation.rust.contains("builder.set_char_at(9")
+            && !translation.rust.contains("builder.set_char_at(1")
+            && !translation.rust.contains("builder.delete_char_at(9")
+            && !translation.rust.contains("builder.delete_char_at(1")
+            && !translation.rust.contains("builder.replace(3, 1")
+            && !translation.rust.contains("builder.replace(1, 3"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "string_builder_helper_catch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn helper_exceptions_are_catchable() {
+        assert_eq!(StringBuilderHelperCatch::run(0), "caught");
+        assert_eq!(StringBuilderHelperCatch::run(1), "caught");
+        assert_eq!(StringBuilderHelperCatch::run(2), "caught");
+        assert_eq!(StringBuilderHelperCatch::run(3), "caught");
+        assert_eq!(StringBuilderHelperCatch::run(4), "aZc");
+        assert_eq!(StringBuilderHelperCatch::run(5), "caught");
+        assert_eq!(StringBuilderHelperCatch::run(6), "caught");
+        assert_eq!(StringBuilderHelperCatch::run(7), "ac");
+        assert_eq!(StringBuilderHelperCatch::run(8), "aZZ");
+        assert_eq!(StringBuilderHelperCatch::run(9), "abc");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn array2_creation_negative_dimension_in_try_lowers_to_java_exception_result() {
     let translation = translate_source(
         r#"
@@ -33630,14 +36148,13 @@ class StreamFilterNegatedJavaEqualsProjection {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "stream_filter_negated_java_equals_projection",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "can't compare `&&StreamFilterNegatedJavaEqualsProjection_Version`",
     );
 }
 
@@ -34576,11 +37093,13 @@ class Zip {
     assert!(
         translation
             .rust
-            .contains("let xhtml: Option<&Writer> = report.xhtml.as_ref();")
+            .contains("let xhtml: Option<&Writer> = report.xhtml.as_ref().map(|value| &**value);")
+            && translation.rust.contains(
+                "let data: Option<&Buffer> = report.data.as_ref().map(|value| &**value);"
+            )
             && translation
                 .rust
-                .contains("let data: Option<&Buffer> = report.data.as_ref();")
-            && translation.rust.contains("let zip: &Zip = report.zip;")
+                .contains("let zip: std::rc::Rc<Zip> = report.zip.clone()")
             && !translation.rust.contains("Some(report.xhtml_stream())")
             && !translation.rust.contains("Some(report.data_document())")
             && !translation
@@ -34590,14 +37109,13 @@ class Zip {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "source_borrowed_getter_initializers",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "expected `&Zip`, found `Rc<Zip>`",
     );
 }
 
@@ -34632,7 +37150,11 @@ class ErasedObjectArrayCloneAndFormat {
     assert!(
         translation
             .rust
-            .contains(".to_vec()/* TODO(translation): validate added clone */")
+            .contains("java_clone_optional_erased_object_vec_ref")
+            && !translation
+                .rust
+                .contains(".to_vec()/* TODO(translation): validate added clone */")
+            && !translation.rust.contains(".cloned().ok_or_else")
             && translation.rust.contains(
                 "pub fn format(&self, fmt: &MessageFormat) -> Result<String, JavaException>"
             )
@@ -34642,14 +37164,13 @@ class ErasedObjectArrayCloneAndFormat {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "erased_object_array_clone_and_format",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "the trait bound `Box<dyn Any>: Clone` is not satisfied",
     );
 }
 
@@ -35162,6 +37683,122 @@ fn exception_cause_chaining_uses_java_exception_cause() {
 }
 
 #[test]
+fn finally_throw_overrides_loop_break_and_is_catchable() {
+    let translation = translate_source(
+        r#"
+class FinallyThrowOverridesLoopBreak {
+    static String run() {
+        try {
+            for (int i = 0; i < 1; i++) {
+                try {
+                    break;
+                } finally {
+                    throw new RuntimeException("finally");
+                }
+            }
+            return "after";
+        } catch (RuntimeException ex) {
+            return ex.getMessage();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Err(JavaException::new(\"RuntimeException\"")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "finally_throw_overrides_loop_break",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_finally_throw_instead_of_breaking() {
+        assert_eq!(FinallyThrowOverridesLoopBreak::run(), Some("finally".to_string()));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn finally_mixed_return_throw_overrides_loop_break() {
+    let translation = translate_source(
+        r#"
+class FinallyMixedReturnThrowOverBreak {
+    static String run(int mode) {
+        try {
+            for (int i = 0; i < 1; i++) {
+                try {
+                    break;
+                } finally {
+                    if (mode == 0) {
+                        throw new RuntimeException("boom");
+                    }
+                    if (mode == 1) {
+                        return "ret";
+                    }
+                }
+            }
+            return "after";
+        } catch (RuntimeException ex) {
+            return "caught:" + ex.getMessage();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Err(JavaException::new(\"RuntimeException\"")
+            && translation.rust.contains("return Ok(\"ret\".to_string());")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "finally_mixed_return_throw_over_break",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn mixed_finally_abrupt_completion_overrides_break() {
+        assert_eq!(FinallyMixedReturnThrowOverBreak::run(0), "caught:boom".to_string());
+        assert_eq!(FinallyMixedReturnThrowOverBreak::run(1), "ret".to_string());
+        assert_eq!(FinallyMixedReturnThrowOverBreak::run(2), "after".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn exception_constructor_message_argument_is_stringified() {
     let translation = translate_source(
         r#"
@@ -35250,6 +37887,54 @@ fn erased_object_array_display_uses_java_identity_display() {
 }
 
 #[test]
+fn catch_throwable_covers_runtime_exception_via_generated_hierarchy() {
+    let translation = translate_source(
+        r#"
+class CatchThrowableRuntimeException {
+    static String run() {
+        try {
+            throw new RuntimeException("bad");
+        } catch (Throwable ex) {
+            return "t:" + ex.getMessage();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(ex) if ex.is_instance(&[\"AssertionError\"")
+            && translation.rust.contains("\"Throwable\"")
+            && translation
+                .rust
+                .contains("JavaException::new(\"RuntimeException\""),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "catch_throwable_runtime_exception",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn throwable_catches_runtime_exception() {
+        assert_eq!(CatchThrowableRuntimeException::run(), Ok("t:bad".to_string()));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn caught_checked_exception_rethrown_as_known_unchecked_propagates_result() {
     let translation = translate_source(
         r#"
@@ -35275,13 +37960,13 @@ class CaughtCheckedRethrownAsKnownUnchecked {
     assert!(
         translation
             .rust
-            .contains("pub fn encode(value: String) -> Result<String, JavaException>")
+            .contains("pub fn encode(value: &String) -> Result<String, JavaException>")
             && translation
                 .rust
-                .contains("pub fn write(out: &mut Appendable, value: String) -> Result<Appendable, JavaException>")
+                .contains("pub fn write(out: &Appendable, value: &String) -> Result<Appendable, JavaException>")
             && translation
                 .rust
-                .contains("Self::write(&mut StringBuilder::new_capacity_result(16)?.into(), value)?")
+                .contains("Self::write(&StringBuilder::new_capacity_result(16)?.into(), value)?")
             && translation
                 .rust
                 .contains("return Err(JavaException::new(\"SAMException\""),
@@ -35580,6 +38265,72 @@ fn external_throwing_call_in_try_uses_external_effect_facts() {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn unmodelled_throwing_external_facade_returns_catchable_exception() {
+    let mut facts = FactSet::default();
+    facts.external_api_effect_facts.push(ExternalApiEffectFact {
+        method_name: "validate".to_string(),
+        receiver_type: Some("Validator".to_string()),
+        arg_count: Some(0),
+        parameter_patterns: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::Unknown,
+        return_type: Some(JavaType::Void),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: vec![JavaType::Unknown("ValidationProblem".to_string())],
+        provenance: FactProvenance::UserOverride,
+    });
+    let translation = translate_source_with_facts(
+        r#"
+class ExternalThrowingFacadeCatch {
+    static String run(Validator validator) {
+        try {
+            validator.validate();
+            return "ok";
+        } catch (ValidationProblem ex) {
+            return "caught";
+        }
+    }
+}
+
+class ValidationProblem extends Exception {
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Err(JavaException::new(\"ValidationProblem\"")
+            && translation.rust.contains("validator.validate()?;")
+            && !translation
+                .rust
+                .contains("Validator.validate is not modelled\") }"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "unmodelled_throwing_external_facade_returns_catchable_exception",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_fact_backed_unmodelled_facade_exception() {
+        assert_eq!(ExternalThrowingFacadeCatch::run(Validator), Ok("caught".to_string()));
+    }
+}
+"#,
         }],
     );
 }

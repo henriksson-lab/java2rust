@@ -356,6 +356,13 @@ impl RepresentationPlan {
             .clone()
     }
 
+    pub fn storage_placement_for(
+        &self,
+        type_name: &str,
+    ) -> crate::storage_strategy::StoragePlacement {
+        self.storage.placement(type_name)
+    }
+
     pub fn representation_lookup_policy(&self, java_ty: &JavaType) -> RepresentationLookupPolicy {
         let planned_representation = match java_ty {
             JavaType::Named { name, .. } => self

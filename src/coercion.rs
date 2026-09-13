@@ -779,8 +779,22 @@ pub fn apply_lowered_expr_to_slot_with_facts(
 }
 
 pub fn apply_coercions(mut expr: RustExpr, coercions: &[Coercion]) -> RustExpr {
-    for coercion in coercions {
+    let mut index = 0;
+    while index < coercions.len() {
+        let coercion = &coercions[index];
+        if let Coercion::BorrowConcreteFacade { target_type } = coercion
+            && matches!(coercions.get(index + 1), Some(Coercion::BorrowMut))
+            && !is_structural_borrow_facade_target(target_type)
+        {
+            expr = RustExpr::shaped(
+                RustExprShape::MutBorrowed,
+                mutable_borrow_expr(concrete_facade_value_block_expr(expr, target_type)),
+            );
+            index += 2;
+            continue;
+        }
         expr = apply_one(expr, coercion);
+        index += 1;
     }
     expr
 }
@@ -865,6 +879,24 @@ fn optional_erased_object_array_clone_projection(
             actual,
             expr: Box::new(optional_erased_object_array_clone_projection(*expr, target)),
         },
+        RustExpr::PostfixComment { expr, comment } => {
+            let projected = optional_erased_object_array_clone_projection(*expr, target);
+            if projected.recorded_shape() == Some(RustExprShape::OwnedRecovery) {
+                projected
+            } else {
+                RustExpr::PostfixComment {
+                    expr: Box::new(projected),
+                    comment,
+                }
+            }
+        }
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "to_vec" && args.is_empty() => {
+            clone_optional_erased_object_vec_ref_once(*receiver)
+        }
         RustExpr::MethodCall {
             receiver,
             method,
@@ -3039,6 +3071,10 @@ pub(crate) fn clone_erased_object_ref_once(expr: RustExpr) -> RustExpr {
     clone_erased_object_helper_once(expr, "java_clone_erased_object_ref")
 }
 
+pub(crate) fn clone_optional_erased_object_vec_ref_once(expr: RustExpr) -> RustExpr {
+    clone_erased_object_helper_once(expr, "java_clone_optional_erased_object_vec_ref")
+}
+
 fn clone_erased_object_helper_once(expr: RustExpr, helper: &str) -> RustExpr {
     if rust_expr_is_erased_object_clone_helper_call(&expr) {
         return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
@@ -3392,6 +3428,9 @@ fn java_float_parse_null_argument_as_null_pointer(
 }
 
 pub(crate) fn java_integral_parse_null_argument_as_number_format(arg: RustExpr) -> RustExpr {
+    if integral_parse_arg_is_optional_string_carrier(&arg) {
+        return nullable_string_parse_display_projection(arg);
+    }
     match arg {
         RustExpr::MethodCall {
             receiver,
@@ -3399,6 +3438,9 @@ pub(crate) fn java_integral_parse_null_argument_as_number_format(arg: RustExpr) 
             args,
         } if method == "as_str" && args.is_empty() => {
             let receiver = *receiver;
+            if expr_is_fallible_cloned_sequence_get_result(&receiver) {
+                return nullable_string_parse_display_projection(receiver);
+            }
             let rewritten = java_integral_parse_null_argument_as_number_format(receiver.clone());
             if rewritten == receiver {
                 receiver_method_call_projection_exact(rewritten, "as_str", Vec::new())
@@ -3411,6 +3453,13 @@ pub(crate) fn java_integral_parse_null_argument_as_number_format(arg: RustExpr) 
             method,
             args,
         } if method == "as_ref" && args.is_empty() => {
+            if expr_is_fallible_cloned_sequence_get_result(receiver.as_ref()) {
+                return RustExpr::MethodCall {
+                    receiver,
+                    method,
+                    args,
+                };
+            }
             nullable_string_parse_display_projection(RustExpr::MethodCall {
                 receiver,
                 method,
@@ -3446,6 +3495,44 @@ pub(crate) fn java_integral_parse_null_argument_as_number_format(arg: RustExpr) 
         }
         other => other,
     }
+}
+
+fn integral_parse_arg_is_optional_string_carrier(arg: &RustExpr) -> bool {
+    arg.recorded_slot_shape()
+        .is_some_and(|shape| shape.optional_element_type() == Some(JavaType::String))
+}
+
+fn expr_is_fallible_cloned_sequence_get_result(expr: &RustExpr) -> bool {
+    let RustExpr::Try(inner) = expr.unshaped() else {
+        return false;
+    };
+    let RustExpr::Block {
+        tail: Some(tail), ..
+    } = inner.unshaped()
+    else {
+        return false;
+    };
+    let RustExpr::If { else_expr, .. } = tail.unshaped() else {
+        return false;
+    };
+    let RustExpr::MethodCall {
+        receiver,
+        method,
+        args,
+    } = else_expr.unshaped()
+    else {
+        return false;
+    };
+    method == "ok_or_else"
+        && args.len() == 1
+        && matches!(
+            receiver.unshaped(),
+            RustExpr::MethodCall {
+                method,
+                args,
+                ..
+            } if method == "cloned" && args.is_empty()
+        )
 }
 
 fn nullable_string_parse_display_projection(expr: RustExpr) -> RustExpr {
@@ -3595,10 +3682,11 @@ fn primitive_integral_parse_radix_call(
     radix: RustExpr,
     rust_ty: &str,
 ) -> RustExpr {
+    let receiver = string_helper_receiver_projection(parenthesize_raw_method_receiver(receiver));
     RustExpr::Call {
         function: Box::new(RustExpr::path([rust_ty, "from_str_radix"])),
         args: vec![
-            parenthesize_raw_method_receiver(receiver),
+            receiver,
             RustExpr::Cast {
                 expr: Box::new(parenthesize_raw_method_receiver(radix)),
                 ty: "u32".to_string(),
@@ -4284,6 +4372,16 @@ pub(crate) fn string_get_bytes_projection(receiver: RustExpr) -> RustExpr {
             )],
         },
         "Vec<i8>",
+    )
+}
+
+pub(crate) fn string_get_bytes_result_projection(
+    receiver: RustExpr,
+    charset: RustExpr,
+) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["java_string_get_bytes_result"]),
+        vec![string_helper_receiver_projection(receiver), charset],
     )
 }
 
@@ -5229,6 +5327,33 @@ pub(crate) fn java_iterator_from_collection_projection(receiver: RustExpr) -> Ru
     function_call_projection(
         RustExpr::path(["JavaIterator", "new"]),
         vec![sequence_iter_cloned_projection(receiver)],
+    )
+}
+
+pub(crate) fn java_list_iterator_from_collection_projection(receiver: RustExpr) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["JavaListIterator", "new"]),
+        vec![sequence_iter_cloned_projection(receiver)],
+    )
+}
+
+pub(crate) fn java_list_iterator_from_collection_at_projection(
+    receiver: RustExpr,
+    index: RustExpr,
+) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["JavaListIterator", "new_at"]),
+        vec![sequence_iter_cloned_projection(receiver), index],
+    )
+}
+
+pub(crate) fn java_list_iterator_from_collection_at_result_projection(
+    receiver: RustExpr,
+    index: RustExpr,
+) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["JavaListIterator", "new_at_result"]),
+        vec![sequence_iter_cloned_projection(receiver), index],
     )
 }
 
@@ -10106,8 +10231,7 @@ fn apply_rust_borrowed_facade_return(
     policy: &RustBorrowedFacadeReturnPolicy,
 ) -> RustExpr {
     if borrowed_facade_return_targets_erased_object(policy.target()) {
-        let recovered = apply_borrowed_facade_recovery(expr, policy.recovery());
-        let erased = erased_object_box_projection(recovered);
+        let erased = apply_erased_object_borrowed_facade_recovery(expr, policy.recovery());
         if policy.target().optional_element_type().is_some() {
             return option_some_projection(erased);
         }
@@ -10199,8 +10323,21 @@ fn borrowed_facade_recovery_value_closure_expr(
 }
 
 fn boxed_erased_any_value_closure_expr(recovery: RustBorrowedFacadeReturnRecovery) -> RustExpr {
-    let recovered = apply_borrowed_facade_recovery(RustExpr::Var("value".to_string()), recovery);
-    single_param_closure_expr("value", erased_object_box_projection(recovered))
+    let recovered =
+        apply_erased_object_borrowed_facade_recovery(RustExpr::Var("value".to_string()), recovery);
+    single_param_closure_expr("value", recovered)
+}
+
+fn apply_erased_object_borrowed_facade_recovery(
+    expr: RustExpr,
+    recovery: RustBorrowedFacadeReturnRecovery,
+) -> RustExpr {
+    match recovery {
+        RustBorrowedFacadeReturnRecovery::ToPathBuf => {
+            erased_object_box_projection(apply_borrowed_facade_recovery(expr, recovery))
+        }
+        RustBorrowedFacadeReturnRecovery::Clone => clone_erased_object_ref_once(expr),
+    }
 }
 
 fn borrowed_facade_return_targets_erased_object(target: &RustSlotShape) -> bool {
@@ -10296,6 +10433,7 @@ pub(crate) fn ensure_borrow_projection(
     }
     match use_case {
         BorrowProjectionUse::MutableSliceView => {
+            let expr = concrete_facade_borrow_block_to_value_expr(expr);
             RustExpr::shaped(RustExprShape::MutBorrowed, mutable_borrow_expr(expr))
         }
         BorrowProjectionUse::Argument | BorrowProjectionUse::MethodReceiver => {
@@ -12151,6 +12289,51 @@ fn borrow_concrete_facade_block_expr(expr: RustExpr, target_type: &str) -> RustE
             op: "&".to_string(),
             expr: Box::new(external_facade_rust_path_projection(target_type)),
         })),
+    }
+}
+
+fn concrete_facade_value_block_expr(expr: RustExpr, target_type: &str) -> RustExpr {
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: "_java_value".to_string(),
+            ty: None,
+            value: Some(expr),
+        }],
+        tail: Some(Box::new(external_facade_rust_path_projection(target_type))),
+    }
+}
+
+fn concrete_facade_borrow_block_to_value_expr(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Shaped {
+            shape: RustExprShape::Borrowed,
+            expr,
+            ..
+        } => concrete_facade_borrow_block_to_value_expr(*expr),
+        RustExpr::Block {
+            stmts,
+            tail: Some(tail),
+        } if matches!(
+            stmts.as_slice(),
+            [RustStmt::Let { name, .. }] if name == "_java_value"
+        ) =>
+        {
+            match *tail {
+                RustExpr::Unary {
+                    op,
+                    expr: tail_expr,
+                } if op == "&" => RustExpr::Block {
+                    stmts,
+                    tail: Some(tail_expr),
+                },
+                other_tail => RustExpr::Block {
+                    stmts,
+                    tail: Some(Box::new(other_tail)),
+                },
+            }
+        }
+        other => other,
     }
 }
 
@@ -16008,6 +16191,21 @@ mod tests {
             ),
             concrete_facade
         );
+
+        let mutable_concrete_facade = apply_coercions(
+            RustExpr::Var("source".to_string()),
+            &[
+                Coercion::BorrowConcreteFacade {
+                    target_type: "Appendable".to_string(),
+                },
+                Coercion::BorrowMut,
+            ],
+        );
+        assert_eq!(
+            emit::emit_expr(&mutable_concrete_facade),
+            "&mut { let _java_value = source; Appendable }"
+        );
+        assert!(!emit::emit_expr(&mutable_concrete_facade).contains("&Appendable"));
 
         let map_entry = apply_one(
             RustExpr::Tuple(vec![
@@ -20884,7 +21082,7 @@ mod tests {
                 RustExpr::Var("value".to_string()),
                 &cloned_erased_facade_policy,
             )),
-            "Box::new(value.clone()) as Box<dyn std::any::Any>"
+            "java_clone_erased_object_ref(&(value))"
         );
         let concrete_target = RustSlotShape::conservative(JavaType::Named {
             name: "VCFHeaderLine".to_string(),
@@ -20957,7 +21155,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&optional_cloned_erased_facade_return),
-            "maybe_object.map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>).expect(\"Java null receiver\")"
+            "maybe_object.map(|value| java_clone_erased_object_ref(&(value))).expect(\"Java null receiver\")"
         );
         assert!(matches!(
             optional_source_borrowed_facade_return.into_unshaped(),

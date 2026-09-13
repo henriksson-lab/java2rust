@@ -163,15 +163,20 @@ __SOURCE_EXCEPTION_PARENT_ARMS__        _ => match class_name.rsplit('.').next()
             "ArithmeticException" => Some("RuntimeException"),
             "ClassCastException" => Some("RuntimeException"),
             "ConcurrentModificationException" => Some("RuntimeException"),
+            "ExecutionException" => Some("Exception"),
+            "Exception" => Some("Throwable"),
             "IllegalArgumentException" => Some("RuntimeException"),
             "IllegalMonitorStateException" => Some("RuntimeException"),
             "IllegalStateException" => Some("RuntimeException"),
             "IndexOutOfBoundsException" => Some("RuntimeException"),
             "InputMismatchException" => Some("NoSuchElementException"),
+            "InterruptedException" => Some("Exception"),
+            "IOException" => Some("Exception"),
             "NegativeArraySizeException" => Some("RuntimeException"),
             "NoSuchElementException" => Some("RuntimeException"),
             "NullPointerException" => Some("RuntimeException"),
             "NumberFormatException" => Some("IllegalArgumentException"),
+            "PatternSyntaxException" => Some("IllegalArgumentException"),
             "StringIndexOutOfBoundsException" => Some("IndexOutOfBoundsException"),
             "UncheckedIOException" => Some("RuntimeException"),
             "UnsupportedOperationException" => Some("RuntimeException"),
@@ -254,6 +259,7 @@ fn source_exception_parent_match_arms(facts: &FactSet) -> String {
         "NoSuchElementException",
         "NullPointerException",
         "NumberFormatException",
+        "PatternSyntaxException",
         "StringIndexOutOfBoundsException",
         "UncheckedIOException",
         "UnsupportedOperationException",
@@ -462,7 +468,10 @@ pub(crate) fn try_catch_value_fallthrough_stmt(
     let option_ok_type = RustType::Option(Box::new(ok_type));
     let result_type = exception_result_type(option_ok_type);
     let mut body_with_fallthrough = wrap_ok_returns_in_some(try_body);
-    body_with_fallthrough.push(RustStmt::Return(Some(ok_none_expr())));
+    let body_may_fall_through = !rust_stmts_definitely_terminate(&body_with_fallthrough);
+    if body_may_fall_through {
+        body_with_fallthrough.push(RustStmt::Return(Some(ok_none_expr())));
+    }
 
     let mut arms = Vec::new();
     arms.push(RustMatchArm {
@@ -483,12 +492,23 @@ pub(crate) fn try_catch_value_fallthrough_stmt(
     arms.push(RustMatchArm {
         pattern: "Ok(None)".to_string(),
         body: RustExpr::Block {
-            stmts: if outer_returns_result && outer_result_returns_option {
-                vec![RustStmt::Return(Some(ok_none_expr()))]
+            stmts: if body_may_fall_through {
+                if outer_returns_result && outer_result_returns_option {
+                    vec![RustStmt::Return(Some(ok_none_expr()))]
+                } else {
+                    Vec::new()
+                }
             } else {
                 Vec::new()
             },
-            tail: None,
+            tail: if body_may_fall_through {
+                None
+            } else {
+                Some(Box::new(RustExpr::MacroCall {
+                    macro_name: "unreachable".to_string(),
+                    args: Vec::new(),
+                }))
+            },
         },
     });
     for catch in catches {
@@ -568,6 +588,10 @@ fn wrap_ok_return_in_some(stmt: RustStmt) -> RustStmt {
             label,
             body: wrap_ok_returns_in_some(body),
         },
+        RustStmt::Expr(RustExpr::Block { stmts, tail }) => RustStmt::Expr(RustExpr::Block {
+            stmts: wrap_ok_returns_in_some(stmts),
+            tail,
+        }),
         other => other,
     }
 }
@@ -1147,10 +1171,40 @@ pub(crate) fn try_catch_finally_scope_stmt(
 }
 
 fn rust_stmts_definitely_terminate(stmts: &[RustStmt]) -> bool {
-    matches!(
-        stmts.last(),
-        Some(RustStmt::Return(_) | RustStmt::Break(_) | RustStmt::Continue(_))
-    )
+    stmts.last().is_some_and(rust_stmt_definitely_terminates)
+}
+
+fn rust_stmt_definitely_terminates(stmt: &RustStmt) -> bool {
+    match stmt {
+        RustStmt::Return(_) | RustStmt::Break(_) | RustStmt::Continue(_) => true,
+        RustStmt::Expr(expr) => rust_expr_definitely_terminates(expr),
+        RustStmt::If {
+            then_body,
+            else_body,
+            ..
+        }
+        | RustStmt::IfLet {
+            then_body,
+            else_body,
+            ..
+        } => {
+            rust_stmts_definitely_terminate(then_body) && rust_stmts_definitely_terminate(else_body)
+        }
+        _ => false,
+    }
+}
+
+fn rust_expr_definitely_terminates(expr: &RustExpr) -> bool {
+    match expr.unshaped() {
+        RustExpr::Block { stmts, tail: None } => rust_stmts_definitely_terminate(stmts),
+        RustExpr::Match { arms, .. } if !arms.is_empty() => arms
+            .iter()
+            .all(|arm| rust_expr_definitely_terminates(&arm.body)),
+        RustExpr::MarkedBlock { expr, .. }
+        | RustExpr::Grouped(expr)
+        | RustExpr::PostfixComment { expr, .. } => rust_expr_definitely_terminates(expr),
+        _ => false,
+    }
 }
 
 pub(crate) fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {
@@ -1606,7 +1660,7 @@ mod tests {
         ));
         assert_eq!(
             crate::emit::emit_statements(&[value_fallthrough_stmt], 0),
-            "match (|| -> Result<Option<i32>, JavaException> { return Ok(Some(7)); return Ok(None); })() { Ok(Some(value)) => { return Ok(value); }, Ok(None) => { }, Err(ex) if ex.is_instance(&[\"IOException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
+            "match (|| -> Result<Option<i32>, JavaException> { return Ok(Some(7)); })() { Ok(Some(value)) => { return Ok(value); }, Ok(None) => { unreachable!() }, Err(ex) if ex.is_instance(&[\"IOException\"]) => { return Ok(1); }, Err(ex) => { return Err(ex); } };\n"
         );
     }
 

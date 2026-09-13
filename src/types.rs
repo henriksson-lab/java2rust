@@ -678,6 +678,7 @@ pub(crate) fn is_known_raw_generic_type(java_ty: &JavaType) -> bool {
                         | "Map"
                         | "Optional"
                         | "Iterator"
+                        | "ListIterator"
                         | "Iterable"
                         | "Comparator"
                         | "Comparable"

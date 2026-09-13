@@ -1,6 +1,6 @@
 # 0007 — The Rust IR is mostly opaque strings, so decisions are made by substring search
 
-Status: **validated by inspection** (structural)
+Status: **done for the audited raw-boundary cleanup scope**.
 Severity: high — this is the mechanism the convergence plan is fighting
 Kind: IR modelling gap
 

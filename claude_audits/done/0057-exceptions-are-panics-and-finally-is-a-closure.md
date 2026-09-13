@@ -1,7 +1,21 @@
 # 0057 — Java exceptions still leak as panics, and general `finally` completion is not represented
 
 Recorded 2026-08-23.
-Status: **open**.
+Status: **done for the audited actual-error scope**.
+
+Closure recheck 2026-09-13: two independent current-state audits found no
+remaining named 0057 fixture or TODO2 item that still reproduces as an uncovered
+semantic error. After rebuilding the translator from a clean `target/`, the
+focused gates passed:
+
+- `cargo test --test idiom_gaps finally -- --nocapture`: 24/24
+- `cargo test --test differential finally_completion_fixtures_match_java_output -- --nocapture`
+- `cargo test --test differential list_exception_fixtures_match_java_output -- --nocapture`
+
+The historical notes below still document why a fully general Java completion
+carrier would be cleaner than the accumulated bounded fast paths. That broader
+representation work is design debt, but this audit no longer tracks a known
+current semantic failure.
 
 Current checkpoint 2026-09-09: checked-in release `idiom_gaps` baseline is
 `816 passed; 0 failed`, and the focused exception/finally oracle loops cover
@@ -9,6 +23,250 @@ the promoted exception, collection-exception, parse-exception, and completion
 fixtures named in this file. The audit remains open for the general completion
 carrier and remaining panic-only Java exception surfaces, not for the
 already-promoted fixture set.
+
+Codex recheck 2026-09-12 actual-error focus: the current pinned gates for this
+audit pass. `cargo test --test idiom_gaps finally -- --nocapture` passed 23/23,
+`cargo test --test differential finally_completion_fixtures_match_java_output
+-- --nocapture` passed, and `cargo test --test differential
+list_exception_fixtures_match_java_output -- --nocapture` passed. A scan for
+tests still accepting `unsupported Java statement: try/catch/finally` found
+only negative guards. The remaining 0057 work is therefore not an already-pinned
+fixture failure; it is the broader completion-carrier design and future
+concrete panic-only helper surfaces as they are found.
+
+Codex follow-up 2026-09-12 thrown-fact drift pass: the built-in facade model for
+`Random.nextInt(int)` already lowered through `Random::next_int_result` and the
+differential `RandomNextIntCatch` fixture catches `IllegalArgumentException`,
+but the parallel external-pack effect fact still advertised no thrown
+exception. `external_packs::java_platform_api_effect_for_receiver_with_arity`
+now reports `IllegalArgumentException` for both `Random.nextInt` spellings, and
+`tests/semantic_facts.rs::random_next_int_fact_advertises_illegal_argument_exception`
+pins the arity-sensitive fact lookup.
+
+Codex follow-up 2026-09-12 Pattern.compile catchability pass:
+`Pattern.compile(String)` now has a bounded `Pattern::compile_result` path and
+advertises `PatternSyntaxException` from the built-in external-pack effect
+fact. Propagated Java `try` contexts call the result helper, so malformed
+patterns such as `"["` are catchable instead of silently constructing a
+`Pattern`; ordinary callers still use the panic-adapting `Pattern::compile`.
+`PatternSyntaxException` is also linked under `IllegalArgumentException` in the
+generated exception hierarchy. Covered by
+`tests/idiom_gaps.rs::pattern_compile_invalid_regex_is_catchable` and
+`tests/semantic_facts.rs::pattern_compile_fact_advertises_pattern_syntax_exception`.
+
+Codex follow-up 2026-09-12 actual-error pass: three more compile/catchability
+surfaces are fixed and pinned in `tests/idiom_gaps.rs`. `ArrayDeque.getLast()`
+and `removeLast()` now share the catchable queue-tail projections instead of
+rendering missing `Vec::get_last`/`Vec::remove_last` methods
+(`array_deque_last_aliases_are_catchable_and_compile`). `Integer.decode` and
+`Integer.valueOf(String)`, including the string-concat operand path, now lower
+through catchable `NumberFormatException` parse projections instead of
+`Integer::decode` or `<Integer>::value_of("...")`
+(`integer_decode_and_value_of_string_are_catchable`). A nested
+try/finally-return carrier now wraps `Ok(Some(value))` through block
+expressions and keeps an impossible `Ok(None) => unreachable!()` arm, avoiding
+both `Result<String>`/`()` fallthrough and non-exhaustive generated matches
+(`nested_try_finally_return_wraps_optional_carrier_value`). Verified with
+`cargo check --tests` and the three focused generated-crate tests.
+
+Codex follow-up 2026-09-12 helper-surface pin: `StringBuffer`/`StringBuilder`
+helper methods that keep panic wrappers for ordinary uncaught calls are
+verified catchable in propagated `try` contexts. `StringBuffer.{charAt,
+setLength,delete,setCharAt,deleteCharAt,replace}` and
+`StringBuilder.{insert,substring,setCharAt,deleteCharAt,replace}` lower through
+`*_result` helpers with `?`, so Java `catch
+(StringIndexOutOfBoundsException)` observes the failure instead of a Rust
+panic. Covered by
+`tests/idiom_gaps.rs::string_buffer_mutating_helpers_in_try_are_catchable` and
+`tests/idiom_gaps.rs::string_builder_insert_and_substring_helpers_in_try_are_catchable`.
+The broader audit remains open for helper surfaces that still lack a propagated
+result path and for the general completion carrier.
+
+Codex follow-up 2026-09-12 `setCharAt` actual-error pass:
+`StringBuffer.setCharAt` and `StringBuilder.setCharAt` now share the same
+result-helper path. Invalid indices propagate `StringIndexOutOfBoundsException`
+through `*_result()?` inside Java `try`, while valid calls replace by Java
+character index instead of byte offset.
+
+Codex follow-up 2026-09-12 `replace`/`deleteCharAt` actual-error pass:
+`StringBuffer.replace`, `StringBuilder.replace`, `StringBuffer.deleteCharAt`,
+and `StringBuilder.deleteCharAt` no longer emit missing Rust methods in Java
+`try` blocks. They now use catchable result helpers, preserve fluent mutation
+on success, clamp `replace` end to the buffer length, and reject invalid start
+or character indices with `StringIndexOutOfBoundsException`.
+
+Codex follow-up 2026-09-12 list-iterator compile/catchability pass:
+`List.listIterator()` no longer lowers to a missing `Vec::list_iterator()` call
+or a non-emitted `ListIterator<T>` facade type. It now renders a
+`JavaListIterator<T>` runtime cursor, includes that support block when
+`java.util.ListIterator` is imported or declared, and routes
+`ListIterator.previous()` through `previous_result()` so exhaustion is a
+catchable `NoSuchElementException` in propagated `try` contexts. Covered by
+`tests/idiom_gaps.rs::java_list_iterator_previous_is_catchable`, with the
+existing `java_list_iterator_cursor_uses_platform_facade` guarding ordinary
+`Iterator` behavior.
+
+Codex follow-up 2026-09-12 indexed list-iterator actual-error pass:
+`List.listIterator(int)` no longer ignores its index argument. Propagated Java
+`try` contexts now lower the call through `JavaListIterator::new_at_result`, so
+negative or too-large indices raise catchable `IndexOutOfBoundsException`
+instead of constructing a cursor at zero and later misclassifying the failure
+as `NoSuchElementException`. Covered by
+`tests/idiom_gaps.rs::java_list_iterator_index_is_catchable`.
+
+Codex follow-up 2026-09-12 radix-parse compile-error pass:
+integral radix parse helpers now pass a borrowed string view to
+`from_str_radix`. `Integer.parseInt(String,int)`,
+`Long.parseLong(String,int)`, `Short.parseShort(String,int)`, and
+`Byte.parseByte(String,int)` no longer emit `from_str_radix(String, ...)`,
+which failed to compile before Java `NumberFormatException` handling could run.
+Covered by
+`tests/idiom_gaps.rs::integer_radix_parse_string_argument_is_catchable`.
+
+Codex follow-up 2026-09-12 string/class catchability pass:
+`Class.forName(String)` now lowers through `JavaClass::for_name_result` in
+propagated Java `try` contexts, so a missing class becomes catchable
+`ClassNotFoundException` instead of an invalid `?` on an infallible
+`JavaClass`. `String.getBytes(String)` is now distinct from zero-argument
+`getBytes()`: the charset overload lowers through `java_string_get_bytes_result`
+with a catchable `UnsupportedEncodingException`, while zero-argument `getBytes`
+keeps the direct byte-vector helper. Covered by
+`tests/idiom_gaps.rs::class_for_name_missing_class_is_catchable`,
+`tests/idiom_gaps.rs::java_string_get_bytes_charset_is_catchable`, and the
+existing `java_string_get_bytes_and_index_of_use_native_helpers` generated
+crate check.
+
+Codex follow-up 2026-09-12 copy/getChars actual-error pass:
+`System.arraycopy` is no longer an emitted no-op. The runtime facade now copies
+between source and destination slices, and the optional-local destination
+fixture runs a generated crate assertion that proves bytes are copied.
+`String.getChars` now lowers as a free helper instead of an impossible method
+on `&str`, while `StringBuilder.getChars`/`StringBuffer.getChars` have runtime
+facade methods. Their destination `char[]` argument is treated as mutating, so
+locals passed as the destination render as `mut`, and invalid ranges propagate
+`StringIndexOutOfBoundsException` in Java `try` contexts. Covered by
+`tests/idiom_gaps.rs::system_arraycopy_mutable_optional_local_dest_does_not_clone_slice`
+and
+`tests/idiom_gaps.rs::java_string_get_chars_helpers_are_catchable_and_copy_chars`.
+
+Codex follow-up 2026-09-12 iterator-mutator actual-error pass:
+`Iterator.remove()` and `ListIterator.set(value)` no longer fall through to
+missing runtime methods or panic-only call sites. The current iterator runtime
+is snapshot-backed, so these mutators are modeled explicitly as catchable
+`UnsupportedOperationException` rather than pretending to update the backing
+collection. Covered by
+`tests/idiom_gaps.rs::iterator_snapshot_mutators_are_catchable_unsupported_operations`.
+Full Java backing-collection iterator mutation remains out of scope for this
+bounded fix and would require changing the iterator representation.
+
+Codex follow-up 2026-09-12 arraycopy bounds catchability pass:
+`System.arraycopy` keeps the plain panic-adapting helper for uncaught calls but
+now also emits `System::arraycopy_result` for propagated Java `try` contexts.
+Out-of-range source or destination slices return catchable
+`IndexOutOfBoundsException` instead of panicking inside Rust slice indexing.
+Covered by
+`tests/idiom_gaps.rs::system_arraycopy_bounds_failure_is_catchable`.
+
+Codex follow-up 2026-09-12 erased-object compile-error pass: borrowed facade
+recovery into erased `Object` slots no longer renders
+`Box::new(value.clone()) as Box<dyn Any>` for erased values. It now uses the
+existing `java_clone_erased_object_ref` helper, preserving concrete clone/box
+recovery only for non-erased borrowed values. Return-shape selection also keeps
+solved `Option<Object>` return carriers instead of collapsing them back to a
+declared bare `Object`, and fallible optional receiver projection stops applying
+an optional-erased facade map after `ok_or_else(...)?` has already produced the
+borrowed element. Verified with the focused generated-crate fixtures for
+constructor fallible cast recovery, cross-source null-check helpers,
+erased-object `getClass().{getName,isArray}`, raw-list `instanceof`, plus
+`cargo check --tests` and `cargo test --test idiom_gaps catchable`.
+
+Codex follow-up 2026-09-12 nullable parse sequence-element pass:
+`Integer.parseInt(values.get(i))` where `values` is a nullable `List<String>`
+no longer emits `Option<String>.parse::<i32>()`. Propagated native `List.get`
+now records the actual element storage shape: true nullable elements keep their
+owned nullable carrier, while ordinary `String` elements stay bare so nullable
+local/return slots wrap them through the usual slot conversion. The integral
+parse null-policy recovery also recognizes a fallible cloned sequence-get
+receiver that has already been coerced to `.as_str()`. The generated Rust maps
+the Java null input to `"null"`, so `NumberFormatException` remains catchable
+instead of producing invalid Rust or a synthetic `NullPointerException`.
+Verified with
+`tests/idiom_gaps.rs::integer_parse_int_nullable_sequence_element_is_number_format_exception`,
+`tests/idiom_gaps.rs::sequence_get_in_try_slot_coercion_is_catchable`,
+`tests/idiom_gaps.rs::catch_and_finally_locals_receive_signature_plans`,
+`lower::tests::integral_parse_shaped_optional_string_arg_maps_null_to_number_format_input`,
+`cargo test --test idiom_gaps catchable`, `cargo test --test idiom_gaps finally`,
+and `cargo check --tests`.
+
+Codex follow-up 2026-09-12 source exception constructor-state compile pass:
+source-defined classes whose names end in `Exception` no longer collapse to the
+`JavaException` carrier in ordinary source type positions. The carrier predicate
+now uses the modeled JDK/runtime throwable table instead of a suffix rule, so a
+source constructor parameter such as `CauseStateException owner` remains the
+source struct while JDK exception supertypes still render as `JavaException`.
+Self-dependent constructor field assignments also apply the shared-handle fresh
+construction wrap on the deferred assignment path, and source structs used as
+those constructor placeholders derive `Default` only when their fields support
+it. The
+`external_standard_exception_super_with_trailing_body_lowers_subclass_state`
+fixture now cargo-checks instead of being pinned as an expected
+`ExceptionContext: Default` failure. Verified with that focused generated-crate
+test, `slot_render::tests::exception_like_java_types_render_to_java_exception_carrier`,
+and `cargo test --test idiom_gaps exception`.
+
+Codex follow-up 2026-09-12 enhanced-for continue fail-fast pass: the bounded
+enhanced-for-over-mutated-local lowering now handles a loop-body `continue`
+instead of falling back to a compile-time placeholder. The synthesized
+index-based loop rewrites `continue` sites to run the same
+`ConcurrentModificationException` length check before advancing the synthetic
+index and continuing; a mutation still throws before the back edge, while a
+non-mutating continue proceeds to the next element. Nested-loop continues remain
+outside this bounded lowering. Regression:
+`enhanced_for_mutating_iterated_collection_with_continue_throws_concurrent_modification`.
+Verified with the two focused enhanced-for generated runtime tests.
+
+Codex follow-up 2026-09-12 erased varargs compile pass: source `Object...`
+forwarding no longer relies on `Clone` for `Box<dyn Any>` or
+`Vec<Option<Box<dyn Any>>>`. Explicit erased varargs arrays and appended erased
+varargs tails now use `java_clone_optional_erased_object_vec_ref`, which accepts
+both `Vec` and slice callers, while reused scalar `Object` arguments use
+`java_clone_erased_object_ref`. Receiver-mutability propagation also recognizes
+resolved source mutating calls through a self field when the exact resolved
+varargs key misses. `source_object_varargs_forward_and_append_erased_arguments`
+now cargo-checks.
+
+Codex follow-up 2026-09-12 source-context boundary compile pass: non-emitted
+context sources now contribute opaque boundary types, used constructors, and
+used methods to the external facade support surface. Source-summary varargs
+method arity matching accepts fixed-prefix calls, facade stubs render declared
+argument types instead of unconstrained generics, inherited context receiver
+projections borrow optional shared fields instead of moving them, inherited
+source-super constructor fields pass through the shared-handle assignment plan,
+and reused erased `Object` values downcast through
+`java_clone_erased_object_ref` instead of cloning `Box<dyn Any>`. The four
+source-super/context fixtures now cargo-check:
+`source_super_constructor_preserves_trailing_method_result_call`,
+`source_super_constructor_matches_varargs_super_arity`,
+`implicit_source_super_constructor_initializes_inherited_fields`, and
+`inherited_context_trailing_call_uses_context_field_and_shared_varargs_plan`.
+
+Codex follow-up 2026-09-12 erased object array clone pass: borrowed or
+catchable `List<Object[]>.get(...)` results no longer recover ownership with
+Rust `.to_vec()` / `.cloned()`, which requires `Box<dyn Any>: Clone`. Optional
+erased object arrays now route through `java_clone_optional_erased_object_vec_ref`
+in both the ordinary optional-wrap path and the fallible list-get projection.
+`erased_object_array_clone_and_format_use_explicit_helpers` now cargo-checks
+instead of pinning the old clone-trait failure.
+
+Codex follow-up 2026-09-13 exception-supertype boundary pass: source exception
+classes passed as `this` to a `Throwable` slot no longer emit the generic class
+hierarchy `compile_error!`. Because modeled exception supertypes already lower
+to the `JavaException` carrier, current-self exception upcasts now construct a
+`JavaException` with the source class name and display message at that boundary.
+Covered by
+`tests/idiom_gaps.rs::exception_self_as_throwable_context_argument_uses_exception_carrier`
+and
+`tests/idiom_gaps.rs::explicit_cast_exception_self_as_throwable_context_argument_uses_exception_carrier`.
 
 Fixture-count numbers below are chronological checkpoints, not live inventory.
 For the current differential inventory, use
@@ -29,32 +287,19 @@ Follow-up 2026-09-07 `List.subList` exception-class pass: catchable
 continue to raise `IndexOutOfBoundsException`. Regression:
 `idiom_gaps::list_sub_list_invalid_range_is_catchable_as_illegal_argument`.
 
-Codex follow-up 2026-09-12 enhanced-for mutation guard: enhanced-for over a
-local collection that is structurally mutated in the loop body no longer emits
-borrow-checker-invalid Rust such as `for s in xs.iter() { xs.push(...) }`.
-That direct shape now fails loudly with
-`compile_error!("unsupported Java enhanced-for over a collection mutated in the loop body")`.
-This keeps the unsupported Java fail-fast iterator contract explicit; it does
-not implement catchable `ConcurrentModificationException`. Guard:
-`idiom_gaps::enhanced_for_mutating_iterated_collection_fails_loudly`.
+Codex follow-up 2026-09-12 enhanced-for mutation guard, superseded later the
+same day: enhanced-for over a local collection that is structurally mutated in
+the loop body first became loud instead of emitting borrow-checker-invalid Rust
+such as `for s in xs.iter() { xs.push(...) }`. The later focused fail-fast pass
+below replaced that loud placeholder for the bounded local/result-producing
+shape with a catchable `ConcurrentModificationException`.
 
-Codex follow-up 2026-09-12 guard hardening: that enhanced-for mutation fixture
-now also runs the generated crate through the failing cargo-check harness and
-asserts the unsupported message there. The behavior is still intentionally loud,
-but the guard no longer relies only on a rendered-string assertion.
-
-Codex follow-up 2026-09-12 loop-body `try/finally` carrier guard: after the
-known simple-loop fast paths decline a `try/finally`, a loop-body shape whose
-body/catch/finally can `break` or `continue` now emits the existing unsupported
-`try/catch/finally` placeholder instead of closure-crossing `break`/`continue`
-Rust. This does not implement the general completion carrier; it keeps another
-open 0057 shape from becoming invalid generated Rust. Regression:
-`idiom_gaps::try_finally_conditional_return_over_break_fails_loudly_in_loop_body`.
-
-Codex follow-up 2026-09-12 guard hardening: that loop-body `try/finally`
-fixture now also runs the generated crate through the failing cargo-check
-harness and asserts the unsupported message there, so the guard no longer relies
-only on rendered-string matching.
+Codex follow-up 2026-09-12 loop-body `try/finally` carrier guard, superseded
+later the same day: after the known simple-loop fast paths declined a
+`try/finally`, a loop-body shape whose body could `break` and whose `finally`
+could conditionally return first emitted the existing unsupported
+`try/catch/finally` placeholder instead of closure-crossing invalid Rust. The
+later focused loop-finally pass below now lowers this bounded shape correctly.
 
 Follow-up 2026-09-08 `BitSet.clear`/`flip` exception pass: the modeled
 `java.util.BitSet` facade now carries mutating, result-returning ABI/effect
@@ -2112,3 +2357,295 @@ display, and `getMessage()` behavior internally. Guard:
 `layering::exception_lowering_keeps_exception_paths_structured`; a focused
 generated-support guard now also pins the runtime accessors directly:
 `exception_lowering::tests::java_exception_support_exposes_read_only_runtime_accessors`.
+
+Follow-up 2026-09-12 focused loop-finally fix: the narrow loop-body
+`try/finally` shape where the try body can break and the `finally` block
+conditionally returns is no longer a loud unsupported statement. The simple
+loop fast path now lowers the try body, prepends the `finally` body before
+loop-abrupt statements, and keeps the appended `finally` body for fall-through
+paths; a `return` inside the inserted `finally` naturally overrides the pending
+`break`, matching Java for this bounded non-catch/no-resource shape. Covered by
+`tests/idiom_gaps.rs::try_finally_conditional_return_over_break_runs_finally_return`
+(`tftf:fin`). The broader completion-carrier work remains open for general
+nested/labeled/throwing combinations.
+
+Follow-up 2026-09-12 focused enhanced-for fail-fast fix: a bare local
+collection enhanced-for loop that mutates the iterated collection in a
+result-producing `try` context is no longer only a loud compile error. The
+bounded lowering snapshots the collection length, iterates by index over cloned
+elements to avoid a Rust borrow conflict, and raises a catchable
+`ConcurrentModificationException` if the collection length changes after an
+iteration body. Covered by
+`tests/idiom_gaps.rs::enhanced_for_mutating_iterated_collection_throws_concurrent_modification`
+(`cme`). Broader Java iterator fail-fast fidelity remains open for labeled,
+non-result, non-local, and non-length-changing mutation shapes.
+
+Follow-up 2026-09-12 enhanced-for fail-fast continue pass: the focused
+fail-fast lowering no longer declines simple `continue` bodies. The synthetic
+`while` loop now rewrites `continue` sites to run the generated length check
+and index increment before continuing, so a mutation raises catchable
+`ConcurrentModificationException` and a non-mutating continue advances normally.
+Nested-loop continues still stay outside the bounded lowering. Covered by
+`tests/idiom_gaps.rs::enhanced_for_mutating_iterated_collection_with_continue_throws_concurrent_modification`.
+
+Follow-up 2026-09-12 focused unmodelled I/O facade fix: known Java I/O facades
+that already advertise `Result<_, JavaException>` no longer panic in their
+generated fallback bodies. `java.nio.file.Files.{newInputStream,newOutputStream,
+newBufferedReader,readAllLines}`, `java.io.OutputStream.write*`, and
+`java.io.Closeable.close()` now return a catchable `IOException` when the
+facade is otherwise unmodelled, including the external-facts/source-summary
+support path. Covered by
+`tests/idiom_gaps.rs::java_nio_files_unmodelled_facade_throws_catchable_io_exception`,
+`tests/idiom_gaps.rs::closeable_close_unmodelled_facade_throws_catchable_io_exception`,
+and
+`tests/idiom_gaps.rs::output_stream_write_unmodelled_facade_throws_catchable_io_exception`.
+
+Follow-up 2026-09-12 focused future/runtime hierarchy fix: the generic
+`Future<T>::get()` fallback no longer panics despite advertising
+`Result<T, JavaException>`. It now returns a catchable `ExecutionException`,
+and the generated runtime subtype table includes the common checked edges
+`IOException -> Exception`, `InterruptedException -> Exception`,
+`ExecutionException -> Exception`, and `Exception -> Throwable`, so broad
+`catch (Exception)` / `catch (Throwable)` arms can catch these modeled Java
+exceptions. Covered by
+`tests/idiom_gaps.rs::selected_opaque_future_get_is_generic_instance_surface`,
+`tests/idiom_gaps.rs::foreach_lambda_throw_wraps_enclosing_method_in_result`,
+`tests/idiom_gaps.rs::catch_throwable_covers_runtime_exception_via_generated_hierarchy`,
+and the `catch (Exception)` arm in
+`tests/idiom_gaps.rs::java_nio_files_unmodelled_facade_throws_catchable_io_exception`.
+
+Follow-up 2026-09-12 focused loop-finally throw fix: a loop-body
+`try/finally` where the try body breaks and the `finally` block throws is no
+longer rejected as unsupported. The loop fast path now accepts finalizers that
+the exception planner proves terminate and whose statements are simple apart
+from `throw`; inserting that finalizer before `break`/`continue` preserves the
+Java override because the generated `Err(JavaException)` makes the loop-abrupt
+statement unreachable. Covered by
+`tests/idiom_gaps.rs::finally_throw_overrides_loop_break_and_is_catchable`.
+Conditional finalizers with mixed break/return/throw paths still require the
+general completion carrier.
+
+Follow-up 2026-09-12 focused mixed-finalizer loop fix: the same simple
+loop-body `try/finally` fast path now also accepts finalizers with conditional
+`throw` and `return` arms plus fall-through. The lowered finalizer is inserted
+before the pending loop exit, so `throw` and `return` override the break while
+ordinary fall-through still performs the original loop exit. Covered by
+`tests/idiom_gaps.rs::finally_mixed_return_throw_overrides_loop_break`.
+More general nested/labeled/resource/catch combinations still require the
+completion carrier.
+
+Follow-up 2026-09-12 catch/finally optional-string display fix: reused optional
+`String` locals in catch/finally display slots now use the Java string null
+display projection rather than the generic optional-value formatter. This
+avoids generating `value.java_arrays_deep_to_string()` on `&String` in
+`System.out.println(t)` after `String t = xs.get(i)` inside a `finally` block.
+Covered by `tests/idiom_gaps.rs::catch_and_finally_locals_receive_signature_plans`.
+
+Follow-up 2026-09-12 focused fact-backed facade fallback fix: unmodelled
+external facade methods that already have a `Result<_, JavaException>` ABI from
+external effect facts no longer emit `unimplemented!`. They now return
+`Err(JavaException::new(<declared thrown type>, ...))`, falling back to
+`UnsupportedOperationException` only when no thrown fact is available. Covered
+by
+`tests/idiom_gaps.rs::unmodelled_throwing_external_facade_returns_catchable_exception`.
+
+Follow-up 2026-09-12 focused boxed-primitive map-get unboxing fix: a ternary
+branch that unboxes a nullable `HashMap<K, Integer>.get(k)` into an `int` slot
+no longer renders an invalid Rust branch such as `values.get(k).as_ref()` next
+to a primitive `0`. The map-get slot lowering now recognizes the nested
+`Option<&Option<i32>>` carrier, projects through the present map entry and
+present boxed value, and raises a catchable `NullPointerException` if either is
+missing. Covered by
+`tests/idiom_gaps.rs::map_get_in_ternary_primitive_slot_null_unwrap_is_catchable`
+and the broader `cargo test --test idiom_gaps catchable` subset.
+
+Follow-up 2026-09-12 focused source-summary fallback fix: source-summary
+facade methods that have already been assigned a `Result<_, JavaException>` ABI
+from effect facts no longer render `unimplemented!` inside that fallible
+surface. They now return a catchable
+`UnsupportedOperationException`, preserving loud untranslated-summary behavior
+for non-fallible methods while letting Java `catch (Exception)` handle the
+fallible fallback. Covered by
+`tests/idiom_gaps.rs::source_summary_throwing_method_fallback_is_catchable`.
+
+Follow-up 2026-09-12 focused source-summary-super compile fix: inherited or
+explicit `super.*` calls whose superclass lives only in source-summary context
+no longer lower by constructing or statically calling the un-emitted summary
+owner, e.g. `SummaryBase::label(&SummaryBase {})`. Inherited methods from
+source-summary supertypes are emitted as untranslated summary surfaces, and
+explicit fallible `super.*` calls return a catchable
+`UnsupportedOperationException` rather than silently succeeding. Covered by
+`tests/idiom_gaps.rs::source_summary_super_calls_lower_to_boundary_defaults_not_raw_super_receiver`.
+
+Follow-up 2026-09-12 focused `List.get` slot-catchability fix: slot-specific
+sequence-get lowering no longer uses the panic-only projection inside fallible
+`try` lowering. `List.get` into a concrete local now uses the existing
+`IndexOutOfBoundsException` result projection before slot coercion, so Java
+`catch (IndexOutOfBoundsException)` can observe the failure instead of the
+generated Rust aborting through `panic!("uncaught Java exception")`. Covered by
+`tests/idiom_gaps.rs::sequence_get_in_try_slot_coercion_is_catchable`.
+
+Follow-up 2026-09-12 focused source-summary-super return fix: `return
+super.value()` for a throwing source-summary superclass method now returns the
+fallback `Err(JavaException)` directly. The previous generic return path could
+render the fallback as an already-propagated value under an outer `Ok(...)`,
+which was noisy and brittle around source-summary boundary calls. Covered by
+`tests/idiom_gaps.rs::source_summary_super_returning_throwing_method_is_not_double_wrapped`.
+
+Follow-up 2026-09-12 focused pending-return/finally fixes: a simple loop-body
+`try/finally` whose try body evaluates a direct `return` and whose `finally`
+can conditionally break now saves the pending return value, runs the finalizer,
+and returns the saved value only if the finalizer falls through. This fixes the
+labeled-break shape `run(true) == "TFA"` / `run(false) == "TR"` without using
+the old closure-crossing lowering. Covered by
+`tests/idiom_gaps.rs::try_finally_conditional_labeled_break_over_return_preserves_fallthrough_return`.
+
+Follow-up 2026-09-12 focused TWR catch/finally pending-return fix:
+try-with-resources/catch/finally shapes whose try path falls through but whose
+catch path returns now carry `Option<return>` through the catch/finally scope.
+Resource cleanup and `finally` still run first, and a finalizer throw overrides
+the pending catch return. This fixes an invalid generated Rust shape where the
+catch arm returned `Ok(String)` inside a `Result<(), JavaException>` scope.
+Covered by
+`tests/idiom_gaps.rs::try_with_resources_finally_throw_overrides_catch_return_after_cleanup`.
+The broader completion-carrier gap remains open for arbitrary nested,
+labeled/resource/catch combinations.
+
+Follow-up 2026-09-12 focused loop catch/finally pending-return fix: a loop-body
+plain `try/catch/finally` whose catch computes a pending return and whose
+`finally` conditionally breaks now uses the same `Option<return>` carrier in
+loop-body context. The finalizer break wins when it runs; otherwise the pending
+catch return resumes. Covered by
+`tests/idiom_gaps.rs::try_catch_finally_conditional_break_over_catch_return_preserves_fallthrough_return`
+(`b:r`).
+
+Follow-up 2026-09-12 focused TWR finally-return-over-break fix:
+try-with-resources/finally loop-body lowering now accepts the existing simple
+finalizer predicate instead of only fall-through finalizers. This lets resource
+cleanup and `finally` run before a pending body `break`, with a finalizer
+`return` overriding the break and fall-through preserving it. Covered by
+`tests/idiom_gaps.rs::try_with_resources_finally_return_overrides_body_break_after_cleanup`
+(`R:A`). More general conditional TWR catch-return/labeled-continue carrier
+shapes remain open.
+
+Follow-up 2026-09-12 focused TWR catch-return carrier expansion: loop-body
+try-with-resources/catch/finally now supports the pending catch-return carrier
+when resource cleanup must run before a conditional finalizer `break`,
+`continue`, labeled `continue`, or `throw`. The cleanup result is combined with
+the guarded body before `finally` executes, and the saved catch return resumes
+only when the finalizer falls through. Covered by
+`tests/idiom_gaps.rs::try_with_resources_finally_break_overrides_catch_return_after_cleanup_when_conditional`
+(`A:R`),
+`tests/idiom_gaps.rs::try_with_resources_finally_throw_overrides_body_continue_after_cleanup`
+(`E:A`), and
+`tests/idiom_gaps.rs::try_with_resources_finally_labeled_continue_overrides_catch_return_after_cleanup`
+(`R:R`).
+
+Follow-up 2026-09-12 focused mixed plain catch/finally override fix: loop-body
+plain `try/catch/finally` now handles the bounded shape where the guarded body
+throws, a catch performs side effects and a pending `break`, and the finalizer
+then performs side effects before always completing abruptly through a
+conditional `throw` or fall-through `return`. The catch break is discarded
+because Java finalizer completion overrides it. Covered by
+`tests/idiom_gaps.rs::try_catch_finally_mixed_throw_return_overrides_catch_break`
+(`tcf:caught`).
+
+Follow-up 2026-09-12 focused URL constructor catchability pass: `new
+URL(value)` now uses the stdlib constructor-result path and lowers through
+`URL::new_result` in fallible contexts, so malformed specs produce a catchable
+`MalformedURLException`/`IOException` instead of constructing a value
+silently. Covered by
+`tests/semantic_facts.rs::url_constructor_fact_uses_result_for_malformed_url_exception`
+and `tests/idiom_gaps.rs::url_constructor_malformed_spec_is_catchable`.
+
+Follow-up 2026-09-12 focused File/String IO constructor slot pass:
+`new FileInputStream(file)`, `new FileReader(file)`, and
+`new FileWriter(file)` now use the same actual-argument constructor slot fact
+as `FileOutputStream`, so nullable `File` fields are unwrapped through the Java
+null-receiver path instead of being passed as `Option<File>` to an untyped
+facade constructor. The String path remains a direct String slot rather than
+being coerced through `File::new(path)`. Covered by
+`tests/idiom_gaps.rs::file_input_stream_constructor_selects_file_and_string_overload_slots`,
+`tests/idiom_gaps.rs::file_reader_constructor_selects_file_and_string_overload_slots`,
+and `tests/idiom_gaps.rs::file_writer_constructor_selects_file_and_string_overload_slots`;
+the existing `file_output_stream_constructor_selects_file_and_string_overload_slots`
+fixture remains green.
+
+Follow-up 2026-09-13 focused PrintStream constructor overload slot pass:
+`new PrintStream(file)`, `new PrintStream(path)`, and
+`new PrintStream(out)` now use the actual argument type to select the constructor
+slot. This keeps `File` nullable-field checks catchable, keeps `String` paths
+from being coerced through `File::new(path)`, and avoids the previous ambiguous
+`out.into()` call when the support constructor accepts `OutputStream` directly.
+Covered by
+`tests/idiom_gaps.rs::print_stream_output_stream_constructor_uses_actual_overload_slot`
+and
+`tests/idiom_gaps.rs::print_stream_constructor_selects_file_string_and_output_stream_slots`.
+
+Follow-up 2026-09-13 focused Appendable facade argument compile pass:
+`Appendable.append(...)` is still modeled as a fluent call, but its generated
+facade method takes `&self` and clones the marker value. The built-in external
+fact now records that receiver as read-only in Rust receiver terms, matching
+the existing `Writer.append` behavior, so a source helper accepting an
+`Appendable` no longer forces callers to pass `&mut Appendable` from a shared
+field. Concrete-facade borrow blocks also recover their owned marker before a
+later mutable borrow projection, avoiding `&mut { ...; &Facade }` if such a
+slot is genuinely requested. Covered by
+`tests/idiom_gaps.rs::appendable_field_conversion_clones_before_into`,
+`tests/idiom_gaps.rs::appendable_fluent_chain_keeps_receiver_and_to_string_type`,
+`tests/idiom_gaps.rs::caught_checked_exception_rethrown_as_known_unchecked_propagates_result`,
+and
+`tests/semantic_facts.rs::external_logger_style_side_effects_do_not_require_mutable_receiver`.
+
+Follow-up 2026-09-13 focused CountDownLatch catchability pass:
+`CountDownLatch.await()` now has a built-in concurrent-platform effect fact
+advertising `InterruptedException` and a result-returning facade ABI. The
+existing raw-identifier lowering still emits `r#await`, but propagated Java
+`try` contexts now call `latch.r#await()?` so
+`catch (InterruptedException)` is reachable instead of silently treating
+`await()` as infallible. Covered by
+`tests/idiom_gaps.rs::external_facade_keyword_method_names_render_as_raw_identifiers`
+and
+`tests/external_packs.rs::java_platform_concurrent_static_factory_declares_precise_return_type`.
+
+Follow-up 2026-09-13 focused Thread.sleep catchability pass:
+`Thread.sleep(long)` and `Thread.sleep(long,int)` already lowered through the
+runtime result helper in fallible contexts, but the platform effect facts did
+not advertise their checked `InterruptedException`. Both overloads now have
+built-in side-effect facts, so propagated Java `try` contexts keep the helper's
+`?` and make `catch (InterruptedException)` reachable instead of treating the
+call as an infallible sleep. The generated facade support also normalizes the
+two-argument overload to `sleep_2`, avoiding the duplicate Rust `sleep` method
+that surfaced when both facts were enabled. Covered by
+`tests/idiom_gaps.rs::thread_sleep_interrupted_exception_is_catchable` and the
+Thread assertions in
+`tests/external_packs.rs::java_platform_concurrent_static_factory_declares_precise_return_type`.
+
+Follow-up 2026-09-13 focused ArrayBlockingQueue.put catchability pass:
+`ArrayBlockingQueue.put(value)` no longer emits a compile-time unsupported
+diagnostic. The native collection planner has a supported `ArrayBlockingQueuePut`
+target, propagated Java `try` contexts lower through a
+`Result<(), JavaException>` projection, and the bounded carrier pushes while
+capacity remains. A full queue cannot block in the translated single-threaded
+runtime, so it returns a catchable `InterruptedException` instead of becoming a
+Rust panic or hard `compile_error!`. Covered by
+`tests/idiom_gaps.rs::array_blocking_queue_put_pushes_or_returns_interrupted_exception`
+and promoted Java-oracle fixture `tests/differential/ArrayBlockingQueuePut.java`
+for the non-blocking success path. The adjacent `ArrayBlockingQueue` add,
+offer, bad-capacity, and null-element idiom guards now run generated assertions
+instead of stopping at `cargo_check`, so the catchability paths are pinned both
+locally and in the differential exception loop. Planner guard:
+`call_plan::tests::native_queue_receiver_kind_is_the_single_queue_capability_answer`.
+
+Follow-up 2026-09-13 focused switch/finally fallthrough pass:
+`plan_block_exception_completion` no longer treats every `switch` as a
+terminating exception boundary. A switch only terminates the enclosing
+try/finally body when it has a default label and every possible fallthrough path
+reaches `return`, `throw`, or another terminating exception boundary before a
+`break`. Plain `try/finally` bodies that can both return a value and fall
+through now use the same pending optional-return carrier pattern already used by
+catch/finally fallthrough cases, so a `switch` case `break` runs `finally` and
+continues after the try while a default `return` preserves Java's return value.
+Covered by
+`tests/idiom_gaps.rs::try_finally_switch_break_falls_through_after_finally`
+and Java-oracle fixture `tests/differential/FinallySwitchFallsThrough.java`.

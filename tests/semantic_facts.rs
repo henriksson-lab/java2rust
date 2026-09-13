@@ -8034,6 +8034,77 @@ class ArraysMutatorFactUse {
 }
 
 #[test]
+fn random_next_int_fact_advertises_illegal_argument_exception() {
+    let semantic = analyze(
+        r#"
+import java.util.Random;
+
+class RandomNextIntFactUse {
+    int sample(Random random, int bound) {
+        return random.nextInt(bound);
+    }
+}
+"#,
+    );
+
+    for receiver in ["Random", "java.util.Random"] {
+        let effect = semantic
+            .facts
+            .external_api_effect_for_receiver_with_arity(Some(receiver), "nextInt", Some(1))
+            .unwrap();
+        assert_eq!(effect.role, ExternalApiRole::Getter);
+        assert_eq!(
+            effect.thrown,
+            vec![JavaType::Named {
+                name: "IllegalArgumentException".to_string(),
+                args: Vec::new(),
+            }]
+        );
+    }
+}
+
+#[test]
+fn pattern_compile_fact_advertises_pattern_syntax_exception() {
+    let semantic = analyze(
+        r#"
+import java.util.regex.Pattern;
+
+class PatternCompileFactUse {
+    Pattern compile(String value) {
+        return Pattern.compile(value);
+    }
+}
+"#,
+    );
+
+    let effect = semantic
+        .facts
+        .external_api_effect_for_receiver_with_arity(Some("Pattern"), "compile", Some(1))
+        .unwrap();
+    assert_eq!(effect.role, ExternalApiRole::Getter);
+    assert_eq!(
+        effect.thrown,
+        vec![JavaType::Named {
+            name: "PatternSyntaxException".to_string(),
+            args: Vec::new(),
+        }]
+    );
+}
+
+#[test]
+fn url_constructor_fact_uses_result_for_malformed_url_exception() {
+    let facts = new_java2rust::stdlib::rust_stdlib_signature_facts();
+
+    for owner in ["URL", "java.net.URL"] {
+        let fact = facts
+            .external_constructor_rust_result_for(owner, 1)
+            .unwrap();
+        assert!(fact.returns_result);
+        assert_eq!(fact.provenance, FactProvenance::BuiltinExternalModel);
+    }
+}
+
+#[test]
 fn external_array_math_is_non_null_read_only_array_fact() {
     let semantic = analyze(
         r#"
@@ -8587,10 +8658,11 @@ fn external_logger_style_side_effects_do_not_require_mutable_receiver() {
     let semantic = analyze(
         r#"
 class LoggerApiUse {
-    void run(Logger log, Writer out) {
+    void run(Logger log, Writer out, Appendable appendable) {
         log.info("started");
         log.warn("slow");
         out.append("x");
+        appendable.append("x");
         out.newLine();
     }
 }
@@ -8617,6 +8689,16 @@ class LoggerApiUse {
         .unwrap();
     assert_eq!(append.role, ExternalApiRole::SideEffect);
     assert_eq!(append.receiver_mutability, ReceiverMutabilityFact::ReadOnly);
+
+    let appendable_append = semantic
+        .facts
+        .external_api_effect_for_receiver(Some("Appendable"), "append")
+        .unwrap();
+    assert_eq!(appendable_append.role, ExternalApiRole::FluentMutator);
+    assert_eq!(
+        appendable_append.receiver_mutability,
+        ReceiverMutabilityFact::ReadOnly
+    );
 
     let new_line = semantic
         .facts
