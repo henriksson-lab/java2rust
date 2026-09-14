@@ -320,6 +320,11 @@ pub enum Coercion {
         target_type: String,
         invalid_cast: InvalidCastPolicy,
     },
+    DowncastErasedObjectToClosedEnum {
+        enum_name: String,
+        variants: Vec<String>,
+        invalid_cast: InvalidCastPolicy,
+    },
     UnsupportedDispatch {
         actual_dispatch: DispatchShape,
         target_dispatch: DispatchShape,
@@ -692,6 +697,15 @@ impl DispatchCoercionPolicy {
                 target_type: target_type.clone(),
                 invalid_cast: invalid_cast.clone(),
             }],
+            DispatchCoercionPolicy::DowncastErasedObjectToClosedEnum {
+                enum_name,
+                variants,
+                invalid_cast,
+            } => vec![Coercion::DowncastErasedObjectToClosedEnum {
+                enum_name: enum_name.clone(),
+                variants: variants.clone(),
+                invalid_cast: invalid_cast.clone(),
+            }],
             DispatchCoercionPolicy::Unsupported {
                 actual_dispatch,
                 target_dispatch,
@@ -800,6 +814,11 @@ pub fn apply_coercions(mut expr: RustExpr, coercions: &[Coercion]) -> RustExpr {
 }
 
 pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> RustExpr {
+    if expr.recorded_shape() == Some(RustExprShape::OptionalConstructed)
+        && matches!(plan.dispatch(), DispatchCoercionPolicy::EraseObject)
+    {
+        return record_view_coercion_target_shape(apply_one(expr, &Coercion::EraseObject), plan);
+    }
     match plan.optional() {
         OptionalShapeCoercionPolicy::Wrap { element_plan, .. } => {
             let expr = apply_shape_coercion_plan(expr, element_plan);
@@ -2298,7 +2317,10 @@ pub(crate) fn optional_of_projection(value: RustExpr) -> RustExpr {
     } else {
         value
     };
-    function_call_projection(RustExpr::Var("Some".to_string()), vec![value])
+    RustExpr::shaped(
+        RustExprShape::OptionalConstructed,
+        function_call_projection(RustExpr::Var("Some".to_string()), vec![value]),
+    )
 }
 
 pub(crate) fn rust_expr_may_be_java_null_value(expr: &RustExpr) -> bool {
@@ -9924,7 +9946,22 @@ pub(crate) fn erased_object_box_projection(value: RustExpr) -> RustExpr {
     if rust_expr_is_erased_object_clone_helper_call(&value) {
         return value;
     }
+    let value = typed_empty_optional_for_erased_object_box(value);
+    if value.recorded_shape() == Some(RustExprShape::OptionalConstructed) {
+        return boxed_optional_cast_projection(value, "Box<dyn std::any::Any>".to_string());
+    }
     boxed_cast_projection(value, "Box<dyn std::any::Any>".to_string())
+}
+
+fn typed_empty_optional_for_erased_object_box(value: RustExpr) -> RustExpr {
+    if value.recorded_shape() != Some(RustExprShape::OptionalConstructed) {
+        return value;
+    }
+    if matches!(value.unshaped(), RustExpr::Var(name) if name == "None") {
+        typed_none_projection("String")
+    } else {
+        value
+    }
 }
 
 pub(crate) fn erased_object_constructor_projection(args: Vec<RustExpr>) -> RustExpr {
@@ -9954,6 +9991,22 @@ fn boxed_cast_projection(value: RustExpr, ty: String) -> RustExpr {
         expr: Box::new(function_call_projection(
             RustExpr::path(["Box", "new"]),
             vec![preserve_raw_tuple_operand(value)],
+        )),
+        ty,
+    };
+    if result_propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, boxed)
+    } else {
+        boxed
+    }
+}
+
+fn boxed_optional_cast_projection(value: RustExpr, ty: String) -> RustExpr {
+    let result_propagated = expr_is_result_propagated(&value);
+    let boxed = RustExpr::Cast {
+        expr: Box::new(function_call_projection(
+            RustExpr::path(["Box", "new"]),
+            vec![preserve_raw_tuple_operand(value.into_unshaped())],
         )),
         ty,
     };
@@ -11741,6 +11794,9 @@ pub(crate) fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfChec
             "is_some_and",
             vec![optional_erased_object_is_instance_closure_leaf(target_type)],
         ),
+        InstanceOfCheck::ErasedObjectClosedEnum { variants, .. } => {
+            erased_object_closed_enum_instanceof_projection(expr, variants)
+        }
         InstanceOfCheck::AlwaysTrue => RustExpr::Literal("true".to_string()),
         InstanceOfCheck::Unsupported {
             actual_dispatch,
@@ -11806,7 +11862,80 @@ pub(crate) fn instanceof_pattern_downcast_ref_projection(
                 )],
             ))
         }
+        InstanceOfCheck::ErasedObjectClosedEnum {
+            enum_name,
+            variants,
+        } => Some(erased_object_closed_enum_pattern_downcast_projection(
+            expr, enum_name, variants,
+        )),
         _ => None,
+    }
+}
+
+fn erased_object_closed_enum_instanceof_projection(
+    expr: RustExpr,
+    variants: &[String],
+) -> RustExpr {
+    let object_name = "__java_instanceof_value".to_string();
+    let object = RustExpr::Var(object_name.clone());
+    let mut checks = variants.iter().map(|variant| {
+        erased_object_is_type_projection(object.clone(), &normalize_emitted_java_type_name(variant))
+    });
+    let Some(first) = checks.next() else {
+        return RustExpr::Literal("false".to_string());
+    };
+    let combined = checks.fold(first, |left, right| RustExpr::Binary {
+        op: "||".to_string(),
+        left: Box::new(left),
+        right: Box::new(right),
+    });
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: object_name,
+            ty: None,
+            value: Some(expr),
+        }],
+        tail: Some(Box::new(combined)),
+    }
+}
+
+fn erased_object_closed_enum_pattern_downcast_projection(
+    expr: RustExpr,
+    enum_name: &str,
+    variants: &[String],
+) -> RustExpr {
+    let object_name = "__java_instanceof_value".to_string();
+    let object = RustExpr::Var(object_name.clone());
+    let tail = variants.iter().rev().fold(
+        RustExpr::Path(vec!["None".to_string()]),
+        |else_expr, variant| {
+            let variant = normalize_emitted_java_type_name(variant);
+            let downcast = method_expect_projection(
+                erased_object_downcast_ref_projection(object.clone(), &variant),
+                crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
+            );
+            RustExpr::If {
+                condition: Box::new(erased_object_is_type_projection(object.clone(), &variant)),
+                then_expr: Box::new(RustExpr::Call {
+                    function: Box::new(RustExpr::path(["Some"])),
+                    args: vec![RustExpr::Call {
+                        function: Box::new(RustExpr::path([enum_name, variant.as_str()])),
+                        args: vec![apply_clone_projection(downcast)],
+                    }],
+                }),
+                else_expr: Box::new(else_expr),
+            }
+        },
+    );
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: object_name,
+            ty: None,
+            value: Some(expr),
+        }],
+        tail: Some(Box::new(tail)),
     }
 }
 
@@ -14009,6 +14138,11 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             target_type,
             invalid_cast,
         } => apply_erased_object_downcast(expr, target_type, invalid_cast),
+        Coercion::DowncastErasedObjectToClosedEnum {
+            enum_name,
+            variants,
+            invalid_cast,
+        } => apply_erased_object_closed_enum_downcast(expr, enum_name, variants, invalid_cast),
         Coercion::UnsupportedDispatch {
             actual_dispatch,
             target_dispatch,
@@ -14083,7 +14217,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
 
 fn option_unwrap_projection_for_coercion(expr: RustExpr) -> RustExpr {
     let propagated = expr_is_result_propagated(&expr);
-    let unwrapped = zero_arg_method_projection(expr, "unwrap");
+    let unwrapped = method_expect_projection(expr, "Java null receiver");
     if propagated {
         RustExpr::shaped(RustExprShape::ResultPropagated, unwrapped)
     } else {
@@ -14511,6 +14645,51 @@ fn apply_erased_object_downcast(
                 crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
             )),
         })),
+    }
+}
+
+fn apply_erased_object_closed_enum_downcast(
+    expr: RustExpr,
+    enum_name: &str,
+    variants: &[String],
+    invalid_cast: &InvalidCastPolicy,
+) -> RustExpr {
+    if expr_is_unresolved_static_owner_value_call(&expr) {
+        return expr;
+    }
+    let InvalidCastPolicy::Panic = invalid_cast;
+    let object_name = "__java_erased_object".to_string();
+    let object = RustExpr::Var(object_name.clone());
+    let fallback = RustExpr::MacroCall {
+        macro_name: "panic".to_string(),
+        args: vec![RustExpr::Literal(format!(
+            "\"{}\"",
+            crate::output_markers::INVALID_JAVA_CAST_MESSAGE
+        ))],
+    };
+    let tail = variants.iter().rev().fold(fallback, |else_expr, variant| {
+        let variant = normalize_emitted_java_type_name(variant);
+        let downcast = method_expect_projection(
+            erased_object_downcast_ref_projection(object.clone(), &variant),
+            crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
+        );
+        RustExpr::If {
+            condition: Box::new(erased_object_is_type_projection(object.clone(), &variant)),
+            then_expr: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path([enum_name, variant.as_str()])),
+                args: vec![apply_clone_projection(downcast)],
+            }),
+            else_expr: Box::new(else_expr),
+        }
+    });
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: object_name,
+            ty: None,
+            value: Some(expr),
+        }],
+        tail: Some(Box::new(tail)),
     }
 }
 
@@ -16328,13 +16507,16 @@ mod tests {
     #[test]
     fn owned_optional_unwrap_keeps_method_structure_for_structured_receivers() {
         let unwrapped = apply_one(RustExpr::Var("value".to_string()), &Coercion::UnwrapOption);
-        assert_eq!(emit::emit_expr(&unwrapped), "value.unwrap()");
+        assert_eq!(
+            emit::emit_expr(&unwrapped),
+            "value.expect(\"Java null receiver\")"
+        );
         assert_eq!(
             unwrapped,
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::Var("value".to_string())),
-                method: "unwrap".to_string(),
-                args: Vec::new(),
+                method: "expect".to_string(),
+                args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
             }
         );
 
@@ -16342,13 +16524,16 @@ mod tests {
             RustExpr::Raw("factory()".to_string()),
             &Coercion::UnwrapOption,
         );
-        assert_eq!(emit::emit_expr(&raw), "factory().unwrap()");
+        assert_eq!(
+            emit::emit_expr(&raw),
+            "factory().expect(\"Java null receiver\")"
+        );
         assert_eq!(
             raw,
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::Raw("factory()".to_string())),
-                method: "unwrap".to_string(),
-                args: Vec::new(),
+                method: "expect".to_string(),
+                args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
             },
             "legacy raw producers keep the raw receiver leaf, not the old opaque method tail"
         );
@@ -16362,14 +16547,17 @@ mod tests {
         );
         let unwrapped = apply_one(propagated, &Coercion::UnwrapOption);
 
-        assert_eq!(emit::emit_expr(&unwrapped), "reader.read_line()?.unwrap()");
+        assert_eq!(
+            emit::emit_expr(&unwrapped),
+            "reader.read_line()?.expect(\"Java null receiver\")"
+        );
         assert_eq!(
             unwrapped.recorded_shape(),
             Some(RustExprShape::ResultPropagated)
         );
         assert_eq!(
             emit::emit_expr(&propagate_result_projection(unwrapped)),
-            "reader.read_line()?.unwrap()"
+            "reader.read_line()?.expect(\"Java null receiver\")"
         );
     }
 
@@ -22773,6 +22961,36 @@ mod tests {
             RustExpr::MethodCall { args, .. }
                 if matches!(args.as_slice(), [RustExpr::Closure { .. }])
         ));
+
+        let erased_carrier_check = InstanceOfCheck::ErasedObjectClosedEnum {
+            enum_name: "AnimalValue".to_string(),
+            variants: vec!["Animal".to_string(), "Dog".to_string()],
+        };
+        let erased_carrier_predicate =
+            instanceof_check_projection(RustExpr::Var("object".to_string()), &erased_carrier_check);
+        let rendered = emit::emit_expr(&erased_carrier_predicate);
+        assert!(
+            rendered.contains("__java_instanceof_value.is::<Animal>()"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_instanceof_value.is::<Dog>()"),
+            "{rendered}"
+        );
+        let erased_carrier_downcast = instanceof_pattern_downcast_ref_projection(
+            RustExpr::Var("object".to_string()),
+            &erased_carrier_check,
+        )
+        .expect("erased-object source carrier instanceof should expose pattern recovery");
+        let rendered = emit::emit_expr(&erased_carrier_downcast);
+        assert!(
+            rendered.contains("Some(AnimalValue::Animal(__java_instanceof_value.downcast_ref::<Animal>().expect(\"invalid Java cast\").clone()))"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Some(AnimalValue::Dog(__java_instanceof_value.downcast_ref::<Dog>().expect(\"invalid Java cast\").clone()))"),
+            "{rendered}"
+        );
     }
 
     #[test]

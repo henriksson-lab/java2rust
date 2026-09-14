@@ -60,7 +60,9 @@ use crate::facts::ReceiverAbi;
 use crate::java_ir::{Expr, JavaType, LambdaBody, PrimitiveType};
 use crate::output_markers::noop_facade_method_call_site_marker;
 use crate::representation::RepresentationPlan;
-use crate::rust_ir::{RustClosureBody, RustClosureParam, RustExpr, RustStmt, RustType};
+use crate::rust_ir::{
+    RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustStmt, RustType,
+};
 use crate::shape_projection::shape_is_erased_object_boundary;
 use crate::slot_render::{rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts};
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
@@ -836,7 +838,10 @@ fn apply_native_java_static_method(
             if !args.is_empty() {
                 return compile_error_call("Optional.empty requires no arguments");
             }
-            RustExpr::Var("None".to_string())
+            RustExpr::shaped(
+                RustExprShape::OptionalConstructed,
+                RustExpr::Var("None".to_string()),
+            )
         }
         NativeJavaStaticMethod::OptionalOf => {
             let Some(value) = args.into_iter().next() else {
@@ -1529,24 +1534,30 @@ pub(crate) fn array_blocking_queue_add_result_projection(
             vec![array_blocking_queue_null_element_exception_expr()],
         );
     }
-    RustExpr::If {
-        condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
-        then_expr: Box::new(RustExpr::Block {
-            stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
-                receiver,
-                "push",
-                vec![value],
-            ))],
-            tail: Some(Box::new(function_call_projection(
-                ok_bool_java_exception_path_projection(),
-                vec![RustExpr::Literal("true".to_string())],
-            ))),
-        }),
-        else_expr: Box::new(function_call_projection(
-            RustExpr::Var("Err".to_string()),
-            vec![array_blocking_queue_full_exception_expr("add")],
-        )),
-    }
+    let value_name = "__java_array_blocking_queue_value";
+    let value_var = RustExpr::Var(value_name.to_string());
+    array_blocking_queue_evaluate_value_before_capacity(
+        value_name,
+        value,
+        RustExpr::If {
+            condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
+            then_expr: Box::new(RustExpr::Block {
+                stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                    receiver,
+                    "push",
+                    vec![value_var],
+                ))],
+                tail: Some(Box::new(function_call_projection(
+                    ok_bool_java_exception_path_projection(),
+                    vec![RustExpr::Literal("true".to_string())],
+                ))),
+            }),
+            else_expr: Box::new(function_call_projection(
+                RustExpr::Var("Err".to_string()),
+                vec![array_blocking_queue_full_exception_expr("add")],
+            )),
+        },
+    )
 }
 
 pub(crate) fn array_blocking_queue_offer_result_projection(
@@ -1560,24 +1571,30 @@ pub(crate) fn array_blocking_queue_offer_result_projection(
             vec![array_blocking_queue_null_element_exception_expr()],
         );
     }
-    RustExpr::If {
-        condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
-        then_expr: Box::new(RustExpr::Block {
-            stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
-                receiver,
-                "push",
-                vec![value],
-            ))],
-            tail: Some(Box::new(function_call_projection(
+    let value_name = "__java_array_blocking_queue_value";
+    let value_var = RustExpr::Var(value_name.to_string());
+    array_blocking_queue_evaluate_value_before_capacity(
+        value_name,
+        value,
+        RustExpr::If {
+            condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
+            then_expr: Box::new(RustExpr::Block {
+                stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                    receiver,
+                    "push",
+                    vec![value_var],
+                ))],
+                tail: Some(Box::new(function_call_projection(
+                    ok_bool_java_exception_path_projection(),
+                    vec![RustExpr::Literal("true".to_string())],
+                ))),
+            }),
+            else_expr: Box::new(function_call_projection(
                 ok_bool_java_exception_path_projection(),
-                vec![RustExpr::Literal("true".to_string())],
-            ))),
-        }),
-        else_expr: Box::new(function_call_projection(
-            ok_bool_java_exception_path_projection(),
-            vec![RustExpr::Literal("false".to_string())],
-        )),
-    }
+                vec![RustExpr::Literal("false".to_string())],
+            )),
+        },
+    )
 }
 
 pub(crate) fn array_blocking_queue_put_result_projection(
@@ -1602,23 +1619,45 @@ pub(crate) fn array_blocking_queue_put_result_projection(
             vec![array_blocking_queue_null_element_exception_expr()],
         );
     }
-    RustExpr::If {
-        condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
-        then_expr: Box::new(RustExpr::Block {
-            stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
-                receiver,
-                "push",
-                vec![value],
-            ))],
-            tail: Some(Box::new(function_call_projection(
-                ok_unit_java_exception_path_projection(),
-                vec![RustExpr::Tuple(Vec::new())],
-            ))),
-        }),
-        else_expr: Box::new(function_call_projection(
-            RustExpr::Var("Err".to_string()),
-            vec![array_blocking_queue_would_block_exception_expr()],
-        )),
+    let value_name = "__java_array_blocking_queue_value";
+    let value_var = RustExpr::Var(value_name.to_string());
+    array_blocking_queue_evaluate_value_before_capacity(
+        value_name,
+        value,
+        RustExpr::If {
+            condition: Box::new(array_blocking_queue_has_capacity_expr(receiver.clone())),
+            then_expr: Box::new(RustExpr::Block {
+                stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                    receiver,
+                    "push",
+                    vec![value_var],
+                ))],
+                tail: Some(Box::new(function_call_projection(
+                    ok_unit_java_exception_path_projection(),
+                    vec![RustExpr::Tuple(Vec::new())],
+                ))),
+            }),
+            else_expr: Box::new(function_call_projection(
+                RustExpr::Var("Err".to_string()),
+                vec![array_blocking_queue_would_block_exception_expr()],
+            )),
+        },
+    )
+}
+
+fn array_blocking_queue_evaluate_value_before_capacity(
+    value_name: &str,
+    value: RustExpr,
+    tail: RustExpr,
+) -> RustExpr {
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: value_name.to_string(),
+            ty: None,
+            value: Some(value),
+        }],
+        tail: Some(Box::new(tail)),
     }
 }
 
@@ -2882,6 +2921,8 @@ fn apply_native_collection_new_target(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
+    let is_priority_queue =
+        crate::stdlib::java_type_is_priority_queue(&target.owner_shape().java_ty);
     let is_array_blocking_queue =
         crate::stdlib::java_type_is_array_blocking_queue(&target.owner_shape().java_ty);
     if matches!(
@@ -2928,9 +2969,30 @@ fn apply_native_collection_new_target(
             NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
                 priority_queue_comparator_constructor_unsupported_projection()
             }
+            NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. } => args
+                .pop()
+                .map(|comparator| {
+                    priority_queue_with_callback_comparator_projection(
+                        comparator,
+                        priority_queue_element_rust_type(target, facts),
+                    )
+                })
+                .unwrap_or_else(priority_queue_empty_new_projection),
+            NativeCollectionNewTarget::PriorityQueueComparator { .. } => args
+                .pop()
+                .map(|comparator| {
+                    priority_queue_with_comparator_projection(
+                        comparator,
+                        priority_queue_element_rust_type(target, facts),
+                    )
+                })
+                .unwrap_or_else(priority_queue_empty_new_projection),
         };
     }
     match native_collection {
+        NativeCollectionNewTarget::Empty { .. } if is_priority_queue => {
+            priority_queue_empty_new_projection()
+        }
         NativeCollectionNewTarget::Empty { .. } if is_array_blocking_queue => {
             array_blocking_queue_empty_new_projection()
         }
@@ -2941,6 +3003,12 @@ fn apply_native_collection_new_target(
             } else {
                 native_collection_empty_new_projection(kind)
             }
+        }
+        NativeCollectionNewTarget::WithCapacity { .. } if is_priority_queue => {
+            let capacity = args
+                .pop()
+                .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+            priority_queue_with_capacity_projection(capacity)
         }
         NativeCollectionNewTarget::WithCapacity { .. } if is_array_blocking_queue => {
             let capacity = args
@@ -2954,6 +3022,10 @@ fn apply_native_collection_new_target(
                 .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
             native_collection_with_capacity_projection(kind, capacity)
         }
+        NativeCollectionNewTarget::FromSource { .. } if is_priority_queue => args
+            .pop()
+            .map(priority_queue_from_source_projection)
+            .unwrap_or_else(priority_queue_empty_new_projection),
         NativeCollectionNewTarget::FromSource { .. } if is_array_blocking_queue => args
             .pop()
             .map(array_blocking_queue_from_source_projection)
@@ -2962,6 +3034,9 @@ fn apply_native_collection_new_target(
             .pop()
             .map(|source| native_collection_from_source_projection(kind, source))
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
+        NativeCollectionNewTarget::FromSingleArg { .. } if is_priority_queue => args
+            .pop()
+            .unwrap_or_else(priority_queue_empty_new_projection),
         NativeCollectionNewTarget::FromSingleArg { .. } if is_array_blocking_queue => args
             .pop()
             .unwrap_or_else(array_blocking_queue_empty_new_projection),
@@ -2971,6 +3046,164 @@ fn apply_native_collection_new_target(
         NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
             priority_queue_comparator_constructor_unsupported_projection()
         }
+        NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. } => args
+            .pop()
+            .map(|comparator| {
+                priority_queue_with_callback_comparator_projection(
+                    comparator,
+                    priority_queue_element_rust_type(target, facts),
+                )
+            })
+            .unwrap_or_else(priority_queue_empty_new_projection),
+        NativeCollectionNewTarget::PriorityQueueComparator { .. } => args
+            .pop()
+            .map(|comparator| {
+                priority_queue_with_comparator_projection(
+                    comparator,
+                    priority_queue_element_rust_type(target, facts),
+                )
+            })
+            .unwrap_or_else(priority_queue_empty_new_projection),
+    }
+}
+
+fn priority_queue_empty_new_projection() -> RustExpr {
+    function_call_projection(RustExpr::path(["JavaPriorityQueue", "new"]), Vec::new())
+}
+
+fn priority_queue_with_capacity_projection(capacity: RustExpr) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["JavaPriorityQueue", "with_capacity"]),
+        vec![index_to_usize_projection(
+            capacity,
+            IndexToUsizeProjection::StreamLambdaArgument,
+        )],
+    )
+}
+
+fn priority_queue_from_source_projection(source: RustExpr) -> RustExpr {
+    receiver_method_call_projection_exact(
+        receiver_method_call_projection_exact(source, "into_iter", Vec::new()),
+        "collect",
+        Vec::new(),
+    )
+}
+
+fn priority_queue_element_rust_type(target: &NewTargetPlan, facts: &FactSet) -> Option<RustType> {
+    let JavaType::Named { args, .. } = &target.owner_shape().java_ty else {
+        return None;
+    };
+    args.first()
+        .map(|element| rust_type_for_java_type_with_facts(element, facts))
+}
+
+fn priority_queue_with_comparator_projection(
+    comparator: RustExpr,
+    element_ty: Option<RustType>,
+) -> RustExpr {
+    let comparison =
+        unwrap_result_or_panic_uncaught_java_exception(receiver_method_call_projection_exact(
+            RustExpr::Var("__java_comparator".to_string()),
+            "compare",
+            vec![
+                receiver_method_call_projection_exact(
+                    RustExpr::Var("a".to_string()),
+                    "clone",
+                    Vec::new(),
+                ),
+                receiver_method_call_projection_exact(
+                    RustExpr::Var("b".to_string()),
+                    "clone",
+                    Vec::new(),
+                ),
+            ],
+        ));
+    let param_ty = element_ty.map(|ty| {
+        crate::emit::emit_type(&RustType::Ref {
+            mutable: false,
+            lifetime: None,
+            inner: Box::new(ty),
+        })
+    });
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: true,
+            name: "__java_comparator".to_string(),
+            ty: None,
+            value: Some(comparator),
+        }],
+        tail: Some(Box::new(function_call_projection(
+            RustExpr::path(["JavaPriorityQueue", "with_comparator"]),
+            vec![RustExpr::Closure {
+                is_move: true,
+                params: vec![
+                    RustClosureParam {
+                        pattern: "a".to_string(),
+                        ty: param_ty.clone(),
+                    },
+                    RustClosureParam {
+                        pattern: "b".to_string(),
+                        ty: param_ty,
+                    },
+                ],
+                return_type: None,
+                body: RustClosureBody::Expr(Box::new(comparison)),
+            }],
+        ))),
+    }
+}
+
+fn priority_queue_with_callback_comparator_projection(
+    comparator: RustExpr,
+    element_ty: Option<RustType>,
+) -> RustExpr {
+    let comparison = function_call_projection(
+        RustExpr::Var("__java_comparator".to_string()),
+        vec![
+            receiver_method_call_projection_exact(
+                RustExpr::Var("a".to_string()),
+                "clone",
+                Vec::new(),
+            ),
+            receiver_method_call_projection_exact(
+                RustExpr::Var("b".to_string()),
+                "clone",
+                Vec::new(),
+            ),
+        ],
+    );
+    let param_ty = element_ty.map(|ty| {
+        crate::emit::emit_type(&RustType::Ref {
+            mutable: false,
+            lifetime: None,
+            inner: Box::new(ty),
+        })
+    });
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: true,
+            name: "__java_comparator".to_string(),
+            ty: None,
+            value: Some(comparator),
+        }],
+        tail: Some(Box::new(function_call_projection(
+            RustExpr::path(["JavaPriorityQueue", "with_comparator"]),
+            vec![RustExpr::Closure {
+                is_move: true,
+                params: vec![
+                    RustClosureParam {
+                        pattern: "a".to_string(),
+                        ty: param_ty.clone(),
+                    },
+                    RustClosureParam {
+                        pattern: "b".to_string(),
+                        ty: param_ty,
+                    },
+                ],
+                return_type: None,
+                body: RustClosureBody::Expr(Box::new(comparison)),
+            }],
+        ))),
     }
 }
 
@@ -3003,7 +3236,9 @@ fn native_collection_new_target_kind(
         | NativeCollectionNewTarget::WithCapacity { kind }
         | NativeCollectionNewTarget::FromSource { kind }
         | NativeCollectionNewTarget::FromSingleArg { kind }
-        | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind } => kind,
+        | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind }
+        | NativeCollectionNewTarget::PriorityQueueComparatorCallback { kind }
+        | NativeCollectionNewTarget::PriorityQueueComparator { kind } => kind,
     }
 }
 

@@ -416,6 +416,7 @@ pub struct MethodUsageFacts {
     bindings: HashMap<String, BindingUseFacts>,
     bindings_by_id: HashMap<BindingId, BindingUseFacts>,
     type_params_in_scope: Vec<String>,
+    same_type_method_arg_targets: HashMap<(String, usize), Option<Vec<JavaType>>>,
     call_sites: Vec<CallSiteUse>,
     constructor_call_sites: Vec<ConstructorCallSiteUse>,
     returned_call_results: Vec<ReturnedCallResultUse>,
@@ -606,6 +607,18 @@ impl MethodUsageFacts {
 
     pub fn field_uses(&self) -> &[FieldUse] {
         &self.field_uses
+    }
+
+    fn same_type_call_arg_target_type(
+        &self,
+        name: &str,
+        arg_count: usize,
+        arg_index: usize,
+    ) -> Option<&JavaType> {
+        self.same_type_method_arg_targets
+            .get(&(name.to_string(), arg_count))
+            .and_then(Option::as_ref)
+            .and_then(|targets| targets.get(arg_index))
     }
 
     pub fn mutates_self(&self) -> bool {
@@ -938,6 +951,21 @@ impl BindingUseFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingUse {
     ContentRead,
+    AssignedSubtypeToLocal {
+        local_name: String,
+        local_binding: Option<BindingId>,
+        actual_type: JavaType,
+    },
+    AssignedSubtypeToCollectionElement {
+        collection_name: String,
+        collection_binding: Option<BindingId>,
+        element_type: JavaType,
+        actual_type: JavaType,
+    },
+    AssignedSubtypeToCallArgument {
+        target_type: JavaType,
+        actual_type: JavaType,
+    },
     AssignedToLocal {
         local_name: String,
         local_binding: Option<BindingId>,
@@ -972,6 +1000,15 @@ pub enum BindingUse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldUse {
+    AssignedSubtypeToField {
+        field_name: String,
+        field_type: JavaType,
+        actual_type: JavaType,
+    },
+    AssignedSubtypeToCallArgument {
+        target_type: JavaType,
+        actual_type: JavaType,
+    },
     AssignedFromCall {
         field_name: String,
         name: String,
@@ -1257,18 +1294,32 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                         return true;
                     }
                     let rust_name = crate::parser::to_snake_case(&call_site.name);
-                    return mutating_compat_methods
-                        .contains(&(resolved.declaring_type.clone(), call_site.name.clone()))
-                        || mutating_compat_methods
-                            .contains(&(resolved.declaring_type.clone(), rust_name));
+                    if legacy_mutating_method_contains(
+                        &mutating_compat_methods,
+                        &resolved.declaring_type,
+                        &call_site.name,
+                    ) || legacy_mutating_method_contains(
+                        &mutating_compat_methods,
+                        &resolved.declaring_type,
+                        &resolved.rust_name,
+                    ) || legacy_mutating_method_contains(
+                        &mutating_compat_methods,
+                        &resolved.declaring_type,
+                        &rust_name,
+                    ) {
+                        return true;
+                    }
                 }
                 if call_site
                     .receiver_type
                     .as_ref()
                     .is_some_and(|receiver_type| {
                         java_type_name_for_usage(receiver_type).is_some_and(|receiver_name| {
-                            mutating_compat_methods
-                                .contains(&(receiver_name.to_string(), call_site.name.clone()))
+                            legacy_mutating_method_contains(
+                                &mutating_compat_methods,
+                                receiver_name,
+                                &call_site.name,
+                            )
                         })
                     })
                 {
@@ -1299,6 +1350,66 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
     }
 }
 
+fn legacy_mutating_method_contains(
+    methods: &HashSet<(String, String)>,
+    owner: &str,
+    method: &str,
+) -> bool {
+    let owner_query_ambiguous = legacy_usage_owner_query_is_ambiguous(
+        methods
+            .iter()
+            .filter_map(|(candidate_owner, candidate_method)| {
+                (candidate_method == method).then_some(candidate_owner.as_str())
+            }),
+        owner,
+    );
+    methods.iter().any(|(candidate_owner, candidate_method)| {
+        candidate_method == method
+            && legacy_usage_owner_fact_matches(candidate_owner, owner, owner_query_ambiguous)
+    })
+}
+
+fn legacy_usage_owner_query_is_ambiguous<'a>(
+    candidates: impl Iterator<Item = &'a str>,
+    query_owner: &str,
+) -> bool {
+    let query_simple = usage_type_name_simple_segment(query_owner);
+    let matches = candidates
+        .filter(|candidate| {
+            *candidate != query_owner
+                && !usage_distinct_qualified_type_owners(candidate, query_owner)
+                && usage_type_name_simple_segment(candidate) == query_simple
+        })
+        .collect::<HashSet<_>>();
+    matches.len() > 1
+}
+
+fn legacy_usage_owner_fact_matches(
+    fact_owner: &str,
+    query_owner: &str,
+    query_ambiguous: bool,
+) -> bool {
+    fact_owner == query_owner
+        || (!query_ambiguous
+            && !usage_distinct_qualified_type_owners(fact_owner, query_owner)
+            && usage_type_name_simple_segment(fact_owner)
+                == usage_type_name_simple_segment(query_owner))
+}
+
+fn usage_type_name_simple_segment(type_name: &str) -> &str {
+    type_name
+        .rsplit(['.', '$', '_'])
+        .next()
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or(type_name)
+}
+
+fn usage_distinct_qualified_type_owners(left: &str, right: &str) -> bool {
+    (left.contains('.') || left.contains('$'))
+        && (right.contains('.') || right.contains('$'))
+        && left != right
+}
+
 pub fn build_call_graph(program: &Program) -> CallGraph {
     build_call_graph_with_facts(program, &FactSet::default())
 }
@@ -1313,17 +1424,22 @@ pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGr
 
 fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &FactSet) {
     let internal_methods = internal_method_names(ty);
+    let same_type_method_arg_targets = same_type_method_arg_targets(ty);
     let source_return_nullability = source_return_nullability_by_call_name(ty);
     let field_names = field_names(ty);
     let field_types = field_types(ty);
+    let current_super_type = ty.extends.as_deref();
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 let mut method_facts = MethodUsageFacts::default();
+                method_facts.same_type_method_arg_targets = same_type_method_arg_targets.clone();
                 method_facts.type_params_in_scope =
                     usage_type_params_in_scope(&ty.type_params, &method.type_params);
-                let type_env = usage_type_env(ty, &method.type_params, &method.type_param_bounds);
+                let mut type_env =
+                    usage_type_env(ty, &method.type_params, &method.type_param_bounds);
                 for param in &method.params {
+                    type_env.insert_param(param.source_name.clone(), param.ty.clone());
                     insert_binding_use_facts(
                         &mut method_facts,
                         param.source_name.clone(),
@@ -1337,6 +1453,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             stmt,
                             &mut method_facts,
                             &ty.name,
+                            current_super_type,
                             &internal_methods,
                             &field_names,
                             &field_types,
@@ -1361,10 +1478,12 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
             }
             Member::Constructor(ctor) => {
                 let mut ctor_facts = MethodUsageFacts::default();
+                ctor_facts.same_type_method_arg_targets = same_type_method_arg_targets.clone();
                 ctor_facts.type_params_in_scope =
                     usage_type_params_in_scope(&ty.type_params, &ctor.type_params);
-                let type_env = usage_type_env(ty, &ctor.type_params, &ctor.type_param_bounds);
+                let mut type_env = usage_type_env(ty, &ctor.type_params, &ctor.type_param_bounds);
                 for param in &ctor.params {
+                    type_env.insert_param(param.source_name.clone(), param.ty.clone());
                     insert_binding_use_facts(
                         &mut ctor_facts,
                         param.source_name.clone(),
@@ -1378,6 +1497,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             stmt,
                             &mut ctor_facts,
                             &ty.name,
+                            current_super_type,
                             &internal_methods,
                             &field_names,
                             &field_types,
@@ -1396,6 +1516,26 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
             _ => {}
         }
     }
+}
+
+fn same_type_method_arg_targets(ty: &TypeDecl) -> HashMap<(String, usize), Option<Vec<JavaType>>> {
+    let mut targets = HashMap::new();
+    for member in &ty.members {
+        let Member::Method(method) = member else {
+            continue;
+        };
+        let key = (method.name.clone(), method.params.len());
+        let value = method
+            .params
+            .iter()
+            .map(|param| param.ty.clone())
+            .collect::<Vec<_>>();
+        targets
+            .entry(key)
+            .and_modify(|existing| *existing = None)
+            .or_insert(Some(value));
+    }
+    targets
 }
 
 fn usage_type_env(
@@ -1710,10 +1850,14 @@ fn collect_call_graph_edges_from_expr(
         }
         Expr::New {
             ty,
+            qualifier,
             args,
             body,
             resolved,
         } => {
+            if let Some(qualifier) = qualifier {
+                collect_call_graph_edges_from_expr(qualifier, graph, context, facts);
+            }
             let callee = resolved
                 .as_ref()
                 .map(CallableKey::resolved_constructor)
@@ -2125,6 +2269,7 @@ fn analyze_stmt(
     stmt: &Stmt,
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -2143,6 +2288,19 @@ fn analyze_stmt(
         } => {
             insert_binding_use_facts(facts, source_name.clone(), binding.clone(), ty.clone());
             if let Some(initializer) = initializer {
+                if let Some(actual_type) =
+                    assigned_subtype_local_actual_type(initializer, ty, type_env, semantic_facts)
+                {
+                    facts.record_declared_binding_use(
+                        source_name,
+                        binding.as_ref(),
+                        BindingUse::AssignedSubtypeToLocal {
+                            local_name: name.clone(),
+                            local_binding: binding.clone(),
+                            actual_type,
+                        },
+                    );
+                }
                 if let Expr::Var(source_name) = initializer {
                     record_use(
                         facts,
@@ -2158,6 +2316,7 @@ fn analyze_stmt(
                     internal_methods,
                     facts,
                     current_type,
+                    current_super_type,
                     field_names,
                     field_types,
                     semantic_facts,
@@ -2177,6 +2336,7 @@ fn analyze_stmt(
                     initializer,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2195,6 +2355,7 @@ fn analyze_stmt(
                         internal_methods,
                         facts,
                         current_type,
+                        current_super_type,
                         field_names,
                         field_types,
                         semantic_facts,
@@ -2207,11 +2368,43 @@ fn analyze_stmt(
                             boundary: policy.boundary,
                         });
                     }
+                    if let Some(field_ty) = field_types.get(name)
+                        && let Some(actual_type) = assigned_subtype_local_actual_type(
+                            value,
+                            field_ty,
+                            type_env,
+                            semantic_facts,
+                        )
+                    {
+                        facts.field_uses.push(FieldUse::AssignedSubtypeToField {
+                            field_name: name.clone(),
+                            field_type: field_ty.clone(),
+                            actual_type,
+                        });
+                    }
                     analyze_stored_expr(value, facts, name);
                 } else {
                     record_use(facts, name, BindingUse::Mutated);
+                    let local_binding = facts.visible_binding_id_for_name(name);
+                    if let Some(target_binding) = facts.current_visible_binding_facts_for_name(name)
+                        && let Some(actual_type) = assigned_subtype_local_actual_type(
+                            value,
+                            target_binding.java_ty(),
+                            type_env,
+                            semantic_facts,
+                        )
+                    {
+                        record_use(
+                            facts,
+                            name,
+                            BindingUse::AssignedSubtypeToLocal {
+                                local_name: name.clone(),
+                                local_binding: local_binding.clone(),
+                                actual_type,
+                            },
+                        );
+                    }
                     if let Expr::Var(source_name) = value {
-                        let local_binding = facts.visible_binding_id_for_name(name);
                         record_use(
                             facts,
                             source_name,
@@ -2226,6 +2419,7 @@ fn analyze_stmt(
                         internal_methods,
                         facts,
                         current_type,
+                        current_super_type,
                         field_names,
                         field_types,
                         semantic_facts,
@@ -2252,6 +2446,7 @@ fn analyze_stmt(
                     internal_methods,
                     facts,
                     current_type,
+                    current_super_type,
                     field_names,
                     field_types,
                     semantic_facts,
@@ -2264,6 +2459,20 @@ fn analyze_stmt(
                         boundary: policy.boundary,
                     });
                 }
+                if let Some(field_ty) = field_types.get(field_name)
+                    && let Some(actual_type) = assigned_subtype_local_actual_type(
+                        value,
+                        field_ty,
+                        type_env,
+                        semantic_facts,
+                    )
+                {
+                    facts.field_uses.push(FieldUse::AssignedSubtypeToField {
+                        field_name: field_name.clone(),
+                        field_type: field_ty.clone(),
+                        actual_type,
+                    });
+                }
                 analyze_stored_expr(value, facts, field_name);
             }
             if array_assignment_targets_self_field(target, facts, field_names) {
@@ -2273,6 +2482,7 @@ fn analyze_stmt(
                 target,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2284,6 +2494,7 @@ fn analyze_stmt(
                 value,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2307,6 +2518,7 @@ fn analyze_stmt(
                 facts,
                 internal_methods,
                 current_type,
+                current_super_type,
                 field_names,
                 field_types,
                 semantic_facts,
@@ -2323,6 +2535,7 @@ fn analyze_stmt(
                 expr,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2337,6 +2550,7 @@ fn analyze_stmt(
                 expr,
                 facts,
                 current_type,
+                current_super_type,
                 field_names,
                 field_types,
                 semantic_facts,
@@ -2347,6 +2561,7 @@ fn analyze_stmt(
                 expr,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2364,6 +2579,7 @@ fn analyze_stmt(
                 condition,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2375,6 +2591,7 @@ fn analyze_stmt(
                 &then_block.statements,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2387,6 +2604,7 @@ fn analyze_stmt(
                     &else_block.statements,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2406,6 +2624,7 @@ fn analyze_stmt(
                 condition,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2417,6 +2636,7 @@ fn analyze_stmt(
                 &body.statements,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2438,6 +2658,7 @@ fn analyze_stmt(
                     stmt,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2451,6 +2672,7 @@ fn analyze_stmt(
                     condition,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2464,6 +2686,7 @@ fn analyze_stmt(
                     expr,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2476,6 +2699,7 @@ fn analyze_stmt(
                 &body.statements,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2498,6 +2722,7 @@ fn analyze_stmt(
                 iterable,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2516,6 +2741,7 @@ fn analyze_stmt(
                 &body.statements,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2530,6 +2756,7 @@ fn analyze_stmt(
                 selector,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2542,6 +2769,7 @@ fn analyze_stmt(
                     &case.statements,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2556,6 +2784,7 @@ fn analyze_stmt(
                 &block.statements,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2576,6 +2805,7 @@ fn analyze_stmt(
                     resource,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2588,6 +2818,7 @@ fn analyze_stmt(
                 &body.statements,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2619,6 +2850,7 @@ fn analyze_stmt(
                     &catch.body.statements,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2634,6 +2866,7 @@ fn analyze_stmt(
                     &finally_block.statements,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2647,6 +2880,7 @@ fn analyze_stmt(
             expr,
             facts,
             current_type,
+            current_super_type,
             internal_methods,
             field_names,
             field_types,
@@ -2689,6 +2923,7 @@ fn analyze_stmt(
                     arg,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2725,6 +2960,7 @@ fn call_result_boundary_policy_with_context(
     internal_methods: &HashSet<String>,
     facts: &MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
@@ -2742,6 +2978,7 @@ fn call_result_boundary_policy_with_context(
                     receiver,
                     facts,
                     current_type,
+                    current_super_type,
                     field_names,
                     field_types,
                     semantic_facts,
@@ -2780,6 +3017,7 @@ fn call_result_receiver_type_with_context(
     receiver: &Expr,
     facts: &MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
@@ -2791,6 +3029,7 @@ fn call_result_receiver_type_with_context(
         Expr::FieldAccess(inner, field_name) if matches!(inner.as_ref(), Expr::This) => {
             source_field_type(current_type, field_name, field_types, semantic_facts)
         }
+        Expr::Super => current_super_type.map(|name| JavaType::Unknown(name.to_string())),
         _ => call_result_receiver_type(receiver, facts),
     }
 }
@@ -2804,10 +3043,66 @@ fn call_result_receiver_type(receiver: &Expr, facts: &MethodUsageFacts) -> Optio
     }
 }
 
+fn assigned_subtype_local_actual_type(
+    value: &Expr,
+    target_ty: &JavaType,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    let actual_ty = crate::types::infer_expr_type(value, type_env);
+    if actual_ty != *target_ty
+        && semantic_facts
+            .hierarchy_subtype_policy(&actual_ty, target_ty)
+            .reaches()
+    {
+        return Some(actual_ty);
+    }
+    assigned_subtype_actual_type_from_source_hierarchy_alias(&actual_ty, target_ty, semantic_facts)
+}
+
+fn assigned_subtype_actual_type_from_source_hierarchy_alias(
+    actual_ty: &JavaType,
+    target_ty: &JavaType,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    let actual_name = usage_java_type_name(actual_ty)?;
+    let target_name = usage_java_type_name(target_ty)?;
+    let actual_simple = simple_usage_type_name(actual_name);
+    let target_simple = simple_usage_type_name(target_name);
+    if actual_simple == target_simple {
+        return None;
+    }
+    let candidates = semantic_facts
+        .type_capability_overrides
+        .iter()
+        .filter(|fact| {
+            fact.provenance == crate::facts::FactProvenance::ParsedSource
+                && simple_usage_type_name(&fact.type_name) == actual_simple
+        })
+        .collect::<Vec<_>>();
+    let [candidate] = candidates.as_slice() else {
+        return None;
+    };
+    let qualified_actual = JavaType::Named {
+        name: candidate.type_name.clone(),
+        args: Vec::new(),
+    };
+    let reaches_target = semantic_facts
+        .reachable_hierarchy_edges_for_type(&qualified_actual)
+        .iter()
+        .any(|edge| simple_usage_type_name(&edge.super_name) == target_simple);
+    reaches_target.then_some(qualified_actual)
+}
+
+fn simple_usage_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
 fn analyze_expr(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -2819,6 +3114,7 @@ fn analyze_expr(
         expr,
         facts,
         current_type,
+        current_super_type,
         internal_methods,
         field_names,
         field_types,
@@ -2833,6 +3129,7 @@ fn analyze_return_expr(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -2844,6 +3141,7 @@ fn analyze_return_expr(
         expr,
         facts,
         current_type,
+        current_super_type,
         internal_methods,
         field_names,
         field_types,
@@ -2858,6 +3156,7 @@ fn analyze_nested_argument_expr(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -2872,6 +3171,7 @@ fn analyze_nested_argument_expr(
         expr,
         facts,
         current_type,
+        current_super_type,
         internal_methods,
         field_names,
         field_types,
@@ -2985,6 +3285,7 @@ fn analyze_expr_with_context(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -2997,6 +3298,7 @@ fn analyze_expr_with_context(
         expr,
         facts,
         current_type,
+        current_super_type,
         field_names,
         field_types,
         semantic_facts,
@@ -3014,6 +3316,7 @@ fn analyze_expr_with_context(
                 receiver,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3034,11 +3337,16 @@ fn analyze_expr_with_context(
                 receiver.as_deref(),
                 facts,
                 current_type,
+                current_super_type,
                 field_names,
                 field_types,
                 semantic_facts,
             );
-            let call_boundary = resolved_receiver_call_boundary(policy.boundary, resolved.as_ref());
+            let call_boundary = resolved_receiver_call_boundary(
+                policy.boundary,
+                receiver.as_deref(),
+                resolved.as_ref(),
+            );
             let call_boundary = modeled_receiver_call_boundary(
                 call_boundary,
                 receiver_type.as_ref(),
@@ -3052,6 +3360,8 @@ fn analyze_expr_with_context(
                 receiver_type.as_ref(),
                 semantic_facts,
             );
+            let usage_resolved =
+                resolved_call_for_usage(receiver.as_deref(), resolved.as_ref(), current_super_type);
             record_trivial_accessor_call_use(
                 facts,
                 current_type,
@@ -3077,7 +3387,7 @@ fn analyze_expr_with_context(
                     source_return_nullability,
                 ),
                 boundary: call_boundary,
-                resolved: resolved.clone(),
+                resolved: usage_resolved.clone(),
             });
             if is_content_read_method(name)
                 && let Some(receiver) = receiver
@@ -3099,6 +3409,21 @@ fn analyze_expr_with_context(
                     },
                 );
             }
+            if let Some(receiver) = receiver.as_deref() {
+                for (arg_index, arg) in args.iter().enumerate() {
+                    record_collection_element_subtype_use(
+                        facts,
+                        receiver,
+                        name,
+                        args.len(),
+                        arg_index,
+                        arg,
+                        receiver_type.as_ref(),
+                        type_env,
+                        semantic_facts,
+                    );
+                }
+            }
             if call_mut_borrow_arg_targets_self_field(
                 receiver.as_deref(),
                 name,
@@ -3112,6 +3437,16 @@ fn analyze_expr_with_context(
             for (arg_index, arg) in args.iter().enumerate() {
                 let arg_boundary =
                     call_argument_use_boundary_policy(name, arg_index, call_boundary);
+                record_call_argument_subtype_use(
+                    facts,
+                    arg,
+                    name,
+                    args.len(),
+                    usage_resolved.as_ref(),
+                    arg_index,
+                    type_env,
+                    semantic_facts,
+                );
                 record_call_arg_use(
                     facts,
                     current_type,
@@ -3129,6 +3464,7 @@ fn analyze_expr_with_context(
                     arg,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3142,6 +3478,7 @@ fn analyze_expr_with_context(
                     receiver,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3156,6 +3493,7 @@ fn analyze_expr_with_context(
                 left,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3167,6 +3505,7 @@ fn analyze_expr_with_context(
                 right,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3179,6 +3518,7 @@ fn analyze_expr_with_context(
             expr,
             facts,
             current_type,
+            current_super_type,
             internal_methods,
             field_names,
             field_types,
@@ -3191,6 +3531,7 @@ fn analyze_expr_with_context(
             expr,
             facts,
             current_type,
+            current_super_type,
             internal_methods,
             field_names,
             field_types,
@@ -3212,6 +3553,7 @@ fn analyze_expr_with_context(
                 expr,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3225,6 +3567,7 @@ fn analyze_expr_with_context(
                 array,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3236,6 +3579,7 @@ fn analyze_expr_with_context(
                 index,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3254,6 +3598,7 @@ fn analyze_expr_with_context(
                     expr,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3268,6 +3613,7 @@ fn analyze_expr_with_context(
                         expr,
                         facts,
                         current_type,
+                        current_super_type,
                         internal_methods,
                         field_names,
                         field_types,
@@ -3284,6 +3630,7 @@ fn analyze_expr_with_context(
                     expr,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3302,6 +3649,7 @@ fn analyze_expr_with_context(
                 condition,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3313,6 +3661,7 @@ fn analyze_expr_with_context(
                 then_expr,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3325,6 +3674,7 @@ fn analyze_expr_with_context(
                 else_expr,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3362,10 +3712,19 @@ fn analyze_expr_with_context(
                     arg_index,
                     constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
                 );
+                record_constructor_argument_subtype_use(
+                    facts,
+                    arg,
+                    resolved.as_ref(),
+                    arg_index,
+                    type_env,
+                    semantic_facts,
+                );
                 analyze_nested_argument_expr(
                     arg,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3380,6 +3739,7 @@ fn analyze_expr_with_context(
             body,
             facts,
             current_type,
+            current_super_type,
             internal_methods,
             field_names,
             field_types,
@@ -3392,6 +3752,7 @@ fn analyze_expr_with_context(
                 selector,
                 facts,
                 current_type,
+                current_super_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -3406,6 +3767,7 @@ fn analyze_expr_with_context(
                             expr,
                             facts,
                             current_type,
+                            current_super_type,
                             internal_methods,
                             field_names,
                             field_types,
@@ -3419,6 +3781,7 @@ fn analyze_expr_with_context(
                     &case.value,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3444,6 +3807,7 @@ fn analyze_lambda_body(
     body: &LambdaBody,
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -3473,6 +3837,7 @@ fn analyze_lambda_body(
             expr,
             facts,
             current_type,
+            current_super_type,
             internal_methods,
             field_names,
             field_types,
@@ -3486,6 +3851,7 @@ fn analyze_lambda_body(
                     stmt,
                     facts,
                     current_type,
+                    current_super_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3507,6 +3873,7 @@ fn record_returned_call_result_use(
     facts: &mut MethodUsageFacts,
     internal_methods: &HashSet<String>,
     current_type: &str,
+    current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
@@ -3519,6 +3886,7 @@ fn record_returned_call_result_use(
                 internal_methods,
                 facts,
                 current_type,
+                current_super_type,
                 field_names,
                 field_types,
                 semantic_facts,
@@ -3539,6 +3907,7 @@ fn record_returned_call_result_use(
             facts,
             internal_methods,
             current_type,
+            current_super_type,
             field_names,
             field_types,
             semantic_facts,
@@ -3554,6 +3923,7 @@ fn record_returned_call_result_use(
                 facts,
                 internal_methods,
                 current_type,
+                current_super_type,
                 field_names,
                 field_types,
                 semantic_facts,
@@ -3564,6 +3934,7 @@ fn record_returned_call_result_use(
                 facts,
                 internal_methods,
                 current_type,
+                current_super_type,
                 field_names,
                 field_types,
                 semantic_facts,
@@ -3572,6 +3943,20 @@ fn record_returned_call_result_use(
         }
         _ => {}
     }
+}
+
+fn resolved_call_for_usage(
+    receiver: Option<&Expr>,
+    resolved: Option<&ResolvedCall>,
+    current_super_type: Option<&str>,
+) -> Option<ResolvedCall> {
+    let mut resolved = resolved.cloned()?;
+    if matches!(receiver, Some(Expr::Super))
+        && let Some(super_type) = current_super_type
+    {
+        resolved.declaring_type = super_type.to_string();
+    }
+    Some(resolved)
 }
 
 fn record_call_arg_use(
@@ -3649,6 +4034,160 @@ fn record_call_arg_use(
             });
         }
         _ => {}
+    }
+}
+
+fn record_collection_element_subtype_use(
+    facts: &mut MethodUsageFacts,
+    receiver: &Expr,
+    call_name: &str,
+    arg_count: usize,
+    arg_index: usize,
+    arg: &Expr,
+    receiver_type: Option<&JavaType>,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) {
+    let Expr::Var(collection_name) = receiver else {
+        return;
+    };
+    let Some(receiver_type) = receiver_type else {
+        return;
+    };
+    let Some(element_type) =
+        collection_stored_argument_type(receiver_type, call_name, arg_count, arg_index)
+    else {
+        return;
+    };
+    let Some(actual_type) =
+        assigned_subtype_local_actual_type(arg, &element_type, type_env, semantic_facts)
+    else {
+        return;
+    };
+    let collection_binding = facts.visible_binding_id_for_name(collection_name);
+    record_use(
+        facts,
+        collection_name,
+        BindingUse::AssignedSubtypeToCollectionElement {
+            collection_name: collection_name.clone(),
+            collection_binding,
+            element_type,
+            actual_type,
+        },
+    );
+}
+
+fn record_call_argument_subtype_use(
+    facts: &mut MethodUsageFacts,
+    arg: &Expr,
+    call_name: &str,
+    arg_count: usize,
+    resolved: Option<&ResolvedCall>,
+    arg_index: usize,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) {
+    let Expr::Var(binding_name) = arg else {
+        return;
+    };
+    let Some(target_type) = resolved
+        .and_then(|resolved| crate::call_plan::resolved_call_arg_target_type(resolved, arg_index))
+        .or_else(|| facts.same_type_call_arg_target_type(call_name, arg_count, arg_index))
+    else {
+        return;
+    };
+    let Some(actual_type) =
+        assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts)
+    else {
+        return;
+    };
+    record_use(
+        facts,
+        binding_name,
+        BindingUse::AssignedSubtypeToCallArgument {
+            target_type: target_type.clone(),
+            actual_type,
+        },
+    );
+}
+
+fn record_constructor_argument_subtype_use(
+    facts: &mut MethodUsageFacts,
+    arg: &Expr,
+    resolved: Option<&ResolvedConstructor>,
+    arg_index: usize,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) {
+    let Some(target_type) = resolved.and_then(|resolved| {
+        resolved
+            .params
+            .get(arg_index)
+            .map(|param| &param.ty)
+            .or_else(|| {
+                resolved
+                    .arg_coercions
+                    .iter()
+                    .find(|coercion| coercion.arg_index == arg_index)
+                    .map(|coercion| &coercion.target)
+            })
+    }) else {
+        return;
+    };
+    let Some(actual_type) =
+        assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts)
+    else {
+        return;
+    };
+
+    if let Expr::Var(binding_name) = arg {
+        record_use(
+            facts,
+            binding_name,
+            BindingUse::AssignedSubtypeToCallArgument {
+                target_type: target_type.clone(),
+                actual_type,
+            },
+        );
+    } else {
+        facts
+            .field_uses
+            .push(FieldUse::AssignedSubtypeToCallArgument {
+                target_type: target_type.clone(),
+                actual_type,
+            });
+    }
+}
+
+fn collection_stored_argument_type(
+    receiver_type: &JavaType,
+    call_name: &str,
+    arg_count: usize,
+    arg_index: usize,
+) -> Option<JavaType> {
+    let JavaType::Named { args, .. } = receiver_type else {
+        return None;
+    };
+    let kind = crate::stdlib::java_collection_kind_for_type(receiver_type)?;
+    match kind {
+        crate::stdlib::JavaCollectionKind::List if call_name == "add" => {
+            let element_arg_index = match arg_count {
+                1 => 0,
+                2 => 1,
+                _ => return None,
+            };
+            (arg_index == element_arg_index)
+                .then(|| args.first().cloned())
+                .flatten()
+        }
+        crate::stdlib::JavaCollectionKind::List if call_name == "set" && arg_index == 1 => {
+            args.first().cloned()
+        }
+        kind if kind.is_set_like() && call_name == "add" && arg_index == 0 => args.first().cloned(),
+        kind if kind.is_map_like() && call_name == "put" && matches!(arg_index, 0 | 1) => {
+            args.get(arg_index).cloned()
+        }
+        _ => None,
     }
 }
 
@@ -3788,6 +4327,7 @@ fn call_receiver_java_type_with_context(
     receiver: Option<&Expr>,
     facts: &MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
@@ -3799,6 +4339,7 @@ fn call_receiver_java_type_with_context(
         Some(Expr::FieldAccess(inner, field_name)) if matches!(inner.as_ref(), Expr::This) => {
             source_field_type(current_type, field_name, field_types, semantic_facts)
         }
+        Some(Expr::Super) => current_super_type.map(|name| JavaType::Unknown(name.to_string())),
         _ => call_receiver_java_type(receiver, facts),
     }
 }
@@ -3939,6 +4480,7 @@ fn analyze_scoped_statements(
     statements: &[Stmt],
     facts: &mut MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -3952,6 +4494,7 @@ fn analyze_scoped_statements(
             stmt,
             facts,
             current_type,
+            current_super_type,
             internal_methods,
             field_names,
             field_types,
@@ -3995,6 +4538,7 @@ fn expr_mutates_self_field(
     expr: &Expr,
     facts: &MethodUsageFacts,
     current_type: &str,
+    current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
@@ -4026,6 +4570,7 @@ fn expr_mutates_self_field(
             Some(receiver.as_ref()),
             facts,
             current_type,
+            current_super_type,
             field_names,
             field_types,
             semantic_facts,
@@ -4129,10 +4674,14 @@ fn constructor_invocation_boundary_policy_for_expr(
 
 fn resolved_receiver_call_boundary(
     boundary: CallArgumentBoundary,
+    receiver: Option<&Expr>,
     resolved: Option<&ResolvedCall>,
 ) -> CallArgumentBoundary {
     if boundary != CallArgumentBoundary::Unknown {
         return boundary;
+    }
+    if matches!(receiver, Some(Expr::Super)) {
+        return CallArgumentBoundary::InternalSameType;
     }
     let Some(resolved) = resolved else {
         return boundary;
@@ -4329,11 +4878,168 @@ class KeyOwner {
     }
 
     #[test]
+    fn local_initialized_from_known_subtype_records_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Use {
+    void run() {
+        Account a = new Savings();
+        a.label();
+    }
+}
+class Account {
+    String label() { return "account"; }
+}
+class Savings extends Account {
+    String label() { return "savings"; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "run");
+        let binding = usage
+            .method_usage_by_key(&method)
+            .and_then(|method| method.current_visible_binding_facts_for_name("a"))
+            .expect("local binding");
+
+        assert!(binding.uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                BindingUse::AssignedSubtypeToLocal {
+                    local_name,
+                    actual_type: JavaType::Named { name, .. },
+                    ..
+                } if local_name == "a" && name == "Savings"
+            )
+        }));
+    }
+
+    #[test]
+    fn collection_add_known_subtype_records_element_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Use {
+    void run() {
+        java.util.ArrayList<Account> accounts = new java.util.ArrayList<Account>();
+        accounts.add(new Savings());
+    }
+}
+class Account {
+    String label() { return "account"; }
+}
+class Savings extends Account {
+    String label() { return "savings"; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "run");
+        let binding = usage
+            .method_usage_by_key(&method)
+            .and_then(|method| method.current_visible_binding_facts_for_name("accounts"))
+            .expect("collection binding");
+
+        assert!(binding.uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                BindingUse::AssignedSubtypeToCollectionElement {
+                    collection_name,
+                    element_type: JavaType::Named { name: element_name, .. },
+                    actual_type: JavaType::Named { name: actual_name, .. },
+                    ..
+                } if collection_name == "accounts"
+                    && element_name == "Account"
+                    && actual_name == "Savings"
+            )
+        }));
+    }
+
+    #[test]
+    fn source_method_known_subtype_argument_records_target_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Base {
+    int id;
+}
+class Sub extends Base {
+}
+class Use {
+    Base keep(Base value) {
+        return value;
+    }
+    void run(Sub value) {
+        keep(value);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "run");
+        let binding = usage
+            .method_usage_by_key(&method)
+            .and_then(|method| method.current_visible_binding_facts_for_name("value"))
+            .expect("argument binding");
+
+        assert!(binding.uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                BindingUse::AssignedSubtypeToCallArgument {
+                    target_type: JavaType::Named { name: target_name, .. },
+                    actual_type: JavaType::Named { name: actual_name, .. },
+                } if target_name == "Base" && actual_name == "Sub"
+            )
+        }));
+    }
+
+    #[test]
+    fn source_constructor_direct_known_subtype_argument_records_target_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Base {
+    int id;
+}
+class Sub extends Base {
+}
+class Holder {
+    Base value;
+    Holder(Base value) {
+        this.value = value;
+    }
+}
+class Use {
+    Holder make() {
+        return new Holder(new Sub());
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "make");
+        let method_usage = usage
+            .method_usage_by_key(&method)
+            .expect("method usage should be recorded");
+
+        assert!(method_usage.field_uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                FieldUse::AssignedSubtypeToCallArgument {
+                    target_type: JavaType::Named { name: target_name, .. },
+                    actual_type: JavaType::Named { name: actual_name, .. },
+                } if target_name == "Base" && actual_name == "Sub"
+            )
+        }));
+    }
+
+    #[test]
     fn resolved_receiver_boundary_treats_source_instance_calls_as_content_reads() {
         let resolved = resolved_instance_call("a.Item");
 
         assert_eq!(
-            resolved_receiver_call_boundary(CallArgumentBoundary::Unknown, Some(&resolved)),
+            resolved_receiver_call_boundary(CallArgumentBoundary::Unknown, None, Some(&resolved)),
             CallArgumentBoundary::KnownContentRead
         );
     }
@@ -4733,6 +5439,7 @@ class KeyOwner {
             &stmt,
             &mut facts,
             "Owner",
+            None,
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),

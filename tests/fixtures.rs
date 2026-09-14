@@ -8,7 +8,7 @@ use common::{
     cargo_test_generated_modules, load_java_fixtures,
 };
 use new_java2rust::diagnostics::Severity;
-use new_java2rust::translate_source;
+use new_java2rust::{translate_source, translate_source_with_context_sources};
 
 fn fixture(path: &str) -> String {
     fs::read_to_string(Path::new("examples/java").join(path)).unwrap()
@@ -1549,6 +1549,63 @@ fn anonymous_interface_return_uses_boxed_dyn_trait_slot() {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn context_anonymous_action_with_sharedlocal_capture_is_not_reported_unsupported() {
+    let action = r#"
+        interface Action {
+            void run();
+        }
+    "#;
+    let translation = translate_source_with_context_sources(
+        r#"
+        public class ContextAnonymousSharedLocalAction {
+            static class Node {
+                int v;
+            }
+
+            static class Owner {
+                int apply(Action action, Node node) {
+                    action.run();
+                    return node.v;
+                }
+            }
+
+            public static String run() {
+                Node a = new Node();
+                Node b = a;
+                Owner owner = new Owner();
+                return String.valueOf(owner.apply(new Action() {
+                    public void run() {
+                        a.v = 23;
+                    }
+                }, b));
+            }
+        }
+        "#,
+        &[action.to_string()],
+        &Default::default(),
+    );
+
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("let a = a.clone()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("std::boxed::Box<dyn Action>"),
+        "{}",
+        translation.rust
     );
 }
 

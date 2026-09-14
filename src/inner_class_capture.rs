@@ -57,7 +57,12 @@ pub(crate) fn unconstructable_inner_classes(
     program: &Program,
     facts: &FactSet,
 ) -> Vec<UnconstructableInnerClass> {
-    constructed_outer_this_inner_classes(program, facts)
+    let constructed = unsupported_outer_this_constructed_type_names(program);
+    let mut found = Vec::new();
+    for ty in &program.types {
+        collect_in_type(ty, facts, &constructed, &mut found);
+    }
+    found
         .into_iter()
         .filter(|inner| !outer_this_constructor_handle_is_implemented(inner.outer_type(), facts))
         .collect()
@@ -127,6 +132,292 @@ fn constructed_type_names(program: &Program) -> HashSet<String> {
         collect_constructed_type_names_from_type(ty, &mut names);
     }
     names
+}
+
+fn unsupported_outer_this_constructed_type_names(program: &Program) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for ty in &program.types {
+        collect_unsupported_outer_this_constructed_type_names_from_type(ty, &mut names);
+    }
+    names
+}
+
+fn collect_unsupported_outer_this_constructed_type_names_from_type(
+    ty: &TypeDecl,
+    names: &mut HashSet<String>,
+) {
+    for member in &ty.members {
+        collect_unsupported_outer_this_constructed_type_names_from_member(member, names);
+    }
+    for block in &ty.static_init_blocks {
+        collect_unsupported_outer_this_constructed_type_names_from_block(&block.block, names);
+    }
+}
+
+fn collect_unsupported_outer_this_constructed_type_names_from_member(
+    member: &Member,
+    names: &mut HashSet<String>,
+) {
+    match member {
+        Member::Field(field) => {
+            if let Some(initializer) = &field.initializer {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(initializer, names);
+            }
+        }
+        Member::Method(method) => {
+            if let Some(body) = &method.body {
+                collect_unsupported_outer_this_constructed_type_names_from_block(body, names);
+            }
+        }
+        Member::Constructor(ctor) => {
+            if let Some(body) = &ctor.body {
+                collect_unsupported_outer_this_constructed_type_names_from_block(body, names);
+            }
+        }
+        Member::Type(ty) => {
+            collect_unsupported_outer_this_constructed_type_names_from_type(ty, names)
+        }
+        _ => {}
+    }
+}
+
+fn collect_unsupported_outer_this_constructed_type_names_from_block(
+    block: &Block,
+    names: &mut HashSet<String>,
+) {
+    for stmt in &block.statements {
+        collect_unsupported_outer_this_constructed_type_names_from_stmt(stmt, names);
+    }
+}
+
+fn collect_unsupported_outer_this_constructed_type_names_from_stmt(
+    stmt: &Stmt,
+    names: &mut HashSet<String>,
+) {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            if let Some(expr) = initializer {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(expr, names);
+            }
+        }
+        Stmt::Assign { target, value } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(target, names);
+            collect_unsupported_outer_this_constructed_type_names_from_expr(value, names);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(expr, names)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(condition, names);
+            collect_unsupported_outer_this_constructed_type_names_from_block(then_block, names);
+            if let Some(else_block) = else_block {
+                collect_unsupported_outer_this_constructed_type_names_from_block(else_block, names);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(condition, names);
+            collect_unsupported_outer_this_constructed_type_names_from_block(body, names);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                collect_unsupported_outer_this_constructed_type_names_from_stmt(stmt, names);
+            }
+            if let Some(condition) = condition {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(condition, names);
+            }
+            for expr in update {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(expr, names);
+            }
+            collect_unsupported_outer_this_constructed_type_names_from_block(body, names);
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(iterable, names);
+            collect_unsupported_outer_this_constructed_type_names_from_block(body, names);
+        }
+        Stmt::Switch { selector, cases } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_unsupported_outer_this_constructed_type_names_from_expr(
+                            expr, names,
+                        );
+                    }
+                }
+                for stmt in &case.statements {
+                    collect_unsupported_outer_this_constructed_type_names_from_stmt(stmt, names);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                collect_unsupported_outer_this_constructed_type_names_from_stmt(resource, names);
+            }
+            collect_unsupported_outer_this_constructed_type_names_from_block(body, names);
+            for catch in catches {
+                collect_unsupported_outer_this_constructed_type_names_from_block(
+                    &catch.body,
+                    names,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                collect_unsupported_outer_this_constructed_type_names_from_block(
+                    finally_block,
+                    names,
+                );
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(arg, names);
+            }
+        }
+        Stmt::LocalType(ty) => {
+            collect_unsupported_outer_this_constructed_type_names_from_type(ty, names)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_unsupported_outer_this_constructed_type_names_from_block(block, names);
+        }
+        Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn collect_unsupported_outer_this_constructed_type_names_from_expr(
+    expr: &Expr,
+    names: &mut HashSet<String>,
+) {
+    match expr {
+        Expr::New {
+            ty,
+            qualifier,
+            args,
+            body,
+            resolved,
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(qualifier, names);
+            } else {
+                if let Some(name) = java_type_name(ty) {
+                    insert_constructed_type_name(names, name);
+                }
+                if let Some(resolved) = resolved
+                    && let Some(name) = java_type_name(&resolved.constructed_type)
+                {
+                    insert_constructed_type_name(names, name);
+                }
+            }
+            for arg in args {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(arg, names);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    collect_unsupported_outer_this_constructed_type_names_from_member(
+                        member, names,
+                    );
+                }
+            }
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(receiver, names);
+        }
+        Expr::ArrayAccess(array, index)
+        | Expr::Binary {
+            left: array,
+            right: index,
+            ..
+        } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(array, names);
+            collect_unsupported_outer_this_constructed_type_names_from_expr(index, names);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(dimension, names);
+            }
+            if let Some(initializer) = initializer {
+                for item in initializer {
+                    collect_unsupported_outer_this_constructed_type_names_from_expr(item, names);
+                }
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for item in items {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(item, names);
+            }
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(condition, names);
+            collect_unsupported_outer_this_constructed_type_names_from_expr(then_expr, names);
+            collect_unsupported_outer_this_constructed_type_names_from_expr(else_expr, names);
+        }
+        Expr::Switch { selector, cases } => {
+            collect_unsupported_outer_this_constructed_type_names_from_expr(selector, names);
+            for case in cases {
+                for label in &case.labels {
+                    if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                        collect_unsupported_outer_this_constructed_type_names_from_expr(
+                            expr, names,
+                        );
+                    }
+                }
+                collect_unsupported_outer_this_constructed_type_names_from_expr(&case.value, names);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(receiver, names);
+            }
+            for arg in args {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(arg, names);
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                collect_unsupported_outer_this_constructed_type_names_from_expr(expr, names)
+            }
+            LambdaBody::Block(block) => {
+                collect_unsupported_outer_this_constructed_type_names_from_block(block, names)
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => {}
+    }
 }
 
 fn collect_constructed_type_names_from_type(ty: &TypeDecl, names: &mut HashSet<String>) {
@@ -269,10 +560,14 @@ fn collect_constructed_type_names_from_expr(expr: &Expr, names: &mut HashSet<Str
     match expr {
         Expr::New {
             ty,
+            qualifier,
             args,
             body,
             resolved,
         } => {
+            if let Some(qualifier) = qualifier {
+                collect_constructed_type_names_from_expr(qualifier, names);
+            }
             if let Some(name) = java_type_name(ty) {
                 insert_constructed_type_name(names, name);
             }
@@ -388,13 +683,17 @@ fn java_type_name(ty: &JavaType) -> Option<&str> {
 
 fn outer_this_constructor_handle_is_implemented(outer_type: &str, facts: &FactSet) -> bool {
     let placement = facts.storage_placement_for(outer_type);
-    placement.shared() && placement.interior_mutable() && placement.is_implemented()
+    if !placement.shared() || !placement.interior_mutable() || !placement.is_implemented() {
+        return false;
+    }
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
         constructed_outer_this_inner_classes, outer_this_constructor_handle_is_implemented,
+        unconstructable_inner_classes,
     };
     use crate::facts::FactSet;
     use crate::parser::parse_java_source;
@@ -428,13 +727,13 @@ mod tests {
                 .with_mutation_provably_absent(false),
         );
         assert!(
-            !outer_this_constructor_handle_is_implemented("Outer", &facts),
-            "SharedLocal is the right shape, but the RefCell tier is not implemented yet"
+            outer_this_constructor_handle_is_implemented("Outer", &facts),
+            "SharedLocal Rc<RefCell<T>> can carry the outer handle"
         );
     }
 
     #[test]
-    fn qualified_inner_construction_is_reported_as_unconstructable() {
+    fn qualified_inner_construction_requires_storage_but_is_constructable_from_qualifier() {
         let parsed = parse_java_source(
             r#"
 class Outer {
@@ -471,6 +770,10 @@ class Outer {
                 "Outer.Inner".to_string(),
                 "Outer".to_string(),
             )]
+        );
+        assert_eq!(
+            unconstructable_inner_classes(&resolved.program, &resolved.facts),
+            Vec::<super::UnconstructableInnerClass>::new()
         );
     }
 }

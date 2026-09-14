@@ -1902,11 +1902,15 @@ fn rewrite_type_name_in_expr(expr: &mut Expr, old_name: &str, new_name: &str) {
         }
         Expr::New {
             ty,
+            qualifier,
             args,
             body,
             resolved,
         } => {
             rewrite_type_name_in_java_type(ty, old_name, new_name);
+            if let Some(qualifier) = qualifier {
+                rewrite_type_name_in_expr(qualifier, old_name, new_name);
+            }
             for arg in args {
                 rewrite_type_name_in_expr(arg, old_name, new_name);
             }
@@ -2539,6 +2543,51 @@ public class Item {
                 "signature plan missing {key:?}"
             );
         }
+        assert!(
+            context
+                .semantic
+                .usage
+                .current_rust_method_usage("a.Item", "who")
+                .is_some(),
+            "exact Java owner should remain available through the legacy Rust-name map"
+        );
+        assert!(
+            context
+                .semantic
+                .usage
+                .current_rust_method_usage("b.Item", "who")
+                .is_some(),
+            "exact Java owner should remain available through the legacy Rust-name map"
+        );
+        assert!(
+            context
+                .semantic
+                .usage
+                .current_rust_method_usage("Item", "who")
+                .is_none(),
+            "bare same-simple owner must not borrow either package peer's usage facts"
+        );
+        assert!(
+            context
+                .signatures
+                .method_signature_by_base_name_and_arity("a.Item", "who", 0)
+                .is_some(),
+            "exact Java owner should keep its signature"
+        );
+        assert!(
+            context
+                .signatures
+                .method_signature_by_base_name_and_arity("b.Item", "who", 0)
+                .is_some(),
+            "exact Java owner should keep its signature"
+        );
+        assert!(
+            context
+                .signatures
+                .method_signature_by_base_name_and_arity("Item", "who", 0)
+                .is_none(),
+            "bare same-simple owner must fail closed instead of selecting a package peer"
+        );
         assert_package_peer_who_keys_stay_in_java_owner_space(&context, &methods);
     }
 

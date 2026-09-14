@@ -79,6 +79,11 @@ pub(crate) fn lower_field_access_with_facts(
     lowered_receiver: RustExpr,
     facts: &crate::facts::FactSet,
 ) -> RustExpr {
+    if let Some(projected) =
+        lower_shared_local_field_access(receiver, field, type_env, lowered_receiver.clone(), facts)
+    {
+        return projected;
+    }
     if let Some(plan) =
         crate::member_access_plan::plan_member_access_with_facts(receiver, field, type_env, facts)
     {
@@ -96,6 +101,31 @@ pub(crate) fn lower_field_access_with_facts(
             lower_nullable_array_element_field_receiver(receiver, type_env, lowered_receiver);
         field_projection(lowered_receiver, field)
     }
+}
+
+fn lower_shared_local_field_access(
+    receiver: &Expr,
+    field: &str,
+    type_env: &TypeEnv,
+    lowered_receiver: RustExpr,
+    facts: &crate::facts::FactSet,
+) -> Option<RustExpr> {
+    let receiver_ty = crate::types::infer_expr_type(receiver, type_env);
+    let crate::java_ir::JavaType::Named { name, .. } = receiver_ty else {
+        return None;
+    };
+    let placement = facts.storage_placement_for(&name);
+    if !placement.shared() || !placement.interior_mutable() || placement.sync() {
+        return None;
+    }
+    Some(field_projection(
+        crate::coercion::receiver_method_call_projection_exact(
+            lowered_receiver,
+            "borrow",
+            Vec::new(),
+        ),
+        &crate::parser::to_snake_case(field),
+    ))
 }
 
 fn lower_nullable_array_element_field_receiver(

@@ -3,7 +3,7 @@ use crate::diagnostics::Severity;
 use crate::facts::FactSet;
 use crate::java_ir::{
     BinaryOp, Block, CatchClause, Expr, JavaType, LambdaBody, Member, MethodDecl, Program, Stmt,
-    SwitchCase, TypeDecl, TypeKind,
+    SwitchCase, SwitchLabel, TypeDecl, TypeKind,
 };
 use crate::representation::RepresentationPlan;
 use crate::rewrite::{MethodControlFlowPlan, control_flow_rewrite_diagnostics};
@@ -45,6 +45,7 @@ impl LoweringDiagnosticPlan {
 
 pub fn collect_lowering_diagnostic_plans(
     program: &Program,
+    support_local_type_program: &Program,
     facts: &FactSet,
     representations: &RepresentationPlan,
     signatures: &SignaturePlan,
@@ -57,7 +58,7 @@ pub fn collect_lowering_diagnostic_plans(
     }));
     diagnostics.extend(
         representations
-            .diagnostics_for_program(program)
+            .diagnostics_for_program_with_anonymous_context(program, support_local_type_program)
             .into_iter()
             .map(|diagnostic| {
                 LoweringDiagnosticPlan::new(
@@ -86,7 +87,9 @@ pub fn collect_lowering_diagnostic_plans(
             }),
     );
     diagnostics.extend(collect_java_reference_identity_equality_diagnostics(
-        program, facts,
+        program,
+        facts,
+        representations,
     ));
     diagnostics
 }
@@ -94,8 +97,9 @@ pub fn collect_lowering_diagnostic_plans(
 fn collect_java_reference_identity_equality_diagnostics(
     program: &Program,
     facts: &FactSet,
+    representations: &RepresentationPlan,
 ) -> Vec<LoweringDiagnosticPlan> {
-    let identity = SourceIdentityFacts::from_program(program, facts);
+    let identity = SourceIdentityFacts::from_program(program, facts, representations);
     let mut diagnostics = Vec::new();
     for ty in &program.types {
         collect_type_reference_identity_equality_diagnostics(
@@ -123,22 +127,46 @@ struct SourceIdentityFacts {
     declares_equals: std::collections::BTreeSet<String>,
     extends: std::collections::BTreeMap<String, String>,
     implemented_reference_identity: std::collections::BTreeSet<String>,
+    source_hierarchy_carriers: std::collections::BTreeSet<String>,
+    concrete_comparator_factory_methods: std::collections::BTreeSet<(String, usize)>,
 }
 
 impl SourceIdentityFacts {
-    fn from_program(program: &Program, storage_facts: &FactSet) -> Self {
+    fn from_program(
+        program: &Program,
+        storage_facts: &FactSet,
+        representations: &RepresentationPlan,
+    ) -> Self {
         let mut facts = Self::default();
         for ty in &program.types {
-            facts.collect_type(ty, storage_facts);
+            facts.collect_type(ty, storage_facts, representations);
         }
         facts
     }
 
-    fn collect_type(&mut self, ty: &TypeDecl, storage_facts: &FactSet) {
+    fn collect_type(
+        &mut self,
+        ty: &TypeDecl,
+        storage_facts: &FactSet,
+        representations: &RepresentationPlan,
+    ) {
         let simple = simple_type_name(&ty.name).to_string();
         self.declared.insert(simple.clone());
         if matches!(ty.kind, TypeKind::Class | TypeKind::Record) {
             self.source_classes.insert(simple.clone());
+        }
+        if representations
+            .type_representation(&ty.name)
+            .is_some_and(|entry| {
+                matches!(
+                    entry.representation(),
+                    crate::representation::ObjectRepresentation::ClosedEnum { .. }
+                        | crate::representation::ObjectRepresentation::SourceHierarchyCarrier { .. }
+                )
+            })
+        {
+            self.source_hierarchy_carriers.insert(ty.name.clone());
+            self.source_hierarchy_carriers.insert(simple.clone());
         }
         let placement = storage_facts.storage_placement_for(&ty.name);
         if placement.shared() && placement.is_implemented() {
@@ -154,7 +182,15 @@ impl SourceIdentityFacts {
                 Member::Method(method) if method_overrides_object_equals(method) => {
                     self.declares_equals.insert(simple.clone());
                 }
-                Member::Type(nested) => self.collect_type(nested, storage_facts),
+                Member::Method(method) if method_returns_concrete_comparator(method) => {
+                    self.concrete_comparator_factory_methods
+                        .insert((method.name.clone(), method.params.len()));
+                    if let Some(rust_name) = &method.rust_name {
+                        self.concrete_comparator_factory_methods
+                            .insert((rust_name.clone(), method.params.len()));
+                    }
+                }
+                Member::Type(nested) => self.collect_type(nested, storage_facts, representations),
                 _ => {}
             }
         }
@@ -222,6 +258,21 @@ impl SourceIdentityFacts {
             current = parent.clone();
         }
         false
+    }
+
+    fn source_class_upcast_is_implemented(&self, source_name: &str, target_name: &str) -> bool {
+        self.source_class_reaches_supertype(source_name, target_name)
+            && (self.source_hierarchy_carriers.contains(target_name)
+                || self
+                    .source_hierarchy_carriers
+                    .contains(simple_type_name(target_name)))
+    }
+
+    fn source_supertype_carrier_is_implemented(&self, target_name: &str) -> bool {
+        self.source_hierarchy_carriers.contains(target_name)
+            || self
+                .source_hierarchy_carriers
+                .contains(simple_type_name(target_name))
     }
 
     fn reference_identity_equality_is_implemented(
@@ -401,6 +452,14 @@ fn collect_stmt_reference_identity_equality_diagnostics(
             then_block,
             else_block,
         } => {
+            collect_used_pattern_instanceof_supertype_diagnostic(
+                condition,
+                Some(then_block),
+                None,
+                env,
+                identity,
+                diagnostics,
+            );
             collect_expr_reference_identity_equality_diagnostics(
                 condition,
                 env,
@@ -652,6 +711,133 @@ fn collect_catch_reference_identity_equality_diagnostics(
     );
 }
 
+fn priority_queue_comparator_arg_is_supported_source_factory(
+    args: &[Expr],
+    identity: &SourceIdentityFacts,
+) -> bool {
+    let [
+        Expr::Call {
+            name,
+            args: call_args,
+            ..
+        },
+    ] = args
+    else {
+        return false;
+    };
+    identity
+        .concrete_comparator_factory_methods
+        .contains(&(name.clone(), call_args.len()))
+}
+
+fn method_returns_concrete_comparator(method: &MethodDecl) -> bool {
+    java_type_is_comparator(&method.return_type)
+        && method.body.as_ref().is_some_and(|body| {
+            let mut returned_types = Vec::new();
+            collect_concrete_comparator_return_types_from_block(body, &mut returned_types)
+                && !returned_types.is_empty()
+                && returned_types.iter().all(|ty| ty == &returned_types[0])
+        })
+}
+
+fn collect_concrete_comparator_return_types_from_block(
+    block: &Block,
+    out: &mut Vec<JavaType>,
+) -> bool {
+    block
+        .statements
+        .iter()
+        .all(|stmt| collect_concrete_comparator_return_types_from_stmt(stmt, out))
+}
+
+fn collect_concrete_comparator_return_types_from_stmt(
+    stmt: &Stmt,
+    out: &mut Vec<JavaType>,
+) -> bool {
+    match stmt {
+        Stmt::Return(Some(expr)) => {
+            let Some(ty) = concrete_comparator_initializer_type(expr) else {
+                return false;
+            };
+            out.push(ty);
+            true
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_concrete_comparator_return_types_from_block(then_block, out)
+                && else_block.as_ref().is_none_or(|block| {
+                    collect_concrete_comparator_return_types_from_block(block, out)
+                })
+        }
+        Stmt::Switch { cases, .. } => cases.iter().all(|case| {
+            case.statements
+                .iter()
+                .all(|stmt| collect_concrete_comparator_return_types_from_stmt(stmt, out))
+        }),
+        Stmt::Try {
+            body,
+            catches,
+            finally_block,
+            ..
+        } => {
+            collect_concrete_comparator_return_types_from_block(body, out)
+                && catches.iter().all(|catch| {
+                    collect_concrete_comparator_return_types_from_block(&catch.body, out)
+                })
+                && finally_block.as_ref().is_none_or(|block| {
+                    collect_concrete_comparator_return_types_from_block(block, out)
+                })
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_concrete_comparator_return_types_from_block(block, out)
+        }
+        Stmt::Return(None) => false,
+        _ => true,
+    }
+}
+
+fn concrete_comparator_initializer_type(initializer: &Expr) -> Option<JavaType> {
+    match initializer {
+        Expr::New {
+            ty,
+            body: None,
+            resolved,
+            ..
+        } if !java_type_is_comparator(ty) => {
+            if matches!(ty, JavaType::Unknown(_))
+                && let Some(resolved) = resolved
+            {
+                Some(JavaType::Named {
+                    name: resolved.declaring_type.clone(),
+                    args: Vec::new(),
+                })
+            } else {
+                Some(ty.clone())
+            }
+        }
+        Expr::Cast { ty, expr } if java_type_is_comparator(ty) => {
+            concrete_comparator_initializer_type(expr)
+        }
+        _ => None,
+    }
+}
+
+fn java_type_is_comparator(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+            canonical
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "Comparator")
+        }
+        _ => false,
+    }
+}
+
 fn collect_expr_reference_identity_equality_diagnostics(
     expr: &Expr,
     env: &TypeEnv,
@@ -664,6 +850,7 @@ fn collect_expr_reference_identity_equality_diagnostics(
             plan_native_collection_constructor_for_args(ty, args, env, facts),
             Some(NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. })
         )
+        && !priority_queue_comparator_arg_is_supported_source_factory(args, identity)
     {
         diagnostics.push(LoweringDiagnosticPlan::new(
             Severity::Unsupported,
@@ -688,20 +875,6 @@ fn collect_expr_reference_identity_equality_diagnostics(
                 "Java ==/!= on reference type is currently lowered as Rust equality; object identity is not represented yet".to_string(),
             ));
         }
-    }
-    if let Expr::InstanceOf {
-        expr: source, ty, ..
-    } = expr
-        && source_instanceof_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
-    {
-        diagnostics.push(LoweringDiagnosticPlan::new(
-            Severity::Unsupported,
-            "unsupported_instanceof_source_hierarchy_runtime_carrier",
-            format!(
-                "unsupported Java instanceof check: target type {} has source subtypes and requires class hierarchy lowering",
-                concrete_java_type_name(ty).unwrap_or("unknown")
-            ),
-        ));
     }
     if let Expr::Cast { ty, expr: source } = expr
         && erased_object_cast_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity)
@@ -847,6 +1020,14 @@ fn collect_expr_reference_identity_equality_diagnostics(
             then_expr,
             else_expr,
         } => {
+            collect_used_pattern_instanceof_supertype_diagnostic(
+                condition,
+                None,
+                Some(then_expr),
+                env,
+                identity,
+                diagnostics,
+            );
             collect_expr_reference_identity_equality_diagnostics(
                 condition,
                 env,
@@ -957,6 +1138,248 @@ fn collect_expr_reference_identity_equality_diagnostics(
     }
 }
 
+fn collect_used_pattern_instanceof_supertype_diagnostic(
+    condition: &Expr,
+    then_block: Option<&Block>,
+    then_expr: Option<&Expr>,
+    env: &TypeEnv,
+    identity: &SourceIdentityFacts,
+    diagnostics: &mut Vec<LoweringDiagnosticPlan>,
+) {
+    let Some((source, ty, binding, guard)) = pattern_instanceof_condition_parts(condition) else {
+        return;
+    };
+    if !guard.is_some_and(|guard| expr_reads_name(guard, binding))
+        && !then_block.is_some_and(|block| block_reads_name(block, binding))
+        && !then_expr.is_some_and(|expr| expr_reads_name(expr, binding))
+    {
+        return;
+    }
+    if source_instanceof_to_supertype_requires_hierarchy_diagnostic(source, ty, env, identity) {
+        diagnostics.push(LoweringDiagnosticPlan::new(
+            Severity::Unsupported,
+            "unsupported_instanceof_source_hierarchy_runtime_carrier",
+            format!(
+                "unsupported Java instanceof check: target type {} has source subtypes and requires class hierarchy lowering",
+                concrete_java_type_name(ty).unwrap_or("unknown")
+            ),
+        ));
+    }
+}
+
+fn pattern_instanceof_condition_parts(
+    condition: &Expr,
+) -> Option<(&Expr, &JavaType, &str, Option<&Expr>)> {
+    match condition {
+        Expr::InstanceOf {
+            expr,
+            ty,
+            binding: Some(binding),
+        } => Some((expr, ty, binding, None)),
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            let Expr::InstanceOf {
+                expr,
+                ty,
+                binding: Some(binding),
+            } = left.as_ref()
+            else {
+                return None;
+            };
+            Some((expr, ty, binding, Some(right)))
+        }
+        _ => None,
+    }
+}
+
+fn block_reads_name(block: &Block, name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_reads_name(stmt, name))
+}
+
+fn stmt_reads_name(stmt: &Stmt, name: &str) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_reads_name(expr, name)),
+        Stmt::Assign { target, value } => {
+            expr_reads_name(target, name) || expr_reads_name(value, name)
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            expr_reads_name(expr, name)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_reads_name(condition, name)
+                || block_reads_name(then_block, name)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_reads_name(block, name))
+        }
+        Stmt::While {
+            condition, body, ..
+        } => expr_reads_name(condition, name) || block_reads_name(body, name),
+        Stmt::DoWhile {
+            body, condition, ..
+        } => block_reads_name(body, name) || expr_reads_name(condition, name),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(|stmt| stmt_reads_name(stmt, name))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_reads_name(expr, name))
+                || update.iter().any(|expr| expr_reads_name(expr, name))
+                || block_reads_name(body, name)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_reads_name(iterable, name) || block_reads_name(body, name)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_reads_name(selector, name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => expr_reads_name(expr, name),
+                        SwitchLabel::Default => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_reads_name(stmt, name))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|resource| stmt_reads_name(resource, name))
+                || block_reads_name(body, name)
+                || catches
+                    .iter()
+                    .any(|catch| block_reads_name(&catch.body, name))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_reads_name(block, name))
+        }
+        Stmt::LocalType(ty) => ty
+            .members
+            .iter()
+            .any(|member| member_reads_name(member, name)),
+        Stmt::ConstructorInvocation { args, .. } => {
+            args.iter().any(|expr| expr_reads_name(expr, name))
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_reads_name(block, name)
+        }
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_reads_name(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Var(candidate) => candidate == name,
+        Expr::FieldAccess(receiver, _) => expr_reads_name(receiver, name),
+        Expr::ArrayAccess(array, index) => {
+            expr_reads_name(array, name) || expr_reads_name(index, name)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(|expr| expr_reads_name(expr, name))
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(|expr| expr_reads_name(expr, name)))
+        }
+        Expr::ArrayInitializer(items) => items.iter().any(|expr| expr_reads_name(expr, name)),
+        Expr::Binary { left, right, .. } => {
+            expr_reads_name(left, name) || expr_reads_name(right, name)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_reads_name(expr, name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_reads_name(condition, name)
+                || expr_reads_name(then_expr, name)
+                || expr_reads_name(else_expr, name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_reads_name(selector, name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => expr_reads_name(expr, name),
+                        SwitchLabel::Default => false,
+                    }) || expr_reads_name(&case.value, name)
+                })
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_reads_name(receiver, name))
+                || args.iter().any(|expr| expr_reads_name(expr, name))
+        }
+        Expr::New { args, body, .. } => {
+            args.iter().any(|expr| expr_reads_name(expr, name))
+                || body
+                    .as_ref()
+                    .is_some_and(|body| body.iter().any(|member| member_reads_name(member, name)))
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => expr_reads_name(expr, name),
+            LambdaBody::Block(block) => block_reads_name(block, name),
+        },
+        Expr::Literal(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => false,
+    }
+}
+
+fn member_reads_name(member: &Member, name: &str) -> bool {
+    match member {
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(|expr| expr_reads_name(expr, name)),
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(|block| block_reads_name(block, name)),
+        Member::Constructor(ctor) => ctor
+            .body
+            .as_ref()
+            .is_some_and(|block| block_reads_name(block, name)),
+        Member::Type(ty) => ty
+            .members
+            .iter()
+            .any(|member| member_reads_name(member, name)),
+        Member::Unsupported { .. } => false,
+    }
+}
+
 fn source_instanceof_to_supertype_requires_hierarchy_diagnostic(
     source: &Expr,
     target: &JavaType,
@@ -967,6 +1390,9 @@ fn source_instanceof_to_supertype_requires_hierarchy_diagnostic(
         infer_expr_type(source, env),
         JavaType::Named { name, .. } if simple_type_name(&name) == "Object"
     ) && identity.source_class_has_subtype(target)
+        && concrete_java_type_name(target).is_none_or(|target_name| {
+            !identity.source_supertype_carrier_is_implemented(target_name)
+        })
 }
 
 fn erased_object_cast_to_supertype_requires_hierarchy_diagnostic(
@@ -975,10 +1401,8 @@ fn erased_object_cast_to_supertype_requires_hierarchy_diagnostic(
     env: &TypeEnv,
     identity: &SourceIdentityFacts,
 ) -> bool {
-    matches!(
-        infer_expr_type(source, env),
-        JavaType::Named { name, .. } if simple_type_name(&name) == "Object"
-    ) && identity.source_class_has_subtype(target)
+    let _ = (source, target, env, identity);
+    false
 }
 
 fn source_class_cast_to_supertype_requires_hierarchy_diagnostic(
@@ -995,6 +1419,7 @@ fn source_class_cast_to_supertype_requires_hierarchy_diagnostic(
         return false;
     };
     identity.source_class_reaches_supertype(source_name, target_name)
+        && !identity.source_class_upcast_is_implemented(source_name, target_name)
 }
 
 fn reference_identity_equality_diagnostic_code(
@@ -1057,7 +1482,7 @@ class Savings extends Account {
     }
 
     #[test]
-    fn erased_object_supertype_cast_reports_runtime_carrier_gap() {
+    fn erased_object_supertype_cast_with_carrier_reports_no_runtime_gap() {
         let translation = translate_source(
             r#"
 class ErasedObjectSupertypeCast {
@@ -1077,7 +1502,7 @@ class B extends A {
         );
 
         assert!(
-            translation
+            !translation
                 .diagnostics
                 .has_code("unsupported_cast_source_hierarchy_runtime_carrier"),
             "{:?}",

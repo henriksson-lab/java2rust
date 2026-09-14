@@ -1959,6 +1959,13 @@ impl NewTargetPlan {
     pub(crate) fn rename_constructor(&mut self, rust_name: String) {
         self.rust_name = rust_name;
     }
+
+    pub(crate) fn set_native_collection(
+        &mut self,
+        native_collection: Option<NativeCollectionNewTarget>,
+    ) {
+        self.native_collection = native_collection;
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2005,6 +2012,12 @@ pub enum NativeCollectionNewTarget {
         kind: crate::stdlib::JavaCollectionKind,
     },
     PriorityQueueComparatorUnsupported {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    PriorityQueueComparatorCallback {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    PriorityQueueComparator {
         kind: crate::stdlib::JavaCollectionKind,
     },
 }
@@ -2619,7 +2632,11 @@ fn weak_unknown_field_access_receiver(receiver: &Expr, inferred: &JavaType) -> b
     }
 }
 
-pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallStatementPlan<'a>> {
+pub fn plan_call_statement<'a>(
+    expr: &'a Expr,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<CallStatementPlan<'a>> {
     let Expr::Call {
         receiver,
         name,
@@ -2638,7 +2655,13 @@ pub fn plan_call_statement<'a>(expr: &'a Expr, facts: &FactSet) -> Option<CallSt
     if let Some(plan) = plan_native_collections_statement(receiver.as_deref(), name, args) {
         return Some(plan);
     }
-    if let Some(plan) = plan_native_system_print_stream_statement(receiver.as_deref(), name, args) {
+    if let Some(plan) = plan_native_system_print_stream_statement(
+        receiver.as_deref(),
+        name,
+        args,
+        resolved.as_ref(),
+        types,
+    ) {
         return Some(plan);
     }
     if plan_java_exception_print_stack_trace_statement(receiver.as_deref(), name, args).is_some() {
@@ -2674,7 +2697,15 @@ fn plan_native_system_print_stream_statement<'a>(
     receiver: Option<&'a Expr>,
     name: &str,
     args: &'a [Expr],
+    resolved: Option<&ResolvedCall>,
+    types: &TypeEnv,
 ) -> Option<CallStatementPlan<'a>> {
+    if !resolved_call_can_use_native_system_print_stream(resolved) {
+        return None;
+    }
+    if source_system_print_stream_field_shadows_native_receiver(receiver?, types) {
+        return None;
+    }
     let stream = system_print_stream_receiver(receiver?)?;
     let method = match (name, args.len()) {
         ("print", 1) => NativePrintStreamMethod::Print,
@@ -2686,6 +2717,36 @@ fn plan_native_system_print_stream_statement<'a>(
         method,
         arg: args.first(),
     })
+}
+
+fn resolved_call_can_use_native_system_print_stream(resolved: Option<&ResolvedCall>) -> bool {
+    let Some(resolved) = resolved else {
+        return true;
+    };
+    resolved.kind == CallKind::Instance
+        && crate::stdlib::canonical_external_receiver_type_key(&resolved.declaring_type)
+            == "PrintStream"
+}
+
+fn source_system_print_stream_field_shadows_native_receiver(
+    receiver: &Expr,
+    types: &TypeEnv,
+) -> bool {
+    let Expr::FieldAccess(owner, field) = receiver else {
+        return false;
+    };
+    let Expr::Var(owner_name) = owner.as_ref() else {
+        return false;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(owner_name) != "System" {
+        return false;
+    }
+    matches!(field.as_str(), "out" | "err" | "OUT" | "ERR")
+        && (types.type_field_type(owner_name, field).is_some()
+            || types
+                .static_type_alias(owner_name)
+                .and_then(|alias| types.type_field_type(alias, field))
+                .is_some())
 }
 
 fn system_print_stream_receiver(receiver: &Expr) -> Option<NativeSystemStream> {
@@ -3543,6 +3604,8 @@ fn static_utility_owner_call_target<'a>(
         return Some(target);
     }
     if let Some(owner) = types.static_type_alias(receiver_name) {
+        let owner =
+            crate::javalibs::preferred_static_owner_alias(owner, name, arg_count).unwrap_or(owner);
         return Some(CallTargetPlan::StaticOwner {
             owner: rust_static_owner_type_name_with_facts(owner, facts),
             rust_name: external_method_rust_name(owner, name, arg_count, facts),
@@ -3782,8 +3845,50 @@ fn static_owner_expr_type_name(
             if is_static_constant_member(field) {
                 return None;
             }
+            if static_owner_field_access_resolves_to_source_field(inner, field, types) {
+                return None;
+            }
             let _ = static_owner_expr_type_name(inner, types, facts)?;
             Some(upper_camel_from_snake_or_preserved(field))
+        }
+        _ => None,
+    }
+}
+
+fn static_owner_field_access_resolves_to_source_field(
+    owner: &Expr,
+    field: &str,
+    types: &TypeEnv,
+) -> bool {
+    let Some(owner_name) = static_owner_expr_java_type_name(owner, types) else {
+        return false;
+    };
+    let field_alias = crate::parser::to_snake_case(field);
+    types.type_field_type(&owner_name, field).is_some()
+        || types.type_field_type(&owner_name, &field_alias).is_some()
+}
+
+fn static_owner_expr_java_type_name(receiver: &Expr, types: &TypeEnv) -> Option<String> {
+    match receiver {
+        Expr::Var(name) => {
+            if types.local_type(name).is_some() || types.field_type(name).is_some() {
+                return None;
+            }
+            Some(
+                types
+                    .static_type_alias(name)
+                    .map(str::to_string)
+                    .unwrap_or_else(|| upper_camel_from_snake_or_preserved(name)),
+            )
+        }
+        Expr::FieldAccess(inner, field) => {
+            if is_static_constant_member(field)
+                || static_owner_field_access_resolves_to_source_field(inner, field, types)
+            {
+                return None;
+            }
+            let owner = static_owner_expr_java_type_name(inner, types)?;
+            Some(format!("{owner}.{field}"))
         }
         _ => None,
     }
@@ -5413,7 +5518,17 @@ pub(crate) fn plan_native_collection_constructor_for_args(
                 Some(NativeQueueReceiverKind::PriorityQueue)
             ) && is_priority_queue_comparator_constructor_arg(arg, types, facts) =>
         {
-            Some(NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind })
+            if priority_queue_comparator_constructor_arg_is_callback_param(arg, types) {
+                Some(NativeCollectionNewTarget::PriorityQueueComparatorCallback { kind })
+            } else if priority_queue_comparator_constructor_arg_is_comparator_object_binding(
+                arg, types,
+            ) {
+                Some(NativeCollectionNewTarget::PriorityQueueComparator { kind })
+            } else if priority_queue_comparator_constructor_arg_is_opaque_comparator(arg, types) {
+                Some(NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind })
+            } else {
+                Some(NativeCollectionNewTarget::PriorityQueueComparator { kind })
+            }
         }
         [_] => Some(NativeCollectionNewTarget::FromSingleArg { kind }),
         _ => None,
@@ -5496,6 +5611,78 @@ fn is_priority_queue_comparator_constructor_arg(
             },
         )
         .reaches()
+}
+
+fn priority_queue_comparator_constructor_arg_is_opaque_comparator(
+    arg: &Expr,
+    types: &TypeEnv,
+) -> bool {
+    if is_anonymous_priority_queue_comparator_arg(arg) {
+        return false;
+    }
+    let arg_ty = infer_expr_type(arg, types);
+    match &arg_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::canonical_external_receiver_type_key(name)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "Comparator")
+        }
+        _ => false,
+    }
+}
+
+fn priority_queue_comparator_constructor_arg_is_callback_param(
+    arg: &Expr,
+    types: &TypeEnv,
+) -> bool {
+    let Expr::Var(name) = arg else {
+        return false;
+    };
+    (types.is_param(name) || types.is_callable_local(name))
+        && priority_queue_comparator_constructor_arg_is_opaque_comparator(arg, types)
+}
+
+fn priority_queue_comparator_constructor_arg_is_comparator_object_binding(
+    arg: &Expr,
+    types: &TypeEnv,
+) -> bool {
+    let comparator_object_binding = match arg {
+        Expr::Var(name) => {
+            types.is_comparator_object_local(name) || types.is_comparator_object_field(name)
+        }
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            types.is_comparator_object_field(field)
+        }
+        _ => false,
+    };
+    comparator_object_binding
+        && priority_queue_comparator_constructor_arg_is_opaque_comparator(arg, types)
+}
+
+fn is_anonymous_priority_queue_comparator_arg(arg: &Expr) -> bool {
+    let Expr::New {
+        ty,
+        args,
+        body: Some(_),
+        ..
+    } = arg
+    else {
+        return false;
+    };
+    args.is_empty() && concrete_type_simple_name_is(ty, "Comparator")
+}
+
+fn concrete_type_simple_name_is(ty: &JavaType, expected: &str) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::canonical_external_receiver_type_key(name)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == expected)
+        }
+        _ => false,
+    }
 }
 
 fn plan_external_crate_constructor(
@@ -7152,6 +7339,57 @@ mod tests {
         assert_eq!(shapes[0].view, ViewShape::Native);
     }
 
+    fn resolved_instance_call(owner: &str, rust_name: &str) -> ResolvedCall {
+        ResolvedCall {
+            declaring_type: owner.to_string(),
+            rust_name: rust_name.to_string(),
+            kind: CallKind::Instance,
+            return_type: JavaType::Void,
+            arg_target_types: Vec::new(),
+            arg_coercions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn native_system_print_statement_refuses_source_resolved_owner() {
+        let call = Expr::Call {
+            receiver: Some(Box::new(Expr::FieldAccess(
+                Box::new(Expr::Var("System".to_string())),
+                "out".to_string(),
+            ))),
+            name: "println".to_string(),
+            args: vec![Expr::Literal(Literal::String("x".to_string()))],
+            resolved: Some(resolved_instance_call("Sink", "println")),
+        };
+
+        assert_eq!(
+            plan_call_statement(&call, &FactSet::default(), &TypeEnv::default()),
+            None
+        );
+    }
+
+    #[test]
+    fn native_system_print_statement_keeps_jdk_print_stream_owner() {
+        let call = Expr::Call {
+            receiver: Some(Box::new(Expr::FieldAccess(
+                Box::new(Expr::Var("System".to_string())),
+                "out".to_string(),
+            ))),
+            name: "println".to_string(),
+            args: vec![Expr::Literal(Literal::String("x".to_string()))],
+            resolved: Some(resolved_instance_call("PrintStream", "println")),
+        };
+
+        assert!(matches!(
+            plan_call_statement(&call, &FactSet::default(), &TypeEnv::default()),
+            Some(CallStatementPlan::NativeSystemPrintStream {
+                stream: NativeSystemStream::Out,
+                method: NativePrintStreamMethod::Println,
+                ..
+            })
+        ));
+    }
+
     #[test]
     fn external_call_thrown_effect_receiver_lookup_uses_rust_method_name() {
         let parsed = crate::external_packs::parse_external_pack_manifest(
@@ -7574,6 +7812,42 @@ mod tests {
             name: "java.util.PriorityQueue".to_string(),
             args: vec![JavaType::Primitive(PrimitiveType::Int)],
         };
+        let comparator_arg = vec![Expr::Var("comparator".to_string())];
+        let comparator_ty = JavaType::Named {
+            name: "java.util.Comparator".to_string(),
+            args: vec![JavaType::Primitive(PrimitiveType::Int)],
+        };
+        types.insert_local("comparator", comparator_ty.clone());
+        assert!(matches!(
+            plan_native_collection_constructor_for_args(
+                &receiver_ty,
+                &comparator_arg,
+                &types,
+                &FactSet::default(),
+            ),
+            Some(NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. })
+        ));
+        types.mark_callable_local("comparator");
+        assert!(matches!(
+            plan_native_collection_constructor_for_args(
+                &receiver_ty,
+                &comparator_arg,
+                &types,
+                &FactSet::default(),
+            ),
+            Some(NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. })
+        ));
+        types.insert_param("param_comparator", comparator_ty);
+        let comparator_param_arg = vec![Expr::Var("param_comparator".to_string())];
+        assert!(matches!(
+            plan_native_collection_constructor_for_args(
+                &receiver_ty,
+                &comparator_param_arg,
+                &types,
+                &FactSet::default(),
+            ),
+            Some(NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. })
+        ));
         assert!(matches!(
             native_collection_method_arg_shapes(
                 &receiver_ty,

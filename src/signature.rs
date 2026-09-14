@@ -13,7 +13,8 @@ use crate::facts::{
 use crate::graph::strongly_connected_components;
 use crate::java_ir::{
     BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, LambdaBody, Literal, MethodDecl,
-    Modifier, Param, Program, ResolvedCall, Stmt, SwitchLabel, TypeDecl, TypeKind, UnaryOp,
+    Modifier, Param, PrimitiveType, Program, ResolvedCall, Stmt, SwitchLabel, TypeDecl, TypeKind,
+    UnaryOp,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey};
 use crate::lattice::{
@@ -1754,6 +1755,7 @@ fn idless_compatibility_local_index_for_constraints(
     local_index_by_name
         .get(name)
         .copied()
+        .filter(|index| locals.get(*index).is_some_and(|local| local.name == name))
         .or_else(|| locals.iter().position(|local| local.name == name))
 }
 
@@ -3099,6 +3101,9 @@ fn add_method_binding_dependency_edges(
                     );
                 }
                 BindingUse::ContentRead
+                | BindingUse::AssignedSubtypeToLocal { .. }
+                | BindingUse::AssignedSubtypeToCollectionElement { .. }
+                | BindingUse::AssignedSubtypeToCallArgument { .. }
                 | BindingUse::InstanceOfTarget { .. }
                 | BindingUse::Mutated => {}
             }
@@ -3206,6 +3211,9 @@ fn add_constructor_binding_dependency_edges(
                     );
                 }
                 BindingUse::ContentRead
+                | BindingUse::AssignedSubtypeToLocal { .. }
+                | BindingUse::AssignedSubtypeToCollectionElement { .. }
+                | BindingUse::AssignedSubtypeToCallArgument { .. }
                 | BindingUse::InstanceOfTarget { .. }
                 | BindingUse::ReceiverForCall { .. }
                 | BindingUse::Returned
@@ -3223,6 +3231,8 @@ fn add_method_field_dependency_edges(
 ) {
     for field_use in method_usage.field_uses() {
         match field_use {
+            FieldUse::AssignedSubtypeToField { .. }
+            | FieldUse::AssignedSubtypeToCallArgument { .. } => {}
             FieldUse::AssignedFromCall {
                 field_name,
                 name,
@@ -3296,6 +3306,8 @@ fn add_constructor_field_dependency_edges(
 ) {
     for field_use in constructor_usage.field_uses() {
         match field_use {
+            FieldUse::AssignedSubtypeToField { .. }
+            | FieldUse::AssignedSubtypeToCallArgument { .. } => {}
             FieldUse::AssignedFromCall {
                 field_name,
                 name,
@@ -3517,7 +3529,7 @@ fn method_call_param_target(
     arg_index: usize,
 ) -> Option<SignatureDependencyNode> {
     let resolved = usage.call_sites().get(call_index)?.resolved()?;
-    let method = MethodKey::resolved_call(resolved);
+    let method = method_key_for_resolved_call(constraints, resolved)?;
     let name = constraints
         .methods
         .get(&method)?
@@ -4165,7 +4177,9 @@ fn propagate_call_site_constraints(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             if !resolved_source_call_propagates_signature_constraints(call_site.boundary()) {
                 continue;
             }
@@ -4340,7 +4354,9 @@ fn propagate_constructor_call_site_constraints(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
@@ -4415,7 +4431,9 @@ fn propagate_resolved_source_mutable_argument_binding_constraints(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
@@ -4484,7 +4502,9 @@ fn propagate_resolved_source_mutable_receiver_binding_constraints(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
@@ -4688,7 +4708,9 @@ fn propagate_call_argument_constraints_to_callees(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
@@ -4771,7 +4793,9 @@ fn propagate_call_argument_collection_carrier_java_types_to_callees(
             if !resolved_source_call_propagates_signature_constraints(call_site.boundary()) {
                 continue;
             }
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
@@ -4893,7 +4917,9 @@ fn propagate_constructor_call_argument_constraints_to_callees(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
@@ -5108,7 +5134,9 @@ fn propagate_null_call_argument_constraints_to_callees(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             if !constraints.methods.contains_key(&callee_key) {
                 continue;
             }
@@ -5145,7 +5173,9 @@ fn propagate_null_call_argument_constraints_to_callees(
             let Some(resolved) = call_site.resolved() else {
                 continue;
             };
-            let callee_key = MethodKey::resolved_call(resolved);
+            let Some(callee_key) = method_key_for_resolved_call(constraints, resolved) else {
+                continue;
+            };
             if !constraints.methods.contains_key(&callee_key) {
                 continue;
             }
@@ -6204,6 +6234,25 @@ fn method_key_for_usage(
     let mut matching = constraints.methods.keys().filter(|method_key| {
         method_key.type_name() == usage_key.type_name()
             && method_key.rust_name.starts_with(usage_key.method_name())
+    });
+    let first = matching.next()?.clone();
+    matching.next().is_none().then_some(first)
+}
+
+fn method_key_for_resolved_call(
+    constraints: &SignatureConstraintState,
+    resolved: &ResolvedCall,
+) -> Option<MethodKey> {
+    let exact = MethodKey::resolved_call(resolved);
+    if constraints.methods.contains_key(&exact) {
+        return Some(exact);
+    }
+    let missing_simple = type_name_simple_segment(exact.type_name());
+    let mut matching = constraints.methods.keys().filter(|method_key| {
+        method_key.rust_name == exact.rust_name
+            && method_key.type_name() != exact.type_name()
+            && !distinct_qualified_type_owners(exact.type_name(), method_key.type_name())
+            && type_name_simple_segment(method_key.type_name()) == missing_simple
     });
     let first = matching.next()?.clone();
     matching.next().is_none().then_some(first)
@@ -7981,10 +8030,12 @@ fn collect_type_signatures(
                     .get(&field_key)
                     .cloned()
                     .unwrap_or_else(field_shape_constraints);
+                let field_storage_ty = comparator_object_field_storage_type(ty, field)
+                    .unwrap_or_else(|| field.ty.clone());
                 plan.fields.insert(
                     field_key,
                     constrained_field_shape(
-                        &field.ty,
+                        &field_storage_ty,
                         representations,
                         &field_constraints,
                         facts,
@@ -8014,6 +8065,7 @@ fn collect_type_signatures(
                             constrained_param_plan(
                                 param,
                                 java_ty,
+                                Some(&ty.name),
                                 representations,
                                 &constraints,
                                 facts,
@@ -8080,6 +8132,7 @@ fn collect_type_signatures(
                                 constrained_param_plan(
                                     param,
                                     &param.ty,
+                                    Some(&ty.name),
                                     representations,
                                     &constraints,
                                     facts,
@@ -8242,6 +8295,7 @@ fn inherited_source_method_signature(
                 constrained_param_plan(
                     param,
                     java_ty,
+                    Some(declaring_ty.name.as_str()),
                     representations,
                     &constraints,
                     facts,
@@ -8396,7 +8450,9 @@ fn method_param_shape_constraints_with_declared_source_types(
         .unwrap_or_default();
     let mut boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind();
     let param_source_name = param.source_name.as_str();
-    if field_receiver_mutated_names.contains(param_source_name)
+    let param_uses_shared_local_handle =
+        java_type_has_implemented_shared_local_storage_in_owner(&param.ty, &ty.name, facts);
+    if (field_receiver_mutated_names.contains(param_source_name) && !param_uses_shared_local_handle)
         || array_element_mutated_names.contains(param_source_name)
         || facade_mut_borrow_argument_names.contains(&param.source_name)
         || map_view_receiver_mutated_names.contains(param_source_name)
@@ -8452,6 +8508,9 @@ fn method_param_shape_constraints_with_declared_source_types(
         &mut constraints,
         &signature_object_representation_fact_constraints(&param.ty, facts),
     );
+    if param_uses_shared_local_handle {
+        push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
+    }
     if let Some(binding) = binding {
         push_unique_signature_constraints(
             &mut constraints,
@@ -8515,6 +8574,7 @@ fn method_param_shape_constraints_with_declared_source_types(
             ),
         );
         if field_receiver_mutated_names.contains(param_source_name)
+            && !param_uses_shared_local_handle
             || map_view_receiver_mutated_names.contains(param_source_name)
         {
             push_unique_signature_constraints(
@@ -8639,6 +8699,76 @@ fn method_param_shape_constraints_with_declared_source_types(
     }
     normalize_param_borrowed_slice_constraints(param, &mut constraints);
     constraints
+}
+
+fn java_type_has_implemented_shared_local_storage_in_owner(
+    java_ty: &JavaType,
+    owner: &str,
+    facts: &FactSet,
+) -> bool {
+    let JavaType::Named { name, .. } = java_ty else {
+        return false;
+    };
+    shared_local_storage_owner_candidates(name, owner)
+        .iter()
+        .any(|candidate| java_type_name_has_implemented_shared_local_storage(candidate, facts))
+}
+
+fn java_type_has_implemented_shared_local_storage_in_owner_representations(
+    java_ty: &JavaType,
+    owner: &str,
+    representations: &RepresentationPlan,
+) -> bool {
+    let JavaType::Named { name, .. } = java_ty else {
+        return false;
+    };
+    shared_local_storage_owner_candidates(name, owner)
+        .iter()
+        .any(|candidate| {
+            storage_placement_is_implemented_shared_local(
+                representations.storage_placement_for(candidate),
+            )
+        })
+}
+
+fn shared_local_storage_owner_candidates(name: &str, owner: &str) -> Vec<String> {
+    let mut candidates = vec![name.to_string()];
+    if !name.contains('.') {
+        let parts = owner.split('.').collect::<Vec<_>>();
+        for end in (1..=parts.len()).rev() {
+            candidates.push(format!("{}.{}", parts[..end].join("."), name));
+        }
+    }
+    candidates
+}
+
+fn java_type_name_has_implemented_shared_local_storage(name: &str, facts: &FactSet) -> bool {
+    let placement = facts.storage_placement_for(name);
+    if storage_placement_is_implemented_shared_local(placement) {
+        return true;
+    }
+    if name.contains('.') {
+        return false;
+    }
+    let mut matches = facts
+        .storage_strategies
+        .iter()
+        .filter(|(type_name, _)| type_name.rsplit('.').next() == Some(name))
+        .map(|(_, storage)| storage.placement())
+        .filter(|placement| storage_placement_is_implemented_shared_local(*placement));
+    let Some(first) = matches.next() else {
+        return false;
+    };
+    matches.next().is_none() && storage_placement_is_implemented_shared_local(first)
+}
+
+fn storage_placement_is_implemented_shared_local(
+    placement: crate::storage_strategy::StoragePlacement,
+) -> bool {
+    placement.shared()
+        && placement.interior_mutable()
+        && !placement.sync()
+        && placement.is_implemented()
 }
 
 fn signature_type_param_env_for_method(ty: &TypeDecl, method: &MethodDecl) -> TypeEnv {
@@ -9439,6 +9569,9 @@ fn constructor_param_shape_constraints_with_declared_source_types(
         &mut constraints,
         &signature_object_representation_fact_constraints(&param.ty, facts),
     );
+    if java_type_has_implemented_shared_local_storage_in_owner(&param.ty, &ty.name, facts) {
+        push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
+    }
     if let Some(binding) = binding {
         let type_env = signature_type_param_env_for_constructor(ty, ctor);
         push_unique_signature_constraints(
@@ -9490,6 +9623,7 @@ fn constructor_param_shape_constraints_with_declared_source_types(
 fn constrained_param_plan(
     param: &Param,
     java_ty: &JavaType,
+    owner: Option<&str>,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
     facts: &FactSet,
@@ -9497,6 +9631,16 @@ fn constrained_param_plan(
 ) -> ParamPlan {
     let mut constraints = constraints.to_vec();
     normalize_param_borrowed_slice_constraints(param, &mut constraints);
+    if owner.is_some_and(|owner| {
+        java_type_has_implemented_shared_local_storage_in_owner(java_ty, owner, facts)
+            || java_type_has_implemented_shared_local_storage_in_owner_representations(
+                java_ty,
+                owner,
+                representations,
+            )
+    }) {
+        push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
+    }
     let shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest::new(
@@ -10643,6 +10787,317 @@ fn source_java_enum_storage_is_copy(
         representations.representation_for(java_ty),
         crate::object_model::ObjectRepresentation::JavaEnum { .. }
     )
+}
+
+fn comparator_object_field_storage_type(ty: &TypeDecl, field: &FieldDecl) -> Option<JavaType> {
+    java_type_is_comparator(&field.ty).then_some(())?;
+    if type_assigns_field(ty, &field.name) {
+        return None;
+    }
+    concrete_comparator_initializer_type(field.initializer.as_ref()?)
+}
+
+fn concrete_comparator_initializer_type(initializer: &Expr) -> Option<JavaType> {
+    match initializer {
+        Expr::New {
+            ty,
+            body: None,
+            resolved,
+            ..
+        } if !java_type_is_comparator(ty) => {
+            if matches!(ty, JavaType::Unknown(_))
+                && let Some(resolved) = resolved
+            {
+                Some(JavaType::Named {
+                    name: resolved.declaring_type.clone(),
+                    args: Vec::new(),
+                })
+            } else {
+                Some(ty.clone())
+            }
+        }
+        Expr::Cast { ty, expr } if java_type_is_comparator(ty) => {
+            concrete_comparator_initializer_type(expr)
+        }
+        _ => None,
+    }
+}
+
+fn concrete_comparator_method_return_type(method: &MethodDecl) -> Option<JavaType> {
+    java_type_is_comparator(&method.return_type).then_some(())?;
+    let body = method.body.as_ref()?;
+    let mut returned_types = Vec::new();
+    if !collect_concrete_comparator_return_types_from_block(body, &mut returned_types) {
+        return None;
+    }
+    let first = returned_types.first()?;
+    returned_types
+        .iter()
+        .all(|ty| ty == first)
+        .then_some(first.clone())
+}
+
+fn collect_concrete_comparator_return_types_from_block(
+    block: &Block,
+    out: &mut Vec<JavaType>,
+) -> bool {
+    block
+        .statements
+        .iter()
+        .all(|stmt| collect_concrete_comparator_return_types_from_stmt(stmt, out))
+}
+
+fn collect_concrete_comparator_return_types_from_stmt(
+    stmt: &Stmt,
+    out: &mut Vec<JavaType>,
+) -> bool {
+    match stmt {
+        Stmt::Return(Some(expr)) => {
+            let Some(ty) = concrete_comparator_initializer_type(expr) else {
+                return false;
+            };
+            out.push(ty);
+            true
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            collect_concrete_comparator_return_types_from_block(then_block, out)
+                && else_block.as_ref().is_none_or(|block| {
+                    collect_concrete_comparator_return_types_from_block(block, out)
+                })
+        }
+        Stmt::Switch { cases, .. } => cases.iter().all(|case| {
+            case.statements
+                .iter()
+                .all(|stmt| collect_concrete_comparator_return_types_from_stmt(stmt, out))
+        }),
+        Stmt::Try {
+            body,
+            catches,
+            finally_block,
+            ..
+        } => {
+            collect_concrete_comparator_return_types_from_block(body, out)
+                && catches.iter().all(|catch| {
+                    collect_concrete_comparator_return_types_from_block(&catch.body, out)
+                })
+                && finally_block.as_ref().is_none_or(|block| {
+                    collect_concrete_comparator_return_types_from_block(block, out)
+                })
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            collect_concrete_comparator_return_types_from_block(block, out)
+        }
+        Stmt::Return(None) => false,
+        _ => true,
+    }
+}
+
+fn java_type_is_comparator(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+            canonical
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "Comparator")
+        }
+        _ => false,
+    }
+}
+
+fn type_assigns_field(ty: &TypeDecl, field_name: &str) -> bool {
+    ty.members.iter().any(|member| match member {
+        crate::java_ir::Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(|body| block_assigns_field(body, field_name)),
+        crate::java_ir::Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(|body| block_assigns_field(body, field_name)),
+        crate::java_ir::Member::Type(nested) => type_assigns_field(nested, field_name),
+        _ => false,
+    })
+}
+
+fn block_assigns_field(block: &Block, field_name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_assigns_field(stmt, field_name))
+}
+
+fn stmt_assigns_field(stmt: &Stmt, field_name: &str) -> bool {
+    match stmt {
+        Stmt::Assign { target, value } => {
+            assignment_targets_field(target, field_name) || expr_assigns_field(value, field_name)
+        }
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_assigns_field(expr, field_name)),
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_assigns_field(expr, field_name),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_assigns_field(condition, field_name)
+                || block_assigns_field(then_block, field_name)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_assigns_field(block, field_name))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_assigns_field(condition, field_name) || block_assigns_field(body, field_name),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(|stmt| stmt_assigns_field(stmt, field_name))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_assigns_field(expr, field_name))
+                || update
+                    .iter()
+                    .any(|expr| expr_assigns_field(expr, field_name))
+                || block_assigns_field(body, field_name)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_assigns_field(iterable, field_name) || block_assigns_field(body, field_name)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_assigns_field(selector, field_name)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => expr_assigns_field(expr, field_name),
+                        SwitchLabel::Default => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_assigns_field(stmt, field_name))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_assigns_field(stmt, field_name))
+                || block_assigns_field(body, field_name)
+                || catches
+                    .iter()
+                    .any(|catch| block_assigns_field(&catch.body, field_name))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_assigns_field(block, field_name))
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_assigns_field(block, field_name)
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            args.iter().any(|expr| expr_assigns_field(expr, field_name))
+        }
+        Stmt::LocalType(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn assignment_targets_field(target: &Expr, field_name: &str) -> bool {
+    match target {
+        Expr::Var(name) => name == field_name,
+        Expr::FieldAccess(receiver, field) => {
+            field == field_name && matches!(receiver.as_ref(), Expr::This)
+        }
+        _ => false,
+    }
+}
+
+fn expr_assigns_field(expr: &Expr, field_name: &str) -> bool {
+    match expr {
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            left,
+            right,
+        } => assignment_targets_field(left, field_name) || expr_assigns_field(right, field_name),
+        Expr::Binary { left, right, .. } => {
+            expr_assigns_field(left, field_name) || expr_assigns_field(right, field_name)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::InstanceOf { expr, .. } => {
+            expr_assigns_field(expr, field_name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_assigns_field(condition, field_name)
+                || expr_assigns_field(then_expr, field_name)
+                || expr_assigns_field(else_expr, field_name)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_assigns_field(selector, field_name)
+                || cases
+                    .iter()
+                    .any(|case| expr_assigns_field(&case.value, field_name))
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_assigns_field(receiver, field_name))
+                || args.iter().any(|arg| expr_assigns_field(arg, field_name))
+        }
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_assigns_field(qualifier, field_name))
+                || args.iter().any(|arg| expr_assigns_field(arg, field_name))
+        }
+        Expr::FieldAccess(receiver, _) => expr_assigns_field(receiver, field_name),
+        Expr::ArrayAccess(array, index) => {
+            expr_assigns_field(array, field_name) || expr_assigns_field(index, field_name)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|dimension| expr_assigns_field(dimension, field_name))
+                || initializer.as_ref().is_some_and(|initializer| {
+                    initializer
+                        .iter()
+                        .any(|expr| expr_assigns_field(expr, field_name))
+                })
+        }
+        Expr::ArrayInitializer(elements) => elements
+            .iter()
+            .any(|element| expr_assigns_field(element, field_name)),
+        Expr::Lambda { .. } => false,
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Unsupported { .. }
+        | Expr::Raw(_) => false,
+    }
 }
 
 fn collect_type_signature_constraints(
@@ -14895,6 +15350,35 @@ class Manifest {
     }
 
     #[test]
+    fn idless_method_local_lookup_rejects_stale_name_index() {
+        let binding = BindingId::new(BindingKind::Local, "other", 0);
+        let locals = vec![LocalConstraintSet {
+            binding,
+            name: "other".to_string(),
+            java_ty: JavaType::String,
+            constraints: vec![SignatureConstraint::MutableBinding],
+        }];
+        let method_constraints = MethodConstraintSet {
+            local_index_by_name: HashMap::from([("value".to_string(), 0)]),
+            locals,
+            ..MethodConstraintSet::default()
+        };
+
+        assert!(
+            method_constraints
+                .idless_compatibility_local("value")
+                .is_none(),
+            "id-less name lookup must not trust a stale index whose payload local has a different name"
+        );
+        assert!(
+            method_constraints
+                .idless_compatibility_local("other")
+                .is_some(),
+            "fallback scan should still find the real local name when it is unique"
+        );
+    }
+
+    #[test]
     fn usage_method_key_prefix_fallback_requires_unique_planned_method() {
         let mut constraints = SignatureConstraintState::default();
         let base = MethodKey::rust_identity("Owner", "pick");
@@ -16534,7 +17018,10 @@ fn map_get_value_binding_is_only_dereferenced_as_receiver(binding: &BindingUseFa
                 saw_receiver_deref = true;
             }
             BindingUse::ContentRead => {}
-            BindingUse::AssignedToLocal { .. }
+            BindingUse::AssignedSubtypeToLocal { .. }
+            | BindingUse::AssignedSubtypeToCollectionElement { .. }
+            | BindingUse::AssignedSubtypeToCallArgument { .. }
+            | BindingUse::AssignedToLocal { .. }
             | BindingUse::PassedToCall { .. }
             | BindingUse::StoredInField { .. }
             | BindingUse::Returned
@@ -16849,6 +17336,9 @@ fn internal_object_binding_is_shared_borrow_safe(
                 saw_read = true;
             }
             BindingUse::AssignedToLocal { .. } => {}
+            BindingUse::AssignedSubtypeToLocal { .. }
+            | BindingUse::AssignedSubtypeToCollectionElement { .. }
+            | BindingUse::AssignedSubtypeToCallArgument { .. } => return false,
             BindingUse::ReceiverForCall {
                 name,
                 boundary: CallArgumentBoundary::Unknown,
@@ -17025,6 +17515,13 @@ pub(crate) fn external_argument_binding_constraints(
             && effect.is_none()
             && native_collection_constraints.is_empty()
             && constructor_constraints.is_empty()
+            && !native_java_argument_is_modeled_by_lowering(
+                receiver_type.as_ref(),
+                name,
+                *arg_count,
+                *arg_index,
+                binding.java_ty(),
+            )
             && !unknown_external_argument_default_non_null_applies(
                 receiver_type.as_ref(),
                 name,
@@ -17061,6 +17558,37 @@ pub(crate) fn external_argument_binding_constraints(
         }
     }
     constraints
+}
+
+fn native_java_argument_is_modeled_by_lowering(
+    receiver_type: Option<&JavaType>,
+    name: &str,
+    arg_count: usize,
+    arg_index: usize,
+    binding_java_ty: &JavaType,
+) -> bool {
+    matches!((name, arg_count, arg_index), ("charAt" | "char_at", 1, 0))
+        && receiver_type.is_some_and(signature_java_type_is_string_type)
+        && java_type_boxed_primitive_storage(binding_java_ty) == Some(PrimitiveType::Int)
+}
+
+fn signature_java_type_is_string_type(java_ty: &JavaType) -> bool {
+    match java_ty {
+        JavaType::String => true,
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            matches!(name.as_str(), "String" | "java.lang.String")
+        }
+        _ => false,
+    }
+}
+
+fn java_type_boxed_primitive_storage(java_ty: &JavaType) -> Option<PrimitiveType> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::boxed_primitive_type(name.rsplit('.').next().unwrap_or(name))
+        }
+        _ => None,
+    }
 }
 
 fn map_entry_set_structural_argument_is_handled_by_lowering(
@@ -21101,7 +21629,11 @@ fn constrained_return_shape(
     facts: &FactSet,
     type_param_scope: TypeParamScope<'_>,
 ) -> Option<RustSlotShape> {
-    let return_type = method_return_type_for_signature(method).unwrap_or(&method.return_type);
+    let concrete_comparator_return_type = concrete_comparator_method_return_type(method);
+    let return_type = concrete_comparator_return_type
+        .as_ref()
+        .or_else(|| method_return_type_for_signature(method))
+        .unwrap_or(&method.return_type);
     let public_api_return = signature_member_api_boundary_policy(&method.modifiers).public_api();
     let merged_constraints = MergedSignatureConstraints::from_constraints(constraints);
     let borrowed_string_return_requested =

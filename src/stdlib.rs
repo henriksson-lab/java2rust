@@ -730,6 +730,16 @@ pub(crate) fn java_type_is_array_blocking_queue(ty: &JavaType) -> bool {
     }
 }
 
+pub(crate) fn java_type_is_priority_queue(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let canonical = canonical_external_receiver_type_key(name);
+            canonical.rsplit('.').next().unwrap_or(&canonical) == "PriorityQueue"
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn native_collection_constructor_kind_for_type(
     ty: &JavaType,
 ) -> Option<JavaCollectionKind> {
@@ -8990,7 +9000,19 @@ macro_rules! impl_java_erased_collection_display {{
     }};
 }}
 
-impl_java_erased_collection_display!(bool, i8, i16, i32, i64, char, f32, f64, String);
+impl_java_erased_collection_display!(bool, i8, i16, i32, i64, char, String);
+
+impl JavaErasedCollectionDisplayElement for f32 {{
+    fn java_erased_collection_display(&self) -> String {{
+        java_float_to_string(*self)
+    }}
+}}
+
+impl JavaErasedCollectionDisplayElement for f64 {{
+    fn java_erased_collection_display(&self) -> String {{
+        java_double_to_string(*self)
+    }}
+}}
 
 impl<T: JavaErasedCollectionDisplayElement> JavaErasedCollectionDisplayElement for Option<T> {{
     fn java_erased_collection_display(&self) -> String {{
@@ -9007,6 +9029,55 @@ fn java_erased_collection_to_string<T: JavaErasedCollectionDisplayElement>(value
         .collect::<Vec<_>>()
         .join(", ");
     format!("[{{body}}]")
+}}
+
+trait JavaErasedOptionalDisplayElement {{
+    fn java_erased_optional_display(&self) -> String;
+}}
+
+macro_rules! impl_java_erased_optional_display {{
+    ($($ty:ty),* $(,)?) => {{
+        $(
+            impl JavaErasedOptionalDisplayElement for $ty {{
+                fn java_erased_optional_display(&self) -> String {{
+                    self.to_string()
+                }}
+            }}
+        )*
+    }};
+}}
+
+impl_java_erased_optional_display!(bool, i8, i16, i32, i64, char, String);
+
+impl JavaErasedOptionalDisplayElement for f32 {{
+    fn java_erased_optional_display(&self) -> String {{
+        java_float_to_string(*self)
+    }}
+}}
+
+impl JavaErasedOptionalDisplayElement for f64 {{
+    fn java_erased_optional_display(&self) -> String {{
+        java_double_to_string(*self)
+    }}
+}}
+
+impl JavaErasedOptionalDisplayElement for std::boxed::Box<dyn std::any::Any> {{
+    fn java_erased_optional_display(&self) -> String {{
+        java_erased_any_to_string(self.as_ref())
+    }}
+}}
+
+impl<T: JavaErasedCollectionDisplayElement> JavaErasedOptionalDisplayElement for Vec<T> {{
+    fn java_erased_optional_display(&self) -> String {{
+        java_erased_collection_to_string(self)
+    }}
+}}
+
+fn java_erased_optional_to_string<T: JavaErasedOptionalDisplayElement>(value: &Option<T>) -> String {{
+    value
+        .as_ref()
+        .map(|value| format!("Optional[{{}}]", value.java_erased_optional_display()))
+        .unwrap_or_else(|| "Optional.empty".to_string())
 }}
 
 pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
@@ -9030,7 +9101,94 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     if let Some(value) = value.downcast_ref::<String>() {{
         return value.clone();
     }}
+    if let Some(value) = value.downcast_ref::<Option<String>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<std::boxed::Box<dyn std::any::Any>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<bool>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<char>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<i8>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<i16>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<i32>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<i64>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<f32>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<f64>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<String>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<bool>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<char>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<i8>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<i16>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<i32>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<i64>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<f32>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<f64>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<String>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<bool>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<char>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<i8>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<i16>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<i32>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<i64>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<f32>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
+    if let Some(value) = value.downcast_ref::<Option<Vec<Option<f64>>>>() {{
+        return java_erased_optional_to_string(value);
+    }}
     if let Some((key, entry_value)) = value.downcast_ref::<(String, String)>() {{
+        return format!("{{}}={{}}", key, entry_value);
+    }}
+    if let Some((key, entry_value)) = value.downcast_ref::<(String, i32)>() {{
         return format!("{{}}={{}}", key, entry_value);
     }}
 {java_class_to_string_downcast}
@@ -9055,10 +9213,10 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
         return value.to_string();
     }}
     if let Some(value) = value.downcast_ref::<f32>() {{
-        return value.to_string();
+        return java_float_to_string(*value);
     }}
     if let Some(value) = value.downcast_ref::<f64>() {{
-        return value.to_string();
+        return java_double_to_string(*value);
     }}
     if value.is::<JavaPlainObject>() {{
         return "java.lang.Object@0".to_string();
@@ -9071,6 +9229,36 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
 
 fn collection_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
     let mut arms = Vec::new();
+    if programs.iter().any(|program| {
+        program_mentions_java_type(program, "TreeSet")
+            || program_mentions_java_type(program, "SortedSet")
+            || program_mentions_java_type(program, "NavigableSet")
+    }) {
+        arms.push(
+            "    if let Some(value) = value.downcast_ref::<std::collections::BTreeSet<String>>() {\n        return java_collection_iter_to_string(value.iter());\n    }\n    if let Some(value) = value.downcast_ref::<std::collections::BTreeSet<i32>>() {\n        return java_collection_iter_to_string(value.iter());\n    }"
+                .to_string(),
+        );
+    }
+    if programs.iter().any(|program| {
+        program_mentions_java_type(program, "TreeMap")
+            || program_mentions_java_type(program, "SortedMap")
+            || program_mentions_java_type(program, "NavigableMap")
+            || program_mentions_java_type(program, "ImmutableSortedMap")
+    }) {
+        arms.push(
+            "    if let Some(value) = value.downcast_ref::<std::collections::BTreeMap<String, String>>() {\n        return java_map_to_string(value.iter());\n    }\n    if let Some(value) = value.downcast_ref::<std::collections::BTreeMap<String, i32>>() {\n        return java_map_to_string(value.iter());\n    }"
+                .to_string(),
+        );
+    }
+    if programs
+        .iter()
+        .any(|program| program_mentions_java_type(program, "ArrayBlockingQueue"))
+    {
+        arms.push(
+            "    if let Some(value) = value.downcast_ref::<JavaArrayBlockingQueue<String>>() {\n        return value.to_string();\n    }\n    if let Some(value) = value.downcast_ref::<JavaArrayBlockingQueue<i32>>() {\n        return value.to_string();\n    }"
+                .to_string(),
+        );
+    }
     if programs
         .iter()
         .any(|program| program_mentions_java_type(program, "LinkedHashSet"))
@@ -9538,6 +9726,10 @@ pub(crate) fn program_mentions_java_array_blocking_queue(program: &Program) -> b
     program_mentions_java_type(program, "ArrayBlockingQueue")
 }
 
+pub(crate) fn program_mentions_java_priority_queue(program: &Program) -> bool {
+    program_mentions_java_type(program, "PriorityQueue")
+}
+
 fn type_decl_mentions_java_type(ty: &TypeDecl, target_simple_name: &str) -> bool {
     ty.type_param_bounds
         .iter()
@@ -9825,11 +10017,15 @@ fn expr_mentions_java_type(expr: &Expr, target_simple_name: &str) -> bool {
         }
         Expr::New {
             ty,
+            qualifier,
             args,
             body,
             resolved,
         } => {
             java_type_mentions_simple_name(ty, target_simple_name)
+                || qualifier
+                    .as_ref()
+                    .is_some_and(|expr| expr_mentions_java_type(expr, target_simple_name))
                 || args
                     .iter()
                     .any(|expr| expr_mentions_java_type(expr, target_simple_name))
@@ -10124,6 +10320,185 @@ pub fn java_collection_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>
     java_arrays_deep_to_string(values)
 }
 
+pub struct JavaPriorityQueue<T> {
+    entries: Vec<T>,
+    comparator: Option<Box<dyn FnMut(&T, &T) -> i32>>,
+}
+
+pub trait JavaPriorityQueueNaturalOrder {
+    fn java_priority_queue_cmp(&self, other: &Self) -> std::cmp::Ordering;
+}
+
+macro_rules! impl_java_priority_queue_natural_ord {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaPriorityQueueNaturalOrder for $ty {
+                fn java_priority_queue_cmp(&self, other: &Self) -> std::cmp::Ordering {
+                    self.cmp(other)
+                }
+            }
+        )*
+    };
+}
+
+impl_java_priority_queue_natural_ord!(bool, i8, i16, i32, i64, char, String);
+
+fn java_priority_queue_float_cmp_f32(left: f32, right: f32) -> std::cmp::Ordering {
+    if left.is_nan() {
+        if right.is_nan() {
+            std::cmp::Ordering::Equal
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    } else if right.is_nan() {
+        std::cmp::Ordering::Less
+    } else if left < right {
+        std::cmp::Ordering::Less
+    } else if left > right {
+        std::cmp::Ordering::Greater
+    } else {
+        left.to_bits().cmp(&right.to_bits())
+    }
+}
+
+fn java_priority_queue_float_cmp_f64(left: f64, right: f64) -> std::cmp::Ordering {
+    if left.is_nan() {
+        if right.is_nan() {
+            std::cmp::Ordering::Equal
+        } else {
+            std::cmp::Ordering::Greater
+        }
+    } else if right.is_nan() {
+        std::cmp::Ordering::Less
+    } else if left < right {
+        std::cmp::Ordering::Less
+    } else if left > right {
+        std::cmp::Ordering::Greater
+    } else {
+        left.to_bits().cmp(&right.to_bits())
+    }
+}
+
+impl JavaPriorityQueueNaturalOrder for f32 {
+    fn java_priority_queue_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        java_priority_queue_float_cmp_f32(*self, *other)
+    }
+}
+
+impl JavaPriorityQueueNaturalOrder for f64 {
+    fn java_priority_queue_cmp(&self, other: &Self) -> std::cmp::Ordering {
+        java_priority_queue_float_cmp_f64(*self, *other)
+    }
+}
+
+fn java_priority_queue_ordering_to_compare(ordering: std::cmp::Ordering) -> i32 {
+    match ordering {
+        std::cmp::Ordering::Less => -1,
+        std::cmp::Ordering::Equal => 0,
+        std::cmp::Ordering::Greater => 1,
+    }
+}
+
+impl<T: JavaPriorityQueueNaturalOrder + 'static> JavaPriorityQueue<T> {
+    pub fn new() -> JavaPriorityQueue<T> {
+        JavaPriorityQueue {
+            entries: Vec::new(),
+            comparator: Some(Box::new(|left, right| {
+                java_priority_queue_ordering_to_compare(left.java_priority_queue_cmp(right))
+            })),
+        }
+    }
+
+    pub fn with_capacity(capacity: usize) -> JavaPriorityQueue<T> {
+        JavaPriorityQueue {
+            entries: Vec::with_capacity(capacity),
+            comparator: Some(Box::new(|left, right| {
+                java_priority_queue_ordering_to_compare(left.java_priority_queue_cmp(right))
+            })),
+        }
+    }
+}
+
+impl<T> JavaPriorityQueue<T> {
+    pub fn with_comparator<F>(comparator: F) -> JavaPriorityQueue<T>
+    where
+        F: FnMut(&T, &T) -> i32 + 'static,
+    {
+        JavaPriorityQueue {
+            entries: Vec::new(),
+            comparator: Some(Box::new(comparator)),
+        }
+    }
+
+    pub fn push(&mut self, value: T) {
+        self.entries.push(value);
+        self.sort();
+    }
+
+    pub fn sort(&mut self) {
+        if let Some(comparator) = self.comparator.as_mut() {
+            java_collection_sort_by_result(&mut self.entries, |left, right| {
+                Ok(comparator(left, right))
+            })
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+        }
+    }
+
+    pub fn get(&self, index: usize) -> Option<&T> {
+        self.entries.get(index)
+    }
+
+    pub fn remove(&mut self, index: usize) -> T {
+        self.entries.remove(index)
+    }
+
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.entries.is_empty()
+    }
+
+    pub fn iter(&self) -> std::slice::Iter<'_, T> {
+        self.entries.iter()
+    }
+}
+
+impl<T: JavaPriorityQueueNaturalOrder + 'static> Default for JavaPriorityQueue<T> {
+    fn default() -> Self {
+        JavaPriorityQueue::new()
+    }
+}
+
+impl<T> AsRef<[T]> for JavaPriorityQueue<T> {
+    fn as_ref(&self) -> &[T] {
+        &self.entries
+    }
+}
+
+impl<T: JavaPriorityQueueNaturalOrder + 'static> std::iter::FromIterator<T> for JavaPriorityQueue<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(iter: I) -> Self {
+        let mut queue = JavaPriorityQueue::new();
+        for value in iter {
+            queue.push(value);
+        }
+        queue
+    }
+}
+
+impl<T: JavaArraysDeepToStringElement> std::fmt::Display for JavaPriorityQueue<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&java_collection_to_string(&self.entries))
+    }
+}
+
+impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for JavaPriorityQueue<T> {
+    fn java_arrays_deep_to_string(&self) -> String {
+        self.to_string()
+    }
+}
+
 pub fn java_collection_sort_by_result<T, F>(
     values: &mut [T],
     mut compare: F,
@@ -10186,7 +10561,19 @@ macro_rules! impl_java_arrays_deep_to_string_display {
     };
 }
 
-impl_java_arrays_deep_to_string_display!(bool, i8, i16, i32, i64, char, f32, f64, String, &str);
+impl_java_arrays_deep_to_string_display!(bool, i8, i16, i32, i64, char, String, &str);
+
+impl JavaArraysDeepToStringElement for f32 {
+    fn java_arrays_deep_to_string(&self) -> String {
+        java_float_to_string(*self)
+    }
+}
+
+impl JavaArraysDeepToStringElement for f64 {
+    fn java_arrays_deep_to_string(&self) -> String {
+        java_double_to_string(*self)
+    }
+}
 
 impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Vec<T> {
     fn java_arrays_deep_to_string(&self) -> String {
@@ -12201,15 +12588,25 @@ impl ExternalApiFacadeSupport {
                 if !source_summary_method_is_used(method, &rust_method, used_calls) {
                     continue;
                 }
-                let effect = facts.external_api_effect_for_receiver_with_arity(
-                    Some(type_key),
+                let arity = method.params.len();
+                let effect = prefer_typed_builtin_external_api_effect(
+                    facts
+                        .external_api_effect_for_receiver_with_arity(
+                            Some(type_key),
+                            &method.name,
+                            Some(arity),
+                        )
+                        .cloned(),
+                    type_key,
                     &method.name,
-                    Some(method.params.len()),
+                    arity,
                 );
                 let effective_return_type = effect
+                    .as_ref()
                     .and_then(|effect| effect.return_type.as_ref())
                     .unwrap_or(&method.return_type);
                 let effective_nullability = effect
+                    .as_ref()
                     .map(|effect| effect.return_nullability)
                     .filter(|state| *state != NullabilityState::Unknown)
                     .unwrap_or_else(|| {
@@ -12219,7 +12616,7 @@ impl ExternalApiFacadeSupport {
                     facts,
                     Some(type_key),
                     &method.name,
-                    Some(method.params.len()),
+                    Some(arity),
                     effective_return_type,
                     effective_nullability,
                 );
@@ -14107,7 +14504,7 @@ impl ExternalApiFacadeSupport {
         java_method: &str,
         arg_count: usize,
     ) -> Option<ExternalApiEffectFact> {
-        facts
+        let effect = facts
             .external_api_effect_for_receiver_with_arity(Some(owner), java_method, Some(arg_count))
             .cloned()
             .or_else(|| {
@@ -14131,7 +14528,8 @@ impl ExternalApiFacadeSupport {
                     java_method,
                     Some(arg_count),
                 )
-            })
+            });
+        prefer_typed_builtin_external_api_effect(effect, owner, java_method, arg_count)
     }
 
     fn facade_abi_rust_method_for_support(
@@ -15213,6 +15611,8 @@ impl ExternalApiFacadeSupport {
         let java_method = lower_camel_from_snake(method_name);
         let Some(java_return_type) =
             Self::known_missing_opaque_support_method_return_type(owner, &java_method, arg_count)
+                .or_else(|| known_external_method_return_type(Some(owner), &java_method, arg_count))
+                .or_else(|| known_external_method_return_type(Some(owner), method_name, arg_count))
         else {
             return method;
         };
@@ -20176,6 +20576,46 @@ fn external_facade_imported_static_method(name: &str, arg_count: usize) -> Strin
     }
 }
 
+fn external_api_effect_for_imported_static(
+    facts: &FactSet,
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> Option<ExternalApiEffectFact> {
+    let effect = facts
+        .external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
+        .cloned()
+        .or_else(|| {
+            crate::external_packs::external_api_effect_for_receiver_with_arity(
+                Some(owner_key),
+                name,
+                Some(arg_count),
+            )
+        });
+    prefer_typed_builtin_external_api_effect(effect, owner_key, name, arg_count)
+}
+
+fn prefer_typed_builtin_external_api_effect(
+    effect: Option<ExternalApiEffectFact>,
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> Option<ExternalApiEffectFact> {
+    if effect
+        .as_ref()
+        .is_some_and(|effect| effect.return_type.is_some())
+    {
+        return effect;
+    }
+    crate::external_packs::external_api_effect_for_receiver_with_arity(
+        Some(owner_key),
+        name,
+        Some(arg_count),
+    )
+    .filter(|builtin| builtin.return_type.is_some())
+    .or(effect)
+}
+
 fn external_facade_imported_static_method_with_facts(
     facts: &FactSet,
     owner_key: &str,
@@ -20185,16 +20625,7 @@ fn external_facade_imported_static_method_with_facts(
     if imported_static_method_returns_first_arg(owner_key, name, arg_count) {
         return external_facade_imported_static_first_arg_method(name, arg_count);
     }
-    if let Some(effect) = facts
-        .external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
-        .cloned()
-        .or_else(|| {
-            crate::external_packs::external_api_effect_for_receiver_with_arity(
-                Some(owner_key),
-                name,
-                Some(arg_count),
-            )
-        })
+    if let Some(effect) = external_api_effect_for_imported_static(facts, owner_key, name, arg_count)
     {
         if let Some(return_type) = &effect.return_type {
             let return_type = external_facade_method_return_type_with_facts(
@@ -20311,16 +20742,7 @@ fn external_facade_imported_static_instance_method_with_facts(
     if imported_static_method_returns_first_arg(owner_key, name, arg_count) {
         return external_facade_imported_static_instance_first_arg_method(name, arg_count);
     }
-    if let Some(effect) = facts
-        .external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
-        .cloned()
-        .or_else(|| {
-            crate::external_packs::external_api_effect_for_receiver_with_arity(
-                Some(owner_key),
-                name,
-                Some(arg_count),
-            )
-        })
+    if let Some(effect) = external_api_effect_for_imported_static(facts, owner_key, name, arg_count)
     {
         if let Some(return_type) = &effect.return_type {
             let return_type = external_facade_method_return_type_with_facts(
@@ -20401,16 +20823,7 @@ fn imported_static_unmodelled_result_type(
     name: &str,
     arg_count: usize,
 ) -> Option<String> {
-    let effect = facts
-        .external_api_effect_for_receiver_with_arity(Some(owner_key), name, Some(arg_count))
-        .cloned()
-        .or_else(|| {
-            crate::external_packs::external_api_effect_for_receiver_with_arity(
-                Some(owner_key),
-                name,
-                Some(arg_count),
-            )
-        })?;
+    let effect = external_api_effect_for_imported_static(facts, owner_key, name, arg_count)?;
     if effect.return_type.is_some()
         || effect.provenance == FactProvenance::ConservativeFallback
         || !external_api_role_returns_value(effect.role)
@@ -20627,23 +21040,39 @@ fn source_summary_imported_static_methods(
         })
         .map(|method| {
             let rust_method = crate::java_signature::source_method_rust_name(method);
-            let effect = facts
-                .external_api_effect_for_receiver_with_arity(
-                    Some(owner_key),
-                    &method.name,
-                    Some(method.params.len()),
-                )
-                .or_else(|| {
-                    facts.external_api_effect_for_receiver_with_arity(
-                        Some(owner_simple),
+            let arity = method.params.len();
+            let effect = prefer_typed_builtin_external_api_effect(
+                facts
+                    .external_api_effect_for_receiver_with_arity(
+                        Some(owner_key),
                         &method.name,
-                        Some(method.params.len()),
+                        Some(arity),
                     )
-                });
+                    .cloned(),
+                owner_key,
+                &method.name,
+                arity,
+            )
+            .or_else(|| {
+                prefer_typed_builtin_external_api_effect(
+                    facts
+                        .external_api_effect_for_receiver_with_arity(
+                            Some(owner_simple),
+                            &method.name,
+                            Some(arity),
+                        )
+                        .cloned(),
+                    owner_simple,
+                    &method.name,
+                    arity,
+                )
+            });
             let effective_return_type = effect
+                .as_ref()
                 .and_then(|effect| effect.return_type.as_ref())
                 .unwrap_or(&method.return_type);
             let effective_nullability = effect
+                .as_ref()
                 .map(|effect| effect.return_nullability)
                 .unwrap_or_else(|| {
                     source_summary_method_effective_return_nullability(facts, owner_simple, method)

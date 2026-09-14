@@ -1136,6 +1136,46 @@ class Dog implements Animal {}
 }
 
 #[test]
+fn open_fieldless_source_class_dispatch_uses_companion_carrier() {
+    let parsed = parse_java_source(
+        r#"
+class Animal {
+    String speak() { return "generic"; }
+}
+class Dog extends Animal {
+    String speak() { return "woof"; }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let mut facts = resolved.facts.clone();
+    facts
+        .dispatch_requirement_facts
+        .push(DispatchRequirementFact {
+            type_name: "Animal".to_string(),
+            requirement: DispatchRequirementKind::NeedsSubtypeDispatch,
+            provenance: FactProvenance::ParsedSource,
+        });
+
+    let object_plan = plan_object_model_for_test(&resolved.program, &facts);
+    let animal = object_plan.strategy_for("Animal").unwrap();
+
+    assert_eq!(
+        animal.strategy(),
+        ObjectRepresentation::SourceHierarchyCarrier {
+            carrier_name: "AnimalValue".to_string(),
+            variants: vec!["Animal".to_string(), "Dog".to_string()],
+        }
+    );
+    assert!(animal.rejected().iter().any(|rejected| {
+        rejected.strategy() == ObjectRepresentation::ErasedObject
+            && rejected
+                .reason()
+                .contains("open subtype-dispatch/runtime case-split")
+    }));
+}
+
+#[test]
 fn object_model_applies_explicit_hierarchy_override_before_inferred_closed_enum() {
     let parsed = parse_java_source(
         r#"

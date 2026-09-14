@@ -14673,6 +14673,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: Some(resolved_setter),
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::TrivialAccessorSetter {
             field_name,
@@ -14702,6 +14703,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: None,
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::IterableForEach {
             param_names,
@@ -14739,6 +14741,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: None,
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::IterableForEach {
             param_names,
@@ -14755,6 +14758,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: None,
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::NativeArraysSort {
             target: Expr::Var(name),
@@ -14775,6 +14779,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: None,
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::NativeArraysSort {
             target: Expr::Var(name),
@@ -14791,6 +14796,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: None,
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::NativeCollectionsSort {
             target: Expr::Var(name),
@@ -14809,6 +14815,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
                 resolved: None,
             },
             &facts,
+            &TypeEnv::new(),
         ),
         Some(CallStatementPlan::NativeCollectionsSort {
             target: Expr::Var(name),
@@ -33847,7 +33854,7 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         supertype_conversion_source.contains("storage_placement_construction_expr(")
             && supertype_conversion_source.contains("RustExpr::Var(\"value\".to_string())")
             && supertype_conversion_source.contains("source_from_trait_impl_item(")
-            && supertype_conversion_source.contains("source_supertype_conversion_struct_literal(")
+            && !supertype_conversion_source.contains("source_supertype_conversion_struct_literal(")
             && lower_source.contains("trait_name: Some(format!(\"From<{from_name}>\"))")
             && !supertype_conversion_source.contains(
                 "crate::emit::emit_expr(&crate::slot_render::storage_placement_construction_expr"
@@ -38072,7 +38079,8 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .expect("native collection constructor lowering should remain discoverable");
     assert!(!native_collection_new_source.contains("fn native_collection_type_name"));
     assert!(!native_collection_new_source.contains("::with_capacity({} as usize)"));
-    assert!(!native_collection_new_source.contains("::new()"));
+    assert!(!native_collection_new_source.contains("\"::new()\""));
+    assert!(!native_collection_new_source.contains("format!(\"{}::new()"));
     assert!(native_collection_new_source.contains("native_collection_empty_new_projection(kind)"));
     assert!(
         native_collection_new_source
@@ -39604,6 +39612,7 @@ fn lowering_diagnostics_only_report_unimplemented_control_flow_rewrites() {
     let diagnostics = control_flow_rewrite_diagnostics(&plans);
     let lowering_diagnostics = collect_lowering_diagnostic_plans(
         &resolved.program,
+        &resolved.program,
         &facts,
         &representations,
         &signatures,
@@ -39637,7 +39646,10 @@ fn lowering_diagnostics_only_report_unimplemented_control_flow_rewrites() {
     assert!(lowering_diagnostics_source.contains(".diagnostics()"));
     assert!(lowering_diagnostics_source.contains("Severity::Warning"));
     assert!(lowering_diagnostics_source.contains("Severity::Unsupported"));
-    assert!(lowering_diagnostics_source.contains("diagnostics_for_program(program)"));
+    assert!(
+        lowering_diagnostics_source
+            .contains("diagnostics_for_program_with_anonymous_context(program")
+    );
     assert!(lowering_diagnostics_source.contains("signatures"));
     assert!(lowering_diagnostics_source.contains("control_flow_rewrite_diagnostics"));
     assert!(rewrite_source.contains("pub struct ControlFlowRewriteDiagnostic"));
@@ -39664,6 +39676,7 @@ fn lowering_diagnostic_codes_for_source(source: &str) -> Vec<&'static str> {
     let signatures =
         solve_signatures_with_facts(&resolved.program, &representations, &usage, &facts);
     collect_lowering_diagnostic_plans(
+        &resolved.program,
         &resolved.program,
         &facts,
         &representations,
@@ -46105,6 +46118,71 @@ public class Caller {
                 generated_items_from_marker(&a_item.rust, "pub struct AItem"),
                 generated_items_from_marker(&b_item.rust, "pub struct BItem"),
                 generated_items_from_marker(&caller.rust, "pub struct Caller"),
+            ),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn same_package_static_owner_beats_ambiguous_context_simple_peer() {
+    let support_a = r#"
+package a;
+
+public class Util {
+    public static int value() { return 1; }
+}
+"#;
+    let support_b = r#"
+package b;
+
+public class Util {
+    public static int value() { return 2; }
+}
+"#;
+    let source = r#"
+package a;
+
+class Use {
+    int x() { return Util.value(); }
+}
+"#;
+    let caller = translate_source_with_context_sources(
+        source,
+        &[support_a.to_string(), support_b.to_string()],
+        &FactSet::default(),
+    );
+    let a_util = translate_source_with_context_sources(
+        support_a,
+        &[support_b.to_string()],
+        &FactSet::default(),
+    );
+    let b_util = translate_source_with_context_sources(
+        support_b,
+        &[support_a.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        caller.rust.contains("AUtil::value()")
+            && !caller
+                .rust
+                .contains("unresolved Java static call Util.value"),
+        "{}",
+        caller.rust
+    );
+
+    cargo_check_generated_modules(
+        "same_package_static_owner_beats_ambiguous_context_simple_peer",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: format!(
+                "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
+                 impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
+                 {}\n{}\n{}",
+                generated_items_from_marker(&a_util.rust, "pub struct AUtil"),
+                generated_items_from_marker(&b_util.rust, "pub struct BUtil"),
+                generated_items_from_marker(&caller.rust, "pub struct Use"),
             ),
             tests: "",
         }],

@@ -421,12 +421,11 @@ impl StoragePlacement {
 
     /// Whether lowering can emit this placement today.
     ///
-    /// The cell rungs need the never-hold-a-borrow-across-a-call guarantee and
-    /// are not implemented. An unimplemented placement falls back to holding the
-    /// value inline, which is today's behaviour — wrong in a known and reported
-    /// way, rather than wrong in a way that does not compile.
+    /// The single-threaded cell rung is implemented for statement-local borrows
+    /// of direct source-object fields. The synchronized cell rung still needs a
+    /// separate `Mutex` borrow policy.
     pub fn is_implemented(self) -> bool {
-        !self.interior_mutable
+        !self.interior_mutable || !self.sync
     }
 }
 
@@ -1490,7 +1489,7 @@ mod tests {
 
         assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
         assert_eq!(facts.placement(), StoragePlacement::new(true, true, false));
-        assert!(!facts.placement().is_implemented());
+        assert!(facts.placement().is_implemented());
     }
 
     #[test]
@@ -1877,10 +1876,7 @@ public class Outer {
         assert_eq!(facts.escape, Escape::Stored);
         assert!(facts.mutated);
         assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
-        assert!(
-            !facts.placement().is_implemented(),
-            "0023 remains blocked until the SharedLocal receiver/RefCell tier is implemented"
-        );
+        assert!(facts.placement().is_implemented());
     }
 
     #[test]
@@ -1889,8 +1885,8 @@ public class Outer {
         assert!(StoragePlacement::new(true, false, false).is_implemented());
         assert!(StoragePlacement::new(true, false, true).is_implemented());
         assert!(
-            !StoragePlacement::new(true, true, false).is_implemented(),
-            "SharedLocal remains blocked until Rc<RefCell<T>> lowering is implemented"
+            StoragePlacement::new(true, true, false).is_implemented(),
+            "SharedLocal Rc<RefCell<T>> lowering is enabled for direct field borrows"
         );
         assert!(
             !StoragePlacement::new(true, true, true).is_implemented(),

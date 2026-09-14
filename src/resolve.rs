@@ -3402,10 +3402,24 @@ fn resolve_expr_calls(
         }
         Expr::New {
             ty,
+            qualifier,
             args,
             body,
             resolved,
         } => {
+            if let Some(qualifier) = qualifier {
+                resolve_expr_calls(
+                    qualifier,
+                    current_type,
+                    symbols,
+                    methods,
+                    env,
+                    diagnostics,
+                    facts,
+                    external_facts,
+                    enclosing_member,
+                );
+            }
             for arg in args.iter_mut() {
                 resolve_expr_calls(
                     arg,

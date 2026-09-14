@@ -747,6 +747,24 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
     {
         match kind {
             crate::stdlib::JavaCollectionKind::List
+                if crate::stdlib::java_type_is_priority_queue(ty) =>
+            {
+                let element_ty = rust_storage_collection_element_java_type(
+                    args.first()
+                        .cloned()
+                        .unwrap_or_else(erased_object_java_type),
+                    &effective_facts,
+                );
+                return rust_generic_type(
+                    "JavaPriorityQueue",
+                    vec![rust_type_for_java_generic_arg_with_representations(
+                        &element_ty,
+                        &effective_facts,
+                        representations,
+                    )],
+                );
+            }
+            crate::stdlib::JavaCollectionKind::List
                 if crate::stdlib::java_type_is_array_blocking_queue(ty) =>
             {
                 let element_ty = rust_storage_collection_element_java_type(
@@ -907,6 +925,24 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
     {
         match kind {
+            crate::stdlib::JavaCollectionKind::List
+                if crate::stdlib::java_type_is_priority_queue(ty) =>
+            {
+                return NativeJavaRustTypePolicy::Direct {
+                    ty: rust_generic_type(
+                        "JavaPriorityQueue",
+                        vec![rust_type_for_java_generic_arg_with_effective_facts(
+                            &rust_storage_collection_element_java_type(
+                                args.first()
+                                    .cloned()
+                                    .unwrap_or_else(erased_object_java_type),
+                                facts,
+                            ),
+                            facts,
+                        )],
+                    ),
+                };
+            }
             crate::stdlib::JavaCollectionKind::List
                 if crate::stdlib::java_type_is_array_blocking_queue(ty) =>
             {

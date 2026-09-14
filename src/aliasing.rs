@@ -46,6 +46,8 @@ pub(crate) struct ObservableAlias {
     mutated_through: String,
     /// The handle that still reads the object after that write.
     observed_through: String,
+    /// The Java type whose reference was copied.
+    aliased_ty: JavaType,
     /// What the write was, for the message.
     mutation: MutationKind,
 }
@@ -57,6 +59,7 @@ impl ObservableAlias {
         alias: String,
         mutated_through: String,
         observed_through: String,
+        aliased_ty: JavaType,
         mutation: MutationKind,
     ) -> Self {
         Self {
@@ -65,6 +68,7 @@ impl ObservableAlias {
             alias,
             mutated_through,
             observed_through,
+            aliased_ty,
             mutation,
         }
     }
@@ -91,6 +95,10 @@ impl ObservableAlias {
 
     pub(crate) fn mutation(&self) -> &MutationKind {
         &self.mutation
+    }
+
+    fn aliased_ty(&self) -> &JavaType {
+        &self.aliased_ty
     }
 }
 
@@ -145,6 +153,9 @@ pub(crate) fn report_observable_aliases(
     into: &mut DiagnosticBag,
 ) {
     for alias in observable_aliases_with_facts(program, usage, facts) {
+        if direct_local_alias_mutation_is_represented(&alias, facts) {
+            continue;
+        }
         into.push(
             Severity::Error,
             "observable_alias",
@@ -161,6 +172,34 @@ pub(crate) fn report_observable_aliases(
             None,
         );
     }
+}
+
+fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &FactSet) -> bool {
+    if !matches!(
+        alias.mutation(),
+        MutationKind::FieldWrite { .. } | MutationKind::MutatingCall { .. }
+    ) {
+        return false;
+    }
+    if [
+        alias.original(),
+        alias.alias(),
+        alias.mutated_through(),
+        alias.observed_through(),
+    ]
+    .iter()
+    .any(|handle| handle.contains('.'))
+    {
+        return false;
+    }
+    let JavaType::Named { name, .. } = alias.aliased_ty() else {
+        return false;
+    };
+    let placement = facts.storage_placement_for(name);
+    placement.shared()
+        && placement.interior_mutable()
+        && !placement.sync()
+        && placement.is_implemented()
 }
 
 fn collect_in_type(
@@ -291,6 +330,7 @@ fn collect_in_body(
             point.alias.display(),
             site.handle.clone(),
             other.display(),
+            point.ty.clone(),
             site.kind.clone(),
         ));
     }
@@ -306,6 +346,7 @@ struct AliasPoint<'a> {
     stmt: &'a Stmt,
     original: String,
     alias: AliasHandle,
+    ty: JavaType,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -355,6 +396,7 @@ fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec
                         stmt,
                         original: source.clone(),
                         alias: AliasHandle::Local(name.clone()),
+                        ty: ty.clone(),
                     });
                 }
                 local_types.insert(name.clone(), ty.clone());
@@ -379,6 +421,7 @@ fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec
                     stmt,
                     original: source.clone(),
                     alias,
+                    ty: source_ty.clone(),
                 });
             }
             _ => {}

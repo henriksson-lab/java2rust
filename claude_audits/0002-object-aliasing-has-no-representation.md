@@ -1,25 +1,26 @@
 # 0002 — Java object aliasing has no representation; aliases become clones
 
-Status: **open, partially implemented** (`SharedImmutable`/`Rc<T>` plus
-reference-identity lowering have landed; mutable aliasing still lacks
-`SharedLocal`/`Rc<RefCell<T>>` lowering)
-Severity: high — mutable alias semantics still need a real representation; the
-current gate makes the known gap loud through `observable_alias` /
-`storage_strategy_disagreement` diagnostics rather than silently accepting the
-old clone semantics
+Status: **open, materially advanced** (`SharedImmutable`/`Rc<T>`,
+reference-identity lowering, and the first single-threaded
+`SharedLocal`/`Rc<RefCell<T>>` slices have landed)
+Severity: high — the original mutable-alias oracle is now promoted and passing,
+including direct locals, field/array storage, named callback parameters, stored
+actions, and the narrow zero-argument anonymous functional-interface action.
+The remaining mutable-sharing work is broader anonymous object lowering,
+shared receivers/ordinary inner construction, and the `SharedSync` tier.
 Kind: missing representation in the object model
 
 ## Symptom
 
-Java reference assignment that requires mutable sharing still cannot be
-represented as one object with two live mutable handles. The historical repro
-below was originally translated as a deep copy (`a.clone()`), so subsequent
-mutation through one reference was not observed through the other. The
-`SharedImmutable` tier now covers aliased source values that are not mutated
-after sharing, but this mutable `Node` shape still requires the unimplemented
-`SharedLocal` tier. Current known-gap fixtures assert that this is reported
-loudly; the remaining defect is the missing mutable shared carrier, not an
-undetected clone in the gated path.
+Java reference assignment that requires mutable sharing originally had no
+representation as one object with two live mutable handles. The historical repro
+below was first translated as a deep copy (`a.clone()`), so subsequent mutation
+through one reference was not observed through the other. The direct mutable
+`Node`/`Counter` shapes are now represented with `SharedLocal`
+(`Rc<RefCell<T>>`) in the promoted `tests/differential/Aliasing.java` oracle.
+The remaining defect is no longer this direct aliasing shape; it is the wider
+surface where a shared receiver handle or general anonymous object lowering is
+needed.
 
 Follow-up cleanup 2026-09-12: the `aliasing` module is crate-internal now. The
 translator still reports observable mutable-alias diagnostics through the batch
@@ -245,15 +246,14 @@ All three fail in the same direction: a missed report, never a false one.
 the analysis can only name the defect. The two-part split above stands: 0002b is
 the representation work, unchanged.
 
-`tests/differential/known-gaps/Aliasing.java` reproduces eight mutable-alias
-cases against the Java oracle (`5|7|3|9|11|13|17|19`). The
-`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` test now
-verifies that this fixture is still live: Java must print
-`5|7|3|9|11|13|17|19`, and the translator must report `observable_alias`
+Historical: `tests/differential/known-gaps/Aliasing.java` reproduced eight
+mutable-alias cases against the Java oracle (`5|7|3|9|11|13|17|19`). The
+`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` test verified
+that this fixture was still live: Java had to print
+`5|7|3|9|11|13|17|19`, and the translator had to report `observable_alias`
 instead of silently translating mutable sharing without a `SharedLocal`
-representation. The original implementation detected three; the later
-array-element, field-storage, block-action, and stored-runnable cases are lifted
-below.
+representation. That fixture has since moved to `tests/differential/Aliasing.java`
+after the bounded SharedLocal slices below landed.
 
 
 ---
@@ -377,21 +377,117 @@ fails the translation rather than shipping the copied-value program. The
 known-gap harness classifies `Aliasing.java` as `LoudDiagnostic` and checks that
 the diagnostic code is an error.
 
-## Update 2026-09-10 — known-gap oracle covers field storage too
+## Update 2026-09-10 — known-gap oracle covered field storage too
 
-`tests/differential/known-gaps/Aliasing.java` now includes the field-storage
-alias shapes already covered by `src/aliasing.rs` unit tests: storing an alias
-through another object's field and through a `this` field, alongside the
-block-action and stored-runnable callback cases. The known-gap harness expects
-Java output `5|7|3|9|11|13|17|19` and the same `observable_alias` error. This
-does not implement `SharedLocal`; it makes the remaining mutable-alias
-representation gap executable at the Java-oracle level.
+Historical: `tests/differential/known-gaps/Aliasing.java` was expanded to
+include the field-storage alias shapes already covered by `src/aliasing.rs`
+unit tests: storing an alias through another object's field and through a
+`this` field, alongside the block-action and stored-runnable callback cases.
+The known-gap harness expected Java output `5|7|3|9|11|13|17|19` and the same
+`observable_alias` error. This did not implement `SharedLocal`; it made the
+then-remaining mutable-alias representation gap executable at the Java-oracle
+level.
 
-## Update 2026-09-10 — aliasing known gap is tied to the `SharedLocal` queue
+## Update 2026-09-10 — aliasing known gap was tied to the `SharedLocal` queue
 
-The `Aliasing.java` known-gap row now requires more than the error-level
-`observable_alias` diagnostic. It also requires `storage_strategy_disagreement`
-warnings naming `Aliasing.Node needs SharedLocal` and
-`Aliasing.Counter needs SharedLocal`, so the core mutable-alias fixture proves
-that the same source program lands in the 0002b mutable shared-representation
-work queue.
+Historical: the `Aliasing.java` known-gap row required more than the
+error-level `observable_alias` diagnostic. It also required
+`storage_strategy_disagreement` warnings naming `Aliasing.Node needs SharedLocal`
+and `Aliasing.Counter needs SharedLocal`, so the core mutable-alias fixture
+proved that the same source program landed in the 0002b mutable
+shared-representation work queue.
+
+## Update 2026-09-14 — first `SharedLocal` slice: direct local/storage aliases
+
+`tests/differential/AliasingLocalField.java` is now a passing Java-vs-Rust
+oracle for the smallest mutable-alias shapes:
+
+```java
+Node a = new Node();
+Node b = a;
+a.v = 5;
+return b.v;
+
+Counter a = new Counter();
+Counter b = a;
+a.bump();
+return b.get();
+
+Node[] cell = new Node[1];
+cell[0] = a;
+a.v = 9;
+return cell[0].v;
+
+holder.stored = a;
+a.v = 11;
+return holder.stored.v;
+
+this.stored = node;
+node.v = 13;
+return this.stored.v;
+
+StoredRunnable action = new StoredRunnable(a);
+action.run();
+return b.v;
+```
+
+That slice renders the aliased source type as `Rc<RefCell<T>>`, clones the
+handle for the second local, writes fields through `borrow_mut()`, reads fields
+through `borrow()`, and dispatches direct source receiver calls through
+`borrow()`/`borrow_mut()` according to the solved method signature. The
+optional field-read path also borrows through optional `Rc<RefCell<T>>`
+receivers before projecting fields, so array-element and holder-field aliases
+read the shared object rather than the handle. Optional SharedLocal assignment
+targets also unwrap with `as_ref()` before `borrow_mut()`, so a named stored
+action can mutate through an optional shared field without requiring `&mut self`.
+The `observable_alias` diagnostic is suppressed only for these direct
+local/direct field-or-receiver-call shapes when the aliased type has
+implemented single-threaded `SharedLocal` placement.
+
+At this checkpoint the broader `known-gaps/Aliasing.java` fixture still stopped
+at `unsupported_anonymous_class`: the direct field and direct receiver-call
+alias cases were represented, so the fixture reached the captured action
+boundary. It identified the next unsupported shapes: captured anonymous actions
+and callback methods whose parameter/trait-object carrier had to preserve the
+shared source-object handle across the call. Inner-class outer construction was
+also still blocked: `Rc<RefCell>` field storage does not imply lowering can
+synthesize an `Rc<RefCell<Self>>` receiver handle from `&mut self`.
+
+Follow-up 2026-09-14: named callback method parameters now preserve the
+SharedLocal handle across the call boundary. `AliasingCallbackParam.java`
+exercises `owner.apply(new NamedAction(a), b)`, where `NamedAction.run()`
+mutates `a` and `Owner.apply(Action action, Node node)` reads `node.v` after
+the callback. The emitted callee parameter and caller argument slot both use
+the storage shape (`Rc<RefCell<Node>>`) rather than rejoining to `&Node`, so the
+Java/Rust oracle now matches `17`. At that checkpoint the broad known-gap
+fixture still stopped at the anonymous action object itself; implementing
+anonymous class object lowering was separate from preserving named callback
+parameter handles.
+
+Follow-up 2026-09-14: the broad `Aliasing.java` fixture is promoted. The
+remaining anonymous action shape is intentionally narrow: a zero-argument,
+void-returning functional-interface implementation now lowers to a boxed
+closure that clones captured locals before `move`, so the outer
+`Rc<RefCell<Node>>` handle is preserved across `Action.run()`. The generated
+trait surface has a matching closure adapter only for that single-method shape;
+general anonymous class object lowering, anonymous bodies that use `this`, and
+interfaces with parameters/returns remain separate work. The Java/Rust oracle
+now covers the full original output:
+`5|7|3|9|11|13|17|19`.
+
+Codex follow-up 2026-09-14: the diagnostic-side support predicate now matches
+the lowering-side boundary for that narrow anonymous action slice. A
+zero-argument void anonymous functional-interface body that mentions `this` or
+`super` is still outside the closure shortcut, so
+`anonymous_class_diagnostics_with_plan` no longer treats it as supported and
+continues to report `unsupported_anonymous_class`. Regression:
+`representation::tests::anonymous_zero_arg_interface_body_using_this_still_reports_unsupported`.
+The shared `this`/`super` body scanner now lives in `java_ir`, so representation
+diagnostics and lowering use the same predicate instead of two copied walkers.
+
+Codex follow-up 2026-09-14 later: the same diagnostic predicate now receives the
+support-local anonymous-interface context that lowering uses. A source file can
+implement a zero-argument void `Action` supplied by co-translated context while
+capturing a SharedLocal handle; that narrow closure path lowers correctly and no
+longer receives a false `unsupported_anonymous_class` diagnostic. Regression:
+`fixtures::context_anonymous_action_with_sharedlocal_capture_is_not_reported_unsupported`.

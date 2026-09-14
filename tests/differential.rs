@@ -20,8 +20,8 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 280;
-const EXPECTED_KNOWN_GAP_FIXTURES: usize = 15;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 347;
+const EXPECTED_KNOWN_GAP_FIXTURES: usize = 2;
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -80,16 +80,20 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedAtomicBooleanDisplay",
         "ErasedAtomicIntegerDisplay",
         "ErasedAtomicLongDisplay",
+        "ErasedArrayBlockingQueueDisplay",
         "ErasedArrayListDisplay",
+        "ErasedArraysAsListNullDisplay",
         "ErasedBoxedPrimitiveDisplay",
         "ErasedBitSetDisplay",
         "ErasedClassDisplay",
         "ErasedFileDisplay",
+        "ErasedFloatingPointDisplay",
         "ErasedInputStreamDisplay",
         "ErasedLinkedHashMapDisplay",
         "ErasedLinkedHashSetDisplay",
         "ErasedLocaleDisplay",
         "ErasedMapEntryDisplay",
+        "ErasedMapEntryIntegerDisplay",
         "ErasedNullableArrayListDisplay",
         "ErasedNullableBooleanArrayListDisplay",
         "ErasedNullableByteArrayListDisplay",
@@ -99,12 +103,17 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedNullableIntegerArrayListDisplay",
         "ErasedNullableLongArrayListDisplay",
         "ErasedNullableShortArrayListDisplay",
+        "ErasedOptionalCollectionDisplay",
+        "ErasedOptionalDisplay",
+        "ErasedOptionalObjectDisplay",
         "ErasedPathDisplay",
         "ErasedPatternDisplay",
         "ErasedPlatformDisplay",
         "ErasedRandomDisplay",
         "ErasedSimpleImmutableEntryDisplay",
         "ErasedStringBuilderDisplay",
+        "ErasedTreeMapDisplay",
+        "ErasedTreeSetDisplay",
         "ErasedUriDisplay",
         "ErasedUrlDisplay",
     ];
@@ -122,6 +131,34 @@ fn erased_display_fixtures_match_java_output() {
         "erased display fixture output differs from Java:\n\n{}",
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn aliasing_shared_local_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    compare_fixture(
+        &translator,
+        &root.join("AliasingLocalField.java"),
+        "AliasingLocalField",
+    )
+    .unwrap();
+    compare_fixture(
+        &translator,
+        &root.join("AliasingCallbackParam.java"),
+        "AliasingCallbackParam",
+    )
+    .unwrap();
+    compare_fixture(&translator, &root.join("Aliasing.java"), "Aliasing").unwrap();
 }
 
 #[test]
@@ -183,8 +220,14 @@ fn null_representation_fixtures_match_java_output() {
         "NullConcat",
         "NullLiteralConcat",
         "NullStringArray",
+        "BoxedPrimitiveOperatorNullCatch",
         "NullableArrayLengthCatch",
         "NullableFieldReceiverCatch",
+        "NullableUnboxSwitchCatch",
+        "NullableUnboxArrayDimensionCatch",
+        "NullableUnboxArrayIndexCatch",
+        "NullableUnboxStringCharAtCatch",
+        "NullableUnboxCatch",
     ];
     let mut failures = Vec::new();
     for class in fixtures {
@@ -200,6 +243,27 @@ fn null_representation_fixtures_match_java_output() {
         "null-representation fixture output differs from Java:\n\n{}",
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn nullable_unbox_catch_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    compare_fixture(
+        &translator,
+        &root.join("NullableUnboxCatch.java"),
+        "NullableUnboxCatch",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -263,6 +327,130 @@ fn record_canonical_constructor_fixtures_match_java_output() {
 }
 
 #[test]
+fn qualified_inner_capture_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = ["InnerCapture", "QualifiedInnerCapture"];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "qualified inner-capture fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn super_call_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "SuperMethodCall",
+        "SuperMutatingCall",
+        "SuperMutatingCallAssignedLocal",
+        "SuperMutatingCallArrayAccess",
+        "SuperMutatingCallConditional",
+        "SuperMutatingCallDoWhileLoop",
+        "SuperMutatingCallEnhancedFor",
+        "SuperMutatingCallForAssignmentUpdate",
+        "SuperMutatingCallForLoop",
+        "SuperMutatingCallIfElseAssignedLocal",
+        "SuperMutatingCallLabeledLoopControl",
+        "SuperMutatingCallLocalArray",
+        "SuperMutatingCallLocalArrayForUpdate",
+        "SuperMutatingCallLocalArrayUnary",
+        "SuperMutatingCallLocalArrayWrite",
+        "SuperMutatingCallLoopControl",
+        "SuperMutatingCallMathStaticCall",
+        "SuperMutatingCallTernaryLocal",
+        "SuperMutatingCallUnaryField",
+        "SuperMutatingCallUnaryLocal",
+        "SuperMutatingCallUnaryParam",
+        "SuperMutatingCallWhileLoop",
+        "SuperMutatingCallWithArg",
+        "SuperMutatingCallWithTemp",
+        "SuperMutatingCallReturning",
+        "SuperMutatingCallSwitch",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "super-call fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
+fn inheritance_upcast_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    let fixtures = [
+        "ErasedObjectSupertypeCast",
+        "ExplicitInheritanceUpcast",
+        "InheritanceUpcast",
+        "NestedInheritanceUpcast",
+        "PolymorphicListUpcast",
+        "PatternInstanceofSupertypeUsed",
+    ];
+    let mut failures = Vec::new();
+    for class in fixtures {
+        let fixture = root.join(format!("{class}.java"));
+        match compare_fixture(&translator, &fixture, class) {
+            Ok(()) => {}
+            Err(report) => failures.push(format!("{class}: {report}")),
+        }
+    }
+
+    assert!(
+        failures.is_empty(),
+        "inheritance-upcast fixture output differs from Java:\n\n{}",
+        failures.join("\n\n")
+    );
+}
+
+#[test]
 fn priority_queue_fixtures_match_java_output() {
     let translator = translator_binary().unwrap_or_else(|| {
         panic!("translator binary not built; run `cargo build --release` before differential tests")
@@ -275,7 +463,22 @@ fn priority_queue_fixtures_match_java_output() {
     }
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
-    let fixtures = ["PriorityQueueHeadOrder", "PriorityQueueOfferHeadOrder"];
+    let fixtures = [
+        "PriorityQueueHeadOrder",
+        "PriorityQueueOfferHeadOrder",
+        "PriorityQueuePollBooleanConcat",
+        "PriorityQueuePollDoubleConcat",
+        "PriorityQueuePollIntegerConcat",
+        "PriorityQueueComparatorConstructor",
+        "PriorityQueueComparatorFactoryConstructor",
+        "PriorityQueueComparatorFactoryLocalConstructor",
+        "PriorityQueueBlockLambdaComparatorConstructor",
+        "PriorityQueueLambdaKeywordComparatorConstructor",
+        "PriorityQueueLambdaComparatorConstructor",
+        "PriorityQueueNamedComparatorConstructor",
+        "PriorityQueueStaticCompareComparatorConstructor",
+        "PriorityQueueSubtractionComparatorConstructor",
+    ];
     let mut failures = Vec::new();
     for class in fixtures {
         let fixture = root.join(format!("{class}.java"));
@@ -483,6 +686,7 @@ fn list_exception_fixtures_match_java_output() {
         "ArrayBlockingQueueAdd",
         "ArrayBlockingQueueBadCapacity",
         "ArrayBlockingQueueNull",
+        "ArrayBlockingQueueNullVariablePrecedence",
         "ArrayBlockingQueueOffer",
         "ArrayBlockingQueuePut",
         "ArrayDequeFirstPopCatch",
@@ -528,6 +732,11 @@ fn list_exception_fixtures_match_java_output() {
         "NullCallArgCatch",
         "NullableArrayLengthCatch",
         "NullableFieldReceiverCatch",
+        "NullableUnboxSwitchCatch",
+        "NullableUnboxArrayDimensionCatch",
+        "NullableUnboxArrayIndexCatch",
+        "NullableUnboxStringCharAtCatch",
+        "NullableUnboxCatch",
         "OptionalFactoryGetCatch",
         "OptionalOfNullCatch",
         "QueueElementCatch",
@@ -711,157 +920,25 @@ struct KnownGapFixture {
 }
 
 enum KnownGapExpectation {
-    LoudDiagnostic {
-        diagnostic_code: &'static str,
-        also_diagnostic_contains: &'static [(&'static str, &'static str)],
-    },
     LoudCompileError {
         message: &'static str,
         diagnostic_code: Option<&'static str>,
         rust_contains: &'static [&'static str],
         rust_not_contains: &'static [&'static str],
     },
-    LoudRuntimePanic {
-        message: &'static str,
-        diagnostic_code: &'static str,
-    },
 }
 
 fn known_gap_fixtures() -> Vec<KnownGapFixture> {
     vec![
         KnownGapFixture {
-            display: "tests/differential/known-gaps/Aliasing.java",
-            class: "Aliasing",
-            expected_java_output: "5|7|3|9|11|13|17|19",
-            expectation: KnownGapExpectation::LoudDiagnostic {
-                diagnostic_code: "observable_alias",
-                also_diagnostic_contains: &[
-                    (
-                        "storage_strategy_disagreement",
-                        "Aliasing.Node needs SharedLocal",
-                    ),
-                    (
-                        "storage_strategy_disagreement",
-                        "Aliasing.Counter needs SharedLocal",
-                    ),
-                ],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/InheritanceUpcast.java",
-            class: "InheritanceUpcast",
-            expected_java_output: "savings,105,savings:105",
+            display: "tests/differential/known-gaps/ErasedCarrierIdentity.java",
+            class: "ErasedCarrierIdentity",
+            expected_java_output: "true,false,true,false",
             expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_inheritance"),
+                message: "unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation",
+                diagnostic_code: Some("java_reference_identity_equality"),
                 rust_contains: &[],
-                rust_not_contains: &["let a: Account = Savings::new(100, 5).into();"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/ExplicitInheritanceUpcast.java",
-            class: "ExplicitInheritanceUpcast",
-            expected_java_output: "savings",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_inheritance"),
-                rust_contains: &[],
-                rust_not_contains: &["Savings::new(100, 5).into()"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/SuperMutatingCall.java",
-            class: "SuperMutatingCall",
-            expected_java_output: "11",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java mutating super call: Base.bump requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_inheritance"),
-                rust_contains: &[],
-                rust_not_contains: &["Base::bump(&"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/NestedInheritanceUpcast.java",
-            class: "NestedInheritanceUpcast",
-            expected_java_output: "woof,woofwoof",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java class upcast: NestedInheritanceUpcast.Dog to NestedInheritanceUpcast.Animal requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_inheritance"),
-                rust_contains: &[],
-                rust_not_contains: &["NestedInheritanceUpcast_Dog::new().into()"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/PolymorphicListUpcast.java",
-            class: "PolymorphicListUpcast",
-            expected_java_output: "savings,105",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_inheritance"),
-                rust_contains: &[],
-                rust_not_contains: &["accounts.add(Savings::new"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/InnerCapture.java",
-            class: "InnerCapture",
-            expected_java_output: "21",
-            expectation: KnownGapExpectation::LoudRuntimePanic {
-                message: "unsupported Java inner-class outer capture construction for InnerCapture.Adder; pass an outer InnerCapture handle",
-                diagnostic_code: "inner_class_construction_panics",
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/QualifiedInnerCapture.java",
-            class: "QualifiedInnerCapture",
-            expected_java_output: "21",
-            expectation: KnownGapExpectation::LoudRuntimePanic {
-                message: "unsupported Java inner-class outer capture construction for QualifiedInnerCapture.Inner; pass an outer QualifiedInnerCapture handle",
-                diagnostic_code: "inner_class_construction_panics",
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/InstanceofSupertype.java",
-            class: "InstanceofSupertype",
-            expected_java_output: "true,true,false",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_instanceof_source_hierarchy_runtime_carrier"),
-                rust_contains: &[],
-                rust_not_contains: &[".is::<A>()"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/ErasedObjectSupertypeCast.java",
-            class: "ErasedObjectSupertypeCast",
-            expected_java_output: "B",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java cast: target type A has source subtypes and requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_cast_source_hierarchy_runtime_carrier"),
-                rust_contains: &[],
-                rust_not_contains: &["o.downcast_ref::<A>()", "o.downcast::<A>()"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/PatternInstanceofSupertype.java",
-            class: "PatternInstanceofSupertype",
-            expected_java_output: "A,A,other",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_instanceof_source_hierarchy_runtime_carrier"),
-                rust_contains: &[],
-                rust_not_contains: &["downcast_ref::<A>()"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/PatternInstanceofSupertypeTernary.java",
-            class: "PatternInstanceofSupertypeTernary",
-            expected_java_output: "A,A,other",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
-                diagnostic_code: Some("unsupported_instanceof_source_hierarchy_runtime_carrier"),
-                rust_contains: &[],
-                rust_not_contains: &["match o.downcast_ref::<A>()"],
+                rust_not_contains: &["a == same", "a == other"],
             },
         },
         KnownGapFixture {
@@ -873,28 +950,6 @@ fn known_gap_fixtures() -> Vec<KnownGapFixture> {
                 diagnostic_code: Some("java_string_identity"),
                 rust_contains: &[],
                 rust_not_contains: &[],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/PriorityQueueComparatorConstructor.java",
-            class: "PriorityQueueComparatorConstructor",
-            expected_java_output: "3,2,1",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
-                diagnostic_code: Some("unsupported_priority_queue_comparator_constructor"),
-                rust_contains: &[],
-                rust_not_contains: &["return comparator;"],
-            },
-        },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/PriorityQueueNamedComparatorConstructor.java",
-            class: "PriorityQueueNamedComparatorConstructor",
-            expected_java_output: "3,2,1",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
-                diagnostic_code: Some("unsupported_priority_queue_comparator_constructor"),
-                rust_contains: &[],
-                rust_not_contains: &["return comparator;"],
             },
         },
     ]
@@ -926,39 +981,6 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
 
     let translation = translate_source(&source);
     match fixture.expectation {
-        KnownGapExpectation::LoudDiagnostic {
-            diagnostic_code,
-            also_diagnostic_contains,
-        } => {
-            let diagnostic = translation
-                .diagnostics
-                .iter()
-                .find(|diagnostic| diagnostic.code() == diagnostic_code)
-                .ok_or_else(|| {
-                    format!(
-                        "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
-                        translation.diagnostics.iter().collect::<Vec<_>>()
-                    )
-                })?;
-            if diagnostic.severity() != new_java2rust::diagnostics::Severity::Error {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "diagnostic code {diagnostic_code:?} was not an error: {:?}",
-                    diagnostic.severity()
-                ));
-            }
-            for (code, message) in also_diagnostic_contains {
-                if !translation.diagnostics.iter().any(|diagnostic| {
-                    diagnostic.code() == *code && diagnostic.message().contains(message)
-                }) {
-                    let _ = std::fs::remove_dir_all(&work);
-                    return Err(format!(
-                        "translation did not report diagnostic {code:?} containing {message:?}: {:?}",
-                        translation.diagnostics.iter().collect::<Vec<_>>()
-                    ));
-                }
-            }
-        }
         KnownGapExpectation::LoudCompileError {
             message,
             diagnostic_code,
@@ -988,29 +1010,6 @@ fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
                     err
                 },
             )?;
-        }
-        KnownGapExpectation::LoudRuntimePanic {
-            message,
-            diagnostic_code,
-        } => {
-            if !translation.diagnostics.has_code(diagnostic_code) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
-                    translation.diagnostics.iter().collect::<Vec<_>>()
-                ));
-            }
-            let run = run_translated_rust_source(&work, fixture.class, &translation.rust);
-            let Err(err) = run else {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err("known runtime-loud translation unexpectedly ran".to_string());
-            };
-            if !err.contains(message) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not fail at runtime with {message:?}: {err}"
-                ));
-            }
         }
     }
     let _ = std::fs::remove_dir_all(&work);

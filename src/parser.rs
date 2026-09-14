@@ -973,6 +973,7 @@ fn parse_enum_constant_decl(
             name: enum_name.to_string(),
             args: Vec::new(),
         },
+        qualifier: None,
         args,
         body,
         resolved: None,
@@ -1415,6 +1416,7 @@ fn parse_assert_node(node: tree_sitter::Node, source: &str) -> Stmt {
                     name: "AssertionError".to_string(),
                     args: Vec::new(),
                 },
+                qualifier: None,
                 args: message.into_iter().collect(),
                 body: None,
                 resolved: None,
@@ -2211,8 +2213,10 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "object_creation_expression" => {
             let ty = parse_object_creation_type_node(node, source)
                 .unwrap_or_else(|| JavaType::Unknown("new".to_string()));
+            let qualifier = parse_object_creation_qualifier_node(node, source).map(Box::new);
             Expr::New {
                 ty,
+                qualifier,
                 args: node
                     .child_by_field_name("arguments")
                     .map(|args| parse_arg_list(args, source))
@@ -2876,6 +2880,14 @@ fn parse_object_creation_type_node(node: tree_sitter::Node, source: &str) -> Opt
         (None, _) => Some(raw_ty),
         _ => parsed_child,
     }
+}
+
+fn parse_object_creation_qualifier_node(node: tree_sitter::Node, source: &str) -> Option<Expr> {
+    let args = node.child_by_field_name("arguments")?;
+    let prefix = source.get(node.start_byte()..args.start_byte())?.trim();
+    let (qualifier, _) = prefix.split_once(".new")?;
+    let qualifier = qualifier.trim();
+    (!qualifier.is_empty()).then(|| parse_expr(qualifier))
 }
 
 fn type_text_starts_with_type_like_segment(raw: &str) -> bool {

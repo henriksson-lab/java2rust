@@ -326,6 +326,7 @@ pub enum Expr {
     },
     New {
         ty: JavaType,
+        qualifier: Option<Box<Expr>>,
         args: Vec<Expr>,
         body: Option<Vec<Member>>,
         resolved: Option<ResolvedConstructor>,
@@ -372,6 +373,168 @@ pub struct SwitchExprCase {
 pub enum LambdaBody {
     Expr(Box<Expr>),
     Block(Block),
+}
+
+pub(crate) fn block_mentions_this_or_super(block: &Block) -> bool {
+    block.statements.iter().any(stmt_mentions_this_or_super)
+}
+
+fn stmt_mentions_this_or_super(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(expr_mentions_this_or_super),
+        Stmt::Return(Some(expr)) => expr_mentions_this_or_super(expr),
+        Stmt::Assign { target, value } => {
+            expr_mentions_this_or_super(target) || expr_mentions_this_or_super(value)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_mentions_this_or_super(expr),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_mentions_this_or_super(condition)
+                || block_mentions_this_or_super(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_mentions_this_or_super)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => expr_mentions_this_or_super(condition) || block_mentions_this_or_super(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_mentions_this_or_super)
+                || condition.as_ref().is_some_and(expr_mentions_this_or_super)
+                || update.iter().any(expr_mentions_this_or_super)
+                || block_mentions_this_or_super(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_mentions_this_or_super(iterable) || block_mentions_this_or_super(body)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_mentions_this_or_super(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => expr_mentions_this_or_super(expr),
+                        SwitchLabel::Default => false,
+                    }) || case.statements.iter().any(stmt_mentions_this_or_super)
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_mentions_this_or_super)
+                || block_mentions_this_or_super(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_mentions_this_or_super(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_mentions_this_or_super)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_mentions_this_or_super(block)
+        }
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(expr_mentions_this_or_super),
+        Stmt::Return(None)
+        | Stmt::LocalType(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn expr_mentions_this_or_super(expr: &Expr) -> bool {
+    match expr {
+        Expr::This | Expr::Super => true,
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => expr_mentions_this_or_super(receiver),
+        Expr::ArrayAccess(array, index) => {
+            expr_mentions_this_or_super(array) || expr_mentions_this_or_super(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(expr_mentions_this_or_super)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(expr_mentions_this_or_super))
+        }
+        Expr::ArrayInitializer(items) => items.iter().any(expr_mentions_this_or_super),
+        Expr::Binary { left, right, .. } => {
+            expr_mentions_this_or_super(left) || expr_mentions_this_or_super(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_mentions_this_or_super(condition)
+                || expr_mentions_this_or_super(then_expr)
+                || expr_mentions_this_or_super(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_mentions_this_or_super(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => expr_mentions_this_or_super(expr),
+                        SwitchLabel::Default => false,
+                    }) || expr_mentions_this_or_super(&case.value)
+                })
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_mentions_this_or_super(receiver))
+                || args.iter().any(expr_mentions_this_or_super)
+        }
+        Expr::New { args, body, .. } => {
+            args.iter().any(expr_mentions_this_or_super)
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Method(method) => method
+                            .body
+                            .as_ref()
+                            .is_some_and(block_mentions_this_or_super),
+                        Member::Type(ty) => ty.members.iter().any(|member| match member {
+                            Member::Method(method) => method
+                                .body
+                                .as_ref()
+                                .is_some_and(block_mentions_this_or_super),
+                            _ => false,
+                        }),
+                        _ => false,
+                    })
+                })
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => expr_mentions_this_or_super(expr),
+            LambdaBody::Block(block) => block_mentions_this_or_super(block),
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

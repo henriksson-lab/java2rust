@@ -1,10 +1,14 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::java_ir::{BinaryOp, Expr, JavaType, Literal, PrimitiveType, Stmt, WildcardBound};
 
 #[derive(Debug, Clone, Default)]
 pub struct TypeEnv {
     locals: HashMap<String, JavaType>,
+    params: HashSet<String>,
+    callable_locals: HashSet<String>,
+    comparator_object_locals: HashSet<String>,
+    comparator_object_fields: HashSet<String>,
     fields: HashMap<String, JavaType>,
     type_fields: HashMap<(String, String), JavaType>,
     type_param_bounds: HashMap<String, JavaType>,
@@ -19,6 +23,58 @@ impl TypeEnv {
 
     pub fn insert_local(&mut self, name: impl Into<String>, ty: JavaType) {
         self.locals.insert(name.into(), ty);
+    }
+
+    pub fn mark_callable_local(&mut self, name: impl Into<String>) {
+        self.callable_locals.insert(name.into());
+    }
+
+    pub fn mark_comparator_object_local(&mut self, name: impl Into<String>) {
+        self.comparator_object_locals.insert(name.into());
+    }
+
+    pub fn mark_comparator_object_field(&mut self, name: impl Into<String>) {
+        self.comparator_object_fields.insert(name.into());
+    }
+
+    pub fn insert_param(&mut self, name: impl Into<String>, ty: JavaType) {
+        let name = name.into();
+        self.locals.insert(name.clone(), ty);
+        self.params.insert(name);
+    }
+
+    pub fn is_param(&self, name: &str) -> bool {
+        self.params.contains(name)
+            || name
+                .strip_prefix("r#")
+                .is_some_and(|plain| self.params.contains(plain))
+            || (!name.starts_with("r#") && self.params.contains(&format!("r#{name}")))
+    }
+
+    pub fn is_callable_local(&self, name: &str) -> bool {
+        self.callable_locals.contains(name)
+            || name
+                .strip_prefix("r#")
+                .is_some_and(|plain| self.callable_locals.contains(plain))
+            || (!name.starts_with("r#") && self.callable_locals.contains(&format!("r#{name}")))
+    }
+
+    pub fn is_comparator_object_local(&self, name: &str) -> bool {
+        self.comparator_object_locals.contains(name)
+            || name
+                .strip_prefix("r#")
+                .is_some_and(|plain| self.comparator_object_locals.contains(plain))
+            || (!name.starts_with("r#")
+                && self.comparator_object_locals.contains(&format!("r#{name}")))
+    }
+
+    pub fn is_comparator_object_field(&self, name: &str) -> bool {
+        self.comparator_object_fields.contains(name)
+            || name
+                .strip_prefix("r#")
+                .is_some_and(|plain| self.comparator_object_fields.contains(plain))
+            || (!name.starts_with("r#")
+                && self.comparator_object_fields.contains(&format!("r#{name}")))
     }
 
     pub fn insert_field(&mut self, name: impl Into<String>, ty: JavaType) {

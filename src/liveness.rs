@@ -897,4 +897,23 @@ mod tests {
             "field assignment should mark the receiver binding mutable"
         );
     }
+
+    #[test]
+    fn unary_array_element_update_mutates_receiver_binding() {
+        let body = Block {
+            statements: vec![
+                decl("values", Expr::ArrayInitializer(vec![int(1)])),
+                Stmt::Expr(Expr::Unary {
+                    op: crate::java_ir::UnaryOp::PostInc,
+                    expr: Box::new(Expr::ArrayAccess(Box::new(var("values")), Box::new(int(0)))),
+                }),
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        assert_eq!(
+            analysis.binding_is_mutated_after(&body.statements[0], "values"),
+            Some(true),
+            "array element unary update should mark the receiver binding mutable"
+        );
+    }
 }

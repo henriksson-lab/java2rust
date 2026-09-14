@@ -3,6 +3,27 @@
 Recorded 2026-08-23.
 Status: **open, narrowed to class hierarchy carrier**.
 
+Codex follow-up 2026-09-14 carrier conversion cleanup: source hierarchy carrier
+conversion no longer also emits a concrete `impl From<Sub> for Super` field-copy
+helper. That helper was a latent slicing path beside the correct
+`impl From<Sub> for SuperValue` carrier conversion. Same-file and emitted-context
+constructor fixtures now assert the carrier conversion and reject the concrete
+helper. Carrier field accessors also render from the signature field slot shape,
+so nullable inherited fields return `Option<String>` instead of invalidly
+returning `String` while cloning an `Option<String>`. Guards:
+`idiom_gaps::source_subclass_constructor_to_superclass_slot_uses_hierarchy_carrier_not_flattened`,
+`idiom_gaps::emitted_context_source_subclass_constructor_flows_to_superclass_slot`,
+and `lower::tests::concrete_source_supertype_conversion_impl_is_loud_not_field_copy`.
+
+Codex follow-up 2026-09-14 wildcard static adapter owner pass:
+wildcard-imported `SAMRecordToGATKReadAdapter.headerlessReadAdapter(...)` now
+applies the same preferred static owner alias in call planning that support
+emission already uses. The call site and emitted support method both use
+`SAMRecordToGATKReadAdapter`, so the generated crate no longer fails on
+undeclared `OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter`.
+Guard:
+`idiom_gaps::wildcard_imported_headerless_read_adapter_has_gatkread_return_surface`.
+
 Follow-up cleanup: `representation_lowering::trait_impl_method_message_policy`
 is crate-local. The direct generated-message policy remains available to
 representation lowering and same-module tests, but it is no longer exported as a
@@ -19,12 +40,111 @@ Follow-up 2026-09-10: direct emitted `super.m()` now has Java/Rust oracle
 coverage, not only generated-crate coverage. `tests/differential/SuperMethodCall.java`
 pins `super.base() + 5` dispatching to the superclass implementation while a
 fresh `Base` call still returns `10` (`15,10`). The class-hierarchy carrier
-remains open for supertype slots and mutating super calls.
+remains open for supertype slots and general mutating super calls.
+Codex follow-up 2026-09-13: a narrow mutating `super.m()` shape is now promoted
+when the superclass method is field-local: its body can assign or
+compound-assign superclass instance fields using literals, params, and
+superclass fields, with no calls or `this` escape. Lowering builds a temporary
+superclass value, calls the superclass implementation with `&mut`, then copies
+the inherited fields back to `self`; non-void calls store the superclass result
+until after copyback so the expression can keep Java's order. `tests/differential/SuperMutatingCall.java`
+now matches Java (`11`), `SuperMutatingCallReturning.java` matches Java
+(`8,4`), `SuperMutatingCallWithTemp.java` matches Java (`14`) for a safe
+temporary local inside the superclass body, and more complex mutating super
+calls still require the real hierarchy carrier.
+Codex follow-up 2026-09-13 hidden-field guard: that narrow mutating-`super`
+copyback path now refuses superclass fields hidden by direct subclass fields of
+the same Java source name. Copying `Base.n` back through `Derived.n` collapses
+two Java fields into one Rust field and is a silent wrong answer, so the case
+falls back to the existing loud `unsupported Java mutating super call`
+diagnostic until the real hierarchy carrier exists. Regression:
+`tests/idiom_gaps.rs::mutating_super_copyback_refuses_hidden_superclass_field`.
+Codex follow-up 2026-09-14: the same narrow mutating-`super` copyback path now
+accepts field-local superclass bodies that use explicit pure static
+`Math`/`StrictMath` calls in copied-back field expressions. The allowlist
+requires either resolved static-call evidence or an unshadowed explicit
+`Math`/`StrictMath` receiver and still rejects implicit receiver calls and
+arbitrary helper calls. Regression:
+`tests/idiom_gaps.rs::source_mutating_super_method_call_allows_safe_math_static_call`.
+Codex follow-up 2026-09-14: plain boolean `Object instanceof Super` now expands
+the erased runtime test across the known source superclass and its known source
+subtypes, without binding or casting a supertype view. `InstanceofSupertype.java`
+is promoted to `tests/differential/` and matches Java (`true,true,false`).
+Unused pattern bindings in statement and ternary `instanceof` tests now take the
+same boolean path, so `PatternInstanceofSupertype.java` and
+`PatternInstanceofSupertypeTernary.java` are also promoted and match Java
+(`A,A,other`). Pattern `instanceof` that reads the bound superclass variable and
+other carrier-consuming source-supertype views remain known gaps because they
+need a usable superclass carrier, not just a boolean test.
+Codex follow-up 2026-09-14 later: explicit source-subtype casts to a represented
+source superclass now use the source hierarchy carrier. `NeedsSubtypeDispatch`
+can select `SourceHierarchyCarrier`, the carrier emits conservative no-argument
+instance-method forwarders, and explicit cast lowering no longer reports the
+old `unsupported_inheritance` diagnostic once the target superclass has that
+carrier. `ExplicitInheritanceUpcast.java` is promoted and matches Java
+(`savings`). Plain assignment/list/nested upcasts still need the upstream usage
+fact and broader carrier dispatch surface.
+Codex follow-up 2026-09-14 top-level supertype slot: locals initialized or
+assigned from a known subtype now contribute `NeedsSubtypeDispatch`, so
+`Account a = new Savings(...)` selects the same carrier. Trivial-accessor
+inlining is disabled for carrier receivers and for inherited method bodies, so
+`a.balance()` calls the carrier forwarder and inherited `describe()` keeps Java
+virtual dispatch through `self.balance()`. `InheritanceUpcast.java` is promoted
+and matches Java (`savings,105,savings:105`).
+Codex follow-up 2026-09-14 collection supertype slot: collection mutator calls
+that store a known subtype into a source-supertype element slot now contribute
+`NeedsSubtypeDispatch` for the element type, native collection argument shapes
+pick up the representation carrier, and carrier reads from `get()` clone into
+owned locals before optional receiver calls. `PolymorphicListUpcast.java` is
+promoted and matches Java (`savings,105`). Nested source-supertype upcasts
+were then fixed by resolving simple nested hierarchy names into their qualified
+source type and by using Rust-safe companion-carrier names for nested roots.
+`NestedInheritanceUpcast.java` is promoted and matches Java (`woof,woofwoof`).
+Erased-object casts to a source superclass now recover through the same carrier
+by checking the root and known source subtype variants with `downcast_ref` and
+cloning the matched value. `ErasedObjectSupertypeCast.java` is promoted and
+matches Java (`B`).
+Codex follow-up 2026-09-14 used pattern carrier: `Object instanceof Super s`
+now recovers a source hierarchy carrier when the bound variable is actually
+used, instead of stopping at the boolean runtime test. The pattern path checks
+the root and known source subtype variants, clones the matched value into the
+carrier enum, and then dispatches through that carrier. `PatternInstanceofSupertypeUsed.java`
+is promoted and matches Java (`B,A,other`).
+Codex follow-up 2026-09-14 carrier identity guard: source-hierarchy carrier
+reference identity recovered from an erased object no longer leaks invalid
+`AValue == AValue` Rust. Until the carrier itself preserves object identity, the
+path emits an explicit
+`unsupported Java source hierarchy carrier reference identity comparison`
+`compile_error!` and keeps the existing identity diagnostics. Regression:
+`idiom_gaps::erased_object_source_hierarchy_carrier_identity_fails_loudly`.
+Codex follow-up 2026-09-14 executable identity known-gap: the same carrier
+identity residue is now in the differential known-gap harness as
+`tests/differential/known-gaps/ErasedCarrierIdentity.java`. Java must print
+`true,false,true,false`, while the current translation must fail loudly with the
+identity-preserving carrier compile error and `java_reference_identity_equality`
+diagnostic. Promote it when erased-object source-supertype recovery preserves
+object identity instead of cloning carrier payloads.
+Codex follow-up 2026-09-14 call-argument supertype slot: source method
+arguments that pass a known subtype into a formal source-supertype parameter
+now contribute `NeedsSubtypeDispatch` for the formal target type. The source
+hierarchy carrier also emits inherited field accessors, and carrier field reads
+lower through those accessors instead of invalid direct enum-field projection.
+Regression:
+`idiom_gaps::shaped_source_subtype_argument_requires_hierarchy_lowering`.
+Codex follow-up 2026-09-14 mutating-super same-file inherited fields: the
+narrow copyback path now builds the temporary superclass receiver with inherited
+fields from the current source program as well as support/summary context. A
+same-file chain `Root.n <- Base.bump() <- Derived.super.bump()` no longer emits
+a superclass temporary that omits `n`; cross-program same-simple ambiguity still
+fails closed. Regressions:
+`idiom_gaps::source_mutating_super_copyback_includes_same_file_inherited_fields`
+and
+`lower::tests::source_instance_field_names_for_conversion_refuses_cross_program_ambiguous_simple_super`.
 Severity: **critical** — the original silent source-class upcast and
-source-supertype `instanceof` paths are now loud, and direct emitted
-`super.m()` calls can lower to the superclass implementation, but Java class
-hierarchy lowering still has no real carrier for dynamic class identity and
-dispatch.
+most source-supertype `instanceof` paths are now loud or correct, and direct
+emitted `super.m()` calls can lower to the superclass implementation, but Java
+class hierarchy lowering still has an incomplete carrier surface for
+identity-preserving carrier recovery and general mutating super calls.
 Kind: behavioural (differential), object model / dispatch.
 
 Updated 2026-09-06 (guardrail): erased-object aliases for nested Java classes
@@ -201,13 +321,12 @@ code.** Compare `compile_error!`, which
 [0012](done/0012-unsupported-diagnostics-emit-invalid-rust.md) already
 established as the mechanism.
 
-### 1b. The same program with *nested* classes now fails loudly too
+### 1b. The same program with *nested* classes now uses the carrier too
 
-Current status: fixed to the same loud source-class upcast refusal as the
-top-level case. `tests/differential/known-gaps/NestedInheritanceUpcast.java`
-pins the Java oracle `woof,woofwoof` and the current `compile_error!`:
-`unsupported Java class upcast: NestedInheritanceUpcast.Dog to
-NestedInheritanceUpcast.Animal requires class hierarchy lowering`.
+Current status: fixed. `tests/differential/NestedInheritanceUpcast.java` pins
+the Java oracle `woof,woofwoof`; the generated Rust uses
+`NestedInheritanceUpcast_AnimalValue` and forwards `speak()`/`twice()` through
+the carrier.
 
 ```java
 public class I1 {
@@ -464,17 +583,13 @@ of that runtime carrier.
 
 ## Suggested fixture placement
 
-`InheritanceUpcast.java`, `NestedInheritanceUpcast.java`, and
-`InstanceofSupertype.java` compile and run, and are now staged under
-`tests/differential/known-gaps/` with
-`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` in
-`tests/differential.rs` proving both sides of the contract: the Java oracle
-remains valid and the translation fails loudly. The two upcast fixtures also
-assert the `unsupported_inheritance` diagnostic; `InstanceofSupertype.java`
-asserts `unsupported_instanceof_source_hierarchy_runtime_carrier`, so the
-source-supertype `instanceof` refusal is now visible in diagnostics as well as
-the generated `compile_error!`. Move them up a level when class hierarchy
-lowering lands.
+`InheritanceUpcast.java`, `NestedInheritanceUpcast.java`,
+`ErasedObjectSupertypeCast.java`, `PatternInstanceofSupertypeUsed.java`, and
+`InstanceofSupertype.java` compile and run, and are now promoted under
+`tests/differential/`. The remaining hierarchy fixtures under
+`tests/differential/known-gaps/` keep proving both sides of the contract: the
+Java oracle remains valid and the translation fails loudly. Move them up a
+level when class hierarchy lowering lands.
 
 `SuperMethodCall.java` is no longer a known gap: it is pinned by
 `source_super_method_call_uses_direct_emitted_super_impl`, which compiles the
@@ -488,10 +603,10 @@ remain explicit known gaps under `tests/differential/known-gaps/` until the
 class hierarchy carrier lands.
 
 Follow-up 2026-09-09: `PolymorphicListUpcast.java` was added beside the direct
-upcast fixtures so the collection-supertype variant is a known-gap contract too.
-`ArrayList<Account>.add(new Savings(...))` now proves the Java oracle
-`savings,105` while requiring the same loud `Savings -> Account` hierarchy
-refusal and `unsupported_inheritance` diagnostic.
+upcast fixtures so the collection-supertype variant had a known-gap contract.
+Follow-up 2026-09-14: the fixture is promoted; `ArrayList<Account>.add(new
+Savings(...))` now stores the `AccountValue` carrier and Java/Rust both produce
+`savings,105`.
 
 ## Codex follow-up 2026-08-25 — type-parameter and argument upcasts are loud
 
@@ -566,26 +681,41 @@ Regression:
 
 - `source_subclass_constructor_to_superclass_slot_is_loud_not_flattened`
 
-## Codex follow-up 2026-08-28 — optional source-supertype present values are loud
+## Codex follow-up 2026-08-28, revised 2026-09-14 — optional source-supertype present values use the carrier
 
-The ordinary assignment and argument guards were still bypassed when a fresh
-source subtype was placed into an optional source-supertype slot. Nullable field
-storage and constructor-argument storage could lower `Child -> Option<Base>` as
-`Some(Child::new())`, letting the optional wrapper hide the missing class
-hierarchy carrier.
+The ordinary assignment and argument guards were originally bypassed when a
+fresh source subtype was placed into an optional source-supertype slot. Nullable
+field storage and constructor-argument storage could lower `Child ->
+Option<Base>` as `Some(Child::new())`, letting the optional wrapper hide the
+missing class hierarchy carrier.
 
-`lower_present_expr_for_optional_target` now checks the actual present value
-against the optional element type before the optional construction plan rewrites
-owned elements to the target element shape. If the present value is a source
-class subtype of the optional element supertype, it emits the same unsupported
-class-upcast `compile_error!` used by the non-optional paths.
+The current tree has the narrow carrier-backed repair. Assigning a known source
+subtype into a field whose declared type is a source supertype now records a
+`NeedsSubtypeDispatch` requirement for the field type; direct constructor
+arguments do the same for the resolved formal parameter type even when the
+argument is `new Child()` rather than a local binding. The slot conversion wraps
+the resulting `BaseValue` carrier in the target shared handle, so the generated
+field/argument values are `Rc<BaseValue>` rather than bare `BaseValue` or
+`Some(Child)`.
+
+The same pass fixed a traversal bug in the implicit-default-constructor
+emission check: `new Holder(new Child())` now counts the nested `new Child()`
+use, so the generated `Child::new()` call has a matching implicit constructor.
 
 Pinned by:
 
-- `optional_source_supertype_field_assignment_is_loud_not_subtype_some`
-- `optional_source_supertype_constructor_arg_is_loud_not_subtype_some`
+- `optional_source_supertype_field_assignment_uses_carrier_handle`
+- `optional_source_supertype_constructor_arg_uses_carrier_handle`
+- `source_constructor_direct_known_subtype_argument_records_target_subtype_dispatch_use`
 
-The audit remains open for the real subtype carrier and dynamic dispatch model.
+Manual generated-library checks also pass for the two minimal fixtures in
+`/tmp/new_java2rust_0058_optional_check/`:
+
+- `OptionalSourceSupertypeField.java`
+- `OptionalSourceSupertypeCtorArg.java`
+
+The audit remains open for the broader class hierarchy surface, especially
+identity-preserving carrier recovery and general mutating super calls.
 
 ## Codex follow-up 2026-08-29 — stale passing repair test removed from failure baseline
 
@@ -697,27 +827,168 @@ positive compile-backed check. The remaining output uses the adapter-backed
 external upcast and compiles, so it no longer belongs in the idiom-gaps failure
 baseline.
 
-Follow-up 2026-09-07: direct emitted `super.m()` lowering now refuses mutating
-superclass methods loudly. The read-only direct call path still constructs a
-borrowed super-literal and is covered by
-`source_super_method_call_uses_direct_emitted_super_impl`, but a mutable
-receiver would mutate a copied temporary or emit invalid Rust. That path now
-emits
-`compile_error!("unsupported Java mutating super call: ... requires class hierarchy lowering")`
-until the real source-class hierarchy carrier exists. Regression:
-`idiom_gaps::source_mutating_super_method_call_is_loud_hierarchy_gap`.
+Follow-up 2026-09-07, narrowed 2026-09-13: direct emitted `super.m()` lowering
+still refuses general mutating superclass methods loudly. The read-only direct
+call path constructs a borrowed super-literal and is covered by
+`source_super_method_call_uses_direct_emitted_super_impl`; the simple
+field-local mutating shape now uses a superclass temporary plus inherited-field
+copyback and is covered by
+`idiom_gaps::source_mutating_super_method_call_uses_copyback_for_field_local_body`.
+Follow-up 2026-09-14: the same field-local shape now also supports ordinary
+non-void returns by storing the superclass result, copying fields back, then
+returning the stored value. Regression:
+`idiom_gaps::source_mutating_super_method_call_returns_value_after_copyback`,
+with Java-oracle coverage in `SuperMutatingCallReturning.java`. Calls, `this`
+escaping, result/exception methods, and other complex mutating super bodies
+still require the real source-class hierarchy carrier.
+Follow-up 2026-09-14 later: that conservative copyback safety check now also
+allows forward-only temporary locals initialized from superclass fields, params,
+other safe locals, and literals. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_temporary_local`;
+Java-oracle coverage: `SuperMutatingCallWithTemp.java`.
+Codex follow-up 2026-09-14: the same narrow copyback path now admits safe
+conditional and nested-block bodies. Branch conditions must read only inherited
+fields, parameters, literals, or already-known safe locals, and branch-local
+declarations are scoped to the branch for the safety check. This keeps the
+repair limited to methods that mutate inherited fields through a superclass
+temporary and copy those fields back immediately after the call. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_conditional_body`;
+Java-oracle coverage: `SuperMutatingCallConditional.java`.
+Codex follow-up 2026-09-14 later: the safety check now distinguishes declared
+locals from safe-to-read locals, so `int next; next = n + value; this.n = next;`
+is admitted without treating declaration alone as proof that a local is
+initialized. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_declared_then_assigned_local`;
+Java-oracle coverage: `SuperMutatingCallAssignedLocal.java`.
+Codex follow-up 2026-09-14 later still: safe ternary expressions are admitted
+inside the same copyback check when the condition and both branches are
+individually safe. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_ternary_local`;
+Java-oracle coverage: `SuperMutatingCallTernaryLocal.java`.
+Safe array reads are admitted too when both the array expression and index are
+already safe, allowing superclass bodies such as `this.n += values[i]` without
+opening calls or `this` escape. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_array_access`;
+Java-oracle coverage: `SuperMutatingCallArrayAccess.java`.
+Safe local array initializers are admitted under the same rule: dimensions and
+initializer elements must be safe expressions, and the resulting local only
+becomes readable through the existing safe-local path. This covers local
+scratch arrays in field-local superclass methods without allowing arrays to
+escape. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_local_array_initializer`;
+Java-oracle coverage: `SuperMutatingCallLocalArray.java`.
+Local scratch-array element writes are admitted for arrays declared and proven
+safe inside the superclass method, again with safe index/value expressions.
+At the time of that pass, parameter-array writes stayed outside this repair
+because they have caller-visible aliasing semantics beyond inherited-field
+copyback. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_local_array_writes`;
+Java-oracle coverage: `SuperMutatingCallLocalArrayWrite.java`.
+Codex follow-up 2026-09-14 later: parameter-array element writes are now
+admitted for the narrow mutating-`super` copyback path when the superclass
+method signature itself requires a mutable array argument. Usage recording
+normalizes explicit `super.m(...)` call sites to the direct superclass owner so
+callee parameter constraints propagate to the derived method, and
+super-boundary argument lowering now takes its slots from the superclass
+signature. `super.add(values, value)` can therefore pass `values.as_mut_slice()`
+through to `Base::add(&mut __java_super, ...)`, preserving both caller-visible
+array mutation and inherited-field copyback. The read-only array access fixture
+still stays read-only. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_parameter_array_write`.
+Unary updates of those same local scratch-array elements are admitted under the
+same target check. This is deliberately narrower than general array mutation:
+only array locals declared and proven safe inside the superclass body qualify.
+Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_local_array_unary_updates`;
+Java-oracle coverage: `SuperMutatingCallLocalArrayUnary.java`.
+The same local scratch-array target check now applies to classic `for` update
+clauses, including unary updates and assignment-form updates such as
+`remaining[0] -= 1`. This keeps loop scratch state inside the superclass
+temporary/copyback model while still refusing parameter-array mutation.
+Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_local_array_for_updates`;
+Java-oracle coverage: `SuperMutatingCallLocalArrayForUpdate.java`.
+Codex follow-up 2026-09-14 final: branch definite-assignment is now tracked for
+locals declared before an `if` and assigned in both branches. Branch-local
+declarations still do not leak out, but `int delta; if (...) { delta = value; }
+else { delta = 0; } this.n = n + delta;` is admitted. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_if_else_assigned_local`;
+Java-oracle coverage: `SuperMutatingCallIfElseAssignedLocal.java`.
+Codex follow-up 2026-09-14 final-plus: expression-statement unary updates of
+inherited fields (`this.n++`, `--n`, etc.) are admitted for the same superclass
+temporary/copyback path. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_unary_inherited_field_update`;
+Java-oracle coverage: `SuperMutatingCallUnaryField.java`.
+Codex follow-up 2026-09-14 final-plus two: expression-statement unary updates
+of already-safe temporary locals are admitted as well. The local must already be
+safe-to-read; a declaration without a safe initializer still does not qualify.
+Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_unary_safe_local_update`;
+Java-oracle coverage: `SuperMutatingCallUnaryLocal.java`.
+Codex follow-up 2026-09-14 final-plus three: expression-statement unary updates
+of method parameters are admitted too. Parameters are local to the superclass
+method call on the temporary receiver, so `value++; this.n += value;` stays
+inside the bounded copyback repair. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_unary_parameter_update`;
+Java-oracle coverage: `SuperMutatingCallUnaryParam.java`.
+Codex follow-up 2026-09-14 final-plus four: `while`/`do while` bodies and
+simple classic `for` loops are admitted when their initializer, condition,
+update, and body stay safe under the same inherited field/parameter/safe-local
+rules. Loop updates may be unary increments/decrements or assignment-form
+updates (`i += 1`, `value -= 1`) when the target is an inherited field,
+parameter, or already-safe local and the right side is safe. `break`/`continue`
+statements inside those safe bodies are admitted as ordinary loop control,
+including labeled forms when the labeled block itself is otherwise safe. The
+loop analysis deliberately does not propagate new definite-assignment facts out
+of the loop. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_while_loop` and
+`idiom_gaps::source_mutating_super_method_call_allows_safe_do_while_loop`, and
+`idiom_gaps::source_mutating_super_method_call_allows_safe_for_loop`,
+`idiom_gaps::source_mutating_super_method_call_allows_safe_for_assignment_update`, plus
+`idiom_gaps::source_mutating_super_method_call_allows_safe_loop_control` and
+`idiom_gaps::source_mutating_super_method_call_allows_safe_labeled_loop_control`;
+Java-oracle coverage: `SuperMutatingCallWhileLoop.java`,
+`SuperMutatingCallDoWhileLoop.java`, `SuperMutatingCallForLoop.java`,
+`SuperMutatingCallForAssignmentUpdate.java`, and
+`SuperMutatingCallLoopControl.java`/`SuperMutatingCallLabeledLoopControl.java`.
+Safe `switch` statement bodies are admitted under the same rule: the selector,
+case labels, and case statements must all be safe. A local declared before the
+switch is treated as safe after the switch only when there is a `default` label
+and every case body leaves that local safe, matching the same conservative
+all-branches rule used for `if`/`else`. Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_switch_body`;
+Java-oracle coverage: `SuperMutatingCallSwitch.java`. Follow-up 2026-09-14:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_switch_assigned_local`
+pins the default-covered assigned-local variant.
+Enhanced-for loops are admitted when the iterable is safe; the loop variable is
+treated as safe only inside the loop body, and no loop-local facts propagate out.
+Regression:
+`idiom_gaps::source_mutating_super_method_call_allows_safe_enhanced_for_loop`;
+Java-oracle coverage: `SuperMutatingCallEnhancedFor.java`.
+Safe static `Math`/`StrictMath` calls inside mutating superclass bodies are now
+Java-oracle covered too, not only asserted through generated Rust text. This
+keeps `this.n = Math.max(this.n, value)` on the same bounded temporary/copyback
+path while still refusing arbitrary calls that could observe or mutate `this`.
+Java-oracle coverage: `SuperMutatingCallMathStaticCall.java`.
 
 Follow-up 2026-09-10: the remaining non-carrier hierarchy gap is now pinned by
 additional differential known-gap Java oracles, not only idiom assertion text.
 Added `ExplicitInheritanceUpcast.java`, `ErasedObjectSupertypeCast.java`,
 `PatternInstanceofSupertype.java`, `PatternInstanceofSupertypeTernary.java`,
-and `SuperMutatingCall.java` under `tests/differential/known-gaps/`; the known
-gap harness validates their Java outputs and the current loud failure mode.
+and initially `SuperMutatingCall.java` under `tests/differential/known-gaps/`;
+the known gap harness validates their Java outputs and the current loud failure
+mode. `SuperMutatingCall.java` was promoted on 2026-09-13 after the narrow
+field-local copyback lowering landed; `ExplicitInheritanceUpcast.java`,
+`InheritanceUpcast.java`, `PolymorphicListUpcast.java`,
+`NestedInheritanceUpcast.java`, and `ErasedObjectSupertypeCast.java` were
+promoted on 2026-09-14 as the source hierarchy carrier path grew from explicit
+casts to plain top-level supertype locals, collection element slots, nested
+source-class locals, and erased-object source-supertype casts. Used pattern
+`instanceof` over a source supertype was promoted later the same day.
 The lowering diagnostics pass now also reports `unsupported_inheritance` for the
-explicit source-subtype cast and
-`unsupported_cast_source_hierarchy_runtime_carrier` for erased-object casts to a
-source supertype, so the known-gap harness checks both the `compile_error!`
-surface and the diagnostic code.
+remaining explicit source-subtype cast refusals, so the known-gap harness
+checks both the `compile_error!` surface and the diagnostic code where a
+hierarchy view is still unsupported.
 
 Follow-up 2026-09-10 cleanup: representation-lowering's dyn-trait
 implementation compatibility policy carriers

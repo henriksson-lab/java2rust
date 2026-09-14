@@ -248,7 +248,7 @@ class Outer {
 "#,
     );
     let body = method_body(&parsed.program.types[0], "make");
-    let Stmt::Return(Some(Expr::New { ty, .. })) = &body.statements[0] else {
+    let Stmt::Return(Some(Expr::New { ty, qualifier, .. })) = &body.statements[0] else {
         panic!("expected qualified inner constructor return");
     };
     assert_eq!(
@@ -258,6 +258,7 @@ class Outer {
             args: Vec::new(),
         }
     );
+    assert_eq!(qualifier.as_deref(), Some(&Expr::Var("other".to_string())));
 }
 
 #[test]

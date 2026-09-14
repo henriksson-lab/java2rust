@@ -1282,6 +1282,61 @@ mod generated_tests {
 }
 
 #[test]
+fn nullable_collection_iterator_next_into_string_is_catchable() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+
+class NullableIteratorNextCatchUse {
+    static String run() {
+        try {
+            ArrayList<String> values = new ArrayList<String>();
+            values.add(null);
+            String value = values.iterator().next();
+            return "len=" + value.length();
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("values.iter().cloned().next().ok_or_else")
+            && translation
+                .rust
+                .contains("ok_or_else(|| JavaException::new(\"NullPointerException\"")
+            && !translation.rust.contains(
+                "Box::new(JavaIterator::new(values.iter().cloned()).next_result()?.unwrap())"
+            )
+            && !translation
+                .rust
+                .contains("let value: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "nullable_collection_iterator_next_into_string_is_catchable",
+        translation.rust,
+        r#"
+#[test]
+fn null_iterator_element_becomes_catchable_null_pointer() {
+    assert_eq!(NullableIteratorNextCatchUse::run().unwrap(), "npe".to_string());
+}
+"#,
+    );
+}
+
+#[test]
 fn java_list_iterator_previous_is_catchable() {
     let translation = translate_source(
         r#"
@@ -5195,6 +5250,39 @@ class NullableErasedObjectInstanceof {
         "nullable_erased_object_instanceof",
         vec![GeneratedCrateModule {
             name: "nullable_erased_object_instanceof",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_erased_object_null_initializer_stays_none_carrier() {
+    let translation = translate_source(
+        r#"
+class NullableErasedObjectNullInitializer {
+    static String run() {
+        Object value = null;
+        return "x" + value + "," + (value instanceof String);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let value: Option<Box<dyn std::any::Any>> = None::<Box<dyn std::any::Any>>;"
+        ) && !translation
+            .rust
+            .contains("Box::new(None::<Box<dyn std::any::Any>>)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "nullable_erased_object_null_initializer",
+        vec![GeneratedCrateModule {
+            name: "nullable_erased_object_null_initializer",
             rust: translation.rust,
             tests: "",
         }],
@@ -13329,7 +13417,103 @@ mod generated_tests {
 }
 
 #[test]
-fn priority_queue_comparator_constructor_requires_comparator_carrier() {
+fn array_blocking_queue_nullable_value_is_checked_before_capacity() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.ArrayBlockingQueue;
+import java.lang.IllegalStateException;
+import java.lang.InterruptedException;
+import java.lang.NullPointerException;
+
+class ArrayBlockingQueueNullablePrecedenceUse {
+    static String run() {
+        String addValue = null;
+        String offerValue = null;
+        String putValue = null;
+
+        ArrayBlockingQueue<String> addQueue = new ArrayBlockingQueue<String>(1);
+        addQueue.add("filled");
+        String addResult;
+        try {
+            addQueue.add(addValue);
+            addResult = "add-ok";
+        } catch (NullPointerException ex) {
+            addResult = "add-npe";
+        } catch (IllegalStateException ex) {
+            addResult = "add-full";
+        }
+
+        ArrayBlockingQueue<String> offerQueue = new ArrayBlockingQueue<String>(1);
+        offerQueue.add("filled");
+        String offerResult;
+        try {
+            offerResult = "offer-" + offerQueue.offer(offerValue);
+        } catch (NullPointerException ex) {
+            offerResult = "offer-npe";
+        }
+
+        ArrayBlockingQueue<String> putQueue = new ArrayBlockingQueue<String>(1);
+        putQueue.add("filled");
+        String putResult;
+        try {
+            putQueue.put(putValue);
+            putResult = "put-ok";
+        } catch (NullPointerException ex) {
+            putResult = "put-npe";
+        } catch (InterruptedException ex) {
+            putResult = "put-interrupted";
+        }
+
+        return addResult + "," + offerResult + "," + putResult;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_array_blocking_queue_value =")
+            && translation
+                .rust
+                .contains("__java_array_blocking_queue_value")
+            && translation.rust.contains(".len() < ")
+            && translation.rust.contains(".capacity()")
+            && translation
+                .rust
+                .contains("ex.is_instance(&[\"NullPointerException\"])")
+            && !translation.rust.contains("push(add_value")
+            && !translation.rust.contains("push(offer_value")
+            && !translation.rust.contains("push(put_value"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "array_blocking_queue_nullable_value_is_checked_before_capacity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn nullable_value_beats_full_queue_result() {
+        assert_eq!(
+            ArrayBlockingQueueNullablePrecedenceUse::run(),
+            "add-npe,offer-npe,put-npe".to_string()
+        );
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn priority_queue_comparator_parameter_constructor_uses_callback_carrier() {
     let translation = translate_source(
         r#"
 import java.util.Comparator;
@@ -13344,33 +13528,148 @@ class PriorityQueueComparatorUse {
     );
 
     assert!(
-        translation
-            .diagnostics
-            .has_code("unsupported_priority_queue_comparator_constructor"),
+        !translation.diagnostics.has_errors(),
         "{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"Java PriorityQueue(Comparator) requires comparator-backed priority-queue support\")"
-        ) && !translation.rust.contains("return comparator;"),
+        translation
+            .rust
+            .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("__java_comparator(")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor")
+            && !translation.rust.contains("return comparator;"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "priority_queue_comparator_constructor_requires_comparator_carrier",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_comparator_parameter_constructor_uses_callback_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn comparator_parameter_orders_values() {
+    let mut queue = PriorityQueueComparatorUse::queue(|left, right| right - left);
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
     );
 }
 
 #[test]
-fn priority_queue_anonymous_comparator_constructor_reports_both_missing_carriers() {
+fn priority_queue_keyword_comparator_parameter_uses_source_name_type_env() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueKeywordComparatorUse {
+    static PriorityQueue<Integer> queue(Comparator<Integer> type) {
+        return new PriorityQueue<Integer>(type);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("__java_comparator(")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_keyword_comparator_parameter_uses_source_name_type_env",
+        translation.rust,
+        r#"
+#[test]
+fn keyword_comparator_parameter_orders_values() {
+    let mut queue = PriorityQueueKeywordComparatorUse::queue(|left, right| right - left);
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_comparator_local_lambda_constructor_uses_callback_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueComparatorLocalUse {
+    static PriorityQueue<Integer> queue() {
+        Comparator<Integer> comparator = (left, right) -> right - left;
+        return new PriorityQueue<Integer>(comparator);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let comparator = |left: i32, right: i32| right - left;")
+            && translation
+                .rust
+                .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("__java_comparator(")
+            && !translation.rust.contains("let mut comparator: Comparator")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_comparator_local_lambda_constructor_uses_callback_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn local_lambda_comparator_orders_values() {
+    let mut queue = PriorityQueueComparatorLocalUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_anonymous_comparator_constructor_lowers_to_inline_closure() {
     let translation = translate_source(
         r#"
 import java.util.Comparator;
@@ -13389,31 +13688,40 @@ class PriorityQueueAnonymousComparatorUse {
     );
 
     assert!(
-        translation
-            .diagnostics
-            .has_code("unsupported_priority_queue_comparator_constructor")
-            && translation
-                .diagnostics
-                .has_code("unsupported_anonymous_class"),
+        !translation.diagnostics.has_errors(),
         "{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"Java PriorityQueue(Comparator) requires comparator-backed priority-queue support\")"
-        ),
+        translation
+            .rust
+            .contains("JavaPriorityQueue::with_comparator")
+            && translation
+                .rust
+                .contains("java_primitive_compare_to(right.clone(), left.clone())")
+            && !translation.rust.contains("unsupported_anonymous_class")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "priority_queue_anonymous_comparator_constructor_reports_both_missing_carriers",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_anonymous_comparator_constructor_lowers_to_inline_closure",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_priority_queue_comparator_orders_values() {
+    let mut queue = PriorityQueueAnonymousComparatorUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
     );
 }
 
@@ -13426,6 +13734,8 @@ import java.util.PriorityQueue;
 
 class PriorityQueueNamedComparatorUse {
     static class ReverseComparator implements Comparator<Integer> {
+        ReverseComparator() {}
+
         public int compare(Integer left, Integer right) {
             return right.compareTo(left);
         }
@@ -13439,28 +13749,339 @@ class PriorityQueueNamedComparatorUse {
     );
 
     assert!(
-        translation
-            .diagnostics
-            .has_code("unsupported_priority_queue_comparator_constructor"),
+        !translation.diagnostics.has_errors(),
         "{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"Java PriorityQueue(Comparator) requires comparator-backed priority-queue support\")"
-        ) && !translation.rust.contains("let mut queue: Vec<i32> = PriorityQueueNamedComparatorUse_ReverseComparator::new();"),
+        translation
+            .rust
+            .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("ReverseComparator::new")
+            && !translation.rust.contains("let mut queue: Vec<i32> = PriorityQueueNamedComparatorUse_ReverseComparator::new();")
+            && !translation.rust.contains("unsupported_priority_queue_comparator_constructor"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_test_generated_modules_for_translation(
         "priority_queue_named_comparator_constructor_requires_comparator_carrier",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "Java PriorityQueue(Comparator) requires comparator-backed priority-queue support",
+        translation.rust,
+        r#"
+#[test]
+fn named_priority_queue_comparator_orders_values() {
+    let mut queue = PriorityQueueNamedComparatorUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_comparator_object_local_constructor_uses_comparator_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueComparatorObjectLocalUse {
+    static class ReverseComparator implements Comparator<Integer> {
+        ReverseComparator() {}
+
+        public int compare(Integer left, Integer right) {
+            return right.compareTo(left);
+        }
+    }
+
+    static PriorityQueue<Integer> queue() {
+        Comparator<Integer> comparator = new ReverseComparator();
+        return new PriorityQueue<Integer>(comparator);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("ReverseComparator::new")
+            && translation.rust.contains("__java_comparator.compare")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_comparator_object_local_constructor_uses_comparator_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn comparator_object_local_orders_values() {
+    let mut queue = PriorityQueueComparatorObjectLocalUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_comparator_object_field_constructor_uses_comparator_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueComparatorObjectFieldUse {
+    static class ReverseComparator implements Comparator<Integer> {
+        ReverseComparator() {}
+
+        public int compare(Integer left, Integer right) {
+            return right.compareTo(left);
+        }
+    }
+
+    private Comparator<Integer> comparator = new ReverseComparator();
+
+    PriorityQueue<Integer> queue() {
+        return new PriorityQueue<Integer>(comparator);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported_priority_queue_comparator_constructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_comparator_object_field_constructor_uses_comparator_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn comparator_object_field_orders_values() {
+    let owner = PriorityQueueComparatorObjectFieldUse {
+        comparator: PriorityQueueComparatorObjectFieldUse_ReverseComparator::new(),
+    };
+    let mut queue = owner.queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_comparator_factory_constructor_uses_comparator_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueComparatorFactoryUse {
+    static class ReverseComparator implements Comparator<Integer> {
+        ReverseComparator() {}
+
+        public int compare(Integer left, Integer right) {
+            return right.compareTo(left);
+        }
+    }
+
+    static Comparator<Integer> make() {
+        return new ReverseComparator();
+    }
+
+    static PriorityQueue<Integer> queue() {
+        return new PriorityQueue<Integer>(make());
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn make() -> PriorityQueueComparatorFactoryUse_ReverseComparator")
+            && translation
+                .rust
+                .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("__java_comparator.compare")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_comparator_factory_constructor_uses_comparator_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn comparator_factory_orders_values() {
+    let mut queue = PriorityQueueComparatorFactoryUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_comparator_factory_local_constructor_uses_comparator_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class PriorityQueueComparatorFactoryLocalUse {
+    static class ReverseComparator implements Comparator<Integer> {
+        ReverseComparator() {}
+
+        public int compare(Integer left, Integer right) {
+            return right.compareTo(left);
+        }
+    }
+
+    static Comparator<Integer> make() {
+        return new ReverseComparator();
+    }
+
+    static PriorityQueue<Integer> queue() {
+        Comparator<Integer> comparator = make();
+        return new PriorityQueue<Integer>(comparator);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation.rust.contains("let comparator = Self::make();")
+            && !translation.rust.contains("let comparator: Comparator")
+            && translation
+                .rust
+                .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("__java_comparator.compare")
+            && !translation
+                .rust
+                .contains("unsupported_priority_queue_comparator_constructor"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_comparator_factory_local_constructor_uses_comparator_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn comparator_factory_local_orders_values() {
+    let mut queue = PriorityQueueComparatorFactoryLocalUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn priority_queue_block_lambda_comparator_constructor_uses_callback_block() {
+    let translation = translate_source(
+        r#"
+import java.util.PriorityQueue;
+
+class PriorityQueueBlockLambdaComparatorUse {
+    static PriorityQueue<Integer> queue() {
+        return new PriorityQueue<Integer>((left, right) -> {
+            if (left < right) return 1;
+            if (left > right) return -1;
+            return 0;
+        });
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .rust
+            .contains("JavaPriorityQueue::with_comparator")
+            && translation.rust.contains("if left < right")
+            && translation.rust.contains("return 1;")
+            && !translation
+                .rust
+                .contains("let mut queue: JavaPriorityQueue<i32> = |"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "priority_queue_block_lambda_comparator_constructor_uses_callback_block",
+        translation.rust,
+        r#"
+#[test]
+fn block_lambda_comparator_orders_values() {
+    let mut queue = PriorityQueueBlockLambdaComparatorUse::queue();
+    queue.push(1);
+    queue.push(3);
+    queue.push(2);
+    assert_eq!(queue.remove(0), 3);
+    assert_eq!(queue.remove(0), 2);
+    assert_eq!(queue.remove(0), 1);
+}
+"#,
     );
 }
 
@@ -13538,6 +14159,79 @@ class QueuePollAliasUse {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn queue_poll_boxed_primitive_concat_uses_optional_java_display() {
+    let translation = translate_source(
+        r#"
+import java.util.PriorityQueue;
+
+class QueuePollBoxedPrimitiveConcatUse {
+    static String run() {
+        PriorityQueue<Integer> queue = new PriorityQueue<Integer>();
+        queue.add(1);
+        queue.add(3);
+        queue.add(2);
+        return queue.poll() + "," + queue.poll() + "," + queue.poll() + "," + queue.poll();
+    }
+}
+
+class QueuePollBoxedDoubleConcatUse {
+    static String run() {
+        PriorityQueue<Double> queue = new PriorityQueue<Double>();
+        queue.add(1.0);
+        queue.add(3.0);
+        queue.add(2.0);
+        return queue.poll() + "," + queue.poll() + "," + queue.poll() + "," + queue.poll();
+    }
+}
+
+class QueuePollBoxedBooleanConcatUse {
+    static String run() {
+        PriorityQueue<Boolean> queue = new PriorityQueue<Boolean>();
+        queue.add(true);
+        queue.add(false);
+        queue.add(true);
+        return queue.poll() + "," + queue.poll() + "," + queue.poll() + "," + queue.poll();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("JavaPriorityQueue<i32>")
+            && translation.rust.contains("JavaPriorityQueue<f64>")
+            && translation.rust.contains("JavaPriorityQueue<bool>")
+            && translation.rust.contains("java_arrays_deep_to_string")
+            && translation
+                .rust
+                .contains("unwrap_or_else(|| \"null\".to_string())")
+            && !translation.rust.contains(".poll("),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "queue_poll_boxed_primitive_concat_uses_optional_java_display",
+        translation.rust,
+        r#"
+#[test]
+fn priority_queue_integer_poll_concat_uses_java_null_display() {
+    assert_eq!(QueuePollBoxedPrimitiveConcatUse::run(), "1,2,3,null".to_string());
+}
+
+#[test]
+fn priority_queue_double_poll_concat_uses_java_float_display() {
+    assert_eq!(QueuePollBoxedDoubleConcatUse::run(), "1.0,2.0,3.0,null".to_string());
+}
+
+#[test]
+fn priority_queue_boolean_poll_concat_uses_java_null_display() {
+    assert_eq!(QueuePollBoxedBooleanConcatUse::run(), "false,true,true,null".to_string());
+}
+"#,
     );
 }
 
@@ -14266,6 +14960,312 @@ mod generated_tests {
     #[test]
     fn catches_null_unboxing_from_map_get_branch() {
         assert_eq!(MapGetTernaryPrimitiveNullCatch::run(), "npe".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_local_unbox_null_is_catchable() {
+    let translation = translate_source(
+        r#"
+class NullableUnboxCatch {
+    static String run() {
+        Integer value = null;
+        try {
+            int primitive = value;
+            return "ok:" + primitive;
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let primitive: i32 = value.ok_or_else(|| JavaException::new(\"NullPointerException\""
+        ) && !translation
+            .rust
+            .contains("let primitive: i32 = value.unwrap();")
+            && !translation
+                .rust
+                .contains("let primitive: i32 = value.expect(\"Java null receiver\");"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "boxed_primitive_local_unbox_null_is_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_direct_nullable_boxed_unbox() {
+        assert_eq!(NullableUnboxCatch::run(), "npe".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_array_index_unbox_null_is_catchable() {
+    let translation = translate_source(
+        r#"
+class NullableUnboxArrayIndexCatch {
+    static String run() {
+        Integer value = null;
+        int[] values = new int[] { 7 };
+        try {
+            return "value:" + values[value];
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let __java_arrays_index = value.ok_or_else(|| JavaException::new(\"NullPointerException\""
+        ) && translation
+            .rust
+            .contains("__java_arrays_source.get(__java_arrays_index as usize)")
+            && !translation.rust.contains("let __java_arrays_index = value;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "boxed_primitive_array_index_unbox_null_is_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_nullable_boxed_array_index_unbox() {
+        assert_eq!(NullableUnboxArrayIndexCatch::run(), "npe".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_string_char_at_index_unbox_null_is_catchable() {
+    let translation = translate_source(
+        r#"
+class NullableUnboxStringCharAtCatch {
+    static String run() {
+        Integer index = null;
+        try {
+            return "" + "abc".charAt(index);
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            ".chars().nth(index.ok_or_else(|| JavaException::new(\"NullPointerException\""
+        ) && translation
+            .rust
+            .contains(".ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\"")
+            && !translation.rust.contains(".chars().nth(index as usize)"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "boxed_primitive_string_char_at_index_unbox_null_is_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_nullable_boxed_string_char_at_index_unbox() {
+        assert_eq!(NullableUnboxStringCharAtCatch::run(), "npe".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_switch_selector_unbox_null_is_catchable() {
+    let translation = translate_source(
+        r#"
+class NullableUnboxSwitchCatch {
+    static Integer value() {
+        return null;
+    }
+
+    static String run() {
+        try {
+            switch (value()) {
+                case 1:
+                    return "one";
+                default:
+                    return "other";
+            }
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "match Self::value().ok_or_else(|| JavaException::new(\"NullPointerException\""
+        ) && !translation.rust.contains("match Self::value() { 1 =>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "boxed_primitive_switch_selector_unbox_null_is_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_nullable_boxed_switch_selector_unbox() {
+        assert_eq!(NullableUnboxSwitchCatch::run(), "npe".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_operator_unbox_nulls_are_catchable() {
+    let translation = translate_source(
+        r#"
+class BoxedPrimitiveOperatorNullCatch {
+    static Boolean boolValue() {
+        return null;
+    }
+
+    static Integer intValue() {
+        return null;
+    }
+
+    static String condition() {
+        try {
+            if (boolValue()) {
+                return "yes";
+            }
+            return "no";
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+
+    static String binary() {
+        try {
+            int primitive = 1 + intValue();
+            return "ok:" + primitive;
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+
+    static String compare() {
+        try {
+            return intValue() > 2 ? "big" : "small";
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+
+    static String unaryMinus() {
+        try {
+            int primitive = -intValue();
+            return "ok:" + primitive;
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+
+    static String unaryPlus() {
+        try {
+            int primitive = +intValue();
+            return "ok:" + primitive;
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .matches("JavaException::new(\"NullPointerException\"")
+            .count()
+            >= 5
+            && !translation.rust.contains("if Self::bool_value() {")
+            && !translation.rust.contains("1 + Self::int_value()")
+            && !translation.rust.contains("Self::int_value() > 2")
+            && !translation
+                .rust
+                .contains("let primitive: i32 = -Self::int_value();")
+            && !translation
+                .rust
+                .contains("let primitive: i32 = +Self::int_value();"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "boxed_primitive_operator_unbox_nulls_are_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_boxed_primitive_operator_nulls() {
+        assert_eq!(BoxedPrimitiveOperatorNullCatch::condition(), "npe".to_string());
+        assert_eq!(BoxedPrimitiveOperatorNullCatch::binary(), "npe".to_string());
+        assert_eq!(BoxedPrimitiveOperatorNullCatch::compare(), "npe".to_string());
+        assert_eq!(BoxedPrimitiveOperatorNullCatch::unary_minus(), "npe".to_string());
+        assert_eq!(BoxedPrimitiveOperatorNullCatch::unary_plus(), "npe".to_string());
     }
 }
 "#,
@@ -15094,7 +16094,7 @@ fn optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver() 
     assert!(
         translation
             .rust
-            .contains("self.holder.as_mut().unwrap().add_string_int(name, value);")
+            .contains("self.holder.as_mut().unwrap().borrow_mut().add_string_int(name, value);")
             && !translation.rust.contains(".as_ref().unwrap().add(")
             && !translation.rust.contains(".add(name, value);"),
         "{}",
@@ -15146,20 +16146,37 @@ class Holder {
     assert!(
         translation
             .rust
-            .contains("self.holder.as_mut().unwrap().add_string_int(")
+            .contains("self.holder.as_mut().unwrap().borrow_mut().add_string_int(")
+            && !translation
+                .rust
+                .contains("self.holder.borrow_mut().add_string_int(")
             && !translation.rust.contains(".add(name, value);"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "context_translation_sibling_overload_signature",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust,
+            rust: format!(
+                r#"
+pub struct Holder {{
+    count: i32,
+}}
+
+impl Holder {{
+    pub fn add_string_int(&mut self, _name: &str, value: i32) {{
+        self.count = value;
+    }}
+}}
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
-        "cannot find type `Holder` in this scope",
     );
 }
 
@@ -16523,21 +17540,29 @@ class Use {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java class upcast: Sub to Base requires class hierarchy lowering\")"
-        ) && !translation.rust.contains("self.keep(value.into())"),
+        translation.rust.contains("pub enum BaseValue")
+            && translation.rust.contains("impl BaseValue")
+            && translation.rust.contains("pub fn id(&self) -> i32")
+            && translation.rust.contains("pub fn keep(&self, value: BaseValue) -> BaseValue")
+            && translation
+                .rust
+                .contains("return self.keep(value.clone()/* TODO(translation): validate added clone */.into()).id();")
+            && !translation.rust.contains("unsupported Java class upcast")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_test_generated_modules_for_translation(
         "shaped_source_subtype_argument_requires_hierarchy_lowering",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "requires class hierarchy lowering",
+        translation.rust,
+        r#"
+#[test]
+fn shaped_source_subtype_argument_preserves_inherited_field() {
+    let use_case = Use {};
+    assert_eq!(use_case.run(Sub { id: 7 }), 7);
+}
+"#,
     );
 }
 
@@ -16753,25 +17778,24 @@ class StandardLineRepair {
     let translation = translate_source(source);
 
     assert!(
-        translation
-            .rust
-            .contains("compile_error!(\"unsupported Java class upcast: FormatLine to HeaderLine requires class hierarchy lowering\")")
+        translation.rust.contains("pub enum HeaderLineValue")
+            && translation.rust.contains("impl From<std::rc::Rc<FormatLine>> for HeaderLineValue")
             && translation.rust.contains(
-                "let repaired: HeaderLine = { let _ = self.formats.as_ref().unwrap().repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)); compile_error!"
+                "let repaired: HeaderLineValue = self.formats.as_ref().unwrap().repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)).into();"
             )
-            && !translation.rust.contains(".repair(std::rc::Rc::new(line.clone()/* TODO(translation): validate added clone */)).into();"),
+            && !translation.rust.contains("unsupported Java class upcast")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "source_receiver_generic_result_upcasts_to_supertype_assignment_slot",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "requires class hierarchy lowering",
     );
 }
 
@@ -19862,7 +20886,7 @@ class SuperMethodCall {
 }
 
 #[test]
-fn source_mutating_super_method_call_is_loud_hierarchy_gap() {
+fn source_mutating_super_method_call_uses_copyback_for_field_local_body() {
     let source = r#"
 class SuperMutate {
     static class Base {
@@ -19880,26 +20904,1419 @@ class SuperMutate {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java mutating super call: SuperMutate.Base.bump requires class hierarchy lowering\")"
-        ) && !translation.rust.contains("SuperMutate_Base::bump(&SuperMutate_Base"),
+        translation
+            .rust
+            .contains("let mut __java_super = SuperMutate_Base { n: self.n };")
+            && translation
+                .rust
+                .contains("SuperMutate_Base::bump(&mut __java_super);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_test_generated_modules_for_translation(
         "source_mutating_super_method_call",
-        vec![GeneratedCrateModule {
-            name: "source_mutating_super_method_call",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "unsupported Java mutating super call: SuperMutate.Base.bump requires class hierarchy lowering",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_copies_inherited_field_changes_back() {
+    let mut value = SuperMutate_Derived { n: 0 };
+    value.bump();
+    assert_eq!(value.n, 11);
+}
+"#,
     );
 }
 
 #[test]
-fn source_class_upcast_requires_hierarchy_lowering() {
+fn source_mutating_super_method_call_returns_value_after_copyback() {
+    let source = r#"
+class SuperMutateReturn {
+    static class Base {
+        int n;
+        int add(int value) {
+            this.n += value;
+            return this.n;
+        }
+    }
+    static class Derived extends Base {
+        int add(int value) {
+            return super.add(value) + this.n;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "let __java_super_result = SuperMutateReturn_Base::add(&mut __java_super, value);"
+        ) && translation.rust.contains("self.n = __java_super.n;")
+            && translation.rust.contains("__java_super_result")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_return",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_return_copies_back_before_using_result() {
+    let mut value = SuperMutateReturn_Derived { n: 0 };
+    assert_eq!(value.add(4), 8);
+    assert_eq!(value.n, 4);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_temporary_local() {
+    let source = r#"
+class SuperMutateTemp {
+    static class Base {
+        int n;
+        void add(int value) {
+            int next = n + value;
+            this.n = next;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateTemp_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_temp_local",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_temp_local_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateTemp_Derived { n: 0 };
+    value.add(4);
+    assert_eq!(value.n, 14);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_conditional_body() {
+    let source = r#"
+class SuperMutateConditional {
+    static class Base {
+        int n;
+        void add(int value) {
+            if (value > 0) {
+                int next = n + value;
+                this.n = next;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateConditional_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_conditional",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_conditional_body_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateConditional_Derived { n: 0 };
+    value.add(4);
+    value.add(-2);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_declared_then_assigned_local() {
+    let source = r#"
+class SuperMutateAssignedLocal {
+    static class Base {
+        int n;
+        void add(int value) {
+            int next;
+            next = n + value;
+            this.n = next;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateAssignedLocal_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_assigned_local",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_assigned_local_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateAssignedLocal_Derived { n: 0 };
+    value.add(4);
+    assert_eq!(value.n, 14);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_ternary_local() {
+    let source = r#"
+class SuperMutateTernaryLocal {
+    static class Base {
+        int n;
+        void add(int value) {
+            int delta = value > 0 ? value : 0;
+            this.n = n + delta;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateTernaryLocal_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_ternary_local",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_ternary_local_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateTernaryLocal_Derived { n: 0 };
+    value.add(4);
+    value.add(-2);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_array_access() {
+    let source = r#"
+class SuperMutateArrayAccess {
+    static class Base {
+        int n;
+        void add(int[] values) {
+            for (int i = 0; i < values.length; i++) {
+                this.n += values[i];
+            }
+        }
+    }
+    static class Derived extends Base {
+        void add(int[] values) {
+            super.add(values);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateArrayAccess_Base::add(&mut __java_super, values);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_array_access",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_array_access_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateArrayAccess_Derived { n: 0 };
+    value.add(&[2, 4, 6]);
+    value.add(&[1]);
+    assert_eq!(value.n, 33);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_parameter_array_write() {
+    let source = r#"
+class SuperMutateParameterArrayWrite {
+    static class Base {
+        int n;
+        void add(int[] values, int value) {
+            values[0] = value;
+            this.n += values[0];
+        }
+    }
+    static class Derived extends Base {
+        void add(int[] values, int value) {
+            super.add(values, value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "SuperMutateParameterArrayWrite_Base::add(&mut __java_super, values, value);"
+        ) && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_parameter_array_write",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_parameter_array_write_updates_array_and_copies_back() {
+    let mut value = SuperMutateParameterArrayWrite_Derived { n: 0 };
+    let mut values = vec![0];
+    value.add(values.as_mut_slice(), 4);
+    assert_eq!(values[0], 4);
+    assert_eq!(value.n, 14);
+    value.add(values.as_mut_slice(), 2);
+    assert_eq!(values[0], 2);
+    assert_eq!(value.n, 26);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_local_array_initializer() {
+    let source = r#"
+class SuperMutateLocalArray {
+    static class Base {
+        int n;
+        void add(int value) {
+            int[] deltas = new int[] { value, 1 };
+            this.n += deltas[0] + deltas[1];
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateLocalArray_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_local_array_initializer",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_local_array_initializer_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateLocalArray_Derived { n: 0 };
+    value.add(4);
+    value.add(2);
+    assert_eq!(value.n, 28);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_local_array_writes() {
+    let source = r#"
+class SuperMutateLocalArrayWrite {
+    static class Base {
+        int n;
+        void add(int value) {
+            int[] deltas = new int[2];
+            deltas[0] = value;
+            deltas[1] = 1;
+            this.n += deltas[0] + deltas[1];
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateLocalArrayWrite_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_local_array_writes",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_local_array_writes_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateLocalArrayWrite_Derived { n: 0 };
+    value.add(4);
+    value.add(2);
+    assert_eq!(value.n, 28);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_local_array_unary_updates() {
+    let source = r#"
+class SuperMutateLocalArrayUnary {
+    static class Base {
+        int n;
+        void add(int value) {
+            int[] deltas = new int[] { value };
+            deltas[0]++;
+            this.n += deltas[0];
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateLocalArrayUnary_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_local_array_unary_updates",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_local_array_unary_updates_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateLocalArrayUnary_Derived { n: 0 };
+    value.add(4);
+    value.add(2);
+    assert_eq!(value.n, 28);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_local_array_for_updates() {
+    let source = r#"
+class SuperMutateLocalArrayForUpdate {
+    static class Base {
+        int n;
+        void addWithUnary(int value) {
+            for (int[] remaining = new int[] { value }; remaining[0] > 0; remaining[0]--) {
+                this.n++;
+            }
+        }
+        void addWithAssignment(int value) {
+            for (int[] remaining = new int[] { value }; remaining[0] > 0; remaining[0] -= 1) {
+                this.n++;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void addWithUnary(int value) {
+            super.addWithUnary(value);
+            this.n += 10;
+        }
+        void addWithAssignment(int value) {
+            super.addWithAssignment(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "SuperMutateLocalArrayForUpdate_Base::add_with_unary(&mut __java_super, value);"
+        ) && translation.rust.contains(
+            "SuperMutateLocalArrayForUpdate_Base::add_with_assignment(&mut __java_super, value);"
+        ) && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_local_array_for_updates",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_local_array_for_updates_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateLocalArrayForUpdate_Derived { n: 0 };
+    value.add_with_unary(3);
+    value.add_with_assignment(2);
+    assert_eq!(value.n, 25);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_if_else_assigned_local() {
+    let source = r#"
+class SuperMutateIfElseAssignedLocal {
+    static class Base {
+        int n;
+        void add(int value) {
+            int delta;
+            if (value > 0) {
+                delta = value;
+            } else {
+                delta = 0;
+            }
+            this.n = n + delta;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateIfElseAssignedLocal_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_if_else_assigned_local",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_if_else_assigned_local_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateIfElseAssignedLocal_Derived { n: 0 };
+    value.add(4);
+    value.add(-2);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_unary_inherited_field_update() {
+    let source = r#"
+class SuperMutateUnaryField {
+    static class Base {
+        int n;
+        void bump() {
+            this.n++;
+        }
+    }
+    static class Derived extends Base {
+        void bump() {
+            super.bump();
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateUnaryField_Base::bump(&mut __java_super);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_unary_field",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_unary_field_update_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateUnaryField_Derived { n: 0 };
+    value.bump();
+    assert_eq!(value.n, 11);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_unary_safe_local_update() {
+    let source = r#"
+class SuperMutateUnaryLocal {
+    static class Base {
+        int n;
+        void add(int value) {
+            int next = n + value;
+            next++;
+            this.n = next;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateUnaryLocal_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_unary_local",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_unary_safe_local_update_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateUnaryLocal_Derived { n: 0 };
+    value.add(4);
+    assert_eq!(value.n, 15);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_unary_parameter_update() {
+    let source = r#"
+class SuperMutateUnaryParam {
+    static class Base {
+        int n;
+        void add(int value) {
+            value++;
+            this.n += value;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateUnaryParam_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_unary_param",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_unary_parameter_update_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateUnaryParam_Derived { n: 0 };
+    value.add(4);
+    assert_eq!(value.n, 15);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_while_loop() {
+    let source = r#"
+class SuperMutateWhileLoop {
+    static class Base {
+        int n;
+        void add(int value) {
+            while (value > 0) {
+                this.n++;
+                value--;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateWhileLoop_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_while_loop",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_while_loop_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateWhileLoop_Derived { n: 0 };
+    value.add(3);
+    assert_eq!(value.n, 13);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_do_while_loop() {
+    let source = r#"
+class SuperMutateDoWhileLoop {
+    static class Base {
+        int n;
+        void add(int value) {
+            do {
+                this.n++;
+                value--;
+            } while (value > 0);
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateDoWhileLoop_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_do_while_loop",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_do_while_loop_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateDoWhileLoop_Derived { n: 0 };
+    value.add(3);
+    value.add(0);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_enhanced_for_loop() {
+    let source = r#"
+class SuperMutateEnhancedFor {
+    static class Base {
+        int n;
+        void add(int[] values) {
+            for (int value : values) {
+                this.n += value;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void add(int[] values) {
+            super.add(values);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateEnhancedFor_Base::add(&mut __java_super, values);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_enhanced_for_loop",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_enhanced_for_loop_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateEnhancedFor_Derived { n: 0 };
+    value.add(&[1, 2, 3]);
+    value.add(&[4]);
+    assert_eq!(value.n, 30);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_for_loop() {
+    let source = r#"
+class SuperMutateForLoop {
+    static class Base {
+        int n;
+        void add(int value) {
+            for (int i = 0; i < value; i++) {
+                this.n++;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateForLoop_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_for_loop",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_for_loop_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateForLoop_Derived { n: 0 };
+    value.add(3);
+    value.add(0);
+    assert_eq!(value.n, 23);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_for_assignment_update() {
+    let source = r#"
+class SuperMutateForAssignmentUpdate {
+    static class Base {
+        int n;
+        void addWithLocalUpdate(int value) {
+            for (int i = 0; i < value; i += 1) {
+                this.n++;
+            }
+        }
+        void addWithParamUpdate(int value) {
+            for (; value > 0; value -= 1) {
+                this.n++;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void addWithLocalUpdate(int value) {
+            super.addWithLocalUpdate(value);
+            this.n += 10;
+        }
+        void addWithParamUpdate(int value) {
+            super.addWithParamUpdate(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "SuperMutateForAssignmentUpdate_Base::add_with_local_update(&mut __java_super, value);"
+        ) && translation.rust.contains(
+            "SuperMutateForAssignmentUpdate_Base::add_with_param_update(&mut __java_super, value);"
+        ) && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_for_assignment_update",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_for_assignment_update_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateForAssignmentUpdate_Derived { n: 0 };
+    value.add_with_local_update(3);
+    value.add_with_param_update(2);
+    assert_eq!(value.n, 25);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_loop_control() {
+    let source = r#"
+class SuperMutateLoopControl {
+    static class Base {
+        int n;
+        void addWithBreak(int value) {
+            while (value > 0) {
+                if (value == 2) {
+                    break;
+                }
+                this.n++;
+                value--;
+            }
+        }
+        void addWithContinue(int value) {
+            while (value > 0) {
+                value--;
+                if (value == 1) {
+                    continue;
+                }
+                this.n++;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void addWithBreak(int value) {
+            super.addWithBreak(value);
+            this.n += 10;
+        }
+        void addWithContinue(int value) {
+            super.addWithContinue(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateLoopControl_Base::add_with_break(&mut __java_super, value);")
+            && translation.rust.contains(
+                "SuperMutateLoopControl_Base::add_with_continue(&mut __java_super, value);"
+            )
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_loop_control",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_loop_control_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateLoopControl_Derived { n: 0 };
+    value.add_with_break(4);
+    value.add_with_continue(3);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_labeled_loop_control() {
+    let source = r#"
+class SuperMutateLabeledLoopControl {
+    static class Base {
+        int n;
+        void addWithLabeledBreak(int value) {
+            outer:
+            while (value > 0) {
+                while (true) {
+                    if (value == 2) {
+                        break outer;
+                    }
+                    this.n++;
+                    value--;
+                    break;
+                }
+            }
+        }
+        void addWithLabeledContinue(int value) {
+            outer:
+            while (value > 0) {
+                value--;
+                while (true) {
+                    if (value == 1) {
+                        continue outer;
+                    }
+                    this.n++;
+                    break;
+                }
+            }
+        }
+    }
+    static class Derived extends Base {
+        void addWithLabeledBreak(int value) {
+            super.addWithLabeledBreak(value);
+            this.n += 10;
+        }
+        void addWithLabeledContinue(int value) {
+            super.addWithLabeledContinue(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "SuperMutateLabeledLoopControl_Base::add_with_labeled_break(&mut __java_super, value);"
+        ) && translation.rust.contains(
+            "SuperMutateLabeledLoopControl_Base::add_with_labeled_continue(&mut __java_super, value);"
+        ) && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_labeled_loop_control",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_labeled_loop_control_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateLabeledLoopControl_Derived { n: 0 };
+    value.add_with_labeled_break(4);
+    value.add_with_labeled_continue(3);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_switch_body() {
+    let source = r#"
+class SuperMutateSwitch {
+    static class Base {
+        int n;
+        void add(int value) {
+            switch (value) {
+                case 1:
+                    this.n += 1;
+                    break;
+                case 2:
+                    this.n += 2;
+                default:
+                    this.n += 3;
+                    break;
+            }
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateSwitch_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_switch_body",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_switch_body_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateSwitch_Derived { n: 0 };
+    value.add(1);
+    value.add(2);
+    value.add(3);
+    assert_eq!(value.n, 39);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_switch_assigned_local() {
+    let source = r#"
+class SuperMutateSwitchAssignedLocal {
+    static class Base {
+        int n;
+        void add(int value) {
+            int next;
+            switch (value) {
+                case 1:
+                    next = 4;
+                    break;
+                default:
+                    next = 2;
+                    break;
+            }
+            this.n += next;
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateSwitchAssignedLocal_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_switch_assigned_local",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_switch_assigned_local_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateSwitchAssignedLocal_Derived { n: 0 };
+    value.add(1);
+    value.add(3);
+    assert_eq!(value.n, 26);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_method_call_allows_safe_math_static_call() {
+    let source = r#"
+class SuperMutateMathCall {
+    static class Base {
+        int n;
+        void add(int value) {
+            this.n = Math.max(this.n, value);
+        }
+    }
+    static class Derived extends Base {
+        void add(int value) {
+            super.add(value);
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("SuperMutateMathCall_Base::add(&mut __java_super, value);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_method_call_math_static_call",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_call_with_math_static_call_copies_inherited_field_changes_back() {
+    let mut value = SuperMutateMathCall_Derived { n: 0 };
+    value.add(4);
+    value.add(2);
+    assert_eq!(value.n, 24);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_mutating_super_copyback_includes_same_file_inherited_fields() {
+    let source = r#"
+class SuperMutateInheritedField {
+    static class Root {
+        int n;
+    }
+    static class Base extends Root {
+        void bump() {
+            this.n += 1;
+        }
+    }
+    static class Derived extends Base {
+        void bump() {
+            super.bump();
+            this.n += 10;
+        }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut __java_super = SuperMutateInheritedField_Base { n: self.n };")
+            && translation
+                .rust
+                .contains("SuperMutateInheritedField_Base::bump(&mut __java_super);")
+            && translation.rust.contains("self.n = __java_super.n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_mutating_super_copyback_same_file_inherited_fields",
+        translation.rust,
+        r#"
+#[test]
+fn mutating_super_copyback_includes_same_file_inherited_fields() {
+    let mut value = SuperMutateInheritedField_Derived { n: 0 };
+    value.bump();
+    assert_eq!(value.n, 11);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutating_super_copyback_refuses_hidden_superclass_field() {
+    let source = r#"
+class SuperMutateHiddenField {
+    static class Base {
+        int n;
+        void bump() { this.n += 1; }
+        int baseValue() { return n; }
+    }
+    static class Derived extends Base {
+        int n;
+        void bump() {
+            super.bump();
+            this.n += 10;
+        }
+        int derivedValue() { return n; }
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java mutating super call: SuperMutateHiddenField.Base.bump requires class hierarchy lowering\")"
+        ) && !translation
+            .rust
+            .contains("let mut __java_super = SuperMutateHiddenField_Base")
+            && !translation.rust.contains("self.n = __java_super.n;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_class_upcast_uses_hierarchy_carrier() {
     let source = r#"
 class InheritanceUpcast {
     static String run() {
@@ -19924,26 +22341,33 @@ class Savings extends Account {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java class upcast: Savings to Account requires class hierarchy lowering\")"
-        ) && !translation.rust.contains("let a: Account = Savings::new(100, 5).into();"),
+        translation.rust.contains("pub enum AccountValue")
+            && translation
+                .rust
+                .contains("let a: AccountValue = Savings::new(100, 5).into();")
+            && translation
+                .rust
+                .contains("impl From<Savings> for AccountValue")
+            && !translation.rust.contains("unsupported Java class upcast")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "source_class_upcast_requires_hierarchy_lowering",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
+    cargo_test_generated_modules_for_translation(
+        "source_class_upcast_uses_hierarchy_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn source_class_upcast_dispatches_through_carrier() {
+    assert_eq!(InheritanceUpcast::run(), "savings,105,savings:105".to_string());
+}
+"#,
     );
 }
 
 #[test]
-fn explicit_source_class_upcast_requires_hierarchy_lowering() {
+fn explicit_source_class_upcast_uses_hierarchy_carrier() {
     let source = r#"
 class ExplicitInheritanceUpcast {
     static String run() {
@@ -19965,28 +22389,33 @@ class Savings extends Account {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java class upcast: Savings to Account requires class hierarchy lowering\")"
-        )
-            && !translation.rust.contains("let a: Account = Savings::new(100, 5)")
-            && !translation.rust.contains("Savings::new(100, 5).into()"),
+        translation.rust.contains("pub enum AccountValue")
+            && translation
+                .rust
+                .contains("let a: AccountValue = AccountValue::Savings(Savings::new(100, 5));")
+            && translation
+                .rust
+                .contains("impl From<Savings> for AccountValue")
+            && !translation.rust.contains("unsupported Java class upcast")
+            && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "explicit_source_class_upcast_requires_hierarchy_lowering",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "unsupported Java class upcast: Savings to Account requires class hierarchy lowering",
+    cargo_test_generated_modules_for_translation(
+        "explicit_source_class_upcast_uses_hierarchy_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn explicit_source_class_upcast_dispatches_through_carrier() {
+    assert_eq!(ExplicitInheritanceUpcast::run(), "savings".to_string());
+}
+"#,
     );
 }
 
 #[test]
-fn erased_object_cast_to_source_supertype_requires_hierarchy_lowering() {
+fn erased_object_cast_to_source_supertype_recovers_hierarchy_carrier() {
     let source = r#"
 class ErasedObjectSupertypeCast {
     static String run() {
@@ -20005,28 +22434,85 @@ class B extends A {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java cast: target type A has source subtypes and requires class hierarchy lowering\")"
-        )
-            && !translation.rust.contains("let a: A = o.downcast")
-            && !translation.rust.contains("let a: A = o.downcast_ref"),
+        !translation.rust.contains("unsupported Java cast")
+            && translation.rust.contains("let a: AValue =")
+            && translation.rust.contains("__java_erased_object.is::<A>()")
+            && translation.rust.contains("__java_erased_object.is::<B>()")
+            && translation.rust.contains("AValue::A(")
+            && translation.rust.contains("AValue::B("),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "erased_object_cast_to_source_supertype_requires_hierarchy_lowering",
+    cargo_check_generated_modules(
+        "erased_object_cast_to_source_supertype_recovers_hierarchy_carrier",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "unsupported Java cast: target type A has source subtypes and requires class hierarchy lowering",
     );
 }
 
 #[test]
-fn erased_object_instanceof_source_supertype_requires_hierarchy_lowering() {
+fn erased_object_source_hierarchy_carrier_identity_fails_loudly() {
+    let source = r#"
+class ErasedCarrierIdentity {
+    static String run() {
+        Object o = new B(7);
+        A a = (A) o;
+        A same = (A) o;
+        A other = new B(7);
+        return (a == same) + "," + (a == other) + "," + a.equals(same) + "," + a.equals(other);
+    }
+}
+class A {
+    int v;
+    A(int v) { this.v = v; }
+}
+class B extends A {
+    B(int v) { super(v); }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains(
+            "compile_error!(\"unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation\")"
+        )
+            && !translation.rust.contains("a == same")
+            && !translation.rust.contains("a == other"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .diagnostics
+            .has_code("java_reference_identity_equality"),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
+            .diagnostics
+            .has_code("java_inherited_equals_identity"),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+
+    cargo_check_generated_modules_fails_with(
+        "erased_object_source_hierarchy_carrier_identity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+        "unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation",
+    );
+}
+
+#[test]
+fn erased_object_instanceof_source_supertype_checks_hierarchy_carrier_variants() {
     let source = r#"
 class InstanceofSupertype {
     static boolean isA(Object o) {
@@ -20044,26 +22530,31 @@ class B extends A {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering\")"
-        ) && !translation.rust.contains(".is::<A>()"),
+        !translation
+            .rust
+            .contains("unsupported Java instanceof check")
+            && translation
+                .rust
+                .contains("__java_instanceof_value.is::<A>()")
+            && translation
+                .rust
+                .contains("__java_instanceof_value.is::<B>()"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "erased_object_instanceof_source_supertype_requires_hierarchy_lowering",
+    cargo_check_generated_modules(
+        "erased_object_instanceof_source_supertype_checks_hierarchy_carrier_variants",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
     );
 }
 
 #[test]
-fn pattern_instanceof_source_supertype_requires_hierarchy_lowering() {
+fn pattern_instanceof_source_supertype_unused_binding_checks_hierarchy_variants() {
     let source = r#"
 class PatternInstanceofSupertype {
     static String classify(Object o) {
@@ -20081,26 +22572,31 @@ class B extends A {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering\")"
-        ) && !translation.rust.contains("o.downcast_ref::<A>()"),
+        !translation
+            .rust
+            .contains("unsupported Java instanceof check")
+            && translation
+                .rust
+                .contains("__java_instanceof_value.is::<A>()")
+            && translation
+                .rust
+                .contains("__java_instanceof_value.is::<B>()"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "pattern_instanceof_source_supertype_requires_hierarchy_lowering",
+    cargo_check_generated_modules(
+        "pattern_instanceof_source_supertype_unused_binding_checks_hierarchy_variants",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
     );
 }
 
 #[test]
-fn pattern_instanceof_ternary_source_supertype_requires_hierarchy_lowering() {
+fn pattern_instanceof_ternary_source_supertype_unused_binding_checks_hierarchy_variants() {
     let source = r#"
 class PatternInstanceofSupertypeTernary {
     static String classify(Object o) {
@@ -20115,21 +22611,26 @@ class B extends A {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering\")"
-        ) && !translation.rust.contains("match o.downcast_ref::<A>()"),
+        !translation
+            .rust
+            .contains("unsupported Java instanceof check")
+            && translation
+                .rust
+                .contains("__java_instanceof_value.is::<A>()")
+            && translation
+                .rust
+                .contains("__java_instanceof_value.is::<B>()"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
-        "pattern_instanceof_ternary_source_supertype_requires_hierarchy_lowering",
+    cargo_check_generated_modules(
+        "pattern_instanceof_ternary_source_supertype_unused_binding_checks_hierarchy_variants",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "unsupported Java instanceof check: target type A has source subtypes and requires class hierarchy lowering",
     );
 }
 
@@ -22351,7 +24852,7 @@ class BaseFormat {
 }
 
 #[test]
-fn source_subclass_constructor_to_superclass_slot_is_loud_not_flattened() {
+fn source_subclass_constructor_to_superclass_slot_uses_hierarchy_carrier_not_flattened() {
     let translation = translate_source(
         r#"
 class BaseOutputFormat {
@@ -22378,32 +24879,33 @@ class UsesOutputFormat {
 "#,
     );
 
-    let unsupported_message = "unsupported Java class upcast: PairOutputFormat to BaseOutputFormat requires class hierarchy lowering";
     assert!(
         translation
             .rust
-            .contains(&format!("compile_error!(\"{unsupported_message}\")"))
+            .contains("let format: BaseOutputFormatValue = PairOutputFormat::new().into();")
             && translation
                 .rust
-                .contains("impl From<PairOutputFormat> for BaseOutputFormat")
+                .contains("impl From<PairOutputFormat> for BaseOutputFormatValue")
             && translation
                 .rust
-                .contains(&format!("panic!(\"{unsupported_message}\")"))
+                .contains("return BaseOutputFormatValue::PairOutputFormat(value);")
             && !translation
                 .rust
                 .contains("BaseOutputFormat { id: value.id }")
-            && !translation.rust.contains("id: value.id"),
+            && !translation
+                .rust
+                .contains("impl From<PairOutputFormat> for BaseOutputFormat {")
+            && !translation.rust.contains("unsupported Java class upcast"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules_fails_with(
-        "source_subclass_constructor_to_superclass_slot_is_loud_not_flattened",
+    cargo_check_generated_modules(
+        "source_subclass_constructor_to_superclass_slot_uses_hierarchy_carrier",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        unsupported_message,
     );
 }
 
@@ -22444,25 +24946,47 @@ class BaseOutputFormat {
     assert!(
         translation
             .rust
-            .contains("unsupported Java class upcast: PairOutputFormat to BaseOutputFormat requires class hierarchy lowering")
+            .contains("let format: BaseOutputFormatValue = PairOutputFormat::new().into();")
             && translation
                 .rust
-                .contains("impl From<PairOutputFormat> for BaseOutputFormat")
+                .contains("impl From<PairOutputFormat> for BaseOutputFormatValue")
+            && translation
+                .rust
+                .contains("return BaseOutputFormatValue::PairOutputFormat(value);")
             && !translation
                 .rust
-                .contains("let format: BaseOutputFormat = PairOutputFormat::new();"),
+                .contains("impl From<PairOutputFormat> for BaseOutputFormat {")
+            && !translation
+                .rust
+                .contains("BaseOutputFormat { id: value.id }")
+            && !translation.rust.contains("unsupported Java class upcast"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "emitted_context_source_subclass_constructor_flows_to_superclass_slot",
         vec![GeneratedCrateModule {
             name: "fixture",
-            rust: translation.rust,
+            rust: format!(
+                r#"
+#[derive(Clone, PartialEq)]
+pub struct BaseOutputFormat {{
+    id: Option<String>,
+}}
+
+#[derive(Clone)]
+pub enum BaseOutputFormatValue {{
+    BaseOutputFormat(BaseOutputFormat),
+    PairOutputFormat(PairOutputFormat),
+}}
+
+{}
+"#,
+                translation.rust
+            ),
             tests: "",
         }],
-        "unsupported Java class upcast: PairOutputFormat to BaseOutputFormat requires class hierarchy lowering",
     );
 }
 
@@ -22788,6 +25312,12 @@ class HeaderlessReadAdapterSurface {
         translation
             .rust
             .contains("pub fn headerless_read_adapter<T0>(_arg0: T0) -> GATKRead")
+            && translation
+                .rust
+                .contains("SAMRecordToGATKReadAdapter::headerless_read_adapter(record)")
+            && !translation
+                .rust
+                .contains("OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter::headerless_read_adapter")
             && !translation
                 .rust
                 .contains("headerless_read_adapter<R: Default"),
@@ -22795,14 +25325,13 @@ class HeaderlessReadAdapterSurface {
         translation.rust
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "wildcard_imported_headerless_read_adapter_has_gatkread_return_surface",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "use of undeclared type `OrgBroadinstituteHellbenderUtilsReadSAMRecordToGATKReadAdapter`",
     );
 }
 
@@ -24298,7 +26827,7 @@ class InnerConstructionCompanion {
                 .rust
                 .contains("return panic!(\"unsupported Java inner-class outer capture construction for InnerConstructionCompanion.Inner; pass an outer InnerConstructionCompanion handle\");")
             && translation.rust.contains(
-                "pub fn make_with_outer(&self, __java_self: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanion_Inner"
+                "pub fn make_with_outer(__java_self: std::rc::Rc<std::cell::RefCell<InnerConstructionCompanion>>) -> InnerConstructionCompanion_Inner"
             )
             && translation.rust.contains(
                 "return InnerConstructionCompanion_Inner::new_with_outer(__java_self.clone());"
@@ -24397,7 +26926,7 @@ class InnerMethodCompanionRoute {
     assert!(
         translation
             .rust
-            .contains("return self.__outer.borrow().make_with_outer(self.__outer.clone());"),
+            .contains("return InnerMethodCompanionRoute::make_with_outer(self.__outer.clone());"),
         "{}",
         translation.rust
     );
@@ -24826,7 +27355,7 @@ class PlainObjectCtorOnly {
 }
 
 #[test]
-fn external_object_to_string_fallback_is_loud_not_empty() {
+fn external_object_to_string_receiver_uses_erased_runtime_display() {
     let translation = translate_source(
         r#"
 class ExternalObjectToStringFallback {
@@ -24840,7 +27369,17 @@ class ExternalObjectToStringFallback {
     assert!(
         translation
             .rust
-            .contains("pub fn to_string(&self) -> String { unimplemented!(\"Object.toString is not modelled\") }")
+            .contains("pub trait JavaErasedObjectFacade")
+            && translation
+                .rust
+                .contains("impl JavaErasedObjectFacade for std::boxed::Box<dyn std::any::Any>")
+            && translation
+                .rust
+                .contains("fn to_string(&self) -> String { java_erased_object_to_string(self) }")
+            && translation
+                .rust
+                .contains("pub fn describe(&self, value: Box<dyn std::any::Any>) -> Result<String, JavaException>")
+            && translation.rust.contains("return Ok(value.to_string());")
             && !translation
                 .rust
                 .contains("fn to_string(&self) -> String { Default::default() }"),
@@ -24849,7 +27388,7 @@ class ExternalObjectToStringFallback {
     );
 
     cargo_check_generated_modules(
-        "external_object_to_string_fallback_loud",
+        "external_object_to_string_receiver_uses_erased_runtime_display",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -26226,6 +28765,60 @@ class SystemPrintStreamStatements {
 }
 
 #[test]
+fn source_defined_system_out_statement_does_not_lower_to_native_print_macro() {
+    let translation = translate_source(
+        r#"
+class System {
+    static Sink out = new Sink();
+}
+
+class Sink {
+    static String log = "";
+
+    void println(String value) {
+        log = "source:" + value;
+    }
+}
+
+class SourceSystemPrintShadow {
+    static String run() {
+        System.out.println("x");
+        return Sink.log;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("println!(\"{}\", \"x\".to_string())")
+            && !translation.rust.contains("println!(\"{}\", \"x\")")
+            && translation
+                .rust
+                .contains("System::__static_out().println(\"x\");"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_defined_system_out_statement",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn source_system_out_dispatches_to_source_sink() {
+        assert_eq!(SourceSystemPrintShadow::run(), "source:x".to_string());
+    }
+}
+"#,
+    );
+}
+
+#[test]
 fn system_err_static_constant_emits_typed_surface() {
     let translation = translate_source(
         r#"
@@ -27233,14 +29826,13 @@ class SmartMergeHeaderLinesSlot {
         translation.diagnostics
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_check_generated_modules(
         "static_external_call_generic_set_slot",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
             tests: "",
         }],
-        "expected `HashSet<VCFHeaderLine>`, found `Vec<Box<dyn Any>>`",
     );
 }
 
@@ -34634,6 +37226,56 @@ mod generated_tests {
     fn negative_size_is_catchable() {
         assert_eq!(ArrayNegativeSizeCatch::run(-1), "caught");
         assert_eq!(ArrayNegativeSizeCatch::run(2), "len:2");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn boxed_primitive_array_dimension_unbox_null_is_catchable() {
+    let translation = translate_source(
+        r#"
+class NullableUnboxArrayDimensionCatch {
+    static String run() {
+        Integer size = null;
+        try {
+            int[] values = new int[size];
+            return "len:" + values.length;
+        } catch (NullPointerException ex) {
+            return "npe";
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "let __java_array_len = size.ok_or_else(|| JavaException::new(\"NullPointerException\""
+        ) && translation.rust.contains("__java_array_len < 0")
+            && translation
+                .rust
+                .contains("vec![0; __java_array_len as usize]")
+            && !translation.rust.contains("let __java_array_len = size;"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "boxed_primitive_array_dimension_unbox_null_is_catchable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn catches_nullable_boxed_array_dimension_unbox() {
+        assert_eq!(NullableUnboxArrayDimensionCatch::run(), "npe".to_string());
     }
 }
 "#,

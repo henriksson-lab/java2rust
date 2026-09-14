@@ -146,6 +146,7 @@ fn type_emission_for_with_facts_and_exceptions(
 pub(crate) fn source_hierarchy_carrier_item_for_type(
     representations: &RepresentationPlan,
     ty: &TypeDecl,
+    signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Option<String> {
     let representation = representations.type_representation(&ty.name)?;
@@ -156,15 +157,42 @@ pub(crate) fn source_hierarchy_carrier_item_for_type(
     else {
         return None;
     };
-    Some(source_hierarchy_carrier_item(carrier_name, variants, facts))
+    Some(source_hierarchy_carrier_item(
+        carrier_name,
+        variants,
+        facts,
+        signatures,
+        ty,
+    ))
 }
 
 fn closed_enum_carrier_item(enum_name: &str, variants: &[String], facts: &FactSet) -> String {
     carrier_enum_item("#[derive(Clone, PartialEq)]", enum_name, variants, facts)
 }
 
-fn source_hierarchy_carrier_item(enum_name: &str, variants: &[String], facts: &FactSet) -> String {
-    carrier_enum_item("#[derive(Clone)]", enum_name, variants, facts)
+fn source_hierarchy_carrier_item(
+    enum_name: &str,
+    variants: &[String],
+    facts: &FactSet,
+    signatures: &SignaturePlan,
+    ty: &TypeDecl,
+) -> String {
+    let mut item = carrier_enum_item("#[derive(Clone)]", enum_name, variants, facts);
+    let mut impl_members = Vec::new();
+    impl_members.extend(source_hierarchy_carrier_field_accessors(
+        variants, facts, signatures, ty,
+    ));
+    impl_members.extend(source_hierarchy_carrier_forwarding_methods(
+        enum_name, variants, facts, ty,
+    ));
+    if !impl_members.is_empty() {
+        item.push_str("\n\n");
+        item.push_str(&format!(
+            "impl {enum_name} {{\n{}\n}}",
+            impl_members.join("\n\n")
+        ));
+    }
+    item
 }
 
 fn carrier_enum_item(
@@ -184,6 +212,96 @@ fn carrier_enum_item(
         .collect::<Vec<_>>()
         .join("\n");
     format!("{derive}\npub enum {enum_name} {{\n{variants}\n}}")
+}
+
+fn source_hierarchy_carrier_forwarding_methods(
+    enum_name: &str,
+    variants: &[String],
+    facts: &FactSet,
+    ty: &TypeDecl,
+) -> Vec<String> {
+    ty.members
+        .iter()
+        .filter_map(|member| {
+            let Member::Method(method) = member else {
+                return None;
+            };
+            source_hierarchy_carrier_forwarding_method(enum_name, variants, facts, method)
+        })
+        .collect()
+}
+
+fn source_hierarchy_carrier_forwarding_method(
+    _enum_name: &str,
+    variants: &[String],
+    facts: &FactSet,
+    method: &MethodDecl,
+) -> Option<String> {
+    if method.modifiers.contains(&Modifier::Static) || !method.params.is_empty() {
+        return None;
+    }
+    let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(method));
+    let return_ty = emit_type(&rust_type_for_java_type_with_facts(
+        &method.return_type,
+        facts,
+    ));
+    let arms = variants
+        .iter()
+        .map(|variant| format!("            Self::{variant}(value) => value.{rust_name}(),"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "    pub fn {rust_name}(&self) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+    ))
+}
+
+fn source_hierarchy_carrier_field_accessors(
+    variants: &[String],
+    facts: &FactSet,
+    signatures: &SignaturePlan,
+    ty: &TypeDecl,
+) -> Vec<String> {
+    ty.members
+        .iter()
+        .filter_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            source_hierarchy_carrier_field_accessor(variants, facts, signatures, ty, field)
+        })
+        .collect()
+}
+
+fn source_hierarchy_carrier_field_accessor(
+    variants: &[String],
+    facts: &FactSet,
+    signatures: &SignaturePlan,
+    ty: &TypeDecl,
+    field: &FieldDecl,
+) -> Option<String> {
+    if field.modifiers.contains(&Modifier::Static) {
+        return None;
+    }
+    let rust_name = rust_identifier_token(&crate::parser::to_snake_case(&field.name));
+    let field_shape = signatures.required_declared_field_shape(ty, field);
+    let return_ty = emit_type(&rust_type_for_slot_with_facts(&field_shape, facts));
+    let projection = if source_hierarchy_carrier_field_accessor_returns_copy(&field.ty) {
+        format!("value.{rust_name}")
+    } else {
+        format!("value.{rust_name}.clone()")
+    };
+    let arms = variants
+        .iter()
+        .map(|variant| format!("            Self::{variant}(value) => {projection},"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "    pub fn {rust_name}(&self) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+    ))
+}
+
+fn source_hierarchy_carrier_field_accessor_returns_copy(java_ty: &JavaType) -> bool {
+    matches!(java_ty, JavaType::Primitive(_))
 }
 
 /// The payload a carrier variant stores.
@@ -935,8 +1053,11 @@ fn trait_item_for_type(
     let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
+    let closure_adapter = zero_arg_void_closure_trait_impl(ty, &trait_name)
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}",
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name)
@@ -973,12 +1094,46 @@ fn trait_item_for_type_with_program(
     let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
+    let closure_adapter = zero_arg_void_closure_trait_impl(ty, &trait_name)
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}",
+        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name)
     )
+}
+
+fn zero_arg_void_closure_trait_impl(ty: &TypeDecl, trait_name: &str) -> Option<String> {
+    let method = zero_arg_void_functional_method(ty)?;
+    let rust_name = method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    Some(format!(
+        "impl<__JavaAnonymous> {trait_name} for __JavaAnonymous\nwhere\n    __JavaAnonymous: Fn() + Clone + 'static,\n{{\n    fn {rust_name}(&self) {{ self() }}\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}\n}}"
+    ))
+}
+
+fn zero_arg_void_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
+    if ty.kind != TypeKind::Interface {
+        return None;
+    }
+    let mut methods = ty.members.iter().filter_map(|member| match member {
+        Member::Method(method) if method.body.is_none() => Some(method),
+        _ => None,
+    });
+    let method = methods.next()?;
+    if methods.next().is_some()
+        || !method.params.is_empty()
+        || !method.type_params.is_empty()
+        || !matches!(method.return_type, JavaType::Void)
+        || method.modifiers.contains(&Modifier::Static)
+    {
+        return None;
+    }
+    Some(method)
 }
 
 fn trait_impl_for_type(

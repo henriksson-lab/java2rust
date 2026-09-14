@@ -5956,3 +5956,13 @@ import the raw builders; direct support-text assertions live in `stdlib`.
 Guards: `stdlib::stdlib_support_item_tests` and
 `layering::production_formatted_raw_constructors_stay_in_named_boundaries`;
 compile guard: `cargo check --tests`.
+
+Codex follow-up 2026-09-14: the broad rendered-string guard is green again after
+closing two stale structural leaks. `typed_empty_optional_for_erased_object_box`
+now uses `typed_none_projection("String")` instead of constructing
+`RustExpr::Raw("None::<String>")`, and the source super-call statement boundary
+builds `Ok::<(), JavaException>(())?` as a typed generic-path call wrapped in
+`RustExpr::Try`. The native-collection constructor source guard was also
+tightened to reject quoted/rendered `::new()` constructors rather than matching
+ordinary implementation syntax such as `Vec::new()`. Focused guard:
+`cargo test rendered_string_heuristics_have_centralization_guardrails --test slot_shape_design -- --nocapture`.

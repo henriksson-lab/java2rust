@@ -352,6 +352,18 @@ impl ShapeEnv {
         self.bind_name(BindingKind::Local, name);
     }
 
+    pub(crate) fn mark_callable_local(&mut self, name: impl Into<String>) {
+        self.types.mark_callable_local(name);
+    }
+
+    pub(crate) fn mark_comparator_object_local(&mut self, name: impl Into<String>) {
+        self.types.mark_comparator_object_local(name);
+    }
+
+    pub(crate) fn mark_comparator_object_field(&mut self, name: impl Into<String>) {
+        self.types.mark_comparator_object_field(name);
+    }
+
     pub fn insert_field(&mut self, name: impl Into<String>, ty: JavaType) {
         let name = name.into();
         self.field_shapes
@@ -449,7 +461,7 @@ impl ShapeEnv {
         java_ty: JavaType,
     ) {
         let name = name.into();
-        self.types.insert_local(name.clone(), java_ty);
+        self.types.insert_param(name.clone(), java_ty);
         self.local_shapes.insert(name.clone(), shape);
         self.bind_name(BindingKind::Param, name);
     }
@@ -462,7 +474,7 @@ impl ShapeEnv {
         binding: Option<BindingId>,
     ) {
         let name = name.into();
-        self.types.insert_local(name.clone(), java_ty);
+        self.types.insert_param(name.clone(), java_ty);
         self.local_shapes.insert(name.clone(), shape);
         if let Some(binding) = binding {
             self.binding_ids.insert(name, binding);
@@ -1418,6 +1430,7 @@ fn shape_env_for_type_with_fields(
     for member in &ty.members {
         if let Member::Field(field) = member {
             let shape = signatures.required_declared_field_shape(ty, field);
+            let field_shape_java_ty = shape.java_ty.clone();
             let instance_access_name = source_instance_field_rust_names
                 .get(&field.name)
                 .cloned()
@@ -1435,7 +1448,7 @@ fn shape_env_for_type_with_fields(
                 );
                 env.insert_static_field_shape_with_access_name_and_java_type(
                     field.name.clone(),
-                    static_access_name,
+                    static_access_name.clone(),
                     shape,
                     field.ty.clone(),
                 );
@@ -1449,7 +1462,7 @@ fn shape_env_for_type_with_fields(
                 );
                 env.insert_static_storage_field_shape_with_access_name_and_java_type(
                     field.name.clone(),
-                    static_access_name,
+                    static_access_name.clone(),
                     shape,
                     field.ty.clone(),
                 );
@@ -1462,7 +1475,7 @@ fn shape_env_for_type_with_fields(
                 );
                 env.insert_field_shape_with_access_name_and_java_type(
                     field.name.clone(),
-                    instance_access_name,
+                    instance_access_name.clone(),
                     shape,
                     field.ty.clone(),
                 );
@@ -1474,9 +1487,49 @@ fn shape_env_for_type_with_fields(
                     field.ty.clone(),
                 );
             }
+            if field_shape_java_ty != field.ty
+                && comparator_object_field_initializer(&field.ty, field.initializer.as_ref())
+            {
+                env.mark_comparator_object_field(field.name.clone());
+                env.mark_comparator_object_field(static_access_name.clone());
+                env.mark_comparator_object_field(instance_access_name.clone());
+                env.mark_comparator_object_field(crate::parser::to_snake_case(&field.name));
+            }
         }
     }
     env
+}
+
+fn comparator_object_field_initializer(declared_ty: &JavaType, initializer: Option<&Expr>) -> bool {
+    java_type_is_comparator(declared_ty)
+        && initializer.is_some_and(|initializer| match initializer {
+            Expr::New { ty, body: None, .. } => !java_type_is_comparator(ty),
+            Expr::Cast { ty, expr } => {
+                java_type_is_comparator(ty)
+                    && matches!(
+                        expr.as_ref(),
+                        Expr::New {
+                            ty,
+                            body: None,
+                            ..
+                        } if !java_type_is_comparator(ty)
+                    )
+            }
+            _ => false,
+        })
+}
+
+fn java_type_is_comparator(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+            canonical
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "Comparator")
+        }
+        _ => false,
+    }
 }
 
 pub fn shape_env_for_constructor(

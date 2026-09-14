@@ -4,7 +4,8 @@ use crate::dependency_mode::DependencyMode;
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy};
 use crate::java_ir::{
-    Block, Expr, JavaType, LambdaBody, Member, Program, Stmt, SwitchLabel, TypeDecl,
+    Block, Expr, JavaType, LambdaBody, Member, MethodDecl, Modifier, Program, Stmt, SwitchLabel,
+    TypeDecl, TypeKind, block_mentions_this_or_super,
 };
 pub use crate::object_model::{
     ClosedEnumInferencePolicy, ClosedEnumProof, ClosedEnumProofPolicy,
@@ -420,6 +421,14 @@ impl RepresentationPlan {
     }
 
     pub fn diagnostics_for_program(&self, program: &Program) -> Vec<RepresentationDiagnostic> {
+        self.diagnostics_for_program_with_anonymous_context(program, program)
+    }
+
+    pub fn diagnostics_for_program_with_anonymous_context(
+        &self,
+        program: &Program,
+        anonymous_context: &Program,
+    ) -> Vec<RepresentationDiagnostic> {
         self.diagnostics
             .iter()
             .cloned()
@@ -428,7 +437,11 @@ impl RepresentationPlan {
                     .into_iter()
                     .flat_map(|ty| self.diagnostics_for_type(ty)),
             )
-            .chain(anonymous_class_diagnostics_with_plan(program, Some(self)))
+            .chain(anonymous_class_diagnostics_with_plan(
+                program,
+                anonymous_context,
+                Some(self),
+            ))
             .collect()
     }
 
@@ -645,17 +658,19 @@ fn push_unique_alias(aliases: &mut Vec<String>, alias: &str) {
 
 fn anonymous_class_diagnostics_with_plan(
     program: &Program,
+    anonymous_context: &Program,
     plan: Option<&RepresentationPlan>,
 ) -> Vec<RepresentationDiagnostic> {
     let mut diagnostics = Vec::new();
     for ty in all_types(program) {
-        collect_anonymous_class_diagnostics_for_type(ty, plan, &mut diagnostics);
+        collect_anonymous_class_diagnostics_for_type(ty, anonymous_context, plan, &mut diagnostics);
     }
     diagnostics
 }
 
 fn collect_anonymous_class_diagnostics_for_type(
     ty: &TypeDecl,
+    anonymous_context: &Program,
     plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
@@ -663,21 +678,41 @@ fn collect_anonymous_class_diagnostics_for_type(
         match member {
             Member::Field(field) => {
                 if let Some(initializer) = &field.initializer {
-                    collect_anonymous_class_diagnostics_for_expr(initializer, plan, diagnostics);
+                    collect_anonymous_class_diagnostics_for_expr(
+                        initializer,
+                        anonymous_context,
+                        plan,
+                        diagnostics,
+                    );
                 }
             }
             Member::Method(method) => {
                 if let Some(body) = &method.body {
-                    collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
+                    collect_anonymous_class_diagnostics_for_block(
+                        body,
+                        anonymous_context,
+                        plan,
+                        diagnostics,
+                    );
                 }
             }
             Member::Constructor(ctor) => {
                 if let Some(body) = &ctor.body {
-                    collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
+                    collect_anonymous_class_diagnostics_for_block(
+                        body,
+                        anonymous_context,
+                        plan,
+                        diagnostics,
+                    );
                 }
             }
             Member::Type(nested) => {
-                collect_anonymous_class_diagnostics_for_type(nested, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_type(
+                    nested,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
             Member::Unsupported { .. } => {}
         }
@@ -686,35 +721,62 @@ fn collect_anonymous_class_diagnostics_for_type(
 
 fn collect_anonymous_class_diagnostics_for_block(
     block: &Block,
+    anonymous_context: &Program,
     plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     for stmt in &block.statements {
-        collect_anonymous_class_diagnostics_for_stmt(stmt, plan, diagnostics);
+        collect_anonymous_class_diagnostics_for_stmt(stmt, anonymous_context, plan, diagnostics);
     }
 }
 
 fn collect_anonymous_class_diagnostics_for_stmt(
     stmt: &Stmt,
+    anonymous_context: &Program,
     plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     match stmt {
         Stmt::VarDecl { initializer, .. } => {
             if let Some(initializer) = initializer {
-                collect_anonymous_class_diagnostics_for_expr(initializer, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    initializer,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Stmt::Assign { target, value } => {
-            collect_anonymous_class_diagnostics_for_expr(target, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(value, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                target,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_expr(
+                value,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Stmt::Expr(expr) | Stmt::Throw(expr) => {
-            collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                expr,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Stmt::Return(expr) => {
             if let Some(expr) = expr {
-                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    expr,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Stmt::If {
@@ -722,10 +784,25 @@ fn collect_anonymous_class_diagnostics_for_stmt(
             then_block,
             else_block,
         } => {
-            collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_block(then_block, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                condition,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_block(
+                then_block,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
             if let Some(else_block) = else_block {
-                collect_anonymous_class_diagnostics_for_block(else_block, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(
+                    else_block,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Stmt::While {
@@ -734,8 +811,18 @@ fn collect_anonymous_class_diagnostics_for_stmt(
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                condition,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_block(
+                body,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Stmt::For {
             init,
@@ -745,30 +832,75 @@ fn collect_anonymous_class_diagnostics_for_stmt(
             ..
         } => {
             for stmt in init {
-                collect_anonymous_class_diagnostics_for_stmt(stmt, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_stmt(
+                    stmt,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
             if let Some(condition) = condition {
-                collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    condition,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
             for expr in update {
-                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    expr,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
-            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(
+                body,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(iterable, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                iterable,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_block(
+                body,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Stmt::Switch { selector, cases } => {
-            collect_anonymous_class_diagnostics_for_expr(selector, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                selector,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
             for case in cases {
                 for label in &case.labels {
                     if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-                        collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                        collect_anonymous_class_diagnostics_for_expr(
+                            expr,
+                            anonymous_context,
+                            plan,
+                            diagnostics,
+                        );
                     }
                 }
                 for stmt in &case.statements {
-                    collect_anonymous_class_diagnostics_for_stmt(stmt, plan, diagnostics);
+                    collect_anonymous_class_diagnostics_for_stmt(
+                        stmt,
+                        anonymous_context,
+                        plan,
+                        diagnostics,
+                    );
                 }
             }
         }
@@ -779,24 +911,56 @@ fn collect_anonymous_class_diagnostics_for_stmt(
             finally_block,
         } => {
             for resource in resources {
-                collect_anonymous_class_diagnostics_for_stmt(resource, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_stmt(
+                    resource,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
-            collect_anonymous_class_diagnostics_for_block(body, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_block(
+                body,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
             for catch in catches {
-                collect_anonymous_class_diagnostics_for_block(&catch.body, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(
+                    &catch.body,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
             if let Some(finally_block) = finally_block {
-                collect_anonymous_class_diagnostics_for_block(finally_block, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(
+                    finally_block,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
-        Stmt::LocalType(ty) => collect_anonymous_class_diagnostics_for_type(ty, plan, diagnostics),
+        Stmt::LocalType(ty) => {
+            collect_anonymous_class_diagnostics_for_type(ty, anonymous_context, plan, diagnostics)
+        }
         Stmt::ConstructorInvocation { args, .. } => {
             for arg in args {
-                collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    arg,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            collect_anonymous_class_diagnostics_for_block(block, plan, diagnostics)
+            collect_anonymous_class_diagnostics_for_block(
+                block,
+                anonymous_context,
+                plan,
+                diagnostics,
+            )
         }
         Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
     }
@@ -804,16 +968,32 @@ fn collect_anonymous_class_diagnostics_for_stmt(
 
 fn collect_anonymous_class_diagnostics_for_expr(
     expr: &Expr,
+    anonymous_context: &Program,
     plan: Option<&RepresentationPlan>,
     diagnostics: &mut Vec<RepresentationDiagnostic>,
 ) {
     match expr {
         Expr::FieldAccess(receiver, _) => {
-            collect_anonymous_class_diagnostics_for_expr(receiver, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                receiver,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Expr::ArrayAccess(array, index) => {
-            collect_anonymous_class_diagnostics_for_expr(array, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(index, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                array,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_expr(
+                index,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Expr::ArrayCreation {
             dimensions,
@@ -821,59 +1001,145 @@ fn collect_anonymous_class_diagnostics_for_expr(
             ..
         } => {
             for expr in dimensions {
-                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    expr,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
             if let Some(initializer) = initializer {
                 for expr in initializer {
-                    collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                    collect_anonymous_class_diagnostics_for_expr(
+                        expr,
+                        anonymous_context,
+                        plan,
+                        diagnostics,
+                    );
                 }
             }
         }
         Expr::ArrayInitializer(dimensions) => {
             for expr in dimensions {
-                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    expr,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Expr::Binary { left, right, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(left, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(right, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                left,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_expr(
+                right,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                expr,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_anonymous_class_diagnostics_for_expr(condition, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(then_expr, plan, diagnostics);
-            collect_anonymous_class_diagnostics_for_expr(else_expr, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                condition,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_expr(
+                then_expr,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
+            collect_anonymous_class_diagnostics_for_expr(
+                else_expr,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Expr::Switch { selector, cases } => {
-            collect_anonymous_class_diagnostics_for_expr(selector, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                selector,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
             for case in cases {
                 for label in &case.labels {
                     if let SwitchLabel::Expr(expr) = label {
-                        collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+                        collect_anonymous_class_diagnostics_for_expr(
+                            expr,
+                            anonymous_context,
+                            plan,
+                            diagnostics,
+                        );
                     }
                 }
-                collect_anonymous_class_diagnostics_for_expr(&case.value, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    &case.value,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
-                collect_anonymous_class_diagnostics_for_expr(receiver, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    receiver,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
             for arg in args {
-                collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_expr(
+                    arg,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         }
         Expr::New { ty, args, body, .. } => {
-            for arg in args {
-                collect_anonymous_class_diagnostics_for_expr(arg, plan, diagnostics);
+            if anonymous_priority_queue_comparator_constructor_is_supported(ty, args) {
+                return;
             }
-            if body.is_some() && !anonymous_class_target_is_erased_boundary(ty, plan) {
+            for arg in args {
+                collect_anonymous_class_diagnostics_for_expr(
+                    arg,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
+            }
+            if let Some(body) = body
+                && !anonymous_zero_arg_void_interface_constructor_is_supported(
+                    ty,
+                    body,
+                    anonymous_context,
+                    plan,
+                )
+                && !anonymous_class_target_is_erased_boundary(ty, plan)
+            {
                 diagnostics.push(RepresentationDiagnostic::new(
                     "unsupported_anonymous_class",
                     format!(
@@ -884,14 +1150,27 @@ fn collect_anonymous_class_diagnostics_for_expr(
             }
         }
         Expr::InstanceOf { expr, .. } => {
-            collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics);
+            collect_anonymous_class_diagnostics_for_expr(
+                expr,
+                anonymous_context,
+                plan,
+                diagnostics,
+            );
         }
         Expr::Lambda { body, .. } => match body {
-            LambdaBody::Expr(expr) => {
-                collect_anonymous_class_diagnostics_for_expr(expr, plan, diagnostics)
-            }
+            LambdaBody::Expr(expr) => collect_anonymous_class_diagnostics_for_expr(
+                expr,
+                anonymous_context,
+                plan,
+                diagnostics,
+            ),
             LambdaBody::Block(block) => {
-                collect_anonymous_class_diagnostics_for_block(block, plan, diagnostics);
+                collect_anonymous_class_diagnostics_for_block(
+                    block,
+                    anonymous_context,
+                    plan,
+                    diagnostics,
+                );
             }
         },
         Expr::Literal(_)
@@ -903,6 +1182,144 @@ fn collect_anonymous_class_diagnostics_for_expr(
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
     }
+}
+
+fn anonymous_priority_queue_comparator_constructor_is_supported(
+    ty: &JavaType,
+    args: &[Expr],
+) -> bool {
+    if !crate::stdlib::java_type_is_priority_queue(ty) {
+        return false;
+    }
+    let [
+        Expr::New {
+            ty: comparator_ty,
+            args: comparator_args,
+            body: Some(body),
+            ..
+        },
+    ] = args
+    else {
+        return false;
+    };
+    comparator_args.is_empty()
+        && anonymous_comparator_type(comparator_ty)
+        && anonymous_comparator_body_has_single_returning_compare(body)
+}
+
+fn anonymous_comparator_type(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::canonical_external_receiver_type_key(name)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "Comparator")
+        }
+        _ => false,
+    }
+}
+
+fn anonymous_comparator_body_has_single_returning_compare(body: &[Member]) -> bool {
+    let [Member::Method(method)] = body else {
+        return false;
+    };
+    method.name == "compare"
+        && method.params.len() == 2
+        && matches!(
+            method.body.as_ref().map(|body| body.statements.as_slice()),
+            Some([Stmt::Return(Some(_))])
+        )
+}
+
+fn anonymous_zero_arg_void_interface_constructor_is_supported(
+    ty: &JavaType,
+    body: &[Member],
+    program: &Program,
+    plan: Option<&RepresentationPlan>,
+) -> bool {
+    let Some(plan) = plan else {
+        return false;
+    };
+    if !matches!(
+        plan.representation_lookup_policy(ty).representation(),
+        ObjectRepresentation::DynTrait { .. }
+    ) {
+        return false;
+    }
+    let Some(interface) =
+        concrete_java_type_name(ty).and_then(|name| find_type_by_erased_name(program, name))
+    else {
+        return false;
+    };
+    let Some(method) = zero_arg_void_functional_interface_method(interface) else {
+        return false;
+    };
+    anonymous_zero_arg_void_method_body(body, method)
+        .is_some_and(|implementation| !block_mentions_this_or_super(implementation))
+}
+
+fn zero_arg_void_functional_interface_method(ty: &TypeDecl) -> Option<&MethodDecl> {
+    if ty.kind != TypeKind::Interface {
+        return None;
+    }
+    let mut methods = ty.members.iter().filter_map(|member| match member {
+        Member::Method(method) if method.body.is_none() => Some(method),
+        _ => None,
+    });
+    let method = methods.next()?;
+    if methods.next().is_some()
+        || !method.params.is_empty()
+        || !method.type_params.is_empty()
+        || !method.throws.is_empty()
+        || !matches!(method.return_type, JavaType::Void)
+        || method.modifiers.contains(&Modifier::Static)
+    {
+        return None;
+    }
+    Some(method)
+}
+
+fn anonymous_zero_arg_void_method_body<'a>(
+    body: &'a [Member],
+    trait_method: &MethodDecl,
+) -> Option<&'a Block> {
+    let [Member::Method(method)] = body else {
+        return None;
+    };
+    if method.name != trait_method.name
+        || !method.params.is_empty()
+        || !method.type_params.is_empty()
+        || !matches!(method.return_type, JavaType::Void)
+        || method.modifiers.contains(&Modifier::Static)
+    {
+        return None;
+    }
+    method.body.as_ref()
+}
+
+fn concrete_java_type_name(ty: &JavaType) -> Option<&str> {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        _ => None,
+    }
+}
+
+fn find_type_by_erased_name<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    let types = all_types(program);
+    if let Some(exact) = types.iter().copied().find(|ty| ty.name == type_name) {
+        return Some(exact);
+    }
+    if type_name.contains('.') || type_name.contains('$') {
+        return None;
+    }
+    let mut matches = types.into_iter().filter(|ty| {
+        ty.name
+            .rsplit(['.', '$'])
+            .next()
+            .is_some_and(|simple| simple == type_name)
+    });
+    let first = matches.next()?;
+    matches.next().is_none().then_some(first)
 }
 
 fn anonymous_class_target_is_erased_boundary(
@@ -1315,5 +1732,220 @@ fn collect_types<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
         if let crate::java_ir::Member::Type(nested) = member {
             collect_types(nested, out);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::Span;
+
+    fn interface_type(name: &str, method: &str) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Interface,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: vec![Member::Method(MethodDecl {
+                name: method.to_string(),
+                rust_name: None,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                return_type: JavaType::Void,
+                throws: Vec::new(),
+                params: Vec::new(),
+                modifiers: Vec::new(),
+                body: None,
+                span: Span::default(),
+            })],
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
+
+    fn class_type(name: &str, members: Vec<Member>) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members,
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
+
+    fn plan_with_dyn_trait(type_name: &str) -> RepresentationPlan {
+        let mut plan = RepresentationPlan::default();
+        plan.types.insert(
+            type_name.to_string(),
+            TypeRepresentation::new(
+                type_name,
+                ObjectRepresentation::DynTrait {
+                    trait_name: type_name.to_string(),
+                },
+                RepresentationProvenance::ParsedSource,
+                Vec::new(),
+            ),
+        );
+        plan
+    }
+
+    #[test]
+    fn erased_name_type_lookup_refuses_ambiguous_simple_package_peer() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                interface_type("a.Task", "run"),
+                interface_type("b.Task", "close"),
+                interface_type("c.Unique", "run"),
+            ],
+        };
+
+        assert_eq!(
+            find_type_by_erased_name(&program, "a.Task").map(|ty| ty.name.as_str()),
+            Some("a.Task")
+        );
+        assert_eq!(
+            find_type_by_erased_name(&program, "Unique").map(|ty| ty.name.as_str()),
+            Some("c.Unique")
+        );
+        assert_eq!(find_type_by_erased_name(&program, "Task"), None);
+        assert_eq!(find_type_by_erased_name(&program, "missing.Task"), None);
+    }
+
+    #[test]
+    fn anonymous_zero_arg_interface_support_refuses_ambiguous_simple_owner() {
+        let anonymous = Expr::New {
+            ty: JavaType::Named {
+                name: "Task".to_string(),
+                args: Vec::new(),
+            },
+            qualifier: None,
+            args: Vec::new(),
+            body: Some(vec![Member::Method(MethodDecl {
+                name: "run".to_string(),
+                rust_name: None,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                return_type: JavaType::Void,
+                throws: Vec::new(),
+                params: Vec::new(),
+                modifiers: Vec::new(),
+                body: Some(Block {
+                    statements: Vec::new(),
+                }),
+                span: Span::default(),
+            })]),
+            resolved: None,
+        };
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                interface_type("a.Task", "run"),
+                interface_type("b.Task", "close"),
+                class_type(
+                    "UseTask",
+                    vec![Member::Method(MethodDecl {
+                        name: "make".to_string(),
+                        rust_name: None,
+                        type_params: Vec::new(),
+                        type_param_bounds: Vec::new(),
+                        return_type: JavaType::Void,
+                        throws: Vec::new(),
+                        params: Vec::new(),
+                        modifiers: Vec::new(),
+                        body: Some(Block {
+                            statements: vec![Stmt::Expr(anonymous)],
+                        }),
+                        span: Span::default(),
+                    })],
+                ),
+            ],
+        };
+        let plan = plan_with_dyn_trait("Task");
+        let diagnostics = anonymous_class_diagnostics_with_plan(&program, &program, Some(&plan));
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code() == "unsupported_anonymous_class"),
+            "ambiguous simple Task must not borrow the first package peer"
+        );
+    }
+
+    #[test]
+    fn anonymous_zero_arg_interface_body_using_this_still_reports_unsupported() {
+        let anonymous = Expr::New {
+            ty: JavaType::Named {
+                name: "Task".to_string(),
+                args: Vec::new(),
+            },
+            qualifier: None,
+            args: Vec::new(),
+            body: Some(vec![Member::Method(MethodDecl {
+                name: "run".to_string(),
+                rust_name: None,
+                type_params: Vec::new(),
+                type_param_bounds: Vec::new(),
+                return_type: JavaType::Void,
+                throws: Vec::new(),
+                params: Vec::new(),
+                modifiers: Vec::new(),
+                body: Some(Block {
+                    statements: vec![Stmt::Expr(Expr::Call {
+                        receiver: Some(Box::new(Expr::This)),
+                        name: "touch".to_string(),
+                        args: Vec::new(),
+                        resolved: None,
+                    })],
+                }),
+                span: Span::default(),
+            })]),
+            resolved: None,
+        };
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                interface_type("Task", "run"),
+                class_type(
+                    "UseTask",
+                    vec![Member::Method(MethodDecl {
+                        name: "make".to_string(),
+                        rust_name: None,
+                        type_params: Vec::new(),
+                        type_param_bounds: Vec::new(),
+                        return_type: JavaType::Void,
+                        throws: Vec::new(),
+                        params: Vec::new(),
+                        modifiers: Vec::new(),
+                        body: Some(Block {
+                            statements: vec![Stmt::Expr(anonymous)],
+                        }),
+                        span: Span::default(),
+                    })],
+                ),
+            ],
+        };
+        let plan = plan_with_dyn_trait("Task");
+        let diagnostics = anonymous_class_diagnostics_with_plan(&program, &program, Some(&plan));
+
+        assert!(
+            diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.code() == "unsupported_anonymous_class"),
+            "anonymous bodies that use this are rejected by lowering and must stay diagnostic-visible"
+        );
     }
 }

@@ -437,6 +437,11 @@ pub enum DispatchCoercionPolicy {
         target_type: String,
         invalid_cast: InvalidCastPolicy,
     },
+    DowncastErasedObjectToClosedEnum {
+        enum_name: String,
+        variants: Vec<String>,
+        invalid_cast: InvalidCastPolicy,
+    },
     Unsupported {
         actual_dispatch: DispatchShape,
         target_dispatch: DispatchShape,
@@ -2239,6 +2244,18 @@ pub fn dispatch_coercion_policy_with_facts(
                 }
             }
         }
+        (DispatchShape::ErasedObject, DispatchShape::ClosedEnum { enum_name }) => {
+            let variants = erased_object_closed_enum_variants_for_target(target, facts);
+            if variants.is_empty() {
+                unsupported_dispatch_coercion_policy(actual, target)
+            } else {
+                DispatchCoercionPolicy::DowncastErasedObjectToClosedEnum {
+                    enum_name: enum_name.clone(),
+                    variants,
+                    invalid_cast: InvalidCastPolicy::Panic,
+                }
+            }
+        }
         (DispatchShape::DynTrait { .. }, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
@@ -2320,6 +2337,44 @@ pub fn dispatch_coercion_policy_with_facts(
             }
         }
         _ => unsupported_dispatch_coercion_policy(actual, target),
+    }
+}
+
+fn erased_object_closed_enum_variants_for_target(
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> Vec<String> {
+    let Some(target_name) = java_type_name_for_dispatch(&target.java_ty) else {
+        return Vec::new();
+    };
+    let mut variants = vec![target_name.to_string()];
+    for fact in &facts.type_capability_overrides {
+        if fact.provenance != crate::facts::FactProvenance::ParsedSource {
+            continue;
+        }
+        if fact.extends.as_ref().and_then(java_type_name_for_dispatch) == Some(target_name)
+            && !variants.iter().any(|existing| existing == &fact.type_name)
+        {
+            variants.push(fact.type_name.clone());
+        }
+    }
+    variants
+        .into_iter()
+        .filter_map(|name| {
+            rust_nominal_type_name_policy(&JavaType::Named {
+                name,
+                args: Vec::new(),
+            })
+            .into_target_type()
+        })
+        .collect()
+}
+
+fn java_type_name_for_dispatch(java_ty: &JavaType) -> Option<&str> {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::String => Some("String"),
+        _ => None,
     }
 }
 
@@ -2746,6 +2801,10 @@ pub enum InstanceOfCheck {
     OptionalErasedObjectType {
         target_type: String,
     },
+    ErasedObjectClosedEnum {
+        enum_name: String,
+        variants: Vec<String>,
+    },
     AlwaysTrue,
     Unsupported {
         actual_dispatch: DispatchShape,
@@ -3006,6 +3065,15 @@ pub fn plan_instanceof_check_with_facts(
                         InstanceOfFallbackPolicy::MissingRuntimeTarget { java_ty },
                     );
                 }
+            }
+        }
+        (DispatchShape::ErasedObject, DispatchShape::ClosedEnum { enum_name }) => {
+            let variants = erased_object_closed_enum_variants_for_target(target, facts);
+            if !variants.is_empty() {
+                return InstanceOfCheck::ErasedObjectClosedEnum {
+                    enum_name: enum_name.clone(),
+                    variants,
+                };
             }
         }
         (DispatchShape::Concrete, DispatchShape::Concrete) if actual.java_ty == target.java_ty => {
@@ -3616,7 +3684,14 @@ fn optional_display_value_supported(java_ty: &JavaType, facts: &FactSet) -> bool
     match java_ty {
         JavaType::Primitive(_) => true,
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
-            crate::stdlib::is_java_platform_facade_type_name(name)
+            crate::stdlib::boxed_primitive_type(
+                crate::stdlib::canonical_external_receiver_type_key(name)
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(name),
+            )
+            .is_some()
+                || crate::stdlib::is_java_platform_facade_type_name(name)
         }
         JavaType::String | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => false,
     }

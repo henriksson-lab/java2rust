@@ -6,7 +6,7 @@ use crate::facts::{
     ObjectSafetyViolation,
 };
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, TypeKind};
-use crate::usage::{BindingUse, BindingUseFacts, CallArgumentBoundary, UsageFacts};
+use crate::usage::{BindingUse, BindingUseFacts, CallArgumentBoundary, FieldUse, UsageFacts};
 
 #[derive(Debug, Clone, Copy)]
 pub struct ObjectModelInput<'a> {
@@ -69,6 +69,7 @@ pub struct ObjectStrategyPlan {
 
 pub type DispatchRequirement = DispatchRequirementKind;
 pub type UsageDispatchRequirements = BTreeMap<String, Vec<DispatchRequirement>>;
+type UsageRequirementAliases = BTreeMap<String, String>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RejectedObjectStrategy {
@@ -611,10 +612,11 @@ fn plan_object_model_from_effective_facts_and_usage(
     usage_requirements: &UsageDispatchRequirements,
 ) -> ObjectModelPlan {
     let mut plan = ObjectModelPlan::default();
+    let usage_aliases = usage_requirement_aliases(program);
     for ty in &program.types {
-        collect_type_strategy(ty, facts, usage_requirements, &mut plan);
+        collect_type_strategy(ty, facts, usage_requirements, &usage_aliases, &mut plan);
     }
-    collect_hierarchy_edges_for_strategy_plan(facts, usage_requirements, &mut plan);
+    collect_hierarchy_edges_for_strategy_plan(facts, usage_requirements, &usage_aliases, &mut plan);
     apply_hierarchy_overrides_to_strategy_plan(facts, &mut plan);
     apply_closed_enum_strategy_selection(facts, &mut plan);
     plan
@@ -623,11 +625,51 @@ fn plan_object_model_from_effective_facts_and_usage(
 pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequirements {
     let mut requirements = UsageDispatchRequirements::new();
     for method in usage.method_usages().chain(usage.constructor_usages()) {
-        for binding in method.all_binding_facts() {
-            let Some(type_name) = dispatch_requirement_type_name(binding.java_ty()) else {
+        for field_use in method.field_uses() {
+            let subtype_target = match field_use {
+                FieldUse::AssignedSubtypeToField { field_type, .. } => Some(field_type),
+                FieldUse::AssignedSubtypeToCallArgument { target_type, .. } => Some(target_type),
+                _ => None,
+            };
+            let Some(subtype_target) = subtype_target else {
                 continue;
             };
+            let Some(type_name) = dispatch_requirement_type_name(subtype_target) else {
+                continue;
+            };
+            push_usage_dispatch_requirement(
+                &mut requirements,
+                type_name,
+                DispatchRequirementKind::NeedsSubtypeDispatch,
+            );
+        }
+        for binding in method.all_binding_facts() {
             for use_fact in binding.uses() {
+                if let BindingUse::AssignedSubtypeToCollectionElement { element_type, .. } =
+                    use_fact
+                {
+                    if let Some(type_name) = dispatch_requirement_type_name(element_type) {
+                        push_usage_dispatch_requirement(
+                            &mut requirements,
+                            type_name,
+                            DispatchRequirementKind::NeedsSubtypeDispatch,
+                        );
+                    }
+                    continue;
+                }
+                if let BindingUse::AssignedSubtypeToCallArgument { target_type, .. } = use_fact {
+                    if let Some(type_name) = dispatch_requirement_type_name(target_type) {
+                        push_usage_dispatch_requirement(
+                            &mut requirements,
+                            type_name,
+                            DispatchRequirementKind::NeedsSubtypeDispatch,
+                        );
+                    }
+                    continue;
+                }
+                let Some(type_name) = dispatch_requirement_type_name(binding.java_ty()) else {
+                    continue;
+                };
                 for requirement in dispatch_requirements_for_binding_use(
                     binding,
                     use_fact,
@@ -647,6 +689,11 @@ fn dispatch_requirements_for_binding_use(
     type_params_in_scope: &[String],
 ) -> Vec<DispatchRequirement> {
     match use_fact {
+        BindingUse::AssignedSubtypeToLocal { .. } => {
+            vec![DispatchRequirementKind::NeedsSubtypeDispatch]
+        }
+        BindingUse::AssignedSubtypeToCollectionElement { .. }
+        | BindingUse::AssignedSubtypeToCallArgument { .. } => Vec::new(),
         BindingUse::StoredInField { .. } | BindingUse::Returned => {
             vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
         }
@@ -795,16 +842,60 @@ fn merged_dispatch_requirements(
     type_name: &str,
     facts: &EffectiveFacts<'_>,
     usage_requirements: &UsageDispatchRequirements,
+    usage_aliases: &UsageRequirementAliases,
 ) -> Vec<DispatchRequirement> {
     let mut requirements = facts.dispatch_requirements_for(type_name);
-    if let Some(usage) = usage_requirements.get(type_name) {
+    merge_usage_dispatch_requirements(&mut requirements, usage_requirements.get(type_name));
+    if let Some(alias) = usage_aliases.get(type_name) {
+        merge_usage_dispatch_requirements(&mut requirements, usage_requirements.get(alias));
+    }
+    requirements
+}
+
+fn merge_usage_dispatch_requirements(
+    requirements: &mut Vec<DispatchRequirement>,
+    usage: Option<&Vec<DispatchRequirement>>,
+) {
+    if let Some(usage) = usage {
         for requirement in usage {
             if !requirements.contains(requirement) {
                 requirements.push(*requirement);
             }
         }
     }
-    requirements
+}
+
+fn usage_requirement_aliases(program: &Program) -> UsageRequirementAliases {
+    let mut names = Vec::new();
+    for ty in &program.types {
+        collect_usage_requirement_type_names(ty, &mut names);
+    }
+    let mut simple_counts = BTreeMap::<String, usize>::new();
+    for name in &names {
+        *simple_counts
+            .entry(simple_type_name(name).to_string())
+            .or_default() += 1;
+    }
+    names
+        .into_iter()
+        .filter_map(|name| {
+            let simple = simple_type_name(&name).to_string();
+            (simple != name && simple_counts.get(&simple) == Some(&1)).then(|| (name, simple))
+        })
+        .collect()
+}
+
+fn collect_usage_requirement_type_names(ty: &TypeDecl, out: &mut Vec<String>) {
+    out.push(ty.name.clone());
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_usage_requirement_type_names(nested, out);
+        }
+    }
+}
+
+fn simple_type_name(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
 }
 
 impl ObjectModelPlan {
@@ -1273,18 +1364,19 @@ fn collect_type_strategy(
     ty: &TypeDecl,
     facts: &EffectiveFacts<'_>,
     usage_requirements: &UsageDispatchRequirements,
+    usage_aliases: &UsageRequirementAliases,
     plan: &mut ObjectModelPlan,
 ) {
     let strategy = object_strategy_for_type_with_effective_facts_and_requirements(
         ty,
         facts,
-        merged_dispatch_requirements(&ty.name, facts, usage_requirements),
+        merged_dispatch_requirements(&ty.name, facts, usage_requirements, usage_aliases),
     );
     plan.diagnostics.extend(strategy.diagnostics.clone());
     plan.insert_strategy(strategy);
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_type_strategy(nested, facts, usage_requirements, plan);
+            collect_type_strategy(nested, facts, usage_requirements, usage_aliases, plan);
         }
     }
 }
@@ -1292,6 +1384,7 @@ fn collect_type_strategy(
 fn collect_hierarchy_edges_for_strategy_plan(
     facts: &EffectiveFacts<'_>,
     usage_requirements: &UsageDispatchRequirements,
+    usage_aliases: &UsageRequirementAliases,
     plan: &mut ObjectModelPlan,
 ) {
     let roots = plan.strategies.keys().cloned().collect::<Vec<_>>();
@@ -1308,6 +1401,7 @@ fn collect_hierarchy_edges_for_strategy_plan(
                 &edge.sub_name,
                 facts,
                 usage_requirements,
+                usage_aliases,
             );
         }
     }
@@ -1487,6 +1581,7 @@ fn add_direct_subtype_to_strategy(
     subtype_name: &str,
     facts: &EffectiveFacts<'_>,
     usage_requirements: &UsageDispatchRequirements,
+    usage_aliases: &UsageRequirementAliases,
 ) {
     let strategy = if let Some(strategy) = plan.strategy_for_mut(super_name) {
         strategy
@@ -1494,7 +1589,12 @@ fn add_direct_subtype_to_strategy(
         plan.insert_strategy(ObjectStrategyPlan {
             root: super_name.to_string(),
             strategy: ObjectRepresentation::ErasedObject,
-            requirements: merged_dispatch_requirements(super_name, facts, usage_requirements),
+            requirements: merged_dispatch_requirements(
+                super_name,
+                facts,
+                usage_requirements,
+                usage_aliases,
+            ),
             direct_subtypes: Vec::new(),
             source_methods_access_instance_fields: false,
             rejected: Vec::new(),
@@ -1550,7 +1650,7 @@ fn apply_closed_enum_strategy_selection(facts: &EffectiveFacts<'_>, plan: &mut O
         if closed_runtime_case_split_is_useful(&strategy.requirements) {
             strategy.rejected.push(RejectedObjectStrategy {
                 strategy: ObjectRepresentation::ClosedEnum {
-                    enum_name: format!("{}Value", strategy.root),
+                    enum_name: runtime_case_split_type_name(&strategy.root),
                     variants: closed_enum_variant_names_for_subtypes(&strategy.direct_subtypes),
                 },
                 reason: closed_enum_rejection_reason(
@@ -1584,7 +1684,8 @@ fn closed_runtime_case_split_is_useful(requirements: &[DispatchRequirement]) -> 
     requirements.iter().any(|requirement| {
         matches!(
             requirement,
-            DispatchRequirementKind::NeedsClosedRuntimeCaseSplit
+            DispatchRequirementKind::NeedsSubtypeDispatch
+                | DispatchRequirementKind::NeedsClosedRuntimeCaseSplit
                 | DispatchRequirementKind::NeedsInstanceof
                 | DispatchRequirementKind::NeedsDowncast
                 | DispatchRequirementKind::NeedsUnknownRuntimeObject
@@ -1663,13 +1764,12 @@ fn open_source_hierarchy_carrier_fallback(
 ) -> Option<ObjectRepresentation> {
     if !(matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
         && strategy.has_provenance(FactProvenance::ParsedSource)
-        && strategy.source_methods_access_instance_fields
         && source_runtime_case_split_needs_erased_carrier(strategy))
     {
         return None;
     }
     Some(ObjectRepresentation::SourceHierarchyCarrier {
-        carrier_name: format!("{}Value", strategy.root),
+        carrier_name: runtime_case_split_type_name(&strategy.root),
         variants: source_hierarchy_carrier_variant_names(strategy),
     })
 }
@@ -1715,11 +1815,16 @@ fn source_hierarchy_carrier_variant_names(strategy: &ObjectStrategyPlan) -> Vec<
         .collect()
 }
 
+fn runtime_case_split_type_name(type_name: &str) -> String {
+    format!(
+        "{}Value",
+        crate::java_naming::rust_name_for_java_named_type(type_name)
+    )
+}
+
 fn parsed_source_erased_fallback_should_remain_rejected(strategy: &ObjectStrategyPlan) -> bool {
     matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
         && strategy.has_provenance(FactProvenance::ParsedSource)
-        && (strategy.source_methods_access_instance_fields
-            || !source_runtime_case_split_needs_erased_carrier(strategy))
 }
 
 fn source_runtime_case_split_needs_erased_carrier(strategy: &ObjectStrategyPlan) -> bool {
@@ -1727,7 +1832,9 @@ fn source_runtime_case_split_needs_erased_carrier(strategy: &ObjectStrategyPlan)
         && strategy.requirements.iter().any(|requirement| {
             matches!(
                 requirement,
-                DispatchRequirementKind::NeedsInstanceof | DispatchRequirementKind::NeedsDowncast
+                DispatchRequirementKind::NeedsSubtypeDispatch
+                    | DispatchRequirementKind::NeedsInstanceof
+                    | DispatchRequirementKind::NeedsDowncast
             )
         })
 }
@@ -1742,12 +1849,14 @@ fn erased_object_requirement_reason(
         && requirements.iter().any(|requirement| {
             matches!(
                 requirement,
-                DispatchRequirementKind::NeedsInstanceof | DispatchRequirementKind::NeedsDowncast
+                DispatchRequirementKind::NeedsSubtypeDispatch
+                    | DispatchRequirementKind::NeedsInstanceof
+                    | DispatchRequirementKind::NeedsDowncast
             )
         })
     {
         return Some(
-            "open runtime case-split requirement needs erased object fallback when closed enum is unavailable"
+            "open subtype-dispatch/runtime case-split requirement needs erased object fallback when closed enum is unavailable"
                 .to_string(),
         );
     }
@@ -2107,7 +2216,7 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
     let representation = variants.and_then(|variants| match current_representation {
         ObjectRepresentation::DynTrait { .. } | ObjectRepresentation::ErasedObject => {
             Some(ObjectRepresentation::ClosedEnum {
-                enum_name: format!("{type_name}Value"),
+                enum_name: runtime_case_split_type_name(type_name),
                 variants,
             })
         }
@@ -2115,7 +2224,7 @@ fn closed_enum_inference_policy_with_effective_facts_and_requirements(
             if closed_runtime_case_split_is_useful(requirements) =>
         {
             Some(ObjectRepresentation::ClosedEnum {
-                enum_name: format!("{type_name}Value"),
+                enum_name: runtime_case_split_type_name(type_name),
                 variants,
             })
         }

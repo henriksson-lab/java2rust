@@ -76,12 +76,10 @@ const FIXTURES: &[MarkerFixture] = &[
     },
     MarkerFixture {
         marker: "unsupported_inner_class_outer_capture",
-        // A non-static inner class: its constructor cannot obtain a shared
-        // handle to the enclosing instance, so it remains runtime-loud and
-        // carries a translator diagnostic.
-        // The mutate-after-construction step is the semantic reason a copy
-        // would not be a valid repair: Java must observe base = 20 here.
-        java: "public class MarkerInnerCapture { private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); base = 20; return a.add(1); } }",
+        // A static-reachable non-static inner class needs the unimplemented
+        // SharedSync outer handle. The ordinary SharedLocal case is covered by
+        // tests/differential/InnerCapture.java and should not emit this marker.
+        java: "public class MarkerInnerCapture { static MarkerInnerCapture INSTANCE = new MarkerInnerCapture(); private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); base = 20; return a.add(1); } public static String mainRun() { return String.valueOf(INSTANCE.run()); } }",
         counters: &["invalid_patterns"],
     },
     MarkerFixture {
@@ -263,32 +261,21 @@ fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() 
 }
 
 #[test]
-fn inner_capture_gap_reports_mutable_shared_storage_work_queue() {
-    let translation = translate_source(include_str!("differential/known-gaps/InnerCapture.java"));
+fn inner_capture_routes_shared_outer_handle_companion() {
+    let translation = translate_source(include_str!("differential/InnerCapture.java"));
 
     assert!(
-        translation
+        !translation
             .diagnostics
             .has_code("inner_class_construction_panics"),
-        "inner-class construction should stay explicitly reported until outer \
-         receiver handles are implemented:\n{:?}",
+        "ordinary SharedLocal inner construction should no longer be reported as \
+         a construction panic:\n{:?}",
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
     assert!(
-        translation.diagnostics.iter().any(|diagnostic| {
-            diagnostic.code() == "storage_strategy_disagreement"
-                && diagnostic
-                    .message()
-                    .contains("InnerCapture needs SharedLocal")
-        }),
-        "inner capture should also name the unimplemented SharedLocal storage \
-         tier that blocks the repair:\n{:?}",
-        translation.diagnostics.iter().collect::<Vec<_>>()
-    );
-    assert!(
-        translation
-            .rust
-            .contains("unsupported Java inner-class outer capture construction"),
+        translation.rust.contains(
+            "__java_outer_result = InnerCapture::compute_with_outer(__java_outer_receiver.clone())"
+        ) && !translation.rust.contains(".borrow_mut().compute()"),
         "{}",
         translation.rust
     );

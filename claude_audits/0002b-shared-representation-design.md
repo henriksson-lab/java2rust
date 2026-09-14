@@ -2134,6 +2134,16 @@ that currently pin this are:
 and
 `storage_strategy::placement_law_tests::the_type_and_construction_forms_nest_the_same_way`.
 
+Codex follow-up 2026-09-14: one receiver-order hole in that policy is now fixed
+for already-enabled `SharedLocal` contexts. Optional `Rc<RefCell<T>>` source
+field receivers are projected out of `Option` before the `borrow()`/
+`borrow_mut()` receiver adapter runs, so calls emit
+`self.field.as_mut().unwrap().borrow_mut().m(...)` instead of invalid
+`self.field.borrow_mut().m(...)`. Guards:
+`idiom_gaps::optional_field_mutating_overload_call_uses_signature_name_and_mut_receiver`
+and
+`idiom_gaps::context_translation_uses_sibling_overload_signature_for_call_target`.
+
 ## Update 2026-09-10 (Codex follow-up) — the implementation gate is pinned directly
 
 `storage_strategy::storage_placement_implementation_gate_stays_explicit` now
@@ -2150,19 +2160,22 @@ receiver and field-access policy.
 now translates `tests/differential/known-gaps/InnerCapture.java` and requires the
 same output to contain the inner-construction runtime handoff, the
 `inner_class_construction_panics` diagnostic, and a
-`storage_strategy_disagreement` message saying `InnerCapture needs SharedLocal`.
-That keeps 0023's ordinary inner-constructor failure attached to this audit's
-remaining mutable shared receiver/borrow-policy gate.
+`storage_strategy_surface_not_forwardable` message naming `InnerCapture` as a
+shared type whose interface surface cannot yet be handle-forwarded. That keeps
+0023's ordinary inner-constructor failure attached to this audit's remaining
+shared receiver/borrow-policy gate.
 
 ## Update 2026-09-10 (Codex follow-up) — mutable aliasing is pinned to `SharedLocal` too
 
-`known_gap_fixtures_are_valid_java_and_match_expected_failure_mode` now requires
-`tests/differential/known-gaps/Aliasing.java` to report
+Historical note: `known_gap_fixtures_are_valid_java_and_match_expected_failure_mode`
+used to require `tests/differential/known-gaps/Aliasing.java` to report
 `storage_strategy_disagreement` messages for `Aliasing.Node needs SharedLocal`
 and `Aliasing.Counter needs SharedLocal`, in addition to the error-level
-`observable_alias` diagnostic. The fixture still stays in known gaps until the
-mutable shared receiver/field-access policy exists, but it now proves the
-primary 0002 repro feeds this audit's remaining implementation queue.
+`observable_alias` diagnostic. That fixture has since been promoted to
+`tests/differential/Aliasing.java` after the direct local/storage alias,
+callback-parameter, stored-action, and narrow zero-argument anonymous-action
+SharedLocal slices landed. Keep the note as the provenance for why mutable
+aliasing belongs to this audit; do not treat it as current known-gap status.
 
 ## Update 2026-09-12 (Codex follow-up) — placement axes are private-backed
 

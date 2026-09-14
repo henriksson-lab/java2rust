@@ -11,14 +11,125 @@ evidence, plus broader nullable representation work outside the already-pinned
 fixtures.
 Kind: semantics / lowering.
 
+Codex follow-up 2026-09-14 boxed-primitive operator unbox pass:
+boxed primitive calls used directly in non-argument primitive contexts now
+project the nullable carrier before applying the operator. The previous lowering
+planned `Integer`/`Boolean` calls as primitive for numeric/condition planning
+but still emitted the raw `Option<T>` expression in `if (boxedBoolean)`,
+`1 + boxedInteger`, ordered comparison, and unary `+`/`-`. In a
+`try/catch (NullPointerException)` block that either failed to compile or could
+not produce Java's catchable NPE. Primitive-context lowering now unwraps the
+optional boxed primitive through the existing catchable Java-null projection.
+Guards:
+`idiom_gaps::boxed_primitive_operator_unbox_nulls_are_catchable` and
+`tests/differential/BoxedPrimitiveOperatorNullCatch.java` in the focused null
+representation differential loop.
+
+Codex follow-up 2026-09-14 nullable boxed switch-selector pass:
+switch selectors now share the same primitive-context nullable boxed-primitive
+projection. `switch (IntegerValueReturningNull())` previously emitted
+`match Option<i32>` against integer patterns, failing Rust compilation and
+preventing Java's selector unboxing `NullPointerException` from reaching an
+enclosing `catch`. The selector is now unboxed through the catchable
+Java-null path before matching. Guards:
+`idiom_gaps::boxed_primitive_switch_selector_unbox_null_is_catchable` and
+`tests/differential/NullableUnboxSwitchCatch.java`.
+
+Codex follow-up 2026-09-13 ordinary collection iterator-null receiver pass:
+`ArrayList<String> values; values.add(null); String value =
+values.iterator().next(); value.length()` now keeps the declared `String` local
+instead of inheriting an erased-object shape from the nullable iterator element.
+The value side lowers the chained collection iterator through a direct Rust
+`iter().cloned().next().ok_or_else(...)` path and unwraps the nullable element
+as a catchable `NullPointerException` in propagating contexts. Regression:
+`tests/idiom_gaps.rs::nullable_collection_iterator_next_into_string_is_catchable`.
+
+Codex follow-up 2026-09-13 erased Java Optional display pass:
+`Optional.of(value)` and `Optional.empty()` assigned through `Object` now keep
+the Java `Optional` carrier at the erased-object boundary instead of unwrapping
+the present element or boxing an untyped `None`. `java_erased_any_to_string`
+renders top-level erased `Option<T>` carriers as `Optional[...]` or
+`Optional.empty`, including `Optional<Object>` values whose present element is
+itself an erased object. Covered by `tests/differential/ErasedOptionalDisplay.java`
+and `tests/differential/ErasedOptionalObjectDisplay.java` in the focused
+erased-display differential loop. This does not change ordinary
+nullable-reference display or the broader unknown-erased-object fallback.
+
+Codex follow-up 2026-09-13 optional boxed-primitive display pass:
+`Optional<Integer>`-shaped values in string concatenation now use the nullable
+Java display chain (`Some(value)` -> value display, `None` -> `"null"`) instead
+of falling through to `Option<T>.to_string()`. This fixes the concrete
+`PriorityQueue<Integer>.poll()` concat path covered by
+`tests/differential/PriorityQueuePollIntegerConcat.java`. The same pass also
+routes optional `Float`/`Double` display through the Java float/double spelling
+helpers instead of Rust `Display`, covered by
+`tests/differential/PriorityQueuePollDoubleConcat.java`, and keeps
+`PriorityQueue<Boolean>.poll()` on the same optional Java display path through
+`tests/differential/PriorityQueuePollBooleanConcat.java`. The broader unknown
+erased-display model is unchanged.
+
+Codex follow-up 2026-09-13 erased floating-point display pass:
+erased `Float`/`Double` carriers now reuse the existing Java float/double
+spelling helpers in direct erased display, erased collection display, and erased
+`Optional` display. This keeps `1.0` as `1.0` instead of Rust's `1` without
+changing the unknown-erased fallback. Differential fixture:
+`tests/differential/ErasedFloatingPointDisplay.java`.
+
+Codex follow-up 2026-09-13 erased optional collection display pass:
+`Optional.of(list)` erased through `Object` now displays the present collection
+as Java does (`Optional[[a, null, c]]`) instead of falling through to the loud
+unknown-erased runtime panic. The runtime support adds `Vec<T>` optional display
+for already-modeled erased collection element carriers, including nullable
+elements. Differential fixture:
+`tests/differential/ErasedOptionalCollectionDisplay.java`.
+
+Codex follow-up 2026-09-14 nullable erased-object local initializer pass:
+`Object value = null` again stays as `None::<Box<dyn std::any::Any>>` for an
+`Option<Box<dyn Any>>` local instead of being post-processed into
+`Box::new(None::<Box<dyn Any>>) as Box<dyn Any>`. The latter confused Java
+`Optional`-as-erased-Object boxing with ordinary nullable `Object` storage and
+made `NullConcat`/`NullInstanceof` fail to compile. Guard:
+`idiom_gaps::nullable_erased_object_null_initializer_stays_none_carrier`; the
+focused `null_representation_fixtures_match_java_output` loop covers
+`tests/differential/NullConcat.java` and
+`tests/differential/NullInstanceof.java`.
+
+Codex follow-up 2026-09-14 nullable boxed array-index pass:
+array index expressions now apply Java boxed-primitive unboxing before the
+`usize` cast. `Integer value = null; values[value]` therefore raises a catchable
+`NullPointerException` in propagating `try` scopes instead of emitting
+`Option<i32> as usize` and failing Rust compilation. Guards:
+`tests/idiom_gaps.rs::boxed_primitive_array_index_unbox_null_is_catchable` and
+`tests/differential/NullableUnboxArrayIndexCatch.java`.
+
+Codex follow-up 2026-09-14 nullable boxed array-dimension pass:
+array creation dimensions now use the same boxed-primitive unboxing policy while
+keeping the signed Java dimension for the `NegativeArraySizeException` check.
+`Integer size = null; new int[size]` therefore raises a catchable
+`NullPointerException` instead of comparing/casting `Option<i32>`. Guards:
+`tests/idiom_gaps.rs::boxed_primitive_array_dimension_unbox_null_is_catchable`
+and `tests/differential/NullableUnboxArrayDimensionCatch.java`.
+
+Codex follow-up 2026-09-14 nullable boxed string-index pass:
+`String.charAt` index arguments now use the same index-slot lowering policy as
+array indexing and facade index slots, and native `charAt(int)` no longer forces
+boxed index locals into the unknown-external non-null argument default. `Integer
+index = null; "abc".charAt(index)` therefore raises a catchable
+`NullPointerException` before the Rust `usize` projection instead of emitting
+`Option<Box<dyn Any>> as usize` or `Option<i32> as usize`. Guards:
+`tests/idiom_gaps.rs::boxed_primitive_string_char_at_index_unbox_null_is_catchable`
+and `tests/differential/NullableUnboxStringCharAtCatch.java`.
+
 Follow-up 2026-09-09 focused triage: rechecked this audit together with
 0059. The smallest remaining live surface is still not a safe table-arm patch:
 `src/stdlib.rs::java_erased_any_to_string` only recovers carriers for values
 whose concrete runtime type is known through source downcast generation,
 `PLATFORM_ERASED_DISPLAY_TYPES`, or an explicit non-null external
-`toString(): String` fact. The guarding fixtures deliberately pin the loud path
-for missing evidence:
-`tests/idiom_gaps.rs::external_object_to_string_fallback_is_loud_not_empty` and
+`toString(): String` fact. Direct calls on `Object`-typed erased parameters
+route through the same erased-runtime display helper; the guarding fixtures
+deliberately pin that known erased receivers use the helper while missing
+runtime evidence stays loud:
+`tests/idiom_gaps.rs::external_object_to_string_receiver_uses_erased_runtime_display` and
 `tests/slot_shape_design.rs::erased_external_object_display_without_modeled_to_string_stays_loud`.
 Adding more unconditional downcast arms would not solve arbitrary external
 `Object` display; the next valid fix needs a typed-erasure/display-capability
@@ -100,7 +211,17 @@ evidence: current lowering routes it through the erased-object display helper,
 which handles known downcasts and otherwise panics instead of silently returning
 `""`. That is a bounded fact/platform expansion problem for known types, and a
 larger runtime representation question for arbitrary unknown erased objects.
-Guard: `idiom_gaps::external_object_to_string_fallback_is_loud_not_empty`.
+Guard: `idiom_gaps::external_object_to_string_receiver_uses_erased_runtime_display`.
+
+Codex follow-up 2026-09-14 triage: rechecked the adjacent erased-display guards
+after the direct `Object.toString()` path was tightened. The remaining
+checked-in 0056/0059 display surface is still
+`slot_shape_design::erased_external_object_display_without_modeled_to_string_stays_loud`:
+an erased value with no source downcast, platform carrier, or modeled non-null
+external `toString` evidence must stay loud. The positive neighboring
+`idiom_gaps` `external_object*` guards cover direct `Object.toString()` and
+modeled external display. Treat the next real fix as typed-erasure/display
+capability work, not as another unconditional downcast-table arm.
 
 Follow-up 2026-09-06 stale-baseline pass: the map-get string display segment
 row was still listed as an idiom-gap failure even though current lowering uses
@@ -236,6 +357,16 @@ before calling the selected byte-slice overload, instead of panicking through
 `.expect("Java null receiver")`. Regression:
 `tests/idiom_gaps.rs::optional_output_stream_write_byte_array_uses_slice_overload`.
 Broader non-argument catchable null coercions remain open.
+
+Codex follow-up 2026-09-14 direct boxed-unbox pass: owned optional unwraps now
+carry the same `"Java null receiver"` marker as borrowed optional unwraps.
+`Integer value = null; try { int primitive = value; ... } catch
+(NullPointerException ex) { ... }` no longer lowers to `value.unwrap()`, which
+panicked before the Java catch machinery could observe it. In propagating
+contexts the existing catchable-null rewrite now turns the direct local unbox
+into `ok_or_else(...NullPointerException...)?`. Regressions:
+`tests/idiom_gaps.rs::boxed_primitive_local_unbox_null_is_catchable` and
+`tests/differential/NullableUnboxCatch.java`.
 
 Follow-up 2026-08-28 source-class-bound return pass:
 `T extends SourceClass` trait surfaces no longer force declared reference
@@ -1744,9 +1875,16 @@ also covers nullable list display and map-entry display carriers, including
 `ErasedNullableDoubleArrayListDisplay`,
 `ErasedNullableFloatArrayListDisplay`, `ErasedNullableIntegerArrayListDisplay`,
 `ErasedNullableLongArrayListDisplay`, `ErasedNullableShortArrayListDisplay`,
-`ErasedMapEntryDisplay`, and `ErasedSimpleImmutableEntryDisplay`. Unknown
-erased display remains open; this only records the current promoted-fixture
-coverage.
+`ErasedMapEntryDisplay`, `ErasedSimpleImmutableEntryDisplay`, and
+`ErasedTreeSetDisplay`. Unknown erased display remains open; this only records
+the current promoted-fixture coverage.
+Codex follow-up 2026-09-14 null-bearing `Arrays.asList` varargs pass: when a
+literal null appears in `Arrays.asList(...)`, argument lowering now chooses one
+nullable element slot from the non-null peers and lowers every element through
+that slot. The concrete erased fixture
+`tests/differential/ErasedArraysAsListNullDisplay.java` now compiles and matches
+Java (`x[a, null, c]:[a, null, c]`) under the focused
+`erased_display_fixtures_match_java_output` oracle.
 
 Follow-up 2026-09-10 cleanup: the erased-display downcast collectors in
 `stdlib` are pinned as private helpers, and the platform erased-display

@@ -2318,6 +2318,7 @@ mod tests {
                 name: "IllegalArgumentException".to_string(),
                 args: Vec::new(),
             },
+            qualifier: None,
             args: vec![Expr::Var("message".to_string())],
             body: None,
             resolved: None,

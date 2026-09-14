@@ -2992,6 +2992,19 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
         !receiverless_summary_return_shape
             .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
     );
+    let inherited_summary_method = lower_source
+        .split("fn source_summary_declared_inherited_method")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_switch").next())
+        .expect("inherited summary method helper should be present");
+    assert!(
+        inherited_summary_method.contains("SourceContextOwnerKey::new(&type_key)")
+            && inherited_summary_method.contains(".find_context_type(ctx)"),
+        "inherited summary lookup should keep superclass lookup on SourceContextOwnerKey"
+    );
+    assert!(
+        !inherited_summary_method.contains("find_context_type_by_key_in_lower_ctx(ctx, &type_key)")
+    );
 
     let returned_field_lookup = lower_source
         .split("fn source_method_returned_field_name")
@@ -3045,6 +3058,10 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
 
     for (helper_name, next_helper) in [
         (
+            "fn seed_outer_this_capture_fields",
+            "fn imported_static_owner_type_name",
+        ),
+        (
             "fn source_enum_directly_implements_rust_trait_name",
             "fn source_enum_directly_implements_target_interface",
         ),
@@ -3087,6 +3104,10 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
         (
             "fn source_or_jdk_subtype_reaches_in_lower_ctx",
             "#[cfg(test)]\nfn context_type_simple_name_is_ambiguous",
+        ),
+        (
+            "fn source_supertype_conversion_impls_for_type",
+            "fn source_supertype_conversion_impls_for_pair",
         ),
         (
             "fn context_type_simple_name_is_ambiguous_in_lower_ctx",

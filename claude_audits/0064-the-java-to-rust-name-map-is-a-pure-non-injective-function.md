@@ -16,6 +16,36 @@ one level below it
 
 Current tree update:
 
+* Codex follow-up 2026-09-14: statement planning no longer lowers a
+  source-defined `System.out.println(...)` to Rust's native `println!` macro
+  when the `System.out` receiver is unresolved but `System.out` is known as a
+  source static field. The same path also refuses to reinterpret that static
+  field receiver as a static owner (`Sink::println(...)`); it now stays a
+  receiver call (`System::__static_out().println(...)`). This fixes a silent
+  wrong answer where a translated source `Sink.println` body was skipped.
+  Regressions:
+  `call_plan::tests::native_system_print_statement_refuses_source_resolved_owner`,
+  `call_plan::tests::native_system_print_statement_keeps_jdk_print_stream_owner`,
+  and
+  `idiom_gaps::source_defined_system_out_statement_does_not_lower_to_native_print_macro`.
+* Codex follow-up 2026-09-14: unqualified source static calls now prefer the
+  caller's same-package context owner before ambiguous same-simple-name peers,
+  including after the receiver spelling has been normalized to the Rust-style
+  lower-case alias at a slot call site. The unresolved-static fast path now
+  fails closed for source-context owners so `Util.value()` in package `a`
+  lowers through `AUtil::value()` instead of freezing an
+  `unimplemented!("unresolved Java static call ...")` stub while `b.Util` is
+  also present. Regression:
+  `slot_shape_design::same_package_static_owner_beats_ambiguous_context_simple_peer`.
+* Codex follow-up 2026-09-14: anonymous zero-arg interface support in
+  `representation.rs` no longer resolves the interface declaration by taking
+  the first same-simple-name type after an exact erased-name miss. Exact Java
+  owner lookup still wins, unique simple-name compatibility remains available,
+  and ambiguous simple package peers fail closed so unsupported-anonymous-class
+  diagnostics are not suppressed by declaration order. Regressions:
+  `representation::tests::erased_name_type_lookup_refuses_ambiguous_simple_package_peer`
+  and
+  `representation::tests::anonymous_zero_arg_interface_support_refuses_ambiguous_simple_owner`.
 * Follow-up 2026-09-07: `representation_lowering::source_class_bound_trait_name`
   is now crate-local. This does not change the remaining first-class owner/type
   identity work, but it removes one rendered-name helper from the public API and
@@ -870,6 +900,13 @@ Current tree update:
   carry that method; exact package-qualified owners still recover the summary
   shape. Regression:
   `lower::tests::receiver_summary_return_shape_refuses_ambiguous_current_owner`.
+  Codex follow-up 2026-09-14: the shared source-summary context helper now
+  resolves through the combined visible context and then requires the selected
+  declaration to come from `source_summary_type_program`. Direct `super`
+  source-summary fallback and static-owner `super` fallback therefore fail
+  closed for bare ambiguous superclass owners instead of borrowing a summary
+  peer. Regression:
+  `lower::tests::direct_source_summary_super_call_refuses_ambiguous_context_superclass`.
 * Source Java enum type-declaration lookup no longer walks
   program/support/summary and accepts the first simple-name or rendered-alias
   match. Current-type enum lookup and Java-type enum lookup now both use the
@@ -1419,9 +1456,15 @@ batch analysis identity boundary:
 `batch_analysis_keys_keep_same_simple_name_package_peers_distinct` asserts
 through `UsageFacts::source_method_usage_by_java_key` and `SignaturePlan` that
 `a.Item::who` and `b.Item::who` stay under Java-owner keys, not `Item` or emitted
-`AItem`/`BItem`. The remaining live problem is broader: there is still no
-first-class package-aware Java type identity object carried through the whole
-pipeline.
+`AItem`/`BItem`.
+
+Codex follow-up 2026-09-14: that same regression now also pins the legacy
+Rust-name maps used by compatibility callers. Exact `a.Item::who` and
+`b.Item::who` usage/signature lookups still work, while a bare `Item::who`
+query returns no usage facts and no signature instead of borrowing whichever
+package peer happens to be visible. The remaining live problem is broader:
+there is still no first-class package-aware Java type identity object carried
+through the whole pipeline.
 
 Follow-up 2026-08-25: the explicit static receiver check no longer asks the raw
 `SourceContextOwnerKey::matches_context_type` predicate before the
@@ -1449,9 +1492,10 @@ Representative remaining string-owner surfaces:
 - `resolve::{resolve_method, resolve_constructor}` still combine string owners
   and local context rather than consulting one resolved entity map.
 - `usage::UsageMethodKey`, `signature::MethodKey`, and many call-site helpers
-  still accept owner strings. The batch duplicate pre-pass currently keeps
-  same-simple-name package peers distinct for the pinned Java-key path, but the
-  type system cannot express the invariant yet.
+  still accept owner strings. The batch duplicate pre-pass and ambiguity guards
+  currently keep same-simple-name package peers distinct for the pinned Java-key
+  and legacy Rust-name paths, but the type system cannot express the invariant
+  yet.
 
 Smallest implementation slice: introduce a package-aware `JavaTypeKey` (or one
 canonical owner helper returning such a key) and migrate the remaining
@@ -1463,9 +1507,10 @@ pre-pass string rewrites.
 
 Focused tests for that slice:
 
-- Extend `batch_analysis_keys_keep_same_simple_name_package_peers_distinct`
-  when `UsageMethodKey`/`signature::MethodKey` gain a typed owner, so it checks
-  those maps in addition to the Java-key lookup.
+- Keep `batch_analysis_keys_keep_same_simple_name_package_peers_distinct` as
+  the migration guard when `UsageMethodKey`/`signature::MethodKey` gain a typed
+  owner; it already checks the Java-key path plus the exact-vs-bare legacy
+  usage/signature lookups.
 - A context ambiguity unit extending `find_context_type_by_key` for exact and
   package-qualified owner lookups. Follow-up 2026-08-25: the lookup guard is now
   symmetric for package peers: `a.Item`/`AItem` resolve to `a.Item`,
@@ -1586,6 +1631,14 @@ questions. Guards:
 `lower::tests::source_class_upcast_hierarchy_guard_refuses_ambiguous_context_owner`,
 `lower::tests::static_storage_element_assignment_refuses_ambiguous_simple_owner`,
 and `layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
+Codex follow-up 2026-09-14: two regrown production lowerer lookups joined that
+same boundary. Outer-this capture field seeding and source-supertype conversion
+impl walking now wrap their owner strings in `SourceContextOwnerKey` before
+context lookup instead of calling `find_context_type_by_key_in_lower_ctx`
+directly. This is behavior-preserving because both sites already used the
+combined ambiguity-aware lookup; it fences the raw-owner pattern rather than
+claiming first-class owner identity. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
 
 Codex follow-up 2026-09-12: collections-sort method-reference result checks,
 source associated-const/nested-type access, source enum static-owner recovery,
@@ -1642,8 +1695,15 @@ the combined visible context whether the summary declaration is uniquely
 selected, and it treats support-local matches as not summary-only. This prevents
 summary-boundary return-shape and super-boundary handling from being enabled for
 a bare owner that is actually ambiguous across support and summary context.
+Codex follow-up 2026-09-14: the predicate now actually delegates to the combined
+lookup instead of composing three independent per-program probes. This preserves
+exact-vs-alias priority: a summary declaration whose real owner is `AItem` is
+not blocked by a support declaration `a.Item` that merely aliases to the same
+emitted Rust name.
 Regression:
-`lower::tests::context_type_key_is_summary_only_accounts_for_support_context`.
+`lower::tests::context_type_key_is_summary_only_accounts_for_support_context`
+and
+`lower::tests::context_type_key_is_summary_only_prefers_summary_exact_over_support_alias`.
 
 Follow-up 2026-08-26: source-summary inherited method lookup now follows one
 combined context edge per superclass step instead of checking program, then
@@ -1651,6 +1711,12 @@ summary/support, then program again. A source type extending bare `Parent` no
 longer picks the summary `b.Parent` method when support also provides
 `a.Parent`; exact owner spellings still resolve. Regression:
 `lower::tests::source_summary_inherited_method_lookup_refuses_ambiguous_super_owner`.
+Codex follow-up 2026-09-14: that inherited walk now crosses the context lookup
+boundary through `SourceContextOwnerKey` rather than reopening a raw
+`find_context_type_by_key_in_lower_ctx(ctx, &type_key)` call inside the helper.
+This preserves the combined lookup behavior and keeps the remaining
+string-backed owner payload fenced. Guard:
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`.
 
 Follow-up 2026-08-26: the current-type InputStream facade predicate now uses
 the combined context lookup instead of program/support/summary priority
@@ -1658,6 +1724,13 @@ chaining. A bare current type `Item` no longer inherits InputStream behavior fro
 support `a.Item` when summary `b.Item` is also visible; exact `a.Item` still
 resolves. Regression:
 `lower::tests::current_type_input_stream_facade_lookup_refuses_ambiguous_context_type`.
+Codex follow-up 2026-09-14: the one-argument `InputStream.read(byte[])`
+shortcut now lets source/context owners shadow the native JDK facade spelling
+before consulting the platform `read_3` table. A default-package source class
+named `InputStream` no longer borrows `java.io.InputStream` behavior by simple
+name alone, while a source class that explicitly extends `java.io.InputStream`
+still gets the facade path. Regression:
+`lower::tests::source_input_stream_owner_shadows_native_jdk_read_shortcut`.
 
 Follow-up 2026-08-26: receiverless resolved static owner retargeting now
 requires the resolved declaring type to be unique in the combined context and
@@ -2287,6 +2360,30 @@ setter path. Regressions:
 `lower::tests::bare_static_storage_update_uses_recorded_owner_for_getter_and_setter`
 and `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`.
 
+Follow-up 2026-09-14: static-field receiver method recovery now resolves the
+field's declared bare type in the static owner's Java context instead of asking
+the lower context for an ownerless simple name. `a.Owner.cached.danger()` with
+`static Item cached` now selects same-package `a.Item` even when `b.Item` is
+also visible, and a missing `a.Missing` field type no longer silently borrows a
+unique `b.Missing`. This keeps the exception/result propagation fallback from
+crediting a call to the wrong source owner. Regressions:
+`lower::tests::source_static_field_receiver_resolves_bare_field_type_in_owner_package`
+and
+`lower::tests::source_static_field_receiver_does_not_borrow_unique_wrong_package_field_type`.
+
+Follow-up 2026-09-14: statement-level `System.out`/`System.err` print planning
+now respects resolved receiver ownership. A call spelled
+`System.out.println(...)` is only lowered to a native Rust print macro when the
+resolved instance owner is the Java `PrintStream` facade, or when no resolved
+call is available; source-resolved owners fall through to ordinary method-call
+lowering instead of being stolen by the name-only `System.out` shortcut.
+Regressions:
+`call_plan::tests::native_system_print_statement_refuses_source_resolved_owner`
+and
+`call_plan::tests::native_system_print_statement_keeps_jdk_print_stream_owner`;
+the existing `idiom_gaps::system_out_and_err_print_stream_statements_lower_to_rust_macros`
+guard keeps the JDK path intact.
+
 Follow-up 2026-08-30: signature planning's legacy source-summary fact scans no
 longer borrow method mutability or return-nullability facts from a different
 package peer. Qualified receiver owners such as `b.Item` now fail closed
@@ -2902,3 +2999,15 @@ exact/direct/fallback owner matching shape as external fields instead of
 carrying a separate raw scan in `FactSet`. Guards:
 `slot_shape_design::rendered_string_heuristics_have_centralization_guardrails`
 and `semantic_facts::fact_lookup_refuses_ambiguous_simple_package_owner_aliases`.
+
+Codex follow-up 2026-09-14: unqualified source static-owner lookup now applies
+Java's same-package preference before the existing ambiguous simple-name
+fallback. In a file from package `a`, `Util.value()` can resolve to context type
+`a.Util` even when `b.Util` is also present; without an exact same-package
+context type, the old ambiguous simple-owner guard still fails closed. The same
+rule feeds explicit source static receiver detection, source-context static
+fallback signatures, and resolved-owner receiver matching. Guards:
+`lower::tests::source_context_static_fallback_prefers_same_package_simple_receiver_owner`,
+`lower::tests::explicit_source_static_receiver_type_prefers_same_package_simple_owner`,
+`lower::tests::explicit_static_receiver_matches_same_package_simple_owner`,
+plus the existing ambiguous-simple-owner tests.

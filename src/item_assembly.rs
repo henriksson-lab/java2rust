@@ -9,8 +9,8 @@ use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::MethodExceptionPlan;
 use crate::facts::FactSet;
 use crate::java_ir::{
-    BinaryOp, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
-    PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
+    BinaryOp, Block, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl,
+    Modifier, PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
 };
 use crate::java_naming::rust_name_for_java_named_type;
 use crate::representation::RepresentationPlan;
@@ -3610,7 +3610,17 @@ fn method_params_with_optional_lifetime(
                         functional_callback_param_type(&param.java_ty(), facts)
                     }
                     .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape(), facts));
-                    maybe_add_lifetime_to_refs(callback_ty, lifetime)
+                    let callback_ty = maybe_add_lifetime_to_refs(callback_ty, lifetime);
+                    if callback_param
+                        && method_stores_priority_queue_comparator_callback(method, param.name())
+                    {
+                        RustType::Raw(format!(
+                            "{} + 'static",
+                            crate::emit::emit_type(&callback_ty)
+                        ))
+                    } else {
+                        callback_ty
+                    }
                 } else {
                     maybe_add_lifetime_to_refs(
                         rust_type_for_slot_with_facts(&param.shape(), facts),
@@ -4427,6 +4437,11 @@ fn scan_expr_for_callback_param(
                 );
             }
         }
+        Expr::New { ty, args, body, .. }
+            if priority_queue_constructor_consumes_callback_param(ty, args, param_name) =>
+        {
+            *saw_callback_call = true;
+        }
         Expr::New { args, body, .. } => {
             for arg in args {
                 scan_expr_for_callback_param(
@@ -4723,6 +4738,144 @@ fn native_collections_sort_consumes_callback_param(
     };
     crate::stdlib::canonical_external_receiver_type_key(receiver_name) == "Collections"
         && matches!(&args[1], Expr::Var(arg_name) if arg_name == param_name)
+}
+
+fn priority_queue_constructor_consumes_callback_param(
+    ty: &JavaType,
+    args: &[Expr],
+    param_name: &str,
+) -> bool {
+    let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = ty else {
+        return false;
+    };
+    crate::stdlib::canonical_external_receiver_type_key(name)
+        .rsplit('.')
+        .next()
+        .is_some_and(|simple| simple == "PriorityQueue")
+        && matches!(args, [Expr::Var(arg_name)] if arg_name == param_name)
+}
+
+fn method_stores_priority_queue_comparator_callback(method: &MethodDecl, param_name: &str) -> bool {
+    method
+        .body
+        .as_ref()
+        .is_some_and(|body| block_stores_priority_queue_comparator_callback(body, param_name))
+}
+
+fn block_stores_priority_queue_comparator_callback(block: &Block, param_name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_stores_priority_queue_comparator_callback(stmt, param_name))
+}
+
+fn stmt_stores_priority_queue_comparator_callback(stmt: &Stmt, param_name: &str) -> bool {
+    match stmt {
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            expr_stores_priority_queue_comparator_callback(expr, param_name)
+        }
+        Stmt::VarDecl {
+            initializer: Some(expr),
+            ..
+        } => expr_stores_priority_queue_comparator_callback(expr, param_name),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_stores_priority_queue_comparator_callback(condition, param_name)
+                || block_stores_priority_queue_comparator_callback(then_block, param_name)
+                || else_block.as_ref().is_some_and(|block| {
+                    block_stores_priority_queue_comparator_callback(block, param_name)
+                })
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            body, condition, ..
+        } => {
+            expr_stores_priority_queue_comparator_callback(condition, param_name)
+                || block_stores_priority_queue_comparator_callback(body, param_name)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_stores_priority_queue_comparator_callback(stmt, param_name))
+                || condition.as_ref().is_some_and(|expr| {
+                    expr_stores_priority_queue_comparator_callback(expr, param_name)
+                })
+                || update
+                    .iter()
+                    .any(|expr| expr_stores_priority_queue_comparator_callback(expr, param_name))
+                || block_stores_priority_queue_comparator_callback(body, param_name)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_stores_priority_queue_comparator_callback(block, param_name)
+        }
+        _ => false,
+    }
+}
+
+fn expr_stores_priority_queue_comparator_callback(expr: &Expr, param_name: &str) -> bool {
+    match expr {
+        Expr::New { ty, args, .. } => {
+            priority_queue_constructor_consumes_callback_param(ty, args, param_name)
+                || args
+                    .iter()
+                    .any(|arg| expr_stores_priority_queue_comparator_callback(arg, param_name))
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver.as_ref().is_some_and(|receiver| {
+                expr_stores_priority_queue_comparator_callback(receiver, param_name)
+            }) || args
+                .iter()
+                .any(|arg| expr_stores_priority_queue_comparator_callback(arg, param_name))
+        }
+        Expr::Binary { left, right, .. } => {
+            expr_stores_priority_queue_comparator_callback(left, param_name)
+                || expr_stores_priority_queue_comparator_callback(right, param_name)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_stores_priority_queue_comparator_callback(condition, param_name)
+                || expr_stores_priority_queue_comparator_callback(then_expr, param_name)
+                || expr_stores_priority_queue_comparator_callback(else_expr, param_name)
+        }
+        Expr::FieldAccess(receiver, _)
+        | Expr::ArrayAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            expr_stores_priority_queue_comparator_callback(receiver, param_name)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|expr| expr_stores_priority_queue_comparator_callback(expr, param_name))
+                || initializer.as_ref().is_some_and(|values| {
+                    values.iter().any(|expr| {
+                        expr_stores_priority_queue_comparator_callback(expr, param_name)
+                    })
+                })
+        }
+        Expr::ArrayInitializer(values) => values
+            .iter()
+            .any(|expr| expr_stores_priority_queue_comparator_callback(expr, param_name)),
+        _ => false,
+    }
 }
 
 fn maybe_add_lifetime_to_refs(ty: RustType, lifetime: bool) -> RustType {

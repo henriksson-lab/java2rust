@@ -11,6 +11,77 @@ downcast evidence, platform support, or an explicit external display-capability
 fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
 
+Codex follow-up 2026-09-14 external typed collection return pass:
+facade support methods with weak placeholder returns now upgrade from builtin
+external API return facts before they are stored. `VCFUtils.smartMergeHeaders`
+therefore emits `std::collections::HashSet<VCFHeaderLine>` for both the static
+facade owner and the simple alias instead of leaving `Vec<Box<dyn Any>>` on the
+support method while the call site expected a typed `Set<VCFHeaderLine>`.
+Focused guards:
+`idiom_gaps::static_external_call_to_generic_set_slot_uses_external_return_shape`
+and
+`external_packs::vcf_smart_merge_headers_lookup_preserves_set_return_shape`.
+
+Codex follow-up 2026-09-13 erased Java Optional display pass:
+erased `Object` display now distinguishes a real Java `Optional` value from a
+nullable reference carrier when the expression is known to come from
+`Optional.of(...)` or `Optional.empty()`. The erased boundary boxes the
+`Option<T>` carrier, and runtime display prints `Optional[x]` /
+`Optional.empty` instead of `x` / an untyped empty carrier, including
+`Optional<Object>` where the present element is recursively erased. Differential
+fixtures: `tests/differential/ErasedOptionalDisplay.java` and
+`tests/differential/ErasedOptionalObjectDisplay.java`.
+
+Codex follow-up 2026-09-13 erased floating-point display pass:
+direct erased `Float`/`Double`, erased `Optional<Float/Double>`, and erased
+collection elements now use Java float/double display helpers rather than Rust
+`Display`, so integral floating values keep Java's `.0` spelling. Differential
+fixture: `tests/differential/ErasedFloatingPointDisplay.java`.
+
+Codex follow-up 2026-09-13 erased optional collection display pass:
+erased `Optional<ArrayList<String>>` now renders through the existing Java
+collection display path, including null elements, instead of reaching the
+unknown-erased panic. Differential fixture:
+`tests/differential/ErasedOptionalCollectionDisplay.java`.
+
+Codex follow-up 2026-09-14 erased `TreeSet` display note:
+erased `TreeSet<T>` values now recover the sorted-set carrier as
+`BTreeSet<String>`/`BTreeSet<i32>` and render through the Java collection
+formatting helper, so both string concatenation and direct `Object.toString()`
+preserve sorted iteration order. Differential fixture:
+`tests/differential/ErasedTreeSetDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop. This is another concrete
+known-carrier arm; the unknown-erased fallback remains intentionally loud.
+
+Codex follow-up 2026-09-14 erased `TreeMap` display pass:
+the sorted-map carrier had promoted order/navigation coverage but no erased
+display downcast arm, so `Object value = new TreeMap<String,Integer>();
+"" + value` still reached the loud unknown-erased fallback. Erased `TreeMap` /
+`SortedMap` / `NavigableMap` / `ImmutableSortedMap` values now recover
+`BTreeMap<String,String>` and `BTreeMap<String,i32>` carriers and render with
+`java_map_to_string(value.iter())`. Differential fixture:
+`tests/differential/ErasedTreeMapDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-14 erased `ArrayBlockingQueue` display pass:
+the bounded queue carrier already preserved Java insertion-order display for
+direct slots, but the erased `Object` display table did not recover
+`JavaArrayBlockingQueue<T>`. `Object value = new ArrayBlockingQueue<String>(3);
+"" + value` therefore reached the loud unknown-erased fallback. Erased
+`ArrayBlockingQueue<String>`/`ArrayBlockingQueue<Integer>` values now downcast
+to the bounded carrier and reuse its display implementation. Differential
+fixture: `tests/differential/ErasedArrayBlockingQueueDisplay.java` in the
+focused `erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-14 erased `Map.Entry<String,Integer>` display pass:
+the erased map-entry display arm only recognized `(String, String)` tuple
+carriers, so `Object value = new AbstractMap.SimpleEntry<String,Integer>("a", 1);
+"" + value` still fell into the loud unknown-erased fallback. The runtime erased
+display helper now also recognizes `(String, i32)` and formats it with Java's
+`key=value` entry spelling. Differential fixture:
+`tests/differential/ErasedMapEntryIntegerDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
 Follow-up 2026-09-09 focused triage: rechecked this audit together with 0056.
 The collection-order, queue, map-view, enum, source-object, platform-object, and
 modeled-external display repros are now covered by focused fixtures. The
@@ -22,6 +93,14 @@ evidence exists. Current guards intentionally keep that case loud rather than
 guessing. A low-risk next patch would need a concrete missing carrier fixture;
 otherwise the real remaining fix is a typed-erasure/display-capability model,
 not another broad fallback.
+
+Codex follow-up 2026-09-14 triage: rechecked that boundary after the direct
+`Object.toString()` guard was tightened. `idiom_gaps::external_object*` covers
+the known-good direct-object and modeled-external display paths, while
+`slot_shape_design::erased_external_object_display_without_modeled_to_string_stays_loud`
+still pins the unknown-erased case as intentionally loud. No checked-in narrow
+table/facade/carrier row remains for this audit without adding a new concrete
+fixture; the live work is the display-capability model described above.
 
 Follow-up 2026-09-09 compile-harness cleanup: three compile-only generated-crate
 stubs for `java_erased_object_to_string` now panic loudly instead of returning
@@ -55,6 +134,16 @@ and
 `idiom_gaps::array_blocking_queue_put_pushes_or_returns_interrupted_exception`.
 Differential fixture `tests/differential/ArrayBlockingQueuePut.java` covers the
 ordinary non-blocking success path against the Java oracle.
+
+Codex follow-up 2026-09-14 nullable `ArrayBlockingQueue` value precedence:
+`add`, `offer`, and `put` now evaluate a nullable element value before checking
+bounded-queue capacity. A full queue receiving a null variable therefore raises
+the Java-compatible `NullPointerException` instead of reporting the full-queue
+`IllegalStateException`, `false`, or translated `InterruptedException` first.
+Focused generated-crate guard:
+`idiom_gaps::array_blocking_queue_nullable_value_is_checked_before_capacity`.
+Differential fixture:
+`tests/differential/ArrayBlockingQueueNullVariablePrecedence.java`.
 
 Follow-up 2026-09-07 `String.join` null delimiter pass: the focused
 String.join null-display oracle now covers both null elements and a null
@@ -90,31 +179,93 @@ Differential fixtures promoted:
 `tests/differential/ArrayBlockingQueueOffer.java` (`true,false,a`) and
 `tests/differential/ArrayBlockingQueueAdd.java`
 (`true,a,IllegalStateException`). Custom-comparator `PriorityQueue` instances
-still need a real priority-queue carrier.
+with named and inline anonymous comparator implementations are now covered by
+the focused carrier passes below.
 
-Follow-up 2026-09-09 comparator-backed priority queue constructor correction:
-`new PriorityQueue<>(comparator)` now fails loudly with `compile_error!` instead
-of letting the one-argument native collection constructor fallback return the
-comparator expression as if it were the queue carrier. Focused generated-crate
-fixture:
-`idiom_gaps::priority_queue_comparator_constructor_requires_comparator_carrier`.
-Known-gap differential fixture:
-`tests/differential/known-gaps/PriorityQueueComparatorConstructor.java`
+Follow-up 2026-09-09 comparator-backed priority queue constructor correction,
+updated 2026-09-13: `new PriorityQueue<>(comparator)` no longer falls through to
+the one-argument native collection constructor fallback that returned the
+comparator expression as if it were the queue carrier. Nonescaping
+`Comparator<T>` method parameters consumed by that constructor now lower as
+`impl FnMut(T, T) -> int + 'static` callbacks and are stored in the
+`JavaPriorityQueue<T>` carrier. Local `Comparator<T>` values initialized
+directly from lambdas or method references are also treated as callable locals
+and stored in the same carrier. Other arbitrary opaque `Comparator<T>` values
+remain loud until a callable comparator facade exists.
+Focused generated-crate fixture:
+`idiom_gaps::priority_queue_comparator_parameter_constructor_uses_callback_carrier`
+and
+`idiom_gaps::priority_queue_comparator_local_lambda_constructor_uses_callback_carrier`.
+Follow-up fixture split 2026-09-12, superseded by the 2026-09-13 carrier pass
+below: the named `Comparator` fixture isolated the queue-carrier problem from
+anonymous-class lowering. At that checkpoint it still expected the loud
+`unsupported_priority_queue_comparator_constructor` diagnostic; it is now
+promoted as `tests/differential/PriorityQueueNamedComparatorConstructor.java`.
+
+Codex follow-up 2026-09-13 named comparator-backed `PriorityQueue` carrier:
+source `PriorityQueue<T>` slots now render as `JavaPriorityQueue<T>`, preserving
+natural ordering for ordinary queues while allowing named comparator
+constructors to store a boxed comparison closure. The named-comparator fixture is
+promoted from known-gaps to the focused priority-queue differential loop:
+`tests/differential/PriorityQueueNamedComparatorConstructor.java` (`3,2,1`).
+Nonescaping `Comparator<T>` parameters are handled by the callback-carrier pass;
+direct lambda/method-reference locals are handled by the callable-local pass;
+and `Comparator<T>` locals initialized from a concrete comparator object now
+keep that concrete object as their Rust storage while remaining usable as a
+constructor comparator. Focused generated-crate fixture:
+`idiom_gaps::priority_queue_comparator_object_local_constructor_uses_comparator_carrier`.
+Codex follow-up 2026-09-14: `Comparator<T>` fields initialized once from a
+concrete comparator object and not reassigned now get the same concrete storage
+shape and are accepted by `new PriorityQueue<>(field)`. Reassignable/otherwise
+opaque comparator fields still stay on the loud unsupported path. Focused
+generated-crate fixture:
+`idiom_gaps::priority_queue_comparator_object_field_constructor_uses_comparator_carrier`.
+Codex follow-up 2026-09-14 later: source factory methods declared as
+`Comparator<T>` but returning a concrete comparator constructor now keep that
+concrete return storage shape, so `new PriorityQueue<>(make())` and
+`Comparator<T> c = make(); new PriorityQueue<>(c)` can store the same comparator
+object carrier instead of falling into the opaque-comparator unsupported path.
+Focused generated-crate fixtures:
+`idiom_gaps::priority_queue_comparator_factory_constructor_uses_comparator_carrier`
+and
+`idiom_gaps::priority_queue_comparator_factory_local_constructor_uses_comparator_carrier`.
+Differential fixtures:
+`tests/differential/PriorityQueueComparatorFactoryConstructor.java` and
+`tests/differential/PriorityQueueComparatorFactoryLocalConstructor.java`
 (`3,2,1`).
-Comparator-backed queue ordering still needs a real carrier before it can be
-lowered correctly; the checked-in anonymous-comparator shape also reports
-`unsupported_anonymous_class`, so promoting that fixture needs both anonymous
-comparator object lowering and a priority-queue comparator carrier. Guard:
-`idiom_gaps::priority_queue_anonymous_comparator_constructor_reports_both_missing_carriers`.
-Follow-up fixture split 2026-09-12:
-`tests/differential/known-gaps/PriorityQueueNamedComparatorConstructor.java`
-uses a named `Comparator` implementation and expects the same Java result and
-the same loud `unsupported_priority_queue_comparator_constructor` diagnostic,
-without depending on anonymous-class lowering. This isolates the carrier work
-from the older combined fixture. The constructor planner now recognizes both a
-literal `Comparator` argument type and source types that reach `Comparator`
-through hierarchy facts, so named comparator implementations no longer fall
-through to the natural-order `Vec` constructor path.
+Other arbitrary comparator interface slots remain loud because they still lack
+a callable comparator facade.
+
+Codex follow-up 2026-09-13 inline anonymous `PriorityQueue` comparator pass:
+the exact constructor shape
+`new PriorityQueue<T>(new Comparator<T>() { compare(left, right) { return ...; } })`
+now lowers to `JavaPriorityQueue::with_comparator` with an inline closure for
+simple `compareTo` return bodies. The differential fixture
+`tests/differential/PriorityQueueComparatorConstructor.java` is promoted
+(`3,2,1`), and the diagnostic suppression is scoped to that supported
+constructor shape rather than general anonymous-object lowering.
+Follow-up: the same inline constructor path also handles simple arithmetic
+subtraction comparator bodies such as `return right - left;` and
+`Integer.compare(right, left)`, and the equivalent two-argument lambda
+constructor shape, avoiding the stale fallback through an empty
+`Comparator::new()` facade or a lambda-as-queue value. Differential fixtures:
+`tests/differential/PriorityQueueSubtractionComparatorConstructor.java` and
+`tests/differential/PriorityQueueStaticCompareComparatorConstructor.java`, plus
+`tests/differential/PriorityQueueLambdaComparatorConstructor.java` (`3,2,1`).
+The lambda/anonymous comparator lowering now allocates one Rust-safe binding map
+for closure parameter patterns and body variable references, so Java parameter
+names that are Rust keywords do not split into `|type|` plus `r#type` uses;
+`tests/differential/PriorityQueueLambdaKeywordComparatorConstructor.java` pins
+that compile/runtime case.
+Codex follow-up 2026-09-14 later: lambda comparator constructors now also
+handle block bodies with ordinary early returns, not just expression lambdas or
+`{ return expr; }` blocks. `new PriorityQueue<Integer>((left, right) -> {
+if (...) return ...; ... })` lowers the block into the stored comparator closure
+instead of assigning the closure itself to a `JavaPriorityQueue`. Focused
+generated-crate fixture:
+`idiom_gaps::priority_queue_block_lambda_comparator_constructor_uses_callback_block`.
+Differential fixture:
+`tests/differential/PriorityQueueBlockLambdaComparatorConstructor.java` (`3,2,1`).
 
 Follow-up 2026-09-09 `PriorityQueue.add`/`offer` natural-order pass: the native
 `Vec<T>` carrier now sorts after `add(value)` and `offer(value)`, so `element()`
@@ -133,8 +284,24 @@ fixture `idiom_gaps::queue_poll_aliases_remove_head_and_return_null_on_empty`
 pins the same lowering for `ArrayDeque.pollFirst()` and `ArrayBlockingQueue.poll()`.
 Differential fixtures: `tests/differential/QueuePollNull.java` (`a:null:true`)
 and `tests/differential/QueuePollAliases.java` (`a:null:b:null:c:null`).
-Comparator-backed `PriorityQueue` remains open: the checked-in known-gap fixture
-also needs anonymous comparator lowering and a real comparator carrier.
+Codex follow-up 2026-09-13 boxed queue-poll display pass: `poll()` on a
+`PriorityQueue<Integer>`/`PriorityQueue<Double>`/`PriorityQueue<Boolean>` in string concatenation now
+uses the optional Java display policy instead of rendering `Option<T>` directly;
+floating elements route through Java float/double spelling, so `1.0` does not
+collapse to Rust's `1`, and Boolean natural ordering is included in the
+priority-queue carrier. Focused generated-crate fixture:
+`idiom_gaps::queue_poll_boxed_primitive_concat_uses_optional_java_display`;
+differential fixture:
+`tests/differential/PriorityQueuePollIntegerConcat.java` (`1,2,3,null`) and
+`tests/differential/PriorityQueuePollDoubleConcat.java` (`1.0,2.0,3.0,null`),
+and `tests/differential/PriorityQueuePollBooleanConcat.java`
+(`false,true,true,null`).
+Comparator-backed `PriorityQueue` fixtures now cover both named comparator
+implementations and the supported inline anonymous comparator shape above.
+Nonescaping `Comparator<T>` parameters and direct lambda/method-reference
+callable locals consumed by the constructor are covered by the focused
+generated-crate fixtures; other opaque comparator values remain a loud
+unsupported boundary.
 
 Follow-up 2026-09-09 focused map-view contract oracle: the dedicated
 `map_view_contract_fixtures_match_java_output` loop now groups existing
@@ -185,6 +352,13 @@ and `None` as Java `null`. Pinned by
 `tests/differential/ErasedNullableArrayListDisplay.java` in the focused
 `erased_display_fixtures_match_java_output` loop. This is a concrete collection
 carrier arm, not a broad unknown-erased fallback.
+Codex follow-up 2026-09-14 null-bearing `Arrays.asList` display pass:
+`Arrays.asList("a", null, "c")` now lowers all varargs through one nullable
+element slot instead of producing a mixed `Vec<String/None/String>` carrier.
+The erased-object display path can then reuse the nullable collection formatter
+and prints `[a, null, c]` for both concat and direct `toString()`. Differential
+fixture: `tests/differential/ErasedArraysAsListNullDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
 
 Follow-up 2026-09-07 erased `BitSet` display pass: `BitSet` was already a
 modeled platform facade for `get`/`set`, but erased display did not include it.
@@ -1919,19 +2093,19 @@ Rechecked 2026-09-11 after the current dirty-tree audit cleanup:
 passed, covering all four promoted `ArrayBlockingQueue*` fixtures in the release
 translator.
 
-Follow-up triage 2026-09-11 comparator-backed `PriorityQueue`: this is not a
+Follow-up triage 2026-09-11 comparator-backed `PriorityQueue`: this was not a
 simple extension of the natural-order `Vec<T>` carrier. `Collections.sort` can
 use a comparator expression statement-locally, but a priority queue must store
 the comparator across later `add`/`offer`/`peek`/`poll` calls. Rechecked
-2026-09-12: the checked-in fixture also depends on anonymous comparator body
-lowering, and current translation reports both `unsupported_anonymous_class` and
-`unsupported_priority_queue_comparator_constructor`. A correct promotion
-therefore needs a representation decision for comparator storage, trait derives,
-and the anonymous comparator object lowering path before promoting
-`known-gaps/PriorityQueueComparatorConstructor.java`. The named-comparator
-fixture isolates the carrier half, but still should stay known-gap until that
-stored-comparator representation exists. Keep the current loud
-`PriorityQueueComparatorUnsupported` path until that design is chosen.
+2026-09-13: the stored-comparator carrier exists, named comparators are handled
+through their `compare` method, and the checked-in anonymous comparator fixture
+is promoted through a narrow inline-closure lowering for simple `compareTo`
+return bodies. Follow-up 2026-09-13: nonescaping method-parameter
+`Comparator<T>` values consumed by `new PriorityQueue<>(comparator)` now lower
+as stored callback closures with a `'static` bound; direct local
+lambda/method-reference comparator values lower as inferred closures captured
+by the same carrier. Other opaque `Comparator<T>` values remain loud until a
+callable comparator facade exists.
 
 Follow-up cleanup narrowed `SlotContentCapabilityPolicy` to a read-only
 private-backed record. String-content and sequence-element facts still flow

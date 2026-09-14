@@ -70,6 +70,32 @@ fn files_new_buffered_reader_returns_buffered_reader_fact() {
 }
 
 #[test]
+fn vcf_smart_merge_headers_lookup_preserves_set_return_shape() {
+    for receiver in [
+        "htsjdk.variant.vcf.VCFUtils",
+        "HtsjdkVariantVcfVCFUtils",
+        "VCFUtils",
+    ] {
+        for method in ["smartMergeHeaders", "smart_merge_headers"] {
+            let effect =
+                external_api_effect_for_receiver_with_arity(Some(receiver), method, Some(2))
+                    .unwrap_or_else(|| panic!("{receiver}.{method} should resolve"));
+            assert_eq!(
+                effect.return_type,
+                Some(JavaType::Named {
+                    name: "Set".to_string(),
+                    args: vec![JavaType::Named {
+                        name: "VCFHeaderLine".to_string(),
+                        args: Vec::new(),
+                    }],
+                }),
+                "{receiver}.{method}"
+            );
+        }
+    }
+}
+
+#[test]
 fn builtin_external_pack_manifests_declare_boundaries_and_crate_hooks() {
     let manifests = builtin_external_pack_manifests();
     let variantcontext = manifests

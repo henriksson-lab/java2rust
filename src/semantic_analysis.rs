@@ -3185,7 +3185,10 @@ fn collect_external_api_type_env(
         }
     }
     for param in params {
-        env.insert_local(param.name.clone(), param.ty.clone());
+        env.insert_param(param.source_name.clone(), param.ty.clone());
+        if param.name != param.source_name {
+            env.insert_param(param.name.clone(), param.ty.clone());
+        }
     }
     env
 }

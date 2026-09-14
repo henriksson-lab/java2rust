@@ -1,25 +1,24 @@
 # 0023 — Non-static inner-class construction still lacks shared outer receivers
 
-Status: **open, narrowed to shared-receiver construction** (captured-inner
-callers that already carry `self.__outer` can now route through outer method
-`*_with_outer` companions; unsupported construction without an outer handle now
-reports a translator diagnostic and lowers to an explicit runtime handoff in
-companioned fallback bodies)
-Severity: high — ordinary `new Inner()` from an outer instance method still
-routes through an unsupported-construction fallback in the original method body.
-Non-panicking `_with_outer` companion bodies are emitted, and captured inner
-callers that already possess the outer handle now route to them; ordinary
-by-value outer receivers still cannot synthesize the required handle.
-Kind: blocked by unimplemented `SharedLocal`/shared receiver construction ([0002](0002-object-aliasing-has-no-representation.md))
+Status: **fixed for implemented SharedLocal receivers**
+(captured-inner callers, qualified `other.new Inner()` calls, and ordinary
+outer calls on an implemented shared outer handle now route through associated
+`_with_outer` companions; unsupported tiers such as SharedSync still report a
+translator diagnostic and lower to an explicit runtime handoff)
+Severity: closed for the checked `InnerCapture`/`QualifiedInnerCapture` shapes.
+The remaining unsupported cases are representation-tier coverage from
+[0002](0002-object-aliasing-has-no-representation.md), not this
+always-panicking lowering defect.
+Kind: fixed lowering gap; residual SharedSync support remains tracked by [0002](0002-object-aliasing-has-no-representation.md)
 
 ## Symptom
 
 Non-static inner classes compile, and paths that already possess an outer handle
-now have non-panicking `_with_outer` constructor and method companions. The
-remaining ordinary outer method path still has no shared receiver handle, so the
-original method body calls the fallback constructor and remains runtime-loud
-while the translator reports `inner_class_construction_panics`. A
-separate `method_with_outer` body exists when lowering can make the body
+now have non-panicking `_with_outer` constructor and method companions. Ordinary
+outer calls on implemented SharedLocal handles also dispatch through those
+companions, so the promoted differential fixtures execute without the previous
+runtime-loud constructor path. A separate `method_with_outer` body exists when
+lowering can make the body
 non-panicking; the unresolved part is routing ordinary calls to that companion
 once receivers themselves are represented as shared handles.
 
@@ -40,26 +39,43 @@ public class InnerCapture {
 Generated:
 
 ```rust
-pub struct InnerCaptureAdder {
+pub struct InnerCapture_Adder {
     __outer: std::rc::Rc<std::cell::RefCell<InnerCapture>>,
 }
 
-impl InnerCaptureAdder {
+impl InnerCapture_Adder {
     pub fn add(&self, x: i32) -> i32 {
         return self.__outer.borrow().base + x;          // correct
     }
 
-    pub fn new() -> InnerCaptureAdder {
-        return InnerCaptureAdder {
+    pub fn new() -> InnerCapture_Adder {
+        return InnerCapture_Adder {
             __outer: panic!("unsupported Java inner-class outer capture construction \
                              for InnerCapture.Adder; pass an outer InnerCapture handle"),
         };
     }
+
+    pub fn new_with_outer(
+        __outer: std::rc::Rc<std::cell::RefCell<InnerCapture>>,
+    ) -> InnerCapture_Adder {
+        return InnerCapture_Adder { __outer: __outer.clone() };
+    }
 }
 
 impl InnerCapture {
-    pub fn run(&mut self) -> i32 {
-        let a: InnerCaptureAdder = InnerCaptureAdder::new();   // no outer handle passed
+    pub fn compute(&mut self) -> i32 {
+        let a: InnerCapture_Adder =
+            panic!("unsupported Java inner-class outer capture construction \
+                    for InnerCapture.Adder; pass an outer InnerCapture handle");
+        self.base = 20;
+        return a.add(1);
+    }
+
+    pub fn compute_with_outer(
+        &mut self,
+        __java_self: std::rc::Rc<std::cell::RefCell<InnerCapture>>,
+    ) -> i32 {
+        let a: InnerCapture_Adder = InnerCapture_Adder::new_with_outer(__java_self.clone());
         self.base = 20;
         return a.add(1);
     }
@@ -91,8 +107,8 @@ recursing on the inner receiver.
 
 ## Root cause: this is 0002 with the consequence made visible
 
-To construct `InnerCaptureAdder`, `run` must hand it an
-`Rc<RefCell<InnerCapture>>`. But `run`'s receiver is `&mut InnerCapture` — the
+To construct `InnerCapture_Adder`, `compute` must hand it an
+`Rc<RefCell<InnerCapture>>`. But `compute`'s receiver is `&mut InnerCapture` — the
 outer object is represented **by value**, and there is no way to obtain a shared
 handle to it.
 
@@ -583,38 +599,29 @@ crate-internal as well. The diagnostic path and 0002b work queue are unchanged,
 but the unconstructable-inner-class analysis no longer appears as public crate
 API. Guard: `layering::declaration_context_usage_lookups_use_java_callable_keys`.
 
-Follow-up 2026-09-10: attempted to promote a qualified `outer.new Inner()`
-known-gap fixture, but the current parser/lowering path does not report
-`inner_class_construction_panics` for that shape. It reaches the storage-plan
-disagreement warnings for `SharedLocal` instead, then lowers through an erased
-constructor fallback. Do not add it to the known-gap harness until qualified
-object creation preserves enough inner-constructor identity to share the same
-diagnostic contract as ordinary `new Inner()`.
-
-Codex follow-up 2026-09-10: the qualified-construction diagnostic gap above is
-closed. `parse_object_creation_type_node` now treats an object-creation prefix
-of the form `other.new Inner(` as constructing `Inner` rather than the bogus
-type `new`; resolver recovery then records the full constructed type
-`Outer.Inner`, and `inner_class_capture` reports it through the same
-`inner_class_construction_panics` path as ordinary `new Inner()`. Regression:
-`parser_gaps::parses_qualified_inner_constructor_type_after_object_prefix` and
-`inner_class_capture::tests::qualified_inner_construction_is_reported_as_unconstructable`.
-
-Codex follow-up 2026-09-10: the executable known-gap suite now covers the
-qualified construction shape too. `QualifiedInnerCapture.java` exercises
-`other.new Inner()` with a Java oracle of `21`, and the harness requires the
-same loud runtime handoff and `inner_class_construction_panics` diagnostic as
-ordinary `InnerCapture.java`. This is still coverage only; ordinary construction
-remains blocked on the unimplemented `SharedLocal` outer-handle carrier.
+Codex follow-up 2026-09-14: qualified construction is no longer a known gap.
+`Expr::New` now preserves the qualifier from `other.new Inner()`, resolver and
+analysis traversals visit that qualifier, and lowering passes the already-shared
+outer local to `Inner::new_with_outer(other.clone())`. Unshaped constructor
+expressions for source types with shared storage are wrapped through the same
+`Rc<RefCell<T>>` construction policy used by slots, so
+`new Outer().method()` no longer emits a raw value followed by `.borrow()`.
+`inner_class_capture` still feeds qualified construction into storage planning
+but no longer reports `inner_class_construction_panics` for the supported
+qualified path. `tests/differential/QualifiedInnerCapture.java` is promoted and
+matches Java (`21`). Ordinary unqualified `new Inner()` from an outer method
+remains blocked on shared receivers and stays covered by the known-gap
+`InnerCapture.java`.
 
 Codex follow-up 2026-09-10: the ordinary `InnerCapture.java` shape now has a
 full-translation marker guard tying this gap to the mutable shared-storage work
 queue. `output_markers::inner_capture_gap_reports_mutable_shared_storage_work_queue`
 requires the generated Rust to keep the loud unsupported outer-capture handoff,
 requires `inner_class_construction_panics`, and also requires the paired
-`storage_strategy_disagreement` message to name `InnerCapture needs SharedLocal`.
-The test is deliberately evidence only; it prevents the inner-constructor
-runtime gap from drifting away from the 0002b receiver/borrow-policy blocker.
+`storage_strategy_surface_not_forwardable` message to name `InnerCapture` as a
+shared type that cannot yet take the handle-forwarded tier. The test is
+deliberately evidence only; it prevents the inner-constructor runtime gap from
+drifting away from the 0002b receiver/borrow-policy blocker.
 
 Codex follow-up 2026-09-10: that full marker sweep also caught a regression in
 the construction detector. The detector kept a global simple-name fallback, so
@@ -624,3 +631,15 @@ constructed type names, including resolver-provided `Outer.B` names, rather
 than rejoining by simple name. Regression:
 `output_markers::top_level_constructor_does_not_report_same_simple_inner_capture_panic`
 and the full `output_markers` suite.
+
+Codex follow-up 2026-09-14 later: ordinary unqualified `new Inner()` from an
+outer instance method now routes through the shared outer handle when the outer
+type is already on the implemented `SharedLocal` tier. The source method still
+emits its ordinary `&mut self` body, but lowering also emits the existing
+`_with_outer` companion that receives `Rc<RefCell<Outer>>`; calls on a shared
+outer receiver now bind the handle once and dispatch
+`handle.borrow_mut().method_with_outer(handle.clone(), ...)`. The
+`inner_class_capture` diagnostic gate now treats implemented `SharedLocal` as
+constructable instead of reporting `inner_class_construction_panics`.
+`tests/differential/InnerCapture.java` is promoted and matches Java (`21`);
+the known-gap harness is down to the two identity-model fixtures.

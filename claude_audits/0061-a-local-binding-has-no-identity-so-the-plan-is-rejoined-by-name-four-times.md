@@ -14,6 +14,95 @@ through the usage/signature compatibility paths. Treat future fixes here as
 id-less-boundary cleanup, not as evidence that normal Java source locals are
 still rejoined by name.
 
+Codex follow-up 2026-09-14: the id-less borrowed-return compatibility scanner
+now tracks lexical shadowing while checking exact returned names and assignment
+targets. A same-source-name local declared in an inner block can mutate without
+being mistaken for the id-less parameter, while a same-name local returned from
+the method no longer counts as returning the parameter. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_shadowed_local_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_shadowed_local_return`.
+Codex follow-up 2026-09-14 later: the same id-less scanner now treats catch
+parameters as lexical shadows too. A `catch (Exception value)` assignment no
+longer rejects borrowed-return policy for an outer id-less `value` parameter,
+and a return from inside that catch body no longer proves the outer parameter is
+returned. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_shadowed_catch_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_shadowed_catch_return`.
+Codex follow-up 2026-09-14 later: try-with-resources declarations now shadow
+the id-less binding in the try body as well. The resource initializer itself is
+still scanned under the outer binding, but body assignments and returns to the
+same source-name resource are not attributed to the outer parameter. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_shadowed_resource_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_shadowed_resource_return`.
+Codex follow-up 2026-09-14 later: switch statement groups now carry that same
+lexical shadowing state forward across later case groups. A same-source-name
+declaration in one case prevents later case assignments or exact returns from
+being attributed to the outer id-less parameter. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_switch_shadowed_case_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_switch_shadowed_case_return`.
+Codex follow-up 2026-09-14 later: positive `instanceof` pattern bindings in an
+`if` condition now shadow the id-less parameter while scanning the `then` arm.
+A same-source-name pattern binding assignment is no longer treated as mutating
+the outer returned parameter, and a returned pattern binding no longer proves
+the outer parameter was returned. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_pattern_binding_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_pattern_binding_return`.
+Codex follow-up 2026-09-14 later: negated `instanceof` pattern bindings now
+shadow the id-less parameter while scanning the `else` arm of an `if`. A
+same-source-name pattern binding reached through `if (!(... instanceof T value))
+{ ... } else { ... }` is no longer mistaken for the outer id-less `value`
+parameter when checking assignments or exact returns. The branch-scope helper
+also recurses through negation, so double-negated pattern conditions do not fall
+back to the outer id-less binding either. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_negated_pattern_else_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_negated_pattern_else_return`,
+plus
+`slot_policy::tests::idless_borrowed_return_policy_rejects_double_negated_pattern_return`.
+Codex follow-up 2026-09-14 later: the same positive pattern-binding shadow now
+applies to `while` loop bodies. A same-source-name pattern variable assigned in
+the loop body is not attributed to the outer id-less parameter, and a return
+from that loop body no longer proves the outer parameter was returned.
+Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_while_pattern_binding_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_while_pattern_binding_return`.
+Codex follow-up 2026-09-14 later: `for` loop conditions now get the same
+positive pattern-binding shadowing. `for (; input instanceof String value; )`
+no longer treats assignments to the pattern variable as mutations of the outer
+id-less parameter, and returning that pattern variable from the loop body no
+longer proves the parameter was returned. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_for_pattern_binding_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_for_pattern_binding_return`.
+
+Codex follow-up 2026-09-14 later: id-less signature local lookup now validates
+the `local_index_by_name` entry before using it. A stale compatibility index
+such as `value -> 0` no longer returns `locals[0]` when that local's stored name
+is `other`; the helper falls back to the unique real name scan or fails closed.
+Regression:
+`signature::tests::idless_method_local_lookup_rejects_stale_name_index`.
+Codex follow-up 2026-09-14 later: the id-less borrowed-return mutation scanner
+now inspects evaluated constructor surfaces instead of treating them as
+harmless. `this(value = "x")`/`super(value = "x")` constructor invocation
+arguments and qualified inner construction receivers such as
+`(value = "x").new Inner()` now reject borrowed-return policy before a later
+`return value`. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_constructor_invocation_arg_mutation`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_qualified_new_receiver_mutation`.
+Codex follow-up 2026-09-14 later: the same scanner is now regression-pinned for
+`do { ... } while (...)` conditions. A condition assignment such as
+`while (value = "next")` is evaluated before the later `return value`, so the
+id-less borrowed-return policy must reject it just like `while`/`for` conditions
+and update expressions. Regression:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_do_while_condition_mutation`.
+
 Follow-up cleanup renamed the private name-keyed local constraint readers on
 `MethodConstraintSet` and `ConstructorConstraintSet` to
 `idless_compatibility_local*`. Resolver-bound propagation continues to use
@@ -1883,3 +1972,15 @@ and storage side-table mutation owned by `expr_shape`, while lowering still gets
 crate-local entry points for owner-qualified static field and type static-storage
 facts. Boundary guard:
 `layering::idless_local_binding_compatibility_surface_stays_explicit`.
+
+Codex follow-up 2026-09-14 later: expression-level pattern-binding scopes now
+feed the same id-less borrowed-return assignment scanner used by statement
+branches. A pattern binding introduced by the left side of `&&`, by the negated
+left side of `||`, or by a ternary condition shadows the same-source-name
+id-less parameter while scanning the reachable right/arm expression. Assigning
+to that pattern variable no longer rejects borrowed-return policy for the outer
+parameter. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_ternary_pattern_binding_assignment`,
+`slot_policy::tests::idless_borrowed_return_policy_ignores_and_pattern_binding_assignment`,
+and
+`slot_policy::tests::idless_borrowed_return_policy_ignores_or_negated_pattern_binding_assignment`.

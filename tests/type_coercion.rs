@@ -4831,6 +4831,105 @@ fn borrowed_dyn_recovery_uses_clone_box_capability_fact_once() {
 }
 
 #[test]
+fn shape_coercion_recovers_erased_object_into_source_hierarchy_carrier() {
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "Dog".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: Some(JavaType::Named {
+                name: "Animal".to_string(),
+                args: Vec::new(),
+            }),
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::ParsedSource,
+        });
+    let mut actual = RustSlotShape::conservative(JavaType::Unknown("Object".to_string()));
+    actual.dispatch = DispatchShape::ErasedObject;
+    let mut target = RustSlotShape::conservative(JavaType::Named {
+        name: "Animal".to_string(),
+        args: Vec::new(),
+    });
+    target.dispatch = DispatchShape::ClosedEnum {
+        enum_name: "AnimalValue".to_string(),
+    };
+
+    assert_eq!(
+        plan_shape_coercion_with_facts(&actual, &target, &facts),
+        vec![Coercion::DowncastErasedObjectToClosedEnum {
+            enum_name: "AnimalValue".to_string(),
+            variants: vec!["Animal".to_string(), "Dog".to_string()],
+            invalid_cast: InvalidCastPolicy::Panic,
+        }]
+    );
+    let recovered = apply_expr_to_slot_with_facts(
+        RustExpr::Var("object".to_string()),
+        actual,
+        &Slot::Assignment(target),
+        &facts,
+    );
+    let rendered = emit_expr(&recovered);
+    assert!(
+        rendered.contains("if __java_erased_object.is::<Animal>()"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("AnimalValue::Animal(__java_erased_object.downcast_ref::<Animal>().expect(\"invalid Java cast\").clone())"),
+        "{rendered}"
+    );
+    assert!(
+        rendered.contains("AnimalValue::Dog(__java_erased_object.downcast_ref::<Dog>().expect(\"invalid Java cast\").clone())"),
+        "{rendered}"
+    );
+}
+
+#[test]
+fn instanceof_recovers_erased_object_against_source_hierarchy_carrier() {
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "Dog".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: Some(JavaType::Named {
+                name: "Animal".to_string(),
+                args: Vec::new(),
+            }),
+            final_type: None,
+            object_safe_trait: None,
+            provenance: FactProvenance::ParsedSource,
+        });
+    let mut actual = RustSlotShape::conservative(JavaType::Unknown("Object".to_string()));
+    actual.dispatch = DispatchShape::ErasedObject;
+    let mut target = RustSlotShape::conservative(JavaType::Named {
+        name: "Animal".to_string(),
+        args: Vec::new(),
+    });
+    target.dispatch = DispatchShape::ClosedEnum {
+        enum_name: "AnimalValue".to_string(),
+    };
+
+    let check = plan_instanceof_check_with_facts(&actual, &target, &facts);
+    assert_eq!(
+        check,
+        InstanceOfCheck::ErasedObjectClosedEnum {
+            enum_name: "AnimalValue".to_string(),
+            variants: vec!["Animal".to_string(), "Dog".to_string()],
+        }
+    );
+}
+
+#[test]
 fn shape_coercion_owns_unsupported_dispatch_fallback_policy() {
     let mut actual = RustSlotShape::conservative(JavaType::Named {
         name: "Animal".to_string(),
