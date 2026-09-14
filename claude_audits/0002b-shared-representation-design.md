@@ -2,7 +2,7 @@
 
 Status: **partially implemented** (`SharedImmutable` landed; `SharedLocal`/`SharedSync` remain open)
 Blocks: [0002](0002-object-aliasing-has-no-representation.md),
-[0023](0023-inner-class-construction-always-panics.md),
+[0023](done/0023-inner-class-construction-always-panics.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
 
 This exists because three separate documents all stop at the same sentence —

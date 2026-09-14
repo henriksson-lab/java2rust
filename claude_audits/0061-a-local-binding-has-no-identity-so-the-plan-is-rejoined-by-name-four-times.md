@@ -1984,3 +1984,89 @@ parameter. Regressions:
 `slot_policy::tests::idless_borrowed_return_policy_ignores_and_pattern_binding_assignment`,
 and
 `slot_policy::tests::idless_borrowed_return_policy_ignores_or_negated_pattern_binding_assignment`.
+
+Codex follow-up 2026-09-14 later: switch case labels that introduce a pattern
+binding now shadow the id-less outer binding while scanning that case's
+statements. A pattern case assignment no longer looks like a mutation of the
+returned parameter, and a return from the pattern binding no longer proves the
+outer parameter is returned. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_switch_pattern_case_assignment`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_switch_pattern_case_return`.
+The same label shadow is applied to switch expression arm values for the
+assignment scanner; exact-return scanning does not currently descend into switch
+expression values. Regression:
+`slot_policy::tests::idless_borrowed_return_policy_ignores_switch_expression_pattern_case_assignment`.
+
+Codex follow-up 2026-09-14 later: liveness scope recording now carries
+`instanceof` pattern bindings into the true/false branch scopes that can see
+them, and kills those branch-local bindings at the branch boundary so they do
+not become live before the condition that creates them. Reads and writes of a
+same-source-name pattern binding therefore no longer keep or mutate the outer
+binding in liveness queries. Regressions:
+`liveness::tests::if_pattern_binding_read_does_not_keep_outer_same_name_live`
+and
+`liveness::tests::if_pattern_binding_write_does_not_mutate_outer_same_name`.
+Additional coverage pins negated-pattern `else` scopes, `while` pattern scopes,
+and switch pattern-label scopes:
+`liveness::tests::negated_else_pattern_binding_read_does_not_keep_outer_same_name_live`,
+`liveness::tests::while_pattern_binding_write_does_not_mutate_outer_same_name`,
+and
+`liveness::tests::switch_pattern_label_read_does_not_keep_outer_same_name_live`.
+
+Codex follow-up 2026-09-14 later: usage analysis now gives reachable
+`instanceof` pattern variables their own temporary visible binding while
+analyzing the branch/case body that can see them. Same-source-name pattern
+receiver reads therefore no longer attach receiver-call facts to an outer
+parameter or local merely because the pattern variable has no resolver
+`BindingId`. The temporary pattern binding is intentionally id-less: it prevents
+wrong attribution without widening the broader id-less receiver-type fallback.
+Regressions:
+`usage::tests::instanceof_pattern_binding_read_does_not_use_outer_same_name_binding`
+and
+`usage::tests::negated_instanceof_else_pattern_binding_read_does_not_use_outer_same_name_binding`.
+
+Codex follow-up 2026-09-14 later: signature source-nullability scopes now
+represent id-less pattern-variable shadows separately from resolver-bound
+locals. A pattern binding can therefore block same-name field fallback and
+same-name outer binding updates without inventing a fake `BindingId`. This fixes
+two wrong-answer paths: returning a pattern variable no longer borrows a
+same-name field's nullability fact, and assigning `null` to a same-name pattern
+variable no longer marks the outer parameter nullable. Regressions:
+`signature::tests::source_return_nullability_pattern_binding_does_not_fall_back_to_field`
+and
+`signature::tests::source_return_nullability_pattern_assignment_does_not_update_outer_param`.
+
+Codex follow-up 2026-09-14 later: signature source-nullability shadow scopes now
+also apply inside expression-level control flow. Ternary arms inherit the
+true/false pattern-variable scope from the condition, and short-circuit `&&`/`||`
+right-hand sides inherit the corresponding reachable pattern scope from the
+left-hand side. This closes the same-name rejoin for expression-only returns and
+assignments such as `(input instanceof String value) ? value : fallback` and
+`input instanceof String value && (value = null) == null`. Regressions:
+`signature::tests::source_return_nullability_ternary_pattern_binding_does_not_fall_back_to_field`,
+`signature::tests::source_return_nullability_ternary_pattern_assignment_does_not_update_outer_param`,
+and
+`signature::tests::source_return_nullability_short_circuit_pattern_assignment_does_not_update_outer_param`.
+
+Codex follow-up 2026-09-14 later: the remaining name-only source-nullability
+compatibility map now shares the same pattern-variable shadowing rules as the
+binding-aware source-nullability passes. An id-less outer parameter no longer
+inherits nullable-storage evidence from assignments or null comparisons against
+a same-source-name pattern variable in statement branches, switch cases, ternary
+arms, or short-circuit right-hand sides. Regressions:
+`signature::tests::idless_source_nullability_pattern_assignment_does_not_update_outer_param`
+and
+`signature::tests::idless_source_nullability_expression_pattern_assignment_does_not_update_outer_param`.
+
+Codex follow-up 2026-09-14 later: usage analysis now applies pattern-variable
+visible-binding shadows inside expression-level control flow too. Short-circuit
+`&&`/`||` right-hand sides, ternary arms, and switch-expression case values no
+longer charge receiver-call/content-read facts to an outer resolver-bound
+same-name parameter when the read is from an id-less pattern variable.
+Regressions:
+`usage::tests::and_pattern_binding_read_does_not_use_outer_same_name_binding`,
+`usage::tests::or_negated_pattern_binding_read_does_not_use_outer_same_name_binding`,
+`usage::tests::ternary_pattern_binding_read_does_not_use_outer_same_name_binding`,
+and
+`usage::tests::switch_expression_pattern_binding_read_does_not_use_outer_same_name_binding`.

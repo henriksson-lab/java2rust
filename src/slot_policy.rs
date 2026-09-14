@@ -491,12 +491,14 @@ fn switch_cases_assign_to_binding(
     mut binding_shadowed: bool,
 ) -> bool {
     for case in cases {
+        let case_binding_shadowed =
+            binding_shadowed || switch_case_labels_declare_binding_name(case, binding_name);
         if case.labels.iter().any(|label| match label {
             crate::java_ir::SwitchLabel::Expr(expr) => {
                 expr_assigns_to_binding(expr, binding_name, binding_shadowed)
             }
             crate::java_ir::SwitchLabel::Default => false,
-        }) || stmts_assign_to_binding(&case.statements, binding_name, binding_shadowed)
+        }) || stmts_assign_to_binding(&case.statements, binding_name, case_binding_shadowed)
         {
             return true;
         }
@@ -509,6 +511,30 @@ fn switch_cases_assign_to_binding(
         }
     }
     false
+}
+
+fn switch_case_labels_declare_binding_name(
+    case: &crate::java_ir::SwitchCase,
+    binding_name: &str,
+) -> bool {
+    case.labels.iter().any(|label| match label {
+        crate::java_ir::SwitchLabel::Expr(expr) => {
+            expr_declares_binding_name_for_true_branch(expr, binding_name)
+        }
+        crate::java_ir::SwitchLabel::Default => false,
+    })
+}
+
+fn switch_expr_case_labels_declare_binding_name(
+    case: &crate::java_ir::SwitchExprCase,
+    binding_name: &str,
+) -> bool {
+    case.labels.iter().any(|label| match label {
+        crate::java_ir::SwitchLabel::Expr(expr) => {
+            expr_declares_binding_name_for_true_branch(expr, binding_name)
+        }
+        crate::java_ir::SwitchLabel::Default => false,
+    })
 }
 
 fn stmt_declares_binding_name(stmt: &Stmt, binding_name: &str) -> bool {
@@ -575,12 +601,14 @@ fn expr_assigns_to_binding(expr: &Expr, binding_name: &str, binding_shadowed: bo
         Expr::Switch { selector, cases } => {
             expr_assigns_to_binding(selector, binding_name, binding_shadowed)
                 || cases.iter().any(|case| {
+                    let case_binding_shadowed = binding_shadowed
+                        || switch_expr_case_labels_declare_binding_name(case, binding_name);
                     case.labels.iter().any(|label| match label {
                         crate::java_ir::SwitchLabel::Expr(expr) => {
                             expr_assigns_to_binding(expr, binding_name, binding_shadowed)
                         }
                         crate::java_ir::SwitchLabel::Default => false,
-                    }) || expr_assigns_to_binding(&case.value, binding_name, binding_shadowed)
+                    }) || expr_assigns_to_binding(&case.value, binding_name, case_binding_shadowed)
                 })
         }
         Expr::Call { receiver, args, .. } => {
@@ -820,7 +848,9 @@ fn switch_cases_exactly_return_param(
     mut binding_shadowed: bool,
 ) -> bool {
     for case in cases {
-        if stmts_exactly_return_param(&case.statements, binding_name, binding_shadowed) {
+        let case_binding_shadowed =
+            binding_shadowed || switch_case_labels_declare_binding_name(case, binding_name);
+        if stmts_exactly_return_param(&case.statements, binding_name, case_binding_shadowed) {
             return true;
         }
         if case
@@ -1977,6 +2007,109 @@ mod tests {
                 &effective_facts
             ),
             "id-less compatibility must not treat a later switch case return as returning the parameter after an earlier case declares the same source name"
+        );
+    }
+
+    #[test]
+    fn idless_borrowed_return_policy_ignores_switch_pattern_case_assignment() {
+        let method = private_static_idless_method_with_body(vec![
+            Stmt::Switch {
+                selector: Expr::Var("input".to_string()),
+                cases: vec![crate::java_ir::SwitchCase {
+                    labels: vec![crate::java_ir::SwitchLabel::Expr(Expr::InstanceOf {
+                        expr: Box::new(Expr::Var("input".to_string())),
+                        ty: JavaType::String,
+                        binding: Some("value".to_string()),
+                    })],
+                    statements: vec![Stmt::Assign {
+                        target: Expr::Var("value".to_string()),
+                        value: Expr::Literal(Literal::String("changed".to_string())),
+                    }],
+                }],
+            },
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let usage = idless_usage_with_name_facts(&method, vec![BindingUse::Returned]);
+
+        assert!(
+            method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &method.params[0],
+                &usage,
+                &effective_facts
+            ),
+            "id-less compatibility must not attribute a switch pattern-case assignment to the returned parameter"
+        );
+    }
+
+    #[test]
+    fn idless_borrowed_return_policy_rejects_switch_pattern_case_return() {
+        let method = private_static_idless_method_with_body(vec![Stmt::Switch {
+            selector: Expr::Var("input".to_string()),
+            cases: vec![crate::java_ir::SwitchCase {
+                labels: vec![crate::java_ir::SwitchLabel::Expr(Expr::InstanceOf {
+                    expr: Box::new(Expr::Var("input".to_string())),
+                    ty: JavaType::String,
+                    binding: Some("value".to_string()),
+                })],
+                statements: vec![Stmt::Return(Some(Expr::Var("value".to_string())))],
+            }],
+        }]);
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let usage = idless_usage_with_name_facts(&method, vec![BindingUse::Returned]);
+
+        assert!(
+            !method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &method.params[0],
+                &usage,
+                &effective_facts
+            ),
+            "id-less compatibility must not treat a returned switch pattern-case binding as returning the method parameter"
+        );
+    }
+
+    #[test]
+    fn idless_borrowed_return_policy_ignores_switch_expression_pattern_case_assignment() {
+        let method = private_static_idless_method_with_body(vec![
+            Stmt::Expr(Expr::Switch {
+                selector: Box::new(Expr::Var("input".to_string())),
+                cases: vec![crate::java_ir::SwitchExprCase {
+                    labels: vec![crate::java_ir::SwitchLabel::Expr(Expr::InstanceOf {
+                        expr: Box::new(Expr::Var("input".to_string())),
+                        ty: JavaType::String,
+                        binding: Some("value".to_string()),
+                    })],
+                    value: Expr::Binary {
+                        op: BinaryOp::Assign,
+                        left: Box::new(Expr::Var("value".to_string())),
+                        right: Box::new(Expr::Literal(Literal::String("changed".to_string()))),
+                    },
+                }],
+            }),
+            Stmt::Return(Some(Expr::Var("value".to_string()))),
+        ]);
+        let ty = owner_type();
+        let facts = FactSet::default();
+        let effective_facts = EffectiveFacts::new(&facts);
+        let usage = idless_usage_with_name_facts(&method, vec![BindingUse::Returned]);
+
+        assert!(
+            method_return_allows_borrowed_param_content(
+                &ty,
+                &method,
+                &method.params[0],
+                &usage,
+                &effective_facts
+            ),
+            "id-less compatibility must not attribute a switch expression pattern-case assignment to the returned parameter"
         );
     }
 }

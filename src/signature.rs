@@ -11377,6 +11377,12 @@ struct SourceNullabilityMap {
     return_by_binding: HashMap<BindingId, NullabilityState>,
 }
 
+#[derive(Debug, Clone, Default)]
+struct SourceScope {
+    bindings: HashMap<String, BindingId>,
+    idless_shadows: HashSet<String>,
+}
+
 impl SourceNullabilityMap {
     fn constraints_for_name(&self, name: &str) -> Vec<SignatureConstraint> {
         self.by_name
@@ -11404,11 +11410,7 @@ impl SourceNullabilityMap {
             .unwrap_or_else(|| self.constraints_for_name(name))
     }
 
-    fn state_for_var(
-        &self,
-        name: &str,
-        scopes: &[HashMap<String, BindingId>],
-    ) -> Option<NullabilityState> {
+    fn state_for_var(&self, name: &str, scopes: &[SourceScope]) -> Option<NullabilityState> {
         if let Some(binding) = scoped_binding(scopes, name) {
             return Some(
                 self.return_by_binding
@@ -11417,6 +11419,9 @@ impl SourceNullabilityMap {
                     .or_else(|| self.by_binding.get(binding).copied())
                     .unwrap_or(NullabilityState::Unknown),
             );
+        }
+        if scoped_name_is_shadowed(scopes, name) {
+            return Some(NullabilityState::Unknown);
         }
         self.by_name.get(name).copied()
     }
@@ -11679,11 +11684,13 @@ impl<'a> SourceReturnNullabilityContext<'a> {
     fn field_nullability_for_expr(
         &self,
         expr: &Expr,
-        scopes: &[HashMap<String, BindingId>],
+        scopes: &[SourceScope],
     ) -> Option<NullabilityState> {
         let field_name = match expr {
             Expr::Var(name)
-                if self.field_names.contains(name) && scoped_binding(scopes, name).is_none() =>
+                if self.field_names.contains(name)
+                    && scoped_binding(scopes, name).is_none()
+                    && !scoped_name_is_shadowed(scopes, name) =>
             {
                 name.as_str()
             }
@@ -11896,7 +11903,7 @@ fn collect_source_return_nullability_states_from_stmts(
     statements: &[Stmt],
     source_nullability: &SourceNullabilityMap,
     ctx: Option<&SourceReturnNullabilityContext<'_>>,
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scopes: &mut Vec<SourceScope>,
     states: &mut Vec<NullabilityState>,
 ) {
     let mut refinements = HashSet::new();
@@ -11910,15 +11917,16 @@ fn collect_source_return_nullability_states_from_stmts(
     );
 }
 
-fn source_nullability_scopes_for_method(method: &MethodDecl) -> Vec<HashMap<String, BindingId>> {
+fn source_nullability_scopes_for_method(method: &MethodDecl) -> Vec<SourceScope> {
     source_nullability_scopes_for_params(&method.params)
 }
 
-fn source_nullability_scopes_for_params(params: &[Param]) -> Vec<HashMap<String, BindingId>> {
-    let mut root = HashMap::new();
+fn source_nullability_scopes_for_params(params: &[Param]) -> Vec<SourceScope> {
+    let mut root = SourceScope::default();
     for param in params {
         if let Some(binding) = &param.binding {
-            root.insert(param.source_name.clone(), binding.clone());
+            root.bindings
+                .insert(param.source_name.clone(), binding.clone());
         }
     }
     vec![root]
@@ -11928,7 +11936,7 @@ fn collect_source_return_nullability_states_from_stmts_with_refinements(
     statements: &[Stmt],
     source_nullability: &SourceNullabilityMap,
     ctx: Option<&SourceReturnNullabilityContext<'_>>,
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scopes: &mut Vec<SourceScope>,
     refinements: &mut HashSet<String>,
     states: &mut Vec<NullabilityState>,
 ) {
@@ -11949,7 +11957,7 @@ fn collect_source_return_nullability_states_from_stmt(
     stmt: &Stmt,
     source_nullability: &SourceNullabilityMap,
     ctx: Option<&SourceReturnNullabilityContext<'_>>,
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scopes: &mut Vec<SourceScope>,
     refinements: &HashSet<String>,
     states: &mut Vec<NullabilityState>,
 ) {
@@ -11974,11 +11982,13 @@ fn collect_source_return_nullability_states_from_stmt(
             }
         }
         Stmt::If {
+            condition,
             then_block,
             else_block,
-            ..
         } => {
-            scopes.push(HashMap::new());
+            let mut then_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut then_scope, condition);
+            scopes.push(then_scope);
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &then_block.statements,
                 source_nullability,
@@ -11989,7 +11999,9 @@ fn collect_source_return_nullability_states_from_stmt(
             );
             scopes.pop();
             if let Some(else_block) = else_block {
-                scopes.push(HashMap::new());
+                let mut else_scope = SourceScope::default();
+                insert_false_pattern_shadows(&mut else_scope, condition);
+                scopes.push(else_scope);
                 collect_source_return_nullability_states_from_stmts_with_refinements(
                     &else_block.statements,
                     source_nullability,
@@ -12001,8 +12013,24 @@ fn collect_source_return_nullability_states_from_stmt(
                 scopes.pop();
             }
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
-            scopes.push(HashMap::new());
+        Stmt::While {
+            condition, body, ..
+        } => {
+            let mut body_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut body_scope, condition);
+            scopes.push(body_scope);
+            collect_source_return_nullability_states_from_stmts_with_refinements(
+                &body.statements,
+                source_nullability,
+                ctx,
+                scopes,
+                &mut refinements.clone(),
+                states,
+            );
+            scopes.pop();
+        }
+        Stmt::DoWhile { body, .. } => {
+            scopes.push(SourceScope::default());
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &body.statements,
                 source_nullability,
@@ -12019,7 +12047,7 @@ fn collect_source_return_nullability_states_from_stmt(
             body,
             ..
         } => {
-            scopes.push(HashMap::new());
+            scopes.push(SourceScope::default());
             if let Some(binding) = binding {
                 insert_scoped_binding(scopes, source_var_name, binding.clone());
             }
@@ -12033,8 +12061,13 @@ fn collect_source_return_nullability_states_from_stmt(
             );
             scopes.pop();
         }
-        Stmt::For { init, body, .. } => {
-            scopes.push(HashMap::new());
+        Stmt::For {
+            init,
+            condition,
+            body,
+            ..
+        } => {
+            scopes.push(SourceScope::default());
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 init,
                 source_nullability,
@@ -12043,6 +12076,11 @@ fn collect_source_return_nullability_states_from_stmt(
                 &mut refinements.clone(),
                 states,
             );
+            if let Some(condition) = condition {
+                if let Some(scope) = scopes.last_mut() {
+                    insert_true_pattern_shadows(scope, condition);
+                }
+            }
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &body.statements,
                 source_nullability,
@@ -12054,7 +12092,7 @@ fn collect_source_return_nullability_states_from_stmt(
             scopes.pop();
         }
         Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
-            scopes.push(HashMap::new());
+            scopes.push(SourceScope::default());
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &body.statements,
                 source_nullability,
@@ -12067,7 +12105,9 @@ fn collect_source_return_nullability_states_from_stmt(
         }
         Stmt::Switch { cases, .. } => {
             for case in cases {
-                scopes.push(HashMap::new());
+                let mut case_scope = SourceScope::default();
+                insert_switch_case_pattern_shadows(&mut case_scope, case);
+                scopes.push(case_scope);
                 collect_source_return_nullability_states_from_stmts_with_refinements(
                     &case.statements,
                     source_nullability,
@@ -12093,7 +12133,7 @@ fn collect_source_return_nullability_states_from_stmt(
                 &mut refinements.clone(),
                 states,
             );
-            scopes.push(HashMap::new());
+            scopes.push(SourceScope::default());
             collect_source_return_nullability_states_from_stmts_with_refinements(
                 &body.statements,
                 source_nullability,
@@ -12104,7 +12144,7 @@ fn collect_source_return_nullability_states_from_stmt(
             );
             scopes.pop();
             for catch in catches {
-                scopes.push(HashMap::new());
+                scopes.push(SourceScope::default());
                 if let Some(binding) = &catch.binding {
                     insert_scoped_binding(scopes, &catch.source_name, binding.clone());
                 }
@@ -12119,7 +12159,7 @@ fn collect_source_return_nullability_states_from_stmt(
                 scopes.pop();
             }
             if let Some(finally_block) = finally_block {
-                scopes.push(HashMap::new());
+                scopes.push(SourceScope::default());
                 collect_source_return_nullability_states_from_stmts_with_refinements(
                     &finally_block.statements,
                     source_nullability,
@@ -12146,7 +12186,7 @@ fn source_return_expr_nullability_state(
     expr: &Expr,
     source_nullability: &SourceNullabilityMap,
     ctx: Option<&SourceReturnNullabilityContext<'_>>,
-    scopes: &[HashMap<String, BindingId>],
+    scopes: &[SourceScope],
     refinements: &HashSet<String>,
 ) -> NullabilityState {
     match expr {
@@ -12167,25 +12207,35 @@ fn source_return_expr_nullability_state(
                     .unwrap_or(NullabilityState::Unknown)
             }),
         Expr::Ternary {
+            condition,
             then_expr,
             else_expr,
-            ..
-        } => merge_source_nullability_states(&[
-            source_return_expr_nullability_state(
-                then_expr,
-                source_nullability,
-                ctx,
-                scopes,
-                refinements,
-            ),
-            source_return_expr_nullability_state(
-                else_expr,
-                source_nullability,
-                ctx,
-                scopes,
-                refinements,
-            ),
-        ]),
+        } => {
+            let mut then_scopes = scopes.to_vec();
+            let mut then_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut then_scope, condition);
+            then_scopes.push(then_scope);
+            let mut else_scopes = scopes.to_vec();
+            let mut else_scope = SourceScope::default();
+            insert_false_pattern_shadows(&mut else_scope, condition);
+            else_scopes.push(else_scope);
+            merge_source_nullability_states(&[
+                source_return_expr_nullability_state(
+                    then_expr,
+                    source_nullability,
+                    ctx,
+                    &then_scopes,
+                    refinements,
+                ),
+                source_return_expr_nullability_state(
+                    else_expr,
+                    source_nullability,
+                    ctx,
+                    &else_scopes,
+                    refinements,
+                ),
+            ])
+        }
         _ => ctx
             .and_then(|ctx| ctx.expr_nullability_state(expr))
             .or_else(|| source_expr_nullability_state(expr))
@@ -12392,14 +12442,24 @@ fn collect_binding_nullability_states_from_stmts(
     statements: &[Stmt],
     states: &mut HashMap<String, NullabilityState>,
 ) {
+    let mut scopes = Vec::new();
+    collect_binding_nullability_states_from_stmts_with_scopes(statements, states, &mut scopes);
+}
+
+fn collect_binding_nullability_states_from_stmts_with_scopes(
+    statements: &[Stmt],
+    states: &mut HashMap<String, NullabilityState>,
+    scopes: &mut Vec<SourceScope>,
+) {
     for stmt in statements {
-        collect_binding_nullability_states_from_stmt(stmt, states);
+        collect_binding_nullability_states_from_stmt(stmt, states, scopes);
     }
 }
 
 fn collect_binding_nullability_states_from_stmt(
     stmt: &Stmt,
     states: &mut HashMap<String, NullabilityState>,
+    scopes: &mut Vec<SourceScope>,
 ) {
     match stmt {
         Stmt::VarDecl {
@@ -12407,37 +12467,68 @@ fn collect_binding_nullability_states_from_stmt(
             initializer: Some(initializer),
             ..
         } => {
-            collect_binding_nullability_assignment(name, initializer, states);
-            collect_binding_nullability_states_from_expr(initializer, states);
+            collect_binding_nullability_assignment(name, initializer, states, scopes);
+            collect_binding_nullability_states_from_expr(initializer, states, scopes);
         }
         Stmt::Assign { target, value } => {
             if let Expr::Var(name) = target {
-                collect_binding_nullability_assignment(name, value, states);
+                collect_binding_nullability_assignment(name, value, states, scopes);
             }
-            collect_binding_nullability_states_from_expr(value, states);
+            collect_binding_nullability_states_from_expr(value, states, scopes);
         }
         Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
-            collect_binding_nullability_states_from_expr(expr, states);
+            collect_binding_nullability_states_from_expr(expr, states, scopes);
         }
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            collect_binding_nullability_states_from_expr(condition, states);
-            collect_binding_nullability_states_from_stmts(&then_block.statements, states);
+            collect_binding_nullability_states_from_expr(condition, states, scopes);
+            let mut then_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut then_scope, condition);
+            scopes.push(then_scope);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &then_block.statements,
+                states,
+                scopes,
+            );
+            scopes.pop();
             if let Some(else_block) = else_block {
-                collect_binding_nullability_states_from_stmts(&else_block.statements, states);
+                let mut else_scope = SourceScope::default();
+                insert_false_pattern_shadows(&mut else_scope, condition);
+                scopes.push(else_scope);
+                collect_binding_nullability_states_from_stmts_with_scopes(
+                    &else_block.statements,
+                    states,
+                    scopes,
+                );
+                scopes.pop();
             }
         }
         Stmt::While {
             condition, body, ..
+        } => {
+            collect_binding_nullability_states_from_expr(condition, states, scopes);
+            let mut body_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut body_scope, condition);
+            scopes.push(body_scope);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &body.statements,
+                states,
+                scopes,
+            );
+            scopes.pop();
         }
-        | Stmt::DoWhile {
+        Stmt::DoWhile {
             condition, body, ..
         } => {
-            collect_binding_nullability_states_from_expr(condition, states);
-            collect_binding_nullability_states_from_stmts(&body.statements, states);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &body.statements,
+                states,
+                scopes,
+            );
+            collect_binding_nullability_states_from_expr(condition, states, scopes);
         }
         Stmt::For {
             init,
@@ -12446,28 +12537,49 @@ fn collect_binding_nullability_states_from_stmt(
             body,
             ..
         } => {
-            collect_binding_nullability_states_from_stmts(init, states);
+            scopes.push(SourceScope::default());
+            collect_binding_nullability_states_from_stmts_with_scopes(init, states, scopes);
             if let Some(condition) = condition {
-                collect_binding_nullability_states_from_expr(condition, states);
+                collect_binding_nullability_states_from_expr(condition, states, scopes);
+                if let Some(scope) = scopes.last_mut() {
+                    insert_true_pattern_shadows(scope, condition);
+                }
             }
             for expr in update {
-                collect_binding_nullability_states_from_expr(expr, states);
+                collect_binding_nullability_states_from_expr(expr, states, scopes);
             }
-            collect_binding_nullability_states_from_stmts(&body.statements, states);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &body.statements,
+                states,
+                scopes,
+            );
+            scopes.pop();
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            collect_binding_nullability_states_from_expr(iterable, states);
-            collect_binding_nullability_states_from_stmts(&body.statements, states);
+            collect_binding_nullability_states_from_expr(iterable, states, scopes);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &body.statements,
+                states,
+                scopes,
+            );
         }
         Stmt::Switch { selector, cases } => {
-            collect_binding_nullability_states_from_expr(selector, states);
+            collect_binding_nullability_states_from_expr(selector, states, scopes);
             for case in cases {
+                let mut case_scope = SourceScope::default();
                 for label in &case.labels {
                     if let crate::java_ir::SwitchLabel::Expr(expr) = label {
-                        collect_binding_nullability_states_from_expr(expr, states);
+                        collect_binding_nullability_states_from_expr(expr, states, scopes);
+                        insert_true_pattern_shadows(&mut case_scope, expr);
                     }
                 }
-                collect_binding_nullability_states_from_stmts(&case.statements, states);
+                scopes.push(case_scope);
+                collect_binding_nullability_states_from_stmts_with_scopes(
+                    &case.statements,
+                    states,
+                    scopes,
+                );
+                scopes.pop();
             }
         }
         Stmt::Try {
@@ -12476,17 +12588,33 @@ fn collect_binding_nullability_states_from_stmt(
             catches,
             finally_block,
         } => {
-            collect_binding_nullability_states_from_stmts(resources, states);
-            collect_binding_nullability_states_from_stmts(&body.statements, states);
+            collect_binding_nullability_states_from_stmts_with_scopes(resources, states, scopes);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &body.statements,
+                states,
+                scopes,
+            );
             for catch in catches {
-                collect_binding_nullability_states_from_stmts(&catch.body.statements, states);
+                collect_binding_nullability_states_from_stmts_with_scopes(
+                    &catch.body.statements,
+                    states,
+                    scopes,
+                );
             }
             if let Some(finally_block) = finally_block {
-                collect_binding_nullability_states_from_stmts(&finally_block.statements, states);
+                collect_binding_nullability_states_from_stmts_with_scopes(
+                    &finally_block.statements,
+                    states,
+                    scopes,
+                );
             }
         }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
-            collect_binding_nullability_states_from_stmts(&block.statements, states);
+            collect_binding_nullability_states_from_stmts_with_scopes(
+                &block.statements,
+                states,
+                scopes,
+            );
         }
         Stmt::LocalType(_) => {}
         Stmt::VarDecl {
@@ -12503,6 +12631,7 @@ fn collect_binding_nullability_states_from_stmt(
 fn collect_binding_nullability_states_from_expr(
     expr: &Expr,
     states: &mut HashMap<String, NullabilityState>,
+    scopes: &mut Vec<SourceScope>,
 ) {
     match expr {
         Expr::Binary {
@@ -12510,12 +12639,12 @@ fn collect_binding_nullability_states_from_expr(
             left,
             right,
         } => {
-            collect_null_comparison_binding(left, right, states);
-            collect_null_comparison_binding(right, left, states);
-            collect_null_comparison_assignment(left, right, states);
-            collect_null_comparison_assignment(right, left, states);
-            collect_binding_nullability_states_from_expr(left, states);
-            collect_binding_nullability_states_from_expr(right, states);
+            collect_null_comparison_binding(left, right, states, scopes);
+            collect_null_comparison_binding(right, left, states, scopes);
+            collect_null_comparison_assignment(left, right, states, scopes);
+            collect_null_comparison_assignment(right, left, states, scopes);
+            collect_binding_nullability_states_from_expr(left, states, scopes);
+            collect_binding_nullability_states_from_expr(right, states, scopes);
         }
         Expr::Binary {
             op: BinaryOp::Assign,
@@ -12523,53 +12652,91 @@ fn collect_binding_nullability_states_from_expr(
             right,
         } => {
             if let Expr::Var(name) = left.as_ref() {
-                collect_binding_nullability_assignment(name, right, states);
+                collect_binding_nullability_assignment(name, right, states, scopes);
             }
-            collect_binding_nullability_states_from_expr(right, states);
+            collect_binding_nullability_states_from_expr(right, states, scopes);
+        }
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            collect_binding_nullability_states_from_expr(left, states, scopes);
+            let mut right_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut right_scope, left);
+            scopes.push(right_scope);
+            collect_binding_nullability_states_from_expr(right, states, scopes);
+            scopes.pop();
+        }
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            collect_binding_nullability_states_from_expr(left, states, scopes);
+            let mut right_scope = SourceScope::default();
+            insert_false_pattern_shadows(&mut right_scope, left);
+            scopes.push(right_scope);
+            collect_binding_nullability_states_from_expr(right, states, scopes);
+            scopes.pop();
         }
         Expr::Binary { left, right, .. } => {
-            collect_binding_nullability_states_from_expr(left, states);
-            collect_binding_nullability_states_from_expr(right, states);
+            collect_binding_nullability_states_from_expr(left, states, scopes);
+            collect_binding_nullability_states_from_expr(right, states, scopes);
         }
         Expr::Unary { expr, .. }
         | Expr::Cast { expr, .. }
         | Expr::InstanceOf { expr, .. }
-        | Expr::FieldAccess(expr, _) => collect_binding_nullability_states_from_expr(expr, states),
+        | Expr::FieldAccess(expr, _) => {
+            collect_binding_nullability_states_from_expr(expr, states, scopes)
+        }
         Expr::ArrayAccess(array, index) => {
-            collect_binding_nullability_states_from_expr(array, states);
-            collect_binding_nullability_states_from_expr(index, states);
+            collect_binding_nullability_states_from_expr(array, states, scopes);
+            collect_binding_nullability_states_from_expr(index, states, scopes);
         }
         Expr::Ternary {
             condition,
             then_expr,
             else_expr,
         } => {
-            collect_binding_nullability_states_from_expr(condition, states);
-            collect_binding_nullability_states_from_expr(then_expr, states);
-            collect_binding_nullability_states_from_expr(else_expr, states);
+            collect_binding_nullability_states_from_expr(condition, states, scopes);
+            let mut then_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut then_scope, condition);
+            scopes.push(then_scope);
+            collect_binding_nullability_states_from_expr(then_expr, states, scopes);
+            scopes.pop();
+            let mut else_scope = SourceScope::default();
+            insert_false_pattern_shadows(&mut else_scope, condition);
+            scopes.push(else_scope);
+            collect_binding_nullability_states_from_expr(else_expr, states, scopes);
+            scopes.pop();
         }
         Expr::Switch { selector, cases } => {
-            collect_binding_nullability_states_from_expr(selector, states);
+            collect_binding_nullability_states_from_expr(selector, states, scopes);
             for case in cases {
+                let mut case_scope = SourceScope::default();
                 for label in &case.labels {
                     if let SwitchLabel::Expr(expr) = label {
-                        collect_binding_nullability_states_from_expr(expr, states);
+                        collect_binding_nullability_states_from_expr(expr, states, scopes);
+                        insert_true_pattern_shadows(&mut case_scope, expr);
                     }
                 }
-                collect_binding_nullability_states_from_expr(&case.value, states);
+                scopes.push(case_scope);
+                collect_binding_nullability_states_from_expr(&case.value, states, scopes);
+                scopes.pop();
             }
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
-                collect_binding_nullability_states_from_expr(receiver, states);
+                collect_binding_nullability_states_from_expr(receiver, states, scopes);
             }
             for arg in args {
-                collect_binding_nullability_states_from_expr(arg, states);
+                collect_binding_nullability_states_from_expr(arg, states, scopes);
             }
         }
         Expr::New { args, body: _, .. } => {
             for arg in args {
-                collect_binding_nullability_states_from_expr(arg, states);
+                collect_binding_nullability_states_from_expr(arg, states, scopes);
             }
         }
         Expr::ArrayCreation {
@@ -12578,17 +12745,17 @@ fn collect_binding_nullability_states_from_expr(
             ..
         } => {
             for dimension in dimensions {
-                collect_binding_nullability_states_from_expr(dimension, states);
+                collect_binding_nullability_states_from_expr(dimension, states, scopes);
             }
             if let Some(initializer) = initializer {
                 for element in initializer {
-                    collect_binding_nullability_states_from_expr(element, states);
+                    collect_binding_nullability_states_from_expr(element, states, scopes);
                 }
             }
         }
         Expr::ArrayInitializer(elements) => {
             for element in elements {
-                collect_binding_nullability_states_from_expr(element, states);
+                collect_binding_nullability_states_from_expr(element, states, scopes);
             }
         }
         Expr::Lambda { .. } => {}
@@ -12607,7 +12774,11 @@ fn collect_binding_nullability_assignment(
     name: &str,
     value: &Expr,
     states: &mut HashMap<String, NullabilityState>,
+    scopes: &[SourceScope],
 ) {
+    if scoped_name_is_shadowed(scopes, name) {
+        return;
+    }
     if let Some(state) = source_expr_nullability_state(value) {
         merge_binding_nullability_state(states, name, state);
     }
@@ -12617,9 +12788,11 @@ fn collect_null_comparison_binding(
     maybe_binding: &Expr,
     maybe_null: &Expr,
     states: &mut HashMap<String, NullabilityState>,
+    scopes: &[SourceScope],
 ) {
     if matches!(maybe_null, Expr::Literal(Literal::Null))
         && let Expr::Var(name) = maybe_binding
+        && !scoped_name_is_shadowed(scopes, name)
     {
         merge_binding_nullability_state(states, name, NullabilityState::MaybeNull);
     }
@@ -12629,6 +12802,7 @@ fn collect_null_comparison_assignment(
     maybe_assignment: &Expr,
     maybe_null: &Expr,
     states: &mut HashMap<String, NullabilityState>,
+    scopes: &[SourceScope],
 ) {
     if !matches!(maybe_null, Expr::Literal(Literal::Null)) {
         return;
@@ -12642,7 +12816,9 @@ fn collect_null_comparison_assignment(
         return;
     };
     if let Expr::Var(name) = left.as_ref() {
-        merge_binding_nullability_state(states, name, NullabilityState::MaybeNull);
+        if !scoped_name_is_shadowed(scopes, name) {
+            merge_binding_nullability_state(states, name, NullabilityState::MaybeNull);
+        }
     }
 }
 
@@ -12762,7 +12938,7 @@ fn merge_binding_nullability_state(
 
 fn collect_binding_nullability_states_by_binding_from_stmts(
     statements: &[Stmt],
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
 ) {
@@ -12778,7 +12954,7 @@ fn collect_binding_nullability_states_by_binding_from_stmts(
 
 fn collect_binding_nullability_states_by_binding_from_stmt(
     stmt: &Stmt,
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
 ) {
@@ -12852,15 +13028,21 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 states,
                 return_states,
             );
+            let mut then_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut then_scope, condition);
             collect_binding_nullability_states_by_binding_from_child_block(
                 then_block,
+                then_scope,
                 scopes,
                 states,
                 return_states,
             );
             if let Some(else_block) = else_block {
+                let mut else_scope = SourceScope::default();
+                insert_false_pattern_shadows(&mut else_scope, condition);
                 collect_binding_nullability_states_by_binding_from_child_block(
                     else_block,
+                    else_scope,
                     scopes,
                     states,
                     return_states,
@@ -12869,9 +13051,6 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
         }
         Stmt::While {
             condition, body, ..
-        }
-        | Stmt::DoWhile {
-            condition, body, ..
         } => {
             collect_binding_nullability_states_by_binding_from_expr(
                 condition,
@@ -12879,8 +13058,28 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 states,
                 return_states,
             );
+            let mut body_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut body_scope, condition);
             collect_binding_nullability_states_by_binding_from_child_block(
                 body,
+                body_scope,
+                scopes,
+                states,
+                return_states,
+            );
+        }
+        Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            collect_binding_nullability_states_by_binding_from_child_block(
+                body,
+                SourceScope::default(),
+                scopes,
+                states,
+                return_states,
+            );
+            collect_binding_nullability_states_by_binding_from_expr(
+                condition,
                 scopes,
                 states,
                 return_states,
@@ -12893,7 +13092,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             body,
             ..
         } => {
-            scopes.push(HashMap::new());
+            scopes.push(SourceScope::default());
             collect_binding_nullability_states_by_binding_from_stmts(
                 init,
                 scopes,
@@ -12908,6 +13107,11 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                     return_states,
                 );
             }
+            if let Some(condition) = condition {
+                if let Some(scope) = scopes.last_mut() {
+                    insert_true_pattern_shadows(scope, condition);
+                }
+            }
             for expr in update {
                 collect_binding_nullability_states_by_binding_from_expr(
                     expr,
@@ -12918,6 +13122,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             }
             collect_binding_nullability_states_by_binding_from_child_block(
                 body,
+                SourceScope::default(),
                 scopes,
                 states,
                 return_states,
@@ -12937,7 +13142,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 states,
                 return_states,
             );
-            scopes.push(HashMap::new());
+            scopes.push(SourceScope::default());
             if let Some(binding) = binding {
                 insert_scoped_binding(scopes, source_var_name, binding.clone());
             }
@@ -12957,7 +13162,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 return_states,
             );
             for case in cases {
-                scopes.push(HashMap::new());
+                let mut case_scope = SourceScope::default();
                 for label in &case.labels {
                     if let SwitchLabel::Expr(expr) = label {
                         collect_binding_nullability_states_by_binding_from_expr(
@@ -12966,8 +13171,10 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                             states,
                             return_states,
                         );
+                        insert_true_pattern_shadows(&mut case_scope, expr);
                     }
                 }
+                scopes.push(case_scope);
                 collect_binding_nullability_states_by_binding_from_stmts(
                     &case.statements,
                     scopes,
@@ -12991,12 +13198,13 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             );
             collect_binding_nullability_states_by_binding_from_child_block(
                 body,
+                SourceScope::default(),
                 scopes,
                 states,
                 return_states,
             );
             for catch in catches {
-                scopes.push(HashMap::new());
+                scopes.push(SourceScope::default());
                 if let Some(binding) = &catch.binding {
                     insert_scoped_binding(scopes, &catch.source_name, binding.clone());
                 }
@@ -13011,6 +13219,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             if let Some(finally_block) = finally_block {
                 collect_binding_nullability_states_by_binding_from_child_block(
                     finally_block,
+                    SourceScope::default(),
                     scopes,
                     states,
                     return_states,
@@ -13020,6 +13229,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_binding_nullability_states_by_binding_from_child_block(
                 block,
+                SourceScope::default(),
                 scopes,
                 states,
                 return_states,
@@ -13036,11 +13246,12 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
 
 fn collect_binding_nullability_states_by_binding_from_child_block(
     block: &Block,
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scope: SourceScope,
+    scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
 ) {
-    scopes.push(HashMap::new());
+    scopes.push(scope);
     collect_binding_nullability_states_by_binding_from_stmts(
         &block.statements,
         scopes,
@@ -13052,7 +13263,7 @@ fn collect_binding_nullability_states_by_binding_from_child_block(
 
 fn collect_binding_nullability_states_by_binding_from_expr(
     expr: &Expr,
-    scopes: &mut Vec<HashMap<String, BindingId>>,
+    scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
 ) {
@@ -13104,6 +13315,50 @@ fn collect_binding_nullability_states_by_binding_from_expr(
                 return_states,
             );
         }
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            collect_binding_nullability_states_by_binding_from_expr(
+                left,
+                scopes,
+                states,
+                return_states,
+            );
+            let mut right_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut right_scope, left);
+            scopes.push(right_scope);
+            collect_binding_nullability_states_by_binding_from_expr(
+                right,
+                scopes,
+                states,
+                return_states,
+            );
+            scopes.pop();
+        }
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            collect_binding_nullability_states_by_binding_from_expr(
+                left,
+                scopes,
+                states,
+                return_states,
+            );
+            let mut right_scope = SourceScope::default();
+            insert_false_pattern_shadows(&mut right_scope, left);
+            scopes.push(right_scope);
+            collect_binding_nullability_states_by_binding_from_expr(
+                right,
+                scopes,
+                states,
+                return_states,
+            );
+            scopes.pop();
+        }
         Expr::Binary { left, right, .. } => {
             collect_binding_nullability_states_by_binding_from_expr(
                 left,
@@ -13154,18 +13409,26 @@ fn collect_binding_nullability_states_by_binding_from_expr(
                 states,
                 return_states,
             );
+            let mut then_scope = SourceScope::default();
+            insert_true_pattern_shadows(&mut then_scope, condition);
+            scopes.push(then_scope);
             collect_binding_nullability_states_by_binding_from_expr(
                 then_expr,
                 scopes,
                 states,
                 return_states,
             );
+            scopes.pop();
+            let mut else_scope = SourceScope::default();
+            insert_false_pattern_shadows(&mut else_scope, condition);
+            scopes.push(else_scope);
             collect_binding_nullability_states_by_binding_from_expr(
                 else_expr,
                 scopes,
                 states,
                 return_states,
             );
+            scopes.pop();
         }
         Expr::Call { receiver, args, .. } => {
             if let Some(receiver) = receiver {
@@ -13192,7 +13455,7 @@ fn collect_binding_nullability_states_by_binding_from_expr(
 fn collect_null_comparison_binding_by_id(
     maybe_binding: &Expr,
     maybe_null: &Expr,
-    scopes: &[HashMap<String, BindingId>],
+    scopes: &[SourceScope],
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
 ) {
@@ -13208,7 +13471,7 @@ fn collect_null_comparison_binding_by_id(
 fn collect_null_comparison_assignment_by_id(
     maybe_assignment: &Expr,
     maybe_null: &Expr,
-    scopes: &[HashMap<String, BindingId>],
+    scopes: &[SourceScope],
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
 ) {
@@ -13242,21 +13505,85 @@ fn merge_binding_nullability_state_by_id(
         .or_insert(state);
 }
 
-fn insert_scoped_binding(
-    scopes: &mut [HashMap<String, BindingId>],
-    name: &str,
-    binding: BindingId,
-) {
+fn insert_scoped_binding(scopes: &mut [SourceScope], name: &str, binding: BindingId) {
     if let Some(scope) = scopes.last_mut() {
-        scope.insert(name.to_string(), binding);
+        scope.idless_shadows.remove(name);
+        scope.bindings.insert(name.to_string(), binding);
     }
 }
 
-fn scoped_binding<'a>(
-    scopes: &'a [HashMap<String, BindingId>],
-    name: &str,
-) -> Option<&'a BindingId> {
-    scopes.iter().rev().find_map(|scope| scope.get(name))
+fn scoped_binding<'a>(scopes: &'a [SourceScope], name: &str) -> Option<&'a BindingId> {
+    for scope in scopes.iter().rev() {
+        if scope.idless_shadows.contains(name) {
+            return None;
+        }
+        if let Some(binding) = scope.bindings.get(name) {
+            return Some(binding);
+        }
+    }
+    None
+}
+
+fn scoped_name_is_shadowed(scopes: &[SourceScope], name: &str) -> bool {
+    for scope in scopes.iter().rev() {
+        if scope.idless_shadows.contains(name) {
+            return true;
+        }
+        if scope.bindings.contains_key(name) {
+            return false;
+        }
+    }
+    false
+}
+
+fn insert_true_pattern_shadows(scope: &mut SourceScope, expr: &Expr) {
+    match expr {
+        Expr::InstanceOf {
+            binding: Some(name),
+            ..
+        } => {
+            scope.idless_shadows.insert(name.clone());
+        }
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => insert_false_pattern_shadows(scope, expr),
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            insert_true_pattern_shadows(scope, left);
+            insert_true_pattern_shadows(scope, right);
+        }
+        _ => {}
+    }
+}
+
+fn insert_false_pattern_shadows(scope: &mut SourceScope, expr: &Expr) {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => insert_true_pattern_shadows(scope, expr),
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            insert_false_pattern_shadows(scope, left);
+            insert_false_pattern_shadows(scope, right);
+        }
+        _ => {}
+    }
+}
+
+fn insert_switch_case_pattern_shadows(scope: &mut SourceScope, case: &crate::java_ir::SwitchCase) {
+    for label in &case.labels {
+        if let SwitchLabel::Expr(expr) = label {
+            insert_true_pattern_shadows(scope, expr);
+        }
+    }
 }
 
 fn collect_local_constraint_sets(
@@ -14903,6 +15230,101 @@ class SourceEnhancedForNullableLocalOnly {
     }
 
     #[test]
+    fn idless_source_nullability_pattern_assignment_does_not_update_outer_param() {
+        let value = Param {
+            name: "value".to_string(),
+            source_name: "value".to_string(),
+            ty: JavaType::Unknown("Object".to_string()),
+            is_varargs: false,
+            binding: None,
+        };
+        let input = Param {
+            name: "input".to_string(),
+            source_name: "input".to_string(),
+            ty: JavaType::Unknown("Object".to_string()),
+            is_varargs: false,
+            binding: None,
+        };
+        let body = Block {
+            statements: vec![Stmt::If {
+                condition: Expr::InstanceOf {
+                    expr: Box::new(Expr::Var("input".to_string())),
+                    ty: JavaType::String,
+                    binding: Some("value".to_string()),
+                },
+                then_block: Block {
+                    statements: vec![Stmt::Assign {
+                        target: Expr::Var("value".to_string()),
+                        value: Expr::Literal(Literal::Null),
+                    }],
+                },
+                else_block: None,
+            }],
+        };
+        let params = vec![value.clone(), input];
+
+        assert!(
+            source_binding_nullability_constraints_for_declaration(
+                &body,
+                &value.source_name,
+                value.binding.as_ref(),
+                &params,
+            )
+            .is_empty(),
+            "assignment to an id-less pattern variable must not mark the outer id-less parameter nullable"
+        );
+    }
+
+    #[test]
+    fn idless_source_nullability_expression_pattern_assignment_does_not_update_outer_param() {
+        let value = Param {
+            name: "value".to_string(),
+            source_name: "value".to_string(),
+            ty: JavaType::Unknown("Object".to_string()),
+            is_varargs: false,
+            binding: None,
+        };
+        let input = Param {
+            name: "input".to_string(),
+            source_name: "input".to_string(),
+            ty: JavaType::Unknown("Object".to_string()),
+            is_varargs: false,
+            binding: None,
+        };
+        let body = Block {
+            statements: vec![Stmt::Expr(Expr::Binary {
+                op: BinaryOp::And,
+                left: Box::new(Expr::InstanceOf {
+                    expr: Box::new(Expr::Var("input".to_string())),
+                    ty: JavaType::String,
+                    binding: Some("value".to_string()),
+                }),
+                right: Box::new(Expr::Binary {
+                    op: BinaryOp::Eq,
+                    left: Box::new(Expr::Binary {
+                        op: BinaryOp::Assign,
+                        left: Box::new(Expr::Var("value".to_string())),
+                        right: Box::new(Expr::Literal(Literal::Null)),
+                    }),
+                    right: Box::new(Expr::Literal(Literal::Null)),
+                }),
+            })],
+        };
+        let params = vec![value.clone(), input];
+
+        assert!(
+            source_binding_nullability_constraints_for_declaration(
+                &body,
+                &value.source_name,
+                value.binding.as_ref(),
+                &params,
+            )
+            .is_empty(),
+            "expression-level assignment to an id-less pattern variable must not mark the outer id-less parameter nullable"
+        );
+    }
+
+    #[test]
     fn parsed_try_return_value_then_trailing_null_solves_optional_return_shape() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -15713,6 +16135,324 @@ class Manifest {
         assert!(
             typed_source_method_return_nullability_constraints(&ty, &method, &facts).is_empty(),
             "a scoped resolver-bound local with no nullability state must fail closed instead of borrowing a same-name field"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_pattern_binding_does_not_fall_back_to_field() {
+        let method = MethodDecl {
+            name: "keep".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "input".to_string(),
+                source_name: "input".to_string(),
+                ty: JavaType::Unknown("Object".to_string()),
+                is_varargs: false,
+                binding: Some(BindingId::new(BindingKind::Param, "input", 0)),
+            }],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::If {
+                        condition: Expr::InstanceOf {
+                            expr: Box::new(Expr::Var("input".to_string())),
+                            ty: JavaType::String,
+                            binding: Some("value".to_string()),
+                        },
+                        then_block: Block {
+                            statements: vec![Stmt::Return(Some(Expr::Var("value".to_string())))],
+                        },
+                        else_block: None,
+                    },
+                    Stmt::Return(Some(Expr::New {
+                        qualifier: None,
+                        ty: JavaType::Unknown("Object".to_string()),
+                        args: Vec::new(),
+                        body: None,
+                        resolved: None,
+                    })),
+                ],
+            }),
+            span: Span::default(),
+        };
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "PatternFieldShadowReturnNullability".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: vec![
+                crate::java_ir::Member::Field(FieldDecl {
+                    name: "value".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    modifiers: Vec::new(),
+                    initializer: None,
+                    span: Span::default(),
+                }),
+                crate::java_ir::Member::Method(method.clone()),
+            ],
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        };
+        let mut facts = FactSet::default();
+        facts
+            .field_nullability_facts
+            .push(crate::facts::FieldNullabilityFact {
+                field: crate::facts::FieldKey::named(
+                    "PatternFieldShadowReturnNullability",
+                    "value",
+                ),
+                state: NullabilityState::DefinitelyNonNull,
+                provenance: crate::facts::FieldNullabilityProvenance::ConstructorAssignments,
+            });
+
+        assert!(
+            typed_source_method_return_nullability_constraints(&ty, &method, &facts).is_empty(),
+            "id-less pattern binding return must not borrow same-name field nullability"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_pattern_assignment_does_not_update_outer_param() {
+        let value = BindingId::new(BindingKind::Param, "value", 0);
+        let method = MethodDecl {
+            name: "keep".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: vec![
+                Param {
+                    name: "input".to_string(),
+                    source_name: "input".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(BindingId::new(BindingKind::Param, "input", 0)),
+                },
+                Param {
+                    name: "value".to_string(),
+                    source_name: "value".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(value),
+                },
+            ],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::If {
+                        condition: Expr::InstanceOf {
+                            expr: Box::new(Expr::Var("input".to_string())),
+                            ty: JavaType::String,
+                            binding: Some("value".to_string()),
+                        },
+                        then_block: Block {
+                            statements: vec![Stmt::Assign {
+                                target: Expr::Var("value".to_string()),
+                                value: Expr::Literal(Literal::Null),
+                            }],
+                        },
+                        else_block: None,
+                    },
+                    Stmt::Return(Some(Expr::Var("value".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+
+        assert!(
+            source_method_return_nullability_constraints(&method).is_empty(),
+            "assignment to an id-less pattern variable must not mark the outer parameter nullable"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_ternary_pattern_binding_does_not_fall_back_to_field() {
+        let method = MethodDecl {
+            name: "keep".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "input".to_string(),
+                source_name: "input".to_string(),
+                ty: JavaType::Unknown("Object".to_string()),
+                is_varargs: false,
+                binding: Some(BindingId::new(BindingKind::Param, "input", 0)),
+            }],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Return(Some(Expr::Ternary {
+                    condition: Box::new(Expr::InstanceOf {
+                        expr: Box::new(Expr::Var("input".to_string())),
+                        ty: JavaType::String,
+                        binding: Some("value".to_string()),
+                    }),
+                    then_expr: Box::new(Expr::Var("value".to_string())),
+                    else_expr: Box::new(Expr::Var("value".to_string())),
+                }))],
+            }),
+            span: Span::default(),
+        };
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "TernaryPatternFieldShadowReturnNullability".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: vec![
+                crate::java_ir::Member::Field(FieldDecl {
+                    name: "value".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    modifiers: Vec::new(),
+                    initializer: None,
+                    span: Span::default(),
+                }),
+                crate::java_ir::Member::Method(method.clone()),
+            ],
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        };
+        let mut facts = FactSet::default();
+        facts
+            .field_nullability_facts
+            .push(crate::facts::FieldNullabilityFact {
+                field: crate::facts::FieldKey::named(
+                    "TernaryPatternFieldShadowReturnNullability",
+                    "value",
+                ),
+                state: NullabilityState::DefinitelyNonNull,
+                provenance: crate::facts::FieldNullabilityProvenance::ConstructorAssignments,
+            });
+
+        assert!(
+            typed_source_method_return_nullability_constraints(&ty, &method, &facts).is_empty(),
+            "ternary pattern binding return must not borrow same-name field nullability"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_ternary_pattern_assignment_does_not_update_outer_param() {
+        let value = BindingId::new(BindingKind::Param, "value", 0);
+        let method = MethodDecl {
+            name: "keep".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: vec![
+                Param {
+                    name: "input".to_string(),
+                    source_name: "input".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(BindingId::new(BindingKind::Param, "input", 0)),
+                },
+                Param {
+                    name: "value".to_string(),
+                    source_name: "value".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(value),
+                },
+            ],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::Expr(Expr::Ternary {
+                        condition: Box::new(Expr::InstanceOf {
+                            expr: Box::new(Expr::Var("input".to_string())),
+                            ty: JavaType::String,
+                            binding: Some("value".to_string()),
+                        }),
+                        then_expr: Box::new(Expr::Binary {
+                            op: BinaryOp::Assign,
+                            left: Box::new(Expr::Var("value".to_string())),
+                            right: Box::new(Expr::Literal(Literal::Null)),
+                        }),
+                        else_expr: Box::new(Expr::Literal(Literal::Null)),
+                    }),
+                    Stmt::Return(Some(Expr::Var("value".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+
+        assert!(
+            source_method_return_nullability_constraints(&method).is_empty(),
+            "assignment to a ternary-arm pattern variable must not mark the outer parameter nullable"
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_short_circuit_pattern_assignment_does_not_update_outer_param() {
+        let value = BindingId::new(BindingKind::Param, "value", 0);
+        let method = MethodDecl {
+            name: "keep".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Unknown("Object".to_string()),
+            throws: Vec::new(),
+            params: vec![
+                Param {
+                    name: "input".to_string(),
+                    source_name: "input".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(BindingId::new(BindingKind::Param, "input", 0)),
+                },
+                Param {
+                    name: "value".to_string(),
+                    source_name: "value".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(value),
+                },
+            ],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::Expr(Expr::Binary {
+                        op: BinaryOp::And,
+                        left: Box::new(Expr::InstanceOf {
+                            expr: Box::new(Expr::Var("input".to_string())),
+                            ty: JavaType::String,
+                            binding: Some("value".to_string()),
+                        }),
+                        right: Box::new(Expr::Binary {
+                            op: BinaryOp::Eq,
+                            left: Box::new(Expr::Binary {
+                                op: BinaryOp::Assign,
+                                left: Box::new(Expr::Var("value".to_string())),
+                                right: Box::new(Expr::Literal(Literal::Null)),
+                            }),
+                            right: Box::new(Expr::Literal(Literal::Null)),
+                        }),
+                    }),
+                    Stmt::Return(Some(Expr::Var("value".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+
+        assert!(
+            source_method_return_nullability_constraints(&method).is_empty(),
+            "assignment to a short-circuit pattern variable must not mark the outer parameter nullable"
         );
     }
 

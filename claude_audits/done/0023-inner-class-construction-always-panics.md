@@ -1,4 +1,4 @@
-# 0023 — Non-static inner-class construction still lacks shared outer receivers
+# 0023 — Non-static inner-class construction no longer always panics
 
 Status: **fixed for implemented SharedLocal receivers**
 (captured-inner callers, qualified `other.new Inner()` calls, and ordinary

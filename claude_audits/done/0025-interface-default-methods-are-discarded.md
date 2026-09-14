@@ -76,7 +76,7 @@ needs to be lowered into the trait declaration instead of being dropped, and the
 ## Relationship to other findings
 
 The `panic!`-as-placeholder pattern here is the same as
-[0023](../0023-inner-class-construction-always-panics.md) and 0009's
+[0023](0023-inner-class-construction-always-panics.md) and 0009's
 `panic!("…parameter count does not match interface")`. In all three, a
 *translator* gap is encoded as a *runtime* failure in generated code, which
 means it compiles and the corpus metric scores it as success. Whatever emits

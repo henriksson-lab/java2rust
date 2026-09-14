@@ -118,7 +118,7 @@ handling the idioms we currently fail, grounded in corpus error counts.
 | [0017](done/0017-generic-bounds-dropped-and-method-type-params-undeclared.md) | Generic bounds dropped; method type params never declared; ~36% of biojava | probe + corpus | large |
 | [0019](done/0019-unhandled-expressions-emit-raw-java-source.md) | Unhandled expressions emitted as **raw Java source**; hits `switch` expressions | rustc | small |
 | [0020](done/0020-text-block-content-not-processed.md) | Text block keeps incidental indentation → wrong string | runtime | small |
-| [0023](0023-inner-class-construction-always-panics.md) | Non-static inner-class construction has non-panicking constructor/method companions when an outer handle exists, including same-outer sibling, field-initializer, and qualified `other.new Inner()` construction; companioned fallback bodies use explicit runtime handoffs so supported generated crates can compile, and `inner_class_construction_panics` is reported only for actual unsupported construction sites; ordinary unqualified outer methods still need shared receivers | runtime | blocked on SharedLocal/shared receivers for ordinary `new Inner()` |
+| [0023](done/0023-inner-class-construction-always-panics.md) | Non-static inner-class construction no longer always panics for implemented SharedLocal receivers: ordinary `new Inner()`, same-outer sibling construction, field-initializer construction, and qualified `other.new Inner()` route through `_with_outer` companions; unsupported SharedSync/static-reachable cases remain loud and tracked by 0002b | runtime | done |
 | [0024](done/0024-numeric-limit-constants-stubbed-to-zero.md) | **`Integer.MAX_VALUE` is `0`** — breaks every min/max idiom; live in corpus | runtime + corpus | **tiny** |
 | [0025](done/0025-interface-default-methods-are-discarded.md) | `default` method bodies dropped → runtime panic | runtime | small — Rust supports it natively |
 | [0026](done/0026-assignment-evaluation-order-differs-from-java.md) | Rust evaluates assignment RHS before the target; Java is the reverse | runtime | small |
@@ -148,7 +148,7 @@ The historical prioritization in [SUGGESTIONS.md](SUGGESTIONS.md) is useful as
 background but names many issues that have since moved to `done/`. Current work
 should start from the active rows in this file: [0002](0002-object-aliasing-has-no-representation.md),
 [0002b](0002b-shared-representation-design.md),
-[0023](0023-inner-class-construction-always-panics.md),
+[0023](done/0023-inner-class-construction-always-panics.md),
 [0056](0056-null-is-planned-away-not-represented.md),
 [0057](0057-exceptions-are-panics-and-finally-is-a-closure.md),
 [0058](0058-class-inheritance-upcast-discards-the-object.md),

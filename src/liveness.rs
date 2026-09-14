@@ -16,7 +16,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::java_ir::{Block, Expr, Stmt};
+use crate::java_ir::{BinaryOp, Block, Expr, Stmt, UnaryOp};
 
 /// Identity of a declared variable: its name plus the declaration it came from.
 ///
@@ -83,6 +83,68 @@ fn declared_binding_name(stmt: &Stmt) -> Option<&str> {
         Stmt::EnhancedFor { var_name, .. } => Some(var_name),
         _ => None,
     }
+}
+
+fn add_true_pattern_bindings_to_scope(expr: &Expr, decl: usize, scope: &mut ScopeMap) {
+    match expr {
+        Expr::InstanceOf {
+            binding: Some(name),
+            ..
+        } => {
+            scope.insert(name.clone(), decl);
+        }
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => add_false_pattern_bindings_to_scope(expr, decl, scope),
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            add_true_pattern_bindings_to_scope(left, decl, scope);
+            add_true_pattern_bindings_to_scope(right, decl, scope);
+        }
+        _ => {}
+    }
+}
+
+fn add_false_pattern_bindings_to_scope(expr: &Expr, decl: usize, scope: &mut ScopeMap) {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => add_true_pattern_bindings_to_scope(expr, decl, scope),
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            add_false_pattern_bindings_to_scope(left, decl, scope);
+            add_false_pattern_bindings_to_scope(right, decl, scope);
+        }
+        _ => {}
+    }
+}
+
+fn add_switch_case_pattern_bindings_to_scope(
+    case: &crate::java_ir::SwitchCase,
+    decl: usize,
+    scope: &mut ScopeMap,
+) {
+    for label in &case.labels {
+        if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+            add_true_pattern_bindings_to_scope(expr, decl, scope);
+        }
+    }
+}
+
+fn remove_bindings_declared_at(bindings: &mut HashSet<Binding>, decl: usize) {
+    bindings.retain(|binding| binding.decl != decl);
+}
+
+fn remove_scope_bindings_declared_at(scope: &mut ScopeMap, decl: usize) {
+    scope.retain(|_, binding_decl| *binding_decl != decl);
 }
 
 impl LivenessAnalysis {
@@ -236,24 +298,44 @@ impl LivenessAnalysis {
                 scope.insert(name.clone(), stmt_id(stmt));
             }
             Stmt::If {
+                condition,
                 then_block,
                 else_block,
-                ..
             } => {
-                self.record_scopes_block(then_block, &mut scope.clone());
+                let mut then_scope = scope.clone();
+                add_true_pattern_bindings_to_scope(condition, stmt_id(stmt), &mut then_scope);
+                self.record_scopes_block(then_block, &mut then_scope);
                 if let Some(else_block) = else_block {
-                    self.record_scopes_block(else_block, &mut scope.clone());
+                    let mut else_scope = scope.clone();
+                    add_false_pattern_bindings_to_scope(condition, stmt_id(stmt), &mut else_scope);
+                    self.record_scopes_block(else_block, &mut else_scope);
                 }
             }
-            Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
+                let mut body_scope = scope.clone();
+                add_true_pattern_bindings_to_scope(condition, stmt_id(stmt), &mut body_scope);
+                self.record_scopes_block(body, &mut body_scope);
+            }
+            Stmt::DoWhile { body, .. } => {
                 self.record_scopes_block(body, &mut scope.clone());
             }
-            Stmt::For { init, body, .. } => {
+            Stmt::For {
+                init,
+                condition,
+                body,
+                ..
+            } => {
                 let mut inner = scope.clone();
                 for stmt in init {
                     self.record_scopes_stmt(stmt, &mut inner);
                 }
-                self.record_scopes_block(body, &mut inner);
+                let mut body_scope = inner;
+                if let Some(condition) = condition {
+                    add_true_pattern_bindings_to_scope(condition, stmt_id(stmt), &mut body_scope);
+                }
+                self.record_scopes_block(body, &mut body_scope);
             }
             Stmt::EnhancedFor { var_name, body, .. } => {
                 let mut inner = scope.clone();
@@ -263,9 +345,13 @@ impl LivenessAnalysis {
             Stmt::Switch { cases, .. } => {
                 let mut inner = scope.clone();
                 for case in cases {
+                    let mut case_scope = inner.clone();
+                    add_switch_case_pattern_bindings_to_scope(case, stmt_id(stmt), &mut case_scope);
                     for stmt in &case.statements {
-                        self.record_scopes_stmt(stmt, &mut inner);
+                        self.record_scopes_stmt(stmt, &mut case_scope);
                     }
+                    inner = case_scope;
+                    remove_scope_bindings_declared_at(&mut inner, stmt_id(stmt));
                 }
             }
             Stmt::Try {
@@ -490,6 +576,7 @@ impl LivenessAnalysis {
                     // No else: the condition may fall straight through.
                     None => live.extend(live_out.iter().cloned()),
                 }
+                remove_bindings_declared_at(&mut live, stmt_id(stmt));
                 self.read_bindings(stmt, condition, &mut live);
                 live
             }
@@ -497,6 +584,7 @@ impl LivenessAnalysis {
                 condition, body, ..
             } => self.loop_fixpoint(live_out, |analysis, carried| {
                 let mut live = analysis.block_live_in(body, carried, Some(carried));
+                remove_bindings_declared_at(&mut live, stmt_id(stmt));
                 analysis.read_bindings(stmt, condition, &mut live);
                 live
             }),
@@ -517,6 +605,7 @@ impl LivenessAnalysis {
                 let loop_scope = self.scope_after_for_init(stmt, init);
                 let carried = self.loop_fixpoint(live_out, |analysis, carried| {
                     let mut header = analysis.block_live_in(body, carried, Some(carried));
+                    remove_bindings_declared_at(&mut header, stmt_id(stmt));
                     for expr in update {
                         analysis.read_bindings_in_scope(expr, Some(&loop_scope), &mut header);
                     }
@@ -553,6 +642,7 @@ impl LivenessAnalysis {
                     for stmt in case.statements.iter().rev() {
                         trailing = self.stmt_live_in(stmt, &trailing, loop_live);
                     }
+                    remove_bindings_declared_at(&mut trailing, stmt_id(stmt));
                     trailing_case_live = trailing.clone();
                     live.extend(trailing);
                 }
@@ -657,7 +747,7 @@ fn written_names(expr: &Expr, names: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::java_ir::{Block, CatchClause, Expr, Stmt};
+    use crate::java_ir::{Block, CatchClause, Expr, JavaType, Stmt};
 
     fn var(name: &str) -> Expr {
         Expr::Var(name.to_string())
@@ -684,6 +774,14 @@ mod tests {
             ty: crate::java_ir::JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
             initializer: Some(int(init)),
             binding: None,
+        }
+    }
+
+    fn string_instanceof_binding(binding: &str) -> Expr {
+        Expr::InstanceOf {
+            expr: Box::new(var("input")),
+            ty: JavaType::String,
+            binding: Some(binding.to_string()),
         }
     }
 
@@ -775,6 +873,146 @@ mod tests {
         assert!(
             live.iter().all(|binding| binding.decl == OUTER_DECL),
             "inner `x` must not appear as live: {live:?}"
+        );
+    }
+
+    #[test]
+    fn if_pattern_binding_read_does_not_keep_outer_same_name_live() {
+        let body = Block {
+            statements: vec![
+                Stmt::Expr(var("probe")),
+                Stmt::If {
+                    condition: string_instanceof_binding("value"),
+                    then_block: Block {
+                        statements: vec![Stmt::Expr(var("value"))],
+                    },
+                    else_block: None,
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let live = analysis
+            .live_out_bindings_for(&body.statements[0])
+            .expect("probe statement was analyzed");
+
+        assert!(
+            !live.contains(&Binding::new("value", OUTER_DECL)),
+            "a read of the pattern binding must not keep the outer same-name binding live: {live:?}"
+        );
+    }
+
+    #[test]
+    fn if_pattern_binding_write_does_not_mutate_outer_same_name() {
+        let body = Block {
+            statements: vec![
+                Stmt::Expr(var("probe")),
+                Stmt::If {
+                    condition: string_instanceof_binding("value"),
+                    then_block: Block {
+                        statements: vec![Stmt::Assign {
+                            target: var("value"),
+                            value: var("next"),
+                        }],
+                    },
+                    else_block: None,
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let mutated = analysis
+            .mutated_after
+            .get(&stmt_id(&body.statements[0]))
+            .expect("probe statement was analyzed by write pass");
+
+        assert!(
+            !mutated.contains(&Binding::new("value", OUTER_DECL)),
+            "a write to the pattern binding must not count as mutating the outer same-name binding: {mutated:?}"
+        );
+    }
+
+    #[test]
+    fn negated_else_pattern_binding_read_does_not_keep_outer_same_name_live() {
+        let body = Block {
+            statements: vec![
+                Stmt::Expr(var("probe")),
+                Stmt::If {
+                    condition: Expr::Unary {
+                        op: crate::java_ir::UnaryOp::Not,
+                        expr: Box::new(string_instanceof_binding("value")),
+                    },
+                    then_block: Block {
+                        statements: Vec::new(),
+                    },
+                    else_block: Some(Block {
+                        statements: vec![Stmt::Expr(var("value"))],
+                    }),
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let live = analysis
+            .live_out_bindings_for(&body.statements[0])
+            .expect("probe statement was analyzed");
+
+        assert!(
+            !live.contains(&Binding::new("value", OUTER_DECL)),
+            "a read of a negated-pattern else binding must not keep the outer same-name binding live: {live:?}"
+        );
+    }
+
+    #[test]
+    fn while_pattern_binding_write_does_not_mutate_outer_same_name() {
+        let body = Block {
+            statements: vec![
+                Stmt::Expr(var("probe")),
+                Stmt::While {
+                    condition: string_instanceof_binding("value"),
+                    body: Block {
+                        statements: vec![Stmt::Assign {
+                            target: var("value"),
+                            value: var("next"),
+                        }],
+                    },
+                    label: None,
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let mutated = analysis
+            .mutated_after
+            .get(&stmt_id(&body.statements[0]))
+            .expect("probe statement was analyzed by write pass");
+
+        assert!(
+            !mutated.contains(&Binding::new("value", OUTER_DECL)),
+            "a write to a while-pattern binding must not count as mutating the outer same-name binding: {mutated:?}"
+        );
+    }
+
+    #[test]
+    fn switch_pattern_label_read_does_not_keep_outer_same_name_live() {
+        let body = Block {
+            statements: vec![
+                Stmt::Expr(var("probe")),
+                Stmt::Switch {
+                    selector: var("input"),
+                    cases: vec![crate::java_ir::SwitchCase {
+                        labels: vec![crate::java_ir::SwitchLabel::Expr(
+                            string_instanceof_binding("value"),
+                        )],
+                        statements: vec![Stmt::Expr(var("value"))],
+                    }],
+                },
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let live = analysis
+            .live_out_bindings_for(&body.statements[0])
+            .expect("probe statement was analyzed");
+
+        assert!(
+            !live.contains(&Binding::new("value", OUTER_DECL)),
+            "a read of a switch pattern-label binding must not keep the outer same-name binding live: {live:?}"
         );
     }
 

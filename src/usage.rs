@@ -3,8 +3,8 @@ use std::collections::{HashMap, HashSet};
 use crate::binding_id::BindingId;
 use crate::facts::{ExceptionKind, FactSet, NullabilityState, TrivialAccessorKind};
 use crate::java_ir::{
-    Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier, Param, Program,
-    ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
+    BinaryOp, Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier,
+    Param, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl, UnaryOp,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
@@ -2587,6 +2587,7 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            let then_pattern_bindings = save_true_pattern_bindings(facts, condition);
             analyze_scoped_statements(
                 &then_block.statements,
                 facts,
@@ -2599,7 +2600,9 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            restore_scoped_binding_uses(facts, then_pattern_bindings);
             if let Some(else_block) = else_block {
+                let else_pattern_bindings = save_false_pattern_bindings(facts, condition);
                 analyze_scoped_statements(
                     &else_block.statements,
                     facts,
@@ -2612,12 +2615,10 @@ fn analyze_stmt(
                     type_env,
                     source_return_nullability,
                 );
+                restore_scoped_binding_uses(facts, else_pattern_bindings);
             }
         }
         Stmt::While {
-            condition, body, ..
-        }
-        | Stmt::DoWhile {
             condition, body, ..
         } => {
             analyze_expr(
@@ -2632,8 +2633,38 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            let body_pattern_bindings = save_true_pattern_bindings(facts, condition);
             analyze_scoped_statements(
                 &body.statements,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            restore_scoped_binding_uses(facts, body_pattern_bindings);
+        }
+        Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            analyze_scoped_statements(
+                &body.statements,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            analyze_expr(
+                condition,
                 facts,
                 current_type,
                 current_super_type,
@@ -2695,6 +2726,10 @@ fn analyze_stmt(
                     source_return_nullability,
                 );
             }
+            let body_pattern_bindings = condition
+                .as_ref()
+                .map(|condition| save_true_pattern_bindings(facts, condition))
+                .unwrap_or_default();
             analyze_scoped_statements(
                 &body.statements,
                 facts,
@@ -2707,6 +2742,7 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            restore_scoped_binding_uses(facts, body_pattern_bindings);
             restore_scoped_binding_uses(facts, saved_init_bindings);
         }
         Stmt::EnhancedFor {
@@ -2765,6 +2801,7 @@ fn analyze_stmt(
                 source_return_nullability,
             );
             for case in cases {
+                let case_pattern_bindings = save_switch_case_pattern_bindings(facts, case);
                 analyze_scoped_statements(
                     &case.statements,
                     facts,
@@ -2777,6 +2814,7 @@ fn analyze_stmt(
                     type_env,
                     source_return_nullability,
                 );
+                restore_scoped_binding_uses(facts, case_pattern_bindings);
             }
         }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
@@ -3488,6 +3526,70 @@ fn analyze_expr_with_context(
                 );
             }
         }
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            analyze_expr(
+                left,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            let right_pattern_bindings = save_true_pattern_bindings(facts, left);
+            analyze_expr(
+                right,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            restore_scoped_binding_uses(facts, right_pattern_bindings);
+        }
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            analyze_expr(
+                left,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            let right_pattern_bindings = save_false_pattern_bindings(facts, left);
+            analyze_expr(
+                right,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            restore_scoped_binding_uses(facts, right_pattern_bindings);
+        }
         Expr::Binary { left, right, .. } => {
             analyze_expr(
                 left,
@@ -3657,6 +3759,7 @@ fn analyze_expr_with_context(
                 type_env,
                 source_return_nullability,
             );
+            let then_pattern_bindings = save_true_pattern_bindings(facts, condition);
             analyze_expr_with_context(
                 then_expr,
                 facts,
@@ -3670,6 +3773,8 @@ fn analyze_expr_with_context(
                 source_return_nullability,
                 result_returned,
             );
+            restore_scoped_binding_uses(facts, then_pattern_bindings);
+            let else_pattern_bindings = save_false_pattern_bindings(facts, condition);
             analyze_expr_with_context(
                 else_expr,
                 facts,
@@ -3683,6 +3788,7 @@ fn analyze_expr_with_context(
                 source_return_nullability,
                 result_returned,
             );
+            restore_scoped_binding_uses(facts, else_pattern_bindings);
         }
         Expr::New {
             ty, args, resolved, ..
@@ -3777,6 +3883,7 @@ fn analyze_expr_with_context(
                         );
                     }
                 }
+                let case_pattern_bindings = save_switch_expr_case_pattern_bindings(facts, case);
                 analyze_expr(
                     &case.value,
                     facts,
@@ -3789,6 +3896,7 @@ fn analyze_expr_with_context(
                     type_env,
                     source_return_nullability,
                 );
+                restore_scoped_binding_uses(facts, case_pattern_bindings);
             }
         }
         Expr::Var(name) => record_use(facts, name, BindingUse::ContentRead),
@@ -4534,6 +4642,120 @@ fn restore_scoped_binding_uses(
     }
 }
 
+fn save_true_pattern_bindings(
+    facts: &mut MethodUsageFacts,
+    expr: &Expr,
+) -> Vec<(String, Option<BindingUseFacts>)> {
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    save_true_pattern_bindings_inner(facts, expr, &mut seen, &mut saved);
+    saved
+}
+
+fn save_true_pattern_bindings_inner(
+    facts: &mut MethodUsageFacts,
+    expr: &Expr,
+    seen: &mut HashSet<String>,
+    saved: &mut Vec<(String, Option<BindingUseFacts>)>,
+) {
+    match expr {
+        Expr::InstanceOf {
+            binding: Some(name),
+            ty,
+            ..
+        } => save_pattern_binding(facts, name, ty, seen, saved),
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => save_false_pattern_bindings_inner(facts, expr, seen, saved),
+        Expr::Binary {
+            op: BinaryOp::And,
+            left,
+            right,
+        } => {
+            save_true_pattern_bindings_inner(facts, left, seen, saved);
+            save_true_pattern_bindings_inner(facts, right, seen, saved);
+        }
+        _ => {}
+    }
+}
+
+fn save_false_pattern_bindings(
+    facts: &mut MethodUsageFacts,
+    expr: &Expr,
+) -> Vec<(String, Option<BindingUseFacts>)> {
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    save_false_pattern_bindings_inner(facts, expr, &mut seen, &mut saved);
+    saved
+}
+
+fn save_false_pattern_bindings_inner(
+    facts: &mut MethodUsageFacts,
+    expr: &Expr,
+    seen: &mut HashSet<String>,
+    saved: &mut Vec<(String, Option<BindingUseFacts>)>,
+) {
+    match expr {
+        Expr::Unary {
+            op: UnaryOp::Not,
+            expr,
+        } => save_true_pattern_bindings_inner(facts, expr, seen, saved),
+        Expr::Binary {
+            op: BinaryOp::Or,
+            left,
+            right,
+        } => {
+            save_false_pattern_bindings_inner(facts, left, seen, saved);
+            save_false_pattern_bindings_inner(facts, right, seen, saved);
+        }
+        _ => {}
+    }
+}
+
+fn save_switch_case_pattern_bindings(
+    facts: &mut MethodUsageFacts,
+    case: &crate::java_ir::SwitchCase,
+) -> Vec<(String, Option<BindingUseFacts>)> {
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    for label in &case.labels {
+        if let SwitchLabel::Expr(expr) = label {
+            save_true_pattern_bindings_inner(facts, expr, &mut seen, &mut saved);
+        }
+    }
+    saved
+}
+
+fn save_switch_expr_case_pattern_bindings(
+    facts: &mut MethodUsageFacts,
+    case: &crate::java_ir::SwitchExprCase,
+) -> Vec<(String, Option<BindingUseFacts>)> {
+    let mut saved = Vec::new();
+    let mut seen = HashSet::new();
+    for label in &case.labels {
+        if let SwitchLabel::Expr(expr) = label {
+            save_true_pattern_bindings_inner(facts, expr, &mut seen, &mut saved);
+        }
+    }
+    saved
+}
+
+fn save_pattern_binding(
+    facts: &mut MethodUsageFacts,
+    name: &str,
+    java_ty: &JavaType,
+    seen: &mut HashSet<String>,
+    saved: &mut Vec<(String, Option<BindingUseFacts>)>,
+) {
+    if !seen.insert(name.to_string()) {
+        return;
+    }
+    let saved_binding = facts.snapshot_visible_binding_for_scope(name);
+    insert_binding_use_facts(facts, name.to_string(), None, java_ty.clone());
+    saved.push((name.to_string(), saved_binding));
+}
+
 fn expr_mutates_self_field(
     expr: &Expr,
     facts: &MethodUsageFacts,
@@ -4803,7 +5025,7 @@ mod tests {
         BorrowSource, BorrowedReturnRecovery, CallableKey as FactCallableKey, FacadeAbiFact,
         FacadeSlot, FactProvenance, ReceiverAbi, ResultAbi, Staticness,
     };
-    use crate::java_ir::PrimitiveType;
+    use crate::java_ir::{PrimitiveType, TypeKind};
 
     fn binding_fact(name: &str, binding: Option<BindingId>) -> BindingUseFacts {
         BindingUseFacts {
@@ -4823,6 +5045,19 @@ mod tests {
             arg_target_types: Vec::new(),
             arg_coercions: Vec::new(),
         }
+    }
+
+    fn receiver_call_count(binding: &BindingUseFacts, names: &[&str]) -> usize {
+        binding
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if names.contains(&name.as_str())
+                )
+            })
+            .count()
     }
 
     #[test]
@@ -5835,6 +6070,335 @@ class ScopedFieldReturn {
                     .iter()
                     .any(|use_fact| matches!(use_fact, BindingUse::Returned))),
             "the out-of-scope local must not receive the return use: {method_usage:?}"
+        );
+    }
+
+    #[test]
+    fn instanceof_pattern_binding_read_does_not_use_outer_same_name_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class InstanceofPatternUsageScope {
+    void f(Object o, String s) {
+        if (o instanceof String s) {
+            s.toString();
+        }
+        s.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey::current_rust_method_name(
+                "InstanceofPatternUsageScope",
+                "f",
+            ))
+            .expect("method usage should be recorded");
+        let outer = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "s" && binding.binding.is_some())
+            .expect("outer parameter binding should be recorded");
+        let receiver_calls = outer
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if name == "toString"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            receiver_calls, 1,
+            "pattern variable reads must not be charged to the outer same-name parameter: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn negated_instanceof_else_pattern_binding_read_does_not_use_outer_same_name_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class NegatedInstanceofPatternUsageScope {
+    void f(Object o, String s) {
+        if (!(o instanceof String s)) {
+            s.toString();
+        } else {
+            s.toString();
+        }
+        s.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey::current_rust_method_name(
+                "NegatedInstanceofPatternUsageScope",
+                "f",
+            ))
+            .expect("method usage should be recorded");
+        let outer = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "s" && binding.binding.is_some())
+            .expect("outer parameter binding should be recorded");
+        let receiver_calls = outer
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if name == "toString"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            receiver_calls, 2,
+            "only the condition-false branch should hide the outer same-name parameter: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn and_pattern_binding_read_does_not_use_outer_same_name_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class AndPatternUsageScope {
+    void f(Object o, String s) {
+        boolean b = o instanceof String s && s.isEmpty();
+        s.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey::current_rust_method_name(
+                "AndPatternUsageScope",
+                "f",
+            ))
+            .expect("method usage should be recorded");
+        let outer = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "s" && binding.binding.is_some())
+            .expect("outer parameter binding should be recorded");
+        let receiver_calls = outer
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if name == "toString" || name == "isEmpty"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            receiver_calls, 1,
+            "short-circuit pattern variable reads must not be charged to the outer same-name parameter: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn or_negated_pattern_binding_read_does_not_use_outer_same_name_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class OrNegatedPatternUsageScope {
+    void f(Object o, String s) {
+        boolean b = !(o instanceof String s) || s.isEmpty();
+        s.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey::current_rust_method_name(
+                "OrNegatedPatternUsageScope",
+                "f",
+            ))
+            .expect("method usage should be recorded");
+        let outer = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "s" && binding.binding.is_some())
+            .expect("outer parameter binding should be recorded");
+        let receiver_calls = outer
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if name == "toString" || name == "isEmpty"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            receiver_calls, 1,
+            "negated short-circuit pattern variable reads must not be charged to the outer same-name parameter: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn ternary_pattern_binding_read_does_not_use_outer_same_name_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class TernaryPatternUsageScope {
+    void f(Object o, String s) {
+        int n = (o instanceof String s) ? s.length() : 0;
+        s.toString();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey::current_rust_method_name(
+                "TernaryPatternUsageScope",
+                "f",
+            ))
+            .expect("method usage should be recorded");
+        let outer = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "s" && binding.binding.is_some())
+            .expect("outer parameter binding should be recorded");
+        let receiver_calls = outer
+            .uses
+            .iter()
+            .filter(|usage| {
+                matches!(
+                    usage,
+                    BindingUse::ReceiverForCall { name, .. } if name == "toString" || name == "length"
+                )
+            })
+            .count();
+
+        assert_eq!(
+            receiver_calls, 1,
+            "ternary pattern variable reads must not be charged to the outer same-name parameter: {outer:?}"
+        );
+    }
+
+    #[test]
+    fn switch_expression_pattern_binding_read_does_not_use_outer_same_name_binding() {
+        let s_binding = BindingId::new(BindingKind::Param, "s", 0);
+        let o_binding = BindingId::new(BindingKind::Param, "o", 0);
+        let method = crate::java_ir::MethodDecl {
+            name: "f".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: vec![
+                crate::java_ir::Param {
+                    name: "o".to_string(),
+                    source_name: "o".to_string(),
+                    ty: JavaType::Unknown("Object".to_string()),
+                    is_varargs: false,
+                    binding: Some(o_binding),
+                },
+                crate::java_ir::Param {
+                    name: "s".to_string(),
+                    source_name: "s".to_string(),
+                    ty: JavaType::String,
+                    is_varargs: false,
+                    binding: Some(s_binding),
+                },
+            ],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::VarDecl {
+                        ty: JavaType::String,
+                        name: "x".to_string(),
+                        source_name: "x".to_string(),
+                        initializer: Some(Expr::Switch {
+                            selector: Box::new(Expr::Var("o".to_string())),
+                            cases: vec![
+                                crate::java_ir::SwitchExprCase {
+                                    labels: vec![SwitchLabel::Expr(Expr::InstanceOf {
+                                        expr: Box::new(Expr::Var("o".to_string())),
+                                        ty: JavaType::String,
+                                        binding: Some("s".to_string()),
+                                    })],
+                                    value: Expr::Call {
+                                        receiver: Some(Box::new(Expr::Var("s".to_string()))),
+                                        name: "trim".to_string(),
+                                        args: Vec::new(),
+                                        resolved: None,
+                                    },
+                                },
+                                crate::java_ir::SwitchExprCase {
+                                    labels: vec![SwitchLabel::Default],
+                                    value: Expr::Literal(crate::java_ir::Literal::String(
+                                        String::new(),
+                                    )),
+                                },
+                            ],
+                        }),
+                        binding: None,
+                    },
+                    Stmt::Expr(Expr::Call {
+                        receiver: Some(Box::new(Expr::Var("s".to_string()))),
+                        name: "toString".to_string(),
+                        args: Vec::new(),
+                        resolved: None,
+                    }),
+                ],
+            }),
+            span: crate::diagnostics::Span::default(),
+        };
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "SwitchExpressionPatternUsageScope".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: vec![Member::Method(method)],
+            static_init_blocks: Vec::new(),
+            span: crate::diagnostics::Span::default(),
+        };
+        let usage = analyze_usage(&Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![ty],
+        });
+        let method_usage = usage
+            .methods
+            .get(&UsageMethodKey::current_rust_method_name(
+                "SwitchExpressionPatternUsageScope",
+                "f",
+            ))
+            .expect("method usage should be recorded");
+        let outer = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name == "s" && binding.binding.is_some())
+            .expect("outer parameter binding should be recorded");
+
+        assert_eq!(
+            receiver_call_count(outer, &["toString", "trim"]),
+            1,
+            "switch expression pattern variable reads must not be charged to the outer same-name parameter: {outer:?}"
         );
     }
 
