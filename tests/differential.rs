@@ -20,8 +20,8 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 347;
-const EXPECTED_KNOWN_GAP_FIXTURES: usize = 2;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 348;
+const EXPECTED_KNOWN_GAP_FIXTURES: usize = 1;
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -427,6 +427,7 @@ fn inheritance_upcast_fixtures_match_java_output() {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
     let fixtures = [
+        "ErasedCarrierIdentity",
         "ErasedObjectSupertypeCast",
         "ExplicitInheritanceUpcast",
         "InheritanceUpcast",
@@ -929,30 +930,17 @@ enum KnownGapExpectation {
 }
 
 fn known_gap_fixtures() -> Vec<KnownGapFixture> {
-    vec![
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/ErasedCarrierIdentity.java",
-            class: "ErasedCarrierIdentity",
-            expected_java_output: "true,false,true,false",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation",
-                diagnostic_code: Some("java_reference_identity_equality"),
-                rust_contains: &[],
-                rust_not_contains: &["a == same", "a == other"],
-            },
+    vec![KnownGapFixture {
+        display: "tests/differential/known-gaps/StringEqualsVsEq.java",
+        class: "StringEqualsVsEq",
+        expected_java_output: "true,false,true,true,false",
+        expectation: KnownGapExpectation::LoudCompileError {
+            message: "unsupported Java String reference identity comparison requires string identity representation",
+            diagnostic_code: Some("java_string_identity"),
+            rust_contains: &[],
+            rust_not_contains: &[],
         },
-        KnownGapFixture {
-            display: "tests/differential/known-gaps/StringEqualsVsEq.java",
-            class: "StringEqualsVsEq",
-            expected_java_output: "true,false,true,true,false",
-            expectation: KnownGapExpectation::LoudCompileError {
-                message: "unsupported Java String reference identity comparison requires string identity representation",
-                diagnostic_code: Some("java_string_identity"),
-                rust_contains: &[],
-                rust_not_contains: &[],
-            },
-        },
-    ]
+    }]
 }
 
 fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {

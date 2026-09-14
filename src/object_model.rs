@@ -746,6 +746,7 @@ fn dispatch_requirements_for_binding_use(
         BindingUse::ContentRead | BindingUse::AssignedToLocal { .. } | BindingUse::Mutated => {
             Vec::new()
         }
+        BindingUse::CastTarget { .. } => Vec::new(),
     }
 }
 

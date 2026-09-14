@@ -160,6 +160,7 @@ pub(crate) fn source_hierarchy_carrier_item_for_type(
     Some(source_hierarchy_carrier_item(
         carrier_name,
         variants,
+        representations,
         facts,
         signatures,
         ty,
@@ -173,17 +174,22 @@ fn closed_enum_carrier_item(enum_name: &str, variants: &[String], facts: &FactSe
 fn source_hierarchy_carrier_item(
     enum_name: &str,
     variants: &[String],
+    representations: &RepresentationPlan,
     facts: &FactSet,
     signatures: &SignaturePlan,
     ty: &TypeDecl,
 ) -> String {
-    let mut item = carrier_enum_item("#[derive(Clone)]", enum_name, variants, facts);
+    let mut item = source_hierarchy_carrier_enum_item(enum_name, variants, representations);
     let mut impl_members = Vec::new();
     impl_members.extend(source_hierarchy_carrier_field_accessors(
         variants, facts, signatures, ty,
     ));
     impl_members.extend(source_hierarchy_carrier_forwarding_methods(
         enum_name, variants, facts, ty,
+    ));
+    impl_members.push(source_hierarchy_carrier_identity_method(
+        variants,
+        representations,
     ));
     if !impl_members.is_empty() {
         item.push_str("\n\n");
@@ -193,6 +199,51 @@ fn source_hierarchy_carrier_item(
         ));
     }
     item
+}
+
+fn source_hierarchy_carrier_identity_method(
+    variants: &[String],
+    representations: &RepresentationPlan,
+) -> String {
+    let arms = variants
+        .iter()
+        .map(|variant| {
+            let placement = storage_placement_for_emitted_type_name(representations, variant);
+            let comparison = if placement.shared() && placement.is_implemented() {
+                let handle = if placement.sync() {
+                    "std::sync::Arc"
+                } else {
+                    "std::rc::Rc"
+                };
+                format!("{handle}::ptr_eq(left, right)")
+            } else {
+                "std::ptr::eq(left, right)".to_string()
+            };
+            format!("            (Self::{variant}(left), Self::{variant}(right)) => {comparison},")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!(
+        "    pub fn java_identity_eq(&self, other: &Self) -> bool {{\n        match (self, other) {{\n{arms}\n            _ => false,\n        }}\n    }}"
+    )
+}
+
+fn source_hierarchy_carrier_enum_item(
+    enum_name: &str,
+    variants: &[String],
+    representations: &RepresentationPlan,
+) -> String {
+    let variants = variants
+        .iter()
+        .map(|variant| {
+            format!(
+                "    {variant}({}),",
+                source_hierarchy_carrier_variant_payload_type(variant, representations)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("#[derive(Clone)]\npub enum {enum_name} {{\n{variants}\n}}")
 }
 
 fn carrier_enum_item(
@@ -320,6 +371,29 @@ fn carrier_variant_payload_type(variant: &str, facts: &FactSet) -> String {
     } else {
         variant.to_string()
     }
+}
+
+fn source_hierarchy_carrier_variant_payload_type(
+    variant: &str,
+    representations: &RepresentationPlan,
+) -> String {
+    let placement = storage_placement_for_emitted_type_name(representations, variant);
+    if placement.shared() && placement.is_implemented() {
+        placement.wrap(variant.to_string())
+    } else {
+        variant.to_string()
+    }
+}
+
+fn storage_placement_for_emitted_type_name(
+    representations: &RepresentationPlan,
+    emitted_name: &str,
+) -> crate::storage_strategy::StoragePlacement {
+    representations
+        .type_representations()
+        .find(|entry| rust_name_for_java_named_type(entry.java_name()) == emitted_name)
+        .map(|entry| representations.storage_placement_for(entry.java_name()))
+        .unwrap_or_else(|| representations.storage_placement_for(emitted_name))
 }
 
 fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> String {

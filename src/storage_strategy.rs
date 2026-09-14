@@ -891,6 +891,7 @@ fn collect_type_facts(
                         facts.mutated = true;
                     }
                     collect_unknown_boundary_escapes(method_usage, ty, declared, into);
+                    collect_erased_cast_identity_aliases(method_usage, ty, program, declared, into);
                 }
                 if let Some(body) = &method.body {
                     let mut locals = local_types_from_params(&method.params);
@@ -967,6 +968,87 @@ fn collect_unknown_boundary_escapes(
             }
         }
     }
+}
+
+fn collect_erased_cast_identity_aliases(
+    method_usage: &MethodUsageFacts,
+    owner: &TypeDecl,
+    program: &Program,
+    declared: &BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    for binding in method_usage.all_binding_facts() {
+        if !java_type_is_erased_object(binding.java_ty()) {
+            continue;
+        }
+        for use_site in binding.uses() {
+            let BindingUse::CastTarget { target_ty } = use_site else {
+                continue;
+            };
+            let Some(target_name) = declared_type_name(target_ty, &owner.name, declared) else {
+                continue;
+            };
+            for name in source_hierarchy_family_names(program, &target_name, declared) {
+                if let Some(facts) = into.get_mut(&name) {
+                    facts.locally_aliased = true;
+                }
+            }
+        }
+    }
+}
+
+fn java_type_is_erased_object(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Unknown(name) => simple_name(name) == "Object",
+        JavaType::Named { name, .. } => simple_name(name) == "Object",
+        _ => false,
+    }
+}
+
+fn source_hierarchy_family_names(
+    program: &Program,
+    target_name: &str,
+    declared: &BTreeSet<String>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for name in declared {
+        if name == target_name || source_subtype_reaches(program, name, target_name) {
+            out.push(name.clone());
+        }
+    }
+    out
+}
+
+fn source_subtype_reaches(program: &Program, subtype: &str, target: &str) -> bool {
+    let mut current = source_type_decl(program, subtype).and_then(|ty| ty.extends.as_deref());
+    for _ in 0..64 {
+        let Some(super_name) = current else {
+            return false;
+        };
+        if super_name == target || simple_name(super_name) == simple_name(target) {
+            return true;
+        }
+        current = source_type_decl(program, super_name).and_then(|ty| ty.extends.as_deref());
+    }
+    false
+}
+
+fn source_type_decl<'a>(program: &'a Program, name: &str) -> Option<&'a TypeDecl> {
+    program
+        .types
+        .iter()
+        .flat_map(source_type_decl_and_nested)
+        .find(|ty| ty.name == name || simple_name(&ty.name) == simple_name(name))
+}
+
+fn source_type_decl_and_nested(ty: &TypeDecl) -> Vec<&TypeDecl> {
+    let mut out = vec![ty];
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            out.extend(source_type_decl_and_nested(nested));
+        }
+    }
+    out
 }
 
 fn collect_block_facts(
@@ -1725,6 +1807,26 @@ class Outer {
             "Cell",
         );
         assert_eq!(strategy, StorageStrategy::SharedImmutable);
+    }
+
+    #[test]
+    fn erased_object_cast_to_source_supertype_shares_recovered_hierarchy_family() {
+        let source = r#"
+class Use {
+    static boolean run(Object value) {
+        A first = (A) value;
+        A second = (A) value;
+        return first == second;
+    }
+}
+class A {
+    int v;
+}
+class B extends A {
+}
+"#;
+        assert_eq!(strategy_of(source, "A"), StorageStrategy::SharedImmutable);
+        assert_eq!(strategy_of(source, "B"), StorageStrategy::SharedImmutable);
     }
 
     #[test]

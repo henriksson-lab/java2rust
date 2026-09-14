@@ -3104,6 +3104,7 @@ fn add_method_binding_dependency_edges(
                 | BindingUse::AssignedSubtypeToLocal { .. }
                 | BindingUse::AssignedSubtypeToCollectionElement { .. }
                 | BindingUse::AssignedSubtypeToCallArgument { .. }
+                | BindingUse::CastTarget { .. }
                 | BindingUse::InstanceOfTarget { .. }
                 | BindingUse::Mutated => {}
             }
@@ -3214,6 +3215,7 @@ fn add_constructor_binding_dependency_edges(
                 | BindingUse::AssignedSubtypeToLocal { .. }
                 | BindingUse::AssignedSubtypeToCollectionElement { .. }
                 | BindingUse::AssignedSubtypeToCallArgument { .. }
+                | BindingUse::CastTarget { .. }
                 | BindingUse::InstanceOfTarget { .. }
                 | BindingUse::ReceiverForCall { .. }
                 | BindingUse::Returned
@@ -17765,6 +17767,7 @@ fn map_get_value_binding_is_only_dereferenced_as_receiver(binding: &BindingUseFa
             | BindingUse::PassedToCall { .. }
             | BindingUse::StoredInField { .. }
             | BindingUse::Returned
+            | BindingUse::CastTarget { .. }
             | BindingUse::InstanceOfTarget { .. }
             | BindingUse::Mutated => return false,
         }
@@ -18122,6 +18125,7 @@ fn internal_object_binding_is_shared_borrow_safe(
                 ..
             } => {}
             BindingUse::InstanceOfTarget { .. }
+            | BindingUse::CastTarget { .. }
             | BindingUse::AssignedFromCall { .. }
             | BindingUse::StoredInField { .. }
             | BindingUse::Mutated => return false,

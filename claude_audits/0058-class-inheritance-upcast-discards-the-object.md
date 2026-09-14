@@ -3,6 +3,22 @@
 Recorded 2026-08-23.
 Status: **open, narrowed to class hierarchy carrier**.
 
+Codex follow-up 2026-09-14 identity-preserving erased carrier recovery:
+`Object` values cast back to a represented source superclass now keep the
+variant object's shared handle instead of cloning the payload. Cast-target
+usage feeds the storage lattice for the recovered source hierarchy family,
+source hierarchy carrier variants render payload types from the
+`RepresentationPlan` storage plan (including nested emitted-name lookup),
+`From<Rc<Sub>> for SuperValue` keeps the handle, erased-object source-supertype
+casts downcast `Rc<Variant>`/`Arc<Variant>` by borrowing the erased object, and
+the carrier emits `java_identity_eq` to compare same-variant handles rather
+than outer carrier allocations. `tests/differential/ErasedCarrierIdentity.java`
+is promoted from known-gaps and matches Java (`true,false,true,false`).
+Regressions:
+`idiom_gaps::erased_object_source_hierarchy_carrier_identity_preserves_variant_handle_identity`,
+`usage::tests::erased_object_cast_records_target_type_on_source_binding`, and
+`storage_strategy::constructor_mutation_tests::erased_object_cast_to_source_supertype_shares_recovered_hierarchy_family`.
+
 Codex follow-up 2026-09-14 carrier conversion cleanup: source hierarchy carrier
 conversion no longer also emits a concrete `impl From<Sub> for Super` field-copy
 helper. That helper was a latent slicing path beside the correct
@@ -110,14 +126,14 @@ used, instead of stopping at the boolean runtime test. The pattern path checks
 the root and known source subtype variants, clones the matched value into the
 carrier enum, and then dispatches through that carrier. `PatternInstanceofSupertypeUsed.java`
 is promoted and matches Java (`B,A,other`).
-Codex follow-up 2026-09-14 carrier identity guard: source-hierarchy carrier
+Superseded guardrail, 2026-09-14 carrier identity guard: source-hierarchy carrier
 reference identity recovered from an erased object no longer leaks invalid
 `AValue == AValue` Rust. Until the carrier itself preserves object identity, the
 path emits an explicit
 `unsupported Java source hierarchy carrier reference identity comparison`
 `compile_error!` and keeps the existing identity diagnostics. Regression:
 `idiom_gaps::erased_object_source_hierarchy_carrier_identity_fails_loudly`.
-Codex follow-up 2026-09-14 executable identity known-gap: the same carrier
+Superseded known-gap, 2026-09-14 executable identity known-gap: the same carrier
 identity residue is now in the differential known-gap harness as
 `tests/differential/known-gaps/ErasedCarrierIdentity.java`. Java must print
 `true,false,true,false`, while the current translation must fail loudly with the
@@ -144,7 +160,7 @@ Severity: **critical** — the original silent source-class upcast and
 most source-supertype `instanceof` paths are now loud or correct, and direct
 emitted `super.m()` calls can lower to the superclass implementation, but Java
 class hierarchy lowering still has an incomplete carrier surface for
-identity-preserving carrier recovery and general mutating super calls.
+general mutating super calls and broader class-hierarchy representation.
 Kind: behavioural (differential), object model / dispatch.
 
 Updated 2026-09-06 (guardrail): erased-object aliases for nested Java classes
@@ -715,7 +731,7 @@ Manual generated-library checks also pass for the two minimal fixtures in
 - `OptionalSourceSupertypeCtorArg.java`
 
 The audit remains open for the broader class hierarchy surface, especially
-identity-preserving carrier recovery and general mutating super calls.
+general mutating super calls.
 
 ## Codex follow-up 2026-08-29 — stale passing repair test removed from failure baseline
 

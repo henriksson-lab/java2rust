@@ -22455,7 +22455,7 @@ class B extends A {
 }
 
 #[test]
-fn erased_object_source_hierarchy_carrier_identity_fails_loudly() {
+fn erased_object_source_hierarchy_carrier_identity_preserves_variant_handle_identity() {
     let source = r#"
 class ErasedCarrierIdentity {
     static String run() {
@@ -22477,37 +22477,33 @@ class B extends A {
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation\")"
-        )
+        translation
+            .rust
+            .contains("pub fn java_identity_eq(&self, other: &Self) -> bool")
+            && translation
+                .rust
+                .contains("std::rc::Rc::ptr_eq(left, right)")
+            && translation.rust.contains("a.java_identity_eq(&same)")
+            && translation.rust.contains("a.java_identity_eq(&other)")
+            && translation
+                .rust
+                .contains("downcast_ref::<std::rc::Rc<B>>()")
+            && !translation.rust.contains("compile_error!")
+            && !translation.rust.contains("std::rc::Rc::ptr_eq(&a, &same)")
             && !translation.rust.contains("a == same")
             && !translation.rust.contains("a == other"),
         "{}",
         translation.rust
     );
-    assert!(
-        translation
-            .diagnostics
-            .has_code("java_reference_identity_equality"),
-        "{:?}",
-        translation.diagnostics.iter().collect::<Vec<_>>()
-    );
-    assert!(
-        translation
-            .diagnostics
-            .has_code("java_inherited_equals_identity"),
-        "{:?}",
-        translation.diagnostics.iter().collect::<Vec<_>>()
-    );
-
-    cargo_check_generated_modules_fails_with(
+    cargo_test_generated_modules_for_translation(
         "erased_object_source_hierarchy_carrier_identity",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
-        "unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation",
+        translation.rust,
+        r#"
+#[test]
+fn erased_object_source_hierarchy_carrier_identity_matches_java() {
+    assert_eq!(ErasedCarrierIdentity::run(), "true,false,true,false".to_string());
+}
+"#,
     );
 }
 

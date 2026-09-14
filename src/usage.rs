@@ -992,6 +992,9 @@ pub enum BindingUse {
         field_name: String,
     },
     Returned,
+    CastTarget {
+        target_ty: JavaType,
+    },
     InstanceOfTarget {
         target_ty: JavaType,
     },
@@ -3616,19 +3619,30 @@ fn analyze_expr_with_context(
                 source_return_nullability,
             );
         }
-        Expr::Cast { expr, .. } => analyze_expr_with_context(
-            expr,
-            facts,
-            current_type,
-            current_super_type,
-            internal_methods,
-            field_names,
-            field_types,
-            semantic_facts,
-            type_env,
-            source_return_nullability,
-            result_returned,
-        ),
+        Expr::Cast { expr, ty } => {
+            if let Expr::Var(binding) = expr.as_ref() {
+                record_use(
+                    facts,
+                    binding,
+                    BindingUse::CastTarget {
+                        target_ty: ty.clone(),
+                    },
+                );
+            }
+            analyze_expr_with_context(
+                expr,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+                result_returned,
+            )
+        }
         Expr::Unary { expr, .. } => analyze_expr(
             expr,
             facts,
@@ -5225,6 +5239,37 @@ class Use {
                     target_type: JavaType::Named { name: target_name, .. },
                     actual_type: JavaType::Named { name: actual_name, .. },
                 } if target_name == "Base" && actual_name == "Sub"
+            )
+        }));
+    }
+
+    #[test]
+    fn erased_object_cast_records_target_type_on_source_binding() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Use {
+    void run(Object value) {
+        Base base = (Base) value;
+    }
+}
+class Base {
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "run");
+        let binding = usage
+            .method_usage_by_key(&method)
+            .and_then(|method| method.current_visible_binding_facts_for_name("value"))
+            .expect("erased binding");
+
+        assert!(binding.uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                BindingUse::CastTarget {
+                    target_ty: JavaType::Named { name, .. },
+                } if name == "Base"
             )
         }));
     }

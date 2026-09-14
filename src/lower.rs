@@ -3613,6 +3613,26 @@ fn shared_handle_conversion_companion(sub_name: &str, to_name: &str) -> Option<V
     )
 }
 
+fn shared_handle_source_hierarchy_conversion_companion(
+    sub_name: &str,
+    enum_name: &str,
+    placement: crate::storage_strategy::StoragePlacement,
+) -> Vec<RustItem> {
+    let handle = if placement.sync() {
+        "std::sync::Arc"
+    } else {
+        "std::rc::Rc"
+    };
+    vec![source_from_trait_impl_item(
+        format!("{handle}<{sub_name}>"),
+        enum_name.to_string(),
+        RustExpr::Call {
+            function: Box::new(RustExpr::path([enum_name, sub_name])),
+            args: vec![RustExpr::Var("value".to_string())],
+        },
+    )]
+}
+
 fn source_supertype_conversion_impls_for_pair(
     sub_ty: &TypeDecl,
     super_ty: &TypeDecl,
@@ -3623,7 +3643,7 @@ fn source_supertype_conversion_impls_for_pair(
 ) -> Option<Vec<RustItem>> {
     let sub_name = crate::java_naming::rust_name_for_java_named_type(&sub_ty.name);
     let sub_is_shared = {
-        let placement = facts.storage_placement_for(&sub_ty.name);
+        let placement = representations.storage_placement_for(&sub_ty.name);
         placement.shared() && placement.is_implemented()
     };
     let companion = |to_name: &str| -> Option<Vec<RustItem>> {
@@ -3642,7 +3662,7 @@ fn source_supertype_conversion_impls_for_pair(
         // The carrier stores the payload behind its handle, so the conversion
         // puts it there; `value` arrives owned and bare.
         let payload = {
-            let placement = facts.storage_placement_for(&sub_ty.name);
+            let placement = representations.storage_placement_for(&sub_ty.name);
             if placement.shared() && placement.is_implemented() {
                 crate::slot_render::storage_placement_construction_expr(
                     placement,
@@ -3660,7 +3680,14 @@ fn source_supertype_conversion_impls_for_pair(
                 args: vec![payload],
             },
         )];
-        impls.extend(companion(&enum_name).unwrap_or_default());
+        let placement = representations.storage_placement_for(&sub_ty.name);
+        if placement.shared() && placement.is_implemented() {
+            impls.extend(shared_handle_source_hierarchy_conversion_companion(
+                &sub_name, &enum_name, placement,
+            ));
+        } else {
+            impls.extend(companion(&enum_name).unwrap_or_default());
+        }
         return Some(impls);
     }
     if matches!(
@@ -12409,6 +12436,106 @@ fn unsupported_source_hierarchy_cast_expr_for_plan(
         ));
     }
     None
+}
+
+fn erased_object_source_hierarchy_cast_expr_for_plan(
+    plan: &crate::conversion_plan::CastConversionPlan,
+    lowered: RustExpr,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    if !matches!(plan.actual().dispatch, DispatchShape::ErasedObject)
+        || !matches!(plan.target().dispatch, DispatchShape::ClosedEnum { .. })
+    {
+        return None;
+    }
+    let target_name = concrete_java_type_name(&plan.target().java_ty)?;
+    let representation = ctx.representations.type_representation(target_name)?;
+    let crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+        carrier_name,
+        variants,
+    } = representation.representation()
+    else {
+        return None;
+    };
+    let object_name = "__java_erased_object".to_string();
+    let object = RustExpr::Var(object_name.clone());
+    let fallback = RustExpr::MacroCall {
+        macro_name: "panic".to_string(),
+        args: vec![RustExpr::Literal(format!(
+            "\"{}\"",
+            crate::output_markers::INVALID_JAVA_CAST_MESSAGE
+        ))],
+    };
+    let carrier = variants.iter().rev().fold(fallback, |else_expr, variant| {
+        let runtime_ty = erased_source_hierarchy_variant_runtime_type(variant, ctx);
+        let downcast = RustExpr::MethodCall {
+            receiver: Box::new(erased_object_downcast_ref_projection(
+                object.clone(),
+                &runtime_ty,
+            )),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal(format!(
+                "\"{}\"",
+                crate::output_markers::INVALID_JAVA_CAST_MESSAGE
+            ))],
+        };
+        RustExpr::If {
+            condition: Box::new(erased_object_is_type_projection(
+                object.clone(),
+                &runtime_ty,
+            )),
+            then_expr: Box::new(RustExpr::Call {
+                function: Box::new(RustExpr::path([carrier_name.as_str(), variant.as_str()])),
+                args: vec![apply_clone_projection(downcast)],
+            }),
+            else_expr: Box::new(else_expr),
+        }
+    });
+    let target_placement = ctx.representations.storage_placement_for(target_name);
+    let carrier = if target_placement.shared() && target_placement.is_implemented() {
+        crate::slot_render::storage_placement_construction_expr(target_placement, carrier)
+    } else {
+        carrier
+    };
+    Some(RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: object_name,
+            ty: None,
+            value: Some(erased_object_borrow_for_recovery(lowered)),
+        }],
+        tail: Some(Box::new(carrier)),
+    })
+}
+
+fn erased_source_hierarchy_variant_runtime_type(variant: &str, ctx: LowerCtx) -> String {
+    let placement = source_hierarchy_variant_storage_placement(variant, ctx);
+    if placement.shared() && placement.is_implemented() {
+        placement.wrap(variant.to_string())
+    } else {
+        variant.to_string()
+    }
+}
+
+fn source_hierarchy_variant_storage_placement(
+    variant: &str,
+    ctx: LowerCtx,
+) -> crate::storage_strategy::StoragePlacement {
+    ctx.representations
+        .type_representations()
+        .find(|entry| {
+            crate::java_naming::rust_name_for_java_named_type(entry.java_name()) == variant
+        })
+        .map(|entry| ctx.representations.storage_placement_for(entry.java_name()))
+        .unwrap_or_else(|| ctx.representations.storage_placement_for(variant))
+}
+
+fn erased_object_borrow_for_recovery(lowered: RustExpr) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(lowered),
+        method: "as_ref".to_string(),
+        args: Vec::new(),
+    }
 }
 
 fn instanceof_pattern_target_type(expr: &Expr) -> Option<&JavaType> {
@@ -21196,6 +21323,11 @@ fn lower_expr_with_refinements(
             {
                 return unsupported;
             }
+            if let Some(supported) =
+                erased_object_source_hierarchy_cast_expr_for_plan(&plan, lowered.clone(), ctx)
+            {
+                return supported;
+            }
             apply_cast_conversion(lowered, &plan)
         }
         Expr::InstanceOf { expr, ty, .. } => {
@@ -22198,10 +22330,20 @@ fn lower_binary_expr(
             &right_shape,
             left,
             right,
-            lowered_left,
-            lowered_right,
+            lowered_left.clone(),
+            lowered_right.clone(),
             env,
         );
+        if let Some(identity_expr) = lower_source_hierarchy_carrier_identity_comparison(
+            &op,
+            &left_shape,
+            &right_shape,
+            lowered_left.clone(),
+            lowered_right.clone(),
+            ctx.representations,
+        ) {
+            return identity_expr;
+        }
         return if equality_plan_requires_string_identity_representation(
             &equality_plan,
             &left_shape,
@@ -24983,6 +25125,38 @@ fn source_hierarchy_identity_compile_error_expr() -> RustExpr {
     crate::unsupported::compile_error_expr(
         "unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation",
     )
+}
+
+fn lower_source_hierarchy_carrier_identity_comparison(
+    op: &BinaryOp,
+    left_shape: &RustSlotShape,
+    right_shape: &RustSlotShape,
+    lowered_left: RustExpr,
+    lowered_right: RustExpr,
+    representations: &RepresentationPlan,
+) -> Option<RustExpr> {
+    if left_shape.optional_element_type().is_some() || right_shape.optional_element_type().is_some()
+    {
+        return None;
+    }
+    if !slot_shape_is_source_hierarchy_carrier(left_shape, representations)
+        || !slot_shape_is_source_hierarchy_carrier(right_shape, representations)
+    {
+        return None;
+    }
+    let identity = RustExpr::MethodCall {
+        receiver: Box::new(lowered_left),
+        method: "java_identity_eq".to_string(),
+        args: vec![RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(lowered_right),
+        }],
+    };
+    Some(match op {
+        BinaryOp::Eq => identity,
+        BinaryOp::Ne => logical_not_projection(identity),
+        _ => return None,
+    })
 }
 
 fn equality_plan_requires_string_identity_representation(
@@ -33902,6 +34076,7 @@ fn current_callable_binding_is_receiver_only_deref(binding_id: &BindingId, ctx: 
                 | BindingUse::PassedToCall { .. }
                 | BindingUse::StoredInField { .. }
                 | BindingUse::Returned
+                | BindingUse::CastTarget { .. }
                 | BindingUse::InstanceOfTarget { .. }
                 | BindingUse::Mutated => return false,
             }
@@ -36578,14 +36753,6 @@ fn lower_java_equality_operands_for_op(
         ctx.facts,
         crate::operator_lowering::EqualityComparisonSource::EqualsCall,
     );
-    if equality_plan_requires_source_hierarchy_identity_representation(
-        &plan,
-        &left_shape,
-        &right_shape,
-        ctx.representations,
-    ) {
-        return source_hierarchy_identity_compile_error_expr();
-    }
     let lowered_left = lower_equality_operand_with_erased_class_context(
         left,
         right,
@@ -36602,6 +36769,24 @@ fn lower_java_equality_operands_for_op(
         ctx,
         refinements,
     );
+    if let Some(identity_expr) = lower_source_hierarchy_carrier_identity_comparison(
+        &op,
+        &left_shape,
+        &right_shape,
+        lowered_left.clone(),
+        lowered_right.clone(),
+        ctx.representations,
+    ) {
+        return identity_expr;
+    }
+    if equality_plan_requires_source_hierarchy_identity_representation(
+        &plan,
+        &left_shape,
+        &right_shape,
+        ctx.representations,
+    ) {
+        return source_hierarchy_identity_compile_error_expr();
+    }
     lower_equality_comparison_expr_for_op_with_borrowed_optional_locals(
         op,
         plan,

@@ -17,22 +17,6 @@ reason after reintroducing an old wrong lowering shape.
 Move one back up a level as part of the change that fixes it — that is the
 regression test.
 
-## ErasedCarrierIdentity.java
-
-Java casts from `Object` back to a source superclass preserve object identity.
-The current source-hierarchy carrier can recover the dynamic subtype for
-dispatch, but recovered carriers clone the payload and cannot yet answer Java
-reference identity or inherited `Object.equals` correctly.
-
-```
-java: true,false,true,false
-translation: compile_error!("unsupported Java source hierarchy carrier reference identity comparison requires identity-preserving carrier representation")
-diagnostic: java_reference_identity_equality
-```
-
-Move this fixture to `tests/differential/` when the source hierarchy carrier
-preserves identity across erased-object recovery.
-
 ## StringEqualsVsEq.java
 
 Java `String ==` is reference equality. The current translation refuses this

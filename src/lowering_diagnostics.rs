@@ -1452,7 +1452,7 @@ mod tests {
     use crate::translate_source;
 
     #[test]
-    fn explicit_source_supertype_cast_reports_unsupported_inheritance() {
+    fn explicit_source_supertype_cast_with_carrier_reports_no_inheritance_gap() {
         let translation = translate_source(
             r#"
 class ExplicitInheritanceUpcast {
@@ -1475,7 +1475,7 @@ class Savings extends Account {
         );
 
         assert!(
-            translation.diagnostics.has_code("unsupported_inheritance"),
+            !translation.diagnostics.has_code("unsupported_inheritance"),
             "{:?}",
             translation.diagnostics.iter().collect::<Vec<_>>()
         );
