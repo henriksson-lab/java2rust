@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 378;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 379;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 0;
 
 #[test]
@@ -466,7 +466,11 @@ fn qualified_inner_capture_fixtures_match_java_output() {
     }
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
-    let fixtures = ["InnerCapture", "QualifiedInnerCapture"];
+    let fixtures = [
+        "InnerCapture",
+        "QualifiedInnerCapture",
+        "NestedInnerCapture",
+    ];
     let mut failures = Vec::new();
     for class in fixtures {
         let fixture = root.join(format!("{class}.java"));

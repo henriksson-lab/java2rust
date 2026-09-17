@@ -33435,7 +33435,23 @@ fn lower_receiverless_captured_outer_companion_call(
         return None;
     };
     if !source_method_body_needs_outer_this_handle_companion(owner_ty, method, ctx) {
-        return None;
+        let mutable = source_receiver_method_requires_mutable_signature(
+            &JavaType::Named {
+                name: owner_ty.name.clone(),
+                args: Vec::new(),
+            },
+            rust_name,
+            ctx,
+        );
+        return Some(receiver_method_call_projection(
+            receiver_method_call_projection_exact(
+                field_projection(this_expr(), "__outer"),
+                if mutable { "borrow_mut" } else { "borrow" },
+                Vec::new(),
+            ),
+            rust_name,
+            args,
+        ));
     }
     args.insert(
         0,

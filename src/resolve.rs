@@ -6937,21 +6937,19 @@ struct CaptureContext {
     type_name: String,
     method_name: Option<String>,
     fields: HashMap<String, JavaType>,
-    outer_type_name: Option<String>,
-    outer_fields: HashMap<String, JavaType>,
+    outer_field_owners: HashMap<String, String>,
     scopes: Vec<ScopeFrame>,
     mutated_names: HashSet<String>,
 }
 
 impl CaptureAnalyzer {
     fn analyze_top_level_type(&mut self, ty: &TypeDecl) {
-        self.analyze_type_members(ty, None);
+        self.analyze_type_members(ty, &[]);
     }
 
-    fn analyze_type_members(&mut self, ty: &TypeDecl, outer: Option<&TypeDecl>) {
+    fn analyze_type_members(&mut self, ty: &TypeDecl, enclosing_types: &[&TypeDecl]) {
         let fields = field_types(ty);
-        let outer_fields = outer.map(instance_field_types).unwrap_or_default();
-        let outer_type_name = outer.map(|ty| ty.name.clone());
+        let outer_field_owners = enclosing_instance_field_owners(enclosing_types);
 
         for member in &ty.members {
             match member {
@@ -6961,8 +6959,7 @@ impl CaptureAnalyzer {
                             type_name: ty.name.clone(),
                             method_name: Some(method.name.clone()),
                             fields: fields.clone(),
-                            outer_type_name: outer_type_name.clone(),
-                            outer_fields: outer_fields.clone(),
+                            outer_field_owners: outer_field_owners.clone(),
                             scopes: vec![method_param_frame(&method.params, false)],
                             mutated_names: mutated_names_in_block(body),
                         };
@@ -6975,8 +6972,7 @@ impl CaptureAnalyzer {
                             type_name: ty.name.clone(),
                             method_name: None,
                             fields: fields.clone(),
-                            outer_type_name: outer_type_name.clone(),
-                            outer_fields: outer_fields.clone(),
+                            outer_field_owners: outer_field_owners.clone(),
                             scopes: vec![method_param_frame(&ctor.params, false)],
                             mutated_names: mutated_names_in_block(body),
                         };
@@ -6988,18 +6984,51 @@ impl CaptureAnalyzer {
                 // unqualified reference to an outer *static* lower to
                 // `self.__outer.borrow().field`
                 // ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
-                Member::Type(inner) if !inner.modifiers.contains(&Modifier::Static) => {
-                    self.analyze_inner_type(inner, ty)
+                // Member interfaces, enums, and records are implicitly static
+                // in Java.  Only a non-static member class has an enclosing
+                // instance to capture.
+                Member::Type(inner)
+                    if inner.kind == TypeKind::Class
+                        && !inner.modifiers.contains(&Modifier::Static) =>
+                {
+                    let mut inner_enclosing_types = enclosing_types.to_vec();
+                    inner_enclosing_types.push(ty);
+                    self.analyze_inner_type(inner, ty, &inner_enclosing_types)
                 }
-                Member::Type(inner) => self.analyze_type_members(inner, None),
+                Member::Type(inner) => self.analyze_type_members(inner, &[]),
                 _ => {}
             }
         }
     }
 
-    fn analyze_inner_type(&mut self, inner: &TypeDecl, outer: &TypeDecl) {
+    fn analyze_inner_type(
+        &mut self,
+        inner: &TypeDecl,
+        outer: &TypeDecl,
+        enclosing_types: &[&TypeDecl],
+    ) {
         let mut captures = Vec::new();
-        self.analyze_type_members_for_owner(inner, Some(outer), &mut captures);
+        self.analyze_type_members_for_owner(inner, enclosing_types, &mut captures);
+        // Every non-static member class has an enclosing-instance association,
+        // even if its own body does not presently read that instance.  Keeping
+        // the handle is required when a nested member class later captures an
+        // ancestor of this class.
+        if !captures
+            .iter()
+            .any(|capture| capture.source == CaptureSource::OuterThis)
+            && let Some(outer) = enclosing_types.last()
+        {
+            captures.push(Capture {
+                name: outer.name.clone(),
+                source: CaptureSource::OuterThis,
+                ty: JavaType::Named {
+                    name: outer.name.clone(),
+                    args: Vec::new(),
+                },
+                effectively_final: true,
+                mutable_after_capture: false,
+            });
+        }
         let id = self.next_node_id();
         self.push_owner(CaptureOwner {
             id,
@@ -7014,18 +7043,17 @@ impl CaptureAnalyzer {
             },
             captures,
         });
-        self.analyze_type_members(inner, Some(outer));
+        self.analyze_type_members(inner, enclosing_types);
     }
 
     fn analyze_type_members_for_owner(
         &mut self,
         ty: &TypeDecl,
-        outer: Option<&TypeDecl>,
+        enclosing_types: &[&TypeDecl],
         captures: &mut Vec<Capture>,
     ) {
         let fields = field_types(ty);
-        let outer_fields = outer.map(instance_field_types).unwrap_or_default();
-        let outer_type_name = outer.map(|ty| ty.name.clone());
+        let outer_field_owners = enclosing_instance_field_owners(enclosing_types);
 
         for member in &ty.members {
             match member {
@@ -7035,8 +7063,7 @@ impl CaptureAnalyzer {
                             type_name: ty.name.clone(),
                             method_name: Some(method.name.clone()),
                             fields: fields.clone(),
-                            outer_type_name: outer_type_name.clone(),
-                            outer_fields: outer_fields.clone(),
+                            outer_field_owners: outer_field_owners.clone(),
                             scopes: vec![method_param_frame(&method.params, false)],
                             mutated_names: mutated_names_in_block(body),
                         };
@@ -7049,8 +7076,7 @@ impl CaptureAnalyzer {
                             type_name: ty.name.clone(),
                             method_name: None,
                             fields: fields.clone(),
-                            outer_type_name: outer_type_name.clone(),
-                            outer_fields: outer_fields.clone(),
+                            outer_field_owners: outer_field_owners.clone(),
                             scopes: vec![method_param_frame(&ctor.params, false)],
                             mutated_names: mutated_names_in_block(body),
                         };
@@ -7245,8 +7271,11 @@ impl CaptureAnalyzer {
                             type_name: ty.name.clone(),
                             method_name: Some(method.name.clone()),
                             fields: fields.clone(),
-                            outer_type_name: Some(outer_ctx.type_name.clone()),
-                            outer_fields: outer_ctx.fields.clone(),
+                            outer_field_owners: outer_ctx
+                                .fields
+                                .keys()
+                                .map(|name| (name.clone(), outer_ctx.type_name.clone()))
+                                .collect(),
                             scopes: capturable_outer_scopes(outer_ctx),
                             mutated_names: outer_ctx.mutated_names.clone(),
                         };
@@ -7260,8 +7289,11 @@ impl CaptureAnalyzer {
                             type_name: ty.name.clone(),
                             method_name: None,
                             fields: fields.clone(),
-                            outer_type_name: Some(outer_ctx.type_name.clone()),
-                            outer_fields: outer_ctx.fields.clone(),
+                            outer_field_owners: outer_ctx
+                                .fields
+                                .keys()
+                                .map(|name| (name.clone(), outer_ctx.type_name.clone()))
+                                .collect(),
                             scopes: capturable_outer_scopes(outer_ctx),
                             mutated_names: outer_ctx.mutated_names.clone(),
                         };
@@ -7529,6 +7561,20 @@ fn instance_field_types(ty: &TypeDecl) -> HashMap<String, JavaType> {
         .collect()
 }
 
+/// Resolve unqualified fields through the lexical enclosing-instance chain.
+/// The nearest declaration wins, exactly as Java's nested-class lookup does.
+fn enclosing_instance_field_owners(enclosing_types: &[&TypeDecl]) -> HashMap<String, String> {
+    let mut owners = HashMap::new();
+    for ty in enclosing_types.iter().rev() {
+        for (name, _) in instance_field_types(ty) {
+            if let std::collections::hash_map::Entry::Vacant(entry) = owners.entry(name) {
+                entry.insert(ty.name.clone());
+            }
+        }
+    }
+    owners
+}
+
 fn method_param_frame(params: &[Param], capturable: bool) -> ScopeFrame {
     ScopeFrame {
         symbols: params
@@ -7617,8 +7663,7 @@ fn capture_var(name: &str, ctx: &CaptureContext, captures: &mut Vec<Capture>) {
         return;
     }
 
-    if let (Some(outer_name), Some(_)) = (ctx.outer_type_name.as_ref(), ctx.outer_fields.get(name))
-    {
+    if let Some(outer_name) = ctx.outer_field_owners.get(name) {
         captures.push(Capture {
             name: outer_name.clone(),
             source: CaptureSource::OuterThis,
@@ -7998,5 +8043,55 @@ class Path {}
         collect_mutated_names_expr(&expr, &mut mutated);
 
         assert_eq!(mutated, HashSet::from(["value".to_string()]));
+    }
+
+    #[test]
+    fn nested_inner_capture_uses_the_lexical_owner_of_an_ancestor_field() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+                class Outer {
+                    int value;
+                    class Middle {
+                        class Deep { int read() { return value; } }
+                    }
+                }
+            "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+        assert_eq!(
+            resolved
+                .facts
+                .captures
+                .outer_this_type_for_type("Outer.Middle"),
+            Some("Outer")
+        );
+        assert_eq!(
+            resolved
+                .facts
+                .captures
+                .outer_this_type_for_type("Outer.Middle.Deep"),
+            Some("Outer")
+        );
+    }
+
+    #[test]
+    fn nested_record_is_implicitly_static_and_does_not_capture_outer_this() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+                class Outer {
+                    record Pair(int value) {}
+                }
+            "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+
+        assert!(
+            resolved
+                .facts
+                .captures
+                .outer_this_type_for_type("Outer.Pair")
+                .is_none()
+        );
     }
 }
