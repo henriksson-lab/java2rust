@@ -963,7 +963,12 @@ fn visit_subexpressions(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 visit(arg);
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                visit(qualifier);
+            }
             for arg in args {
                 visit(arg);
             }
@@ -1159,6 +1164,26 @@ mod tests {
             provenance: FactProvenance::ExternalLibraryPack,
         });
         facts
+    }
+
+    #[test]
+    fn subexpression_visitor_sees_qualified_new_receiver() {
+        let expr = Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(Expr::Var("outer".to_string()))),
+            args: vec![Expr::Var("arg".to_string())],
+            body: None,
+            resolved: None,
+        };
+        let mut visited = Vec::new();
+
+        visit_subexpressions(&expr, &mut |expr| {
+            if let Expr::Var(name) = expr {
+                visited.push(name.clone());
+            }
+        });
+
+        assert_eq!(visited, vec!["outer".to_string(), "arg".to_string()]);
     }
 
     #[test]

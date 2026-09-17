@@ -1,5 +1,13 @@
 use crate::java_ir::{Expr, JavaType, Member, Program, Stmt, TypeDecl, WildcardBound};
 
+pub(crate) fn domain_external_receiver_type_alias(name: &str) -> Option<&'static str> {
+    match name {
+        "HtsjdkTribbleAbstractFeatureReader" => Some("htsjdk.tribble.AbstractFeatureReader"),
+        "HtsjdkTribbleUtilParsingUtils" => Some("htsjdk.tribble.util.ParsingUtils"),
+        _ => None,
+    }
+}
+
 pub(crate) fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     let JavaType::Named { name, args } = java_ty else {
         return None;

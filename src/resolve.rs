@@ -16,6 +16,7 @@ use crate::java_ir::{
     Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl, TypeKind,
     WildcardBound,
 };
+use crate::java_signature::JavaOwnerKey;
 use crate::types::{TypeEnv, infer_expr_type};
 
 #[derive(Debug, Clone)]
@@ -468,8 +469,39 @@ fn source_summary_method_return_nullability(method: &MethodDecl) -> NullabilityS
 }
 
 fn qualify_nested_type_names(program: &mut Program) {
+    // A Java compilation unit can refer to a nested type through a sibling
+    // top-level owner (`FieldInfo.Builder`).  Lexical qualification alone only
+    // sees nested types of the declaration currently being rewritten, leaving
+    // those references as `Unknown` and later erasing otherwise concrete
+    // builder values to `Box<dyn Any>`.
+    let mut compilation_unit_nested = HashMap::new();
+    for ty in &program.types {
+        collect_compilation_unit_nested_type_aliases(ty, &mut compilation_unit_nested);
+    }
     for ty in &mut program.types {
-        qualify_nested_type_names_for_type(ty, &HashMap::new());
+        qualify_nested_type_names_for_type(ty, &compilation_unit_nested);
+    }
+}
+
+fn collect_compilation_unit_nested_type_aliases(
+    ty: &TypeDecl,
+    aliases: &mut HashMap<String, String>,
+) {
+    let owner_simple = ty.name.rsplit('.').next().unwrap_or(&ty.name);
+    for member in &ty.members {
+        let Member::Type(nested) = member else {
+            continue;
+        };
+        let nested_simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
+        let qualified = format!("{}.{}", ty.name, nested_simple);
+        aliases.insert(format!("{owner_simple}.{nested_simple}"), qualified.clone());
+        aliases.insert(qualified.clone(), qualified.clone());
+        collect_nested_type_path_aliases(
+            nested,
+            format!("{owner_simple}.{nested_simple}"),
+            qualified,
+            aliases,
+        );
     }
 }
 
@@ -1640,7 +1672,15 @@ impl ProgramSymbols {
                     self.collect_local_types_from_expr(arg, enclosing_type);
                 }
             }
-            Expr::New { args, body, .. } => {
+            Expr::New {
+                qualifier,
+                args,
+                body,
+                ..
+            } => {
+                if let Some(qualifier) = qualifier {
+                    self.collect_local_types_from_expr(qualifier, enclosing_type);
+                }
                 for arg in args {
                     self.collect_local_types_from_expr(arg, enclosing_type);
                 }
@@ -4412,6 +4452,17 @@ fn source_receiver_type(
     symbols: &ProgramSymbols,
     env: &TypeEnv,
 ) -> Option<(String, JavaType)> {
+    if matches!(receiver, Expr::Super) {
+        let current_source = symbols.source_type_name(current_type);
+        let super_ty = symbols.extends_type_by_type.get(current_source)?.clone();
+        let super_name = symbols
+            .source_type_name(&java_type_simple_name(&super_ty))
+            .to_string();
+        return symbols
+            .methods_by_type
+            .contains_key(&super_name)
+            .then_some((super_name, super_ty));
+    }
     let receiver_actual_ty = infer_resolver_expr_type(receiver, current_type, symbols, env);
     if let JavaType::Named { name, args } = &receiver_actual_ty
         && args.is_empty()
@@ -6462,7 +6513,7 @@ pub(crate) fn static_final_constant_declarations(program: &Program) -> Vec<Const
 #[derive(Debug, Clone)]
 pub(crate) struct ConstantDeclaration {
     /// Package-qualified owner, e.g. `pkg1.Constants` or `pkg1.Outer.Inner`.
-    owner: String,
+    owner: JavaOwnerKey,
     /// The declaring file's package, if any.
     package: Option<String>,
     field: crate::java_ir::FieldDecl,
@@ -6530,7 +6581,11 @@ pub(crate) fn fold_constant_declarations(
             else {
                 continue;
             };
-            scope.record(&declaration.owner, &declaration.field.name, value.clone());
+            scope.record(
+                declaration.owner.as_str(),
+                &declaration.field.name,
+                value.clone(),
+            );
             folded.insert(index, value);
             progressed = true;
         }
@@ -6548,7 +6603,7 @@ pub(crate) fn fold_constant_declarations(
                 .external_field_value_facts
                 .push(crate::facts::ExternalFieldValueFact {
                     field: FieldKey::named(
-                        declaration.owner.clone(),
+                        declaration.owner.as_str(),
                         declaration.field.name.clone(),
                     ),
                     rust_value,
@@ -6573,7 +6628,7 @@ fn collect_static_final_constant_declarations(
                     && field.modifiers.contains(&Modifier::Final) =>
             {
                 into.push(ConstantDeclaration {
-                    owner: type_name.clone(),
+                    owner: JavaOwnerKey::resolved_source(type_name.clone()),
                     package: package.map(str::to_string),
                     field: field.clone(),
                 });
@@ -7268,7 +7323,16 @@ impl CaptureAnalyzer {
     fn analyze_expr(&mut self, expr: &Expr, ctx: &mut CaptureContext) {
         match expr {
             Expr::Lambda { params, body } => self.analyze_lambda(params, body, ctx),
-            Expr::New { args, body, ty, .. } => {
+            Expr::New {
+                qualifier,
+                args,
+                body,
+                ty,
+                ..
+            } => {
+                if let Some(qualifier) = qualifier {
+                    self.analyze_expr(qualifier, ctx);
+                }
                 for arg in args {
                     self.analyze_expr(arg, ctx);
                 }
@@ -7374,7 +7438,16 @@ impl CaptureAnalyzer {
         match expr {
             Expr::Var(name) => capture_var(name, ctx, captures),
             Expr::Lambda { params, body } => self.analyze_lambda(params, body, ctx),
-            Expr::New { ty, args, body, .. } => {
+            Expr::New {
+                ty,
+                qualifier,
+                args,
+                body,
+                ..
+            } => {
+                if let Some(qualifier) = qualifier {
+                    self.collect_expr_captures(qualifier, ctx, captures);
+                }
                 for arg in args {
                     self.collect_expr_captures(arg, ctx, captures);
                 }
@@ -7692,7 +7765,12 @@ fn collect_mutated_names_expr(expr: &Expr, out: &mut HashSet<String>) {
                 collect_mutated_names_expr(arg, out);
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_mutated_names_expr(qualifier, out);
+            }
             for arg in args {
                 collect_mutated_names_expr(arg, out);
             }
@@ -7713,5 +7791,212 @@ fn collect_assignment_target_name(expr: &Expr, out: &mut HashSet<String>) {
             collect_assignment_target_name(receiver, out);
         }
         _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sibling_qualified_nested_types_stay_concrete_in_local_declarations() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+                class Use {
+                    void use(VidMapping mapping) {
+                        VidMapping.Builder builder = mapping.toBuilder();
+                        FieldInfo.Builder field = builder.getFieldsBuilder();
+                    }
+                }
+                class VidMapping {
+                    Builder toBuilder() { return new Builder(); }
+                    static class Builder {
+                        FieldInfo.Builder getFieldsBuilder() { return new FieldInfo.Builder(); }
+                    }
+                }
+                class FieldInfo { static class Builder {} }
+            "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let use_type = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Use")
+            .expect("Use type");
+        let method = use_type
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "use" => Some(method),
+                _ => None,
+            })
+            .expect("use method");
+        let body = method.body.as_ref().expect("use body");
+        let declared = body
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::VarDecl { ty, .. } => Some(ty),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            declared,
+            vec![
+                &JavaType::Named {
+                    name: "VidMapping.Builder".to_string(),
+                    args: Vec::new(),
+                },
+                &JavaType::Named {
+                    name: "FieldInfo.Builder".to_string(),
+                    args: Vec::new(),
+                },
+            ]
+        );
+        let resolved_calls = body
+            .statements
+            .iter()
+            .filter_map(|stmt| match stmt {
+                Stmt::VarDecl {
+                    initializer: Some(Expr::Call { resolved, .. }),
+                    ..
+                } => resolved.as_ref(),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            resolved_calls
+                .iter()
+                .map(|call| call.return_type.clone())
+                .collect::<Vec<_>>(),
+            vec![
+                JavaType::Named {
+                    name: "VidMapping.Builder".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Named {
+                    name: "FieldInfo.Builder".to_string(),
+                    args: Vec::new(),
+                },
+            ]
+        );
+
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let local = signatures
+            .required_method_signature(use_type, method)
+            .locals()
+            .iter()
+            .find(|local| local.name() == "builder")
+            .expect("builder local signature");
+        assert_eq!(
+            local.shape().java_ty(),
+            JavaType::Named {
+                name: "VidMapping.Builder".to_string(),
+                args: Vec::new(),
+            }
+        );
+        assert_eq!(
+            local.shape().dispatch,
+            crate::slot_shape::DispatchShape::Concrete,
+            "dispatch requirements: {:?}\nrepresentation: {:?}",
+            semantic
+                .facts
+                .dispatch_requirements_for("VidMapping.Builder"),
+            representations.type_representation("VidMapping.Builder")
+        );
+    }
+
+    #[test]
+    fn source_class_named_path_wins_over_platform_facade_in_static_call_result() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Caller {
+    void run(String raw) {
+        Path path = raw == null ? null : IO.getPath(raw);
+    }
+}
+class IO {
+    static Path getPath(String raw) { return new Path(); }
+}
+class Path {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let caller = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Caller")
+            .expect("Caller type");
+        let method = caller
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "run" => Some(method),
+                _ => None,
+            })
+            .expect("run method");
+        let body = method.body.as_ref().expect("run body");
+        let Stmt::VarDecl {
+            ty,
+            initializer: Some(Expr::Ternary { else_expr, .. }),
+            ..
+        } = &body.statements[0]
+        else {
+            panic!("expected nullable Path declaration");
+        };
+        assert_eq!(
+            ty,
+            &JavaType::Named {
+                name: "Path".to_string(),
+                args: Vec::new(),
+            }
+        );
+        let Expr::Call {
+            resolved: Some(call),
+            ..
+        } = else_expr.as_ref()
+        else {
+            panic!("expected resolved IO.getPath call");
+        };
+        assert_eq!(
+            call.return_type,
+            JavaType::Named {
+                name: "Path".to_string(),
+                args: Vec::new(),
+            }
+        );
+    }
+
+    #[test]
+    fn mutated_name_scan_sees_qualified_new_receiver() {
+        let expr = Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(Expr::Unary {
+                op: crate::java_ir::UnaryOp::PostInc,
+                expr: Box::new(Expr::Var("value".to_string())),
+            })),
+            args: Vec::new(),
+            body: None,
+            resolved: None,
+        };
+        let mut mutated = HashSet::new();
+
+        collect_mutated_names_expr(&expr, &mut mutated);
+
+        assert_eq!(mutated, HashSet::from(["value".to_string()]));
     }
 }

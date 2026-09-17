@@ -2,6 +2,15 @@
 
 Status: **fixed** (profiled, call-counted with a breakpoint, list-diffed)
 
+Codex follow-up 2026-09-16: the exhaustive manifest-boundary test regressed
+from the cached production path by rebuilding `ExternalFactLookupIndex` for
+every owned-type and API-effect assertion through `FactSet` convenience
+methods. On the full built-in aggregate it ran for many minutes and stalled the
+gate. The validator now builds one `facts.external_lookup_index()` and reuses it
+for those assertions; it passes in 14.68 seconds (15.71 seconds including the
+test harness). This keeps the test exhaustive while exercising the intended
+indexed lookup path.
+
 Codex follow-up 2026-08-21: substantially fixed. `builtin_external_library_packs()`
 now folds `builtin_external_pack_fact_sets()` through a `OnceLock<FactSet>` and
 returns a clone of that cached aggregate, preserving the old API while removing

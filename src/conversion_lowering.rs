@@ -488,7 +488,7 @@ mod tests {
         );
         assert_eq!(
             crate::emit::emit_expr(&converted_display),
-            "box_value.value.as_ref().map(|value| value.java_arrays_deep_to_string()).unwrap_or_else(|| \"null\".to_string())"
+            "box_value.value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
         );
     }
 

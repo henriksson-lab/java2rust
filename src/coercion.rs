@@ -80,7 +80,9 @@ pub enum JavaDisplayPlan {
     OptionalErasedObject,
     OptionalString,
     OptionalValue,
+    OptionalDisplayValue,
     OptionalBorrowedValue,
+    OptionalBorrowedDisplayValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -273,7 +275,10 @@ pub enum Coercion {
     OptionalErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
+    OptionalToDisplayValue,
+    OptionalBorrowedOptionalStringToJavaDisplayString,
     OptionalBorrowedToJavaDisplayValue,
+    OptionalBorrowedToDisplayValue,
     AsStr,
     ToOwnedString,
     AsSlice,
@@ -393,8 +398,17 @@ impl SyntaxSlotCoercionPolicy {
             SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue => {
                 vec![Coercion::OptionalToJavaDisplayValue]
             }
+            SyntaxSlotCoercionPolicy::OptionalToDisplayValue => {
+                vec![Coercion::OptionalToDisplayValue]
+            }
+            SyntaxSlotCoercionPolicy::OptionalBorrowedOptionalStringToJavaDisplayString => {
+                vec![Coercion::OptionalBorrowedOptionalStringToJavaDisplayString]
+            }
             SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue => {
                 vec![Coercion::OptionalBorrowedToJavaDisplayValue]
+            }
+            SyntaxSlotCoercionPolicy::OptionalBorrowedToDisplayValue => {
+                vec![Coercion::OptionalBorrowedToDisplayValue]
             }
         }
     }
@@ -10284,7 +10298,11 @@ fn apply_rust_borrowed_facade_return(
     policy: &RustBorrowedFacadeReturnPolicy,
 ) -> RustExpr {
     if borrowed_facade_return_targets_erased_object(policy.target()) {
-        let erased = apply_erased_object_borrowed_facade_recovery(expr, policy.recovery());
+        let erased = apply_erased_object_borrowed_facade_recovery(
+            expr,
+            policy.recovery(),
+            policy.source_erased_object(),
+        );
         if policy.target().optional_element_type().is_some() {
             return option_some_projection(erased);
         }
@@ -10307,7 +10325,7 @@ fn apply_optional_rust_borrowed_facade_return(
         receiver: Box::new(expr),
         method: "map".to_string(),
         args: vec![if target_is_erased {
-            boxed_erased_any_value_closure_expr(policy.recovery())
+            boxed_erased_any_value_closure_expr(policy.recovery(), policy.source_erased_object())
         } else {
             borrowed_facade_recovery_value_closure_expr(policy.recovery())
         }],
@@ -10375,22 +10393,27 @@ fn borrowed_facade_recovery_value_closure_expr(
     single_param_closure_expr("value", recovered)
 }
 
-fn boxed_erased_any_value_closure_expr(recovery: RustBorrowedFacadeReturnRecovery) -> RustExpr {
-    let recovered =
-        apply_erased_object_borrowed_facade_recovery(RustExpr::Var("value".to_string()), recovery);
+fn boxed_erased_any_value_closure_expr(
+    recovery: RustBorrowedFacadeReturnRecovery,
+    source_erased_object: bool,
+) -> RustExpr {
+    let recovered = apply_erased_object_borrowed_facade_recovery(
+        RustExpr::Var("value".to_string()),
+        recovery,
+        source_erased_object,
+    );
     single_param_closure_expr("value", recovered)
 }
 
 fn apply_erased_object_borrowed_facade_recovery(
     expr: RustExpr,
     recovery: RustBorrowedFacadeReturnRecovery,
+    source_erased_object: bool,
 ) -> RustExpr {
-    match recovery {
-        RustBorrowedFacadeReturnRecovery::ToPathBuf => {
-            erased_object_box_projection(apply_borrowed_facade_recovery(expr, recovery))
-        }
-        RustBorrowedFacadeReturnRecovery::Clone => clone_erased_object_ref_once(expr),
+    if source_erased_object && matches!(recovery, RustBorrowedFacadeReturnRecovery::Clone) {
+        return clone_erased_object_ref_once(expr);
     }
+    erased_object_box_projection(apply_borrowed_facade_recovery(expr, recovery))
 }
 
 fn borrowed_facade_return_targets_erased_object(target: &RustSlotShape) -> bool {
@@ -10650,7 +10673,11 @@ pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExp
             vec![RustExpr::Literal("\"null\"".to_string())],
         ),
         JavaDisplayPlan::OptionalValue => optional_value_display_projection(expr),
+        JavaDisplayPlan::OptionalDisplayValue => optional_to_string_value_display_projection(expr),
         JavaDisplayPlan::OptionalBorrowedValue => optional_borrowed_value_display_projection(expr),
+        JavaDisplayPlan::OptionalBorrowedDisplayValue => {
+            optional_borrowed_to_string_value_display_projection(expr)
+        }
     }
 }
 
@@ -10704,6 +10731,39 @@ fn optional_borrowed_value_display_projection(expr: RustExpr) -> RustExpr {
     ))
 }
 
+fn optional_to_string_value_display_projection(expr: RustExpr) -> RustExpr {
+    optional_to_string_display_chain_projection(zero_arg_method_projection(
+        parenthesize_raw_method_receiver(recover_optional_display_receiver(expr)),
+        "as_ref",
+    ))
+}
+
+fn optional_borrowed_to_string_value_display_projection(expr: RustExpr) -> RustExpr {
+    optional_to_string_display_chain_projection(parenthesize_raw_method_receiver(
+        recover_optional_display_receiver(expr),
+    ))
+}
+
+fn optional_borrowed_optional_string_display_projection(expr: RustExpr) -> RustExpr {
+    let present_value = method_call_projection(
+        parenthesize_raw_method_receiver(recover_optional_display_receiver(expr)),
+        "and_then",
+        vec![RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![RustClosureParam {
+                pattern: "value".to_string(),
+                ty: None,
+            }],
+            body: RustClosureBody::Expr(Box::new(zero_arg_method_projection(
+                RustExpr::Var("value".to_string()),
+                "as_ref",
+            ))),
+        }],
+    );
+    apply_java_display_plan(present_value, JavaDisplayPlan::OptionalString)
+}
+
 fn optional_display_chain_projection(expr: RustExpr) -> RustExpr {
     method_call_projection(
         method_call_projection(
@@ -10711,6 +10771,14 @@ fn optional_display_chain_projection(expr: RustExpr) -> RustExpr {
             "map",
             vec![param_to_java_display_string_closure_expr("value")],
         ),
+        "unwrap_or_else",
+        vec![null_string_closure_expr()],
+    )
+}
+
+fn optional_to_string_display_chain_projection(expr: RustExpr) -> RustExpr {
+    method_call_projection(
+        method_call_projection(expr, "map", vec![param_to_string_closure_expr("value")]),
         "unwrap_or_else",
         vec![null_string_closure_expr()],
     )
@@ -14028,8 +14096,17 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::OptionalToJavaDisplayValue => {
             apply_java_display_plan(expr, JavaDisplayPlan::OptionalValue)
         }
+        Coercion::OptionalToDisplayValue => {
+            apply_java_display_plan(expr, JavaDisplayPlan::OptionalDisplayValue)
+        }
+        Coercion::OptionalBorrowedOptionalStringToJavaDisplayString => {
+            optional_borrowed_optional_string_display_projection(expr)
+        }
         Coercion::OptionalBorrowedToJavaDisplayValue => {
             apply_java_display_plan(expr, JavaDisplayPlan::OptionalBorrowedValue)
+        }
+        Coercion::OptionalBorrowedToDisplayValue => {
+            apply_java_display_plan(expr, JavaDisplayPlan::OptionalBorrowedDisplayValue)
         }
         Coercion::AsStr => {
             if let Some(view) = deref_string_view_projection(&expr) {
@@ -14082,11 +14159,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             variant_name,
         } => {
             if java_type_param_variant_name(variant_name) {
-                let root_variant = enum_name.strip_suffix("Value").unwrap_or(enum_name);
-                RustExpr::Call {
-                    function: Box::new(RustExpr::path([enum_name.as_str(), root_variant])),
-                    args: vec![into_projection(expr)],
-                }
+                into_projection(expr)
             } else {
                 RustExpr::Call {
                     function: Box::new(RustExpr::path([enum_name.as_str(), variant_name.as_str()])),
@@ -15729,14 +15802,17 @@ mod tests {
         assert_eq!(emit::emit_expr(&expr), "&(left + right)");
         assert_eq!(
             expr,
-            RustExpr::Unary {
-                op: "&".to_string(),
-                expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
-                    op: "+".to_string(),
-                    left: Box::new(RustExpr::Var("left".to_string())),
-                    right: Box::new(RustExpr::Var("right".to_string())),
-                }))),
-            }
+            RustExpr::shaped(
+                RustExprShape::Borrowed,
+                RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(RustExpr::Grouped(Box::new(RustExpr::Binary {
+                        op: "+".to_string(),
+                        left: Box::new(RustExpr::Var("left".to_string())),
+                        right: Box::new(RustExpr::Var("right".to_string())),
+                    }))),
+                },
+            )
         );
 
         let opaque = ensure_borrow_projection(
@@ -15747,7 +15823,7 @@ mod tests {
         );
         assert_eq!(emit::emit_expr(&opaque), "&left +");
         assert!(matches!(
-            opaque,
+            opaque.unshaped(),
             RustExpr::Unary { op, expr }
                 if op == "&"
                     && matches!(expr.as_ref(), RustExpr::Raw(raw) if raw == "left +")
@@ -18511,7 +18587,7 @@ mod tests {
         );
         assert!(
             emit::emit_expr(&radix_parse).contains(
-                "i32::from_str_radix(value.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"), __java_parse_radix as u32)"
+                "i32::from_str_radix(&value.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\"), __java_parse_radix as u32)"
             ),
             "{}",
             emit::emit_expr(&radix_parse)
@@ -21270,7 +21346,7 @@ mod tests {
                 RustExpr::Var("value".to_string()),
                 &cloned_erased_facade_policy,
             )),
-            "java_clone_erased_object_ref(&(value))"
+            "Box::new(value.clone()) as Box<dyn std::any::Any>"
         );
         let concrete_target = RustSlotShape::conservative(JavaType::Named {
             name: "VCFHeaderLine".to_string(),
@@ -21343,7 +21419,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&optional_cloned_erased_facade_return),
-            "maybe_object.map(|value| java_clone_erased_object_ref(&(value))).expect(\"Java null receiver\")"
+            "maybe_object.map(|value| Box::new(value.clone()) as Box<dyn std::any::Any>).expect(\"Java null receiver\")"
         );
         assert!(matches!(
             optional_source_borrowed_facade_return.into_unshaped(),

@@ -1651,6 +1651,92 @@ RUST
   printf "JavaClass\n" >> "$shared_support_types_path"
 fi
 
+# These declarations are used by the root JavaClass facade and by the erased
+# display helpers that remain attached to a generated source module.  They are
+# intentionally small shared identities: concrete display implementations stay
+# with their source module, while every module imports these names below.
+if grep -R -q 'JavaErasedCollectionDisplayElement\|JavaErasedOptionalDisplayElement\|ClassLoader' "$generated_dir"; then
+  cat >> "$shared_support_path" <<'RUST'
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ClassLoader;
+
+impl ClassLoader {
+    pub fn get_system_resource<S: Into<String>>(path: S) -> URL {
+        URL::new(path)
+    }
+
+    pub fn get_resource<S: Into<String>>(&self, path: S) -> Option<URL> {
+        Some(URL::new(path))
+    }
+
+    pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
+        Some(InputStream)
+    }
+}
+
+pub trait JavaErasedCollectionDisplayElement {
+    fn java_erased_collection_display(&self) -> String;
+}
+
+pub trait JavaErasedOptionalDisplayElement {
+    fn java_erased_optional_display(&self) -> String;
+}
+
+macro_rules! impl_java_erased_display_primitives {
+    ($trait_name:ident, $method:ident) => {
+        impl $trait_name for bool { fn $method(&self) -> String { self.to_string() } }
+        impl $trait_name for i8 { fn $method(&self) -> String { self.to_string() } }
+        impl $trait_name for i16 { fn $method(&self) -> String { self.to_string() } }
+        impl $trait_name for i32 { fn $method(&self) -> String { self.to_string() } }
+        impl $trait_name for i64 { fn $method(&self) -> String { self.to_string() } }
+        impl $trait_name for char { fn $method(&self) -> String { self.to_string() } }
+        impl $trait_name for String { fn $method(&self) -> String { self.to_string() } }
+    };
+}
+impl_java_erased_display_primitives!(JavaErasedCollectionDisplayElement, java_erased_collection_display);
+impl_java_erased_display_primitives!(JavaErasedOptionalDisplayElement, java_erased_optional_display);
+
+impl JavaErasedCollectionDisplayElement for f32 {
+    fn java_erased_collection_display(&self) -> String { java_float_to_string(*self) }
+}
+impl JavaErasedCollectionDisplayElement for f64 {
+    fn java_erased_collection_display(&self) -> String { java_double_to_string(*self) }
+}
+impl JavaErasedOptionalDisplayElement for f32 {
+    fn java_erased_optional_display(&self) -> String { java_float_to_string(*self) }
+}
+impl JavaErasedOptionalDisplayElement for f64 {
+    fn java_erased_optional_display(&self) -> String { java_double_to_string(*self) }
+}
+impl JavaErasedOptionalDisplayElement for Box<dyn std::any::Any> {
+    fn java_erased_optional_display(&self) -> String { java_erased_any_to_string(self.as_ref()) }
+}
+impl<T: JavaErasedCollectionDisplayElement> JavaErasedCollectionDisplayElement for Option<T> {
+    fn java_erased_collection_display(&self) -> String {
+        self.as_ref().map(JavaErasedCollectionDisplayElement::java_erased_collection_display)
+            .unwrap_or_else(|| "null".to_string())
+    }
+}
+impl<T: JavaErasedCollectionDisplayElement> JavaErasedOptionalDisplayElement for Vec<T> {
+    fn java_erased_optional_display(&self) -> String { java_erased_collection_to_string(self) }
+}
+pub fn java_double_to_string(value: f64) -> String {
+    if value.is_nan() { return "NaN".to_string(); }
+    if value.is_infinite() { return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string(); }
+    if value == value.trunc() && value.abs() < 1e7 { return format!("{value:.1}"); }
+    value.to_string()
+}
+
+pub fn java_float_to_string(value: f32) -> String {
+    if value.is_nan() { return "NaN".to_string(); }
+    if value.is_infinite() { return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string(); }
+    if value == value.trunc() && value.abs() < 1e7 { return format!("{value:.1}"); }
+    value.to_string()
+}
+RUST
+  printf "ClassLoader\nJavaErasedCollectionDisplayElement\nJavaErasedOptionalDisplayElement\njava_erased_collection_to_string\njava_erased_optional_to_string\njava_erased_any_to_string\njava_float_to_string\njava_double_to_string\n" >> "$shared_support_types_path"
+fi
+
 if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct URL' "$generated_dir" || grep -R -q '^pub struct JarURLConnection' "$generated_dir" || grep -R -q '^pub struct JarFile' "$generated_dir" || grep -R -q '^pub struct JarEntry' "$generated_dir" || grep -R -q '^pub struct Manifest' "$generated_dir" || grep -R -q '^pub struct Attributes' "$generated_dir" || grep -R -q '^pub struct AttributesName' "$generated_dir" || grep -R -q '^pub struct Enumeration' "$generated_dir" || grep -R -q 'JavaIterator' "$generated_dir" || grep -R -q '^pub struct AtomicInteger' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir" || grep -R -q '^pub struct BufferedImage' "$generated_dir" || grep -R -q '^pub struct Graphics' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -2660,6 +2746,85 @@ python3 "$repo_root/scripts/merge-shared-support-facades.py" \
   --shared-support "$shared_support_path" \
   --shared-types "$shared_support_types_path" \
   --conflicts "$shared_support_conflicts_path"
+
+# Facade merging can promote a helper function without promoting a nominal
+# type.  Modules still need an explicit crate import for such helpers.
+awk '
+  /^pub[[:space:]]+fn[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
+    name = $3
+    sub(/<.*/, "", name)
+    sub(/\(.*/, "", name)
+    print name
+  }
+' "$shared_support_path" >> "$shared_support_types_path"
+
+# A blanket string helper has no nominal implementation target, so the
+# facade merger cannot associate it with a selected struct.  It is nevertheless
+# crate-global Rust coherence, and must be emitted once.
+if grep -q '^pub trait JavaStringComparisonHelper' "$shared_support_path"; then
+  cat >> "$shared_support_path" <<'RUST'
+impl<T: AsRef<str> + ?Sized> JavaStringComparisonHelper for T {
+    fn java_string_compare_to<R: AsRef<str>>(&self, other: R) -> i32 {
+        java_string_compare_to(self.as_ref(), other)
+    }
+
+    fn java_string_compare_to_ignore_case<R: AsRef<str>>(&self, other: R) -> i32 {
+        java_string_compare_to_ignore_case(self.as_ref(), other)
+    }
+
+    fn java_string_equals_ignore_case<R: AsRef<str>>(&self, other: R) -> bool {
+        java_string_equals_ignore_case(self.as_ref(), other)
+    }
+}
+RUST
+fi
+
+# Natural-order queue construction calls the marker trait.  The facade merger
+# combines inherent impl blocks, so restore the required bound on that merged
+# block instead of emitting an unconstrained method body.
+python3 - "$shared_support_path" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+text = path.read_text()
+text = text.replace(
+    "impl<T> JavaPriorityQueue<T> {",
+    "impl<T: JavaPriorityQueueNaturalOrder + 'static> JavaPriorityQueue<T> {",
+)
+path.write_text(text)
+PY
+
+# The private erased-display traits have one crate-wide identity.  Their two
+# generic implementations are therefore emitted once above, rather than once
+# per translated Java source module.
+python3 - "$generated_dir" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+patterns = (
+    re.compile(r"^impl<T: JavaErasedCollectionDisplayElement> JavaErasedCollectionDisplayElement for Option<T> \{"),
+    re.compile(r"^impl<T: JavaErasedCollectionDisplayElement> JavaErasedOptionalDisplayElement for Vec<T> \{"),
+    re.compile(r"^impl<T: AsRef<str> \+ \?Sized> JavaStringComparisonHelper for T \{"),
+)
+for path in Path(sys.argv[1]).glob("*.rs"):
+    lines = path.read_text().splitlines(keepends=True)
+    kept = []
+    index = 0
+    while index < len(lines):
+        if any(pattern.match(lines[index]) for pattern in patterns):
+            depth = 0
+            while index < len(lines):
+                depth += lines[index].count("{") - lines[index].count("}")
+                index += 1
+                if depth == 0:
+                    break
+            continue
+        kept.append(lines[index])
+        index += 1
+    path.write_text("".join(kept))
+PY
 
 for rust_path in "$generated_dir"/*.rs; do
   restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path"

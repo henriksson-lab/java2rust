@@ -173,3 +173,9 @@ Runtime: `div(7,2)` is `Ok(3)`, `div(1,0)` is `Err`.
 Status: **closed**. Wrapping arithmetic, shift masking, catchable
 `ArithmeticException`, and unchecked propagation through a transitive caller are
 verified end to end by `java_integer_division_and_remainder_by_zero_raise_catchable_arithmetic_exception`.
+
+Codex follow-up 2026-09-15: the integer div/rem fallibility scanner now sees
+array index expressions too. `items[value % divisor]` can therefore seed the
+same `ArithmeticException` planning as a direct `value % divisor` expression
+instead of being missed because only the array receiver was inspected. Guard:
+`exception_plan::tests::integer_div_rem_scan_sees_array_index`.

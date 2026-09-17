@@ -3,8 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::binding_id::BindingId;
 use crate::facts::{ExceptionKind, FactSet, NullabilityState, TrivialAccessorKind};
 use crate::java_ir::{
-    BinaryOp, Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Member, Modifier,
-    Param, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl, UnaryOp,
+    BinaryOp, Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Literal, Member,
+    Modifier, Param, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
+    UnaryOp,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
@@ -56,12 +57,12 @@ impl CallGraph {
 pub enum CallableKey {
     #[non_exhaustive]
     Method {
-        type_name: String,
+        type_name: JavaOwnerKey,
         method_name: String,
     },
     #[non_exhaustive]
     Constructor {
-        type_name: String,
+        type_name: JavaOwnerKey,
         rust_name: String,
     },
     #[non_exhaustive]
@@ -105,7 +106,10 @@ impl CallableKey {
         ty: &crate::java_ir::TypeDecl,
         method: &crate::java_ir::MethodDecl,
     ) -> Self {
-        Self::source_method(ty.name.clone(), method)
+        CallableKey::Method {
+            type_name: JavaOwnerKey::source_type(ty),
+            method_name: crate::java_signature::source_method_rust_name(method),
+        }
     }
 
     pub(crate) fn source_method(
@@ -113,7 +117,7 @@ impl CallableKey {
         method: &crate::java_ir::MethodDecl,
     ) -> Self {
         CallableKey::Method {
-            type_name: type_name.into(),
+            type_name: JavaOwnerKey::resolved_source(type_name),
             method_name: crate::java_signature::source_method_rust_name(method),
         }
     }
@@ -122,15 +126,15 @@ impl CallableKey {
         ty: &crate::java_ir::TypeDecl,
         constructor: &crate::java_ir::ConstructorDecl,
     ) -> Self {
-        Self::source_constructor(ty.name.clone(), constructor)
+        Self::source_constructor(JavaOwnerKey::source_type(ty), constructor)
     }
 
     pub(crate) fn source_constructor(
-        type_name: impl Into<String>,
+        type_name: JavaOwnerKey,
         constructor: &crate::java_ir::ConstructorDecl,
     ) -> Self {
         CallableKey::Constructor {
-            type_name: type_name.into(),
+            type_name,
             rust_name: constructor
                 .rust_name
                 .clone()
@@ -147,7 +151,7 @@ impl CallableKey {
         method_name: impl Into<String>,
     ) -> Self {
         CallableKey::Method {
-            type_name: type_name.into(),
+            type_name: JavaOwnerKey::resolved_source(type_name),
             method_name: method_name.into(),
         }
     }
@@ -161,7 +165,7 @@ impl CallableKey {
         rust_name: impl Into<String>,
     ) -> Self {
         CallableKey::Constructor {
-            type_name: type_name.into(),
+            type_name: JavaOwnerKey::resolved_source(type_name),
             rust_name: rust_name.into(),
         }
     }
@@ -190,7 +194,7 @@ impl CallableKey {
             CallableKey::Method {
                 type_name,
                 method_name,
-            } => Some((type_name, method_name)),
+            } => Some((type_name.as_str(), method_name)),
             _ => None,
         }
     }
@@ -200,7 +204,7 @@ impl CallableKey {
             CallableKey::Constructor {
                 type_name,
                 rust_name,
-            } => Some((type_name, rust_name)),
+            } => Some((type_name.as_str(), rust_name)),
             _ => None,
         }
     }
@@ -246,11 +250,11 @@ impl CallableKey {
             CallableKey::Method {
                 type_name,
                 method_name,
-            } => format!("{type_name}::{method_name}"),
+            } => format!("{}::{method_name}", type_name.as_str()),
             CallableKey::Constructor {
                 type_name,
                 rust_name,
-            } => format!("{type_name}::{rust_name}"),
+            } => format!("{}::{rust_name}", type_name.as_str()),
             CallableKey::Lambda { owner, ordinal } => {
                 format!("{}#lambda{ordinal}", owner.diagnostic_label())
             }
@@ -321,14 +325,14 @@ pub enum CallGraphEdgeKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageMethodKey {
-    type_name: String,
+    owner: JavaOwnerKey,
     method_name: String,
 }
 
 impl UsageMethodKey {
     pub(crate) fn source_method(ty: &TypeDecl, method: &crate::java_ir::MethodDecl) -> Self {
         Self {
-            type_name: ty.name.clone(),
+            owner: JavaOwnerKey::source_type(ty),
             method_name: source_method_rust_name(method),
         }
     }
@@ -338,7 +342,7 @@ impl UsageMethodKey {
         method: &crate::java_ir::MethodDecl,
     ) -> Self {
         Self {
-            type_name: ty.name.clone(),
+            owner: JavaOwnerKey::source_type(ty),
             method_name: method.name.clone(),
         }
     }
@@ -348,23 +352,27 @@ impl UsageMethodKey {
         method_name: impl Into<String>,
     ) -> Self {
         Self {
-            type_name: type_name.into(),
+            owner: JavaOwnerKey::resolved_source(type_name),
             method_name: method_name.into(),
         }
     }
 
     pub(crate) fn type_name(&self) -> &str {
-        &self.type_name
+        self.owner.as_str()
     }
 
     pub(crate) fn method_name(&self) -> &str {
         &self.method_name
     }
+
+    pub(crate) fn owner(&self) -> &JavaOwnerKey {
+        &self.owner
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct UsageConstructorKey {
-    type_name: String,
+    owner: JavaOwnerKey,
     rust_name: String,
 }
 
@@ -374,7 +382,7 @@ impl UsageConstructorKey {
         ctor: &crate::java_ir::ConstructorDecl,
     ) -> Self {
         Self {
-            type_name: ty.name.clone(),
+            owner: JavaOwnerKey::source_type(ty),
             rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
         }
     }
@@ -384,17 +392,21 @@ impl UsageConstructorKey {
         rust_name: impl Into<String>,
     ) -> Self {
         Self {
-            type_name: type_name.into(),
+            owner: JavaOwnerKey::resolved_source(type_name),
             rust_name: rust_name.into(),
         }
     }
 
     pub(crate) fn type_name(&self) -> &str {
-        &self.type_name
+        self.owner.as_str()
     }
 
     pub(crate) fn rust_name(&self) -> &str {
         &self.rust_name
+    }
+
+    pub(crate) fn owner(&self) -> &JavaOwnerKey {
+        &self.owner
     }
 }
 
@@ -1012,6 +1024,10 @@ pub enum FieldUse {
         target_type: JavaType,
         actual_type: JavaType,
     },
+    AssignedSubtypeToReturn {
+        target_type: JavaType,
+        actual_type: JavaType,
+    },
     AssignedFromCall {
         field_name: String,
         name: String,
@@ -1242,14 +1258,257 @@ pub fn analyze_usage(program: &Program) -> UsageFacts {
 pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> UsageFacts {
     let mut facts = UsageFacts::default();
     for ty in &program.types {
-        analyze_type_usage(ty, &mut facts, semantic_facts);
+        analyze_type_usage(program, ty, &mut facts, semantic_facts);
     }
+    refine_source_null_assertion_call_boundaries(program, &mut facts);
+    refine_source_declared_argument_call_boundaries(program, &mut facts);
     propagate_self_mutability_through_self_calls(&mut facts);
     facts
 }
 
+/// A source helper that only rejects `null` and returns its `Object` argument
+/// cannot retain that argument.  Treat it like the other known content-read
+/// boundaries, so the storage plan does not turn an otherwise local value into
+/// `Rc<RefCell<_>>` merely because a Java null assertion was factored into a
+/// sibling class.
+fn refine_source_null_assertion_call_boundaries(program: &Program, facts: &mut UsageFacts) {
+    let mut targets = HashSet::new();
+    for ty in &program.types {
+        collect_strict_null_assertion_targets(ty, &mut targets);
+    }
+    if targets.is_empty() {
+        return;
+    }
+    for usage in facts
+        .methods
+        .values_mut()
+        .chain(facts.methods_by_rust_name.values_mut())
+        .chain(facts.methods_by_java_key.values_mut())
+        .chain(facts.constructors.values_mut())
+    {
+        let mut call_groups = HashMap::<(String, usize), bool>::new();
+        for call in &usage.call_sites {
+            let Some(resolved) = &call.resolved else {
+                continue;
+            };
+            let key = (call.name.clone(), call.arg_count);
+            let is_assertion = targets.contains(&(
+                resolved.declaring_type.clone(),
+                resolved.rust_name.clone(),
+                call.arg_count,
+            ));
+            call_groups
+                .entry(key)
+                .and_modify(|all_assertions| *all_assertions &= is_assertion)
+                .or_insert(is_assertion);
+        }
+        refine_usage_call_boundaries(usage, &call_groups);
+    }
+}
+
+/// A resolved source call whose parameter has the same declared source type as
+/// its argument is not an FFI hand-off.  In particular, context-source
+/// utilities routinely inspect such values without retaining them.  Preserve
+/// that source boundary so a local does not get erased solely because its
+/// helper lives in a separate input source.
+fn refine_source_declared_argument_call_boundaries(program: &Program, facts: &mut UsageFacts) {
+    let mut source_types = HashSet::new();
+    for ty in &program.types {
+        collect_source_type_names(ty, &mut source_types);
+    }
+    if source_types.is_empty() {
+        return;
+    }
+    let mut targets = HashMap::<(String, usize, usize), Option<JavaType>>::new();
+    for usage in facts
+        .methods
+        .values()
+        .chain(facts.methods_by_rust_name.values())
+        .chain(facts.methods_by_java_key.values())
+        .chain(facts.constructors.values())
+    {
+        for call in &usage.call_sites {
+            let Some(resolved) = &call.resolved else {
+                continue;
+            };
+            for (index, param_ty) in resolved.arg_target_types.iter().enumerate() {
+                if !source_declared_call_param_type(param_ty, &source_types) {
+                    continue;
+                }
+                let key = (call.name.clone(), call.arg_count, index);
+                targets
+                    .entry(key)
+                    .and_modify(|existing| {
+                        if existing.as_ref() != Some(param_ty) {
+                            *existing = None;
+                        }
+                    })
+                    .or_insert_with(|| Some(param_ty.clone()));
+            }
+        }
+    }
+    if targets.is_empty() {
+        return;
+    }
+    for usage in facts
+        .methods
+        .values_mut()
+        .chain(facts.methods_by_rust_name.values_mut())
+        .chain(facts.methods_by_java_key.values_mut())
+        .chain(facts.constructors.values_mut())
+    {
+        for binding in usage.bindings_by_id.values_mut() {
+            let binding_ty = binding.java_ty().clone();
+            for use_site in &mut binding.uses {
+                let BindingUse::PassedToCall {
+                    name,
+                    arg_count,
+                    arg_index,
+                    boundary,
+                    ..
+                } = use_site
+                else {
+                    continue;
+                };
+                if *boundary == CallArgumentBoundary::Unknown
+                    && targets
+                        .get(&(name.clone(), *arg_count, *arg_index))
+                        .and_then(Option::as_ref)
+                        .is_some_and(|target| *target == binding_ty)
+                {
+                    *boundary = CallArgumentBoundary::KnownContentRead;
+                }
+            }
+        }
+    }
+}
+
+fn collect_source_type_names(ty: &TypeDecl, names: &mut HashSet<String>) {
+    names.insert(ty.name.clone());
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_source_type_names(nested, names);
+        }
+    }
+}
+
+fn source_declared_call_param_type(java_ty: &JavaType, source_types: &HashSet<String>) -> bool {
+    match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => source_types.contains(name),
+        _ => false,
+    }
+}
+
+fn refine_usage_call_boundaries(
+    usage: &mut MethodUsageFacts,
+    call_groups: &HashMap<(String, usize), bool>,
+) {
+    let is_strict_assertion = |name: &str, arg_count: usize| {
+        call_groups
+            .get(&(name.to_string(), arg_count))
+            .copied()
+            .unwrap_or(false)
+    };
+    for binding in usage.bindings_by_id.values_mut() {
+        for use_site in &mut binding.uses {
+            if let BindingUse::PassedToCall {
+                name,
+                arg_count,
+                boundary,
+                ..
+            } = use_site
+                && *boundary == CallArgumentBoundary::Unknown
+                && is_strict_assertion(name, *arg_count)
+            {
+                *boundary = CallArgumentBoundary::KnownContentRead;
+            }
+        }
+    }
+    for field_use in &mut usage.field_uses {
+        if let FieldUse::PassedToCall {
+            name,
+            arg_count,
+            boundary,
+            ..
+        } = field_use
+            && *boundary == CallArgumentBoundary::Unknown
+            && is_strict_assertion(name, *arg_count)
+        {
+            *boundary = CallArgumentBoundary::KnownContentRead;
+        }
+    }
+}
+
+fn collect_strict_null_assertion_targets(
+    ty: &TypeDecl,
+    targets: &mut HashSet<(String, String, usize)>,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) if method_is_strict_object_null_assertion(method) => {
+                targets.insert((
+                    ty.name.clone(),
+                    source_method_rust_name(method),
+                    method.params.len(),
+                ));
+            }
+            Member::Type(nested) => collect_strict_null_assertion_targets(nested, targets),
+            _ => {}
+        }
+    }
+}
+
+fn method_is_strict_object_null_assertion(method: &crate::java_ir::MethodDecl) -> bool {
+    let [param] = method.params.as_slice() else {
+        return false;
+    };
+    if !matches!(
+        &param.ty,
+        JavaType::Named { name, .. } | JavaType::Unknown(name)
+            if crate::stdlib::canonical_external_receiver_type_key(name)
+                .rsplit('.').next().is_some_and(|simple| simple == "Object")
+    ) {
+        return false;
+    }
+    let Some(body) = &method.body else {
+        return false;
+    };
+    let [
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        },
+        rest @ ..,
+    ] = body.statements.as_slice()
+    else {
+        return false;
+    };
+    else_block.is_none()
+        && matches!(condition, Expr::Binary { op: BinaryOp::Eq, left, right }
+            if (matches!(left.as_ref(), Expr::Var(name) if name == &param.name)
+                && matches!(right.as_ref(), Expr::Literal(Literal::Null)))
+             || (matches!(right.as_ref(), Expr::Var(name) if name == &param.name)
+                && matches!(left.as_ref(), Expr::Literal(Literal::Null))))
+        && !then_block.statements.is_empty()
+        && then_block
+            .statements
+            .iter()
+            .all(|stmt| matches!(stmt, Stmt::Throw(_)))
+        && rest.iter().all(|stmt| match stmt {
+            Stmt::Return(None) => true,
+            Stmt::Return(Some(Expr::Var(name))) => name == &param.name,
+            _ => false,
+        })
+}
+
 fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
     loop {
+        let source_methods = facts
+            .methods_by_java_key
+            .keys()
+            .cloned()
+            .collect::<HashSet<_>>();
         let mutating_source_methods = facts
             .methods_by_java_key
             .iter()
@@ -1262,7 +1521,7 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
             .filter_map(|(key, usage)| {
                 usage
                     .mutates_self
-                    .then(|| (key.type_name.clone(), key.method_name.clone()))
+                    .then(|| (key.type_name().to_string(), key.method_name.clone()))
             })
             .collect::<HashSet<_>>();
         mutating_compat_methods.extend(facts.methods_by_java_key.iter().filter_map(
@@ -1295,6 +1554,11 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                         &call_site.name,
                     ) {
                         return true;
+                    }
+                    if source_methods
+                        .contains(&resolved_source_method_key(resolved, &call_site.name))
+                    {
+                        return false;
                     }
                     let rust_name = crate::parser::to_snake_case(&call_site.name);
                     if legacy_mutating_method_contains(
@@ -1339,10 +1603,10 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
             }
         };
         for (key, usage) in facts.methods.iter_mut() {
-            mark(&key.type_name, usage);
+            mark(key.type_name(), usage);
         }
         for (key, usage) in facts.methods_by_rust_name.iter_mut() {
-            mark(&key.type_name, usage);
+            mark(key.type_name(), usage);
         }
         for (key, usage) in facts.methods_by_java_key.iter_mut() {
             mark(key.owner(), usage);
@@ -1425,7 +1689,12 @@ pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGr
     graph
 }
 
-fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &FactSet) {
+fn analyze_type_usage(
+    program: &Program,
+    ty: &TypeDecl,
+    facts: &mut UsageFacts,
+    semantic_facts: &FactSet,
+) {
     let internal_methods = internal_method_names(ty);
     let same_type_method_arg_targets = same_type_method_arg_targets(ty);
     let source_return_nullability = source_return_nullability_by_call_name(ty);
@@ -1457,6 +1726,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &mut method_facts,
                             &ty.name,
                             current_super_type,
+                            Some(&method.return_type),
                             &internal_methods,
                             &field_names,
                             &field_types,
@@ -1474,7 +1744,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                 let rust_key = UsageMethodKey::source_method(ty, method);
                 facts.methods.insert(rust_key, method_facts.clone());
                 facts.methods_by_java_key.insert(
-                    JavaCallableKey::source_method_for_type(ty, method),
+                    JavaCallableKey::source_method_in_program(program, ty, method),
                     method_facts.clone(),
                 );
                 facts.methods.insert(java_key, method_facts);
@@ -1501,6 +1771,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                             &mut ctor_facts,
                             &ty.name,
                             current_super_type,
+                            None,
                             &internal_methods,
                             &field_names,
                             &field_types,
@@ -1515,7 +1786,7 @@ fn analyze_type_usage(ty: &TypeDecl, facts: &mut UsageFacts, semantic_facts: &Fa
                     ctor_facts,
                 );
             }
-            Member::Type(nested) => analyze_type_usage(nested, facts, semantic_facts),
+            Member::Type(nested) => analyze_type_usage(program, nested, facts, semantic_facts),
             _ => {}
         }
     }
@@ -2083,7 +2354,7 @@ fn callable_checked_exception_types(callee: &CallableKey, facts: &FactSet) -> Ve
             type_name,
             rust_name: method_name,
         } => facts
-            .method_effect_for(type_name, method_name)
+            .method_effect_for(type_name.as_str(), method_name)
             .map(|effect| effect.thrown.clone())
             .unwrap_or_default(),
         CallableKey::ExternalMethod {
@@ -2273,6 +2544,7 @@ fn analyze_stmt(
     facts: &mut MethodUsageFacts,
     current_type: &str,
     current_super_type: Option<&str>,
+    declared_return_type: Option<&JavaType>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -2516,6 +2788,13 @@ fn analyze_stmt(
                     record_use(facts, name, BindingUse::Returned);
                 }
             }
+            record_returned_subtype_use(
+                expr,
+                declared_return_type,
+                facts,
+                type_env,
+                semantic_facts,
+            );
             record_returned_call_result_use(
                 expr,
                 facts,
@@ -2539,6 +2818,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2596,6 +2876,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2611,6 +2892,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     current_super_type,
+                    declared_return_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2642,6 +2924,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2659,6 +2942,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2693,6 +2977,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     current_super_type,
+                    declared_return_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2738,6 +3023,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2781,6 +3067,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2810,6 +3097,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     current_super_type,
+                    declared_return_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2826,6 +3114,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2847,6 +3136,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     current_super_type,
+                    declared_return_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2860,6 +3150,7 @@ fn analyze_stmt(
                 facts,
                 current_type,
                 current_super_type,
+                declared_return_type,
                 internal_methods,
                 field_names,
                 field_types,
@@ -2892,6 +3183,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     current_super_type,
+                    declared_return_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -2908,6 +3200,7 @@ fn analyze_stmt(
                     facts,
                     current_type,
                     current_super_type,
+                    declared_return_type,
                     internal_methods,
                     field_names,
                     field_types,
@@ -3027,6 +3320,8 @@ fn call_result_boundary_policy_with_context(
             });
             let boundary =
                 call_argument_boundary_policy(receiver.as_deref(), name, internal_methods).boundary;
+            let boundary =
+                resolved_receiver_call_boundary(boundary, receiver.as_deref(), resolved.as_ref());
             let boundary = modeled_receiver_call_boundary(
                 boundary,
                 receiver_type.as_ref(),
@@ -3035,6 +3330,8 @@ fn call_result_boundary_policy_with_context(
                 semantic_facts,
                 type_env,
             );
+            let boundary =
+                source_receiver_call_boundary(boundary, receiver_type.as_ref(), semantic_facts);
             Some(CallResultBoundaryPolicy {
                 name: name.clone(),
                 arg_count: args.len(),
@@ -3098,7 +3395,32 @@ fn assigned_subtype_local_actual_type(
     {
         return Some(actual_ty);
     }
+    if let Some(bound_ty) = assigned_subtype_actual_type_from_type_param_bound(
+        &actual_ty,
+        target_ty,
+        type_env,
+        semantic_facts,
+    ) {
+        return Some(bound_ty);
+    }
     assigned_subtype_actual_type_from_source_hierarchy_alias(&actual_ty, target_ty, semantic_facts)
+}
+
+fn assigned_subtype_actual_type_from_type_param_bound(
+    actual_ty: &JavaType,
+    target_ty: &JavaType,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    let actual_name = usage_java_type_name(actual_ty)?;
+    let bound_ty = type_env.type_param_bound(actual_name)?;
+    if bound_ty == target_ty {
+        return None;
+    }
+    semantic_facts
+        .hierarchy_subtype_policy(bound_ty, target_ty)
+        .reaches()
+        .then(|| bound_ty.clone())
 }
 
 fn assigned_subtype_actual_type_from_source_hierarchy_alias(
@@ -3171,6 +3493,7 @@ fn analyze_return_expr(
     facts: &mut MethodUsageFacts,
     current_type: &str,
     current_super_type: Option<&str>,
+    _declared_return_type: Option<&JavaType>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -3830,7 +4153,11 @@ fn analyze_expr_with_context(
                     Some(ty.clone()),
                     args.len(),
                     arg_index,
-                    constructor_argument_boundary_policy(resolved.as_ref(), arg_index),
+                    constructor_argument_boundary_policy(
+                        current_type,
+                        resolved.as_ref(),
+                        arg_index,
+                    ),
                 );
                 record_constructor_argument_subtype_use(
                     facts,
@@ -3974,6 +4301,7 @@ fn analyze_lambda_body(
                     facts,
                     current_type,
                     current_super_type,
+                    None,
                     internal_methods,
                     field_names,
                     field_types,
@@ -4016,11 +4344,18 @@ fn record_returned_call_result_use(
             ) else {
                 return;
             };
+            let boundary = match expr {
+                Expr::New {
+                    resolved: Some(resolved),
+                    ..
+                } if resolved.declaring_type != current_type => CallArgumentBoundary::Unknown,
+                _ => policy.boundary,
+            };
             facts.returned_call_results.push(ReturnedCallResultUse {
                 name: policy.name,
                 arg_count: policy.arg_count,
                 receiver_type: policy.receiver_type,
-                boundary: policy.boundary,
+                boundary,
                 resolved: policy.resolved,
             });
         }
@@ -4064,6 +4399,50 @@ fn record_returned_call_result_use(
             );
         }
         _ => {}
+    }
+}
+
+fn record_returned_subtype_use(
+    expr: &Expr,
+    declared_return_type: Option<&JavaType>,
+    facts: &mut MethodUsageFacts,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) {
+    let Some(declared_return_type) = declared_return_type else {
+        return;
+    };
+    let target_type = crate::types::optional_element_type(declared_return_type)
+        .unwrap_or_else(|| declared_return_type.clone());
+    let value_expr = optional_of_present_argument(expr).unwrap_or(expr);
+    let Some(actual_type) =
+        assigned_subtype_local_actual_type(value_expr, &target_type, type_env, semantic_facts)
+    else {
+        return;
+    };
+    facts.field_uses.push(FieldUse::AssignedSubtypeToReturn {
+        target_type,
+        actual_type,
+    });
+}
+
+fn optional_of_present_argument(expr: &Expr) -> Option<&Expr> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name == "of"
+        && args.len() == 1
+        && matches!(receiver.as_ref(), Expr::Var(owner) if matches!(owner.as_str(), "Optional" | "optional"))
+    {
+        args.first()
+    } else {
+        None
     }
 }
 
@@ -4209,9 +4588,6 @@ fn record_call_argument_subtype_use(
     type_env: &TypeEnv,
     semantic_facts: &FactSet,
 ) {
-    let Expr::Var(binding_name) = arg else {
-        return;
-    };
     let Some(target_type) = resolved
         .and_then(|resolved| crate::call_plan::resolved_call_arg_target_type(resolved, arg_index))
         .or_else(|| facts.same_type_call_arg_target_type(call_name, arg_count, arg_index))
@@ -4223,14 +4599,23 @@ fn record_call_argument_subtype_use(
     else {
         return;
     };
-    record_use(
-        facts,
-        binding_name,
-        BindingUse::AssignedSubtypeToCallArgument {
-            target_type: target_type.clone(),
-            actual_type,
-        },
-    );
+    if let Expr::Var(binding_name) = arg {
+        record_use(
+            facts,
+            binding_name,
+            BindingUse::AssignedSubtypeToCallArgument {
+                target_type: target_type.clone(),
+                actual_type,
+            },
+        );
+    } else {
+        facts
+            .field_uses
+            .push(FieldUse::AssignedSubtypeToCallArgument {
+                target_type: target_type.clone(),
+                actual_type,
+            });
+    }
 }
 
 fn record_constructor_argument_subtype_use(
@@ -4603,6 +4988,7 @@ fn analyze_scoped_statements(
     facts: &mut MethodUsageFacts,
     current_type: &str,
     current_super_type: Option<&str>,
+    declared_return_type: Option<&JavaType>,
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
@@ -4617,6 +5003,7 @@ fn analyze_scoped_statements(
             facts,
             current_type,
             current_super_type,
+            declared_return_type,
             internal_methods,
             field_names,
             field_types,
@@ -4885,13 +5272,14 @@ fn constructor_result_boundary_policy(
 }
 
 fn constructor_argument_boundary_policy(
+    current_type: &str,
     resolved: Option<&ResolvedConstructor>,
     arg_index: usize,
 ) -> CallArgumentBoundary {
     let Some(resolved) = resolved else {
         return CallArgumentBoundary::Unknown;
     };
-    if resolved.params.get(arg_index).is_some() {
+    if resolved.declaring_type == current_type && resolved.params.get(arg_index).is_some() {
         CallArgumentBoundary::InternalSameType
     } else {
         CallArgumentBoundary::Unknown
@@ -4919,13 +5307,8 @@ fn resolved_receiver_call_boundary(
     if matches!(receiver, Some(Expr::Super)) {
         return CallArgumentBoundary::InternalSameType;
     }
-    let Some(resolved) = resolved else {
-        return boundary;
-    };
-    if resolved.kind != crate::java_ir::CallKind::Instance {
-        return boundary;
-    }
-    CallArgumentBoundary::KnownContentRead
+    let _ = resolved;
+    boundary
 }
 
 fn modeled_receiver_call_boundary(
@@ -5244,6 +5627,81 @@ class Use {
     }
 
     #[test]
+    fn fresh_source_subtype_argument_records_target_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Base {
+    int id;
+}
+class Sub extends Base {
+}
+class Use {
+    Base keep(Base value) {
+        return value;
+    }
+    void run() {
+        keep(new Sub());
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "run");
+        let usage = usage
+            .method_usage_by_key(&method)
+            .expect("method usage facts");
+
+        assert!(usage.field_uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                FieldUse::AssignedSubtypeToCallArgument {
+                    target_type: JavaType::Named { name: target_name, .. },
+                    actual_type: JavaType::Named { name: actual_name, .. },
+                } if target_name == "Base" && actual_name == "Sub"
+            )
+        }));
+    }
+
+    #[test]
+    fn type_param_bound_supertype_assignment_records_bound_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class HeaderLine {
+    String id;
+}
+class CompoundLine extends HeaderLine {
+}
+class Standards<T extends CompoundLine> {
+    void accept(HeaderLine line) {
+    }
+    void run(T line) {
+        accept(line);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Standards", "run");
+        let binding = usage
+            .method_usage_by_key(&method)
+            .and_then(|method| method.current_visible_binding_facts_for_name("line"))
+            .expect("argument binding");
+
+        assert!(binding.uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                BindingUse::AssignedSubtypeToCallArgument {
+                    target_type: JavaType::Named { name: target_name, .. },
+                    actual_type: JavaType::Named { name: actual_name, .. },
+                    ..
+                } if target_name == "HeaderLine" && actual_name == "CompoundLine"
+            )
+        }));
+    }
+
+    #[test]
     fn erased_object_cast_records_target_type_on_source_binding() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -5315,12 +5773,51 @@ class Use {
     }
 
     #[test]
-    fn resolved_receiver_boundary_treats_source_instance_calls_as_content_reads() {
+    fn optional_return_known_subtype_records_target_subtype_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.Optional;
+class Base {
+    int id;
+}
+class Sub extends Base {
+}
+class Use {
+    Optional<Base> make() {
+        return Optional.of(new Sub());
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "make");
+        let method_usage = usage
+            .method_usage_by_key(&method)
+            .expect("method usage should be recorded");
+
+        assert!(
+            method_usage.field_uses().iter().any(|use_site| {
+                matches!(
+                    use_site,
+                    FieldUse::AssignedSubtypeToReturn {
+                        target_type: JavaType::Named { name: target_name, .. },
+                        actual_type: JavaType::Named { name: actual_name, .. },
+                    } if target_name == "Base" && actual_name == "Sub"
+                )
+            }),
+            "field_uses={:?}",
+            method_usage.field_uses()
+        );
+    }
+
+    #[test]
+    fn resolved_receiver_boundary_does_not_turn_source_instance_calls_into_content_reads() {
         let resolved = resolved_instance_call("a.Item");
 
         assert_eq!(
             resolved_receiver_call_boundary(CallArgumentBoundary::Unknown, None, Some(&resolved)),
-            CallArgumentBoundary::KnownContentRead
+            CallArgumentBoundary::Unknown
         );
     }
 
@@ -5719,6 +6216,7 @@ class Use {
             &stmt,
             &mut facts,
             "Owner",
+            None,
             None,
             &HashSet::new(),
             &HashSet::new(),

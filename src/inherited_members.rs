@@ -230,10 +230,13 @@ pub(crate) fn inherited_instance_method_refs_for_type<'a>(
     let mut seen_methods = direct_instance_method_slots(ty);
     let direct_method_rust_names = direct_instance_method_rust_names(ty);
     let mut current = ty.extends.as_deref();
+    let mut owner_context = ty.name.clone();
     let mut visited_types = HashSet::new();
 
     while let Some(type_name) = current {
-        let Some(super_ty) = find_type_decl(support_program, type_name) else {
+        let Some(super_ty) =
+            find_type_decl_for_owner_context(support_program, &owner_context, type_name)
+        else {
             break;
         };
         if !visited_types.insert(super_ty.name.clone()) {
@@ -260,6 +263,7 @@ pub(crate) fn inherited_instance_method_refs_for_type<'a>(
             }
         }
 
+        owner_context = super_ty.name.clone();
         current = super_ty.extends.as_deref();
     }
 
@@ -297,31 +301,59 @@ fn collect_inherited_interface_default_methods<'a>(
 ) {
     // A class inherits the defaults of the interfaces its *superclasses*
     // implement as well as its own.
-    let mut pending = ty.implements.clone();
+    let mut pending = ty
+        .implements
+        .iter()
+        .cloned()
+        .map(|interface| (ty.name.clone(), interface))
+        .collect::<Vec<_>>();
     let mut super_name = ty.extends.as_deref();
+    let mut super_owner_context = ty.name.clone();
     let mut visited_supers = HashSet::new();
     while let Some(name) = super_name {
-        let Some(super_ty) = find_type_decl(support_program, name) else {
+        let Some(super_ty) =
+            find_type_decl_for_owner_context(support_program, &super_owner_context, name)
+        else {
             break;
         };
         if !visited_supers.insert(super_ty.name.clone()) {
             break;
         }
-        pending.extend(super_ty.implements.iter().cloned());
+        pending.extend(
+            super_ty
+                .implements
+                .iter()
+                .cloned()
+                .map(|interface| (super_ty.name.clone(), interface)),
+        );
+        super_owner_context = super_ty.name.clone();
         super_name = super_ty.extends.as_deref();
     }
 
     let mut visited = HashSet::new();
-    while let Some(name) = pending.pop() {
-        let Some(interface) = find_type_decl(support_program, &name) else {
+    while let Some((owner_name, name)) = pending.pop() {
+        let Some(interface) = find_type_decl_for_owner_context(support_program, &owner_name, &name)
+        else {
             continue;
         };
         if !visited.insert(interface.name.clone()) {
             continue;
         }
         // Super-interfaces contribute their defaults too.
-        pending.extend(interface.extends.iter().cloned());
-        pending.extend(interface.implements.iter().cloned());
+        pending.extend(
+            interface
+                .extends
+                .iter()
+                .cloned()
+                .map(|super_interface| (interface.name.clone(), super_interface)),
+        );
+        pending.extend(
+            interface
+                .implements
+                .iter()
+                .cloned()
+                .map(|super_interface| (interface.name.clone(), super_interface)),
+        );
 
         for member in &interface.members {
             let Member::Method(method) = member else {
@@ -581,10 +613,15 @@ pub(crate) fn inherited_instance_field_refs_for_type_in_programs<'a>(
     let mut fields = Vec::new();
     let mut seen_fields = direct_instance_field_names(ty);
     let mut current = ty.extends.as_deref();
+    let mut owner_context = ty.name.clone();
     let mut visited_types = HashSet::new();
 
     while let Some(type_name) = current {
-        let Some(super_ty) = find_unique_type_decl_in_programs(support_programs, type_name) else {
+        let Some(super_ty) = find_unique_type_decl_for_owner_context_in_programs(
+            support_programs,
+            &owner_context,
+            type_name,
+        ) else {
             break;
         };
         if !visited_types.insert(super_ty.name.clone()) {
@@ -603,6 +640,7 @@ pub(crate) fn inherited_instance_field_refs_for_type_in_programs<'a>(
             }
         }
 
+        owner_context = super_ty.name.clone();
         current = super_ty.extends.as_deref();
     }
 
@@ -629,6 +667,16 @@ fn find_unique_type_decl_in_programs<'a>(
     found
 }
 
+fn find_unique_type_decl_for_owner_context_in_programs<'a>(
+    programs: &[&'a Program],
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    find_unique_exact_type_decl_in_programs(programs, type_name)
+        .or_else(|| find_unique_same_package_type_decl_in_programs(programs, owner_name, type_name))
+        .or_else(|| find_unique_type_decl_in_programs(programs, type_name))
+}
+
 fn find_unique_exact_type_decl_in_programs<'a>(
     programs: &[&'a Program],
     type_name: &str,
@@ -649,6 +697,20 @@ fn find_unique_exact_type_decl_in_programs<'a>(
         found = Some(ty);
     }
     found
+}
+
+fn find_unique_same_package_type_decl_in_programs<'a>(
+    programs: &[&'a Program],
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    let type_name = type_name_without_args(type_name);
+    if type_name.contains('.') || type_name.contains('$') {
+        return None;
+    }
+    let package = owner_package_name(owner_name)?;
+    let qualified = format!("{package}.{type_name}");
+    find_unique_exact_type_decl_in_programs(programs, &qualified)
 }
 
 fn find_exact_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
@@ -753,6 +815,48 @@ fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeD
     None
 }
 
+fn find_type_decl_for_owner_context<'a>(
+    program: &'a Program,
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    find_exact_type_decl(program, type_name)
+        .or_else(|| find_same_package_type_decl(program, owner_name, type_name))
+        .or_else(|| find_type_decl(program, type_name))
+}
+
+fn find_exact_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    let query = type_name_without_args(type_name);
+    let mut exact_matches = Vec::new();
+    for ty in &program.types {
+        collect_type_decl_matches(ty, query, &mut exact_matches, |candidate, query| {
+            type_name_without_args(candidate) == query
+        });
+    }
+    match exact_matches.as_slice() {
+        [ty] => Some(*ty),
+        _ => None,
+    }
+}
+
+fn find_same_package_type_decl<'a>(
+    program: &'a Program,
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    let query = type_name_without_args(type_name);
+    if query.contains('.') || query.contains('$') {
+        return None;
+    }
+    let package = owner_package_name(owner_name)?;
+    let qualified = format!("{package}.{query}");
+    find_exact_type_decl(program, &qualified)
+}
+
+fn owner_package_name(owner_name: &str) -> Option<&str> {
+    owner_name.rsplit_once('.').map(|(package, _)| package)
+}
+
 fn collect_type_decl_matches<'a>(
     ty: &'a TypeDecl,
     type_name: &str,
@@ -855,6 +959,16 @@ mod tests {
         })
     }
 
+    fn field(name: &str) -> Member {
+        Member::Field(FieldDecl {
+            name: name.to_string(),
+            ty: JavaType::Primitive(PrimitiveType::Int),
+            modifiers: Vec::new(),
+            initializer: None,
+            span: Span::default(),
+        })
+    }
+
     fn class(name: &str, extends: Option<&str>, members: Vec<Member>) -> TypeDecl {
         TypeDecl {
             static_init_blocks: Vec::new(),
@@ -868,6 +982,21 @@ mod tests {
             permits: Vec::new(),
             members,
             span: Span::default(),
+        }
+    }
+
+    fn interface(name: &str, extends: Vec<&str>, members: Vec<Member>) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Interface,
+            extends: extends.into_iter().map(str::to_string).next(),
+            ..class(name, None, members)
+        }
+    }
+
+    fn class_implementing(name: &str, implements: Vec<&str>) -> TypeDecl {
+        TypeDecl {
+            implements: implements.into_iter().map(str::to_string).collect(),
+            ..class(name, None, Vec::new())
         }
     }
 
@@ -897,7 +1026,7 @@ mod tests {
     }
 
     #[test]
-    fn inherited_source_methods_refuse_ambiguous_simple_package_super() {
+    fn inherited_source_methods_prefer_same_package_simple_super() {
         let program = Program {
             package: None,
             imports: Vec::new(),
@@ -905,20 +1034,86 @@ mod tests {
                 class("a.Base", None, vec![method("v", Vec::new(), "v")]),
                 class("b.Base", None, vec![method("v", Vec::new(), "v")]),
                 class("AmbiguousChild", Some("Base"), Vec::new()),
+                class("b.Child", Some("Base"), Vec::new()),
                 class("ExactChild", Some("b.Base"), Vec::new()),
             ],
         };
         let ambiguous_child = find_type_decl(&program, "AmbiguousChild").unwrap();
+        let same_package_child = find_type_decl(&program, "b.Child").unwrap();
         let exact_child = find_type_decl(&program, "ExactChild").unwrap();
 
         assert!(
             inherited_instance_method_refs_for_type(ambiguous_child, &program).is_empty(),
             "bare same-simple package super lookup must fail closed"
         );
+        let same_package_inherited =
+            inherited_instance_method_refs_for_type(same_package_child, &program);
+        assert_eq!(same_package_inherited.len(), 1);
+        assert_eq!(same_package_inherited[0].declaring_type, "b.Base");
+        assert_eq!(same_package_inherited[0].method.name, "v");
+
         let inherited = inherited_instance_method_refs_for_type(exact_child, &program);
         assert_eq!(inherited.len(), 1);
         assert_eq!(inherited[0].declaring_type, "b.Base");
         assert_eq!(inherited[0].method.name, "v");
+    }
+
+    #[test]
+    fn inherited_source_fields_prefer_same_package_simple_super() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                class("a.Base", None, vec![field("wrong")]),
+                class("b.Base", None, vec![field("right")]),
+                class("AmbiguousChild", Some("Base"), Vec::new()),
+                class("b.Child", Some("Base"), Vec::new()),
+            ],
+        };
+        let ambiguous_child = find_type_decl(&program, "AmbiguousChild").unwrap();
+        let same_package_child = find_type_decl(&program, "b.Child").unwrap();
+
+        assert!(
+            inherited_instance_field_refs_for_type(ambiguous_child, &program).is_empty(),
+            "bare same-simple package field inheritance must fail closed without owner package"
+        );
+        let inherited = inherited_instance_field_refs_for_type(same_package_child, &program);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].declaring_type(), "b.Base");
+        assert_eq!(inherited[0].field().name, "right");
+    }
+
+    #[test]
+    fn inherited_interface_defaults_prefer_same_package_simple_owner() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                interface(
+                    "a.Named",
+                    Vec::new(),
+                    vec![method("wrong", Vec::new(), "wrong")],
+                ),
+                interface(
+                    "b.Named",
+                    Vec::new(),
+                    vec![method("right", Vec::new(), "right")],
+                ),
+                class_implementing("AmbiguousChild", vec!["Named"]),
+                class_implementing("b.Child", vec!["Named"]),
+            ],
+        };
+        let ambiguous_child = find_type_decl(&program, "AmbiguousChild").unwrap();
+        let same_package_child = find_type_decl(&program, "b.Child").unwrap();
+
+        assert!(
+            inherited_instance_method_refs_for_type(ambiguous_child, &program).is_empty(),
+            "bare same-simple interface lookup must fail closed without owner package"
+        );
+        let inherited = inherited_instance_method_refs_for_type(same_package_child, &program);
+        assert_eq!(inherited.len(), 1);
+        assert_eq!(inherited[0].declaring_type, "b.Named");
+        assert_eq!(inherited[0].method.name, "right");
     }
 
     #[test]

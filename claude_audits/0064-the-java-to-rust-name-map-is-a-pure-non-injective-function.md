@@ -16,6 +16,112 @@ one level below it
 
 Current tree update:
 
+* Codex follow-up 2026-09-17: source `static final` constant declarations now
+  retain their package-qualified owner as `JavaOwnerKey` throughout collection
+  and fixpoint folding. The constant scope and external field-fact boundary
+  receive an explicit `as_str()` compatibility spelling rather than allowing
+  the internal declaration map to reintroduce a raw owner `String`. Guard:
+  `batch_translation::stream_static_constant_support_keeps_package_qualified_owner_identity`.
+* Codex follow-up 2026-09-16: `JavaCallableKey` now stores its owner as
+  `JavaOwnerKey`, rather than a bare `String`. Source callable keys therefore
+  retain the package-aware owner selected by
+  `JavaOwnerKey::source_type_in_program` through the Java-signature index;
+  readers can only obtain a compatibility spelling through `owner()`. The
+  package-peer batch regression remains the guard:
+  `tests::batch_analysis_keys_keep_same_simple_name_package_peers_distinct`.
+  `CallableKey` and its compatibility constructors remain a separate
+  call-graph migration surface.
+* Codex follow-up 2026-09-16: `signature::FieldKey` now also stores a
+  `JavaOwnerKey`; its `type_name()` accessor is the sole remaining spelling
+  boundary for field-shape compatibility lookup. This prevents signature field
+  maps from separately reintroducing raw owner storage alongside the migrated
+  method and constructor maps. Guard:
+  `signature::tests::required_field_shape_does_not_borrow_distinct_package_peer`.
+* Codex follow-up 2026-09-16: source `usage::CallableKey::{Method,Constructor}`
+  owners now store the same opaque `JavaOwnerKey`, so call-graph nodes no
+  longer maintain their own raw source-owner strings. External callable owner
+  facts intentionally remain strings, because they model names supplied by
+  external packs rather than resolved source declarations. Public graph readers
+  retain string query methods; named constructors are the only construction
+  path. Guards:
+  `usage::tests::usage_source_key_constructors_name_canonical_and_legacy_paths`
+  and `tests::batch_analysis_keys_keep_same_simple_name_package_peers_distinct`,
+  which now asserts the distinct `a.Item`/`b.Item` call-graph nodes too.
+* Codex follow-up 2026-09-16: lowerer's `SourceContextOwnerKey`, the single
+  wrapper through which resolved-context type lookup is performed, now stores
+  `JavaOwnerKey` rather than an independent `String`. Its compatibility
+  spellings remain behind `as_str()`, while exact/package/alias matching keeps
+  the existing fail-closed lookup policy. Guard:
+  `lower::tests::source_context_owner_key_resolution_refuses_same_simple_package_peer`.
+* Codex follow-up 2026-09-16: scoped Java type parameters now win over
+  same-spelled source classes in clone-recovery and current-owner lookup paths.
+  A `class ELEM` sibling no longer makes `class GenericElemBox<ELEM>` treat the
+  type parameter as the concrete source class and add an invalid `Clone`
+  requirement or `input.clone()` to `ELEM tmp = input`. The current-type lookup
+  first checks the exact `TypeDecl.name` before falling back to compatibility
+  owner-key matching. Regression:
+  `slot_shape_design::scoped_type_param_does_not_collide_with_same_named_source_class`.
+* Codex follow-up 2026-09-15: `SourceContextOwnerKey::resolves_to_owner`
+  now compares the resolved `(TypeDecl, Program)` identity instead of only
+  `ty.name`, and resolved owner strings retain the program package when a
+  declaration stores a simple source name. This prevents `a.Item` and `b.Item`
+  from comparing equal merely because both declarations are stored as `Item`.
+  The source-class upcast guard also carries that package-qualified identity
+  through bare `extends Base` edges after an exact package lookup. Regressions:
+  `lower::tests::source_context_owner_key_resolution_refuses_same_simple_package_peer`
+  and
+  `lower::tests::source_class_upcast_hierarchy_guard_keeps_package_identity_after_exact_lookup`.
+* Codex follow-up 2026-09-15: lowerer's fallback receiver signature lookup now
+  queries `SignaturePlan` with the resolved context owner key, not the raw
+  receiver spelling. A local typed as bare `Util` can resolve uniquely to
+  context owner `a.Util`; the signature table is keyed by that owner, so the
+  raw simple spelling was a wrong-owner miss at the name-fallback boundary.
+  Regression:
+  `lower::tests::fallback_receiver_signature_uses_resolved_context_owner_not_receiver_spelling`.
+* Codex follow-up 2026-09-15: lowerer's combined context type lookup now
+  treats only the same `(TypeDecl, Program)` as a duplicate match. Two different
+  context programs that both expose `Item` therefore fail closed for bare
+  `Item` instead of being accepted as unique because their rendered owner names
+  are equal. The emitted-context lookup uses the same identity check.
+  Regressions:
+  `lower::tests::context_type_lookup_refuses_cross_program_duplicate_owner_name`
+  and
+  `lower::tests::emitted_context_type_lookup_refuses_cross_program_duplicate_owner_name`.
+* Codex follow-up 2026-09-15: `stdlib` source-summary owner lookups no longer
+  let an exact owner query silently pick the first recursively discovered type.
+  `find_source_type_decl` and `find_program_type_by_key` now collect all exact
+  and compatibility matches before accepting the result, so duplicate exact
+  owner declarations fail closed just like ambiguous simple-name package peers.
+  Regressions:
+  `stdlib::source_summary_method_identity_tests::find_source_type_decl_refuses_duplicate_exact_owner`
+  and
+  `stdlib::source_summary_method_identity_tests::find_program_type_by_key_refuses_duplicate_exact_owner`.
+* Codex follow-up 2026-09-15: source enum Java-type lookup,
+  method-reference static type-alias owner lookup, InputStream read-shortcut
+  receiver declaration lookup, anonymous-interface trait-name lookup, and source
+  static-field receiver declared-type lookup now route their context searches
+  through `SourceContextOwnerKey` instead of reopening raw
+  `find_context_type_by_key_in_lower_ctx(...)` calls. This keeps the existing
+  combined exact/package/emitted-name behavior but makes these remaining
+  owner-key compatibility surfaces share the same wrapper boundary as the
+  current-type enum and static-fallback paths. Existing guards:
+  `layering::current_owner_utility_lookups_stay_wrapped_until_context_lookup`
+  and
+  `lower::tests::method_reference_static_type_alias_uses_resolved_context_owner`,
+  `lower::tests::source_input_stream_owner_shadows_native_jdk_read_shortcut`,
+  `lower::tests::anonymous_interface_constructor_trait_name_uses_combined_context_lookup`,
+  and
+  `lower::tests::source_static_field_receiver_resolves_bare_field_type_in_owner_package`.
+  A follow-up in the same pass moved the erased-name context lookup helper and
+  source-declared custom-`equals` receiver candidate lookup behind
+  `SourceContextOwnerKey` as well; production `lower.rs` now only calls raw
+  `find_context_type_by_key_in_lower_ctx(ctx, ...)` inside the wrapper method
+  itself.
+  Another follow-up routed emitted source-call argument planning, emitted source
+  signature lookup, emitted method declared-argument planning, and direct
+  emitted super-call lookup through `SourceContextOwnerKey` as well, keeping the
+  emitted-context compatibility boundary on the same owner-key wrapper instead
+  of reopening raw emitted lookup helpers at those production call sites.
 * Codex follow-up 2026-09-14: statement planning no longer lowers a
   source-defined `System.out.println(...)` to Rust's native `println!` macro
   when the `System.out` receiver is unresolved but `System.out` is known as a
@@ -40,10 +146,14 @@ Current tree update:
 * Codex follow-up 2026-09-14: anonymous zero-arg interface support in
   `representation.rs` no longer resolves the interface declaration by taking
   the first same-simple-name type after an exact erased-name miss. Exact Java
-  owner lookup still wins, unique simple-name compatibility remains available,
-  and ambiguous simple package peers fail closed so unsupported-anonymous-class
-  diagnostics are not suppressed by declaration order. Regressions:
-  `representation::tests::erased_name_type_lookup_refuses_ambiguous_simple_package_peer`
+  owner lookup still wins when unique, unique simple-name compatibility remains
+  available, and ambiguous simple package peers fail closed so
+  unsupported-anonymous-class diagnostics are not suppressed by declaration
+  order. Codex follow-up 2026-09-15 tightened the exact tier too: duplicate
+  exact erased-name owners fail closed instead of taking the first declaration.
+  Regressions:
+  `representation::tests::erased_name_type_lookup_refuses_ambiguous_simple_package_peer`,
+  `representation::tests::erased_name_type_lookup_refuses_duplicate_exact_owner`
   and
   `representation::tests::anonymous_zero_arg_interface_support_refuses_ambiguous_simple_owner`.
 * Follow-up 2026-09-07: `representation_lowering::source_class_bound_trait_name`
@@ -1491,19 +1601,16 @@ Representative remaining string-owner surfaces:
   spelling.
 - `resolve::{resolve_method, resolve_constructor}` still combine string owners
   and local context rather than consulting one resolved entity map.
-- `usage::UsageMethodKey`, `signature::MethodKey`, and many call-site helpers
-  still accept owner strings. The batch duplicate pre-pass and ambiguity guards
-  currently keep same-simple-name package peers distinct for the pinned Java-key
-  and legacy Rust-name paths, but the type system cannot express the invariant
-  yet.
+- Source `UsageMethodKey`, `signature::{MethodKey, ConstructorKey, FieldKey}`,
+  `JavaCallableKey`, and source `CallableKey` owners now use `JavaOwnerKey`.
+  Remaining call-site helpers that accept strings are resolved-context or
+  external-fact compatibility boundaries, where a source declaration is not
+  always available.
 
-Smallest implementation slice: introduce a package-aware `JavaTypeKey` (or one
-canonical owner helper returning such a key) and migrate the remaining
-Rust-name/usage owner strings first: `usage::UsageMethodKey`,
-`signature::MethodKey`, and construction sites that currently pass
-`ty.name.clone()`. Keep emitted Rust names unchanged in that slice. The goal is
-to make the already-pinned Java owner invariant explicit instead of relying on
-pre-pass string rewrites.
+The completed smallest implementation slice introduced `JavaOwnerKey` and
+migrated source Rust-name/usage owner storage while keeping emitted Rust names
+unchanged. The next slice is resolved-context and external-owner compatibility,
+which needs a distinct typed representation because no `TypeDecl` may exist.
 
 Focused tests for that slice:
 
@@ -2060,6 +2167,12 @@ closed. This prevents a `b.Holder` field declared as bare `Item` from charging
 static reachability or storage escape to `a.Item` merely because `a.Item` sorts
 first. Regression:
 `storage_strategy::tests::storage_strategy_simple_owner_uses_same_package_before_first_simple_match`.
+Codex follow-up 2026-09-15: storage-strategy source hierarchy reachability now
+uses the same exact/same-package/unique-simple policy while walking `extends`
+edges. A `b.Child extends Base` edge reaches `b.Base`, not whichever
+same-simple-name `Base` appears first, and does not report reachability to
+`a.Base` merely because the simple names match. Regression:
+`storage_strategy::tests::source_subtype_reachability_prefers_same_package_super_edge`.
 
 Follow-up 2026-08-28: the duplicate-program type pre-pass now checks the Rust
 declaration names produced by its planned Java-owner rewrites, not only the
@@ -2145,6 +2258,13 @@ supertype bounds for source class bounds, so `T extends Base` does not borrow
 `item_assembly::tests::source_type_param_into_supertype_bounds_refuses_ambiguous_simple_package_peer`,
 and the existing generated-crate check
 `idiom_gaps::source_generic_class_bound_overload_call_uses_bound_rust_name`.
+Codex follow-up 2026-09-15: the exact-owner tier in that same source type-bound
+lookup now requires uniqueness too. Duplicate exact owner declarations across
+support programs, or duplicate exact class-bound declarations in one support
+program, fail closed instead of taking the first recursive match. Regressions:
+`item_assembly::tests::source_type_bound_decl_refuses_duplicate_exact_owner`
+and
+`item_assembly::tests::source_type_param_into_supertype_bounds_refuses_duplicate_exact_owner`.
 
 Follow-up 2026-08-28: external field fact lookup now also fails closed for an
 ambiguous package-qualified simple-owner alias. Exact package owners still
@@ -3011,3 +3131,73 @@ fallback signatures, and resolved-owner receiver matching. Guards:
 `lower::tests::explicit_source_static_receiver_type_prefers_same_package_simple_owner`,
 `lower::tests::explicit_static_receiver_matches_same_package_simple_owner`,
 plus the existing ambiguous-simple-owner tests.
+
+Codex follow-up 2026-09-15: source inherited-member lookup now applies the same
+same-package preference before the ambiguous simple-name fallback. A class
+`b.Child extends Base` now inherits methods, fields, and interface defaults from
+`b.Base`/`b.Named` even when `a.Base`/`a.Named` is also present; a package-less
+`Child extends Base` with those peers still fails closed. Guards:
+`inherited_members::tests::inherited_source_methods_prefer_same_package_simple_super`,
+`inherited_members::tests::inherited_source_fields_prefer_same_package_simple_super`,
+and
+`inherited_members::tests::inherited_interface_defaults_prefer_same_package_simple_owner`.
+
+Codex follow-up 2026-09-15 later: semantic analysis' unresolved-target
+type-parameter-bound lookup now fails closed for duplicate exact enclosing
+owners instead of taking the first recursive type-declaration match. This keeps
+external-call fact recovery from applying a type-variable bound from the wrong
+source owner when the owner key is not unique. Guards:
+`semantic_analysis::tests::unresolved_target_type_param_bound_refuses_duplicate_exact_owner`
+and
+`semantic_analysis::tests::unresolved_target_type_param_bound_uses_unique_exact_owner`.
+
+Codex follow-up 2026-09-15 later: erased-object display lowering now keeps the
+source receiver owner as a `SourceContextOwnerKey` through the final context
+type/program lookup instead of reopening
+`find_context_type_and_program_by_key_in_lower_ctx(ctx, receiver_owner.as_str())`.
+This closes another raw owner-string escape without changing the display plan
+itself. Guard:
+`layering::current_owner_utility_lookups_stay_wrapped_until_context_lookup`.
+The same pass routed the array-allocation default-derive capability check
+through `SourceContextOwnerKey::find_context_type_and_program(...)` instead of
+reopening the raw lookup from a `JavaType::Named` string.
+
+Codex follow-up 2026-09-15 later: source-supertype conversion planning no
+longer falls back from the wrapped `SourceContextOwnerKey` lookup to a duplicate
+raw `find_context_type_and_program_by_key_in_lower_ctx(ctx, super_name)` call.
+The remaining raw lower-context lookup hits are now the wrapper definitions and
+tests/layering guards, not production reopenings at this boundary. Guards:
+`lower::tests::source_supertype_conversion_impls_use_combined_context_super_lookup`,
+`layering::receiver_fallback_owner_candidates_stay_wrapped_until_lookup`, and
+`layering::current_owner_utility_lookups_stay_wrapped_until_context_lookup`.
+
+Codex follow-up 2026-09-15 later: source-summary membership checks now use the
+combined context type resolver and accept only the selected
+`source_summary_type_program` owner. A bare `Item` no longer counts as a summary
+type when support has `a.Item` and the summary has `b.Item`; exact `b.Item` and
+its unambiguous Rust alias still work. Guard:
+`lower::tests::context_type_key_is_in_source_summary_refuses_ambiguous_simple_owner`.
+The same pass tightened source type-bound duplicate-owner equivalence: duplicate
+owners are considered the same only when their hierarchy-relevant declaration
+surface agrees, so `a.Base extends a.Parent` and another `a.Base extends
+b.Parent` fail closed instead of choosing the first `Into<...>` bound. Guard:
+`item_assembly::tests::source_type_param_into_supertype_bounds_refuses_duplicate_exact_owner`.
+
+Codex follow-up 2026-09-15 source-summary inherited method return-shape pass:
+the receiverless source-summary inherited-method lookup now carries the
+declaring `Program` while walking `extends` edges. A bare `extends Parent` from
+package `a` resolves through `a.Parent` before the ambiguous simple-owner
+fallback, while package-less callers with both `a.Parent` and `b.Parent` still
+fail closed. Guard:
+`lower::tests::source_summary_inherited_method_lookup_prefers_same_package_super_owner`
+plus the existing ambiguous-super-owner test.
+
+Codex follow-up 2026-09-16 emitted-context fallback identity pass:
+`find_emitted_context_type_by_rust_use_name` and
+`find_emitted_context_type_by_nested_path` now carry the declaring `Program`
+through their match collectors and use the pointer-plus-program uniqueness rule.
+Two different context programs that both expose `Item` therefore fail closed
+instead of being collapsed by equal `TypeDecl.name` strings. Guards:
+`lower::tests::emitted_context_rust_use_name_lookup_refuses_cross_program_duplicate_owner_name`
+and
+`lower::tests::emitted_context_nested_path_lookup_refuses_cross_program_duplicate_owner_name`.

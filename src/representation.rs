@@ -4,8 +4,8 @@ use crate::dependency_mode::DependencyMode;
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy};
 use crate::java_ir::{
-    Block, Expr, JavaType, LambdaBody, Member, MethodDecl, Modifier, Program, Stmt, SwitchLabel,
-    TypeDecl, TypeKind, block_mentions_this_or_super,
+    Block, Expr, JavaType, LambdaBody, Member, Modifier, Program, Stmt, SwitchLabel, TypeDecl,
+    TypeKind,
 };
 pub use crate::object_model::{
     ClosedEnumInferencePolicy, ClosedEnumProof, ClosedEnumProofPolicy,
@@ -230,10 +230,11 @@ fn keep_source_platform_facade_subclasses_concrete(
 }
 
 fn keep_source_platform_facade_subclass_concrete(ty: &TypeDecl, plan: &mut RepresentationPlan) {
-    if ty
-        .extends
-        .as_deref()
-        .is_some_and(crate::stdlib::is_java_platform_facade_type_name)
+    if crate::stdlib::is_java_platform_facade_type_name(&ty.name)
+        || ty
+            .extends
+            .as_deref()
+            .is_some_and(crate::stdlib::is_java_platform_facade_type_name)
     {
         plan.types.insert(
             ty.name.clone(),
@@ -1120,7 +1121,14 @@ fn collect_anonymous_class_diagnostics_for_expr(
             }
         }
         Expr::New { ty, args, body, .. } => {
-            if anonymous_priority_queue_comparator_constructor_is_supported(ty, args) {
+            if anonymous_priority_queue_comparator_constructor_is_supported(ty, args)
+                || anonymous_zero_arg_interface_is_supported(
+                    ty,
+                    args,
+                    body.as_deref(),
+                    anonymous_context,
+                )
+            {
                 return;
             }
             for arg in args {
@@ -1131,15 +1139,7 @@ fn collect_anonymous_class_diagnostics_for_expr(
                     diagnostics,
                 );
             }
-            if let Some(body) = body
-                && !anonymous_zero_arg_void_interface_constructor_is_supported(
-                    ty,
-                    body,
-                    anonymous_context,
-                    plan,
-                )
-                && !anonymous_class_target_is_erased_boundary(ty, plan)
-            {
+            if body.is_some() && !anonymous_class_target_is_erased_boundary(ty, plan) {
                 diagnostics.push(RepresentationDiagnostic::new(
                     "unsupported_anonymous_class",
                     format!(
@@ -1182,6 +1182,52 @@ fn collect_anonymous_class_diagnostics_for_expr(
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
     }
+}
+
+fn anonymous_zero_arg_interface_is_supported(
+    ty: &JavaType,
+    args: &[Expr],
+    body: Option<&[Member]>,
+    anonymous_context: &Program,
+) -> bool {
+    if !args.is_empty() {
+        return false;
+    }
+    let JavaType::Named { name, .. } = ty else {
+        return false;
+    };
+    let Some(interface) = find_type_by_erased_name(anonymous_context, name) else {
+        return false;
+    };
+    if interface.kind != TypeKind::Interface {
+        return false;
+    }
+    let mut methods = interface.members.iter().filter_map(|member| match member {
+        Member::Method(method) if method.body.is_none() => Some(method),
+        _ => None,
+    });
+    let Some(interface_method) = methods.next() else {
+        return false;
+    };
+    if methods.next().is_some()
+        || !interface_method.params.is_empty()
+        || !interface_method.type_params.is_empty()
+        || !interface_method.throws.is_empty()
+        || interface_method.modifiers.contains(&Modifier::Static)
+    {
+        return false;
+    }
+    let Some([Member::Method(implementation)]) = body else {
+        return false;
+    };
+    implementation.name == interface_method.name
+        && implementation.params.is_empty()
+        && implementation.type_params.is_empty()
+        && !implementation.modifiers.contains(&Modifier::Static)
+        && implementation
+            .body
+            .as_ref()
+            .is_some_and(|body| !crate::java_ir::block_mentions_this_or_super(body))
 }
 
 fn anonymous_priority_queue_comparator_constructor_is_supported(
@@ -1231,83 +1277,15 @@ fn anonymous_comparator_body_has_single_returning_compare(body: &[Member]) -> bo
         )
 }
 
-fn anonymous_zero_arg_void_interface_constructor_is_supported(
-    ty: &JavaType,
-    body: &[Member],
-    program: &Program,
-    plan: Option<&RepresentationPlan>,
-) -> bool {
-    let Some(plan) = plan else {
-        return false;
-    };
-    if !matches!(
-        plan.representation_lookup_policy(ty).representation(),
-        ObjectRepresentation::DynTrait { .. }
-    ) {
-        return false;
-    }
-    let Some(interface) =
-        concrete_java_type_name(ty).and_then(|name| find_type_by_erased_name(program, name))
-    else {
-        return false;
-    };
-    let Some(method) = zero_arg_void_functional_interface_method(interface) else {
-        return false;
-    };
-    anonymous_zero_arg_void_method_body(body, method)
-        .is_some_and(|implementation| !block_mentions_this_or_super(implementation))
-}
-
-fn zero_arg_void_functional_interface_method(ty: &TypeDecl) -> Option<&MethodDecl> {
-    if ty.kind != TypeKind::Interface {
-        return None;
-    }
-    let mut methods = ty.members.iter().filter_map(|member| match member {
-        Member::Method(method) if method.body.is_none() => Some(method),
-        _ => None,
-    });
-    let method = methods.next()?;
-    if methods.next().is_some()
-        || !method.params.is_empty()
-        || !method.type_params.is_empty()
-        || !method.throws.is_empty()
-        || !matches!(method.return_type, JavaType::Void)
-        || method.modifiers.contains(&Modifier::Static)
-    {
-        return None;
-    }
-    Some(method)
-}
-
-fn anonymous_zero_arg_void_method_body<'a>(
-    body: &'a [Member],
-    trait_method: &MethodDecl,
-) -> Option<&'a Block> {
-    let [Member::Method(method)] = body else {
-        return None;
-    };
-    if method.name != trait_method.name
-        || !method.params.is_empty()
-        || !method.type_params.is_empty()
-        || !matches!(method.return_type, JavaType::Void)
-        || method.modifiers.contains(&Modifier::Static)
-    {
-        return None;
-    }
-    method.body.as_ref()
-}
-
-fn concrete_java_type_name(ty: &JavaType) -> Option<&str> {
-    match ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
-        _ => None,
-    }
-}
-
 fn find_type_by_erased_name<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
     let types = all_types(program);
-    if let Some(exact) = types.iter().copied().find(|ty| ty.name == type_name) {
-        return Some(exact);
+    let exact = types
+        .iter()
+        .copied()
+        .filter(|ty| ty.name == type_name)
+        .collect::<Vec<_>>();
+    if !exact.is_empty() {
+        return unique_type_decl_match(exact.as_slice());
     }
     if type_name.contains('.') || type_name.contains('$') {
         return None;
@@ -1320,6 +1298,13 @@ fn find_type_by_erased_name<'a>(program: &'a Program, type_name: &str) -> Option
     });
     let first = matches.next()?;
     matches.next().is_none().then_some(first)
+}
+
+fn unique_type_decl_match<'a>(matches: &[&'a TypeDecl]) -> Option<&'a TypeDecl> {
+    match matches {
+        [ty] => Some(*ty),
+        _ => None,
+    }
 }
 
 fn anonymous_class_target_is_erased_boundary(
@@ -1739,6 +1724,19 @@ fn collect_types<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
 mod tests {
     use super::*;
     use crate::diagnostics::Span;
+    use crate::java_ir::{MethodDecl, TypeKind};
+
+    #[test]
+    fn source_type_named_like_platform_facade_stays_concrete() {
+        let parsed = crate::parser::parse_java_source("class Path {}");
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(matches!(
+            plan.type_representation("Path")
+                .map(|entry| entry.representation()),
+            Some(ObjectRepresentation::ConcreteStruct)
+        ));
+    }
 
     fn interface_type(name: &str, method: &str) -> TypeDecl {
         TypeDecl {
@@ -1821,6 +1819,29 @@ mod tests {
         );
         assert_eq!(find_type_by_erased_name(&program, "Task"), None);
         assert_eq!(find_type_by_erased_name(&program, "missing.Task"), None);
+    }
+
+    #[test]
+    fn erased_name_type_lookup_refuses_duplicate_exact_owner() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                interface_type("a.Task", "run"),
+                interface_type("a.Task", "close"),
+                interface_type("c.Unique", "run"),
+            ],
+        };
+
+        assert_eq!(
+            find_type_by_erased_name(&program, "a.Task").map(|ty| ty.name.as_str()),
+            None,
+            "duplicate exact erased-name owners must fail closed"
+        );
+        assert_eq!(
+            find_type_by_erased_name(&program, "Unique").map(|ty| ty.name.as_str()),
+            Some("c.Unique")
+        );
     }
 
     #[test]

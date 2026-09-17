@@ -332,6 +332,17 @@ Remaining cleanup, not part of the fixed correctness defect: a generated
 keyword-table fixture would make the coverage more systematic than hand-written
 cases.
 
+Codex follow-up 2026-09-15: bare constructor assignments to non-rawable keyword
+fields now render through the owning `TypeDecl`'s allocated field-name table
+instead of rejoining through an owner string and falling back to one-name
+allocation. This fixes the current generated-Rust failure where fields
+`self`/`self__` were declared as `self___`/`self__` but a bare `self = 1`
+initializer emitted `self__: 1`, colliding with the real `self__` field. Guards:
+`idiom_gaps::bare_non_rawable_keyword_field_names_do_not_collapse`,
+`idiom_gaps::bare_non_rawable_keyword_field_alias_does_not_overwrite_semantic_field`,
+`idiom_gaps::bare_non_rawable_keyword_field_preserves_local_shadowing`, and the
+`java_naming` keyword-collision unit tests.
+
 ## Checked and clean, for the record
 
 Two nearby things that look like the same shape and are not:

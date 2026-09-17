@@ -464,7 +464,9 @@ fn two_dimensional_array_element_type_after_optional(java_ty: &JavaType) -> Opti
 
 pub fn optional_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
-        JavaType::Named { name, args } if name == "Optional" && args.len() == 1 => {
+        JavaType::Named { name, args }
+            if matches!(name.as_str(), "Optional" | "java.util.Optional") && args.len() == 1 =>
+        {
             Some(args[0].clone())
         }
         _ => None,

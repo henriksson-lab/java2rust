@@ -82,13 +82,28 @@ pub(crate) fn impl_item_for_type(ty: &TypeDecl, functions: Vec<RustFunction>) ->
     impl_item_for_type_with_support_context(ty, functions, &Program::default())
 }
 
+#[cfg(test)]
 pub(crate) fn impl_item_for_type_with_support_context(
     ty: &TypeDecl,
     functions: Vec<RustFunction>,
     support_program: &Program,
 ) -> RustItem {
+    impl_item_for_type_with_support_context_and_representations(
+        ty,
+        functions,
+        support_program,
+        None,
+    )
+}
+
+pub(crate) fn impl_item_for_type_with_support_context_and_representations(
+    ty: &TypeDecl,
+    functions: Vec<RustFunction>,
+    support_program: &Program,
+    representations: Option<&RepresentationPlan>,
+) -> RustItem {
     RustItem::Impl(RustImpl {
-        target: rust_impl_target_for_source_type(ty, support_program),
+        target: rust_impl_target_for_source_type(ty, support_program, representations),
         trait_name: None,
         associated_consts: associated_consts_for_type(ty),
         functions,
@@ -108,9 +123,13 @@ pub(crate) fn rust_use_name_for_source_type(ty: &TypeDecl) -> String {
     rust_decl_name_for_source_type(ty)
 }
 
-fn rust_impl_target_for_source_type(ty: &TypeDecl, support_program: &Program) -> String {
+fn rust_impl_target_for_source_type(
+    ty: &TypeDecl,
+    support_program: &Program,
+    representations: Option<&RepresentationPlan>,
+) -> String {
     let use_name = rust_use_name_for_source_type(ty);
-    let impl_params = rust_impl_params_for_source_type(ty, support_program);
+    let impl_params = rust_impl_params_for_source_type(ty, support_program, representations);
     if impl_params.is_empty() {
         use_name
     } else {
@@ -191,7 +210,11 @@ fn jdk_type_param_bound_rust_bounds(bound: &str) -> Vec<String> {
     }
 }
 
-fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) -> Vec<String> {
+fn rust_impl_params_for_source_type(
+    ty: &TypeDecl,
+    support_program: &Program,
+    representations: Option<&RepresentationPlan>,
+) -> Vec<String> {
     ty.type_params
         .iter()
         .enumerate()
@@ -205,7 +228,11 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
             }
             if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
             {
-                let into_bounds = source_type_param_into_supertype_bounds(bound, support_program);
+                let into_bounds = source_type_param_into_supertype_bounds(
+                    bound,
+                    support_program,
+                    representations,
+                );
                 if !into_bounds.is_empty() {
                     bounds.extend(into_bounds);
                     bounds.push("'static".to_string());
@@ -220,7 +247,11 @@ fn rust_impl_params_for_source_type(ty: &TypeDecl, support_program: &Program) ->
         .collect()
 }
 
-fn source_type_param_into_supertype_bounds(bound: &str, support_program: &Program) -> Vec<String> {
+fn source_type_param_into_supertype_bounds(
+    bound: &str,
+    support_program: &Program,
+    representations: Option<&RepresentationPlan>,
+) -> Vec<String> {
     let mut bounds = Vec::new();
     let mut current =
         source_type_bound_decl(bound, &[support_program]).and_then(|ty| ty.extends.as_deref());
@@ -235,12 +266,32 @@ fn source_type_param_into_supertype_bounds(bound: &str, support_program: &Progra
         if matches!(super_ty.kind, crate::java_ir::TypeKind::Class) {
             bounds.push(format!(
                 "Into<{}>",
-                rust_name_for_java_named_type(&super_ty.name)
+                source_type_param_into_supertype_bound_target(&super_ty.name, representations)
             ));
         }
         current = super_ty.extends.as_deref();
     }
     bounds
+}
+
+fn source_type_param_into_supertype_bound_target(
+    super_name: &str,
+    representations: Option<&RepresentationPlan>,
+) -> String {
+    let Some(representations) = representations else {
+        return rust_name_for_java_named_type(super_name);
+    };
+    let Some(representation) = representations.type_representation(super_name) else {
+        return rust_name_for_java_named_type(super_name);
+    };
+    match representation.representation() {
+        crate::representation::ObjectRepresentation::ClosedEnum { enum_name, .. }
+        | crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+            carrier_name: enum_name,
+            ..
+        } => rust_name_for_java_named_type(enum_name),
+        _ => rust_name_for_java_named_type(super_name),
+    }
 }
 
 /// Whether a *method or constructor* type parameter needs a `Clone` bound.
@@ -450,6 +501,15 @@ fn expr_is_type_param_sequence_get(
 }
 
 fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool {
+    if ty.members.iter().any(|member| {
+        matches!(
+            member,
+            Member::Method(method)
+                if source_method_clones_class_type_param_param_to_owned_local(method, type_param)
+        )
+    }) {
+        return true;
+    }
     if !type_has_field_containing_type_param(ty, type_param) {
         return false;
     }
@@ -460,6 +520,288 @@ fn source_type_param_needs_clone_bound(ty: &TypeDecl, type_param: &str) -> bool 
         }
         _ => false,
     })
+}
+
+fn source_method_clones_class_type_param_param_to_owned_local(
+    method: &MethodDecl,
+    type_param: &str,
+) -> bool {
+    let param_names = method
+        .params
+        .iter()
+        .filter(|param| java_type_contains_type_param(&param.ty, type_param))
+        .map(|param| param.name.as_str())
+        .collect::<HashSet<_>>();
+    if param_names.is_empty() {
+        return false;
+    }
+    method.body.as_ref().is_some_and(|body| {
+        block_clones_class_type_param_param_to_owned_local(body, type_param, &param_names)
+    })
+}
+
+fn block_clones_class_type_param_param_to_owned_local(
+    block: &Block,
+    type_param: &str,
+    param_names: &HashSet<&str>,
+) -> bool {
+    block_clones_class_type_param_param_to_owned_local_before_later_read(
+        block,
+        type_param,
+        param_names,
+        false,
+    )
+}
+
+fn block_clones_class_type_param_param_to_owned_local_before_later_read(
+    block: &Block,
+    type_param: &str,
+    param_names: &HashSet<&str>,
+    mut later_param_read: bool,
+) -> bool {
+    for stmt in block.statements.iter().rev() {
+        if stmt_clones_class_type_param_param_to_owned_local_before_later_read(
+            stmt,
+            type_param,
+            param_names,
+            later_param_read,
+        ) {
+            return true;
+        }
+        later_param_read |= stmt_reads_named_type_param_param(stmt, param_names);
+    }
+    false
+}
+
+fn stmt_clones_class_type_param_param_to_owned_local_before_later_read(
+    stmt: &Stmt,
+    type_param: &str,
+    param_names: &HashSet<&str>,
+    later_param_read: bool,
+) -> bool {
+    match stmt {
+        Stmt::VarDecl {
+            ty,
+            initializer: Some(initializer),
+            ..
+        } => {
+            later_param_read
+                && java_type_contains_type_param(ty, type_param)
+                && expr_reads_named_type_param_param(initializer, param_names)
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_clones_class_type_param_param_to_owned_local_before_later_read(
+                then_block,
+                type_param,
+                param_names,
+                later_param_read,
+            ) || else_block.as_ref().is_some_and(|else_block| {
+                block_clones_class_type_param_param_to_owned_local_before_later_read(
+                    else_block,
+                    type_param,
+                    param_names,
+                    later_param_read,
+                )
+            })
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+            block_clones_class_type_param_param_to_owned_local_before_later_read(
+                body,
+                type_param,
+                param_names,
+                true,
+            )
+        }
+        Stmt::For { init, body, .. } => {
+            init.iter().any(|stmt| {
+                stmt_clones_class_type_param_param_to_owned_local_before_later_read(
+                    stmt,
+                    type_param,
+                    param_names,
+                    true,
+                )
+            }) || block_clones_class_type_param_param_to_owned_local_before_later_read(
+                body,
+                type_param,
+                param_names,
+                true,
+            )
+        }
+        Stmt::EnhancedFor { body, .. } => {
+            block_clones_class_type_param_param_to_owned_local_before_later_read(
+                body,
+                type_param,
+                param_names,
+                true,
+            )
+        }
+        Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+            case.statements.iter().any(|stmt| {
+                stmt_clones_class_type_param_param_to_owned_local_before_later_read(
+                    stmt,
+                    type_param,
+                    param_names,
+                    later_param_read,
+                )
+            })
+        }),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(|stmt| {
+                stmt_clones_class_type_param_param_to_owned_local_before_later_read(
+                    stmt,
+                    type_param,
+                    param_names,
+                    true,
+                )
+            }) || block_clones_class_type_param_param_to_owned_local_before_later_read(
+                body,
+                type_param,
+                param_names,
+                later_param_read,
+            ) || catches.iter().any(|catch| {
+                block_clones_class_type_param_param_to_owned_local_before_later_read(
+                    &catch.body,
+                    type_param,
+                    param_names,
+                    later_param_read,
+                )
+            }) || finally_block.as_ref().is_some_and(|finally_block| {
+                block_clones_class_type_param_param_to_owned_local_before_later_read(
+                    finally_block,
+                    type_param,
+                    param_names,
+                    later_param_read,
+                )
+            })
+        }
+        _ => false,
+    }
+}
+
+fn stmt_reads_named_type_param_param(stmt: &Stmt, param_names: &HashSet<&str>) -> bool {
+    match stmt {
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_reads_named_type_param_param(expr, param_names)),
+        Stmt::Assign { target, value } => {
+            expr_reads_named_type_param_param(target, param_names)
+                || expr_reads_named_type_param_param(value, param_names)
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            expr_reads_named_type_param_param(expr, param_names)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_reads_named_type_param_param(condition, param_names)
+                || block_reads_named_type_param_param(then_block, param_names)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_reads_named_type_param_param(block, param_names))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_reads_named_type_param_param(condition, param_names)
+                || block_reads_named_type_param_param(body, param_names)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_reads_named_type_param_param(stmt, param_names))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_reads_named_type_param_param(expr, param_names))
+                || update
+                    .iter()
+                    .any(|expr| expr_reads_named_type_param_param(expr, param_names))
+                || block_reads_named_type_param_param(body, param_names)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_reads_named_type_param_param(iterable, param_names)
+                || block_reads_named_type_param_param(body, param_names)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_reads_named_type_param_param(selector, param_names)
+                || cases.iter().any(|case| {
+                    case.statements
+                        .iter()
+                        .any(|stmt| stmt_reads_named_type_param_param(stmt, param_names))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_reads_named_type_param_param(stmt, param_names))
+                || block_reads_named_type_param_param(body, param_names)
+                || catches
+                    .iter()
+                    .any(|catch| block_reads_named_type_param_param(&catch.body, param_names))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_reads_named_type_param_param(block, param_names))
+        }
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_reads_named_type_param_param(expr, param_names)),
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_reads_named_type_param_param(block, param_names)
+        }
+        Stmt::Return(None)
+        | Stmt::LocalType(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn block_reads_named_type_param_param(block: &Block, param_names: &HashSet<&str>) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_reads_named_type_param_param(stmt, param_names))
+}
+
+fn expr_reads_named_type_param_param(expr: &Expr, param_names: &HashSet<&str>) -> bool {
+    match expr {
+        Expr::Var(name) => param_names.contains(name.as_str()),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_reads_named_type_param_param(then_expr, param_names)
+                || expr_reads_named_type_param_param(else_expr, param_names)
+        }
+        Expr::Cast { expr, .. } | Expr::Unary { expr, .. } => {
+            expr_reads_named_type_param_param(expr, param_names)
+        }
+        _ => false,
+    }
 }
 
 fn type_has_field_containing_type_param(ty: &TypeDecl, type_param: &str) -> bool {
@@ -571,21 +913,25 @@ fn source_type_bound_decl<'a>(
     bound: &str,
     support_programs: &[&'a Program],
 ) -> Option<&'a TypeDecl> {
-    source_type_bound_decl_by_match_kind(bound, support_programs, SourceTypeBoundMatch::Exact)
-        .or_else(|| {
-            unique_source_type_bound_decl_by_match_kind(
-                bound,
-                support_programs,
-                SourceTypeBoundMatch::RustAlias,
-            )
-        })
-        .or_else(|| {
-            unique_source_type_bound_decl_by_match_kind(
-                bound,
-                support_programs,
-                SourceTypeBoundMatch::Simple,
-            )
-        })
+    unique_source_type_bound_decl_by_match_kind(
+        bound,
+        support_programs,
+        SourceTypeBoundMatch::Exact,
+    )
+    .or_else(|| {
+        unique_source_type_bound_decl_by_match_kind(
+            bound,
+            support_programs,
+            SourceTypeBoundMatch::RustAlias,
+        )
+    })
+    .or_else(|| {
+        unique_source_type_bound_decl_by_match_kind(
+            bound,
+            support_programs,
+            SourceTypeBoundMatch::Simple,
+        )
+    })
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -595,26 +941,19 @@ enum SourceTypeBoundMatch {
     Simple,
 }
 
-fn source_type_bound_decl_by_match_kind<'a>(
-    bound: &str,
-    support_programs: &[&'a Program],
-    kind: SourceTypeBoundMatch,
-) -> Option<&'a TypeDecl> {
-    support_programs
-        .iter()
-        .find_map(|program| source_type_bound_decl_in_program_by_match_kind(bound, program, kind))
-}
-
 fn unique_source_type_bound_decl_by_match_kind<'a>(
     bound: &str,
     support_programs: &[&'a Program],
     kind: SourceTypeBoundMatch,
 ) -> Option<&'a TypeDecl> {
-    let mut found = None;
+    let mut found: Option<&'a TypeDecl> = None;
     let mut ambiguous = false;
     for program in support_programs {
         collect_source_type_bound_decls_in_program_by_match_kind(bound, program, kind, &mut |ty| {
-            if found.is_some() {
+            if let Some(existing) = found {
+                if source_type_bound_duplicate_decl_is_same_owner(existing, ty) {
+                    return true;
+                }
                 ambiguous = true;
                 return false;
             }
@@ -628,17 +967,13 @@ fn unique_source_type_bound_decl_by_match_kind<'a>(
     found
 }
 
-fn source_type_bound_decl_in_program_by_match_kind<'a>(
-    bound: &str,
-    program: &'a Program,
-    kind: SourceTypeBoundMatch,
-) -> Option<&'a TypeDecl> {
-    let mut found = None;
-    collect_source_type_bound_decls_in_program_by_match_kind(bound, program, kind, &mut |ty| {
-        found = Some(ty);
-        false
-    });
-    found
+fn source_type_bound_duplicate_decl_is_same_owner(left: &TypeDecl, right: &TypeDecl) -> bool {
+    left.name == right.name
+        && left.kind == right.kind
+        && left.extends == right.extends
+        && left.implements == right.implements
+        && left.type_params == right.type_params
+        && left.type_param_bounds == right.type_param_bounds
 }
 
 fn collect_source_type_bound_decls_in_program_by_match_kind<'a>(
@@ -1159,6 +1494,217 @@ mod tests {
         }
     }
 
+    fn qualified_new_expr(qualifier: Expr, args: Vec<Expr>) -> Expr {
+        Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(qualifier)),
+            args,
+            body: None,
+            resolved: None,
+        }
+    }
+
+    #[test]
+    fn constructor_self_read_scan_sees_qualified_new_receiver() {
+        assert!(constructor_expr_reads_self(&qualified_new_expr(
+            Expr::FieldAccess(Box::new(Expr::This), "outer".to_string()),
+            Vec::new(),
+        )));
+    }
+
+    #[test]
+    fn mutable_array_target_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(
+            Expr::Unary {
+                op: crate::java_ir::UnaryOp::PostInc,
+                expr: Box::new(Expr::ArrayAccess(
+                    Box::new(Expr::Var("values".to_string())),
+                    Box::new(Expr::Literal(Literal::Int(0))),
+                )),
+            },
+            Vec::new(),
+        );
+        let mut names = HashSet::new();
+
+        collect_mutable_array_target_params_in_expr(&expr, &mut names);
+
+        assert_eq!(names, HashSet::from(["values".to_string()]));
+    }
+
+    #[test]
+    fn callback_reference_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(Expr::Var("callback".to_string()), Vec::new());
+
+        assert!(expr_references_callback_param(&expr, "callback"));
+    }
+
+    #[test]
+    fn priority_queue_callback_storage_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(
+            Expr::New {
+                ty: JavaType::Named {
+                    name: "PriorityQueue".to_string(),
+                    args: Vec::new(),
+                },
+                qualifier: None,
+                args: vec![Expr::Var("comparator".to_string())],
+                body: None,
+                resolved: None,
+            },
+            Vec::new(),
+        );
+
+        assert!(expr_stores_priority_queue_comparator_callback(
+            &expr,
+            "comparator"
+        ));
+    }
+
+    #[test]
+    fn collections_sort_consumes_comparator_param_as_callback() {
+        let method = MethodDecl {
+            name: "sortValues".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: vec![crate::java_ir::Param {
+                name: "comparator".to_string(),
+                source_name: "comparator".to_string(),
+                ty: JavaType::Named {
+                    name: "Comparator".to_string(),
+                    args: vec![JavaType::String],
+                },
+                is_varargs: false,
+                binding: None,
+            }],
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![Stmt::Expr(Expr::Call {
+                    receiver: Some(Box::new(Expr::Var("Collections".to_string()))),
+                    name: "sort".to_string(),
+                    args: vec![
+                        Expr::Var("values".to_string()),
+                        Expr::Var("comparator".to_string()),
+                    ],
+                    resolved: None,
+                })],
+            }),
+            span: crate::diagnostics::Span::default(),
+        };
+
+        assert!(method_param_is_nonescaping_functional_callback(
+            &method,
+            "comparator"
+        ));
+        assert_eq!(
+            functional_callback_param_type(&method.params[0].ty, &FactSet::default()),
+            Some(RustType::ImplFnTrait {
+                trait_name: "FnMut".to_string(),
+                params: vec![RustType::String, RustType::String],
+                return_type: Some(Box::new(RustType::I32)),
+            })
+        );
+    }
+
+    #[test]
+    fn method_params_render_collections_sort_comparator_param_as_callback() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+
+class SortUse {
+    void sortValues(ArrayList<String> values, Comparator<String> comparator) {
+        Collections.sort(values, comparator);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &resolved.facts);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &resolved.facts,
+        );
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "sortValues" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+
+        let params = method_params(ty, method, &signatures, &resolved.facts);
+
+        assert_eq!(
+            params
+                .iter()
+                .find(|param| param.name.contains("comparator"))
+                .map(|param| &param.ty),
+            Some(&RustType::ImplFnTrait {
+                trait_name: "FnMut".to_string(),
+                params: vec![RustType::String, RustType::String],
+                return_type: Some(Box::new(RustType::I32)),
+            })
+        );
+    }
+
+    #[test]
+    fn method_params_render_priority_queue_comparator_param_as_callback() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.Comparator;
+import java.util.PriorityQueue;
+
+class QueueUse {
+    static PriorityQueue<Integer> queue(Comparator<Integer> comparator) {
+        return new PriorityQueue<Integer>(comparator);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &resolved.facts);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &resolved.facts,
+        );
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "queue" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+
+        let params = method_params(ty, method, &signatures, &resolved.facts);
+
+        assert_eq!(
+            params
+                .iter()
+                .find(|param| param.name.contains("comparator"))
+                .map(|param| &param.ty),
+            Some(&RustType::Raw(
+                "impl FnMut(i32, i32) -> i32 + 'static".to_string()
+            ))
+        );
+    }
+
     #[test]
     fn source_type_bound_decl_refuses_ambiguous_simple_package_peer() {
         let support = support_program(vec![
@@ -1204,6 +1750,37 @@ mod tests {
     }
 
     #[test]
+    fn source_type_bound_decl_accepts_duplicate_view_of_same_owner() {
+        let left = support_program(vec![test_type_decl("a.Base", TypeKind::Interface, None)]);
+        let right = support_program(vec![test_type_decl("a.Base", TypeKind::Interface, None)]);
+        let bound = JavaType::Named {
+            name: "a.Base".to_string(),
+            args: Vec::new(),
+        };
+
+        assert_eq!(
+            rust_bounds_for_java_type_param(&bound, &[&left, &right]),
+            vec![rust_name_for_java_named_type("a.Base")]
+        );
+    }
+
+    #[test]
+    fn source_type_bound_decl_refuses_duplicate_exact_owner() {
+        let left = support_program(vec![test_type_decl("a.Base", TypeKind::Interface, None)]);
+        let right = support_program(vec![test_type_decl("a.Base", TypeKind::Class, None)]);
+        let bound = JavaType::Named {
+            name: "a.Base".to_string(),
+            args: Vec::new(),
+        };
+
+        assert_eq!(
+            rust_bounds_for_java_type_param(&bound, &[&left, &right]),
+            Vec::<String>::new(),
+            "duplicate exact source type-bound owners must fail closed"
+        );
+    }
+
+    #[test]
     fn source_type_param_into_supertype_bounds_refuses_ambiguous_simple_package_peer() {
         let support = support_program(vec![
             test_type_decl("a.Parent", TypeKind::Class, None),
@@ -1212,9 +1789,9 @@ mod tests {
             test_type_decl("b.Base", TypeKind::Class, Some("b.Parent")),
         ]);
 
-        assert!(source_type_param_into_supertype_bounds("Base", &support).is_empty());
+        assert!(source_type_param_into_supertype_bounds("Base", &support, None).is_empty());
         assert_eq!(
-            source_type_param_into_supertype_bounds("a.Base", &support),
+            source_type_param_into_supertype_bounds("a.Base", &support, None),
             vec![format!(
                 "Into<{}>",
                 rust_name_for_java_named_type("a.Parent")
@@ -1229,7 +1806,22 @@ mod tests {
         ]);
         let rust_alias = rust_name_for_java_named_type("a.B.C");
         assert_eq!(rust_alias, rust_name_for_java_named_type("AB.C"));
-        assert!(source_type_param_into_supertype_bounds(&rust_alias, &support).is_empty());
+        assert!(source_type_param_into_supertype_bounds(&rust_alias, &support, None).is_empty());
+    }
+
+    #[test]
+    fn source_type_param_into_supertype_bounds_refuses_duplicate_exact_owner() {
+        let support = support_program(vec![
+            test_type_decl("a.Parent", TypeKind::Class, None),
+            test_type_decl("a.Base", TypeKind::Class, Some("a.Parent")),
+            test_type_decl("b.Parent", TypeKind::Class, None),
+            test_type_decl("a.Base", TypeKind::Class, Some("b.Parent")),
+        ]);
+
+        assert!(
+            source_type_param_into_supertype_bounds("a.Base", &support, None).is_empty(),
+            "duplicate exact source type-bound owners must not choose the first supertype"
+        );
     }
 
     #[test]
@@ -1944,6 +2536,7 @@ fn method_function_shell_with_facts_exception_plan_and_support_context(
         facts,
         exceptions,
         &[support_program],
+        None,
     )
 }
 
@@ -1955,9 +2548,9 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     support_programs: &[&Program],
+    representations: Option<&RepresentationPlan>,
 ) -> RustFunction {
-    let needs_lifetime =
-        static_method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
+    let needs_lifetime = method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
     let name = method
         .rust_name
         .clone()
@@ -1973,7 +2566,14 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
             &method.params,
             method.body.as_ref(),
         ),
-        params: method_params_with_optional_lifetime(ty, method, signatures, facts, needs_lifetime),
+        params: method_params_with_optional_lifetime(
+            ty,
+            method,
+            signatures,
+            facts,
+            needs_lifetime,
+            representations,
+        ),
         return_type: method_return_type_with_optional_lifetime(
             ty,
             method,
@@ -1981,6 +2581,7 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
             facts,
             exceptions,
             needs_lifetime,
+            representations,
         ),
         body,
         is_pub: true,
@@ -1988,19 +2589,85 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
     }
 }
 
-fn static_method_needs_borrowed_return_lifetime(
+fn method_needs_borrowed_return_lifetime(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> bool {
-    method.modifiers.contains(&Modifier::Static)
-        && method_return_type_with_facts(ty, method, signatures, facts)
-            .as_ref()
-            .is_some_and(rust_type_contains_ref)
-        && method_params(ty, method, signatures, facts)
+    if !method_return_type_with_facts(ty, method, signatures, facts)
+        .as_ref()
+        .is_some_and(rust_type_contains_ref)
+        || !method_params(ty, method, signatures, facts)
             .iter()
             .any(|param| rust_type_contains_ref(&param.ty))
+    {
+        return false;
+    }
+    method.modifiers.contains(&Modifier::Static) || method_returns_source_param(method)
+}
+
+fn method_returns_source_param(method: &MethodDecl) -> bool {
+    let param_names = method
+        .params
+        .iter()
+        .flat_map(|param| [param.name.as_str(), param.source_name.as_str()])
+        .collect::<std::collections::HashSet<_>>();
+    method
+        .body
+        .as_ref()
+        .is_some_and(|body| block_returns_any_param(body, &param_names))
+}
+
+fn block_returns_any_param(block: &Block, param_names: &std::collections::HashSet<&str>) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_returns_any_param(stmt, param_names))
+}
+
+fn stmt_returns_any_param(stmt: &Stmt, param_names: &std::collections::HashSet<&str>) -> bool {
+    match stmt {
+        Stmt::Return(Some(expr)) => expr_returns_any_param(expr, param_names),
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_returns_any_param(then_block, param_names)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_returns_any_param(block, param_names))
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_returns_any_param(block, param_names)
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            block_returns_any_param(body, param_names)
+        }
+        Stmt::For { init, body, .. } => {
+            init.iter()
+                .any(|stmt| stmt_returns_any_param(stmt, param_names))
+                || block_returns_any_param(body, param_names)
+        }
+        _ => false,
+    }
+}
+
+fn expr_returns_any_param(expr: &Expr, param_names: &std::collections::HashSet<&str>) -> bool {
+    match expr {
+        Expr::Var(name) => param_names.contains(name.as_str()),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            expr_returns_any_param(then_expr, param_names)
+                || expr_returns_any_param(else_expr, param_names)
+        }
+        Expr::Cast { expr, .. } => expr_returns_any_param(expr, param_names),
+        _ => false,
+    }
 }
 
 fn method_return_shape(
@@ -2465,9 +3132,15 @@ fn constructor_expr_reads_self(expr: &Expr) -> bool {
             receiver.as_deref().is_some_and(constructor_expr_reads_self)
                 || args.iter().any(constructor_expr_reads_self)
         }
-        Expr::New { args, .. } | Expr::ArrayInitializer(args) => {
-            args.iter().any(constructor_expr_reads_self)
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            qualifier
+                .as_deref()
+                .is_some_and(constructor_expr_reads_self)
+                || args.iter().any(constructor_expr_reads_self)
         }
+        Expr::ArrayInitializer(args) => args.iter().any(constructor_expr_reads_self),
         Expr::ArrayCreation {
             dimensions,
             initializer,
@@ -3555,7 +4228,7 @@ fn method_params(
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Vec<RustParam> {
-    method_params_with_optional_lifetime(ty, method, signatures, facts, false)
+    method_params_with_optional_lifetime(ty, method, signatures, facts, false, None)
 }
 
 fn method_params_with_optional_lifetime(
@@ -3564,6 +4237,7 @@ fn method_params_with_optional_lifetime(
     signatures: &SignaturePlan,
     facts: &FactSet,
     lifetime: bool,
+    representations: Option<&RepresentationPlan>,
 ) -> Vec<RustParam> {
     let signature = signatures.required_method_signature(ty, method);
     let mutable_array_target_params = mutable_array_target_params(method);
@@ -3575,10 +4249,15 @@ fn method_params_with_optional_lifetime(
         .iter()
         .enumerate()
         .map(|(index, param)| {
+            let source_param_name = method
+                .params
+                .get(index)
+                .map(|source_param| source_param.name.as_str())
+                .unwrap_or_else(|| param.name());
             let callback_param =
-                method_param_is_nonescaping_functional_callback(method, param.name());
+                method_param_is_nonescaping_functional_callback(method, source_param_name);
             let submit_callable_param =
-                method_param_is_submit_callable_callback(method, param.name());
+                method_param_is_submit_callable_callback(method, source_param_name);
             let mutable_optional_sequence_param = mutable_array_target_params
                 .contains(param.name())
                 && optional_sequence_slot(&param.shape());
@@ -3604,12 +4283,23 @@ fn method_params_with_optional_lifetime(
                     name
                 },
                 ty: if callback_param || submit_callable_param {
+                    let source_java_ty = method
+                        .params
+                        .get(index)
+                        .map(|source_param| &source_param.ty)
+                        .unwrap_or_else(|| param.java_ty());
                     let callback_ty = if submit_callable_param {
-                        submit_callable_callback_param_type(method, &param.java_ty(), facts)
+                        submit_callable_callback_param_type(method, source_java_ty, facts)
                     } else {
-                        functional_callback_param_type(&param.java_ty(), facts)
+                        functional_callback_param_type(source_java_ty, facts)
                     }
-                    .unwrap_or_else(|| rust_type_for_slot_with_facts(&param.shape(), facts));
+                    .unwrap_or_else(|| {
+                        rust_type_for_slot_with_optional_representations(
+                            &param.shape(),
+                            facts,
+                            representations,
+                        )
+                    });
                     let callback_ty = maybe_add_lifetime_to_refs(callback_ty, lifetime);
                     if callback_param
                         && method_stores_priority_queue_comparator_callback(method, param.name())
@@ -3623,7 +4313,11 @@ fn method_params_with_optional_lifetime(
                     }
                 } else {
                     maybe_add_lifetime_to_refs(
-                        rust_type_for_slot_with_facts(&param.shape(), facts),
+                        rust_type_for_slot_with_optional_representations(
+                            &param.shape(),
+                            facts,
+                            representations,
+                        ),
                         lifetime,
                     )
                 },
@@ -3798,7 +4492,17 @@ fn collect_mutable_array_target_params_in_expr(expr: &Expr, names: &mut HashSet<
                 collect_mutable_array_target_params_in_expr(arg, names);
             }
         }
-        Expr::New { args, .. } | Expr::ArrayInitializer(args) => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_mutable_array_target_params_in_expr(qualifier, names);
+            }
+            for arg in args {
+                collect_mutable_array_target_params_in_expr(arg, names);
+            }
+        }
+        Expr::ArrayInitializer(args) => {
             for arg in args {
                 collect_mutable_array_target_params_in_expr(arg, names);
             }
@@ -4442,7 +5146,21 @@ fn scan_expr_for_callback_param(
         {
             *saw_callback_call = true;
         }
-        Expr::New { args, body, .. } => {
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                scan_expr_for_callback_param(
+                    qualifier,
+                    param_name,
+                    callback_method,
+                    saw_callback_call,
+                    escaped,
+                );
+            }
             for arg in args {
                 scan_expr_for_callback_param(
                     arg,
@@ -4689,9 +5407,18 @@ fn expr_references_callback_param(expr: &Expr, param_name: &str) -> bool {
                     .iter()
                     .any(|arg| expr_references_callback_param(arg, param_name))
         }
-        Expr::New { args, body, .. } => {
-            args.iter()
-                .any(|arg| expr_references_callback_param(arg, param_name))
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_references_callback_param(qualifier, param_name))
+                || args
+                    .iter()
+                    .any(|arg| expr_references_callback_param(arg, param_name))
                 || body
                     .as_ref()
                     .is_some_and(|members| members_capture_callback_param(members, param_name))
@@ -4824,8 +5551,16 @@ fn stmt_stores_priority_queue_comparator_callback(stmt: &Stmt, param_name: &str)
 
 fn expr_stores_priority_queue_comparator_callback(expr: &Expr, param_name: &str) -> bool {
     match expr {
-        Expr::New { ty, args, .. } => {
+        Expr::New {
+            ty,
+            qualifier,
+            args,
+            ..
+        } => {
             priority_queue_constructor_consumes_callback_param(ty, args, param_name)
+                || qualifier.as_ref().is_some_and(|qualifier| {
+                    expr_stores_priority_queue_comparator_callback(qualifier, param_name)
+                })
                 || args
                     .iter()
                     .any(|arg| expr_stores_priority_queue_comparator_callback(arg, param_name))
@@ -4959,14 +5694,64 @@ fn method_return_type_with_optional_lifetime(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     lifetime: bool,
+    representations: Option<&RepresentationPlan>,
 ) -> Option<RustType> {
-    let base = method_return_type_with_facts(ty, method, signatures, facts)
-        .map(|ty| maybe_add_lifetime_to_refs(ty, lifetime));
+    let base = method_return_type_with_optional_representations(
+        ty,
+        method,
+        signatures,
+        facts,
+        representations,
+    )
+    .map(|ty| maybe_add_lifetime_to_refs(ty, lifetime));
     if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(base.unwrap_or(RustType::Unit)))
     } else {
         base
     }
+}
+
+fn method_return_type_with_optional_representations(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> Option<RustType> {
+    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
+        return Some(ty);
+    }
+    let return_shape = method_return_shape(ty, method, signatures);
+    if let Some(shape) = return_shape.as_ref() {
+        return Some(rust_type_for_slot_with_optional_representations(
+            shape,
+            facts,
+            representations,
+        ));
+    }
+    if rust_crate_mapped_external_java_type(&method.return_type, facts) {
+        return Some(rust_type_for_java_type_with_facts(
+            &method.return_type,
+            facts,
+        ));
+    }
+    None
+}
+
+fn rust_type_for_slot_with_optional_representations(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> RustType {
+    representations
+        .map(|representations| {
+            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                shape,
+                facts,
+                representations,
+            )
+        })
+        .unwrap_or_else(|| rust_type_for_slot_with_facts(shape, facts))
 }
 
 fn method_receiver(ty: &TypeDecl, method: &MethodDecl, signatures: &SignaturePlan) -> ReceiverPlan {

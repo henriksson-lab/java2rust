@@ -3,6 +3,53 @@
 Recorded 2026-08-23.
 Status: **open, narrowed to class hierarchy carrier**.
 
+Codex follow-up 2026-09-15 explicit exception self-cast:
+general cast lowering now routes `(Throwable) this` for a source exception
+subclass through the same `JavaException` carrier used by bare `this` when
+constructing a helper that expects `Throwable`. The generated constructor no
+longer tries to downcast `__java_self` through erased-object machinery.
+Regression:
+`idiom_gaps::explicit_cast_exception_self_as_throwable_context_argument_uses_exception_carrier`.
+
+Codex follow-up 2026-09-15 package-qualified upcast guardrail:
+source-class upcast detection now keeps the owning program/package after an
+exact `a.Child`/`a.Base` context lookup instead of rechecking the resolved
+declarations as bare `Child`/`Base`. A visible `b.Child extends b.Base` peer no
+longer makes the exact `a` hierarchy edge disappear, while bare ambiguous
+owners still fail closed. Regression:
+`lower::tests::source_class_upcast_hierarchy_guard_keeps_package_identity_after_exact_lookup`.
+
+Codex follow-up 2026-09-15 type-parameter supertype slot pass:
+`T extends Sub` values assigned to or inserted into `Super` slots now record
+the bound as the actual source subtype, so usage planning selects the source
+hierarchy carrier instead of falling back to the loud class-upcast diagnostic.
+Representation-aware class impl bounds now require `Into<SuperValue>` when the
+supertype is carried by a hierarchy enum, optional `T` unwraps upcast through
+that conversion before closed-enum wrapping, and borrowed `T` params cloned into
+owned locals add the needed `Clone` bound. Regression:
+`idiom_gaps::type_param_bound_source_supertype_assignment_requires_hierarchy_lowering`
+now compiles its generated crate.
+
+Codex follow-up 2026-09-15 collection-element upcast pass:
+native collection local refinement no longer treats every optional-shaped
+collection result as a nullable Java local. `List.get(i)` uses `Option` only as
+the translator's bounds-check carrier; it must still assign the element through
+the source hierarchy carrier when `ArrayList<Super>` stores a `Sub`. This fixes
+`PolymorphicListUpcast`, which had regressed to `Option<Account>` plus invalid
+field access instead of preserving `AccountValue` dispatch. Guard:
+`differential::inheritance_upcast_fixtures_match_java_output`.
+
+Codex follow-up 2026-09-15 optional source-supertype return: `return
+Optional.of(new Sub())` in a method declared as `Optional<Super>` now records
+the returned subtype as a `NeedsSubtypeDispatch` use for the optional element,
+projects optional slot dispatch from the element type, and lowers the
+`Optional.of` argument against the element slot before wrapping it in `Some`.
+The generated crate now uses the source hierarchy carrier instead of emitting
+the unsupported class-upcast `compile_error!`. Regressions:
+`usage::tests::optional_return_known_subtype_records_target_subtype_dispatch_use`
+and
+`idiom_gaps::optional_of_source_subtype_to_supertype_uses_carrier`.
+
 Codex follow-up 2026-09-14 identity-preserving erased carrier recovery:
 `Object` values cast back to a represented source superclass now keep the
 variant object's shared handle instead of cloning the payload. Cast-target
@@ -56,7 +103,16 @@ Follow-up 2026-09-10: direct emitted `super.m()` now has Java/Rust oracle
 coverage, not only generated-crate coverage. `tests/differential/SuperMethodCall.java`
 pins `super.base() + 5` dispatching to the superclass implementation while a
 fresh `Base` call still returns `10` (`15,10`). The class-hierarchy carrier
-remains open for supertype slots and general mutating super calls.
+remains open for supertype slots and broader class-hierarchy representation.
+Codex follow-up 2026-09-15 direct-super recursion repair:
+`source_method_emits_outer_this_handle_companion` no longer lowers the method
+body recursively while deciding whether a shared-outer companion exists. That
+preflight could re-enter the same `super.m()` body through
+`lower_shared_outer_handle_companion_receiver_call` and stack-overflow the
+translator before generated Rust was produced. The check now uses the source
+body and implemented SharedLocal capability directly; the actual companion
+emission still uses the existing lowering path. Regression:
+`tests/differential::super_call_fixtures_match_java_output`.
 Codex follow-up 2026-09-13: a narrow mutating `super.m()` shape is now promoted
 when the superclass method is field-local: its body can assign or
 compound-assign superclass instance fields using literals, params, and
@@ -66,8 +122,11 @@ the inherited fields back to `self`; non-void calls store the superclass result
 until after copyback so the expression can keep Java's order. `tests/differential/SuperMutatingCall.java`
 now matches Java (`11`), `SuperMutatingCallReturning.java` matches Java
 (`8,4`), `SuperMutatingCallWithTemp.java` matches Java (`14`) for a safe
-temporary local inside the superclass body, and more complex mutating super
-calls still require the real hierarchy carrier.
+temporary local inside the superclass body. Follow-up focused coverage now
+checks 25 `Super*` fixtures in
+`tests/differential::super_call_fixtures_match_java_output`; that oracle passes,
+so no named mutating-super fixture remains open. More complex unmodeled
+supertype views still require the real hierarchy carrier.
 Codex follow-up 2026-09-13 hidden-field guard: that narrow mutating-`super`
 copyback path now refuses superclass fields hidden by direct subclass fields of
 the same Java source name. Copying `Base.n` back through `Derived.n` collapses
@@ -133,13 +192,14 @@ path emits an explicit
 `unsupported Java source hierarchy carrier reference identity comparison`
 `compile_error!` and keeps the existing identity diagnostics. Regression:
 `idiom_gaps::erased_object_source_hierarchy_carrier_identity_fails_loudly`.
-Superseded known-gap, 2026-09-14 executable identity known-gap: the same carrier
-identity residue is now in the differential known-gap harness as
-`tests/differential/known-gaps/ErasedCarrierIdentity.java`. Java must print
-`true,false,true,false`, while the current translation must fail loudly with the
-identity-preserving carrier compile error and `java_reference_identity_equality`
-diagnostic. Promote it when erased-object source-supertype recovery preserves
-object identity instead of cloning carrier payloads.
+Superseded known-gap, 2026-09-14 executable identity known-gap: this was
+briefly pinned in the differential known-gap harness as
+`tests/differential/known-gaps/ErasedCarrierIdentity.java`, expecting Java to
+print `true,false,true,false` while translation failed loudly. The fixture was
+promoted later the same day after erased-object source-supertype recovery
+preserved variant handle identity; the current guard is the positive
+`tests/differential/ErasedCarrierIdentity.java` oracle plus
+`idiom_gaps::erased_object_source_hierarchy_carrier_identity_preserves_variant_handle_identity`.
 Codex follow-up 2026-09-14 call-argument supertype slot: source method
 arguments that pass a known subtype into a formal source-supertype parameter
 now contribute `NeedsSubtypeDispatch` for the formal target type. The source
@@ -158,9 +218,9 @@ and
 `lower::tests::source_instance_field_names_for_conversion_refuses_cross_program_ambiguous_simple_super`.
 Severity: **critical** — the original silent source-class upcast and
 most source-supertype `instanceof` paths are now loud or correct, and direct
-emitted `super.m()` calls can lower to the superclass implementation, but Java
-class hierarchy lowering still has an incomplete carrier surface for
-general mutating super calls and broader class-hierarchy representation.
+emitted `super.m()`/checked mutating `super.m()` calls can lower to the
+superclass implementation/copyback path, but Java class hierarchy lowering still
+has an incomplete carrier surface for broader class-hierarchy representation.
 Kind: behavioural (differential), object model / dispatch.
 
 Updated 2026-09-06 (guardrail): erased-object aliases for nested Java classes
@@ -602,10 +662,11 @@ of that runtime carrier.
 `InheritanceUpcast.java`, `NestedInheritanceUpcast.java`,
 `ErasedObjectSupertypeCast.java`, `PatternInstanceofSupertypeUsed.java`, and
 `InstanceofSupertype.java` compile and run, and are now promoted under
-`tests/differential/`. The remaining hierarchy fixtures under
-`tests/differential/known-gaps/` keep proving both sides of the contract: the
-Java oracle remains valid and the translation fails loudly. Move them up a
-level when class hierarchy lowering lands.
+`tests/differential/`. As of 2026-09-15 there are no inheritance fixtures left
+under `tests/differential/known-gaps/`; that directory only contains the
+separate Java `String ==` identity gap. Future 0058 fixtures should be added
+there only when they prove a new current loud carrier refusal rather than a
+stale promoted shape.
 
 `SuperMethodCall.java` is no longer a known gap: it is pinned by
 `source_super_method_call_uses_direct_emitted_super_impl`, which compiles the
@@ -614,9 +675,9 @@ generated Rust and rejects the old `Default::default()` lowering.
 `NestedInterfaceDispatch.java` is now in `tests/differential/`.
 
 The main `tests/differential/` suite now contains positive concrete inheritance,
-direct `super`, and interface coverage. The source-class subtype-carrier cases
-remain explicit known gaps under `tests/differential/known-gaps/` until the
-class hierarchy carrier lands.
+direct `super`, and interface coverage. Remaining source-class carrier work is
+tracked by the audit/design text and focused idiom/lowering guards, not by any
+current differential inheritance known-gap fixture.
 
 Follow-up 2026-09-09: `PolymorphicListUpcast.java` was added beside the direct
 upcast fixtures so the collection-supertype variant had a known-gap contract.
@@ -730,8 +791,7 @@ Manual generated-library checks also pass for the two minimal fixtures in
 - `OptionalSourceSupertypeField.java`
 - `OptionalSourceSupertypeCtorArg.java`
 
-The audit remains open for the broader class hierarchy surface, especially
-general mutating super calls.
+The audit remains open for the broader class hierarchy representation surface.
 
 ## Codex follow-up 2026-08-29 — stale passing repair test removed from failure baseline
 
@@ -836,6 +896,19 @@ Pinned by:
 
 The audit remains open for the actual non-carrier class hierarchy
 representation and dynamic dispatch model.
+
+Codex follow-up 2026-09-15 receiverless fresh subtype argument pass:
+call-argument subtype usage recording no longer only handles local-variable
+arguments. Fresh constructor expressions passed to a formal source-supertype
+parameter now record the same `AssignedSubtypeToCallArgument` requirement at
+method scope, so object-model planning can select the source hierarchy carrier
+before lowering reaches the call. The receiverless overload-delegation fixture
+now lowers `open(new LocalSeekablePathStream(...))` through
+`BaseStreamValue`/`.into()` and compiles instead of emitting the old
+`requires class hierarchy lowering` guard. Regressions:
+`usage::tests::fresh_source_subtype_argument_records_target_subtype_dispatch_use`
+and
+`idiom_gaps::receiverless_instance_overload_delegation_uses_current_self_and_subtype_argument`.
 
 Follow-up 2026-09-07:
 `optional_resource_facade_upcast_clones_wrapper_before_consuming_unwrap` is now a
@@ -1000,11 +1073,10 @@ field-local copyback lowering landed; `ExplicitInheritanceUpcast.java`,
 promoted on 2026-09-14 as the source hierarchy carrier path grew from explicit
 casts to plain top-level supertype locals, collection element slots, nested
 source-class locals, and erased-object source-supertype casts. Used pattern
-`instanceof` over a source supertype was promoted later the same day.
-The lowering diagnostics pass now also reports `unsupported_inheritance` for the
-remaining explicit source-subtype cast refusals, so the known-gap harness
-checks both the `compile_error!` surface and the diagnostic code where a
-hierarchy view is still unsupported.
+`instanceof` over a source supertype was promoted later the same day. A later
+cleanup left no inheritance fixtures in the known-gap harness; new carrier
+known-gaps should include both the `compile_error!` surface and diagnostic code
+when a current hierarchy view is unsupported.
 
 Follow-up 2026-09-10 cleanup: representation-lowering's dyn-trait
 implementation compatibility policy carriers
@@ -1042,3 +1114,28 @@ guards:
 `slot_shape_design::facts_saturate_reachable_hierarchy_edges_through_finite_domain`
 and
 `slot_shape_design::facts_saturate_recursive_hierarchy_edges_without_unbounded_expansion`.
+
+Codex follow-up 2026-09-15: source-method parameter shaping no longer lets a
+direct field read force a source supertype parameter back to concrete when usage
+facts already show that the parameter is a subtype-call-argument target. That
+closed the compile-shape mismatch where the call site lowered
+`same(&that.clone().into())` to the `CompoundLineValue` carrier while the callee
+still rendered `same(&self, other: &CompoundLine)`. The direct reused-argument
+fixture now renders `same(&self, other: &CompoundLineValue)` and fails only on
+the pre-existing string-reference-identity compile error. The borrowed
+`Rc<FormatLine>` downcast variant is explicitly still on the concrete upcast
+residue (`From<Rc<FormatLine>> for CompoundLine`) and remains part of the
+broader class-hierarchy carrier work. Guards:
+`idiom_gaps::reused_source_subtype_argument_upcasts_after_clone_recovery` and
+`idiom_gaps::borrowed_downcast_source_subtype_argument_upcasts_after_clone_recovery`.
+
+Codex follow-up 2026-09-16: repaired the source-method parameter-shaping
+regression above. The subtype-call evidence was present, but a later concrete
+dispatch preference from direct field reads won the dispatch lattice over the
+source hierarchy carrier. Parsed source params with a closed-enum carrier
+requirement now drop that concrete preference before solving, and method/ctor
+emission compares the current shell type against the solved representation-aware
+param type directly. Guards:
+`signature::tests::source_subtype_call_argument_pressure_shapes_callee_param_as_carrier`,
+`idiom_gaps::reused_source_subtype_argument_upcasts_after_clone_recovery`, and
+the adjacent owned/borrowed source-subtype clone-recovery fixtures.

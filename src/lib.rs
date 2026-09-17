@@ -438,6 +438,14 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     let mut source_program = parsed.program.clone();
     for context_parsed in &parsed_context {
         merge_program_context(&mut source_program, context_parsed.program.clone());
+        summary_facts.extend_from(summary_field_nullability_facts_from_program(
+            &context_parsed.program,
+            external_facts,
+        ));
+        summary_facts.extend_from(typed_source_method_nullability_facts_from_program(
+            &context_parsed.program,
+            &summary_facts,
+        ));
     }
     // Pooled across files, because a constant may be defined in terms of one
     // owned by another class in another file. Type names are qualified with
@@ -452,6 +460,10 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         summary_facts.extend_from(summary_field_nullability_facts_from_program(
             &summary_parsed.program,
             external_facts,
+        ));
+        summary_facts.extend_from(typed_source_method_nullability_facts_from_program(
+            &summary_parsed.program,
+            &summary_facts,
         ));
         summary_constant_declarations.extend(resolve::static_final_constant_declarations(
             &summary_parsed.program,
@@ -578,6 +590,14 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     }
     for parsed in &parsed_context {
         merge_program_context(&mut source_program, parsed.program.clone());
+        summary_facts.extend_from(summary_field_nullability_facts_from_program(
+            &parsed.program,
+            external_facts,
+        ));
+        summary_facts.extend_from(typed_source_method_nullability_facts_from_program(
+            &parsed.program,
+            &summary_facts,
+        ));
     }
     timings.context_parse_ms = context_parse_start.elapsed().as_millis();
     emit_batch_phase_progress(
@@ -608,6 +628,10 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         summary_facts.extend_from(summary_field_nullability_facts_from_program(
             &summary_parsed.program,
             external_facts,
+        ));
+        summary_facts.extend_from(typed_source_method_nullability_facts_from_program(
+            &summary_parsed.program,
+            &summary_facts,
         ));
         summary_constant_declarations.extend(resolve::static_final_constant_declarations(
             &summary_parsed.program,
@@ -720,7 +744,95 @@ fn summary_field_nullability_facts_from_program(
     );
     let mut facts = FactSet::default();
     facts.field_nullability_facts = semantic.facts.field_nullability_facts;
+    collect_conservative_support_field_nullability_facts(program, &mut facts);
     facts
+}
+
+fn collect_conservative_support_field_nullability_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_conservative_support_field_nullability_facts_for_type(ty, facts);
+    }
+}
+
+fn collect_conservative_support_field_nullability_facts_for_type(
+    ty: &TypeDecl,
+    facts: &mut FactSet,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field)
+                if !matches!(field.ty, JavaType::Void | JavaType::Primitive(_))
+                    && facts.field_nullability_for(&ty.name, &field.name).is_none() =>
+            {
+                facts
+                    .field_nullability_facts
+                    .push(facts::FieldNullabilityFact {
+                        field: facts::FieldKey::source_field(ty, field),
+                        state: facts::NullabilityState::MaybeNull,
+                        provenance: facts::FieldNullabilityProvenance::ConservativeFallback,
+                    });
+            }
+            Member::Type(nested) => {
+                collect_conservative_support_field_nullability_facts_for_type(nested, facts);
+            }
+            Member::Field(_)
+            | Member::Method(_)
+            | Member::Constructor(_)
+            | Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn typed_source_method_nullability_facts_from_program(
+    program: &Program,
+    facts: &FactSet,
+) -> FactSet {
+    let mut out = FactSet::default();
+    let mut working_facts = facts.clone();
+    for ty in &program.types {
+        collect_typed_source_method_nullability_facts_for_type(ty, &mut working_facts, &mut out);
+    }
+    out
+}
+
+fn collect_typed_source_method_nullability_facts_for_type(
+    ty: &TypeDecl,
+    facts: &mut FactSet,
+    out: &mut FactSet,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => {
+                let return_nullability =
+                    signature::typed_source_method_return_nullability_constraints(
+                        ty, method, facts,
+                    )
+                    .into_iter()
+                    .find_map(|constraint| match constraint {
+                        signature::SignatureConstraint::RequiredStorageNullability(state) => {
+                            Some(state)
+                        }
+                        _ => None,
+                    })
+                    .unwrap_or(facts::NullabilityState::Unknown);
+                if return_nullability != facts::NullabilityState::Unknown {
+                    let effect = facts::MethodEffectFact {
+                        method: facts::MethodKey::source_method(ty, method),
+                        receiver_mutability: facts::ReceiverMutabilityFact::Unknown,
+                        return_nullability,
+                        thrown: Vec::new(),
+                        provenance: facts::FactProvenance::ParsedSource,
+                    };
+                    facts.method_effect_facts.push(effect.clone());
+                    out.method_effect_facts.push(effect);
+                }
+            }
+            Member::Type(nested) => {
+                collect_typed_source_method_nullability_facts_for_type(nested, facts, out);
+            }
+            Member::Field(_) | Member::Constructor(_) | Member::Unsupported { .. } => {}
+        }
+    }
 }
 
 struct BatchTranslationContext {
@@ -2487,6 +2599,19 @@ mod tests {
                 .source_method_usage_has_collapsed_owner_alias(&["AItem", "BItem"], "who"),
             "analysis identity should stay in Java owner space, not emitted Rust spelling"
         );
+        let call_graph = crate::usage::build_call_graph(&context.support_program);
+        let call_graph_owners = call_graph
+            .nodes()
+            .iter()
+            .filter_map(|key| key.method_identity_parts())
+            .filter(|(_, method_name)| *method_name == "who")
+            .map(|(owner, _)| owner)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            call_graph_owners,
+            BTreeSet::from(["a.Item", "b.Item"]),
+            "call-graph nodes must retain distinct package-aware owners"
+        );
     }
 
     #[test]
@@ -2692,6 +2817,84 @@ public class UseAB {
                 name: "a.b.JavaType.C".to_string(),
                 args: Vec::new(),
             }
+        );
+    }
+
+    #[test]
+    fn context_source_method_nullability_facts_follow_same_type_field_getter() {
+        let parsed = parser::parse_java_source(
+            r#"
+class SourceHeaderReader {
+    VCFHeader header;
+
+    VCFHeader getHeader() {
+        return header;
+    }
+
+    VCFHeader getFileHeader() {
+        return getHeader();
+    }
+}
+"#,
+        );
+        let mut facts =
+            summary_field_nullability_facts_from_program(&parsed.program, &FactSet::default());
+        assert_eq!(
+            facts.field_nullability_for("SourceHeaderReader", "header"),
+            Some(facts::NullabilityState::MaybeNull)
+        );
+        let get_header = parsed.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "getHeader" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            signature::typed_source_method_return_nullability_constraints(
+                &parsed.program.types[0],
+                get_header,
+                &facts,
+            ),
+            vec![signature::SignatureConstraint::RequiredStorageNullability(
+                facts::NullabilityState::MaybeNull
+            )]
+        );
+        let get_file_header = parsed.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "getFileHeader" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            signature::typed_source_method_return_nullability_constraints(
+                &parsed.program.types[0],
+                get_file_header,
+                &facts,
+            ),
+            vec![signature::SignatureConstraint::RequiredStorageNullability(
+                facts::NullabilityState::MaybeNull
+            )]
+        );
+        facts.extend_from(typed_source_method_nullability_facts_from_program(
+            &parsed.program,
+            &facts,
+        ));
+
+        assert_eq!(
+            facts
+                .method_effect_for("SourceHeaderReader", "getHeader")
+                .map(|effect| effect.return_nullability),
+            Some(facts::NullabilityState::MaybeNull)
+        );
+        assert_eq!(
+            facts
+                .method_effect_for("SourceHeaderReader", "getFileHeader")
+                .map(|effect| effect.return_nullability),
+            Some(facts::NullabilityState::MaybeNull)
         );
     }
 }

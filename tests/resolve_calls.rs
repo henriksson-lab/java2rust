@@ -384,6 +384,63 @@ fn resolve_annotates_same_class_overload_call_targets() {
 }
 
 #[test]
+fn resolver_uses_lexical_outer_for_unqualified_inner_method_call() {
+    let parsed = parse_java_source(
+        r#"
+class InnerMethodCompanionRoute {
+    class A {
+        B makeViaOuter() {
+            return make();
+        }
+    }
+
+    class B {}
+
+    B make() {
+        return new B();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let outer = &resolved.program.types[0];
+    let inner_a = outer
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Type(ty) if ty.name == "InnerMethodCompanionRoute.A" => Some(ty),
+            _ => None,
+        })
+        .expect("inner A should be present");
+    let body = inner_a
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "makeViaOuter" => method.body.as_ref(),
+            _ => None,
+        })
+        .expect("makeViaOuter body should be present");
+    let Stmt::Return(Some(Expr::Call {
+        receiver: None,
+        name,
+        resolved: Some(call),
+        ..
+    })) = &body.statements[0]
+    else {
+        panic!("expected resolved receiverless make() return");
+    };
+    assert_eq!(name, "make");
+    assert_eq!(call.declaring_type, "InnerMethodCompanionRoute");
+    assert_eq!(call.rust_name, "make");
+    assert_eq!(call.kind, CallKind::Instance);
+}
+
+#[test]
 fn resolve_annotates_same_class_constructor_delegation_targets() {
     let source =
         std::fs::read_to_string("examples/java/03-methods/ConstructorOverloads.java").unwrap();

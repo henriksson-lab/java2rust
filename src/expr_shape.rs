@@ -8,7 +8,6 @@ use crate::shape_projection::{
     borrowed_string_content_shape, indexed_assignment_shape_with_facts,
     indexed_read_shape_for_access_with_facts,
     project_java_value_shape as project_java_value_shape_with_representations,
-    shape_is_erased_object_boundary,
 };
 use crate::signature::{
     ConstructorSignaturePlan, LocalPlan, MethodSignaturePlan, ParamPlan, SignaturePlan,
@@ -271,6 +270,13 @@ impl ShapeEnv {
         self.nested_array2_locals.remove(name);
     }
 
+    fn clear_local_side_facts_for_access_name(&mut self, name: &str, access_name: &str) {
+        self.clear_local_side_facts(name);
+        if access_name != name {
+            self.clear_local_side_facts(access_name);
+        }
+    }
+
     pub(crate) fn map_key_set_view_receiver(&self, name: &str) -> Option<&Expr> {
         if let Some(binding) = self.binding_ids.get(name) {
             return self.map_key_set_view_receivers_by_binding.get(binding);
@@ -531,6 +537,7 @@ impl ShapeEnv {
     ) {
         let name = name.into();
         let access_name = access_name.into();
+        self.clear_local_side_facts_for_access_name(&name, &access_name);
         self.types.insert_local(name.clone(), shape.java_ty.clone());
         self.local_shapes.insert(name.clone(), shape);
         if let Some(binding) = binding {
@@ -565,6 +572,7 @@ impl ShapeEnv {
         binding: Option<BindingId>,
     ) {
         let name = name.into();
+        self.clear_local_side_facts(&name);
         self.local_shapes
             .insert(name.clone(), RustSlotShape::for_storage(ty.clone()));
         self.types.insert_local(name.clone(), ty);
@@ -584,6 +592,7 @@ impl ShapeEnv {
     ) {
         let name = name.into();
         let access_name = access_name.into();
+        self.clear_local_side_facts_for_access_name(&name, &access_name);
         self.insert_catch_param_with_binding(name.clone(), ty, binding.clone());
         self.bind_access_name_alias(&name, &access_name, binding);
         self.binding_access_names
@@ -1087,11 +1096,6 @@ fn is_this_expr(expr: &Expr) -> bool {
     matches!(expr, Expr::This) || matches!(expr, Expr::Var(name) if name == "this")
 }
 
-fn java_type_is_erased_object_boundary(ty: &JavaType) -> bool {
-    matches!(ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
-        if name == "Object" || name == "java.lang.Object")
-}
-
 fn java_type_erased_occurrence_key(ty: &JavaType) -> String {
     match ty {
         JavaType::Void => "void".to_string(),
@@ -1140,16 +1144,6 @@ fn unique_local_plan_for_declared_type<'a>(
         .collect::<Vec<_>>();
     if exact_matches.is_empty() {
         return None;
-    }
-    if java_type_is_erased_object_boundary(declared_ty)
-        && let [local] = exact_matches
-            .iter()
-            .filter(|local| shape_is_erased_object_boundary(&local.shape()))
-            .copied()
-            .collect::<Vec<_>>()
-            .as_slice()
-    {
-        return Some(local);
     }
     match exact_matches.as_slice() {
         [local] => Some(*local),
@@ -2195,6 +2189,29 @@ mod tests {
     }
 
     #[test]
+    fn mixed_erased_object_idless_local_plan_lookup_fails_closed() {
+        let declared_ty = JavaType::Unknown("Object".to_string());
+        let mut concrete_shape = RustSlotShape::conservative(JavaType::String);
+        concrete_shape.ownership = OwnershipShape::Owned;
+        let plans = vec![
+            erased_object_plan_with_ownership(OwnershipShape::Owned),
+            LocalPlan::new(
+                crate::binding_id::BindingId::compatibility_local("value"),
+                "value".to_string(),
+                declared_ty.clone(),
+                concrete_shape,
+                false,
+            ),
+        ];
+
+        assert!(
+            idless_compatibility_local_plan_for_declared_type(&plans, "value", &declared_ty)
+                .is_none(),
+            "mixed Object compatibility plans must fail closed instead of selecting the only erased boundary"
+        );
+    }
+
+    #[test]
     fn local_plan_type_mismatch_does_not_fall_back_by_name() {
         let string_ty = JavaType::String;
         let mut string_shape = RustSlotShape::conservative(string_ty.clone());
@@ -2719,6 +2736,27 @@ mod tests {
     }
 
     #[test]
+    fn loop_variable_insert_clears_shadowed_collection_side_facts() {
+        let mut env = ShapeEnv::new();
+        env.insert_map_key_set_view_receiver("crate", Expr::Var("source".to_string()));
+        env.insert_map_values_view_receiver("crate__", Expr::Var("access".to_string()));
+        env.insert_unmodifiable_collection_view_source("crate", Expr::Var("values".to_string()));
+        env.insert_nested_array2_local("crate__");
+
+        env.insert_loop_variable_shape_with_access_name_and_binding(
+            "crate",
+            "crate__",
+            RustSlotShape::for_storage(JavaType::String),
+            None,
+        );
+
+        assert_eq!(env.map_key_set_view_receiver("crate"), None);
+        assert_eq!(env.map_values_view_receiver("crate__"), None);
+        assert_eq!(env.unmodifiable_collection_view_source("crate"), None);
+        assert!(!env.local_uses_nested_array2_slice("crate__"));
+    }
+
+    #[test]
     fn bound_catch_param_env_insert_preserves_resolver_binding_id() {
         let mut env = ShapeEnv::new();
         let binding = BindingId::new(BindingKind::CatchParam, "ex".to_string(), 1);
@@ -2751,5 +2789,36 @@ mod tests {
         assert_eq!(env.binding_id("type"), Some(&binding));
         assert_eq!(env.binding_id("type__"), Some(&binding));
         assert_eq!(env.binding_access_name("type"), Some("type__"));
+    }
+
+    #[test]
+    fn catch_param_insert_clears_shadowed_collection_side_facts() {
+        let mut env = ShapeEnv::new();
+        env.insert_map_entry_set_view_receiver("type", Expr::Var("entries".to_string()));
+        env.insert_map_entry_value_receiver("type__", Expr::Var("entry".to_string()));
+        env.insert_simple_map_entry_value(
+            "type",
+            Expr::Literal(crate::java_ir::Literal::String("k".to_string())),
+            Expr::Literal(crate::java_ir::Literal::String("v".to_string())),
+        );
+        env.insert_immutable_collection_view_local(
+            "type__",
+            ImmutableCollectionViewMutationProfile::Empty,
+        );
+
+        env.insert_catch_param_with_access_name_and_binding(
+            "type",
+            "type__",
+            JavaType::Named {
+                name: "JavaException".to_string(),
+                args: Vec::new(),
+            },
+            None,
+        );
+
+        assert_eq!(env.map_entry_set_view_receiver("type"), None);
+        assert_eq!(env.map_entry_value_receiver("type__"), None);
+        assert_eq!(env.simple_map_entry_value("type"), None);
+        assert_eq!(env.immutable_collection_view_local("type__"), None);
     }
 }

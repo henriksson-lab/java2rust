@@ -8,9 +8,13 @@ use crate::facts::{
     OwnedRecoveryCapability,
 };
 use crate::java_ir::{Expr, JavaCoercionEvidence, JavaCoercionKind, JavaType, PrimitiveType};
+use crate::representation::RepresentationPlan;
 use crate::shape_projection::{borrowed_sequence_element_shape, project_java_value_shape};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
-use crate::types::{is_numeric_primitive_type, list_java_type, optional_java_type, set_java_type};
+use crate::types::{
+    is_numeric_primitive_type, list_java_type, optional_element_type, optional_java_type,
+    set_java_type,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Slot {
@@ -149,7 +153,10 @@ pub enum SyntaxSlotCoercionPolicy {
     OptionalErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
     OptionalToJavaDisplayValue,
+    OptionalToDisplayValue,
+    OptionalBorrowedOptionalStringToJavaDisplayString,
     OptionalBorrowedToJavaDisplayValue,
+    OptionalBorrowedToDisplayValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -528,6 +535,20 @@ fn optional_element_handle_placement(
     (placement.shared() && placement.is_implemented()).then_some(placement)
 }
 
+fn optional_element_handle_placement_with_representations(
+    target: &RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<crate::storage_strategy::StoragePlacement> {
+    let JavaType::Named { name, .. } = target.optional_element_type()? else {
+        return None;
+    };
+    optional_element_handle_placement(target, facts).or_else(|| {
+        let placement = representations.storage_placement_for(&name);
+        (placement.shared() && placement.is_implemented()).then_some(placement)
+    })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OptionalPresentConstructionSource {
     Plain,
@@ -600,6 +621,20 @@ pub fn optional_slot_construction_plan_for_actual(
 ) -> OptionalSlotConstructionPlan {
     optional_slot_construction_plan_with_actual_element(actual_element_shape, target, facts)
         .expect("target must be an optional slot")
+}
+
+pub fn optional_slot_construction_plan_for_actual_with_representations(
+    actual_element_shape: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> OptionalSlotConstructionPlan {
+    let mut plan = optional_slot_construction_plan_for_actual(actual_element_shape, target, facts);
+    if plan.element_handle.is_none() {
+        plan.element_handle =
+            optional_element_handle_placement_with_representations(target, facts, representations);
+    }
+    plan
 }
 
 pub fn optional_present_construction_plan_for_actual(
@@ -1026,11 +1061,29 @@ impl RustScalarSlotCastPolicy {
 pub struct RustBorrowedFacadeReturnPolicy {
     target: RustSlotShape,
     recovery: RustBorrowedFacadeReturnRecovery,
+    source_erased_object: bool,
 }
 
 impl RustBorrowedFacadeReturnPolicy {
+    #[cfg(test)]
     pub(crate) fn new(target: RustSlotShape, recovery: RustBorrowedFacadeReturnRecovery) -> Self {
-        Self { target, recovery }
+        Self {
+            target,
+            recovery,
+            source_erased_object: false,
+        }
+    }
+
+    pub(crate) fn with_source_erased_object(
+        target: RustSlotShape,
+        recovery: RustBorrowedFacadeReturnRecovery,
+        source_erased_object: bool,
+    ) -> Self {
+        Self {
+            target,
+            recovery,
+            source_erased_object,
+        }
     }
 
     pub fn target(&self) -> &RustSlotShape {
@@ -1039,6 +1092,10 @@ impl RustBorrowedFacadeReturnPolicy {
 
     pub fn recovery(&self) -> RustBorrowedFacadeReturnRecovery {
         self.recovery
+    }
+
+    pub fn source_erased_object(&self) -> bool {
+        self.source_erased_object
     }
 }
 
@@ -1203,6 +1260,9 @@ pub fn rust_nominal_type_name_policy(java_ty: &JavaType) -> RustNominalTypeNameP
         java_ty if reifiable_raw_collection_runtime_target(java_ty).is_some() => {
             reifiable_raw_collection_runtime_target(java_ty)
         }
+        java_ty if reifiable_object_array_runtime_target(java_ty).is_some() => {
+            reifiable_object_array_runtime_target(java_ty)
+        }
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
             if java_exception_like_runtime_type_name(&canonical) {
@@ -1224,6 +1284,19 @@ fn java_exception_like_runtime_type_name(name: &str) -> bool {
     matches!(simple, "Throwable" | "Exception" | "Error")
         || simple.ends_with("Exception")
         || simple.ends_with("Error")
+}
+
+fn reifiable_object_array_runtime_target(java_ty: &JavaType) -> Option<String> {
+    let JavaType::Array(element) = java_ty else {
+        return None;
+    };
+    let JavaType::Named { name, args } = element.as_ref() else {
+        return None;
+    };
+    if !args.is_empty() || crate::stdlib::canonical_external_receiver_type_key(name) != "Object" {
+        return None;
+    }
+    Some("Vec<Option<Box<dyn std::any::Any>>>".to_string())
 }
 
 fn reifiable_raw_collection_runtime_target(java_ty: &JavaType) -> Option<String> {
@@ -1423,8 +1496,11 @@ pub fn view_coercion_policy_with_effective_facts(
     {
         return ViewCoercionPolicy::BorrowStringView;
     }
-    if actual.ownership == OwnershipShape::SharedBorrow
-        && actual.view == ViewShape::Str
+    // The source ABI occasionally retains `Owned` ownership metadata for a
+    // string slot whose rendered view is still `&str`.  Representation is the
+    // deciding factor here: either ownership annotation needs recovery when
+    // the target is an owned native `String`.
+    if actual.view == ViewShape::Str
         && target.ownership == OwnershipShape::Owned
         && target.view == ViewShape::Native
     {
@@ -1951,10 +2027,21 @@ pub(crate) fn borrowed_element_adapter_policy_with_unwrap(
     facts: &FactSet,
     unwrap_carrier: bool,
 ) -> BorrowedElementAdapterPolicy {
+    // `ViewShape::Str` is rendered as `&str`, including in a few source
+    // boundary shapes whose ownership is still recorded as `Owned`.  The
+    // carrier therefore needs string recovery whenever the destination owns
+    // that element; cloning the view would keep it as `&str`.
+    let recovery = if matches!(element_shape.java_ty, JavaType::String)
+        && matches!(element_shape.view, ViewShape::Str)
+    {
+        BorrowedElementRecoveryPolicy::StringViewToOwned
+    } else {
+        borrowed_element_recovery_policy(element_shape, facts)
+    };
     BorrowedElementAdapterPolicy {
         carrier,
         element_shape: element_shape.clone(),
-        recovery: borrowed_element_recovery_policy(element_shape, facts),
+        recovery,
         unwrap_carrier,
     }
 }
@@ -2037,6 +2124,14 @@ fn normalize_borrowed_element_adapter_target(
     {
         normalized.ownership = OwnershipShape::SharedBorrow;
     }
+    if matches!(
+        normalized.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) && external_crate_mapped_dyn_trait_java_type(&normalized.java_ty, facts)
+    {
+        normalized.dispatch = DispatchShape::Concrete;
+        normalized.view = ViewShape::Native;
+    }
     normalized
 }
 
@@ -2116,6 +2211,15 @@ pub fn dispatch_coercion_policy_with_facts(
     if actual.dispatch == target.dispatch && actual.java_ty == target.java_ty {
         return DispatchCoercionPolicy::NoDispatchChange;
     }
+    if matches!(
+        (actual.ownership, target.ownership),
+        (OwnershipShape::SharedBorrow, OwnershipShape::SharedBorrow)
+            | (OwnershipShape::MutableBorrow, OwnershipShape::MutableBorrow)
+    ) && actual.java_ty == target.java_ty
+        && external_crate_mapped_dyn_trait_java_type(&target.java_ty, facts)
+    {
+        return DispatchCoercionPolicy::NoDispatchChange;
+    }
     if (actual.java_ty == target.java_ty || matches!(actual.java_ty, JavaType::Unknown(_)))
         && matches!(
             runtime_type_target_policy(&target.java_ty),
@@ -2163,7 +2267,9 @@ pub fn dispatch_coercion_policy_with_facts(
                 .unwrap_or_else(|| unsupported_dispatch_coercion_policy(actual, target))
         }
         (DispatchShape::Concrete, DispatchShape::DynTrait { trait_name }) => {
-            if external_crate_mapped_dyn_trait_boundary(trait_name, facts) {
+            if external_crate_mapped_dyn_trait_boundary(trait_name, facts)
+                || external_crate_mapped_dyn_trait_java_type(&target.java_ty, facts)
+            {
                 return DispatchCoercionPolicy::NoDispatchChange;
             }
             if actual.ownership == OwnershipShape::SharedBorrow
@@ -2392,6 +2498,16 @@ fn external_crate_mapped_dyn_trait_boundary(trait_name: &str, facts: &FactSet) -
             trait_name,
         ))
         .is_some_and(|pack| pack.mode == crate::facts::ExternalLibraryMode::RustCrateMapping)
+}
+
+fn external_crate_mapped_dyn_trait_java_type(java_ty: &JavaType, facts: &FactSet) -> bool {
+    let JavaType::Named { name, args } = java_ty else {
+        return false;
+    };
+    if !args.is_empty() {
+        return false;
+    }
+    external_crate_mapped_dyn_trait_boundary(name, facts)
 }
 
 fn object_safe_trait_boundary(java_ty: &JavaType, facts: &FactSet) -> bool {
@@ -3662,10 +3778,15 @@ fn slot_conversion_plan_by_value(
                 .optional_element_type()
                 .is_some_and(|element_ty| optional_display_value_supported(&element_ty, facts)) =>
         {
+            let policy = actual
+                .optional_element_type()
+                .filter(|element_ty| optional_display_value_uses_java_helper(element_ty, facts))
+                .map(|_| SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue)
+                .unwrap_or(SyntaxSlotCoercionPolicy::OptionalToDisplayValue);
             SlotConversionPlan::Syntax(SyntaxCoercionPlan::new(
                 actual.java_ty.clone(),
                 slot.clone(),
-                SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue,
+                policy,
             ))
         }
         _ => SlotConversionPlan::Syntax(syntax_coercion_plan_with_facts(
@@ -3674,6 +3795,29 @@ fn slot_conversion_plan_by_value(
             facts,
         )),
     }
+}
+
+pub(crate) fn optional_display_value_uses_java_helper(
+    java_ty: &JavaType,
+    _facts: &FactSet,
+) -> bool {
+    match java_ty {
+        JavaType::Primitive(_) => true,
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::boxed_primitive_type(
+                crate::stdlib::canonical_external_receiver_type_key(name)
+                    .rsplit('.')
+                    .next()
+                    .unwrap_or(name),
+            )
+            .is_some()
+        }
+        JavaType::String | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => false,
+    }
+}
+
+fn optional_borrowed_element_is_nullable_string(java_ty: &JavaType) -> bool {
+    optional_element_type(java_ty).is_some_and(|element_ty| element_ty == JavaType::String)
 }
 
 fn optional_display_value_supported(java_ty: &JavaType, facts: &FactSet) -> bool {
@@ -3839,10 +3983,13 @@ pub fn lowered_slot_conversion_plan_with_facts(
             },
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) if slot_or_optional_element_targets_erased_object(target) => {
-            SlotConversionPlan::RustBorrowedFacadeReturn(RustBorrowedFacadeReturnPolicy::new(
-                target.clone(),
-                recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
-            ))
+            SlotConversionPlan::RustBorrowedFacadeReturn(
+                RustBorrowedFacadeReturnPolicy::with_source_erased_object(
+                    target.clone(),
+                    recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
+                    slot_or_optional_element_targets_erased_object(java_shape),
+                ),
+            )
         }
         (
             LoweredType::RustBorrowed { java_shape, .. },
@@ -3888,13 +4035,26 @@ pub fn lowered_slot_conversion_plan_with_facts(
             Slot::Assignment(_) | Slot::Return(_) | Slot::Argument(_),
         ) => slot_conversion_plan_with_facts(java_shape, slot, facts),
         (
-            LoweredType::OptionalElementBorrow { option_shape, .. },
+            LoweredType::OptionalElementBorrow {
+                option_shape,
+                element_shape,
+                ..
+            },
             Slot::StringConcatSegment | Slot::DisplaySegment,
-        ) => SlotConversionPlan::Syntax(SyntaxCoercionPlan::new(
-            option_shape.java_ty.clone(),
-            slot.clone(),
-            SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue,
-        )),
+        ) => {
+            let policy = if optional_borrowed_element_is_nullable_string(&element_shape.java_ty) {
+                SyntaxSlotCoercionPolicy::OptionalBorrowedOptionalStringToJavaDisplayString
+            } else if optional_display_value_uses_java_helper(&element_shape.java_ty, facts) {
+                SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+            } else {
+                SyntaxSlotCoercionPolicy::OptionalBorrowedToDisplayValue
+            };
+            SlotConversionPlan::Syntax(SyntaxCoercionPlan::new(
+                option_shape.java_ty.clone(),
+                slot.clone(),
+                policy,
+            ))
+        }
         (
             LoweredType::OptionalElementBorrow {
                 option_shape,
@@ -3905,9 +4065,10 @@ pub fn lowered_slot_conversion_plan_with_facts(
         ) => {
             if slot_or_optional_element_targets_erased_object(target) {
                 SlotConversionPlan::OptionalRustBorrowedFacadeReturn(
-                    RustBorrowedFacadeReturnPolicy::new(
+                    RustBorrowedFacadeReturnPolicy::with_source_erased_object(
                         target.clone(),
                         recovery.unwrap_or(RustBorrowedFacadeReturnRecovery::Clone),
+                        slot_or_optional_element_targets_erased_object(element_shape),
                     ),
                 )
             } else {

@@ -1,6 +1,7 @@
 # 0002b — Shared object representation design and rollout
 
-Status: **partially implemented** (`SharedImmutable` landed; `SharedLocal`/`SharedSync` remain open)
+Status: **partially implemented** (`SharedImmutable` and the single-threaded
+`SharedLocal` tier landed; `SharedSync` remains open)
 Blocks: [0002](0002-object-aliasing-has-no-representation.md),
 [0023](done/0023-inner-class-construction-always-panics.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
@@ -12,16 +13,25 @@ representation choice on paper before implementing it. Cheap now, expensive
 later.** This is that paper.
 
 The early sections below are the original design. Later updates record the
-current implementation state: `SharedImmutable` handles and 0028 identity
-lowering are landed; the mutable handle tiers and shared receivers are not.
+current implementation state: `SharedImmutable` handles, 0028 identity
+lowering, and the single-threaded `SharedLocal` receiver slices are landed;
+the synchronized mutable-handle tier is not.
+
+Codex verification 2026-09-17: the current `StoragePlacement` gate implements
+`Rc<RefCell<T>>` (`SharedLocal`) while continuing to reject
+`Arc<Mutex<T>>` (`SharedSync`). The Java/Rust differential oracles for mutable
+aliasing and qualified/ordinary inner capture pass:
+`differential::aliasing_shared_local_fixtures_match_java_output` and
+`differential::qualified_inner_capture_fixtures_match_java_output`; the output
+marker guard `inner_capture_routes_shared_outer_handle_companion` also passes.
 
 ## What one decision buys
 
 This table is the original design framing. Current status: `SharedImmutable`
 handles and [0028](done/0028-reference-equality-lowered-as-structural-equality.md)
-identity lowering have landed; diagnosed mutable-alias cases are loud instead
-of invisibly copied, while `SharedLocal`, `SharedSync`, and shared receivers
-remain open.
+identity lowering have landed; the promoted mutable-alias and inner-capture
+paths use `SharedLocal`, while `SharedSync` and unsupported shared-receiver
+surfaces remain open.
 
 | issue | today | under this design |
 |---|---|---|
@@ -29,7 +39,7 @@ remain open.
 | 0028 | **landed for the SharedImmutable scope** | `Rc::ptr_eq` — *exactly* Java's reference identity |
 | 0023 | ordinary outer-method inner construction still calls the panic fallback until a shared outer receiver can be passed to the existing companions | `__outer` stops being a one-off; it becomes the general receiver case |
 | 0006 | clone/borrow recovery is the largest rule cluster in `lower.rs` | for shared types the answer is always `Rc::clone`, and the cluster does not apply |
-| concurrency | `synchronized` erased; nothing to lock | `Arc<Mutex<T>>` gives `synchronized (o)` an object to lock |
+| concurrency | synchronized forms fail loudly until monitor semantics exist | `Arc<Mutex<T>>` gives `synchronized (o)` an object to lock |
 
 0028 is worth pausing on: it is not "also fixed", it is fixed *because the
 representation is finally the right one*. Reference identity is unimplementable
@@ -2118,6 +2128,10 @@ public raw construction-string API.
 
 ## Update 2026-09-09 (Codex follow-up) — `SharedLocal` is blocked at the receiver boundary
 
+**Superseded by the 2026-09-17 verification above.** This records the pre-rollout
+state; `SharedLocal` is now enabled for the guarded single-threaded receiver
+paths. `SharedSync` remains the unimplemented tier.
+
 The type and value renderers already know how to spell the mutable shared
 placements structurally: `storage_placement_type` builds
 `Rc<RefCell<T>>`/`Arc<Mutex<T>>`, and
@@ -2148,13 +2162,19 @@ and
 
 `storage_strategy::storage_placement_implementation_gate_stays_explicit` now
 checks the four active placement rungs without going through a Java fixture:
-inline values and immutable shared `Rc`/`Arc` placements are implemented, while
-`SharedLocal`/`SharedSync` remain off. This is a tripwire against accidentally
-enabling `Rc<RefCell<T>>` or `Arc<Mutex<T>>` by weakening
-`StoragePlacement::is_implemented`; it does not implement the mutable shared
-receiver and field-access policy.
+inline values, immutable shared `Rc`/`Arc`, and single-threaded
+`Rc<RefCell<T>>` placements are implemented, while `SharedSync` remains off.
+The test is now a tripwire against accidentally enabling `Arc<Mutex<T>>` by
+weakening `StoragePlacement::is_implemented`; the covered `SharedLocal`
+receiver and field-access policy is exercised by the promoted differential
+fixtures above.
 
 ## Update 2026-09-10 (Codex follow-up) — inner capture is pinned to `SharedLocal` end-to-end
+
+**Superseded by the promoted fixtures.** `InnerCapture` and
+`QualifiedInnerCapture` now execute through the implemented SharedLocal outer
+handle companions; this historical output-marker expectation describes the
+former diagnostic-only state.
 
 `output_markers::inner_capture_gap_reports_mutable_shared_storage_work_queue`
 now translates `tests/differential/known-gaps/InnerCapture.java` and requires the
@@ -2194,3 +2214,23 @@ static-reachability evidence while it collects facts, but cross-module fixtures
 and callers build/read those axes through named setters and accessors. This
 keeps the evidence record inspectable without making its raw tuple layout public
 API.
+
+## Update 2026-09-15 (Codex follow-up) — zero-argument anonymous returns no longer fall through
+
+Anonymous implementations of single-method, zero-argument interfaces now lower
+through a block-local adapter around the closure body instead of falling back to
+`<dyn Trait>::anonymous()` whenever the method returns a value. The adapter
+handles local source traits with object-support methods and external facade
+traits whose emitted surface only requires the functional method plus
+`Display`. Promoted behavioral guard:
+`differential::anonymous_functional_interface_fixtures_match_java_output`
+(`tests/differential/AnonymousSupplier.java`); regression guard:
+`fixtures::anonymous_interface_return_uses_boxed_dyn_trait_slot`.
+
+Codex follow-up 2026-09-17 closes the specific mutable-capture counterexample:
+storage analysis now descends into anonymous method bodies, so writes through a
+captured outer handle select `Rc<RefCell<T>>` before closure lowering. The
+context `Action` fixture executes and observes `"23"` through its alias. This
+does not claim general anonymous-object support: interfaces with parameters,
+anonymous bodies using `this`/`super`, and more complex receiver adaptation
+remain outside the closure-adapter boundary.

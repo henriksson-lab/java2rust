@@ -1607,6 +1607,31 @@ fn context_anonymous_action_with_sharedlocal_capture_is_not_reported_unsupported
         "{}",
         translation.rust
     );
+    assert!(
+        !translation.rust.contains("<dyn Action>::anonymous()"),
+        "the supported zero-arg anonymous action should lower to the closure \
+         adapter, not the loud anonymous-object fallback\n{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "context_anonymous_sharedlocal_action",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn captured_shared_local_mutation_is_observable_through_the_alias() {
+        assert_eq!(ContextAnonymousSharedLocalAction::run().unwrap(), "23");
+    }
+}
+"#,
+        }],
+    );
 }
 
 #[test]

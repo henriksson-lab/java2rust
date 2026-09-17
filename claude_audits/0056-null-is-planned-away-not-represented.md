@@ -11,6 +11,22 @@ evidence, plus broader nullable representation work outside the already-pinned
 fixtures.
 Kind: semantics / lowering.
 
+Codex follow-up 2026-09-16 borrowed nullable return lifetime pass:
+representation-aware signature rewriting now only overwrites a parameter type
+when representation rendering differs from normal slot rendering. This
+preserves lifetimes already added for borrowed parameters that flow into a
+borrowed nullable return, so generated signatures use `&'a T` parameters
+instead of returning `Option<&'a T>` from shorter-lived `&T` inputs. Guards:
+`idiom_gaps::nullable_static_alias_return_emits_lifetime_for_borrowed_params`
+and `differential::null_representation_fixtures_match_java_output`.
+
+Codex follow-up 2026-09-16 path-constructor null pass: nullable reference-array
+elements supplied to the modeled `File`/`Path`/`URI` constructors now unwrap at
+the constructor boundary and raise the ordinary catchable
+`NullPointerException`, rather than flowing through `JavaPathArg`'s historical
+empty-path fallback. Guard:
+`idiom_gaps::jdk_file_constructor_clones_borrowed_string_array_element`.
+
 Codex follow-up 2026-09-14 boxed-primitive operator unbox pass:
 boxed primitive calls used directly in non-argument primitive contexts now
 project the nullable carrier before applying the operator. The previous lowering
@@ -200,6 +216,13 @@ method is emitted, its return stays nullable, but `Display` stays on the loud
 unsupported facade path instead of assuming the display contract is non-null.
 Regression:
 `slot_shape_design::nullable_external_to_string_fact_does_not_mark_facade_display_capable`.
+
+Codex follow-up 2026-09-15 stale-erased-display assertion cleanup:
+`idiom_gaps::exception_constructor_message_argument_is_stringified` no longer
+accepts the old `java_erased_object_to_string(&e)` exception-message fallback.
+The fixture now requires the current direct `e.to_string()` lowering and
+explicitly rejects the stale erased-display helper spelling, so this assertion
+cannot mask a regression back to the older erased-display path.
 
 Follow-up 2026-08-30 current-tree triage:
 the original broad `null` complaint is mostly stale. Bare `null`, nullable
@@ -1398,6 +1421,29 @@ through the stable `java.util.Random@` prefix for both concat and direct calls.
 This remains a platform-carrier mitigation; arbitrary unknown erased display
 without source/platform/fact evidence remains open.
 
+Codex follow-up 2026-09-15: `Object value = new StringTokenizer("a b"); "x" +
+value` and direct `value.toString()` now follow the platform erased-display
+route too. The modeled `StringTokenizer` runtime shim implements Java
+object-style `Display`, and `StringTokenizer` is included in the generated
+platform downcast table when it appears in the source surface. Promoted
+differential fixture: `ErasedStringTokenizerDisplay`, which compares Java and
+translated output through the stable `java.util.StringTokenizer@` prefix. This
+remains a platform-carrier mitigation; arbitrary unknown erased display without
+source/platform/fact evidence remains open.
+
+Codex follow-up 2026-09-15 later: `Object value = new ZipEntry("folder/file.txt");
+"x" + value` and direct `value.toString()` now use the modeled `ZipEntry`
+name value instead of falling into the unsupported erased-object display path.
+The `ZipEntry` shim implements `Display`, and `ZipEntry` is included in the
+generated platform downcast table when it appears in the source surface.
+Promoted differential fixture: `ErasedZipEntryDisplay`.
+
+Codex follow-up 2026-09-15 later still: `java.util.jar.JarEntry` now keeps the
+same modeled name/directory state as `ZipEntry` for its string constructor,
+`getName()`, `isDirectory()`, string concatenation after erasure to `Object`,
+and direct erased `Object.toString()`. Promoted differential fixture:
+`ErasedJarEntryDisplay`.
+
 Follow-up 2026-08-28: `Object value = new URL("http://example.com/a"); "x" +
 value` now uses the platform erased-display route. Both generated `URL` support
 shims implement `Display` as the URL string value, and `URL` is included in the
@@ -1898,3 +1944,21 @@ external, and source erased-display downcast collectors now share one private
 `Arc<T>`. This removes a duplicated policy table while preserving the same loud
 unknown-runtime-target fallback. Guard:
 `layering::stdlib_erased_display_downcast_collectors_stay_internal`.
+
+Codex follow-up 2026-09-15 erased `PriorityQueue` display pass: modeled
+`JavaPriorityQueue<T>` carriers already implement Java collection display, but
+the erased-object runtime did not downcast them before the loud unknown-erased
+fallback. `String`, `Integer`, `Double`, and `Boolean` priority-queue carriers
+now use the existing `JavaPriorityQueue<T>::to_string()` path when such a queue
+is stored as `Object`. Promoted differential fixture:
+`tests/differential/ErasedPriorityQueueDisplay.java`; guard:
+`cargo test --test differential erased_display_fixtures_match_java_output`.
+
+Codex follow-up 2026-09-15 erased hash collection display pass: standard
+`HashMap`/`HashSet` carriers now have the same erased-object display bridge as
+the existing ordered collection wrappers for deterministic one-element
+regressions. This is still carrier-specific support, not a fallback for
+arbitrary unknown erased runtime targets. Promoted differential fixtures:
+`tests/differential/ErasedHashMapDisplay.java` and
+`tests/differential/ErasedHashSetDisplay.java`; guard:
+`cargo test --test differential erased_display_fixtures_match_java_output`.

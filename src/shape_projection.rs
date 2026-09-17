@@ -1,6 +1,6 @@
 use crate::effective_facts::EffectiveFacts;
 use crate::facts::{DispatchRequirementKind, FacadeSlot, FactSet, HierarchyStrategy};
-use crate::java_ir::{JavaType, PrimitiveType};
+use crate::java_ir::JavaType;
 use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{optional_element_type, optional_java_type};
@@ -194,7 +194,7 @@ pub fn value_shape_for_java_type(
     } else if java_type_is_known_platform_facade(&java_ty) {
         DispatchShape::Concrete
     } else {
-        representations.dispatch_for(&java_ty)
+        dispatch_for_java_type_or_optional_element(representations, &java_ty)
     };
     apply_dispatch_projection(&mut shape, dispatch);
     shape
@@ -467,7 +467,7 @@ pub fn storage_shape_for_java_type(
     let dispatch = if java_type_is_erased_object_boundary(&java_ty) {
         DispatchShape::ErasedObject
     } else {
-        representations.dispatch_for(&java_ty)
+        dispatch_for_java_type_or_optional_element(representations, &java_ty)
     };
     apply_dispatch_projection(
         &mut shape,
@@ -500,13 +500,30 @@ pub fn return_shape_for_java_type(
         let dispatch = if java_type_is_erased_object_boundary(java_ty) {
             DispatchShape::ErasedObject
         } else {
-            representations.dispatch_for(java_ty)
+            dispatch_for_java_type_or_optional_element(representations, java_ty)
         };
         apply_dispatch_projection(
             &mut shape,
             escaping_role_dispatch_policy(dispatch).into_projected_dispatch(),
         );
         Some(shape)
+    }
+}
+
+fn dispatch_for_java_type_or_optional_element(
+    representations: &RepresentationPlan,
+    java_ty: &JavaType,
+) -> DispatchShape {
+    if let Some(element_ty) = optional_element_type(java_ty) {
+        if java_type_is_erased_object_boundary(&element_ty) {
+            DispatchShape::ErasedObject
+        } else if java_type_is_known_platform_facade(&element_ty) {
+            DispatchShape::Concrete
+        } else {
+            representations.dispatch_for(&element_ty)
+        }
+    } else {
+        representations.dispatch_for(java_ty)
     }
 }
 
@@ -627,6 +644,15 @@ pub fn indexed_read_shape_with_effective_facts(
     if matches!(element_shape.java_ty, JavaType::Array(_)) {
         apply_required_view(&mut element_shape, ViewShape::Slice);
     }
+    // Reference-array storage is `Vec<Option<T>>`, including when the array
+    // receiver itself is non-null. Keep that carrier in the read shape so
+    // argument lowering can project `Option<&T>` rather than borrow an
+    // `Option<T>` container as though it were a `T`.
+    if let JavaType::Array(element_ty) = &array_shape.java_ty
+        && java_array_element_needs_nullable_access_carrier(element_ty)
+    {
+        element_shape.java_ty = optional_java_type(element_shape.java_ty);
+    }
 
     element_shape
 }
@@ -637,7 +663,6 @@ pub fn indexed_element_projection_policy_with_effective_facts(
     _container_view: &ViewShape,
     facts: &EffectiveFacts,
 ) -> IndexedElementProjectionPolicy {
-    let element_ty = nullable_java_array_element_type(element_ty);
     let capability = shape_projection_capability_policy_with_effective_facts(&element_ty, facts);
     let projected_ownership = if capability.value_semantics() {
         OwnershipShape::CopyValue
@@ -674,32 +699,14 @@ pub fn indexed_assignment_shape_with_effective_facts(
 ) -> Option<RustSlotShape> {
     sequence_element_projection_policy_with_effective_facts(&array_shape.java_ty, facts)
         .into_element_ty()
-        .map(nullable_java_array_element_type)
         .map(RustSlotShape::for_storage)
 }
 
-fn nullable_java_array_element_type(element_ty: JavaType) -> JavaType {
-    if java_array_element_needs_nullable_carrier(&element_ty) {
-        crate::types::optional_java_type(element_ty)
-    } else {
-        element_ty
-    }
-}
-
-fn java_array_element_needs_nullable_carrier(element_ty: &JavaType) -> bool {
+fn java_array_element_needs_nullable_access_carrier(element_ty: &JavaType) -> bool {
     !matches!(
         element_ty,
-        JavaType::Primitive(PrimitiveType::Boolean)
-            | JavaType::Primitive(PrimitiveType::Byte)
-            | JavaType::Primitive(PrimitiveType::Short)
-            | JavaType::Primitive(PrimitiveType::Int)
-            | JavaType::Primitive(PrimitiveType::Long)
-            | JavaType::Primitive(PrimitiveType::Float)
-            | JavaType::Primitive(PrimitiveType::Double)
-            | JavaType::Primitive(PrimitiveType::Char)
-            | JavaType::Void
-            | JavaType::Array(_)
-    ) && crate::types::optional_element_type(element_ty).is_none()
+        JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_)
+    ) && optional_element_type(element_ty).is_none()
 }
 
 pub fn sequence_element_projection_policy_with_effective_facts(

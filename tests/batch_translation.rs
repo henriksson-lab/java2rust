@@ -135,7 +135,7 @@ public class B {
 }
 
 #[test]
-fn batch_translation_reports_inner_class_constructor_panics() {
+fn batch_translation_uses_shared_local_inner_class_construction() {
     let translations =
         new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
             &[new_java2rust::BatchSource::new(
@@ -163,11 +163,11 @@ public class MarkerInnerCapture {
 
     assert_eq!(translations.len(), 1);
     assert!(
-        translations[0]
+        !translations[0]
             .diagnostics()
             .has_code("inner_class_construction_panics"),
-        "batch translation should report the runtime panic marker as a \
-         diagnostic:\n{:?}",
+        "SharedLocal construction must not retain the obsolete inner-class \
+         panic diagnostic:\n{:?}",
         translations[0].diagnostics().iter().collect::<Vec<_>>()
     );
 }

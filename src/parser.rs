@@ -1511,15 +1511,14 @@ fn attach_label_to_stmt(label: String, stmt: Stmt) -> Stmt {
 }
 
 fn parse_synchronized_node(
-    node: tree_sitter::Node,
-    source: &str,
-    diagnostics: &mut DiagnosticBag,
+    _node: tree_sitter::Node,
+    _source: &str,
+    _diagnostics: &mut DiagnosticBag,
 ) -> Stmt {
-    named_children(node)
-        .into_iter()
-        .find(|child| child.kind() == "block")
-        .map(|block| Stmt::Block(parse_block_like(block, source, diagnostics)))
-        .unwrap_or_else(|| Stmt::Unsupported("synchronized without block".to_string()))
+    // Java monitors are reentrant and attach to an object. Lowering this as an
+    // ordinary block silently drops mutual exclusion; do not claim semantics
+    // until the SharedSync/monitor representation exists.
+    Stmt::Unsupported("synchronized monitor semantics".to_string())
 }
 
 fn parse_try_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
@@ -3104,6 +3103,9 @@ fn parse_modifiers(node: tree_sitter::Node, source: &str) -> Vec<Modifier> {
             "protected" => out.push(Modifier::Protected),
             "private" => out.push(Modifier::Private),
             "static" => out.push(Modifier::Static),
+            "synchronized" => out.push(Modifier::Synchronized),
+            "volatile" => out.push(Modifier::Volatile),
+            "native" => out.push(Modifier::Native),
             "final" => out.push(Modifier::Final),
             "sealed" => out.push(Modifier::Sealed),
             "abstract" => out.push(Modifier::Abstract),

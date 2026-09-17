@@ -393,18 +393,28 @@ fn expr_has_integer_div_rem_expr(expr: &Expr) -> bool {
                 || expr_has_integer_div_rem_expr(left)
                 || expr_has_integer_div_rem_expr(right)
         }
-        Expr::Unary { expr, .. }
-        | Expr::Cast { expr, .. }
-        | Expr::FieldAccess(expr, _)
-        | Expr::ArrayAccess(expr, _) => expr_has_integer_div_rem_expr(expr),
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::FieldAccess(expr, _) => {
+            expr_has_integer_div_rem_expr(expr)
+        }
+        Expr::ArrayAccess(array, index) => {
+            expr_has_integer_div_rem_expr(array) || expr_has_integer_div_rem_expr(index)
+        }
         Expr::Call { receiver, args, .. } => {
             receiver
                 .as_ref()
                 .is_some_and(|receiver| expr_has_integer_div_rem_expr(receiver))
                 || args.iter().any(expr_has_integer_div_rem_expr)
         }
-        Expr::New { args, body, .. } => {
-            args.iter().any(expr_has_integer_div_rem_expr)
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_has_integer_div_rem_expr(qualifier))
+                || args.iter().any(expr_has_integer_div_rem_expr)
                 || body.as_ref().is_some_and(|members| {
                     members.iter().any(|member| match member {
                         Member::Method(method) => method
@@ -977,8 +987,16 @@ fn expr_has_math_to_int_exact_call(expr: &Expr) -> bool {
         Expr::Binary { left, right, .. } => {
             expr_has_math_to_int_exact_call(left) || expr_has_math_to_int_exact_call(right)
         }
-        Expr::New { args, body, .. } => {
-            args.iter().any(expr_has_math_to_int_exact_call)
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_has_math_to_int_exact_call(qualifier))
+                || args.iter().any(expr_has_math_to_int_exact_call)
                 || body.as_ref().is_some_and(|members| {
                     members.iter().any(|member| match member {
                         Member::Method(method) => method
@@ -1537,9 +1555,18 @@ fn expr_has_nullable_receiver_deref(expr: &Expr, names: &HashSet<String>) -> boo
                         || expr_has_nullable_receiver_deref(&case.value, names)
                 })
         }
-        Expr::New { args, body, .. } => {
-            args.iter()
-                .any(|arg| expr_has_nullable_receiver_deref(arg, names))
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_has_nullable_receiver_deref(qualifier, names))
+                || args
+                    .iter()
+                    .any(|arg| expr_has_nullable_receiver_deref(arg, names))
                 || body
                     .iter()
                     .flatten()
@@ -2274,6 +2301,64 @@ mod tests {
         }
     }
 
+    fn qualified_new_expr(qualifier: Expr) -> Expr {
+        Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(qualifier)),
+            args: Vec::new(),
+            body: None,
+            resolved: None,
+        }
+    }
+
+    #[test]
+    fn integer_div_rem_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(Expr::Binary {
+            op: BinaryOp::Div,
+            left: Box::new(Expr::Literal(Literal::Int(4))),
+            right: Box::new(Expr::Literal(Literal::Int(2))),
+        });
+
+        assert!(expr_has_integer_div_rem_expr(&expr));
+    }
+
+    #[test]
+    fn integer_div_rem_scan_sees_array_index() {
+        let expr = Expr::ArrayAccess(
+            Box::new(Expr::Var("items".to_string())),
+            Box::new(Expr::Binary {
+                op: BinaryOp::Rem,
+                left: Box::new(Expr::Literal(Literal::Int(5))),
+                right: Box::new(Expr::Literal(Literal::Int(2))),
+            }),
+        );
+
+        assert!(expr_has_integer_div_rem_expr(&expr));
+    }
+
+    #[test]
+    fn math_to_int_exact_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(Expr::Call {
+            receiver: Some(Box::new(Expr::Var("Math".to_string()))),
+            name: "toIntExact".to_string(),
+            args: vec![Expr::Var("value".to_string())],
+            resolved: None,
+        });
+
+        assert!(expr_has_math_to_int_exact_call(&expr));
+    }
+
+    #[test]
+    fn nullable_receiver_deref_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(Expr::FieldAccess(
+            Box::new(Expr::Var("maybe".to_string())),
+            "value".to_string(),
+        ));
+        let names = HashSet::from(["maybe".to_string()]);
+
+        assert!(expr_has_nullable_receiver_deref(&expr, &names));
+    }
+
     #[test]
     fn method_plan_uses_only_canonical_source_method_key() {
         let ty = test_type("Owner");
@@ -2297,6 +2382,60 @@ mod tests {
             plan.method_plan(&ty, &method),
             MethodExceptionPlan::new(true)
         );
+    }
+
+    #[test]
+    fn non_throwing_interface_override_group_stays_infallible() {
+        let parsed = parse_java_source(
+            r#"
+interface Metric {
+    int score(String sample);
+    void merge(Metric other);
+}
+class CountMetric implements Metric {
+    int value;
+    public int score(String sample) { return this.value; }
+    public void merge(Metric other) { this.value = this.value + 1; }
+}
+class FixedMetric implements Metric {
+    public int score(String sample) { return 1; }
+    public void merge(Metric other) {}
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+
+        for (type_name, method_name) in [
+            ("Metric", "merge"),
+            ("CountMetric", "merge"),
+            ("FixedMetric", "merge"),
+        ] {
+            let ty = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == type_name)
+                .expect("test type is present");
+            let method = ty
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == method_name => Some(method),
+                    _ => None,
+                })
+                .expect("test method is present");
+            let key = CallableKey::source_method_for_type(ty, method);
+            assert!(
+                !fallibility.returns_result(&key),
+                "{key:?}: {:?}",
+                fallibility.callable(&key).map(CallableFallibility::reasons)
+            );
+        }
+
+        let _semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
     }
 
     #[test]

@@ -2978,6 +2978,15 @@ fn apply_native_collection_new_target(
                     )
                 })
                 .unwrap_or_else(priority_queue_empty_new_projection),
+            NativeCollectionNewTarget::PriorityQueueComparatorFacade { .. } => args
+                .pop()
+                .map(|comparator| {
+                    priority_queue_with_comparator_facade_projection(
+                        comparator,
+                        priority_queue_element_rust_type(target, facts),
+                    )
+                })
+                .unwrap_or_else(priority_queue_empty_new_projection),
             NativeCollectionNewTarget::PriorityQueueComparator { .. } => args
                 .pop()
                 .map(|comparator| {
@@ -3055,6 +3064,15 @@ fn apply_native_collection_new_target(
                 )
             })
             .unwrap_or_else(priority_queue_empty_new_projection),
+        NativeCollectionNewTarget::PriorityQueueComparatorFacade { .. } => args
+            .pop()
+            .map(|comparator| {
+                priority_queue_with_comparator_facade_projection(
+                    comparator,
+                    priority_queue_element_rust_type(target, facts),
+                )
+            })
+            .unwrap_or_else(priority_queue_empty_new_projection),
         NativeCollectionNewTarget::PriorityQueueComparator { .. } => args
             .pop()
             .map(|comparator| {
@@ -3102,22 +3120,45 @@ fn priority_queue_with_comparator_projection(
     element_ty: Option<RustType>,
 ) -> RustExpr {
     let comparison =
-        unwrap_result_or_panic_uncaught_java_exception(receiver_method_call_projection_exact(
-            RustExpr::Var("__java_comparator".to_string()),
-            "compare",
-            vec![
-                receiver_method_call_projection_exact(
-                    RustExpr::Var("a".to_string()),
-                    "clone",
-                    Vec::new(),
-                ),
-                receiver_method_call_projection_exact(
-                    RustExpr::Var("b".to_string()),
-                    "clone",
-                    Vec::new(),
-                ),
-            ],
-        ));
+        unwrap_result_or_panic_uncaught_java_exception(priority_queue_comparator_compare_call());
+    priority_queue_with_comparator_compare_projection(comparator, element_ty, comparison)
+}
+
+fn priority_queue_with_comparator_facade_projection(
+    comparator: RustExpr,
+    element_ty: Option<RustType>,
+) -> RustExpr {
+    priority_queue_with_comparator_compare_projection(
+        comparator,
+        element_ty,
+        priority_queue_comparator_compare_call(),
+    )
+}
+
+fn priority_queue_comparator_compare_call() -> RustExpr {
+    receiver_method_call_projection_exact(
+        RustExpr::Var("__java_comparator".to_string()),
+        "compare",
+        vec![
+            receiver_method_call_projection_exact(
+                RustExpr::Var("a".to_string()),
+                "clone",
+                Vec::new(),
+            ),
+            receiver_method_call_projection_exact(
+                RustExpr::Var("b".to_string()),
+                "clone",
+                Vec::new(),
+            ),
+        ],
+    )
+}
+
+fn priority_queue_with_comparator_compare_projection(
+    comparator: RustExpr,
+    element_ty: Option<RustType>,
+    comparison: RustExpr,
+) -> RustExpr {
     let param_ty = element_ty.map(|ty| {
         crate::emit::emit_type(&RustType::Ref {
             mutable: false,
@@ -3238,6 +3279,7 @@ fn native_collection_new_target_kind(
         | NativeCollectionNewTarget::FromSingleArg { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorCallback { kind }
+        | NativeCollectionNewTarget::PriorityQueueComparatorFacade { kind }
         | NativeCollectionNewTarget::PriorityQueueComparator { kind } => kind,
     }
 }

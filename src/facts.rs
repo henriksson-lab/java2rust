@@ -879,21 +879,21 @@ impl<'a> ExternalFactLookupIndex<'a> {
     ) -> bool {
         self.facts.external_api_effect_facts.iter().any(|fact| {
             fact.receiver_type.as_deref().is_some_and(|receiver_type| {
-                external_type_name_directly_matches(receiver_type, type_name)
+                external_type_name_matches(receiver_type, type_name)
                     && external_pack_owns_type(pack, receiver_type)
             })
         }) || self.facts.external_constructor_facts.iter().any(|fact| {
-            external_type_name_directly_matches(&fact.type_name, type_name)
+            external_type_name_matches(&fact.type_name, type_name)
                 && external_pack_owns_type(pack, &fact.type_name)
         }) || self.facts.external_field_facts.iter().any(|fact| {
-            external_type_name_directly_matches(&fact.field.type_name, type_name)
+            external_type_name_matches(&fact.field.type_name, type_name)
                 && external_pack_owns_type(pack, &fact.field.type_name)
         }) || self
             .facts
             .external_crate_api_mapping_facts
             .iter()
             .any(|fact| {
-                external_type_name_directly_matches(&fact.receiver_type, type_name)
+                external_type_name_matches(&fact.receiver_type, type_name)
                     && external_pack_owns_type(pack, &fact.receiver_type)
             })
             || self
@@ -901,7 +901,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
                 .external_crate_type_mapping_facts
                 .iter()
                 .any(|fact| {
-                    external_type_name_directly_matches(&fact.type_name, type_name)
+                    external_type_name_matches(&fact.type_name, type_name)
                         && external_pack_owns_type(pack, &fact.type_name)
                 })
             || self
@@ -909,7 +909,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
                 .external_crate_constructor_mapping_facts
                 .iter()
                 .any(|fact| {
-                    external_type_name_directly_matches(&fact.type_name, type_name)
+                    external_type_name_matches(&fact.type_name, type_name)
                         && (fact
                             .pack_name
                             .as_deref()

@@ -712,6 +712,26 @@ fn emit_stream_lambda_body_with_locals_prec(
                     None,
                 );
             }
+            if matches!(name.as_str(), "newBuilder" | "new_builder")
+                && args.is_empty()
+                && let Expr::Var(receiver_name) = receiver.as_ref()
+                && ctx.env.is_none_or(|env| {
+                    env.local_type(receiver_name).is_none()
+                        && env.field_type(receiver_name).is_none()
+                })
+            {
+                let owner = stream_static_owner_type_name_with_context(receiver_name, ctx);
+                let expr = function_call_projection(
+                    owner_associated_path_projection(&owner, "new_builder"),
+                    Vec::new(),
+                );
+                return parenthesize_stream_expr_if_needed(
+                    stream_lambda_expr(expr, 11),
+                    parent_prec,
+                    right_child,
+                    None,
+                );
+            }
             let args = emit_stream_lambda_call_args_for_receiver_exprs(
                 Some(receiver),
                 name,
@@ -1616,7 +1636,9 @@ fn render_stream_sub_pipeline_expr(
             ctx,
         ),
         iteration,
-        ctx.propagate_java_exceptions,
+        // This expression is returned from an Iterator::flat_map closure, so
+        // the closure must yield an iterator directly rather than `Result<_>`.
+        false,
     );
     let item_is_borrowed = source_is_lambda_param
         && matches!(
@@ -2780,7 +2802,12 @@ fn collect_stream_expr_mutated_locals(
                 collect_stream_expr_mutated_locals(arg, mutated, ctx);
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_stream_expr_mutated_locals(qualifier, mutated, ctx);
+            }
             for arg in args {
                 collect_stream_expr_mutated_locals(arg, mutated, ctx);
             }
@@ -3685,6 +3712,25 @@ mod tests {
             rendered,
             Some("SimpleInterval::new_3(contig, start, end)".to_string())
         );
+    }
+
+    #[test]
+    fn stream_mutated_local_scan_sees_qualified_new_receiver() {
+        let expr = Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(Expr::Unary {
+                op: UnaryOp::PostInc,
+                expr: Box::new(Expr::Var("value".to_string())),
+            })),
+            args: Vec::new(),
+            body: None,
+            resolved: None,
+        };
+        let mut mutated = HashSet::new();
+
+        collect_stream_expr_mutated_locals(&expr, &mut mutated, StreamRenderContext::empty());
+
+        assert_eq!(mutated, HashSet::from(["value".to_string()]));
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use crate::java_ir::{Expr, Member, Stmt};
+use crate::java_ir::{Expr, Member, Modifier, Stmt};
 use crate::rust_ir::{RustExpr, RustStmt};
 
 pub(crate) fn compile_error_stmt(message: &str) -> RustStmt {
@@ -75,6 +75,9 @@ pub enum UnsupportedExpressionLowering {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedMemberLowering {
+    SynchronizedMethod,
+    VolatileField,
+    NativeMethod,
     ParserUnsupported(String),
 }
 
@@ -200,6 +203,15 @@ pub(crate) fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedState
 
 pub(crate) fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemberLowering> {
     match member {
+        Member::Method(method) if method.modifiers.contains(&Modifier::Synchronized) => {
+            Some(UnsupportedMemberLowering::SynchronizedMethod)
+        }
+        Member::Field(field) if field.modifiers.contains(&Modifier::Volatile) => {
+            Some(UnsupportedMemberLowering::VolatileField)
+        }
+        Member::Method(method) if method.modifiers.contains(&Modifier::Native) => {
+            Some(UnsupportedMemberLowering::NativeMethod)
+        }
         Member::Unsupported { reason, .. } => {
             Some(UnsupportedMemberLowering::ParserUnsupported(reason.clone()))
         }
@@ -251,6 +263,16 @@ fn constructor_message(kind: UnsupportedConstructorLowering) -> String {
 
 fn member_message(kind: UnsupportedMemberLowering) -> String {
     match kind {
+        UnsupportedMemberLowering::SynchronizedMethod => {
+            "unsupported Java member: synchronized method requires monitor semantics".to_string()
+        }
+        UnsupportedMemberLowering::VolatileField => {
+            "unsupported Java member: volatile field requires atomic memory-order semantics"
+                .to_string()
+        }
+        UnsupportedMemberLowering::NativeMethod => {
+            "unsupported Java member: native method has no translatable Java body".to_string()
+        }
         UnsupportedMemberLowering::ParserUnsupported(reason) => reason,
     }
 }

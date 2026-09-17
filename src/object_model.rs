@@ -629,6 +629,7 @@ pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequ
             let subtype_target = match field_use {
                 FieldUse::AssignedSubtypeToField { field_type, .. } => Some(field_type),
                 FieldUse::AssignedSubtypeToCallArgument { target_type, .. } => Some(target_type),
+                FieldUse::AssignedSubtypeToReturn { target_type, .. } => Some(target_type),
                 _ => None,
             };
             let Some(subtype_target) = subtype_target else {
@@ -1292,9 +1293,18 @@ fn expr_accesses_instance_field(expr: &Expr, field_names: &HashSet<String>) -> b
                     .iter()
                     .any(|expr| expr_accesses_instance_field(expr, field_names))
         }
-        Expr::New { args, body, .. } => {
-            args.iter()
-                .any(|expr| expr_accesses_instance_field(expr, field_names))
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|expr| expr_accesses_instance_field(expr, field_names))
+                || args
+                    .iter()
+                    .any(|expr| expr_accesses_instance_field(expr, field_names))
                 || body.as_ref().is_some_and(|members| {
                     members.iter().any(|member| match member {
                         Member::Method(method) => method
@@ -1824,8 +1834,10 @@ fn runtime_case_split_type_name(type_name: &str) -> String {
 }
 
 fn parsed_source_erased_fallback_should_remain_rejected(strategy: &ObjectStrategyPlan) -> bool {
-    matches!(strategy.strategy, ObjectRepresentation::ConcreteStruct)
-        && strategy.has_provenance(FactProvenance::ParsedSource)
+    matches!(
+        strategy.strategy,
+        ObjectRepresentation::ConcreteStruct | ObjectRepresentation::DynTrait { .. }
+    ) && strategy.has_provenance(FactProvenance::ParsedSource)
 }
 
 fn source_runtime_case_split_needs_erased_carrier(strategy: &ObjectStrategyPlan) -> bool {
@@ -2497,6 +2509,27 @@ mod tests {
     use super::*;
     use crate::binding_id::{BindingId, BindingKind};
     use crate::usage::{MethodUsageFacts, UsageMethodKey};
+
+    fn qualified_new_expr(qualifier: Expr, args: Vec<Expr>) -> Expr {
+        Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(qualifier)),
+            args,
+            body: None,
+            resolved: None,
+        }
+    }
+
+    #[test]
+    fn instance_field_access_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(
+            Expr::FieldAccess(Box::new(Expr::This), "state".to_string()),
+            Vec::new(),
+        );
+        let field_names = HashSet::from(["state".to_string()]);
+
+        assert!(expr_accesses_instance_field(&expr, &field_names));
+    }
 
     #[test]
     fn dispatch_requirements_include_shadowed_binding_id_facts() {

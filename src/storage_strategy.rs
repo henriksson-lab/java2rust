@@ -10,9 +10,9 @@
 //! This module started as the measurement layer: compute the decision and report
 //! where lowering disagrees with it, turning "we do not know how big 0002b is"
 //! into a number. It now also supplies the storage placement consumed by slot
-//! rendering and handle wrapping for the implemented `SharedImmutable` tier.
-//! `SharedLocal`/`SharedSync` remain deliberately unimplemented until the
-//! `RefCell`/`Mutex` receiver and reentrancy rules land.
+//! rendering and handle wrapping for the implemented `SharedImmutable` and
+//! single-threaded `SharedLocal` tiers. `SharedSync` remains deliberately
+//! unimplemented until the `Mutex` receiver and reentrancy rules land.
 //!
 //! ## Per type, not per allocation site
 //!
@@ -27,7 +27,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::FactSet;
 use crate::java_ir::{
-    Block, Expr, JavaType, Member, Modifier, Program, Stmt, TypeDecl, TypeKind, WildcardBound,
+    Block, Expr, JavaType, LambdaBody, Member, Modifier, Program, Stmt, SwitchLabel, TypeDecl,
+    TypeKind, WildcardBound,
 };
 use crate::usage::{BindingUse, CallArgumentBoundary, MethodUsageFacts, UsageFacts};
 
@@ -1020,25 +1021,95 @@ fn source_hierarchy_family_names(
 }
 
 fn source_subtype_reaches(program: &Program, subtype: &str, target: &str) -> bool {
-    let mut current = source_type_decl(program, subtype).and_then(|ty| ty.extends.as_deref());
+    let mut current_owner = subtype.to_string();
+    let mut current = source_type_decl(program, subtype).and_then(|ty| ty.extends.clone());
     for _ in 0..64 {
         let Some(super_name) = current else {
             return false;
         };
-        if super_name == target || simple_name(super_name) == simple_name(target) {
+        let Some(super_ty) =
+            source_type_decl_for_owner_context(program, &current_owner, &super_name)
+        else {
+            return false;
+        };
+        if super_ty.name == target {
             return true;
         }
-        current = source_type_decl(program, super_name).and_then(|ty| ty.extends.as_deref());
+        current_owner = super_ty.name.clone();
+        current = super_ty.extends.clone();
     }
     false
 }
 
 fn source_type_decl<'a>(program: &'a Program, name: &str) -> Option<&'a TypeDecl> {
-    program
+    let types = program
         .types
         .iter()
         .flat_map(source_type_decl_and_nested)
-        .find(|ty| ty.name == name || simple_name(&ty.name) == simple_name(name))
+        .collect::<Vec<_>>();
+    unique_type_decl_match(
+        &types
+            .iter()
+            .copied()
+            .filter(|ty| ty.name == name)
+            .collect::<Vec<_>>(),
+    )
+    .or_else(|| {
+        unique_type_decl_match(
+            &types
+                .iter()
+                .copied()
+                .filter(|ty| simple_name(&ty.name) == simple_name(name))
+                .collect::<Vec<_>>(),
+        )
+    })
+}
+
+fn source_type_decl_for_owner_context<'a>(
+    program: &'a Program,
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    let types = program
+        .types
+        .iter()
+        .flat_map(source_type_decl_and_nested)
+        .collect::<Vec<_>>();
+    unique_type_decl_match(
+        &types
+            .iter()
+            .copied()
+            .filter(|ty| ty.name == type_name)
+            .collect::<Vec<_>>(),
+    )
+    .or_else(|| {
+        unique_type_decl_match(
+            &types
+                .iter()
+                .copied()
+                .filter(|ty| {
+                    simple_name(&ty.name) == simple_name(type_name)
+                        && package_name(&ty.name) == package_name(owner_name)
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .or_else(|| {
+        unique_type_decl_match(
+            &types
+                .iter()
+                .copied()
+                .filter(|ty| simple_name(&ty.name) == simple_name(type_name))
+                .collect::<Vec<_>>(),
+        )
+    })
+}
+
+fn unique_type_decl_match<'a>(matches: &[&'a TypeDecl]) -> Option<&'a TypeDecl> {
+    match matches {
+        [ty] => Some(*ty),
+        _ => None,
+    }
 }
 
 fn source_type_decl_and_nested(ty: &TypeDecl) -> Vec<&TypeDecl> {
@@ -1093,8 +1164,20 @@ fn collect_stmt_facts(
                 facts.locally_aliased = true;
             }
             locals.insert(name.clone(), ty.clone());
+            if let Some(initializer) = initializer {
+                collect_anonymous_body_facts_from_expr(
+                    initializer,
+                    owner,
+                    program,
+                    declared,
+                    locals,
+                    into,
+                );
+            }
         }
         Stmt::Assign { target, value } => {
+            collect_anonymous_body_facts_from_expr(target, owner, program, declared, locals, into);
+            collect_anonymous_body_facts_from_expr(value, owner, program, declared, locals, into);
             if expr_is_bare_handle(value) {
                 match target {
                     // `this.f = x` stores an alias *of `f`'s declared type*.
@@ -1117,10 +1200,29 @@ fn collect_stmt_facts(
                             facts.escape = facts.escape.max(Escape::Stored);
                         }
                     }
-                    // A qualified field or an array element: the element type is
-                    // genuinely not available here, so the conservative charge
-                    // on the owner stands.
-                    Expr::FieldAccess(..) | Expr::ArrayAccess(..) => {
+                    // For `other.f = value`, the receiver's local type lets us
+                    // charge the field's declared type.  In particular,
+                    // `other.intField = value` cannot retain `value`; charging
+                    // the owner here turned ordinary copies into shared
+                    // storage merely because the source expression was a bare
+                    // handle.
+                    Expr::FieldAccess(receiver, field_name) => {
+                        let receiver_ty = handle_type_name(receiver, owner, declared, locals)
+                            .and_then(|name| source_type_decl(program, &name));
+                        if let Some(receiver_ty) = receiver_ty {
+                            for name in field_storage_type_names(receiver_ty, field_name, declared)
+                            {
+                                if let Some(facts) = into.get_mut(&name) {
+                                    facts.escape = facts.escape.max(Escape::Stored);
+                                }
+                            }
+                        } else if let Some(facts) = into.get_mut(&owner.name) {
+                            facts.escape = facts.escape.max(Escape::Stored);
+                        }
+                    }
+                    // An array element's type is not available in this local
+                    // environment, so retain the conservative owner charge.
+                    Expr::ArrayAccess(..) => {
                         if let Some(facts) = into.get_mut(&owner.name) {
                             facts.escape = facts.escape.max(Escape::Stored);
                         }
@@ -1324,7 +1426,166 @@ fn collect_stmt_facts(
                 }
             }
         }
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
+        }
         _ => {}
+    }
+}
+
+/// Anonymous class bodies execute after their enclosing method has constructed
+/// aliases. Their field writes must therefore contribute mutation facts for
+/// captured handles; otherwise the outer type is incorrectly planned as
+/// `Rc<T>` instead of `Rc<RefCell<T>>`.
+fn collect_anonymous_body_facts_from_expr(
+    expr: &Expr,
+    owner: &TypeDecl,
+    program: &Program,
+    declared: &BTreeSet<String>,
+    locals: &BTreeMap<String, JavaType>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    match expr {
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            collect_anonymous_body_facts_from_expr(receiver, owner, program, declared, locals, into)
+        }
+        Expr::ArrayAccess(array, index) => {
+            collect_anonymous_body_facts_from_expr(array, owner, program, declared, locals, into);
+            collect_anonymous_body_facts_from_expr(index, owner, program, declared, locals, into);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                collect_anonymous_body_facts_from_expr(
+                    dimension, owner, program, declared, locals, into,
+                );
+            }
+            if let Some(initializer) = initializer {
+                for item in initializer {
+                    collect_anonymous_body_facts_from_expr(
+                        item, owner, program, declared, locals, into,
+                    );
+                }
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for item in items {
+                collect_anonymous_body_facts_from_expr(
+                    item, owner, program, declared, locals, into,
+                );
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            collect_anonymous_body_facts_from_expr(left, owner, program, declared, locals, into);
+            collect_anonymous_body_facts_from_expr(right, owner, program, declared, locals, into);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            for child in [condition, then_expr, else_expr] {
+                collect_anonymous_body_facts_from_expr(
+                    child, owner, program, declared, locals, into,
+                );
+            }
+        }
+        Expr::Switch { selector, cases } => {
+            collect_anonymous_body_facts_from_expr(
+                selector, owner, program, declared, locals, into,
+            );
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(label) = label {
+                        collect_anonymous_body_facts_from_expr(
+                            label, owner, program, declared, locals, into,
+                        );
+                    }
+                }
+                collect_anonymous_body_facts_from_expr(
+                    &case.value,
+                    owner,
+                    program,
+                    declared,
+                    locals,
+                    into,
+                );
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                collect_anonymous_body_facts_from_expr(
+                    receiver, owner, program, declared, locals, into,
+                );
+            }
+            for arg in args {
+                collect_anonymous_body_facts_from_expr(arg, owner, program, declared, locals, into);
+            }
+        }
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_anonymous_body_facts_from_expr(
+                    qualifier, owner, program, declared, locals, into,
+                );
+            }
+            for arg in args {
+                collect_anonymous_body_facts_from_expr(arg, owner, program, declared, locals, into);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    if let Member::Method(method) = member
+                        && let Some(body) = &method.body
+                    {
+                        let mut closure_locals = locals.clone();
+                        collect_block_facts(
+                            body,
+                            owner,
+                            program,
+                            declared,
+                            false,
+                            &mut closure_locals,
+                            into,
+                        );
+                    }
+                }
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => {
+                collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into)
+            }
+            LambdaBody::Block(block) => {
+                let mut closure_locals = locals.clone();
+                collect_block_facts(
+                    block,
+                    owner,
+                    program,
+                    declared,
+                    false,
+                    &mut closure_locals,
+                    into,
+                );
+            }
+        },
+        Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
     }
 }
 
@@ -1678,6 +1939,37 @@ mod tests {
         );
     }
 
+    #[test]
+    fn source_subtype_reachability_prefers_same_package_super_edge() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                empty_class("a.Base"),
+                empty_class("b.Base"),
+                TypeDecl {
+                    kind: TypeKind::Class,
+                    name: "b.Child".to_string(),
+                    type_params: Vec::new(),
+                    type_param_bounds: Vec::new(),
+                    modifiers: Vec::new(),
+                    extends: Some("Base".to_string()),
+                    implements: Vec::new(),
+                    permits: Vec::new(),
+                    members: Vec::new(),
+                    static_init_blocks: Vec::new(),
+                    span: Span::default(),
+                },
+            ],
+        };
+
+        assert!(source_subtype_reaches(&program, "b.Child", "b.Base"));
+        assert!(
+            !source_subtype_reaches(&program, "b.Child", "a.Base"),
+            "bare super edge must not reach the first same-simple package peer"
+        );
+    }
+
     fn empty_class(name: &str) -> TypeDecl {
         TypeDecl {
             kind: TypeKind::Class,
@@ -1718,6 +2010,31 @@ mod constructor_mutation_tests {
             .facts(type_name)
             .unwrap_or_else(|| panic!("missing storage facts for {type_name}"))
             .clone()
+    }
+
+    #[test]
+    fn source_null_assertion_helper_does_not_make_argument_escape() {
+        let facts = facts_of(
+            r#"
+class NullCheckHelper {
+    static Object checkNotNull(Object value) {
+        if (value == null) throw new RuntimeException();
+        return value;
+    }
+}
+class CopyTarget {
+    int count;
+    static void copy(CopyTarget source, CopyTarget dest) {
+        NullCheckHelper.checkNotNull(source);
+        NullCheckHelper.checkNotNull(dest);
+        dest.count = source.count;
+    }
+}
+"#,
+            "CopyTarget",
+        );
+        assert_eq!(facts.escape(), Escape::LocalOnly, "{facts:?}");
+        assert!(!facts.locally_aliased(), "{facts:?}");
     }
 
     /// A constructor writing its own fields is **not** mutation in this

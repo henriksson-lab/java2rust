@@ -80,25 +80,7 @@ fn record_element_type(ty: &JavaType, names: &mut BTreeSet<String>) {
 
 fn collect_in_type(ty: &TypeDecl, names: &mut BTreeSet<String>) {
     for member in &ty.members {
-        match member {
-            Member::Method(method) => {
-                if let Some(body) = &method.body {
-                    collect_in_block(body, names);
-                }
-            }
-            Member::Constructor(constructor) => {
-                if let Some(body) = &constructor.body {
-                    collect_in_block(body, names);
-                }
-            }
-            Member::Field(field) => {
-                if let Some(initializer) = &field.initializer {
-                    collect_in_expr(initializer, names);
-                }
-            }
-            Member::Type(nested) => collect_in_type(nested, names),
-            Member::Unsupported { .. } => {}
-        }
+        collect_in_member(member, names);
     }
     for block in &ty.static_init_blocks {
         collect_in_block(&block.block, names);
@@ -263,9 +245,22 @@ fn collect_in_expr(expr: &Expr, names: &mut BTreeSet<String>) {
                 collect_in_expr(arg, names);
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_in_expr(qualifier, names);
+            }
             for arg in args {
                 collect_in_expr(arg, names);
+            }
+            if let Some(members) = body {
+                for member in members {
+                    collect_in_member(member, names);
+                }
             }
         }
         Expr::Lambda { body, .. } => match body {
@@ -280,6 +275,28 @@ fn collect_in_expr(expr: &Expr, names: &mut BTreeSet<String>) {
         | Expr::ClassLiteral(_)
         | Expr::Unsupported { .. }
         | Expr::Raw(_) => {}
+    }
+}
+
+fn collect_in_member(member: &Member, names: &mut BTreeSet<String>) {
+    match member {
+        Member::Method(method) => {
+            if let Some(body) = &method.body {
+                collect_in_block(body, names);
+            }
+        }
+        Member::Constructor(constructor) => {
+            if let Some(body) = &constructor.body {
+                collect_in_block(body, names);
+            }
+        }
+        Member::Field(field) => {
+            if let Some(initializer) = &field.initializer {
+                collect_in_expr(initializer, names);
+            }
+        }
+        Member::Type(nested) => collect_in_type(nested, names),
+        Member::Unsupported { .. } => {}
     }
 }
 
@@ -327,6 +344,39 @@ mod tests {
     fn a_creation_nested_in_an_expression_is_found() {
         let names = names_for(
             "class Holder { static class Node {} void m() { take(new Node[3]); } void take(Node[] n) {} }",
+        );
+        assert!(names.contains("Node"), "{names:?}");
+    }
+
+    #[test]
+    fn a_creation_nested_in_qualified_new_receiver_is_found() {
+        let names = names_for(
+            r#"
+class Holder {
+    static class Node {}
+    class Inner {}
+    Holder keep(Node[] n) { return this; }
+    void m() { keep(new Node[3]).new Inner(); }
+}
+"#,
+        );
+        assert!(names.contains("Node"), "{names:?}");
+    }
+
+    #[test]
+    fn a_creation_nested_in_anonymous_class_body_is_found() {
+        let names = names_for(
+            r#"
+class Holder {
+    static class Node {}
+    interface Task { void run(); }
+    void m() {
+        Task task = new Task() {
+            public void run() { Node[] nodes = new Node[3]; }
+        };
+    }
+}
+"#,
         );
         assert!(names.contains("Node"), "{names:?}");
     }

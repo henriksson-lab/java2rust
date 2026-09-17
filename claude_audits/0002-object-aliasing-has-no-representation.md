@@ -10,6 +10,29 @@ The remaining mutable-sharing work is broader anonymous object lowering,
 shared receivers/ordinary inner construction, and the `SharedSync` tier.
 Kind: missing representation in the object model
 
+Codex follow-up 2026-09-17 synchronized-erasure refusal: Java
+`synchronized (monitor) { ... }` statements and `synchronized` methods are no
+longer lowered as ordinary blocks/methods. Both forms now emit an explicit
+unsupported diagnostic and generated `compile_error!` until the reentrant
+SharedSync monitor representation is implemented. Guards:
+`idiom_gaps::{synchronized_statement_is_loud_until_monitor_semantics_exist,
+synchronized_method_is_loud_until_monitor_semantics_exist}`. The same pass
+also refuses `volatile` fields until Java atomic memory-order semantics are
+implemented; guard:
+`idiom_gaps::volatile_field_is_loud_until_atomic_memory_order_semantics_exist`.
+
+Codex follow-up 2026-09-15 direct SharedLocal receiver companion pass:
+implemented mutable receiver companions now get emitted even when the ordinary
+lowered body is textually identical, because call sites with only an
+`Rc<RefCell<T>>` handle still need a legal entry point. The identical-body
+case delegates through one `borrow_mut().method(...)` call, avoiding the
+previous `RefCell already borrowed` runtime panic from repeated
+`__java_self.borrow_mut()` projections inside the generated companion body.
+Guards:
+`differential::aliasing_shared_local_fixtures_match_java_output`,
+`differential::qualified_inner_capture_fixtures_match_java_output`, and the
+adjacent `differential::super_call_fixtures_match_java_output` regression.
+
 ## Symptom
 
 Java reference assignment that requires mutable sharing originally had no
@@ -491,3 +514,10 @@ implement a zero-argument void `Action` supplied by co-translated context while
 capturing a SharedLocal handle; that narrow closure path lowers correctly and no
 longer receives a false `unsupported_anonymous_class` diagnostic. Regression:
 `fixtures::context_anonymous_action_with_sharedlocal_capture_is_not_reported_unsupported`.
+
+Codex follow-up 2026-09-17 anonymous mutable-capture storage pass: the storage
+lattice now descends into anonymous bodies and records writes through captured
+outer handles. The context `Action` fixture therefore plans `Node` as
+`Rc<RefCell<Node>>`, rather than `Rc<Node>`, and its closure mutation is both
+compilable and observable through the alias (`"23"`). The same fixture is now
+an execution guard, not only a generated-crate compile check.

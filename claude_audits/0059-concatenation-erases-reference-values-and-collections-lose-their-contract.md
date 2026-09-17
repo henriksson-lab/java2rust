@@ -11,6 +11,15 @@ downcast evidence, platform support, or an explicit external display-capability
 fact is available.
 Kind: behavioural (differential), JDK facades / collections / enums.
 
+Codex follow-up 2026-09-15 `Queue.poll()` nullable local pass:
+`Queue<T>.poll()` now reports an optional element-borrow return shape instead
+of an erased `Optional<T>` Java value. Assigning the result to a `String` local
+therefore keeps Java's nullable-reference carrier (`Option<String>`) and
+displays empty polls as `null` instead of printing `Optional[...]`. Guards:
+`tests/differential/QueuePollNull.java` through
+`differential::queue_poll_fixture_matches_java_output`, plus the focused
+`idiom_gaps::queue_poll*` generated-crate checks.
+
 Codex follow-up 2026-09-14 external typed collection return pass:
 facade support methods with weak placeholder returns now upgrade from builtin
 external API return facts before they are stored. `VCFUtils.smartMergeHeaders`
@@ -52,6 +61,84 @@ preserve sorted iteration order. Differential fixture:
 `tests/differential/ErasedTreeSetDisplay.java` in the focused
 `erased_display_fixtures_match_java_output` loop. This is another concrete
 known-carrier arm; the unknown-erased fallback remains intentionally loud.
+
+Codex follow-up 2026-09-15 boolean set carrier pass:
+erased `TreeSet<Boolean>` and `LinkedHashSet<Boolean>` values now recover their
+known carriers instead of reaching the unknown-erased fallback. The sorted-set
+path downcasts `BTreeSet<bool>` and the insertion-ordered set path downcasts
+`JavaLinkedHashSet<bool>`, preserving Java display for both concatenation and
+direct `Object.toString()`. Differential fixtures:
+`tests/differential/ErasedTreeSetBooleanDisplay.java` and
+`tests/differential/ErasedLinkedHashSetBooleanDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-15 boolean map carrier pass:
+erased `TreeMap<String, Boolean>` and `LinkedHashMap<String, Boolean>` values
+now recover their known carriers instead of reaching the unknown-erased
+fallback. The sorted-map path downcasts `BTreeMap<String, bool>` and the
+insertion-ordered map path downcasts `JavaLinkedHashMap<String, bool>`,
+preserving Java map display order for both concatenation and direct
+`Object.toString()`. Differential fixtures:
+`tests/differential/ErasedTreeMapBooleanDisplay.java` and
+`tests/differential/ErasedLinkedHashMapBooleanDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-15 integer-key map carrier pass:
+erased `TreeMap<Integer, String>` and `LinkedHashMap<Integer, String>` values
+now recover their known carriers instead of reaching the unknown-erased
+fallback. The sorted-map path downcasts `BTreeMap<i32, String>` and the
+insertion-ordered map path downcasts `JavaLinkedHashMap<i32, String>`,
+preserving Java map display order for both concatenation and direct
+`Object.toString()`. Differential fixtures:
+`tests/differential/ErasedTreeMapIntegerKeyDisplay.java` and
+`tests/differential/ErasedLinkedHashMapIntegerKeyDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-15 floating map value carrier pass:
+erased `TreeMap<String, Double>` and `LinkedHashMap<String, Double>` values now
+recover their known carriers instead of reaching the unknown-erased fallback.
+The sorted-map path downcasts `BTreeMap<String, f64>` and the insertion-ordered
+map path downcasts `JavaLinkedHashMap<String, f64>`, preserving Java floating
+display and map order for both concatenation and direct `Object.toString()`.
+Differential fixtures: `tests/differential/ErasedTreeMapDoubleDisplay.java`
+and `tests/differential/ErasedLinkedHashMapDoubleDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-15 erased `PriorityQueue<Float>` display pass:
+the priority-queue erased-display table already covered `Double` with
+`JavaPriorityQueue<f64>`, but missed the `Float` carrier. Erased
+`PriorityQueue<Float>` now downcasts `JavaPriorityQueue<f32>` and reuses the
+modeled queue display path, preserving Java floating display and natural queue
+order for concatenation and direct `Object.toString()`. Differential fixture:
+`tests/differential/ErasedPriorityQueueFloatDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-15 floating ordered collection carrier pass:
+erased `LinkedHashSet<Double>`, `ArrayBlockingQueue<Float>`, and
+`ArrayBlockingQueue<Double>` values now recover their known carriers instead of
+reaching the unknown-erased fallback. The insertion-ordered set path downcasts
+`JavaLinkedHashSet<f64>`, and the bounded-queue path downcasts
+`JavaArrayBlockingQueue<f32>` / `JavaArrayBlockingQueue<f64>`, reusing the
+modeled Java display implementations for both concatenation and direct
+`Object.toString()`. Differential fixtures:
+`tests/differential/ErasedLinkedHashSetDoubleDisplay.java`,
+`tests/differential/ErasedArrayBlockingQueueFloatDisplay.java`, and
+`tests/differential/ErasedArrayBlockingQueueDoubleDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
+
+Codex follow-up 2026-09-15 erased collection table generation:
+the erased collection downcast arms are now generated from explicit
+carrier/type lists instead of hand-written string blocks. This keeps the
+known-carrier policy narrow while eliminating the repeated omission pattern
+across adjacent primitive carriers. The generated table now covers supported
+ordered scalar carriers such as `JavaLinkedHashSet<f32/i64>`,
+`JavaArrayBlockingQueue<i64>`, and `JavaPriorityQueue<i64>`. Differential
+fixtures:
+`tests/differential/ErasedLinkedHashSetFloatDisplay.java`,
+`tests/differential/ErasedLinkedHashSetLongDisplay.java`,
+`tests/differential/ErasedArrayBlockingQueueLongDisplay.java`, and
+`tests/differential/ErasedPriorityQueueLongDisplay.java` in the focused
+`erased_display_fixtures_match_java_output` loop.
 
 Codex follow-up 2026-09-14 erased `TreeMap` display pass:
 the sorted-map carrier had promoted order/navigation coverage but no erased
@@ -101,6 +188,19 @@ the known-good direct-object and modeled-external display paths, while
 still pins the unknown-erased case as intentionally loud. No checked-in narrow
 table/facade/carrier row remains for this audit without adding a new concrete
 fixture; the live work is the display-capability model described above.
+
+Codex follow-up 2026-09-15 platform erased-display pass:
+`Object value = new StringTokenizer("a b"); "x" + value` and
+`Object value = new ZipEntry("folder/file.txt"); "x" + value` now use the
+known-platform erased-display route instead of the unknown-erased fallback. The
+`StringTokenizer` shim emits a Java object-style display prefix, and `ZipEntry`
+displays its modeled entry name. Differential fixtures:
+`tests/differential/ErasedStringTokenizerDisplay.java` and
+`tests/differential/ErasedZipEntryDisplay.java`.
+`java.util.jar.JarEntry` now follows the same modeled entry-name path for direct
+`getName()`/`isDirectory()` and erased string concatenation/direct
+`Object.toString()`, covered by
+`tests/differential/ErasedJarEntryDisplay.java`.
 
 Follow-up 2026-09-09 compile-harness cleanup: three compile-only generated-crate
 stubs for `java_erased_object_to_string` now panic loudly instead of returning
@@ -233,8 +333,17 @@ Differential fixtures:
 `tests/differential/PriorityQueueComparatorFactoryConstructor.java` and
 `tests/differential/PriorityQueueComparatorFactoryLocalConstructor.java`
 (`3,2,1`).
-Other arbitrary comparator interface slots remain loud because they still lack
-a callable comparator facade.
+Codex follow-up 2026-09-15 functional-interface facade pass: stored and
+returned lambdas targeting functional-interface slots now lower into
+callback-backed facade carriers instead of returning bare Rust closures. This
+generalizes the `Runnable::from_fn` carrier to the existing functional-interface
+shape table; `Consumer<T>` and `Supplier<T>` returned from methods now compile
+and invoke their stored callbacks. Guards:
+`idiom_gaps::returned_consumer_lambda_uses_callback_facade_carrier`,
+`idiom_gaps::returned_supplier_lambda_uses_callback_facade_carrier`, and the
+existing `callback_called_only_inside_nested_lambda_is_not_nonescaping`.
+Arbitrary opaque comparator objects are still separate from lambdas and remain
+limited by their concrete modeling evidence.
 
 Codex follow-up 2026-09-13 inline anonymous `PriorityQueue` comparator pass:
 the exact constructor shape
@@ -2297,3 +2406,57 @@ payload no longer exposes public mutable fields; slot/render/signature/stream
 callers use accessors, and `EffectiveFacts` remains the central writer through
 crate-local setters. Guard: `slot_shape_design::slot_shape_design_guardrails`;
 compile guard: `cargo check --tests`.
+
+Follow-up 2026-09-15 stale fixture note cleanup: the checked-in differential
+fixtures `EnumValuesElementIntoObject.java` and
+`BorrowedElementIntoPrimitiveLocal.java` were still labelled "Known gap" even
+though both are registered under
+`borrowed_element_discharge_fixtures_match_java_output` and pass against the
+Java oracle. The comments now describe them as promoted regressions; no
+translator code changed. Focused guard:
+`cargo test --test differential borrowed_element_discharge_fixtures_match_java_output -- --nocapture`.
+
+Codex follow-up 2026-09-15 erased entry display pass: the erased-object display
+runtime already handled decomposed `Map.Entry` tuple carriers for
+`(String, String)` and `(String, Integer)`. The same bounded carrier table now
+covers `(String, Boolean)`; arbitrary opaque entries without extractable
+key/value still need the real entry-value model described above. Promoted
+differential fixture: `tests/differential/ErasedMapEntryBooleanDisplay.java`;
+guard: `cargo test --test differential erased_display_fixtures_match_java_output`.
+
+Codex follow-up 2026-09-15 priority-queue comparator constructor pass: the
+functional facade carrier for `Comparator<T>` already emits `new()`, `from_fn`,
+and `compare`. The static-constant/constructor support path was also emitting a
+fallback zero-arg `new()` when a fixture called `new Comparator<...>()`, which
+made generated Rust define duplicate inherent `Comparator::new` methods. The
+constructor fallback now skips functional closure carriers and leaves their
+owned constructor on the carrier implementation. Guard:
+`cargo test --test differential priority_queue_fixtures_match_java_output -- --nocapture`.
+
+Codex follow-up 2026-09-15 erased entry floating-value pass: the bounded
+erased-object display carrier table for decomposed `Map.Entry` tuples now also
+handles `(String, Long)`, `(String, Float)`, and `(String, Double)`, using the
+Java float/double spelling helpers for floating values. This closes the observed
+`AbstractMap.SimpleEntry<String, Double>` runtime panic while keeping arbitrary
+opaque entries loud until they have recoverable key/value evidence. Promoted
+differential fixture: `tests/differential/ErasedMapEntryDoubleDisplay.java`;
+guard: `cargo test --test differential erased_display_fixtures_match_java_output`.
+
+Codex follow-up 2026-09-16 erased `HashMap<Integer, String>` display pass:
+the plain `HashMap` erased-display table now includes the integer-key/string
+value carrier already covered for ordered map carriers. The fixture uses one
+entry so the Java/Rust oracle does not depend on hash iteration order. Promoted
+differential fixture: `tests/differential/ErasedHashMapIntegerKeyDisplay.java`;
+focused guard:
+`cargo test --test differential erased_hash_map_integer_key_display_matches_java_output -- --nocapture`.
+
+Codex follow-up 2026-09-16 erased `StringBuilder`/`StringBuffer.toString()`
+pass: direct `toString()` calls on nullable erased `Object` carriers now unwrap
+the nullable receiver by shared reference and route the present erased value
+through `java_erased_object_to_string`, instead of applying erased-object clone
+recovery to the borrowed `Box<dyn Any>`. This fixes the generated
+`&Box<dyn Any>.map(...)` compile error for `Object builder = new
+StringBuilder(...); builder.toString()` while preserving Java's null-receiver
+failure for `toString()`. Focused guard:
+`cargo test --test differential erased_string_builder_display_matches_java_output -- --nocapture`;
+the broader `erased_display_fixtures_match_java_output` oracle now passes too.

@@ -1548,6 +1548,38 @@ fn optional_element_borrow_display_projects_the_option_carrier() {
 }
 
 #[test]
+fn optional_element_borrow_nullable_string_display_flattens_nested_nulls() {
+    let option_shape =
+        RustSlotShape::conservative(optional_java_type(optional_java_type(JavaType::String)));
+    let mut element_shape = RustSlotShape::conservative(optional_java_type(JavaType::String));
+    element_shape.ownership = OwnershipShape::SharedBorrow;
+    let actual = LoweredType::OptionalElementBorrow {
+        option_shape: Box::new(option_shape),
+        element_shape: Box::new(element_shape),
+        recovery: None,
+    };
+    let plan =
+        plan_lowered_slot_conversion(&actual, Slot::StringConcatSegment, &FactSet::default());
+
+    let SlotConversionPlan::Syntax(syntax_plan) = plan.conversion() else {
+        panic!("expected syntax conversion");
+    };
+    assert_eq!(
+        syntax_plan.policy(),
+        &SyntaxSlotCoercionPolicy::OptionalBorrowedOptionalStringToJavaDisplayString
+    );
+
+    let rendered = emit_expr(&apply_coercions(
+        RustExpr::Var("value".to_string()),
+        &[Coercion::OptionalBorrowedOptionalStringToJavaDisplayString],
+    ));
+    assert_eq!(
+        rendered,
+        "value.and_then(|value| value.as_ref()).as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\")"
+    );
+}
+
+#[test]
 fn optional_owned_recovery_capability_follows_element_capability() {
     let facts = FactSet::default();
     let optional_string = optional_java_type(JavaType::String);
@@ -3044,7 +3076,7 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
     assert_eq!(optional_uri_syntax.slot(), &Slot::DisplaySegment);
     assert_eq!(
         optional_uri_syntax.policy(),
-        &SyntaxSlotCoercionPolicy::OptionalToJavaDisplayValue
+        &SyntaxSlotCoercionPolicy::OptionalToDisplayValue
     );
     assert_eq!(
         apply_slot_conversion_plan(
@@ -3072,7 +3104,7 @@ fn optional_platform_facade_display_segments_use_display_value_policy() {
                     }],
                     body: RustClosureBody::Expr(Box::new(RustExpr::MethodCall {
                         receiver: Box::new(RustExpr::Var("value".to_string())),
-                        method: "java_arrays_deep_to_string".to_string(),
+                        method: "to_string".to_string(),
                         args: Vec::new(),
                     })),
                 }],
@@ -3137,7 +3169,7 @@ fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
     assert_eq!(borrowed_display_syntax.slot(), &Slot::DisplaySegment);
     assert_eq!(
         borrowed_display_syntax.policy(),
-        &SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+        &SyntaxSlotCoercionPolicy::OptionalBorrowedToDisplayValue
     );
     let borrowed_string_concat_plan = plan_lowered_slot_conversion(
         &LoweredType::optional_element_borrow_shape(RustSlotShape::conservative(JavaType::Named {
@@ -3153,7 +3185,7 @@ fn optional_element_borrow_display_segments_use_lowered_slot_policy() {
     };
     assert_eq!(
         borrowed_string_concat_syntax.policy(),
-        &SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+        &SyntaxSlotCoercionPolicy::OptionalBorrowedToDisplayValue
     );
 }
 
@@ -4013,6 +4045,28 @@ fn instanceof_allows_reifiable_raw_list_runtime_target() {
         wildcard_check,
         InstanceOfCheck::ErasedObjectType {
             target_type: "Vec<Box<dyn std::any::Any>>".to_string(),
+        }
+    );
+}
+
+#[test]
+fn instanceof_allows_erased_object_array_runtime_target() {
+    let mut actual = RustSlotShape::conservative(JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    });
+    actual.dispatch = DispatchShape::ErasedObject;
+    let object_array = RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::Named {
+        name: "Object".to_string(),
+        args: Vec::new(),
+    })));
+
+    let check = plan_instanceof_check_with_facts(&actual, &object_array, &FactSet::default());
+
+    assert_eq!(
+        check,
+        InstanceOfCheck::ErasedObjectType {
+            target_type: "Vec<Option<Box<dyn std::any::Any>>>".to_string(),
         }
     );
 }

@@ -23,6 +23,19 @@ STATIC_METHOD_CALL_RE_TEMPLATE = r"\b{}\s*::\s*{}\s*(?:<|\()"
 INSTANCE_METHOD_CALL_RE_TEMPLATE = r"\.\s*{}\s*(?:<|\()"
 
 
+def impl_target_name(raw_target: str) -> str:
+    """Return the declared type name from an impl target.
+
+    `impl Trait for Comparator<T>` and `impl Trait for Comparator` have the
+    same facade owner.  Keeping the generic spelling here caused the former to
+    escape shared-support removal and emit one conflicting impl per module.
+    """
+    target = raw_target.strip()
+    target = target.removeprefix("&mut ").removeprefix("&")
+    match = re.match(r"(?:dyn\s+)?([A-Za-z_][A-Za-z0-9_]*)", target)
+    return match.group(1) if match else target
+
+
 def is_char_literal_start(line: str, index: int) -> bool:
     next_index = index + 1
     if next_index >= len(line):
@@ -189,7 +202,7 @@ def prelude_from_impls(path: Path) -> list[tuple[str, str]]:
                 from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
                 if from_match:
                     from_name = from_match.group(1)
-                    to_name = trait_match.group(2)
+                    to_name = impl_target_name(trait_match.group(2))
                     if not (
                         source_owned_nested_type_name(source_type, from_name)
                         or source_owned_nested_type_name(source_type, to_name)
@@ -215,7 +228,7 @@ def prelude_trait_impls(path: Path) -> list[tuple[str, str]]:
                 declared_traits.add(trait_decl_match.group(1))
             trait_match = TRAIT_IMPL_RE.match(line)
             if trait_match and trait_match.group(1).strip() in declared_traits:
-                impls.append((trait_match.group(1).strip(), trait_match.group(2)))
+                impls.append((trait_match.group(1).strip(), impl_target_name(trait_match.group(2))))
         depth += brace_delta(line)
     return impls
 
@@ -355,12 +368,14 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
 
             trait_match = TRAIT_IMPL_RE.match(line)
             if trait_match and (
-                trait_match.group(2) in selected or trait_match.group(1).strip() in selected
+                impl_target_name(trait_match.group(2)) in selected
+                or trait_match.group(1).strip() in selected
             ):
+                target_name = impl_target_name(trait_match.group(2))
                 from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
                 if from_match and (
                     source_owned_nested_type_name(source_type, from_match.group(1))
-                    or source_owned_nested_type_name(source_type, trait_match.group(2))
+                    or source_owned_nested_type_name(source_type, target_name)
                 ):
                     depth += brace_delta(line)
                     index += 1
@@ -369,7 +384,7 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
                 items.append(
                     {
                         "kind": "trait_impl",
-                        "name": trait_match.group(2),
+                        "name": target_name,
                         "trait": trait_match.group(1).strip(),
                         "start": index,
                         "end": end,
@@ -465,13 +480,15 @@ def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
 
             trait_match = TRAIT_IMPL_RE.match(line)
             if trait_match and (
-                trait_match.group(2) in selected or trait_match.group(1).strip() in selected
+                impl_target_name(trait_match.group(2)) in selected
+                or trait_match.group(1).strip() in selected
             ):
+                target_name = impl_target_name(trait_match.group(2))
                 end = item_end(lines, index)
                 items.append(
                     {
                         "kind": "trait_impl",
-                        "name": trait_match.group(2),
+                        "name": target_name,
                         "trait": trait_match.group(1).strip(),
                         "start": index,
                         "end": end,
@@ -685,15 +702,19 @@ def extract_methods(impl_text: str) -> list[tuple[str, str]]:
             index += 1
             continue
         start = index
-        depth = brace_delta(line)
-        if "{" not in line:
-            index += 1
-            continue
-        index += 1
-        while index < len(lines) - 1 and depth > 0:
+        depth = 0
+        saw_body = False
+        while index < len(lines) - 1:
             depth += brace_delta(lines[index])
             index += 1
-        methods.append((match.group(1), "".join(lines[start:index]).strip()))
+            if "{" in lines[index - 1]:
+                saw_body = True
+            if saw_body and depth <= 0:
+                break
+            if not saw_body and ";" in lines[index - 1]:
+                break
+        if saw_body:
+            methods.append((match.group(1), "".join(lines[start:index]).strip()))
     return methods
 
 
@@ -1070,7 +1091,11 @@ def inherent_impl_header_for_decl(name: str, decl_text: str, selected_decl_is_tr
     ]
     if not generic_args:
         return f"impl {name}"
-    return f"impl<{impl_generics}> {name}<{', '.join(generic_args)}>"
+    # Defaults belong on a type declaration, never on an `impl` generic
+    # parameter list.  Rebuilding an inherent impl from
+    # `pub struct Comparator<T = Box<dyn Any>>` previously emitted the invalid
+    # `impl<T = Box<dyn Any>> Comparator<T>`.
+    return f"impl<{', '.join(generic_args)}> {name}<{', '.join(generic_args)}>"
 
 
 def simple_rust_type_name(name: str) -> bool:
@@ -1114,7 +1139,7 @@ def from_impl_keys_from_text(text: str) -> set[tuple[str, str]]:
             continue
         from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
         if from_match:
-            keys.add((from_match.group(1), trait_match.group(2)))
+            keys.add((from_match.group(1), impl_target_name(trait_match.group(2))))
     return keys
 
 

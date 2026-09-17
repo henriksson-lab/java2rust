@@ -537,14 +537,14 @@ fn semantic_analysis_shell_preserves_current_translation_output() {
 }
 
 #[test]
-fn records_non_null_field_from_all_constructors() {
+fn constructor_parameter_assignment_keeps_field_nullable() {
     let semantic = analyze(&idiom_gap("NonNullFieldFromConstructors.java"));
 
     assert_eq!(
         semantic
             .facts
             .field_nullability_for("NonNullFieldFromConstructors", "name"),
-        Some(NullabilityState::DefinitelyNonNull)
+        Some(NullabilityState::MaybeNull)
     );
 }
 
@@ -630,14 +630,14 @@ fn records_non_null_field_assignment_through_private_helper() {
 }
 
 #[test]
-fn records_non_null_field_assignment_through_constructor_delegation() {
+fn constructor_delegation_preserves_nullable_parameter_assignment() {
     let semantic = analyze(&java_fixture("03-methods/ConstructorOverloads.java"));
 
     assert_eq!(
         semantic
             .facts
             .field_nullability_for("ConstructorOverloads", "label"),
-        Some(NullabilityState::DefinitelyNonNull)
+        Some(NullabilityState::MaybeNull)
     );
     assert!(semantic.iterations.field_nullability() >= 2);
 }

@@ -970,7 +970,15 @@ fn collect_expr_type_names(expr: &Expr, names: &mut HashSet<String>) {
                 collect_expr_type_names(arg, names);
             }
         }
-        Expr::New { args, body, .. } => {
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_expr_type_names(qualifier, names);
+            }
             for arg in args {
                 collect_expr_type_names(arg, names);
             }
@@ -1197,20 +1205,29 @@ fn type_param_bound_from_decl(
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    program
-        .types
-        .iter()
-        .find_map(|ty| find_type_decl_in_type(ty, type_name))
+    let mut matches = Vec::new();
+    for ty in &program.types {
+        collect_exact_type_decls(ty, type_name, &mut matches);
+    }
+    match matches.as_slice() {
+        [ty] => Some(*ty),
+        _ => None,
+    }
 }
 
-fn find_type_decl_in_type<'a>(ty: &'a TypeDecl, type_name: &str) -> Option<&'a TypeDecl> {
+fn collect_exact_type_decls<'a>(
+    ty: &'a TypeDecl,
+    type_name: &str,
+    matches: &mut Vec<&'a TypeDecl>,
+) {
     if ty.name == type_name {
-        return Some(ty);
+        matches.push(ty);
     }
-    ty.members.iter().find_map(|member| match member {
-        Member::Type(nested) => find_type_decl_in_type(nested, type_name),
-        _ => None,
-    })
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_exact_type_decls(nested, type_name, matches);
+        }
+    }
 }
 
 enum SourceTypeDeclLookup<'a> {
@@ -2737,7 +2754,12 @@ fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 walk_expr_outside_lambdas(arg, visit);
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                walk_expr_outside_lambdas(qualifier, visit);
+            }
             for arg in args {
                 walk_expr_outside_lambdas(arg, visit);
             }
@@ -3950,7 +3972,12 @@ fn collect_thrown_exception_types_from_expr(
                 }
             }
         }
-        Expr::New { ty, args, .. } => {
+        Expr::New {
+            ty,
+            qualifier,
+            args,
+            ..
+        } => {
             if matches!(
                 java_type_name(ty).map(|name| name.rsplit('.').next().unwrap_or(name)),
                 Some("URI")
@@ -3963,6 +3990,9 @@ fn collect_thrown_exception_types_from_expr(
                         args: Vec::new(),
                     },
                 );
+            }
+            if let Some(qualifier) = qualifier {
+                collect_thrown_exception_types_from_expr(qualifier, exception_env, facts, thrown);
             }
             for arg in args {
                 collect_thrown_exception_types_from_expr(arg, exception_env, facts, thrown);
@@ -4426,7 +4456,15 @@ fn collect_dispatch_requirement_facts_from_expr(expr: &Expr, facts: &mut FactSet
                 collect_dispatch_requirement_facts_from_expr(arg, facts);
             }
         }
-        Expr::New { args, body, .. } => {
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_dispatch_requirement_facts_from_expr(qualifier, facts);
+            }
             for arg in args {
                 collect_dispatch_requirement_facts_from_expr(arg, facts);
             }
@@ -6095,7 +6133,20 @@ fn collect_field_assignments_from_expr(
                 );
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                collect_field_assignments_from_expr(
+                    qualifier,
+                    ty,
+                    field_name,
+                    local_shadows,
+                    helper_assignments,
+                    facts,
+                    assignments,
+                );
+            }
             for arg in args {
                 collect_field_assignments_from_expr(
                     arg,
@@ -6788,7 +6839,12 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
                 walk_expr(arg, visit);
             }
         }
-        Expr::New { args, .. } => {
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                walk_expr(qualifier, visit);
+            }
             for arg in args {
                 walk_expr(arg, visit);
             }
@@ -6805,5 +6861,143 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
         | Expr::ClassLiteral(_)
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::diagnostics::Span;
+    use crate::facts::{FactProvenance, UnresolvedTargetFact};
+    use crate::java_ir::{Literal, TypeKind};
+
+    fn type_with_bound(name: &str, bound: JavaType) -> TypeDecl {
+        TypeDecl {
+            kind: TypeKind::Class,
+            name: name.to_string(),
+            type_params: vec!["T".to_string()],
+            type_param_bounds: vec![Some(bound)],
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: Vec::new(),
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        }
+    }
+
+    fn unresolved_type_param_target(enclosing_type: &str) -> UnresolvedTargetFact {
+        UnresolvedTargetFact {
+            enclosing_type: enclosing_type.to_string(),
+            enclosing_member: None,
+            kind: UnresolvedTargetKind::MethodCall,
+            target_name: "size".to_string(),
+            receiver_type: Some(JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            }),
+            arg_types: Vec::new(),
+            is_anonymous_class: false,
+            provenance: FactProvenance::ParsedSource,
+        }
+    }
+
+    fn qualified_new_expr(qualifier: Expr, args: Vec<Expr>) -> Expr {
+        Expr::New {
+            ty: JavaType::Unknown("Inner".to_string()),
+            qualifier: Some(Box::new(qualifier)),
+            args,
+            body: None,
+            resolved: None,
+        }
+    }
+
+    #[test]
+    fn thrown_exception_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(
+            Expr::New {
+                ty: JavaType::Named {
+                    name: "URI".to_string(),
+                    args: Vec::new(),
+                },
+                qualifier: None,
+                args: vec![Expr::Literal(Literal::String("bad uri".to_string()))],
+                body: None,
+                resolved: None,
+            },
+            Vec::new(),
+        );
+        let mut thrown = Vec::new();
+
+        collect_thrown_exception_types_from_expr(
+            &expr,
+            &mut HashMap::new(),
+            &FactSet::default(),
+            &mut thrown,
+        );
+
+        assert!(thrown.iter().any(|ty| matches!(
+            ty,
+            JavaType::Named { name, .. } if name == "URISyntaxException"
+        )));
+    }
+
+    #[test]
+    fn dispatch_requirement_scan_sees_qualified_new_receiver() {
+        let expr = qualified_new_expr(
+            Expr::Cast {
+                ty: JavaType::Named {
+                    name: "Target".to_string(),
+                    args: Vec::new(),
+                },
+                expr: Box::new(Expr::Var("value".to_string())),
+            },
+            Vec::new(),
+        );
+        let mut facts = FactSet::default();
+
+        collect_dispatch_requirement_facts_from_expr(&expr, &mut facts);
+
+        assert!(facts.dispatch_requirement_facts.iter().any(|fact| {
+            fact.type_name == "Target" && fact.requirement == DispatchRequirementKind::NeedsDowncast
+        }));
+    }
+
+    #[test]
+    fn unresolved_target_type_param_bound_refuses_duplicate_exact_owner() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                type_with_bound("Owner", JavaType::String),
+                type_with_bound(
+                    "Owner",
+                    JavaType::Primitive(crate::java_ir::PrimitiveType::Int),
+                ),
+            ],
+        };
+        let fact = unresolved_type_param_target("Owner");
+
+        assert_eq!(
+            unresolved_target_type_param_bound(&program, &fact, "T"),
+            None,
+            "duplicate exact owner keys must fail closed instead of borrowing the first bound"
+        );
+    }
+
+    #[test]
+    fn unresolved_target_type_param_bound_uses_unique_exact_owner() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![type_with_bound("Owner", JavaType::String)],
+        };
+        let fact = unresolved_type_param_target("Owner");
+
+        assert_eq!(
+            unresolved_target_type_param_bound(&program, &fact, "T"),
+            Some(JavaType::String)
+        );
     }
 }

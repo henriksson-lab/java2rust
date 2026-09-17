@@ -30018,6 +30018,8 @@ fn java_platform_api_effects_for_method_arity(
         "java.util.concurrent.ExecutorService",
         "ExecutorService",
         "JavaUtilConcurrentExecutorService",
+        "java.util.jar.JarEntry",
+        "JarEntry",
         "java.util.zip.ZipEntry",
         "ZipEntry",
         "javax.xml.stream.XMLOutputFactory",
@@ -30827,12 +30829,12 @@ fn java_platform_io_api_effect(
                 args: Vec::new(),
             },
         ),
-        ("ZipEntry", "isDirectory" | "is_directory") if matches_arg_count(0) => (
+        ("JarEntry" | "ZipEntry", "isDirectory" | "is_directory") if matches_arg_count(0) => (
             0,
             ExternalApiRole::BooleanGetter,
             JavaType::Primitive(PrimitiveType::Boolean),
         ),
-        ("ZipEntry", "getName" | "get_name") if matches_arg_count(0) => {
+        ("JarEntry" | "ZipEntry", "getName" | "get_name") if matches_arg_count(0) => {
             (0, ExternalApiRole::Getter, JavaType::String)
         }
         ("URL", "getFile" | "get_file") if matches_arg_count(0) => {
@@ -31119,7 +31121,8 @@ pub fn java_platform_constructor_argument_effect_for(
             provenance: FactProvenance::BuiltinExternalModel,
         });
     }
-    if crate::facts::external_type_name_matches(type_name, "java.util.zip.ZipEntry")
+    if (crate::facts::external_type_name_matches(type_name, "java.util.jar.JarEntry")
+        || crate::facts::external_type_name_matches(type_name, "java.util.zip.ZipEntry"))
         && arg_count == 1
         && parameter_index == 0
     {

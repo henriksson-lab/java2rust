@@ -706,7 +706,18 @@ pub(crate) fn source_class_bound_trait_item_for_type(
         return None;
     }
     let trait_name = source_class_bound_trait_name(&ty.name);
-    let methods = ty
+    let declared_method_keys = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => Some((
+                crate::java_signature::source_method_rust_name(method),
+                method.params.len(),
+            )),
+            _ => None,
+        })
+        .collect::<HashSet<_>>();
+    let mut methods = ty
         .members
         .iter()
         .filter_map(|member| match member {
@@ -732,6 +743,11 @@ pub(crate) fn source_class_bound_trait_item_for_type(
             _ => None,
         })
         .collect::<Vec<_>>();
+    methods.extend(source_class_bound_trait_external_fact_methods(
+        ty,
+        facts,
+        &declared_method_keys,
+    ));
     // Class-bound traits need the handle forwarding just as interface traits do:
     // this is the trait a Java `<T extends SomeClass>` bound lowers to, so
     // `Standards<Rc<FormatLine>>` fails without it (claude_audits/0002b).
@@ -742,6 +758,116 @@ pub(crate) fn source_class_bound_trait_item_for_type(
         "pub trait {trait_name} {{\n{}\n}}{forwarding}",
         methods.join("\n")
     ))
+}
+
+fn source_class_bound_trait_external_fact_methods(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    declared_method_keys: &HashSet<(String, usize)>,
+) -> Vec<String> {
+    facts
+        .external_api_effect_facts
+        .iter()
+        .filter_map(|fact| {
+            let receiver = fact.receiver_type.as_deref()?;
+            if !crate::facts::external_type_name_matches(&ty.name, receiver) {
+                return None;
+            }
+            let arg_count = fact.arg_count.unwrap_or(0);
+            let rust_name = crate::call_plan::external_method_rust_name(
+                receiver,
+                &fact.method_name,
+                arg_count,
+                facts,
+            );
+            if declared_method_keys.contains(&(rust_name.clone(), arg_count)) {
+                return None;
+            }
+            Some(source_class_bound_trait_external_fact_method(
+                fact, &rust_name, arg_count, facts,
+            ))
+        })
+        .collect()
+}
+
+fn source_class_bound_trait_external_fact_method(
+    fact: &crate::facts::ExternalApiEffectFact,
+    rust_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> String {
+    let receiver = match fact.receiver_mutability {
+        crate::facts::ReceiverMutabilityFact::MutatesReceiver => "&mut self",
+        _ => "&self",
+    };
+    let args = (0..arg_count)
+        .map(|index| format!("_arg{index}: T{index}"))
+        .collect::<Vec<_>>();
+    let type_params = if arg_count == 0 {
+        String::new()
+    } else {
+        format!(
+            "<{}>",
+            (0..arg_count)
+                .map(|index| format!("T{index}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    let params = std::iter::once(receiver.to_string())
+        .chain(args)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rust_name = raw_ident_if_needed(rust_name);
+    let return_type = source_class_bound_trait_external_fact_return_type(fact, facts);
+    let return_sig = return_type
+        .as_ref()
+        .map(|return_type| format!(" -> {}", emit_type(return_type)))
+        .unwrap_or_default();
+    let body = source_class_bound_trait_external_fact_body(return_type.as_ref());
+    format!("    fn {rust_name}{type_params}({params}){return_sig} {{ {body} }}")
+}
+
+fn raw_ident_if_needed(name: &str) -> String {
+    if name.starts_with("r#")
+        || name.contains("::")
+        || name.contains('<')
+        || name.contains('>')
+        || name.contains(' ')
+        || name.is_empty()
+    {
+        return name.to_string();
+    }
+    if crate::java_naming::rust_keyword_is_rawable_identifier(name) {
+        format!("r#{name}")
+    } else {
+        name.to_string()
+    }
+}
+
+fn source_class_bound_trait_external_fact_return_type(
+    fact: &crate::facts::ExternalApiEffectFact,
+    facts: &FactSet,
+) -> Option<RustType> {
+    let base = fact
+        .return_type
+        .as_ref()
+        .map(|return_type| rust_type_for_java_type_with_facts(return_type, facts));
+    if fact.thrown.is_empty() {
+        return base;
+    }
+    Some(exception_result_type(base.unwrap_or(RustType::Unit)))
+}
+
+fn source_class_bound_trait_external_fact_body(return_type: Option<&RustType>) -> String {
+    match return_type {
+        Some(RustType::String) => "String::new()".to_string(),
+        Some(RustType::Generic { base, .. }) if base == "Result" => {
+            "Err(JavaException::new(\"UnsupportedOperationException\", \"external type-parameter bound method is not modelled\".to_string()))".to_string()
+        }
+        Some(_) => "Default::default()".to_string(),
+        None => String::new(),
+    }
 }
 
 pub(crate) fn source_class_bound_trait_impl_emissions_for_type(
@@ -1127,7 +1253,7 @@ fn trait_item_for_type(
     let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
-    let closure_adapter = zero_arg_void_closure_trait_impl(ty, &trait_name)
+    let closure_adapter = zero_arg_closure_trait_impl(ty, &trait_name, facts)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
     format!(
@@ -1168,7 +1294,7 @@ fn trait_item_for_type_with_program(
     let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
-    let closure_adapter = zero_arg_void_closure_trait_impl(ty, &trait_name)
+    let closure_adapter = zero_arg_closure_trait_impl(ty, &trait_name, facts)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
     format!(
@@ -1179,18 +1305,33 @@ fn trait_item_for_type_with_program(
     )
 }
 
-fn zero_arg_void_closure_trait_impl(ty: &TypeDecl, trait_name: &str) -> Option<String> {
-    let method = zero_arg_void_functional_method(ty)?;
+pub(crate) fn zero_arg_closure_trait_impl(
+    ty: &TypeDecl,
+    trait_name: &str,
+    facts: &FactSet,
+) -> Option<String> {
+    let method = zero_arg_functional_method(ty)?;
     let rust_name = method
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    let (fn_bound, method_return, method_body) = if matches!(method.return_type, JavaType::Void) {
+        ("Fn()".to_string(), String::new(), "self()".to_string())
+    } else {
+        let return_shape = RustSlotShape::for_storage(method.return_type.clone());
+        let return_ty = emit_type(&rust_type_for_slot_with_facts(&return_shape, facts));
+        (
+            format!("Fn() -> {return_ty}"),
+            format!(" -> {return_ty}"),
+            "self()".to_string(),
+        )
+    };
     Some(format!(
-        "impl<__JavaAnonymous> {trait_name} for __JavaAnonymous\nwhere\n    __JavaAnonymous: Fn() + Clone + 'static,\n{{\n    fn {rust_name}(&self) {{ self() }}\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}\n}}"
+        "impl<__JavaAnonymous> {trait_name} for __JavaAnonymous\nwhere\n    __JavaAnonymous: {fn_bound} + Clone + 'static,\n{{\n    fn {rust_name}(&self){method_return} {{ {method_body} }}\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}\n}}"
     ))
 }
 
-fn zero_arg_void_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
+fn zero_arg_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     if ty.kind != TypeKind::Interface {
         return None;
     }
@@ -1202,7 +1343,6 @@ fn zero_arg_void_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     if methods.next().is_some()
         || !method.params.is_empty()
         || !method.type_params.is_empty()
-        || !matches!(method.return_type, JavaType::Void)
         || method.modifiers.contains(&Modifier::Static)
     {
         return None;
@@ -2571,7 +2711,10 @@ interface Named {
         };
         assert!(item.contains("pub trait Named"));
         assert!(item.contains("fn name(&self) -> String;"));
-        assert!(item.contains("fn score(&self, prefix: &str) -> i32;"));
+        assert!(
+            item.contains("fn score(&self, prefix: String) -> i32;"),
+            "{item}"
+        );
         assert!(item.contains("impl Clone for std::boxed::Box<dyn Named>"));
         assert!(
             item.contains(
@@ -2627,7 +2770,7 @@ class ExternalId {}
         assert_eq!(
             type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
             RepresentationTypeEmission::RawRustItem(
-                "pub trait IdSource {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: &[ExternalId]) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
+                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
                     .to_string()
             )
         );
@@ -2830,7 +2973,7 @@ class Source implements IdSource {
                 &facts,
             ),
             vec![
-                "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values.to_vec()) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
+                "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: clone_box for IdSource requires a cloneable Java object carrier\") }\n}"
                     .to_string()
             ]
         );
@@ -2979,7 +3122,7 @@ class OverloadedNamed implements Named {
         assert!(!impls[0].contains("compile_error!"), "{}", impls[0]);
         assert!(
             impls[0].contains(
-                "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, prefix.to_string()) }"
+                "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, prefix) }"
             ),
             "{}",
             impls[0]
@@ -3122,7 +3265,7 @@ interface Mapper {
             matches!(
                 emission,
                 RepresentationTypeEmission::RawRustItem(ref item)
-                    if item.contains("fn name_of<T: Base>(&self, value: T) -> String where Self: Sized;")
+                    if item.contains("fn name_of<T: Base>(&self, value: &T) -> String where Self: Sized;")
             ),
             "{emission:?}"
         );

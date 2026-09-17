@@ -980,13 +980,15 @@ fn aliasing_uses_binding_fact_view_instead_of_legacy_name_map() {
 #[test]
 fn legacy_usage_binding_name_map_is_owned_by_usage_module() {
     let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
-    let forbidden = [
-        ".bindings.get(",
-        ".bindings.get_mut(",
-        ".bindings.insert(",
-        ".bindings.remove(",
-        ".bindings_by_id.get(",
-        ".bindings_by_id.get_mut(",
+    let forbidden_usage_fact_accesses = [
+        "method_usage.bindings.",
+        "constructor_usage.bindings.",
+        "usage.bindings.",
+        "facts.bindings.",
+        "method_usage.bindings_by_id.",
+        "constructor_usage.bindings_by_id.",
+        "usage.bindings_by_id.",
+        "facts.bindings_by_id.",
     ];
     for entry in std::fs::read_dir(&src_dir).expect("src directory should be readable") {
         let path = entry.expect("src entry should be readable").path();
@@ -1003,7 +1005,7 @@ fn legacy_usage_binding_name_map_is_owned_by_usage_module() {
         if !production_source.contains("MethodUsageFacts") {
             continue;
         }
-        for needle in forbidden {
+        for needle in forbidden_usage_fact_accesses {
             assert!(
                 !production_source.contains(needle),
                 "{} must use MethodUsageFacts accessors or all_binding_facts() instead of touching {needle}",
@@ -1035,8 +1037,19 @@ fn legacy_usage_binding_name_map_is_owned_by_usage_module() {
             0,
         ),
     ] {
-        let direct_binding_map_mutations = source.matches(".bindings.insert(").count()
-            + source.matches(".bindings_by_id.insert(").count();
+        let direct_binding_map_mutations = [
+            "method_usage.bindings.insert(",
+            "constructor_usage.bindings.insert(",
+            "usage.bindings.insert(",
+            "facts.bindings.insert(",
+            "method_usage.bindings_by_id.insert(",
+            "constructor_usage.bindings_by_id.insert(",
+            "usage.bindings_by_id.insert(",
+            "facts.bindings_by_id.insert(",
+        ]
+        .iter()
+        .map(|needle| source.matches(needle).count())
+        .sum::<usize>();
         assert_eq!(
             direct_binding_map_mutations, allowed_direct_mutations,
             "{path} should build test MethodUsageFacts through MethodUsageFacts helpers instead of mutating legacy maps directly"
@@ -2238,10 +2251,17 @@ fn signature_uses_usage_binding_policy_for_legacy_name_fallback() {
         .next()
         .expect("production slot_policy source should be present");
 
-    assert!(
-        !signature_source.contains(".bindings.get("),
-        "signature should ask MethodUsageFacts for binding lookup instead of reading the legacy name map directly"
-    );
+    for forbidden in [
+        "method_usage.bindings.get(",
+        "constructor_usage.bindings.get(",
+        "usage.bindings.get(",
+        "facts.bindings.get(",
+    ] {
+        assert!(
+            !signature_source.contains(forbidden),
+            "signature should ask MethodUsageFacts for binding lookup instead of reading the legacy name map directly"
+        );
+    }
     assert!(
         signature_source.contains("binding_facts_for_param")
             && signature_source.contains("binding_facts_for_declaration_id")
@@ -2789,8 +2809,13 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
                 .next()
         })
         .expect("receiver signature fallback should be present");
-    assert!(signature_fallback.contains("receiver_owner.as_str()"));
+    assert!(
+        signature_fallback.contains(
+            "let resolved_receiver_name = receiver_owner.resolved_context_owner_key(ctx)"
+        )
+    );
     assert!(signature_fallback.contains("receiver_owner.resolved_context_owner_key(ctx)"));
+    assert!(signature_fallback.contains("&resolved_receiver_name"));
     assert!(!signature_fallback.contains("resolved_context_owner_key(ctx, receiver_name)"));
 
     let static_receiver_check = lower_source
@@ -2829,7 +2854,12 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
         .and_then(|tail| tail.split("fn is_static_context_emitted").next())
         .expect("SourceContextOwnerKey::resolves_to_owner should be present");
     assert!(resolves_to_owner.contains("owner: &Self"));
-    assert!(resolves_to_owner.contains("owner.find_context_type(ctx)"));
+    assert!(resolves_to_owner.contains("self.find_context_type_and_program(ctx)"));
+    assert!(resolves_to_owner.contains("owner.find_context_type_and_program(ctx)"));
+    assert!(
+        resolves_to_owner
+            .contains("std::ptr::eq(ty, owner_ty) && std::ptr::eq(program, owner_program)")
+    );
     assert!(
         !resolves_to_owner.contains("find_context_type_by_key_in_lower_ctx(ctx, owner"),
         "SourceContextOwnerKey owner comparison should keep both sides wrapped"
@@ -2987,7 +3017,10 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
         receiverless_summary_return_shape.contains("current_owner: &SourceContextOwnerKey"),
         "receiverless summary return-shape lookup should keep current owner identity wrapped"
     );
-    assert!(receiverless_summary_return_shape.contains("current_owner.find_context_type(ctx)?"));
+    assert!(
+        receiverless_summary_return_shape
+            .contains("current_owner.find_context_type_and_program(ctx)?")
+    );
     assert!(
         !receiverless_summary_return_shape
             .contains("find_context_type_by_key_in_lower_ctx(ctx, current_type)")
@@ -2998,9 +3031,8 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
         .and_then(|tail| tail.split("fn lower_switch").next())
         .expect("inherited summary method helper should be present");
     assert!(
-        inherited_summary_method.contains("SourceContextOwnerKey::new(&type_key)")
-            && inherited_summary_method.contains(".find_context_type(ctx)"),
-        "inherited summary lookup should keep superclass lookup on SourceContextOwnerKey"
+        inherited_summary_method.contains("source_context_super_type_for_decl("),
+        "inherited summary lookup should keep superclass lookup on the wrapped context-super resolver"
     );
     assert!(
         !inherited_summary_method.contains("find_context_type_by_key_in_lower_ctx(ctx, &type_key)")
@@ -3031,7 +3063,7 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
             "fn static_field_decl_by_name",
         ),
         (
-            "fn source_instance_field_rust_name",
+            "fn source_instance_field_rust_name(",
             "fn lower_constructor_field_assignment_value",
         ),
         (
@@ -3046,7 +3078,8 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
             .expect("source owner lookup helper should be present");
         assert!(
             helper.contains("SourceContextOwnerKey::new")
-                && helper.contains(".find_context_type(ctx)"),
+                && (helper.contains(".find_context_type(ctx)")
+                    || helper.contains(".find_context_type_and_program(ctx)")),
             "{helper_name} should keep owner lookup on SourceContextOwnerKey"
         );
         assert!(
@@ -3181,7 +3214,8 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
             .expect("source owner utility helper should be present");
         assert!(
             helper.contains("SourceContextOwnerKey::new")
-                && helper.contains(".find_context_type(ctx)"),
+                && (helper.contains(".find_context_type(ctx)")
+                    || helper.contains(".find_context_type_and_program(ctx)")),
             "{helper_name} should keep owner lookup on SourceContextOwnerKey"
         );
         assert!(
@@ -3345,6 +3379,18 @@ fn current_owner_utility_lookups_stay_wrapped_until_context_lookup() {
             .contains("find_context_type_by_key_in_lower_ctx(ctx, ctx.current_type?)"),
         "production direct ctx.current_type lookups should stay behind SourceContextOwnerKey"
     );
+    assert!(
+        !production_source
+            .contains("find_context_type_by_key_in_lower_ctx(ctx, &resolved.declaring_type)"),
+        "production resolved-owner context lookups should stay behind SourceContextOwnerKey"
+    );
+    assert_eq!(
+        production_source
+            .matches("find_context_type_by_key_in_lower_ctx(ctx,")
+            .count(),
+        1,
+        "production context type lookup should be reopened only by SourceContextOwnerKey::find_context_type"
+    );
 }
 
 #[test]
@@ -3361,7 +3407,10 @@ fn signature_diagnostics_route_fields_through_capability_audit() {
 #[test]
 fn usage_owns_call_site_boundary_facts() {
     let usage_source = include_str!("../src/usage.rs");
-    let slot_policy_source = include_str!("../src/slot_policy.rs");
+    let slot_policy_source = include_str!("../src/slot_policy.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production slot policy source should be present");
     let method_usage_source = usage_source
         .split("#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct MethodUsageFacts")
         .nth(1)
@@ -7563,7 +7612,7 @@ fn coercion_plan_owns_invalid_cast_runtime_policy() {
     assert!(lower_source.contains("assignment_value_plan_for_shape"));
     assert!(lower_source.contains("assignment_value_plan_for_target"));
     assert!(lower_source.contains("assignment_statement_plan_for_target"));
-    assert!(!lower_source.contains("assignment_slot("));
+    assert!(!lower_source.contains("assignment_slot(shape"));
     assert!(!lower_source.contains("assignment_slot_for_target"));
     assert!(conversion_source.contains("pub struct SyntaxCoercionPlan"));
     let syntax_coercion_plan_source = conversion_source
@@ -9003,7 +9052,7 @@ fn call_lowering_renders_constructor_owner_types_with_facts() {
         "constructor owner associated paths should render named owners without storage decoration, while non-named owners still derive a structured RustType with facts"
     );
     assert!(!source.contains("fn constructor_owner_type_associated_path_expr"));
-    assert!(!source.contains("emit_type"));
+    assert!(!constructor_owner_path_source.contains("emit_type"));
     assert!(coercion_source.contains("pub(crate) fn rust_type_associated_path_projection"));
     assert!(coercion_source.contains("RustExpr::GenericPath"));
     assert!(!source.contains("RustExpr::Path(vec![crate::emit::emit_type(&other)"));

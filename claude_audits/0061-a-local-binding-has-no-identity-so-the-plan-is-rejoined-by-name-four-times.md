@@ -14,6 +14,21 @@ through the usage/signature compatibility paths. Treat future fixes here as
 id-less-boundary cleanup, not as evidence that normal Java source locals are
 still rejoined by name.
 
+Codex follow-up 2026-09-15 qualified-new `this` scan:
+the shared `block_mentions_this_or_super` / `expr_mentions_this_or_super`
+walker now includes the qualifier of `Expr::New`. A qualified inner creation
+such as `this.new Inner()` inside an anonymous zero-arg interface body is no
+longer treated as a body that does not mention `this`, so downstream anonymous
+closure eligibility checks cannot miss that receiver dependency. Guard:
+`java_ir::tests::qualified_new_receiver_mentions_this`.
+
+Codex follow-up 2026-09-15 source-nullability catch shadow:
+the id-less source-nullability compatibility collector now shadows catch
+parameters while scanning catch bodies. A parser-only body such as
+`catch (Exception value) { value = null; }` no longer records nullable state for
+an outer id-less `value`. Guard:
+`signature::tests::source_nullability_ignores_idless_catch_parameter_assignment_shadow`.
+
 Codex follow-up 2026-09-14: the id-less borrowed-return compatibility scanner
 now tracks lexical shadowing while checking exact returned names and assignment
 targets. A same-source-name local declared in an inner block can mutate without
@@ -96,6 +111,97 @@ arguments and qualified inner construction receivers such as
 `slot_policy::tests::idless_borrowed_return_policy_rejects_constructor_invocation_arg_mutation`
 and
 `slot_policy::tests::idless_borrowed_return_policy_rejects_qualified_new_receiver_mutation`.
+Codex follow-up 2026-09-15: that same id-less mutation scanner now inspects
+evaluated assignment targets, not just the direct assigned name and RHS. Java
+evaluates targets such as `items[value = "x"] = stored` before a later
+`return value`, so the compatibility borrowed-return policy must reject them.
+Both statement-level assignments and nested assignment expressions now recurse
+through the target expression. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_assignment_target_index_mutation`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_nested_assignment_target_mutation`.
+Codex follow-up 2026-09-15 later: update expressions now apply that same
+target-evaluation rule. `items[value = "x"]++` and
+`(value = "x").field++` both evaluate an assignment before the later
+`return value`, so they no longer qualify for borrowed-return compatibility.
+Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_update_target_index_mutation`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_update_target_receiver_mutation`.
+Codex follow-up 2026-09-15 later: the id-less mutation scanner now recurses
+through lambda bodies using the same conservative captured-local treatment as
+the signature mutation collectors, while preserving lambda-parameter shadowing.
+A compatibility IR body that mutates `value` inside a lambda before
+`return value` no longer qualifies for borrowed-return policy, but a lambda
+parameter named `value` remains local to the lambda. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_lambda_body_mutation`
+and
+`slot_policy::tests::idless_borrowed_return_policy_ignores_lambda_param_shadow_mutation`.
+Codex follow-up 2026-09-15 later still: the same conservative scanner now
+inspects executable members attached to `Expr::New` anonymous/local bodies.
+Field initializers and constructor bodies can run as part of construction, so a
+compatibility body that mutates `value` there before `return value` no longer
+qualifies for borrowed-return policy. Ordinary method bodies remain ignored
+because the construction expression does not execute them. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_rejects_anonymous_field_initializer_mutation`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_anonymous_constructor_body_mutation`.
+Codex follow-up 2026-09-15 signature pass: signature's local-mutation collector
+now applies the same evaluated-`new` traversal. Qualified-new receivers,
+anonymous field initializers, and anonymous constructor bodies can mutate a
+parameter before the signature solver decides whether it is safely unmutated.
+Those surfaces now feed `collect_mutated_local_names` instead of failing open;
+ordinary anonymous methods remain ignored because construction does not execute
+them. Regressions:
+`signature::tests::mutated_local_scan_inspects_qualified_new_receiver`,
+`signature::tests::mutated_local_scan_inspects_anonymous_field_initializer`,
+and `signature::tests::mutated_local_scan_inspects_anonymous_constructor_body`.
+The same pass fixed signature's field-assignment scanner for evaluated
+assignment targets. `arr[this.field = value] = x` and the equivalent assignment
+expression shape now count as assigning the field instead of only scanning the
+assignment RHS. Regressions:
+`signature::tests::field_assignment_scan_inspects_statement_assignment_target_expressions`
+and
+`signature::tests::field_assignment_scan_inspects_expression_assignment_targets`.
+Follow-up in that pass: signature's field-receiver and array-element mutation
+collectors now recurse through evaluated assignment targets as well. Hidden
+mutations such as `items[value.field = x] = y` or `(values[0] = x).field = y`
+therefore feed the same mutability decisions as direct `value.field = x` and
+`values[0] = x`. Regressions:
+`signature::tests::field_receiver_mutated_scan_inspects_assignment_target_expressions`
+and
+`signature::tests::array_element_mutated_scan_inspects_assignment_target_expressions`.
+Follow-up in the same collector cluster: those field-receiver and array-element
+mutation collectors now also scan evaluated `Expr::New` qualifier expressions
+and construction-time anonymous body members. Qualified-new receivers, field
+initializers, and constructor bodies no longer hide mutations from signature
+planning. Regressions:
+`signature::tests::field_receiver_mutated_scan_inspects_qualified_new_receiver`,
+`signature::tests::field_receiver_mutated_scan_inspects_anonymous_field_initializer`,
+`signature::tests::array_element_mutated_scan_inspects_qualified_new_receiver`,
+and
+`signature::tests::array_element_mutated_scan_inspects_anonymous_constructor_body`.
+The same evaluated-`new` traversal now covers facade mut-borrow and map-view
+backing-mutation collectors. Qualified-new receivers can no longer hide facade
+mutable-borrow calls, and anonymous constructor bodies can no longer hide
+backing-map mutations through tracked map-view aliases. Regressions:
+`signature::tests::facade_mut_borrow_scan_inspects_qualified_new_receiver` and
+`signature::tests::map_view_mutated_scan_inspects_anonymous_constructor_body`.
+The field-receiver read collector and input-stream read-buffer collector now
+use the same evaluated-`new` traversal for their narrow side-effect/read sets.
+Anonymous field initializers can no longer hide receiver field reads, and
+qualified-new receivers can no longer hide `InputStream.read(buffer,off,len)`
+buffer mutation. Regressions:
+`signature::tests::field_receiver_read_scan_inspects_anonymous_field_initializer`
+and `signature::tests::input_stream_read_scan_inspects_qualified_new_receiver`.
+The source-nullability collector now follows the same evaluated-expression rule
+for assignment targets and `Expr::New` surfaces. Null assignments hidden in
+assignment targets, qualified-new receivers, or anonymous constructor bodies now
+feed name-only nullability facts instead of being skipped. Ordinary anonymous
+methods remain ignored. Regressions:
+`signature::tests::source_nullability_scans_assignment_target_expressions`,
+`signature::tests::source_nullability_scans_qualified_new_receiver`, and
+`signature::tests::source_nullability_scans_anonymous_constructor_body`.
 Codex follow-up 2026-09-14 later: the same scanner is now regression-pinned for
 `do { ... } while (...)` conditions. A condition assignment such as
 `while (value = "next")` is evaluated before the later `return value`, so the
@@ -169,6 +275,22 @@ parameter whose emitted Rust name is escaped, such as Java `self`, now hides the
 outer source-name binding while analyzing the lambda body instead of attributing
 the lambda body reads to the outer binding. Regression:
 `usage::tests::lambda_keyword_param_scope_uses_source_name`.
+Signature mutation collectors now apply the same lambda-parameter shadowing to
+field-receiver, array-element, and map-view mutation scans. A lambda parameter
+whose Java source name matches an outer parameter no longer marks the outer
+parameter as mutated when the lambda mutates `param.field`, `param[index]`, or a
+map-view alias named `param`. Regressions:
+`signature::tests::field_receiver_mutated_lambda_keyword_param_shadows_source_name`,
+`signature::tests::array_element_mutated_lambda_keyword_param_shadows_source_name`,
+and
+`signature::tests::map_view_mutated_lambda_param_shadows_source_name_and_alias`.
+The id-less exact-return scanner now fails closed for mixed return values. A
+compatibility method with one branch returning the parameter and another branch
+returning a fresh value no longer qualifies for borrowed-return policy merely
+because some return matched by name. Regressions:
+`slot_policy::tests::idless_borrowed_return_policy_accepts_all_exact_branch_returns`
+and
+`slot_policy::tests::idless_borrowed_return_policy_rejects_mixed_non_param_return`.
 Liveness `try/catch` handling also no longer removes catch parameters from
 catch live sets by source name alone. The filter now removes only the catch
 binding declared by that `try`, preserving any distinct same-name binding
@@ -388,6 +510,13 @@ Partial progress:
   `expr_shape::tests::local_plan_occurrence_overrun_does_not_reuse_the_last_plan`,
   `expr_shape::tests::local_plan_type_mismatch_does_not_fall_back_by_name`, and
   `expr_shape::tests::local_shape_type_mismatch_does_not_fall_back_by_name`.
+- Follow-up 2026-09-15: id-less local plan lookup no longer treats `Object` as
+  a special disambiguation escape hatch. A mixed pair of same-name `Object`
+  compatibility plans, one still erased and one solved to a concrete shape, now
+  fails closed instead of selecting the only erased-boundary plan by name. The
+  unique concrete-erased compatibility path remains accepted when there is
+  exactly one match. Regression:
+  `expr_shape::tests::mixed_erased_object_idless_local_plan_lookup_fails_closed`.
 - Delegated-constructor trailing `VarDecl` statements no longer consume the
   local-plan occurrence cursor twice. The trailing statement lowerer now updates
   the same constructor-trailing environment used by later statements, and the
@@ -415,6 +544,13 @@ Partial progress:
   removed from that map; bound declarations keep using `BindingId` lookup.
   Regression:
   `signature::tests::bound_nullability_constraints_do_not_fall_back_by_name`.
+- Follow-up 2026-09-15: the source-nullability compatibility cleanup now
+  mirrors the collector's scope for local classes. Local class bodies are not
+  collected into the enclosing method's by-name nullability map, so the
+  resolver-bound-name removal pass no longer descends into `Stmt::LocalType`
+  and deletes an enclosing id-less compatibility fact for the same source name.
+  Regression:
+  `signature::tests::idless_nullability_name_survives_bound_local_type_body_shadow`.
 
 Update 2026-08-26: the lowering occurrence cursor described in the original
 finding is gone in the current tree.
@@ -1973,6 +2109,16 @@ crate-local entry points for owner-qualified static field and type static-storag
 facts. Boundary guard:
 `layering::idless_local_binding_compatibility_surface_stays_explicit`.
 
+Codex follow-up 2026-09-15: loop-variable and catch-parameter insertion in
+`ShapeEnv` now clears stale local side facts for both the Java source spelling
+and emitted access spelling before installing the scoped binding. A shadowing
+`for` variable or `catch` parameter no longer inherits map-view, map-entry,
+immutable/fixed collection, or nested-array side facts from an older same-name
+local. Regressions:
+`expr_shape::tests::loop_variable_insert_clears_shadowed_collection_side_facts`
+and
+`expr_shape::tests::catch_param_insert_clears_shadowed_collection_side_facts`.
+
 Codex follow-up 2026-09-14 later: expression-level pattern-binding scopes now
 feed the same id-less borrowed-return assignment scanner used by statement
 branches. A pattern binding introduced by the left side of `&&`, by the negated
@@ -2070,3 +2216,124 @@ Regressions:
 `usage::tests::ternary_pattern_binding_read_does_not_use_outer_same_name_binding`,
 and
 `usage::tests::switch_expression_pattern_binding_read_does_not_use_outer_same_name_binding`.
+
+Codex follow-up 2026-09-15: constructor id-less compatibility lookup now has the
+same stale-index guard coverage as method lookup. The shared helper already
+validated that a name-index hit still points at a local with the requested
+source name before returning it, but only the method-side stale index case was
+pinned. Regression:
+`signature::tests::idless_constructor_local_lookup_rejects_stale_name_index`.
+
+Codex follow-up 2026-09-15 later: lowering-side value walkers no longer treat a
+qualified object construction as only its constructor arguments. The evaluated
+qualifier is now visible to constructor self-temporary planning, liveness
+assigned-name collection, mutable-write detection, and local-read detection.
+Delegated constructor invocations also scan their argument expressions for
+assigned names. This closes another compatibility fail-open where `outer.new
+Inner(...)` or `this(f(++x))` could hide a read/write from the planner.
+Regressions:
+`lower::tests::assigned_name_scan_sees_qualified_new_receiver_and_constructor_args`,
+`lower::tests::assigned_name_scan_sees_delegated_constructor_args`,
+`lower::tests::self_read_scan_sees_qualified_new_receiver`, and
+`lower::tests::local_read_scan_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 later still: adjacent analysis walkers now apply the
+same evaluated-qualified-new rule. Object-array default obligations scan
+qualified-new receivers and anonymous class body members, item assembly scans
+qualified-new receivers for constructor self-dependency and mutable-array target
+collection, and the aliasing subexpression visitor visits qualified-new
+receivers before constructor arguments. This closes more planner fail-open
+surfaces where `outer().new Inner(...)` hid a support obligation, read, write,
+or aliasing subexpression. Regressions:
+`array_default_obligations::tests::a_creation_nested_in_qualified_new_receiver_is_found`,
+`array_default_obligations::tests::a_creation_nested_in_anonymous_class_body_is_found`,
+`item_assembly::tests::constructor_self_read_scan_sees_qualified_new_receiver`,
+`item_assembly::tests::mutable_array_target_scan_sees_qualified_new_receiver`,
+and `aliasing::tests::subexpression_visitor_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 final pass: semantic-analysis expression walkers now
+also scan qualified-new receivers. This feeds type-name collection, external
+effect walking, thrown-exception facts, dispatch-requirement facts, helper field
+assignment facts, and the generic expression walker from the receiver expression
+instead of treating object construction as args-only. Regressions pin the two
+highest-impact facts:
+`semantic_analysis::tests::thrown_exception_scan_sees_qualified_new_receiver`
+and
+`semantic_analysis::tests::dispatch_requirement_scan_sees_qualified_new_receiver`.
+
+The callback-carrier scanners in item assembly now use the same rule. A
+qualified-new receiver can no longer hide a callback parameter reference or a
+stored `PriorityQueue` comparator callback from the carrier planner.
+Regressions:
+`item_assembly::tests::callback_reference_scan_sees_qualified_new_receiver`
+and
+`item_assembly::tests::priority_queue_callback_storage_scan_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 object/stream pass: object-model and stream-lambda
+analysis now also inspect qualified-new receivers. Instance-field access through
+`outer.new Inner(...)` feeds the object-model strategy flags, and mutations
+hidden in a stream lambda's qualified-new receiver feed the stream local
+mutation planner. Regressions:
+`object_model::tests::instance_field_access_scan_sees_qualified_new_receiver`
+and `stream_lowering::tests::stream_mutated_local_scan_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 resolve pass: resolve-side walkers now inspect
+qualified-new receivers for local-type collection, capture analysis, and
+mutated-name collection. Call resolution already traversed this receiver; the
+side analyses now match it instead of treating construction as args-only.
+Regression:
+`resolve::tests::mutated_name_scan_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 stdlib support pass: stdlib support-emission
+collectors now scan qualified-new receivers. Constructor/call arity inference,
+class-token detection, local-type key collection, imported static owner calls,
+display-return hints, fallible external-call detection, external static string
+constants, and string runtime-helper detectors no longer miss support needs
+hidden in `outer.new Inner(...)`. Regressions:
+`stdlib::qualified_new_support_detection_tests::constructor_arity_scan_sees_qualified_new_receiver`,
+`stdlib::qualified_new_support_detection_tests::call_arity_scan_sees_qualified_new_receiver`,
+and
+`stdlib::qualified_new_support_detection_tests::string_format_detection_sees_qualified_new_receiver`.
+Additional runtime-support coverage pins platform facade, erased-object, and
+string-helper detection through the same receiver:
+`stdlib::qualified_new_support_detection_tests::platform_facade_detection_sees_qualified_new_receiver`,
+`stdlib::qualified_new_support_detection_tests::erased_object_runtime_detection_sees_qualified_new_receiver`,
+and
+`stdlib::qualified_new_support_detection_tests::string_runtime_helper_detection_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 exception-plan pass: fallibility predicates now scan
+qualified-new receivers for integer division/remainder, `Math.toIntExact`, and
+nullable receiver dereferences. A construction receiver can no longer hide a
+fallible expression from method exception planning. Regressions:
+`exception_plan::tests::integer_div_rem_scan_sees_qualified_new_receiver`,
+`exception_plan::tests::math_to_int_exact_scan_sees_qualified_new_receiver`,
+and
+`exception_plan::tests::nullable_receiver_deref_scan_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 lower analysis pass: remaining lowering-side
+analysis walkers now scan qualified-new receivers for emittable local capture
+types, native `Collections.sort` comparator detection, liveness read counts,
+liveness read names, and `Map.Entry.setValue` mutation detection. Regressions:
+`lower::tests::read_count_scan_sees_qualified_new_receiver`,
+`lower::tests::read_name_scan_sees_qualified_new_receiver`, and
+`lower::tests::native_sort_callback_scan_sees_qualified_new_receiver`.
+
+Codex follow-up 2026-09-15 delegated-constructor pass: constructor delegation
+arguments are now treated as evaluated expressions by the remaining signature
+and lowering walkers audited here. This closes missed binding nullability,
+map-view backing mutation, field-receiver read/mutation, array-element
+mutation, input-stream read-buffer mutation, local mutation, read-name, and
+`Map.Entry.setValue` detection inside `this(...)`/`super(...)` arguments.
+`slot_expr_needs_result_propagation` also recurses through qualified-new
+receivers and constructor args before asking whether the constructor itself
+returns `Result`. Regressions:
+`signature::tests::constructor_delegation_args_are_scanned_by_signature_walkers`,
+`signature::tests::source_nullability_scans_constructor_delegation_args`,
+`lower::tests::read_name_scan_sees_delegated_constructor_args`, and
+`lower::tests::map_entry_set_value_scan_sees_delegated_constructor_args`.
+
+Codex follow-up 2026-09-16 input-stream array-index pass: signature's
+input-stream read-buffer scanner now treats the index side of `array[index]` as
+an evaluated expression. A hidden `input.read(buffer, off, len)` in the index
+can no longer escape the mutable-buffer constraint for `buffer`. Regression:
+`signature::tests::input_stream_read_scan_inspects_array_access_index`.

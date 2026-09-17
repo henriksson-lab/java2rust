@@ -132,6 +132,9 @@ pub enum Modifier {
     Protected,
     Private,
     Static,
+    Synchronized,
+    Volatile,
+    Native,
     Final,
     Sealed,
     Abstract,
@@ -505,8 +508,16 @@ fn expr_mentions_this_or_super(expr: &Expr) -> bool {
                 .is_some_and(|receiver| expr_mentions_this_or_super(receiver))
                 || args.iter().any(expr_mentions_this_or_super)
         }
-        Expr::New { args, body, .. } => {
-            args.iter().any(expr_mentions_this_or_super)
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_mentions_this_or_super(qualifier))
+                || args.iter().any(expr_mentions_this_or_super)
                 || body.as_ref().is_some_and(|members| {
                     members.iter().any(|member| match member {
                         Member::Method(method) => method
@@ -621,4 +632,27 @@ pub enum UnaryOp {
     PreDec,
     PostInc,
     PostDec,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qualified_new_receiver_mentions_this() {
+        let block = Block {
+            statements: vec![Stmt::Expr(Expr::New {
+                ty: JavaType::Named {
+                    name: "Inner".to_string(),
+                    args: Vec::new(),
+                },
+                qualifier: Some(Box::new(Expr::This)),
+                args: Vec::new(),
+                body: None,
+                resolved: None,
+            })],
+        };
+
+        assert!(block_mentions_this_or_super(&block));
+    }
 }

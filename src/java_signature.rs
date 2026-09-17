@@ -1,9 +1,31 @@
-use crate::java_ir::{CallKind, JavaType, MethodDecl, Modifier, Param, TypeDecl};
+use crate::java_ir::{CallKind, JavaType, MethodDecl, Modifier, Param, Program, TypeDecl};
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub(crate) struct JavaOwnerKey(String);
+pub struct JavaOwnerKey(String);
 
 impl JavaOwnerKey {
+    /// The canonical source owner includes the compilation unit package.
+    ///
+    /// `TypeDecl` intentionally does not duplicate `Program::package`, so
+    /// callers that have both must use this constructor rather than silently
+    /// collapsing `a.Item` and `b.Item` to the same simple name.
+    pub(crate) fn source_type_in_program(program: &Program, ty: &TypeDecl) -> Self {
+        // Batch construction qualifies colliding peers in `TypeDecl::name`
+        // before merging their compilation units.  That spelling is already
+        // canonical and must not acquire the package of the first merged unit
+        // (which would turn `b.Item` into `a.b.Item`).
+        if ty.name.contains('.') {
+            return Self(ty.name.clone());
+        }
+        match &program.package {
+            Some(package) if !package.is_empty() => Self(format!("{package}.{}", ty.name)),
+            _ => Self(ty.name.clone()),
+        }
+    }
+
+    /// Compatibility constructor for contexts that genuinely do not retain a
+    /// compilation unit. New source-program key construction should use
+    /// [`Self::source_type_in_program`].
     pub(crate) fn source_type(ty: &TypeDecl) -> Self {
         Self(ty.name.clone())
     }
@@ -12,14 +34,14 @@ impl JavaOwnerKey {
         Self(owner.into())
     }
 
-    fn into_string(self) -> String {
-        self.0
+    pub(crate) fn as_str(&self) -> &str {
+        &self.0
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub(crate) struct JavaCallableKey {
-    owner: String,
+    owner: JavaOwnerKey,
     java_name: String,
     erased_param_types: Vec<String>,
     kind: JavaCallableKind,
@@ -46,12 +68,20 @@ pub(crate) enum JavaCallableStaticness {
 }
 
 impl JavaCallableKey {
+    pub(crate) fn source_method_in_program(
+        program: &Program,
+        ty: &TypeDecl,
+        method: &MethodDecl,
+    ) -> Self {
+        Self::source_method_for_owner(JavaOwnerKey::source_type_in_program(program, ty), method)
+    }
+
     pub(crate) fn source_method_for_type(ty: &TypeDecl, method: &MethodDecl) -> Self {
         Self::source_method_for_owner(JavaOwnerKey::source_type(ty), method)
     }
 
     pub(crate) fn source_method_for_owner(owner: JavaOwnerKey, method: &MethodDecl) -> Self {
-        Self::source_method(owner.into_string(), method)
+        Self::source_method(owner, method)
     }
 
     pub(crate) fn resolved_source_method(
@@ -61,7 +91,7 @@ impl JavaCallableKey {
         kind: CallKind,
     ) -> Self {
         Self {
-            owner: owner.into_string(),
+            owner,
             java_name: java_name.into(),
             erased_param_types: arg_target_types
                 .iter()
@@ -75,9 +105,9 @@ impl JavaCallableKey {
         }
     }
 
-    fn source_method(owner: impl Into<String>, method: &MethodDecl) -> Self {
+    fn source_method(owner: JavaOwnerKey, method: &MethodDecl) -> Self {
         Self {
-            owner: owner.into(),
+            owner,
             java_name: method.name.clone(),
             erased_param_types: erased_param_types(&method.params),
             kind: JavaCallableKind::Method,
@@ -95,7 +125,7 @@ impl JavaCallableKey {
     }
 
     pub(crate) fn owner(&self) -> &str {
-        &self.owner
+        self.owner.as_str()
     }
 
     pub(crate) fn java_name(&self) -> &str {
@@ -105,7 +135,7 @@ impl JavaCallableKey {
 
 impl JavaCallableSlotKey {
     pub(crate) fn source_method(method: &MethodDecl) -> Self {
-        JavaCallableKey::source_method("", method).slot()
+        JavaCallableKey::source_method(JavaOwnerKey::resolved_source(""), method).slot()
     }
 }
 

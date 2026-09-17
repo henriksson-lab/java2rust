@@ -26,6 +26,9 @@ pub(crate) fn java_accessor_method_reference_fallback_name(name: &str) -> bool {
 
 pub(crate) fn rust_name_for_java_named_type(name: &str) -> String {
     if !name.contains('.') {
+        if name == "Result" {
+            return "JavaResult".to_string();
+        }
         return name.to_string();
     }
     let mut out = String::new();
@@ -292,6 +295,12 @@ mod tests {
             rust_name_for_java_named_type("java.io.InputStream"),
             "JavaIoInputStream"
         );
+    }
+
+    #[test]
+    fn source_type_named_result_does_not_shadow_std_result() {
+        assert_eq!(rust_name_for_java_named_type("Result"), "JavaResult");
+        assert_eq!(rust_name_for_java_named_type("a.Result"), "AResult");
     }
 
     #[test]

@@ -1084,10 +1084,11 @@ fn commons_math_localized_formats_implements_localizable_pack_trait() {
 #[test]
 fn builtin_external_pack_facts_are_generated_from_manifest_boundaries() {
     let facts = builtin_external_library_pack_facts();
+    let index = facts.external_lookup_index();
 
     for manifest in builtin_external_pack_manifests() {
         for owned_type in manifest.owned_type_patterns {
-            let pack = facts
+            let pack = index
                 .external_library_pack_for_type(owned_type)
                 .unwrap_or_else(|| panic!("{owned_type} should have a generated pack fact"));
             assert_eq!(pack.pack_name, manifest.pack_name);
@@ -1200,7 +1201,7 @@ fn builtin_external_pack_facts_are_generated_from_manifest_boundaries() {
             );
         }
         for effect in manifest.api_effects {
-            let effect_fact = facts
+            let effect_fact = index
                 .external_api_effect_for_receiver_with_arity(
                     Some(effect.receiver_type),
                     effect.method_name,

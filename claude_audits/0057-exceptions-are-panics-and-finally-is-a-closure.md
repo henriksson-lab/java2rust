@@ -3,6 +3,29 @@
 Recorded 2026-08-23.
 Status: **done for the audited actual-error scope**.
 
+Codex follow-up 2026-09-17 fallibility traversal completion: the fallibility
+planner now descends into both operands of array access and the qualifier of a
+qualified constructor expression. Those positions previously could hide an
+integer division/remainder, `Math.toIntExact`, or nullable receiver dereference
+from the enclosing `Result` decision. Guards:
+`exception_plan::tests::{integer_div_rem_scan_sees_array_index,
+integer_div_rem_scan_sees_qualified_new_receiver,
+math_to_int_exact_scan_sees_qualified_new_receiver,
+nullable_receiver_deref_scan_sees_qualified_new_receiver}`. The related
+non-throwing interface override group also remains explicitly in fallible-free
+state via `non_throwing_interface_override_group_stays_infallible`.
+
+Codex follow-up 2026-09-16 rectangular primitive-array carrier pass:
+representation-aware slot rendering now selects `ndarray::Array2<T>` for
+primitive `T[][]` before its generic `Vec` fallback. This closes a generated-
+crate regression where catchable 2D creation/read lowering correctly emitted
+`Array2` operations but a local declaration still said `Vec<Vec<T>>`. The
+negative-size, row-read, and element-read catch paths now compile and execute;
+guards: `idiom_gaps::{array2_creation_negative_dimension_in_try_lowers_to_java_exception_result,
+array2_index_read_in_try_lowers_to_java_exception_result,
+array2_row_read_in_try_lowers_to_java_exception_result}` and
+`slot_shape_design::representation_aware_type_rendering_keeps_rectangular_primitive_arrays_as_array2`.
+
 Closure recheck 2026-09-13: two independent current-state audits found no
 remaining named 0057 fixture or TODO2 item that still reproduces as an uncovered
 semantic error. After rebuilding the translator from a clean `target/`, the

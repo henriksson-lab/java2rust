@@ -20,7 +20,7 @@ use std::process::Command;
 
 use new_java2rust::translate_source;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 348;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 375;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 1;
 
 #[test]
@@ -81,6 +81,10 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedAtomicIntegerDisplay",
         "ErasedAtomicLongDisplay",
         "ErasedArrayBlockingQueueDisplay",
+        "ErasedArrayBlockingQueueBooleanDisplay",
+        "ErasedArrayBlockingQueueDoubleDisplay",
+        "ErasedArrayBlockingQueueFloatDisplay",
+        "ErasedArrayBlockingQueueLongDisplay",
         "ErasedArrayListDisplay",
         "ErasedArraysAsListNullDisplay",
         "ErasedBoxedPrimitiveDisplay",
@@ -88,11 +92,24 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedClassDisplay",
         "ErasedFileDisplay",
         "ErasedFloatingPointDisplay",
+        "ErasedHashMapDisplay",
+        "ErasedHashMapIntegerKeyDisplay",
+        "ErasedHashSetDisplay",
         "ErasedInputStreamDisplay",
+        "ErasedJarEntryDisplay",
+        "ErasedLinkedHashMapBooleanDisplay",
         "ErasedLinkedHashMapDisplay",
+        "ErasedLinkedHashMapDoubleDisplay",
+        "ErasedLinkedHashMapIntegerKeyDisplay",
+        "ErasedLinkedHashSetBooleanDisplay",
         "ErasedLinkedHashSetDisplay",
+        "ErasedLinkedHashSetDoubleDisplay",
+        "ErasedLinkedHashSetFloatDisplay",
+        "ErasedLinkedHashSetLongDisplay",
         "ErasedLocaleDisplay",
+        "ErasedMapEntryBooleanDisplay",
         "ErasedMapEntryDisplay",
+        "ErasedMapEntryDoubleDisplay",
         "ErasedMapEntryIntegerDisplay",
         "ErasedNullableArrayListDisplay",
         "ErasedNullableBooleanArrayListDisplay",
@@ -109,13 +126,22 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedPathDisplay",
         "ErasedPatternDisplay",
         "ErasedPlatformDisplay",
+        "ErasedPriorityQueueDisplay",
+        "ErasedPriorityQueueFloatDisplay",
+        "ErasedPriorityQueueLongDisplay",
         "ErasedRandomDisplay",
         "ErasedSimpleImmutableEntryDisplay",
         "ErasedStringBuilderDisplay",
+        "ErasedStringTokenizerDisplay",
+        "ErasedTreeMapBooleanDisplay",
         "ErasedTreeMapDisplay",
+        "ErasedTreeMapDoubleDisplay",
+        "ErasedTreeMapIntegerKeyDisplay",
+        "ErasedTreeSetBooleanDisplay",
         "ErasedTreeSetDisplay",
         "ErasedUriDisplay",
         "ErasedUrlDisplay",
+        "ErasedZipEntryDisplay",
     ];
     let mut failures = Vec::new();
     for class in fixtures {
@@ -131,6 +157,40 @@ fn erased_display_fixtures_match_java_output() {
         "erased display fixture output differs from Java:\n\n{}",
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn erased_hash_map_integer_key_display_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedHashMapIntegerKeyDisplay.java");
+    compare_fixture(&translator, &fixture, "ErasedHashMapIntegerKeyDisplay")
+        .expect("ErasedHashMapIntegerKeyDisplay should match Java output");
+}
+
+#[test]
+fn erased_string_builder_display_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedStringBuilderDisplay.java");
+    compare_fixture(&translator, &fixture, "ErasedStringBuilderDisplay")
+        .expect("ErasedStringBuilderDisplay should match Java output");
 }
 
 #[test]
@@ -159,6 +219,27 @@ fn aliasing_shared_local_fixtures_match_java_output() {
     )
     .unwrap();
     compare_fixture(&translator, &root.join("Aliasing.java"), "Aliasing").unwrap();
+}
+
+#[test]
+fn anonymous_functional_interface_fixtures_match_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    compare_fixture(
+        &translator,
+        &root.join("AnonymousSupplier.java"),
+        "AnonymousSupplier",
+    )
+    .unwrap();
 }
 
 #[test]

@@ -164,7 +164,12 @@ pub fn rust_type_for_slot_with_facts_and_representations(
 ) -> RustType {
     let rendered =
         rust_type_for_slot_with_facts_and_representations_unwrapped(shape, facts, representations);
-    shared_handle_slot_rust_type(shape, &EffectiveFacts::new(facts), rendered)
+    shared_handle_slot_rust_type_with_representations(
+        shape,
+        &EffectiveFacts::new(facts),
+        representations,
+        rendered,
+    )
 }
 
 fn rust_type_for_slot_with_facts_and_representations_unwrapped(
@@ -176,6 +181,26 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
     if let Some(element_ty) = shape.optional_element_type() {
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
+        // A Rust `Option` owns its payload.  Rendering an optional Java array
+        // with the array's borrowed slice view produces `Option<[T]>`, which
+        // is unsized and cannot hold assignments such as `bytes = input`.
+        // Keep the element as the native, owned `Vec<T>` carrier instead.
+        if matches!(element_shape.java_ty, JavaType::Array(_))
+            && element_shape.view == ViewShape::Slice
+        {
+            element_shape.view = ViewShape::Native;
+            element_shape.ownership = OwnershipShape::Owned;
+        }
+        // Likewise, `Option` stores a string value rather than a borrowed
+        // `str` view. Rendering the inherited view here would produce the
+        // unsized `Option<str>` for nullable Java `String` locals/returns.
+        if matches!(element_shape.java_ty, JavaType::String)
+            && element_shape.view == ViewShape::Str
+            && matches!(element_shape.ownership, OwnershipShape::Owned)
+        {
+            element_shape.view = ViewShape::Native;
+            element_shape.ownership = OwnershipShape::Owned;
+        }
         // Through the wrapping entry point: the element is where the handle
         // belongs, giving `Option<Rc<T>>`.
         return RustType::Option(Box::new(rust_type_for_slot_with_facts_and_representations(
@@ -187,9 +212,41 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
 
     let viewed = match (&shape.view, &shape.dispatch) {
         (ViewShape::Str, _) => return rust_type_for_slot_with_facts(shape, facts),
-        (ViewShape::Slice, _) => return rust_type_for_slot_with_facts(shape, facts),
+        (ViewShape::Slice, _)
+            if crate::types::ndarray_array2_element_type(&shape.java_ty).is_some() =>
+        {
+            rust_type_for_slot_with_facts(shape, facts)
+        }
+        (ViewShape::Slice, _) => {
+            let content = slot_content_capability_policy_with_effective_facts(
+                &shape.java_ty,
+                &effective_facts,
+            );
+            if let Some(element_ty) = content.into_sequence_element() {
+                let element_ty = rust_storage_sequence_element_java_type(
+                    &shape.java_ty,
+                    element_ty,
+                    &effective_facts,
+                );
+                RustType::Slice(Box::new(
+                    rust_type_for_java_generic_arg_with_representations(
+                        &element_ty,
+                        &effective_facts,
+                        representations,
+                    ),
+                ))
+            } else {
+                rust_type_for_slot_with_facts(shape, facts)
+            }
+        }
         (_, DispatchShape::Concrete) => {
-            if crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some() {
+            if external_final_facade_should_keep_named_type(&shape.java_ty, &effective_facts)
+                && let JavaType::Named { name, .. } = &shape.java_ty
+            {
+                RustType::Named(rust_name_for_java_named_type(name))
+            } else if crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some()
+                || matches!(shape.java_ty, JavaType::Array(_))
+            {
                 rust_type_for_java_type_with_facts_and_representations(
                     &shape.java_ty,
                     facts,
@@ -204,6 +261,9 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
             &effective_facts,
         ),
     };
+
+    let viewed =
+        borrowed_external_dyn_trait_facade_view_type(shape, &effective_facts).unwrap_or(viewed);
 
     match shape.ownership {
         OwnershipShape::Owned | OwnershipShape::CopyValue => viewed,
@@ -262,14 +322,44 @@ fn shared_handle_slot_rust_type(
     storage_placement_type(placement, rendered)
 }
 
+fn shared_handle_slot_rust_type_with_representations(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+    rendered: RustType,
+) -> RustType {
+    if !matches!(
+        shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) || shape.optional_element_type().is_some()
+    {
+        return rendered;
+    }
+    let JavaType::Named { name, .. } = &shape.java_ty else {
+        return rendered;
+    };
+    let fact_placement = facts.storage_placement_for(name);
+    let placement = if fact_placement.is_implemented() && fact_placement.shared() {
+        fact_placement
+    } else {
+        representations.storage_placement_for(name)
+    };
+    if !placement.is_implemented() || !placement.shared() {
+        return rendered;
+    }
+    storage_placement_type(placement, rendered)
+}
+
 pub fn slot_rust_type_policy_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> SlotRustTypePolicy {
-    let viewed = render_slot_value_rust_type_policy_with_effective_facts(
-        &slot_value_rust_type_policy_with_effective_facts(shape, facts),
-        facts,
-    );
+    let viewed = borrowed_external_dyn_trait_facade_view_type(shape, facts).unwrap_or_else(|| {
+        render_slot_value_rust_type_policy_with_effective_facts(
+            &slot_value_rust_type_policy_with_effective_facts(shape, facts),
+            facts,
+        )
+    });
 
     match shape.ownership {
         OwnershipShape::Owned | OwnershipShape::CopyValue => {
@@ -278,6 +368,22 @@ pub fn slot_rust_type_policy_with_effective_facts(
         OwnershipShape::SharedBorrow => SlotRustTypePolicy::SharedBorrow { ty: viewed },
         OwnershipShape::MutableBorrow => SlotRustTypePolicy::MutableBorrow { ty: viewed },
     }
+}
+
+fn borrowed_external_dyn_trait_facade_view_type(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> Option<RustType> {
+    if !matches!(
+        shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        return None;
+    }
+    let JavaType::Named { name, .. } = &shape.java_ty else {
+        return None;
+    };
+    external_crate_mapped_dyn_trait_path(name, facts).map(RustType::ImplTrait)
 }
 
 pub fn slot_value_rust_type_policy_with_effective_facts(
@@ -391,6 +497,10 @@ pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
             {
                 ty
             } else if erased_facade_concrete_dispatch_should_keep_named_type(java_ty, facts)
+                && let JavaType::Named { name, .. } = java_ty
+            {
+                RustType::Named(rust_name_for_java_named_type(name))
+            } else if external_final_facade_should_keep_named_type(java_ty, facts)
                 && let JavaType::Named { name, .. } = java_ty
             {
                 RustType::Named(rust_name_for_java_named_type(name))
@@ -843,6 +953,32 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
         && let Some(ty) = external_crate_mapped_named_rust_type(name, &[], &effective_facts)
     {
         return ty;
+    }
+
+    // Rectangular primitive two-dimensional Java arrays have one carrier across
+    // construction, access, and slots: `ndarray::Array2<T>`.  This
+    // representation-aware path used to take the generic array branch below,
+    // which rendered declarations as `Vec<Vec<T>>` even though array lowering
+    // had correctly created an `Array2<T>`.
+    if let Some(element_ty) = crate::types::ndarray_array2_element_type(ty) {
+        return RustType::Array2(Box::new(
+            rust_type_for_java_generic_arg_with_representations(
+                &element_ty,
+                &effective_facts,
+                representations,
+            ),
+        ));
+    }
+
+    if let JavaType::Array(element_ty) = ty {
+        let element_ty = rust_storage_array_element_java_type(element_ty.as_ref().clone());
+        return RustType::Vec(Box::new(
+            rust_type_for_java_generic_arg_with_representations(
+                &element_ty,
+                &effective_facts,
+                representations,
+            ),
+        ));
     }
 
     if let Some(dispatch_ty) = rust_type_for_representation_dispatch(ty, representations) {
@@ -1347,6 +1483,12 @@ fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFact
     if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
         return rust_type_for_java_generic_arg_unwrapped(bound, facts);
     }
+    if let Some(element_ty) = optional_element_type(ty) {
+        return RustType::Option(Box::new(rust_type_for_optional_element_arg(
+            &element_ty,
+            facts,
+        )));
+    }
     if let JavaType::Named { name, args } = ty
         && args.is_empty()
         && let Some(primitive) = boxed_primitive_storage_java_type(name, facts)
@@ -1409,6 +1551,27 @@ fn rust_type_for_java_generic_arg_unwrapped(ty: &JavaType, facts: &EffectiveFact
         return erased_object_rust_type();
     }
     rust_type_for_java_type_with_effective_facts(ty, facts)
+}
+
+fn rust_type_for_optional_element_arg(ty: &JavaType, facts: &EffectiveFacts<'_>) -> RustType {
+    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
+        return rust_type_for_optional_element_arg(bound, facts);
+    }
+    if let JavaType::Named { name, args } = ty
+        && args.is_empty()
+        && let Some(primitive) = boxed_primitive_storage_java_type(name, facts)
+    {
+        return rust_type_for_java_type_with_effective_facts(
+            &JavaType::Primitive(primitive),
+            facts,
+        );
+    }
+    if erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
+        && let JavaType::Named { name, .. } = ty
+    {
+        return RustType::Named(rust_name_for_java_named_type(name));
+    }
+    rust_type_for_java_generic_arg_unwrapped(ty, facts)
 }
 
 fn rust_storage_sequence_element_java_type(
@@ -1491,6 +1654,15 @@ fn rust_type_for_java_generic_arg_with_representations(
     if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
         return rust_type_for_java_generic_arg_with_representations(bound, facts, representations);
     }
+    if let Some(element_ty) = optional_element_type(ty) {
+        return RustType::Option(Box::new(
+            rust_type_for_optional_element_arg_with_representations(
+                &element_ty,
+                facts,
+                representations,
+            ),
+        ));
+    }
     if builtin_or_conservative_erased_external_representation(ty, representations)
         && let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty
     {
@@ -1501,7 +1673,69 @@ fn rust_type_for_java_generic_arg_with_representations(
     {
         return dispatch_ty;
     }
+    if let Some(storage_ty) =
+        rust_type_for_representation_storage_placement(ty, facts, representations)
+    {
+        return storage_ty;
+    }
     rust_type_for_java_generic_arg_with_effective_facts(ty, facts)
+}
+
+fn rust_type_for_optional_element_arg_with_representations(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> RustType {
+    if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
+        return rust_type_for_optional_element_arg_with_representations(
+            bound,
+            facts,
+            representations,
+        );
+    }
+    if let JavaType::Named { name, args } = ty
+        && args.is_empty()
+        && let Some(primitive) = boxed_primitive_storage_java_type(name, facts)
+    {
+        return rust_type_for_java_type_with_effective_facts(
+            &JavaType::Primitive(primitive),
+            facts,
+        );
+    }
+    if erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
+        && let JavaType::Named { name, .. } = ty
+    {
+        return RustType::Named(rust_name_for_java_named_type(name));
+    }
+    if let Some(storage_ty) =
+        rust_type_for_representation_storage_placement(ty, facts, representations)
+    {
+        return storage_ty;
+    }
+    rust_type_for_java_generic_arg_with_representations(ty, facts, representations)
+}
+
+fn rust_type_for_representation_storage_placement(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> Option<RustType> {
+    let JavaType::Named { name, .. } = ty else {
+        return None;
+    };
+    let fact_placement = facts.storage_placement_for(name);
+    let placement = if fact_placement.is_implemented() && fact_placement.shared() {
+        fact_placement
+    } else {
+        representations.storage_placement_for(name)
+    };
+    if !placement.is_implemented() || !placement.shared() {
+        return None;
+    }
+    Some(storage_placement_type(
+        placement,
+        rust_type_for_java_type_with_effective_facts(ty, facts),
+    ))
 }
 
 fn rust_type_for_representation_dispatch(
@@ -1599,7 +1833,7 @@ pub(crate) fn render_native_java_rust_type_policy_with_effective_facts(
             }
         }
         NativeJavaRustTypePolicy::Optional { element_ty } => RustType::Option(Box::new(
-            rust_type_for_java_generic_arg_with_effective_facts(element_ty, facts),
+            rust_type_for_optional_element_arg(element_ty, facts),
         )),
         NativeJavaRustTypePolicy::Direct { ty } => ty.clone(),
         NativeJavaRustTypePolicy::Named { name } => RustType::Named(name.clone()),

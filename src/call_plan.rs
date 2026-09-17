@@ -842,9 +842,9 @@ pub fn native_collection_lowered_type(
         }
         NativeCollectionMethod::QueuePoll => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
-            Some(LoweredType::from_java(crate::types::optional_java_type(
-                element_ty.clone(),
-            )))
+            Some(LoweredType::optional_element_borrow_shape(
+                borrowed_sequence_element_shape(element_ty.clone()),
+            ))
         }
         NativeCollectionMethod::ListRemoveObject => Some(LoweredType::from_java(
             JavaType::Primitive(PrimitiveType::Boolean),
@@ -1201,6 +1201,10 @@ pub(crate) fn external_call_lowered_type_with_external_index(
         types,
         current_type,
     )?;
+    let rust_method = receiver_key
+        .as_deref()
+        .map(|receiver_key| external_method_rust_name(receiver_key, name, arg_count, facts))
+        .unwrap_or_else(|| crate::parser::to_snake_case(name));
     let Some(effect) = external_index
         .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
         .cloned()
@@ -1219,6 +1223,16 @@ pub(crate) fn external_call_lowered_type_with_external_index(
                 erased_object_facade_method_return_lowered_type(name, arg_count, facts)
         {
             return Some(lowered);
+        }
+        if let Some(receiver_key) = receiver_key.as_deref()
+            && let Some((return_ty, return_rust)) =
+                crate::stdlib::inferred_external_builder_facade_return_type(
+                    receiver_key,
+                    &rust_method,
+                    arg_count,
+                )
+        {
+            return Some(LoweredType::rust_owned_return(return_ty, return_rust));
         }
         let snake_name = crate::parser::to_snake_case(name);
         let (method_name, return_ty) =
@@ -1240,10 +1254,25 @@ pub(crate) fn external_call_lowered_type_with_external_index(
             return_ty,
         ));
     };
-    let rust_method = receiver_key
-        .as_deref()
-        .map(|receiver_key| external_method_rust_name(receiver_key, name, arg_count, facts))
-        .unwrap_or_else(|| crate::parser::to_snake_case(name));
+    if effect.return_type.is_none()
+        && let Some(receiver_key) = receiver_key.as_deref()
+        && let Some((return_ty, return_rust)) =
+            crate::stdlib::inferred_external_builder_facade_return_type(
+                receiver_key,
+                &rust_method,
+                arg_count,
+            )
+    {
+        let returns_optional = matches!(
+            effect.return_nullability,
+            NullabilityState::MaybeNull | NullabilityState::DefinitelyNull
+        );
+        return Some(if returns_optional {
+            LoweredType::optional_rust_owned_return(return_ty, return_rust)
+        } else {
+            LoweredType::rust_owned_return(return_ty, return_rust)
+        });
+    }
     let return_ty = crate::types::receiver_generic_return_type(
         receiver_ty.as_ref(),
         effect.return_type.clone().or_else(|| {
@@ -1313,6 +1342,15 @@ pub(crate) fn external_call_lowered_type_with_external_index(
         && external_return_type_is_typed_erased_facade(&return_ty, facts)
         && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
     {
+        if let Some(rust_return_type) = rust_return_type
+            && rust_return_is_shared_borrow
+        {
+            return Some(LoweredType::rust_borrowed_return(
+                return_ty,
+                rust_return_type.rust_type_name.clone(),
+                rust_return_type.borrowed_return_recovery.map(Into::into),
+            ));
+        }
         return Some(LoweredType::rust_owned_return(
             return_ty,
             rust_return_type
@@ -1414,7 +1452,11 @@ pub(crate) fn external_call_lowered_type_from_static_owner_plan_with_external_in
         external_index,
         types,
     );
-    let CallExprPlan::Target(CallTargetPlan::StaticOwner { owner, .. }) = plan else {
+    let CallExprPlan::Target(CallTargetPlan::StaticOwner {
+        owner,
+        rust_name: target_rust_name,
+    }) = plan
+    else {
         return None;
     };
     static_owner_result_type_candidates(receiver, &owner, types)
@@ -1434,7 +1476,16 @@ pub(crate) fn external_call_lowered_type_from_static_owner_plan_with_external_in
                         &arg_types,
                     )
                 })
-                .and_then(external_effect_lowered_type)
+                .and_then(|effect| {
+                    external_effect_lowered_type(effect).or_else(|| {
+                        inferred_static_owner_new_builder_lowered_type(
+                            &owner,
+                            &target_rust_name,
+                            args.len(),
+                            facts,
+                        )
+                    })
+                })
                 .or_else(|| {
                     let receiver_ty = JavaType::Named {
                         name: owner.clone(),
@@ -1460,7 +1511,35 @@ pub(crate) fn external_call_lowered_type_from_static_owner_plan_with_external_in
                         known_external_call_lowered_type(Some(&owner), name, args.len(), return_ty)
                     })
                 })
+                .or_else(|| {
+                    inferred_static_owner_new_builder_lowered_type(
+                        &owner,
+                        &target_rust_name,
+                        args.len(),
+                        facts,
+                    )
+                })
         })
+}
+
+fn inferred_static_owner_new_builder_lowered_type(
+    owner: &str,
+    rust_name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> Option<LoweredType> {
+    if rust_name != "new_builder" || arg_count != 0 {
+        return None;
+    }
+    let owner_rust = rust_static_owner_type_name_with_facts(owner, facts);
+    let return_rust = format!("{owner_rust}Builder");
+    Some(LoweredType::rust_owned_return(
+        JavaType::Named {
+            name: return_rust.clone(),
+            args: Vec::new(),
+        },
+        return_rust,
+    ))
 }
 
 pub(crate) fn external_receiver_call_return_type_with_external_index(
@@ -1628,16 +1707,6 @@ fn lowered_type_for_facade_abi(abi: &FacadeAbiFact, return_ty: &JavaType) -> Opt
             abi.borrowed_return_recovery.map(Into::into),
         ));
     }
-    if returns_optional
-        && matches!(unwrapped_slot, FacadeSlot::Owned)
-        && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
-    {
-        return Some(LoweredType::optional_rust_owned_return(
-            return_ty.clone(),
-            abi.rust_path.clone(),
-        ));
-    }
-
     if java_type_is_byte_array(return_ty)
         && matches!(unwrapped_slot, FacadeSlot::Owned | FacadeSlot::Slice(_))
     {
@@ -1649,6 +1718,15 @@ fn lowered_type_for_facade_abi(abi: &FacadeAbiFact, return_ty: &JavaType) -> Opt
         return Some(LoweredType::rust_unsigned_byte_array_return(
             semantic_ty,
             returns_optional,
+        ));
+    }
+    if returns_optional
+        && matches!(unwrapped_slot, FacadeSlot::Owned)
+        && !matches!(return_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return Some(LoweredType::optional_rust_owned_return(
+            return_ty.clone(),
+            abi.rust_path.clone(),
         ));
     }
 
@@ -2015,6 +2093,9 @@ pub enum NativeCollectionNewTarget {
         kind: crate::stdlib::JavaCollectionKind,
     },
     PriorityQueueComparatorCallback {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
+    PriorityQueueComparatorFacade {
         kind: crate::stdlib::JavaCollectionKind,
     },
     PriorityQueueComparator {
@@ -3572,6 +3653,13 @@ fn static_utility_owner_call_target<'a>(
         return None;
     }
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
+    if matches!(name, "newBuilder" | "new_builder") && arg_count == 0 {
+        let owner_key = upper_camel_from_snake_or_preserved(&receiver_key);
+        return Some(CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(&owner_key, facts),
+            rust_name: "new_builder".to_string(),
+        });
+    }
     let native_receiver_key =
         crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
     if crate::javalibs::native_java_static_owner_alias(&receiver_key).is_some()
@@ -3625,8 +3713,15 @@ fn static_utility_owner_call_target<'a>(
         && (unproven_simple_receiver_can_be_static_owner(receiver_name)
             || query_owner != receiver_name.as_str())
     {
+        let owner_key = if unproven_simple_receiver_can_be_static_owner(receiver_name)
+            && query_owner == receiver_name.as_str()
+        {
+            upper_camel_from_snake_or_preserved(receiver_name)
+        } else {
+            query_owner.clone()
+        };
         Some(CallTargetPlan::StaticOwner {
-            owner: rust_static_owner_type_name_with_facts(&query_owner, facts),
+            owner: rust_static_owner_type_name_with_facts(&owner_key, facts),
             rust_name: external_method_rust_name(&query_owner, name, arg_count, facts),
         })
     } else if unproven_simple_receiver_can_be_static_owner(receiver_name) {
@@ -5204,7 +5299,7 @@ fn constructor_member_rust_name(rust_name: &str) -> &str {
 fn java_mutable_string_buffer_constructor_uses_arity_name(type_name: &str) -> bool {
     matches!(
         crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
-        "StringBuilder" | "StringBuffer" | "StringTokenizer" | "BitSet" | "ZipEntry"
+        "StringBuilder" | "StringBuffer" | "StringTokenizer" | "BitSet" | "JarEntry" | "ZipEntry"
     )
 }
 
@@ -5520,6 +5615,8 @@ pub(crate) fn plan_native_collection_constructor_for_args(
         {
             if priority_queue_comparator_constructor_arg_is_callback_param(arg, types) {
                 Some(NativeCollectionNewTarget::PriorityQueueComparatorCallback { kind })
+            } else if priority_queue_comparator_constructor_arg_is_callable_facade(arg, types) {
+                Some(NativeCollectionNewTarget::PriorityQueueComparatorFacade { kind })
             } else if priority_queue_comparator_constructor_arg_is_comparator_object_binding(
                 arg, types,
             ) {
@@ -5537,13 +5634,9 @@ pub(crate) fn plan_native_collection_constructor_for_args(
 
 fn native_collection_constructor_kind_with_facts(
     ty: &JavaType,
-    facts: &FactSet,
+    _facts: &FactSet,
 ) -> Option<crate::stdlib::JavaCollectionKind> {
-    crate::stdlib::native_collection_constructor_kind_for_type(ty).or_else(|| {
-        EffectiveFacts::new(facts)
-            .sequence_element_type_for(ty)
-            .map(|_| crate::stdlib::JavaCollectionKind::List)
-    })
+    crate::stdlib::native_collection_constructor_kind_for_type(ty)
 }
 
 fn is_integral_capacity_arg(arg: &Expr, types: &TypeEnv) -> bool {
@@ -5639,7 +5732,18 @@ fn priority_queue_comparator_constructor_arg_is_callback_param(
     let Expr::Var(name) = arg else {
         return false;
     };
-    (types.is_param(name) || types.is_callable_local(name))
+    types.is_param(name)
+        && priority_queue_comparator_constructor_arg_is_opaque_comparator(arg, types)
+}
+
+fn priority_queue_comparator_constructor_arg_is_callable_facade(
+    arg: &Expr,
+    types: &TypeEnv,
+) -> bool {
+    let Expr::Var(name) = arg else {
+        return false;
+    };
+    types.is_callable_local(name)
         && priority_queue_comparator_constructor_arg_is_opaque_comparator(arg, types)
 }
 
@@ -7158,6 +7262,7 @@ fn argument_shape_from_external_metadata(
     let mut shape = RustSlotShape::conservative(java_ty);
     if let Some(HierarchyStrategy::DynTrait { trait_name }) =
         facts.object_representation_override_strategy_for(&base_java_ty)
+        && !external_crate_mapped_dyn_trait_argument(&base_java_ty, facts)
     {
         apply_required_dispatch(
             &mut shape,
@@ -7209,6 +7314,22 @@ fn argument_shape_from_external_metadata(
     }
 
     shape
+}
+
+fn external_crate_mapped_dyn_trait_argument(
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    let JavaType::Named { name, args } = java_ty else {
+        return false;
+    };
+    if !args.is_empty() {
+        return false;
+    }
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+    facts
+        .external_library_pack_for_type(&canonical)
+        .is_some_and(|pack| pack.mode == ExternalLibraryMode::RustCrateMapping)
 }
 
 fn external_generic_facade_receiver_keeps_argument_concrete(
@@ -7835,7 +7956,7 @@ mod tests {
                 &types,
                 &FactSet::default(),
             ),
-            Some(NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. })
+            Some(NativeCollectionNewTarget::PriorityQueueComparatorFacade { .. })
         ));
         types.insert_param("param_comparator", comparator_ty);
         let comparator_param_arg = vec![Expr::Var("param_comparator".to_string())];
@@ -7985,6 +8106,26 @@ mod tests {
                 ref rust_name,
             } if owner == "Product" && rust_name == "new_builder"
         ));
+    }
+
+    #[test]
+    fn uppercase_static_utility_receiver_uses_associated_owner_path() {
+        for receiver in ["IntervalUtils", "interval_utils"] {
+            assert!(matches!(
+                plan_call_target_with_facts_and_arity(
+                    Some(&Expr::Var(receiver.to_string())),
+                    "getSpanningIntervals",
+                    2,
+                    None,
+                    &FactSet::default(),
+                    &TypeEnv::default(),
+                ),
+                CallTargetPlan::StaticOwner {
+                    ref owner,
+                    ref rust_name,
+                } if owner == "IntervalUtils" && rust_name == "get_spanning_intervals"
+            ));
+        }
     }
 
     #[test]

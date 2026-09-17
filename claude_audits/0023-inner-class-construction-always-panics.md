@@ -642,4 +642,5 @@ outer receiver now bind the handle once and dispatch
 `inner_class_capture` diagnostic gate now treats implemented `SharedLocal` as
 constructable instead of reporting `inner_class_construction_panics`.
 `tests/differential/InnerCapture.java` is promoted and matches Java (`21`);
-the known-gap harness is down to the two identity-model fixtures.
+the known-gap harness is down to the single Java-String reference-identity
+fixture, `StringEqualsVsEq.java`.
