@@ -9025,6 +9025,35 @@ pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts
     let external_to_string_downcasts = external_erased_object_to_string_downcasts(programs, facts);
     let collection_to_string_downcasts = collection_erased_object_to_string_downcasts(programs);
     let vec_to_string_downcasts = erased_vec_to_string_downcasts();
+    let java_string_identity_erased_support = if facts.java_string_identity_representation {
+        r#"impl JavaErasedCollectionDisplayElement for JavaString {
+    fn java_erased_collection_display(&self) -> String { self.as_str().to_string() }
+}
+
+impl JavaErasedOptionalDisplayElement for JavaString {
+    fn java_erased_optional_display(&self) -> String { self.as_str().to_string() }
+}
+"#
+    } else {
+        ""
+    };
+    let java_string_identity_erased_downcasts = if facts.java_string_identity_representation {
+        r#"    if let Some(value) = value.downcast_ref::<Vec<JavaString>>() {
+        return java_erased_collection_to_string(value);
+    }
+    if let Some(value) = value.downcast_ref::<Vec<Option<JavaString>>>() {
+        return java_erased_collection_to_string(value);
+    }
+    if let Some(value) = value.downcast_ref::<JavaString>() {
+        return value.as_str().to_string();
+    }
+    if let Some(value) = value.downcast_ref::<Option<JavaString>>() {
+        return java_erased_optional_to_string(value);
+    }
+"#
+    } else {
+        ""
+    };
     crate::rust_ir::RustItem::Raw(format!(
         r#"pub fn java_is_serializable<T: ?Sized>(_value: &T) -> bool {{
     true
@@ -9127,6 +9156,8 @@ macro_rules! impl_java_erased_optional_display {{
 
 impl_java_erased_optional_display!(bool, i8, i16, i32, i64, char, String);
 
+{java_string_identity_erased_support}
+
 impl JavaErasedOptionalDisplayElement for f32 {{
     fn java_erased_optional_display(&self) -> String {{
         java_float_to_string(*self)
@@ -9176,6 +9207,7 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     }}
 {vec_to_string_downcasts}
 {collection_to_string_downcasts}
+{java_string_identity_erased_downcasts}
     if let Some(value) = value.downcast_ref::<String>() {{
         return value.clone();
     }}
@@ -11379,6 +11411,110 @@ fn java_simple_regex_literal(regex: &str) -> &str {
     }
 }"#
         .to_string(),
+    )
+}
+
+/// Runtime carrier used by the identity-preserving Java `String` migration.
+///
+/// Kept as generated support rather than a translator-host type because each
+/// translated crate must preserve Java literal interning and fresh
+/// `new String(...)` allocation independently.
+pub(crate) fn java_string_identity_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"#[derive(Clone, Debug)]
+pub struct JavaString(std::sync::Arc<str>);
+
+impl JavaString {
+    pub fn intern(value: impl AsRef<str>) -> Self {
+        static INTERNED: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<str>>>> = std::sync::OnceLock::new();
+        let value = value.as_ref();
+        let table = INTERNED.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+        let mut table = table.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(existing) = table.get(value) {
+            return Self(existing.clone());
+        }
+        let interned: std::sync::Arc<str> = std::sync::Arc::from(value);
+        table.insert(value.to_string(), interned.clone());
+        Self(interned)
+    }
+
+    pub fn fresh(value: impl AsRef<str>) -> Self {
+        Self(std::sync::Arc::from(value.as_ref()))
+    }
+
+    pub fn java_equals(&self, other: &Self) -> bool { self.0 == other.0 }
+    pub fn java_identity_eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.0, &other.0) }
+    pub fn as_str(&self) -> &str { &self.0 }
+}
+
+impl AsRef<str> for JavaString { fn as_ref(&self) -> &str { self.as_str() } }
+impl std::fmt::Display for JavaString { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) } }
+impl PartialEq for JavaString { fn eq(&self, other: &Self) -> bool { self.java_equals(other) } }
+impl Eq for JavaString {}
+impl std::hash::Hash for JavaString { fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.0.hash(state) } }
+impl PartialOrd for JavaString { fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) } }
+impl Ord for JavaString { fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.cmp(&other.0) } }
+"#.to_string(),
+    )
+}
+
+/// Runtime monitor for generated Java programs. It tracks logical ownership
+/// separately from translated object fields, making nested acquisition by the
+/// owning thread reentrant and releasing the acquisition through RAII.
+pub(crate) fn java_monitor_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"use std::sync::{Condvar, Mutex};
+
+#[derive(Default)]
+struct JavaMonitorState { owner: Option<std::thread::ThreadId>, depth: usize }
+pub struct JavaMonitor { state: Mutex<JavaMonitorState>, changed: Condvar }
+impl Default for JavaMonitor { fn default() -> Self { Self::new() } }
+// A monitor is runtime metadata, not part of an object's Java value.  Generated
+// source structs may derive these traits, so make an embedded `Arc<JavaMonitor>`
+// observationally neutral for those derives.  Object identity is represented by
+// the surrounding source-object handle, never by its monitor.
+impl std::fmt::Debug for JavaMonitor { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.write_str("JavaMonitor") } }
+impl PartialEq for JavaMonitor { fn eq(&self, _other: &Self) -> bool { true } }
+impl Eq for JavaMonitor {}
+impl std::hash::Hash for JavaMonitor { fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {} }
+impl JavaMonitor {
+    pub const fn new() -> Self { Self { state: Mutex::new(JavaMonitorState { owner: None, depth: 0 }), changed: Condvar::new() } }
+    fn lock_state(&self) -> std::sync::MutexGuard<'_, JavaMonitorState> { self.state.lock().unwrap_or_else(|p| p.into_inner()) }
+    pub fn enter(&self) -> JavaMonitorGuard<'_> {
+        let current = std::thread::current().id(); let mut state = self.lock_state();
+        while state.owner.is_some_and(|owner| owner != current) { state = self.changed.wait(state).unwrap_or_else(|p| p.into_inner()); }
+        state.owner = Some(current); state.depth += 1; JavaMonitorGuard { monitor: self, active: true }
+    }
+    fn notify_one(&self) { self.changed.notify_one(); }
+    fn notify_all(&self) { self.changed.notify_all(); }
+}
+pub struct JavaMonitorGuard<'a> { monitor: &'a JavaMonitor, active: bool }
+impl JavaMonitorGuard<'_> {
+    fn assert_owner(&self, state: &JavaMonitorState) { assert!(self.active && state.owner == Some(std::thread::current().id()), "Java monitor operation without ownership"); }
+    pub fn wait(&self) {
+        let current = std::thread::current().id(); let mut state = self.monitor.lock_state(); self.assert_owner(&state);
+        let depth = state.depth; state.owner = None; state.depth = 0; self.monitor.changed.notify_all();
+        state = self.monitor.changed.wait(state).unwrap_or_else(|p| p.into_inner());
+        while state.owner.is_some_and(|owner| owner != current) { state = self.monitor.changed.wait(state).unwrap_or_else(|p| p.into_inner()); }
+        state.owner = Some(current); state.depth = depth;
+    }
+    pub fn wait_millis(&self, millis: i64) {
+        assert!(millis >= 0, "Java Object.wait timeout must be non-negative");
+        if millis == 0 { self.wait(); return; }
+        let current = std::thread::current().id(); let mut state = self.monitor.lock_state(); self.assert_owner(&state);
+        let depth = state.depth; state.owner = None; state.depth = 0; self.monitor.changed.notify_all();
+        let timeout = std::time::Duration::from_millis(millis as u64);
+        state = self.monitor.changed.wait_timeout(state, timeout).unwrap_or_else(|p| p.into_inner()).0;
+        while state.owner.is_some_and(|owner| owner != current) { state = self.monitor.changed.wait(state).unwrap_or_else(|p| p.into_inner()); }
+        state.owner = Some(current); state.depth = depth;
+    }
+    pub fn notify(&self) { let state = self.monitor.lock_state(); self.assert_owner(&state); drop(state); self.monitor.notify_one(); }
+    pub fn notify_all(&self) { let state = self.monitor.lock_state(); self.assert_owner(&state); drop(state); self.monitor.notify_all(); }
+}
+impl Drop for JavaMonitorGuard<'_> {
+    fn drop(&mut self) { if !self.active { return; } let mut state = self.monitor.lock_state(); self.assert_owner(&state); state.depth -= 1; if state.depth == 0 { state.owner = None; self.monitor.changed.notify_all(); } self.active = false; }
+}
+"#.to_string(),
     )
 }
 
@@ -19069,6 +19205,84 @@ mod stdlib_support_item_tests {
         assert!(support.contains("JavaArraysDeepToStringElement"));
         assert!(support.contains("JavaArraysDeepEqualsElement"));
         assert!(support.contains("JavaArraysDeepHashElement"));
+    }
+
+    #[test]
+    fn java_string_identity_runtime_support_keeps_value_and_reference_semantics_distinct() {
+        let support = raw_support_item_text(java_string_identity_support_item());
+        assert!(support.contains("pub struct JavaString"));
+        assert!(support.contains("pub fn intern"));
+        assert!(support.contains("pub fn fresh"));
+        assert!(support.contains("pub fn java_identity_eq"));
+        assert!(support.contains("std::sync::Arc::ptr_eq"));
+        assert!(support.contains("impl PartialEq for JavaString"));
+    }
+
+    #[test]
+    fn java_monitor_runtime_support_has_reentrant_wait_notify_surface() {
+        let support = raw_support_item_text(java_monitor_support_item());
+        assert!(support.contains("pub struct JavaMonitor"));
+        assert!(support.contains("state.depth += 1"));
+        assert!(support.contains("pub fn wait(&self)"));
+        assert!(support.contains("pub fn notify(&self)"));
+        assert!(support.contains("pub fn notify_all(&self)"));
+        assert!(support.contains("impl Drop for JavaMonitorGuard"));
+    }
+
+    #[test]
+    fn generated_java_monitor_runtime_compiles_and_reenters() {
+        let support = raw_support_item_text(java_monitor_support_item());
+        let source = format!(
+            "{support}\n#[derive(Debug, Clone, PartialEq, Eq, Hash)] struct Object {{ monitor: std::sync::Arc<JavaMonitor> }}\nfn main() {{ let monitor = std::sync::Arc::new(JavaMonitor::new()); let object = Object {{ monitor: monitor.clone() }}; assert_eq!(object, object.clone()); let outer = monitor.enter(); let inner = monitor.enter(); inner.notify_all(); drop(inner); drop(outer); let timed = monitor.enter(); timed.wait_millis(1); drop(timed); let ready = std::sync::Arc::new(std::sync::Barrier::new(2)); let worker_monitor = monitor.clone(); let worker_ready = ready.clone(); let worker = std::thread::spawn(move || {{ let guard = worker_monitor.enter(); worker_ready.wait(); guard.wait(); }}); ready.wait(); let guard = monitor.enter(); guard.notify(); drop(guard); worker.join().expect(\"waiter completes\"); }}"
+        );
+        let stem = format!("new_java2rust_monitor_{}", std::process::id());
+        let source_path = std::env::temp_dir().join(format!("{stem}.rs"));
+        let binary_path = std::env::temp_dir().join(stem);
+        std::fs::write(&source_path, source).expect("write monitor runtime fixture");
+        let compile = std::process::Command::new("rustc")
+            .args(["--edition", "2021"])
+            .arg(&source_path)
+            .arg("-o")
+            .arg(&binary_path)
+            .output()
+            .expect("invoke rustc for monitor runtime fixture");
+        assert!(
+            compile.status.success(),
+            "monitor runtime fixture did not compile: {}",
+            String::from_utf8_lossy(&compile.stderr)
+        );
+        let run = std::process::Command::new(&binary_path)
+            .status()
+            .expect("run monitor runtime fixture");
+        let _ = std::fs::remove_file(&source_path);
+        let _ = std::fs::remove_file(&binary_path);
+        assert!(run.success(), "reentrant monitor fixture failed");
+    }
+
+    #[test]
+    fn erased_object_support_includes_identity_string_carrier_only_when_selected() {
+        let ordinary = raw_support_item_text(
+            java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
+                &[],
+                &[],
+                &FactSet::default(),
+                None,
+            ),
+        );
+        assert!(!ordinary.contains("downcast_ref::<JavaString>()"));
+
+        let mut facts = FactSet::default();
+        facts.java_string_identity_representation = true;
+        let identity = raw_support_item_text(
+            java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
+                &[],
+                &[],
+                &facts,
+                None,
+            ),
+        );
+        assert!(identity.contains("downcast_ref::<JavaString>()"));
+        assert!(identity.contains("Vec<Option<JavaString>>"));
     }
 }
 

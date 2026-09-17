@@ -152,6 +152,7 @@ pub fn analyze_program_with_config(
         &mut facts,
         config.builtin_external_packs_enabled(),
     );
+    collect_java_string_identity_representation_facts(program, &mut facts);
     collect_trivial_accessor_facts(program, &mut facts);
     collect_source_equals_override_facts(program, &mut facts);
     if config.external_api_guesses_enabled() {
@@ -219,6 +220,80 @@ pub fn analyze_program_with_config(
         diagnostics,
         iterations: SemanticAnalysisIterations::new(field_nullability_iterations),
     }
+}
+
+/// Select one whole-program carrier for `String` as soon as a source-level
+/// reference comparison requires it.  This has to happen before lowering: a
+/// late, expression-local conversion would mix `String` and `JavaString` in
+/// signatures and generic collections.
+fn collect_java_string_identity_representation_facts(program: &Program, facts: &mut FactSet) {
+    for ty in &program.types {
+        collect_type_java_string_identity_representation_facts(ty, facts);
+    }
+}
+
+fn collect_type_java_string_identity_representation_facts(ty: &TypeDecl, facts: &mut FactSet) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method) => {
+                let Some(body) = &method.body else {
+                    continue;
+                };
+                let mut env = collect_external_api_type_env(
+                    ty,
+                    &method.type_params,
+                    &method.type_param_bounds,
+                    &method.params,
+                );
+                collect_block_declared_locals(body, &mut env);
+                if block_has_java_string_reference_equality(body, &env) {
+                    facts.java_string_identity_representation = true;
+                    return;
+                }
+            }
+            Member::Constructor(constructor) => {
+                let Some(body) = &constructor.body else {
+                    continue;
+                };
+                let mut env = collect_external_api_type_env(
+                    ty,
+                    &constructor.type_params,
+                    &constructor.type_param_bounds,
+                    &constructor.params,
+                );
+                collect_block_declared_locals(body, &mut env);
+                if block_has_java_string_reference_equality(body, &env) {
+                    facts.java_string_identity_representation = true;
+                    return;
+                }
+            }
+            Member::Type(nested) => {
+                collect_type_java_string_identity_representation_facts(nested, facts);
+                if facts.java_string_identity_representation {
+                    return;
+                }
+            }
+            Member::Field(_) | Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn block_has_java_string_reference_equality(body: &Block, env: &TypeEnv) -> bool {
+    let mut found = false;
+    walk_block_exprs(body, &mut |expr| {
+        let Expr::Binary { op, left, right } = expr else {
+            return;
+        };
+        if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
+            return;
+        }
+        let left_ty = infer_expr_type(left, env);
+        let right_ty = infer_expr_type(right, env);
+        if matches!(left_ty, JavaType::String) && matches!(right_ty, JavaType::String) {
+            found = true;
+        }
+    });
+    found
 }
 
 fn collect_builtin_external_representation_facts(facts: &mut FactSet, enabled: bool) {

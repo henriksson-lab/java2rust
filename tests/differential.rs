@@ -18,10 +18,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use new_java2rust::translate_source;
-
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 375;
-const EXPECTED_KNOWN_GAP_FIXTURES: usize = 1;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 378;
+const EXPECTED_KNOWN_GAP_FIXTURES: usize = 0;
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -61,6 +59,54 @@ fn translated_output_matches_java_output() {
         fixtures.len(),
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn string_reference_identity_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/StringEqualsVsEq.java");
+    compare_fixture(&translator, &fixture, "StringEqualsVsEq").unwrap();
+}
+
+#[test]
+fn generic_getter_concat_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/Generics.java");
+    compare_fixture(&translator, &fixture, "Generics").unwrap();
+}
+
+#[test]
+fn linked_node_optional_shared_receiver_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/LinkedNode.java");
+    compare_fixture(&translator, &fixture, "LinkedNode").unwrap();
+}
+
+#[test]
+fn synchronized_instance_method_reentry_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/SynchronizedMethodReentry.java");
+    compare_fixture(&translator, &fixture, "SynchronizedMethodReentry").unwrap();
+}
+
+#[test]
+fn synchronized_static_method_reentry_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/SynchronizedStaticMethodReentry.java");
+    compare_fixture(&translator, &fixture, "SynchronizedStaticMethodReentry").unwrap();
 }
 
 #[test]
@@ -936,11 +982,6 @@ fn known_gap_fixtures_are_valid_java_and_match_expected_failure_mode() {
         );
     }
 
-    let fixtures = known_gap_fixtures();
-    let expected_paths = fixtures
-        .iter()
-        .map(|fixture| fixture.display.to_string())
-        .collect::<BTreeSet<_>>();
     let actual_paths = known_gap_fixture_paths()
         .into_iter()
         .map(|path| {
@@ -951,26 +992,9 @@ fn known_gap_fixtures_are_valid_java_and_match_expected_failure_mode() {
         })
         .collect::<BTreeSet<_>>();
     assert_eq!(
-        fixtures.len(),
+        actual_paths.len(),
         EXPECTED_KNOWN_GAP_FIXTURES,
         "known-gap fixture count changed; update EXPECTED_KNOWN_GAP_FIXTURES intentionally"
-    );
-    assert_eq!(
-        actual_paths, expected_paths,
-        "known-gap fixture list does not match tests/differential/known-gaps/*.java"
-    );
-
-    let mut failures = Vec::new();
-    for fixture in fixtures {
-        if let Err(report) = check_known_gap(&fixture) {
-            failures.push(format!("{}: {report}", fixture.display));
-        }
-    }
-
-    assert!(
-        failures.is_empty(),
-        "known-gap fixture checks failed:\n\n{}",
-        failures.join("\n\n")
     );
 }
 
@@ -994,117 +1018,6 @@ fn compare_fixture(translator: &Path, fixture: &Path, class: &str) -> Result<(),
     }
 }
 
-struct KnownGapFixture {
-    display: &'static str,
-    class: &'static str,
-    expected_java_output: &'static str,
-    expectation: KnownGapExpectation,
-}
-
-enum KnownGapExpectation {
-    LoudCompileError {
-        message: &'static str,
-        diagnostic_code: Option<&'static str>,
-        rust_contains: &'static [&'static str],
-        rust_not_contains: &'static [&'static str],
-    },
-}
-
-fn known_gap_fixtures() -> Vec<KnownGapFixture> {
-    vec![KnownGapFixture {
-        display: "tests/differential/known-gaps/StringEqualsVsEq.java",
-        class: "StringEqualsVsEq",
-        expected_java_output: "true,false,true,true,false",
-        expectation: KnownGapExpectation::LoudCompileError {
-            message: "unsupported Java String reference identity comparison requires string identity representation",
-            diagnostic_code: Some("java_string_identity"),
-            rust_contains: &[],
-            rust_not_contains: &[],
-        },
-    }]
-}
-
-fn check_known_gap(fixture: &KnownGapFixture) -> Result<(), String> {
-    let source_path = Path::new(env!("CARGO_MANIFEST_DIR")).join(fixture.display);
-    let source = std::fs::read_to_string(&source_path).map_err(|err| err.to_string())?;
-
-    let work = std::env::temp_dir().join(format!("new_java2rust_known_gap_{}", fixture.class));
-    let _ = std::fs::remove_dir_all(&work);
-    std::fs::create_dir_all(&work).map_err(|err| format!("temp dir: {err}"))?;
-    let java_output = run_java(&work, &source_path, fixture.class);
-    let java_output = match java_output {
-        Ok(output) => output,
-        Err(err) => {
-            let _ = std::fs::remove_dir_all(&work);
-            return Err(err);
-        }
-    };
-
-    if java_output != fixture.expected_java_output {
-        let _ = std::fs::remove_dir_all(&work);
-        return Err(format!(
-            "Java oracle changed: expected {:?}, got {:?}",
-            fixture.expected_java_output, java_output
-        ));
-    }
-
-    let translation = translate_source(&source);
-    match fixture.expectation {
-        KnownGapExpectation::LoudCompileError {
-            message,
-            diagnostic_code,
-            rust_contains,
-            rust_not_contains,
-        } => {
-            let expected = format!("compile_error!(\"{message}\")");
-            if !translation.rust.contains(&expected) {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not fail loudly with {expected:?}\n{}",
-                    translation.rust
-                ));
-            }
-            if let Some(diagnostic_code) = diagnostic_code
-                && !translation.diagnostics.has_code(diagnostic_code)
-            {
-                let _ = std::fs::remove_dir_all(&work);
-                return Err(format!(
-                    "translation did not report diagnostic code {diagnostic_code:?}: {:?}",
-                    translation.diagnostics.iter().collect::<Vec<_>>()
-                ));
-            }
-            check_rust_fragments(&translation.rust, rust_contains, rust_not_contains).map_err(
-                |err| {
-                    let _ = std::fs::remove_dir_all(&work);
-                    err
-                },
-            )?;
-        }
-    }
-    let _ = std::fs::remove_dir_all(&work);
-    Ok(())
-}
-
-fn check_rust_fragments(rust: &str, required: &[&str], forbidden: &[&str]) -> Result<(), String> {
-    for expected in required {
-        if !rust.contains(expected) {
-            return Err(format!(
-                "translation did not contain expected generated Rust fragment \
-                 {expected:?}\n{rust}"
-            ));
-        }
-    }
-    for unexpected in forbidden {
-        if rust.contains(unexpected) {
-            return Err(format!(
-                "translation still contains forbidden generated Rust fragment \
-                 {unexpected:?}\n{rust}"
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn known_gap_fixture_paths() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/known-gaps");
     let mut paths = std::fs::read_dir(dir)
@@ -1118,44 +1031,6 @@ fn known_gap_fixture_paths() -> Vec<PathBuf> {
         .unwrap_or_default();
     paths.sort();
     paths
-}
-
-fn run_translated_rust_source(work: &Path, class: &str, rust: &str) -> Result<String, String> {
-    let binary = compile_translated_rust_source(work, class, rust)?;
-    let run = Command::new(&binary)
-        .output()
-        .map_err(|err| format!("run: {err}"))?;
-    if !run.status.success() {
-        return Err(format!(
-            "translated program failed: {}",
-            String::from_utf8_lossy(&run.stderr).trim_end()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&run.stdout).trim_end().to_string())
-}
-
-fn compile_translated_rust_source(work: &Path, class: &str, rust: &str) -> Result<PathBuf, String> {
-    let mut rust = rust.to_string();
-    rust.push_str(&harness_main(&rust, class));
-    let rust_path = work.join(format!("{class}.rs"));
-    std::fs::write(&rust_path, rust).map_err(|err| format!("write rust: {err}"))?;
-
-    let binary = work.join(class);
-    let compile = Command::new("rustc")
-        .args(["--edition", "2021", "--crate-name"])
-        .arg(class.to_lowercase())
-        .arg(&rust_path)
-        .arg("-o")
-        .arg(&binary)
-        .output()
-        .map_err(|err| format!("rustc: {err}"))?;
-    if !compile.status.success() {
-        return Err(format!(
-            "generated Rust did not compile: {}",
-            String::from_utf8_lossy(&compile.stderr)
-        ));
-    }
-    Ok(binary)
 }
 
 fn run_java(work: &Path, source: &Path, class: &str) -> Result<String, String> {

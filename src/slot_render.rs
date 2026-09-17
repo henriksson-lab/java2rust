@@ -1196,7 +1196,11 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             NativeJavaRustTypePolicy::Direct { ty: RustType::F64 }
         }
         JavaType::String => NativeJavaRustTypePolicy::Direct {
-            ty: RustType::String,
+            ty: if facts.uses_java_string_identity_representation() {
+                RustType::Named("JavaString".to_string())
+            } else {
+                RustType::String
+            },
         },
         JavaType::Array(_) => NativeJavaRustTypePolicy::ArrayRequiresSequenceElement,
         JavaType::Named { name, args }
@@ -2263,6 +2267,26 @@ mod tests {
                 args: Vec::new(),
             }),
             RustType::Named("CauseStateException".to_string())
+        );
+    }
+
+    #[test]
+    fn identity_string_representation_is_consistent_for_direct_and_collection_slots() {
+        let mut facts = FactSet::default();
+        facts.java_string_identity_representation = true;
+        assert_eq!(
+            rust_type_for_java_type_with_facts(&JavaType::String, &facts),
+            RustType::Named("JavaString".to_string())
+        );
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_java_type_with_facts(
+                &JavaType::Named {
+                    name: "java.util.List".to_string(),
+                    args: vec![JavaType::String],
+                },
+                &facts,
+            )),
+            "Vec<JavaString>"
         );
     }
 }

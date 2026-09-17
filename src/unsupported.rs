@@ -1,4 +1,4 @@
-use crate::java_ir::{Expr, Member, Modifier, Stmt};
+use crate::java_ir::{Expr, JavaType, Member, Modifier, PrimitiveType, Stmt};
 use crate::rust_ir::{RustExpr, RustStmt};
 
 pub(crate) fn compile_error_stmt(message: &str) -> RustStmt {
@@ -203,10 +203,10 @@ pub(crate) fn plan_unsupported_statement(stmt: &Stmt) -> Option<UnsupportedState
 
 pub(crate) fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemberLowering> {
     match member {
-        Member::Method(method) if method.modifiers.contains(&Modifier::Synchronized) => {
-            Some(UnsupportedMemberLowering::SynchronizedMethod)
-        }
-        Member::Field(field) if field.modifiers.contains(&Modifier::Volatile) => {
+        Member::Field(field)
+            if field.modifiers.contains(&Modifier::Volatile)
+                && !representable_volatile_static_primitive(field) =>
+        {
             Some(UnsupportedMemberLowering::VolatileField)
         }
         Member::Method(method) if method.modifiers.contains(&Modifier::Native) => {
@@ -217,6 +217,22 @@ pub(crate) fn plan_unsupported_member(member: &Member) -> Option<UnsupportedMemb
         }
         _ => None,
     }
+}
+
+/// The atomic static path has a direct Rust representation.  Instance
+/// volatiles need atomic fields inside the object representation, and wider
+/// Java primitives need narrowing adapters, so those remain loud until they
+/// have equally explicit semantics.
+pub(crate) fn representable_volatile_static_primitive(field: &crate::java_ir::FieldDecl) -> bool {
+    field.modifiers.contains(&Modifier::Static)
+        && matches!(
+            field.ty,
+            JavaType::Primitive(PrimitiveType::Boolean | PrimitiveType::Int | PrimitiveType::Long)
+        )
+        && field
+            .initializer
+            .as_ref()
+            .is_none_or(|initializer| matches!(initializer, Expr::Literal(_)))
 }
 
 pub(crate) fn unsupported_constructor_message_policy(

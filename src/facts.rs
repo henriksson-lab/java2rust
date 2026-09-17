@@ -9,6 +9,13 @@ use crate::slot_shape::TypeCapabilities;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FactSet {
+    /// Selects the generated `JavaString` carrier for a translation unit.
+    ///
+    /// This is deliberately a whole-unit representation choice: a Java String
+    /// may cross fields, methods, collections, and erased-object boundaries,
+    /// so changing only the comparison expression would leave a mixed Rust
+    /// carrier and silently lose reference identity.
+    pub java_string_identity_representation: bool,
     /// How values of each source type are *held* — by value, or behind a shared
     /// handle.
     ///
@@ -66,6 +73,7 @@ pub struct FactSet {
 impl Default for FactSet {
     fn default() -> Self {
         Self {
+            java_string_identity_representation: false,
             storage_strategies: crate::storage_strategy::StoragePlan::default(),
             notes: Vec::new(),
             captures: CaptureFacts::default(),
@@ -2261,6 +2269,7 @@ impl FactSet {
 
     pub fn extend_from(&mut self, other: FactSet) {
         self.disable_builtin_external_packs |= other.disable_builtin_external_packs;
+        self.java_string_identity_representation |= other.java_string_identity_representation;
         self.storage_strategies
             .extend_from(other.storage_strategies);
         self.notes.extend(other.notes);

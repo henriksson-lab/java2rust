@@ -22482,6 +22482,185 @@ class B extends A {
 }
 
 #[test]
+fn opt_in_java_string_identity_carrier_interns_literals_and_uses_pointer_equality() {
+    let source = r#"
+class StringIdentityCarrier {
+    static String run() {
+        String a = "hello";
+        String b = "hel" + "lo";
+        String c = new String("hello");
+        String d = a;
+        return (a == b) + "," + (a == c) + "," + (a == d) + "," + a.equals(c) + "," + a.equals("nope");
+    }
+}
+"#;
+    let translation = translate_source(source);
+    assert!(
+        translation.rust.contains("pub struct JavaString")
+            && translation.rust.contains("JavaString::intern(\"hello\")")
+            && translation
+                .rust
+                .contains("JavaString::fresh(JavaString::intern(\"hello\"))")
+            && translation.rust.contains("a.java_identity_eq(&b)")
+            && !translation
+                .rust
+                .contains("unsupported Java String reference identity"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "opt_in_java_string_identity_carrier",
+        translation.rust,
+        r#"
+#[test]
+fn interned_literals_and_fresh_constructor_keep_java_reference_identity() {
+    assert_eq!(StringIdentityCarrier::run().as_str(), "true,false,true,true,false");
+}
+"#,
+    );
+}
+
+#[test]
+fn context_translation_restarts_with_one_string_identity_carrier() {
+    let translation = translate_source_with_context_sources(
+        r#"
+class ContextStringIdentity {
+    static boolean run() { String a = "x"; String b = "x"; return a == b; }
+}
+"#,
+        &["class ContextPeer { static int value() { return 1; } }".to_string()],
+        &FactSet::default(),
+    );
+    assert!(
+        translation.rust.contains("pub struct JavaString")
+            && translation.rust.contains("JavaString::intern(\"x\")")
+            && translation.rust.contains("a.java_identity_eq(&b)")
+            && !translation
+                .rust
+                .contains("unsupported Java String reference identity"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn identity_string_carrier_flows_through_collections() {
+    let source = r#"
+import java.util.ArrayList;
+class StringIdentityCollection {
+    static boolean run() {
+        ArrayList<String> values = new ArrayList<>();
+        values.add("x");
+        String recovered = values.get(0);
+        String fresh = new String("x");
+        return recovered == fresh;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains("Vec<JavaString>")
+            && translation.rust.contains("JavaString::intern(\"x\")")
+            && translation
+                .rust
+                .contains("__java_left.java_identity_eq(&fresh)"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "identity_string_collection",
+        translation.rust,
+        r#"
+#[test]
+fn collection_preserves_fresh_string_reference_identity() {
+    assert!(!StringIdentityCollection::run());
+}
+"#,
+    );
+}
+
+#[test]
+fn thread_reachable_mutable_alias_uses_arc_mutex_and_preserves_updates() {
+    let translation = translate_source(
+        r#"
+class SharedSyncNode implements Runnable {
+    int value;
+    SharedSyncNode(int value) { this.value = value; }
+    void bump() { value++; }
+    int readValue() { return value; }
+    public void run() { }
+    static int result() {
+        SharedSyncNode node = new SharedSyncNode(4);
+        SharedSyncNode alias = node;
+        alias.bump();
+        return node.readValue();
+    }
+}
+"#,
+    );
+    assert!(
+        translation
+            .rust
+            .contains("std::sync::Arc<std::sync::Mutex<SharedSyncNode>>")
+            && translation
+                .rust
+                .contains("__java_self.lock().expect(\"Java shared object mutex poisoned\")"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "thread_reachable_mutable_alias",
+        translation.rust,
+        r#"
+#[test]
+fn shared_sync_alias_observes_mutation() {
+    assert_eq!(SharedSyncNode::result(), 5);
+}
+"#,
+    );
+}
+
+#[test]
+fn static_volatile_primitives_use_seqcst_atomics() {
+    let translation = translate_source(
+        r#"
+class VolatileCounter {
+    static volatile int count = 2;
+    static volatile boolean ready;
+    static void increment() { count = count + 1; ready = true; }
+    static int result() { increment(); return ready ? count : 0; }
+}
+"#,
+    );
+    assert!(
+        translation
+            .rust
+            .contains("AtomicI32 = std::sync::atomic::AtomicI32::new(2)")
+            && translation
+                .rust
+                .contains("AtomicBool = std::sync::atomic::AtomicBool::new(false)")
+            && translation.rust.contains("Ordering::SeqCst")
+            && !translation
+                .rust
+                .contains("volatile field requires atomic memory-order semantics"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "static_volatile_primitives",
+        translation.rust,
+        r#"
+#[test]
+fn volatile_static_read_write_observes_seqcst_storage() {
+    assert_eq!(VolatileCounter::result(), 3);
+}
+"#,
+    );
+}
+
+#[test]
 fn erased_object_source_hierarchy_carrier_identity_preserves_variant_handle_identity() {
     let source = r#"
 class ErasedCarrierIdentity {
@@ -45142,26 +45321,93 @@ class SynchronizedBodyAfterGuard {
 }
 
 #[test]
-fn synchronized_method_is_loud_until_monitor_semantics_exist() {
+fn synchronized_instance_methods_use_object_owned_reentrant_monitors() {
     let translation = translate_source(
         r#"
 class SynchronizedMethod {
-    synchronized int increment(int value) { return value + 1; }
+    int value;
+    synchronized void increment() { value += 1; notifyAll(); }
+    synchronized void reenter() { increment(); }
+    static int run() {
+        SynchronizedMethod value = new SynchronizedMethod();
+        value.reenter();
+        return value.value;
+    }
 }
 "#,
     );
 
     assert!(
-        translation.diagnostics.has_code("unsupported_member"),
+        !translation.diagnostics.has_code("unsupported_member"),
         "{:?}",
         translation.diagnostics
     );
     assert!(
         translation
             .rust
-            .contains("unsupported Java member: synchronized method requires monitor semantics"),
+            .contains("let __java_monitor = self.__java_monitor.clone();")
+            && translation
+                .rust
+                .contains("let __java_monitor_guard = __java_monitor.enter();"),
         "{}",
         translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("__java_monitor: std::sync::Arc<JavaMonitor>")
+            && translation.rust.contains("pub struct JavaMonitor"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "synchronized_instance_method_reentry",
+        translation.rust,
+        r#"
+#[test]
+fn synchronized_reentry_observes_the_inner_mutation() {
+    assert_eq!(SynchronizedMethod::run(), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn synchronized_static_methods_use_class_owned_reentrant_monitors() {
+    let translation = translate_source(
+        r#"
+class SynchronizedStaticMethod {
+    static int value;
+    static synchronized void increment() { value += 1; }
+    static synchronized void reenter() { increment(); }
+    static int run() { reenter(); return value; }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_code("unsupported_member"),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("JavaMonitor = JavaMonitor::new()")
+            && translation.rust.contains(
+                "let __java_monitor_guard = SYNCHRONIZED_STATIC_METHOD___JAVA_MONITOR.enter();"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "synchronized_static_method_reentry",
+        translation.rust,
+        r#"
+#[test]
+fn synchronized_static_reentry_observes_the_inner_mutation() {
+    assert_eq!(SynchronizedStaticMethod::run(), 1);
+}
+"#,
     );
 }
 

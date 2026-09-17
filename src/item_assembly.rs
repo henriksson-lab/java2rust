@@ -2749,6 +2749,18 @@ fn struct_fields_for_type(
     support_program: &Program,
 ) -> Vec<RustField> {
     let mut fields = Vec::new();
+    // A Java monitor belongs to each object, not to the class.  Keep it out of
+    // ordinary source-field planning: it is runtime metadata that is seeded by
+    // every constructor below, and `JavaMonitor`'s trait implementations make
+    // it neutral to the structural derives used by generated source structs.
+    if type_declares_synchronized_instance_method(ty) {
+        fields.push(RustField {
+            name: "__java_monitor".to_string(),
+            ty: RustType::Raw("std::sync::Arc<JavaMonitor>".to_string()),
+            is_pub: false,
+            is_pub_crate: false,
+        });
+    }
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
         fields.push(RustField {
             name: "__outer".to_string(),
@@ -2820,6 +2832,22 @@ fn struct_fields_for_type(
         });
     }
     fields
+}
+
+pub(crate) fn type_declares_synchronized_instance_method(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| {
+        matches!(member, Member::Method(method)
+            if method.modifiers.contains(&Modifier::Synchronized)
+                && !method.modifiers.contains(&Modifier::Static))
+    })
+}
+
+pub(crate) fn type_declares_synchronized_static_method(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| {
+        matches!(member, Member::Method(method)
+            if method.modifiers.contains(&Modifier::Synchronized)
+                && method.modifiers.contains(&Modifier::Static))
+    })
 }
 
 fn source_type_needs_type_param_marker_field(ty: &TypeDecl) -> bool {

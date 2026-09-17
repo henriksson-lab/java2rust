@@ -141,6 +141,10 @@ impl<'a> EffectiveFacts<'a> {
         Self { facts }
     }
 
+    pub fn uses_java_string_identity_representation(&self) -> bool {
+        self.facts.java_string_identity_representation
+    }
+
     pub fn hierarchy_overrides(&self) -> &'a [HierarchyOverride] {
         &self.facts.hierarchy_overrides
     }

@@ -368,8 +368,8 @@ pub fn translate_source(source: &str) -> Translation {
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let mut parsed = parser::parse_java_source(source);
     qualify_same_package_class_literals(&mut parsed.program);
-    let effective_external_facts = effective_external_facts_with_stdlib(external_facts, None);
-    translate_parsed_source_with_context(
+    let mut effective_external_facts = effective_external_facts_with_stdlib(external_facts, None);
+    let translation = translate_parsed_source_with_context(
         parsed,
         None,
         None,
@@ -377,7 +377,30 @@ pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Tr
         None,
         false,
         &effective_external_facts,
-    )
+    );
+    // Reference equality is discovered while lowering because it depends on
+    // solved slot shapes.  Re-run the whole unit with one carrier, rather than
+    // patching only that expression and mixing `String` with `JavaString` at
+    // method and collection boundaries.
+    if !effective_external_facts.java_string_identity_representation
+        && translation
+            .rust
+            .contains("unsupported Java String reference identity comparison requires string identity representation")
+    {
+        effective_external_facts.java_string_identity_representation = true;
+        let mut parsed = parser::parse_java_source(source);
+        qualify_same_package_class_literals(&mut parsed.program);
+        return translate_parsed_source_with_context(
+            parsed,
+            None,
+            None,
+            None,
+            None,
+            false,
+            &effective_external_facts,
+        );
+    }
+    translation
 }
 
 pub fn translate_source_with_context_sources(
@@ -492,6 +515,21 @@ pub fn translate_source_with_context_sources_and_summary_sources(
         &effective_external_facts,
     );
     translation.diagnostics.extend(context_diagnostics);
+    if !external_facts.java_string_identity_representation
+        && translation
+            .rust
+            .contains("unsupported Java String reference identity comparison requires string identity representation")
+    {
+        let mut identity_facts = external_facts.clone();
+        identity_facts.java_string_identity_representation = true;
+        return translate_source_with_context_sources_and_summary_sources(
+            source,
+            context_sources,
+            summary_sources,
+            context_sources_are_emitted,
+            &identity_facts,
+        );
+    }
     translation
 }
 
@@ -911,6 +949,10 @@ fn build_batch_translation_context(
         external_facts,
         semantic_analysis_config_from_facts(external_facts),
     );
+    // Keep a caller-selected carrier, while preserving the semantic pass's
+    // type-aware discovery of Java String reference comparisons.
+    semantic.facts.java_string_identity_representation |=
+        external_facts.java_string_identity_representation;
     semantic.facts.storage_strategies = storage_strategy::plan_storage_strategies_from_facts(
         &support_program,
         &semantic.usage,
@@ -1304,6 +1346,8 @@ fn translate_parsed_source_with_context(
         external_facts,
         semantic_analysis_config_from_facts(external_facts),
     );
+    semantic.facts.java_string_identity_representation |=
+        external_facts.java_string_identity_representation;
     // Step 3 of the 0002b design: the storage decision has to be visible to
     // *every* place that renders a type, or a struct field and a parameter of
     // the same Java type get different Rust spellings and the output does not

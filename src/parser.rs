@@ -1515,9 +1515,6 @@ fn parse_synchronized_node(
     _source: &str,
     _diagnostics: &mut DiagnosticBag,
 ) -> Stmt {
-    // Java monitors are reentrant and attach to an object. Lowering this as an
-    // ordinary block silently drops mutual exclusion; do not claim semantics
-    // until the SharedSync/monitor representation exists.
     Stmt::Unsupported("synchronized monitor semantics".to_string())
 }
 

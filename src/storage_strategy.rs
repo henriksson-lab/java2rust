@@ -11,8 +11,7 @@
 //! where lowering disagrees with it, turning "we do not know how big 0002b is"
 //! into a number. It now also supplies the storage placement consumed by slot
 //! rendering and handle wrapping for the implemented `SharedImmutable` and
-//! single-threaded `SharedLocal` tiers. `SharedSync` remains deliberately
-//! unimplemented until the `Mutex` receiver and reentrancy rules land.
+//! single-threaded `SharedLocal` and thread-reachable `SharedSync` tiers.
 //!
 //! ## Per type, not per allocation site
 //!
@@ -422,11 +421,11 @@ impl StoragePlacement {
 
     /// Whether lowering can emit this placement today.
     ///
-    /// The single-threaded cell rung is implemented for statement-local borrows
-    /// of direct source-object fields. The synchronized cell rung still needs a
-    /// separate `Mutex` borrow policy.
+    /// Interior-mutable shared values are rendered as either
+    /// `Rc<RefCell<T>>` or `Arc<Mutex<T>>`; lowering selects the corresponding
+    /// short-lived receiver projection at each access.
     pub fn is_implemented(self) -> bool {
-        !self.interior_mutable || !self.sync
+        true
     }
 }
 
@@ -2299,7 +2298,7 @@ public class Outer {
     }
 
     #[test]
-    fn storage_placement_implementation_gate_stays_explicit() {
+    fn all_storage_placements_are_lowerable() {
         assert!(StoragePlacement::new(false, false, false).is_implemented());
         assert!(StoragePlacement::new(true, false, false).is_implemented());
         assert!(StoragePlacement::new(true, false, true).is_implemented());
@@ -2308,8 +2307,8 @@ public class Outer {
             "SharedLocal Rc<RefCell<T>> lowering is enabled for direct field borrows"
         );
         assert!(
-            !StoragePlacement::new(true, true, true).is_implemented(),
-            "SharedSync remains blocked until Arc<Mutex<T>> lowering is implemented"
+            StoragePlacement::new(true, true, true).is_implemented(),
+            "SharedSync Arc<Mutex<T>> lowering uses short-lived lock projections"
         );
     }
 
