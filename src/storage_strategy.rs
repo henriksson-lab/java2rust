@@ -627,72 +627,17 @@ pub fn type_interface_surface_is_handle_forwardable(
 /// Whether a shared handle can carry this type through the traits it implements.
 ///
 /// A generated trait method whose Java body mutates the receiver lowers to
-/// `&mut self`, and `Rc<T>` has no `DerefMut`, so no forwarding impl
-/// (`impl<T: Named> Named for Rc<T>`) can exist for such a trait. Without that
-/// impl a wrapped value cannot satisfy a bound like
-/// `Standards<T extends Named>`, which is how the tier reaches user generics at
-/// all.
-///
-/// So this is a **precondition of the tier**, not a property discovered
-/// afterwards: a type whose interface surface mutates cannot be shared, and the
-/// check has to run before the wrap is applied rather than surface as a compile
-/// error. `mutates_self` is already a fixpoint over self-calls in
-/// [`crate::usage`], so delegating mutators are included.
-/// See [0002b](../claude_audits/0002b-shared-representation-design.md).
+/// Mutable interface methods are forwarded through `Rc<RefCell<T>>` and
+/// `Arc<Mutex<T>>`, so receiver mutability is no longer a precondition of the
+/// sharing tier. The retained program/usage arguments document that this query
+/// remains the policy boundary for future non-forwardable surfaces (notably a
+/// borrowed return that would outlive a cell guard).
 pub fn interface_surface_is_handle_forwardable(
-    ty: &TypeDecl,
-    program: &Program,
-    usage: &UsageFacts,
+    _ty: &TypeDecl,
+    _program: &Program,
+    _usage: &UsageFacts,
 ) -> bool {
-    // A Java class used as a type-parameter bound also gets a generated trait
-    // (`HeaderLineBound`), built from the methods of the class *and* of every
-    // superclass, so the whole `extends` chain has to be `&self`-only too.
-    // Checking only `implements` missed exactly that, and the wrap then produced
-    // `doesn't satisfy Rc<FormatLine>: HeaderLineBound`.
-    let mut current = Some(ty);
-    while let Some(class) = current {
-        let mutates = class.members.iter().any(|member| match member {
-            Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => usage
-                .source_method_usage(class, method)
-                .is_some_and(|facts| facts.mutates_self()),
-            _ => false,
-        });
-        if mutates {
-            return false;
-        }
-        current = class.extends.as_ref().and_then(|name| {
-            program
-                .types
-                .iter()
-                .find(|candidate| candidate.name == *name)
-        });
-    }
-    ty.implements.iter().all(|interface_name| {
-        let Some(interface) = program
-            .types
-            .iter()
-            .find(|candidate| candidate.name == *interface_name)
-        else {
-            // Not a source interface: nothing of ours to forward through.
-            return true;
-        };
-        interface.members.iter().all(|member| {
-            let Member::Method(method) = member else {
-                return true;
-            };
-            // The interface declares it; every implementor decides the receiver,
-            // and one mutating implementor makes the trait `&mut self`.
-            !program.types.iter().any(|implementor| {
-                implementor
-                    .implements
-                    .iter()
-                    .any(|name| name == interface_name)
-                    && usage
-                        .source_method_usage(implementor, method)
-                        .is_some_and(|facts| facts.mutates_self())
-            })
-        })
-    })
+    true
 }
 
 /// Types whose *values* this lattice describes.
@@ -2434,13 +2379,10 @@ class Fixed implements Named {
         ));
     }
 
-    /// The point of the check: `Fixed` never mutates, but a **sibling**
-    /// implementor does, so the shared trait lowers to `&mut self` and no
-    /// `impl<T: Shape> Shape for Rc<T>` can exist. The blocker is the trait's
-    /// surface across all implementors, not the type's own mutability -- which
-    /// is why this cannot be read off `TypeStorageFacts::mutated`.
+    /// A mutating sibling makes the trait method `&mut self`, which now forwards
+    /// through the cell-backed shared handle rather than blocking sharing.
     #[test]
-    fn a_mutating_sibling_implementor_blocks_the_whole_trait() {
+    fn a_mutating_sibling_implementor_allows_cell_handle_forwarding() {
         let source = r#"
 interface Shape { int size(); void grow(); }
 class Fixed implements Shape {
@@ -2455,12 +2397,12 @@ class Growing implements Shape {
     public void grow() { s = s + 1; }
 }
 "#;
-        assert!(!forwardable(source, "Fixed"));
-        assert!(!forwardable(source, "Growing"));
+        assert!(forwardable(source, "Fixed"));
+        assert!(forwardable(source, "Growing"));
     }
 
     #[test]
-    fn camel_case_mutating_interface_method_blocks_forwarding() {
+    fn camel_case_mutating_interface_method_forwards() {
         let source = r#"
 interface Shape { void resetSize(); }
 class Fixed implements Shape {
@@ -2468,7 +2410,7 @@ class Fixed implements Shape {
     public void resetSize() { s = 0; }
 }
 "#;
-        assert!(!forwardable(source, "Fixed"));
+        assert!(forwardable(source, "Fixed"));
     }
 
     /// A type implementing nothing of ours has no surface to forward through.

@@ -332,6 +332,7 @@ fn shared_handle_slot_rust_type_with_representations(
         shape.ownership,
         OwnershipShape::Owned | OwnershipShape::CopyValue
     ) || shape.optional_element_type().is_some()
+        || matches!(shape.dispatch, DispatchShape::ErasedObject)
     {
         return rendered;
     }

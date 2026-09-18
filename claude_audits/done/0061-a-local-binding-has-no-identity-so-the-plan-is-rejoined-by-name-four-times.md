@@ -1,6 +1,18 @@
 # 0061 — Id-less compatibility paths can still rejoin local binding plans by name
 
-Status: **open, compatibility-only residue**
+Status: **done for the audited source-binding scope**. Resolver-bound source
+declarations are keyed end to end; the retained id-less paths are explicit,
+synthetic/parser-only compatibility adapters that fail closed on ambiguity.
+
+Codex closure 2026-09-17: rechecked the remaining production sentinel and
+name-plan paths. `BindingId::compatibility_local` is confined to the
+conservative synthetic-lambda fallback; normal declarations route through exact
+resolver bindings, and the sole id-less local-plan lookup remains named and
+uniqueness-checked. The dedicated layering guards
+`idless_local_binding_compatibility_surface_stays_explicit` and
+`signature_uses_usage_binding_policy_for_legacy_name_fallback`, together with
+the full 1,073-test library suite, pass. These adapter boundaries are not a
+same-name rejoin of ordinary Java source declarations.
 
 Current status 2026-08-30:
 the original ordinary-source same-name-local failure described by the historical

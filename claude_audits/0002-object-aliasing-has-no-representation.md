@@ -1,13 +1,20 @@
 # 0002 — Java object aliasing has no representation; aliases become clones
 
-Status: **open, materially advanced** (`SharedImmutable`/`Rc<T>`,
-reference-identity lowering, and the first single-threaded
-`SharedLocal`/`Rc<RefCell<T>>` slices have landed)
+Status: **open, materially advanced** (`SharedImmutable`, `SharedLocal`, and
+the base `SharedSync`/`Arc<Mutex<T>>` receiver and captured-outer slices have
+landed)
 Severity: high — the original mutable-alias oracle is now promoted and passing,
 including direct locals, field/array storage, named callback parameters, stored
-actions, and the narrow zero-argument anonymous functional-interface action.
-The remaining mutable-sharing work is broader anonymous object lowering,
-shared receivers/ordinary inner construction, and the `SharedSync` tier.
+actions, parameterized anonymous functional-interface adapters, and narrow
+stateful anonymous-object adapters.
+The remaining mutable-sharing work is anonymous objects with broader mutable
+state/control flow or class-`super`, plus borrowed-return trait surfaces through
+cell/lock handles that cannot safely outlive a shared-handle guard. Read-only
+`if`/`return` field access is now within the object-backed slice.
+In particular, a method that computes `int next = total + delta;` and then
+assigns `this.total = next` still needs the general statement rebinding and
+interior-cell assignment path; it is not covered by the exact direct-assignment
+recognizers.
 Kind: missing representation in the object model
 
 Codex follow-up 2026-09-17 synchronized-erasure refusal: Java
@@ -42,8 +49,205 @@ through one reference was not observed through the other. The direct mutable
 `Node`/`Counter` shapes are now represented with `SharedLocal`
 (`Rc<RefCell<T>>`) in the promoted `tests/differential/Aliasing.java` oracle.
 The remaining defect is no longer this direct aliasing shape; it is the wider
-surface where a shared receiver handle or general anonymous object lowering is
-needed.
+surface where general anonymous object lowering or an unforwardable shared
+trait surface is needed.
+
+Codex follow-up 2026-09-18: a static-reachable outer can now construct a
+non-static inner through the same `_with_outer` companion mechanism as a local
+shared outer. The inner `__outer` field, constructor companion parameter, and
+field projections all use the enclosing type's selected storage placement, so
+the `Arc<Mutex<Outer>>` handle is preserved rather than being forced into the
+old `Rc<RefCell<Outer>>` shape. Guard:
+`idiom_gaps::static_reachable_outer_capture_uses_arc_mutex_and_preserves_outer_identity`.
+
+Codex follow-up 2026-09-18 anonymous functional-interface pass: the closure
+adapter is no longer limited to zero-argument methods. A source functional
+interface with ordinary parameters and a return value now carries its declared
+parameter/return slot shapes into the closure and generated trait adapter.
+The promoted `AnonymousInterface.IntPredicate` fixture invokes its anonymous
+`test(int)` implementation at runtime; bodies that mention anonymous `this` or
+`super` remain explicitly unsupported because a closure cannot represent that
+receiver identity.
+
+Codex follow-up 2026-09-18 shared-capture callback intersection: a supported
+parameterized anonymous functional interface assigned to a local interface now
+plans that local as `Box<dyn Interface>` before lowering its initializer. Its
+closure can mutate a captured `Rc<RefCell<T>>` alias without overlapping the
+read and write borrows: field-assignment RHS evaluation is hoisted before the
+mutable field place. Runtime guard:
+`idiom_gaps::parameterized_anonymous_callback_preserves_sharedlocal_capture_identity`.
+
+Codex follow-up 2026-09-18 stateful anonymous-interface slice: a one-method
+functional-interface anonymous object with initialized instance fields and a
+single read-only returned expression can now be a generated local adapter
+struct. This represents `this.field` as real anonymous-instance state instead
+of falsely treating it as a closure capture. Mutable fields, control-flow
+bodies, `super`, and multi-method anonymous objects remain deliberately
+unsupported pending the full anonymous-object representation. Guard:
+`fixtures::stateful_anonymous_functional_interface_preserves_this_field`.
+
+The first mutable stateful subcase is now also represented: an `int` field with
+the exact `this.counter = expression; return this.counter;` functional-method
+shape, including Java compound-assignment normalization such as `+=`, is stored
+as `Cell<i32>`. This permits state to persist across calls while
+the generated interface receiver remains `&self`; it is intentionally not a
+claim of general mutable-field support. Guard:
+`fixtures::stateful_anonymous_counter_preserves_mutable_this_field`.
+Within that exact no-local-declaration body, ordinary bare reads (`counter`)
+are structurally rebound to the anonymous field; a parameter of the same name
+is rejected rather than guessed.
+
+The same counter path now canonicalizes an explicit Java camel-case receiver
+field before emitting Rust, so `this.totalValue += value; return totalValue;`
+uses one `Cell<i32>` field named `total_value` rather than falling back or
+emitting an invalid mixed-spelling projection. Guard:
+`fixtures::stateful_anonymous_counter_rebinds_camel_case_source_field`.
+
+Codex follow-up 2026-09-18 shared-trait forwarding: mutable interface methods
+now forward through `Rc<RefCell<T>>` and `Arc<Mutex<T>>` rather than rejecting
+the entire shared trait surface because direct `Rc<T>` has no `DerefMut`.
+Generic source bounds receive a mutable borrow when a bound method is known to
+mutate, so an aliased implementation can satisfy `T extends Counter` and retain
+its Java identity. Guard:
+`fixtures::shared_mutating_interface_implementation_satisfies_generic_bound`.
+The same forwarding applies to a thread-reachable `SharedSync` implementation:
+an `Arc<Mutex<T>>` alias satisfies the mutating generic interface bound and
+observes the shared update. Guard:
+`fixtures::shared_sync_mutating_interface_implementation_satisfies_generic_bound`.
+Methods returning borrowed references now forward through direct `Rc<T>` and
+`Arc<T>` handles, where the borrow is tied to the handle's `&self` lifetime.
+They remain intentionally excluded from `Rc<RefCell<T>>` and `Arc<Mutex<T>>`:
+their temporary cell/lock guards cannot escape the forwarding call. Guard:
+`representation_lowering::shared_handle_forwarding_tests::borrowed_returns_forward_through_direct_handles_only`.
+
+The interface-getter residual is now covered: a mutable source `Item` returned
+by a `Runnable` holder through `<T extends ItemSource>` keeps its concrete
+`Rc<RefCell<Item>>` carrier. Parsed source declarations suppress a stale
+unknown-runtime requirement from the generic call; shared mutable returns use
+an owned cloned handle rather than an invalid borrow of the element. Guard:
+`fixtures::shared_interface_getter_preserves_mutable_item_handle` verifies the
+alias-observable update through both the generic caller and a second holder
+alias.
+The same owned-handle return is forwardable through a mutable sync holder:
+`Arc<Mutex<SyncItemSource>>` locks only long enough to call the getter, which
+returns its cloned item handle after the guard is dropped. Guard:
+`fixtures::shared_sync_interface_getter_preserves_mutable_item_handle`.
+The observable-alias diagnostic now accepts an implemented `SharedSync`
+carrier as well as `SharedLocal`, so a direct mutation through one `Arc` alias
+does not falsely report that a later read through its clone diverges. The same
+sync getter guard exercises that route.
+
+Codex follow-up 2026-09-18 fieldless anonymous objects: a non-functional source
+interface with multiple abstract methods now lowers to a local generated object
+adapter rather than the `<dyn Trait>::anonymous()` panic fallback. Every
+declared method is lowered through the ordinary body pipeline. The deliberately
+next boundary is anonymous instance state and `this`/`super`; guard:
+`fixtures::fieldless_multi_method_anonymous_interface_is_object_backed`.
+
+That fieldless adapter now also has a narrow real-`this` tier: anonymous-only
+primitive helpers (including primitive parameters) with a single non-`super`
+return are emitted in the adapter's inherent `impl`. Interface methods can call
+those helpers through `this.helper()` without closure capture or fabricated
+receiver identity. Guards:
+`fixtures::fieldless_anonymous_interface_supports_this_helper_method` and
+`fixtures::fieldless_anonymous_interface_supports_this_helper_parameters`.
+The helper tier composes with initialized primitive anonymous fields: helper
+reads use the same `Cell::get()` projection as interface methods, retaining
+per-instance state rather than returning the storage cell. It also supports the
+exact update-and-return form `this.field = expression; return field;`, emitting
+one `Cell::set(...)` followed by `Cell::get()`; this is deliberately narrower
+than arbitrary helper control flow. Guards:
+`fixtures::stateful_anonymous_interface_helper_reads_instance_field` and
+`fixtures::stateful_anonymous_interface_helper_mutates_instance_field`.
+
+The object-backed path also follows every source superinterface chain with
+distinct inherited contracts, including Java's comma-separated direct
+interfaces.
+An anonymous implementation of a derived interface now emits the required
+parent-trait impl before its derived-trait impl, so inherited abstract methods
+are supplied by the adapter and inherited Java default methods remain callable.
+If the child redundantly redeclares a parent abstract method, its Rust subtrait
+omits that duplicate contract rather than creating ambiguous method lookup.
+The same adapter preserves a qualified interface-default call such as
+`Scaled.super.tripled()` across parent-state mutation; this is distinct from
+anonymous classes extending a source class and using class `super`.
+Two unrelated parent interfaces that declare the same abstract signature still
+need the general interface-hierarchy trait representation pass; Rust cannot
+inherit them as two unrelated methods and expose Java's single contract.
+Guard: `fixtures::fieldless_anonymous_interface_inherits_default_method`.
+
+The same object-backed tier now retains initialized read-only instance fields
+across multiple interface methods. Bare field reads are structurally rebound to
+the adapter's `self.field`, while parameter shadowing stays refused. Guard:
+`fixtures::stateful_multi_method_anonymous_interface_preserves_instance_fields`.
+
+The corresponding narrow mutable tier is now shared across multiple methods:
+one primitive field is emitted as `Cell<T>`, a void `this.field += value`
+mutator (or direct primitive assignment) updates it, and a separate reader
+observes the result. Guards:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_preserves_counter`.
+`fixtures::mutable_stateful_multi_method_anonymous_interface_preserves_boolean_field`
+pins the `boolean`/`Cell<bool>` form.
+
+The first reference-valued mutable field is also covered without leaking a
+borrow from the adapter: an initialized `String` field uses `RefCell<String>`;
+the exact setter replaces its value and a `String` reader or setter-return path
+returns an owned clone. Guards:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_preserves_string_field`
+and
+`fixtures::mutable_stateful_multi_method_anonymous_interface_returns_updated_string`.
+Arbitrary reference fields remain outside this narrow ownership-safe slice.
+The same route safely handles a `String` read-modify-write RHS: it clones the
+borrowed field value before replacing the `RefCell`, so successive
+`this.label = this.label + suffix` calls retain their accumulated state. Guard:
+`fixtures::mutable_stateful_anonymous_interface_appends_string_field`.
+
+Supported mutable fields are no longer limited to one slot per adapter: each
+recognized primitive or `String` field gets its own `Cell<T>` or
+`RefCell<String>` storage, so independent setter/reader pairs share their own
+anonymous-instance state. Guard:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_keeps_multiple_fields`.
+Two factory calls create separate adapters and therefore separate counter cells;
+guard: `fixtures::mutable_multi_method_anonymous_objects_keep_distinct_instance_state`.
+
+The primitive `Cell<T>` route now also admits guarded void updates:
+`if (enabled) { this.total += value; }`, and `if/else` when both branches
+update the same field. Conditions may read another cell-backed anonymous field;
+the lowering projects that field through `.get()` before the branch. The
+adapter retains the same state on both sides of the branch; this is still not a
+general mutable control-flow or definite-assignment model. Guards:
+`fixtures::mutable_stateful_anonymous_interface_allows_guarded_primitive_update`
+and
+`fixtures::mutable_stateful_anonymous_interface_allows_two_branch_primitive_update`,
+plus
+`fixtures::mutable_stateful_anonymous_interface_reads_cell_backed_condition_field`.
+The guarded form can likewise return that same primitive field after the branch,
+so `if (enabled) { this.total += value; } return total;` returns the selected
+post-update adapter state. Guard:
+`fixtures::mutable_stateful_anonymous_interface_returns_after_guarded_update`.
+The same guarded assignment/owned-return route applies to the already-supported
+`RefCell<String>` field, without letting a `Ref` guard escape the adapter.
+Arbitrary reference fields remain outside this ownership-safe slice. Guard:
+`fixtures::mutable_stateful_anonymous_interface_allows_guarded_string_update`.
+
+That same multi-method tier now accepts the equally narrow non-void update
+form, `int add(int value) { this.total += value; return total; }`, returning
+the post-update `Cell` value while a sibling reader sees the same object state.
+Guard:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_returns_updated_counter`.
+
+Read-only anonymous state is not confined to one expression: the adapter now
+accepts an `if`/`return` body with explicit or bare instance-field reads and no
+assignment or `super`. Field rebinding recurses through the approved control
+flow grammar, so each branch uses the adapter's `self.field`. Guard:
+`fixtures::stateful_anonymous_interface_allows_read_only_branching`.
+The same rebinding traversal covers nested safe expressions (including
+ternaries, calls, arrays, casts, `instanceof`, and switch-expression arms),
+keeping eligibility and lowering aligned. Guard:
+`fixtures::stateful_multi_method_anonymous_interface_rebinds_nested_field_reads`.
+The one-method stateful functional adapter uses the same traversal before
+lowering, rather than relying on a separate `this.field` spelling path. Guard:
+`fixtures::stateful_anonymous_functional_interface_rebinds_nested_bare_field_reads`.
 
 Follow-up cleanup 2026-09-12: the `aliasing` module is crate-internal now. The
 translator still reports observable mutable-alias diagnostics through the batch

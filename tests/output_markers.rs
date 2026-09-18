@@ -75,14 +75,6 @@ const FIXTURES: &[MarkerFixture] = &[
         counters: &["invalid_patterns"],
     },
     MarkerFixture {
-        marker: "unsupported_inner_class_outer_capture",
-        // A static-reachable non-static inner class needs the unimplemented
-        // SharedSync outer handle. The ordinary SharedLocal case is covered by
-        // tests/differential/InnerCapture.java and should not emit this marker.
-        java: "public class MarkerInnerCapture { static MarkerInnerCapture INSTANCE = new MarkerInnerCapture(); private int base = 10; class Adder { int add(int x) { return base + x; } } public int run() { Adder a = new Adder(); base = 20; return a.add(1); } public static String mainRun() { return String.valueOf(INSTANCE.run()); } }",
-        counters: &["invalid_patterns"],
-    },
-    MarkerFixture {
         marker: "unimplemented",
         java: "import com.unmodelled.Bag;\npublic class MarkerUnimplemented { public void m(Bag b, Bag other) { b.addAll(other); } }",
         counters: &["unimplemented_facade_methods"],
@@ -224,39 +216,6 @@ fn source_summary_method_marker_uses_source_summary_emitter() {
     assert!(
         count_unimplemented_facade_methods(&rust) > 0,
         "source-summary marker should move the unimplemented facade counter.\n{rust}"
-    );
-}
-
-#[test]
-fn unsupported_inner_class_outer_capture_is_reported_as_a_translation_warning() {
-    let fixture = FIXTURES
-        .iter()
-        .find(|fixture| fixture.marker == "unsupported_inner_class_outer_capture")
-        .expect("inner-class marker fixture");
-    let translation = translate_source(fixture.java);
-
-    assert!(
-        translation
-            .diagnostics
-            .has_code("inner_class_construction_panics"),
-        "inner-class construction should be reported by the translator, not only \
-         left as a runtime panic marker:\n{:?}",
-        translation.diagnostics.iter().collect::<Vec<_>>()
-    );
-    assert!(
-        translation
-            .rust
-            .contains("unsupported Java inner-class outer capture construction"),
-        "{}",
-        translation.rust
-    );
-    assert!(translation.rust.contains("panic!("), "{}", translation.rust);
-    assert!(
-        !translation
-            .rust
-            .contains("compile_error!(\"unsupported Java inner-class outer capture construction"),
-        "{}",
-        translation.rust
     );
 }
 

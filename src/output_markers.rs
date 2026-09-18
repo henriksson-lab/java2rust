@@ -192,11 +192,6 @@ pub const OUTPUT_MARKERS: &[OutputMarker] = &[
         OutputMarkerKind::Diagnostic,
     ),
     OutputMarker::new(
-        "unsupported_inner_class_outer_capture",
-        UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE,
-        OutputMarkerKind::Diagnostic,
-    ),
-    OutputMarker::new(
         "unmodelled_java_upcast",
         UNMODELLED_JAVA_UPCAST_PREFIX,
         OutputMarkerKind::Stub,

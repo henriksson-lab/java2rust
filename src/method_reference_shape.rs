@@ -208,7 +208,7 @@ pub(crate) fn infer_method_reference_output_shape_for_plan(
 ) -> Option<RustSlotShape> {
     match plan {
         MethodReferencePlan::AssociatedFunction { owner, method }
-            if method_reference_plan_owner_simple_name(owner) == "Integer"
+            if method_reference_plan_owner_simple_name(owner.as_str()) == "Integer"
                 && method == "int_value" =>
         {
             Some(RustSlotShape::for_storage(JavaType::Primitive(
@@ -216,9 +216,9 @@ pub(crate) fn infer_method_reference_output_shape_for_plan(
             )))
         }
         MethodReferencePlan::AssociatedFunction { owner, method }
-            if (method_reference_plan_owner_simple_name(owner) == "String"
+            if (method_reference_plan_owner_simple_name(owner.as_str()) == "String"
                 && method == "value_of")
-                || (method_reference_plan_owner_simple_name(owner) == "Object"
+                || (method_reference_plan_owner_simple_name(owner.as_str()) == "Object"
                     && method == "to_string") =>
         {
             Some(crate::shape_projection::owned_string_value_shape())

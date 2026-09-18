@@ -22623,6 +22623,97 @@ fn shared_sync_alias_observes_mutation() {
 }
 
 #[test]
+fn static_reachable_outer_capture_uses_arc_mutex_and_preserves_outer_identity() {
+    let translation = translate_source(
+        r#"
+class SyncOuterCapture {
+    static SyncOuterCapture INSTANCE = new SyncOuterCapture();
+    int base = 10;
+    class Adder { int add(int x) { return base + x; } }
+    int run() { Adder adder = new Adder(); base = 20; return adder.add(1); }
+    static int result() { return INSTANCE.run(); }
+}
+"#,
+    );
+    assert!(
+        translation
+            .rust
+            .contains("__outer: std::sync::Arc<std::sync::Mutex<SyncOuterCapture>>")
+            && translation.rust.contains(
+                "new_with_outer(__outer: std::sync::Arc<std::sync::Mutex<SyncOuterCapture>>)"
+            )
+            && translation
+                .rust
+                .contains("self.__outer.lock().expect(\"Java shared object mutex poisoned\")"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "static_reachable_outer_capture",
+        translation.rust,
+        r#"
+#[test]
+fn inner_instance_reads_the_mutated_static_reachable_outer() {
+    assert_eq!(SyncOuterCapture::result(), 21);
+}
+"#,
+    );
+}
+
+#[test]
+fn parameterized_anonymous_callback_preserves_sharedlocal_capture_identity() {
+    let translation = translate_source(
+        r#"
+interface IntAction {
+    int apply(int amount);
+}
+
+class ParameterizedAnonymousSharedLocal {
+    static class Node { int value; }
+
+    static int result() {
+        Node node = new Node();
+        node.value = 3;
+        Node alias = node;
+        IntAction action = new IntAction() {
+            public int apply(int amount) {
+                node.value += amount;
+                return node.value;
+            }
+        };
+        int observed = action.apply(2);
+        return observed + alias.value;
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class")
+            && translation.rust.contains(
+                "std::rc::Rc<std::cell::RefCell<ParameterizedAnonymousSharedLocal_Node>>"
+            )
+            && translation
+                .rust
+                .contains("__call: std::rc::Rc<dyn Fn(i32) -> i32>"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "parameterized_anonymous_sharedlocal_capture",
+        translation.rust,
+        r#"
+#[test]
+fn callback_mutation_is_visible_through_the_alias() {
+    assert_eq!(ParameterizedAnonymousSharedLocal::result(), 10);
+}
+"#,
+    );
+}
+
+#[test]
 fn static_volatile_primitives_use_seqcst_atomics() {
     let translation = translate_source(
         r#"

@@ -2473,12 +2473,16 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
     let main_source = include_str!("../src/main.rs");
     let slot_render_source = include_str!("../src/slot_render.rs");
     let source_constant_values_source = include_str!("../src/source_constant_values.rs");
+    let method_reference_plan_source = include_str!("../src/method_reference_plan.rs")
+        .split("#[cfg(test)]")
+        .next()
+        .expect("production method-reference plan source should be present");
     let constant_declaration_source = resolve_source
         .split("pub(crate) struct ConstantDeclaration")
         .nth(1)
         .and_then(|tail| tail.split("/// Folds `declarations`").next())
         .expect("ConstantDeclaration source should remain discoverable");
-    assert!(java_signature_source.contains("pub(crate) struct JavaOwnerKey"));
+    assert!(java_signature_source.contains("pub struct JavaOwnerKey"));
     assert!(java_signature_source.contains("pub(crate) fn source_method_for_type"));
     assert!(!java_signature_source.contains("pub fn source_method_for_type"));
     assert!(java_signature_source.contains("pub(crate) fn source_method_for_owner"));
@@ -2488,8 +2492,22 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
     );
     assert!(facts_source.contains("pub(crate) fn external_type_name_matches"));
     assert!(!facts_source.contains("pub fn external_type_name_matches"));
-    assert!(!java_signature_source.contains("pub struct JavaOwnerKey"));
+    let java_owner_key_source = java_signature_source
+        .split("pub struct JavaOwnerKey")
+        .nth(1)
+        .and_then(|tail| tail.split("impl JavaOwnerKey").next())
+        .expect("JavaOwnerKey source should remain discoverable");
+    assert!(java_owner_key_source.contains("(String)"));
+    assert!(!java_owner_key_source.contains("pub String"));
+    assert!(!java_signature_source.contains("pub fn resolved_source"));
     assert!(!java_signature_source.contains("pub fn source_method(method: &MethodDecl) -> Self"));
+    assert!(method_reference_plan_source.contains("owner: JavaOwnerKey"));
+    assert!(method_reference_plan_source.contains("type_name: JavaOwnerKey"));
+    assert!(
+        !method_reference_plan_source.contains("owner: String")
+            && !method_reference_plan_source.contains("type_name: String"),
+        "method-reference plans must retain source owner identity until their explicit rendering boundary"
+    );
     assert!(!constant_declaration_source.contains("pub owner: String"));
     assert!(!constant_declaration_source.contains("pub package: Option<String>"));
     assert!(!constant_declaration_source.contains("pub field: crate::java_ir::FieldDecl"));

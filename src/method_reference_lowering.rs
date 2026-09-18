@@ -38,14 +38,20 @@ fn associated_function_method_reference_body_plan(
 
 pub(crate) fn method_reference_expr(plan: &MethodReferencePlan) -> RustExpr {
     match plan {
-        MethodReferencePlan::Constructor { type_name } => {
-            owner_associated_path_projection(&method_reference_owner_rust_path(type_name), "new")
-        }
+        MethodReferencePlan::Constructor { type_name } => owner_associated_path_projection(
+            &method_reference_owner_rust_path(type_name.as_str()),
+            "new",
+        ),
         MethodReferencePlan::AssociatedFunction { owner, method } => {
-            if method_reference_owner_simple_name(owner) == "Objects" && method == "non_null" {
+            if method_reference_owner_simple_name(owner.as_str()) == "Objects"
+                && method == "non_null"
+            {
                 return always_true_method_reference_closure_leaf();
             }
-            owner_associated_path_projection(&method_reference_owner_rust_path(owner), method)
+            owner_associated_path_projection(
+                &method_reference_owner_rust_path(owner.as_str()),
+                method,
+            )
         }
         MethodReferencePlan::BoundReceiver { receiver, method } => {
             bound_receiver_method_reference_closure_leaf(receiver, method)
@@ -148,7 +154,7 @@ pub(crate) fn single_input_method_reference_body_expr(
 ) -> RustExpr {
     match plan {
         MethodReferencePlan::Constructor { type_name } => {
-            let rust_owner = method_reference_owner_rust_path(type_name);
+            let rust_owner = method_reference_owner_rust_path(type_name.as_str());
             function_call_projection(
                 owner_associated_path_projection(&rust_owner, "new"),
                 vec![receiver],
@@ -156,7 +162,10 @@ pub(crate) fn single_input_method_reference_body_expr(
         }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
             associated_function_method_reference_body_expr_from_operands(
-                owner, method, receiver, value_expr,
+                owner.as_str(),
+                method,
+                receiver,
+                value_expr,
             )
         }
         MethodReferencePlan::BoundReceiver {
@@ -185,7 +194,7 @@ pub(crate) fn single_input_method_reference_body_expr_with_facts(
 ) -> RustExpr {
     if let MethodReferencePlan::AssociatedFunction { owner, method } = plan
         && let Some(body) = facade_abi_method_reference_body_expr(
-            owner,
+            owner.as_str(),
             method,
             receiver.clone(),
             input_shape,

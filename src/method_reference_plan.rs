@@ -1,10 +1,12 @@
+use crate::java_signature::JavaOwnerKey;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum MethodReferencePlan {
     Constructor {
-        type_name: String,
+        type_name: JavaOwnerKey,
     },
     AssociatedFunction {
-        owner: String,
+        owner: JavaOwnerKey,
         method: String,
     },
     BoundReceiver {
@@ -30,7 +32,7 @@ pub(crate) fn plan_method_reference(target: &str, method: &str) -> MethodReferen
     let method = crate::parser::to_snake_case(method);
     if method == "new" {
         return MethodReferencePlan::Constructor {
-            type_name: source_owner_path(target),
+            type_name: source_owner_key(target),
         };
     }
     if matches!(target, "this" | "self") {
@@ -43,7 +45,7 @@ pub(crate) fn plan_method_reference(target: &str, method: &str) -> MethodReferen
         return MethodReferencePlan::UnboundAccessor { method };
     }
     MethodReferencePlan::AssociatedFunction {
-        owner: source_owner_path(target),
+        owner: source_owner_key(target),
         method,
     }
 }
@@ -77,44 +79,48 @@ fn source_owner_path(target: &str) -> String {
     target.replace('$', ".")
 }
 
+fn source_owner_key(target: &str) -> JavaOwnerKey {
+    JavaOwnerKey::resolved_source(source_owner_path(target))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{MethodReferencePlan, plan_method_reference};
+    use super::{JavaOwnerKey, MethodReferencePlan, plan_method_reference};
 
     #[test]
     fn method_reference_owner_preserves_package_and_nested_identity() {
         assert_eq!(
             plan_method_reference("a.Mapper", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "a.Mapper".to_string(),
+                owner: JavaOwnerKey::resolved_source("a.Mapper"),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("b.Mapper", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "b.Mapper".to_string(),
+                owner: JavaOwnerKey::resolved_source("b.Mapper"),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("K.AB", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "K.AB".to_string(),
+                owner: JavaOwnerKey::resolved_source("K.AB"),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("K.A.B", "tag"),
             MethodReferencePlan::AssociatedFunction {
-                owner: "K.A.B".to_string(),
+                owner: JavaOwnerKey::resolved_source("K.A.B"),
                 method: "tag".to_string(),
             }
         );
         assert_eq!(
             plan_method_reference("a.Mapper", "new"),
             MethodReferencePlan::Constructor {
-                type_name: "a.Mapper".to_string(),
+                type_name: JavaOwnerKey::resolved_source("a.Mapper"),
             }
         );
         assert_eq!(

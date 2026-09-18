@@ -1,18 +1,28 @@
 # 0064 — The Java→Rust name map is a pure, non-injective function of one string
 
-Status: **open, model-level** — the 7 historical repros were validated with
-`javac`/`java` oracles and `rustc` output, but the current tree has local fixes
-or ambiguity guards for the concrete paths named below. The remaining defect is
-the broader identity model: package/type ownership is still not first-class
-across the analysis keys.
-Severity: medium-high while mitigated — the original repros included three
-*silently wrong programs* (wrong class constructed, wrong package's constant
-read, `unimplemented!` for a class the translator is itself translating), but
-the live risk is recurrence at remaining string-owner surfaces rather than a
-known still-failing repro in this file.
+Status: **done for source-owner identity** — the seven historical repros and
+the later same-simple-name sibling collision are fixed or fail closed. Source
+declarations, call graphs, signatures, fields, resolved-context lookup, and
+method-reference plans retain an opaque package-aware `JavaOwnerKey`; external
+facts remain deliberately spelling-keyed because no resolved source declaration
+exists at that boundary.
+Severity: resolved for the audited source-owner failure modes. The historical
+repros included three *silently wrong programs* (wrong class constructed, wrong
+package's constant read, `unimplemented!` for a class the translator is itself
+translating); their current paths are package-aware or ambiguity-refusing.
 Kind: identity modelling — the same failure family as
 [0009](../../claude_audits/done/0009-overload-identity-collapses-onto-rust-name.md),
 one level below it
+
+Codex closure 2026-09-17: `MethodReferencePlan` no longer carries either an
+associated-function owner or constructor type owner as a raw `String`; both
+are `JavaOwnerKey` values until the explicit Rust rendering/fact-query
+boundary. The plan, renderer, shape inference, and context resolution callers
+are covered by focused method-reference tests, the package-peer batch oracle,
+and `layering::declaration_context_usage_lookups_use_java_callable_keys`. The
+full 1,073-test library suite passes. External pack facts are intentionally
+string-keyed compatibility inputs, but their lookups reject ambiguous simple
+owners and are not a second source-owner identity store.
 
 Current tree update:
 

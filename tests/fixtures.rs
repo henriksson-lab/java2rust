@@ -125,7 +125,16 @@ fn local_class_capture_lowers_captured_parameters_and_locals() {
         "{}",
         translation.rust
     );
-    cargo_check_translation("local_class_capture", &translation.rust);
+    cargo_test_translation(
+        "local_class_capture",
+        translation.rust,
+        r#"
+#[test]
+fn method_local_class_retains_its_parameter_and_local_captures() {
+    assert_eq!(LocalClassCapture {}.add_later(4, 5), 12);
+}
+"#,
+    );
 }
 
 #[test]
@@ -1496,16 +1505,10 @@ fn collectors_to_map_lowers_to_hash_map_collect() {
 
 #[test]
 fn guardrail_fixtures_emit_structured_unsupported_diagnostics() {
-    let cases = [
-        (
-            "04-objects/InheritanceAndSuper.java",
-            "unsupported_inheritance",
-        ),
-        (
-            "04-objects/AnonymousInterface.java",
-            "unsupported_anonymous_class",
-        ),
-    ];
+    let cases = [(
+        "04-objects/InheritanceAndSuper.java",
+        "unsupported_inheritance",
+    )];
 
     for (path, code) in cases {
         let translation = translate_source(&fixture(path));
@@ -1528,27 +1531,1451 @@ fn anonymous_interface_return_uses_boxed_dyn_trait_slot() {
     let translation = translate_source(&fixture("04-objects/AnonymousInterface.java"));
 
     assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
         translation
             .rust
             .contains("pub fn positive(&self) -> Box<dyn AnonymousInterface_IntPredicate>")
             && translation
                 .rust
-                .contains("return <dyn AnonymousInterface_IntPredicate>::anonymous();")
+                .contains("struct __JavaAnonymousAnonymousInterface_IntPredicate_test")
+            && translation
+                .rust
+                .contains("__call: std::rc::Rc<dyn Fn(i32) -> bool>")
             && !translation
                 .rust
                 .contains("pub fn positive(&self) -> AnonymousInterface_IntPredicate")
+            && !translation
+                .rust
+                .contains("<dyn AnonymousInterface_IntPredicate>::anonymous()")
             && !translation.rust.contains("return Default::default();"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_translation(
         "anonymous_interface_return",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_predicate_invokes_its_body() {
+    let predicate = AnonymousInterface {}.positive();
+    assert!(predicate.test(1));
+    assert!(!predicate.test(0));
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_functional_interface_preserves_this_field() {
+    let translation = translate_source(
+        r#"
+interface Adder { int add(int value); }
+class StatefulAnonymous {
+    static Adder make() {
+        return new Adder() {
+            int base = 4;
+            public int add(int value) { return this.base + value; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("struct __JavaAnonymousAdder_add")
+            && translation.rust.contains("base: i32"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "stateful_anonymous_functional_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_state_is_read_through_this() {
+    assert_eq!(StatefulAnonymous::make().add(3), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_functional_interface_rebinds_nested_bare_field_reads() {
+    let translation = translate_source(
+        r#"
+interface Selector { int choose(int value); }
+class NestedFunctionalAnonymousSelector {
+    static Selector make() {
+        return new Selector() {
+            int fallback = 9;
+            public int choose(int value) { return value > 0 ? fallback + value : fallback; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("struct __JavaAnonymousSelector_choose"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "nested_functional_anonymous_selector",
+        translation.rust,
+        r#"
+#[test]
+fn nested_bare_field_reads_use_single_method_adapter_state() {
+    let selector = NestedFunctionalAnonymousSelector::make();
+    assert_eq!(selector.choose(2), 11);
+    assert_eq!(selector.choose(0), 9);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_counter_preserves_mutable_this_field() {
+    let translation = translate_source(
+        r#"
+interface Counter { int add(int value); }
+class StatefulAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int total = 1;
+            public int add(int value) { this.total += value; return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("total: std::cell::Cell<i32>"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "stateful_anonymous_counter",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_counter_retains_object_state() {
+    let counter = StatefulAnonymousCounter::make();
+    assert_eq!(counter.add(2), 3);
+    assert_eq!(counter.add(4), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_counter_rebinds_camel_case_source_field() {
+    let translation = translate_source(
+        r#"
+interface Counter { int add(int value); }
+class CamelCaseAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int totalValue = 1;
+            public int add(int value) { this.totalValue += value; return totalValue; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("total_value: std::cell::Cell<i32>")
+    );
+    cargo_test_translation(
+        "camel_case_stateful_anonymous_counter",
+        translation.rust,
+        r#"
+#[test]
+fn source_field_spelling_rebinds_before_rust_snake_case() {
+    let counter = CamelCaseAnonymousCounter::make();
+    assert_eq!(counter.add(2), 3);
+    assert_eq!(counter.add(4), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn shared_mutating_interface_implementation_satisfies_generic_bound() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void increment();
+    int value();
+}
+class CounterImpl implements Counter {
+    int n;
+    public void increment() { n = n + 1; }
+    public int value() { return n; }
+}
+class CounterUse {
+    static <T extends Counter> int tick(T counter) {
+        counter.increment();
+        return counter.value();
+    }
+    static int run() {
+        CounterImpl first = new CounterImpl();
+        CounterImpl second = first;
+        return tick(first) + second.value();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Counter for std::rc::Rc<std::cell::RefCell<__JavaShared>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("fn increment(&mut self) { self.borrow_mut().increment() }"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "shared_mutating_interface_bound",
+        translation.rust,
+        r#"
+#[test]
+fn generic_bound_keeps_the_shared_counter_identity() {
+    assert_eq!(CounterUse::run().unwrap(), 2);
+}
+"#,
+    );
+}
+
+#[test]
+fn shared_sync_mutating_interface_implementation_satisfies_generic_bound() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void increment();
+    int value();
+}
+class SyncCounterImpl implements Counter, Runnable {
+    int n;
+    public void increment() { n = n + 1; }
+    public int value() { return n; }
+    public void run() { }
+}
+class SyncCounterUse {
+    static <T extends Counter> int tick(T counter) {
+        counter.increment();
+        return counter.value();
+    }
+    static int run() {
+        SyncCounterImpl first = new SyncCounterImpl();
+        SyncCounterImpl second = first;
+        return tick(first) + second.value();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Counter for std::sync::Arc<std::sync::Mutex<__JavaShared>>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "shared_sync_mutating_interface_bound",
+        translation.rust,
+        r#"
+#[test]
+fn generic_bound_keeps_shared_sync_counter_identity() {
+    assert_eq!(SyncCounterUse::run().unwrap(), 2);
+}
+"#,
+    );
+}
+
+#[test]
+fn shared_sync_interface_getter_preserves_mutable_item_handle() {
+    let translation = translate_source(
+        r#"
+class Item {
+    int value;
+    Item(int value) { this.value = value; }
+    void bump() { value++; }
+    int value() { return value; }
+}
+interface ItemSource { Item item(); }
+class SyncItemSource implements ItemSource, Runnable {
+    Item stored = new Item(1);
+    int runs;
+    public Item item() { return stored; }
+    public void run() { runs++; }
+}
+class SyncItemSourceUse {
+    static <T extends ItemSource> int bump(T source) {
+        Item item = source.item();
+        item.bump();
+        return item.value();
+    }
+    static int run() {
+        SyncItemSource first = new SyncItemSource();
+        SyncItemSource second = first;
+        first.run();
+        bump(first);
+        return second.item().value();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("ItemSource for std::sync::Arc<std::sync::Mutex<__JavaShared>>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "shared_sync_interface_mutable_item_getter",
+        translation.rust,
+        r#"
+#[test]
+fn getter_through_sync_handle_keeps_the_mutable_item_identity() {
+    assert_eq!(SyncItemSourceUse::run().unwrap(), 2);
+}
+"#,
+    );
+}
+
+#[test]
+fn shared_interface_getter_preserves_mutable_item_handle() {
+    let translation = translate_source(
+        r#"
+class Item {
+    int value;
+    Item(int value) { this.value = value; }
+    void bump() { value++; }
+    int value() { return value; }
+}
+interface ItemSource { Item item(); }
+class SharedItemSource implements ItemSource, Runnable {
+    Item stored = new Item(1);
+    public Item item() { return stored; }
+    public void run() { }
+}
+class SharedItemSourceUse {
+    static <T extends ItemSource> int bump(T source) {
+        Item item = source.item();
+        item.bump();
+        return item.value();
+    }
+    static int run() {
+        SharedItemSource first = new SharedItemSource();
+        SharedItemSource second = first;
+        bump(first);
+        return second.item().value();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("std::rc::Rc<std::cell::RefCell<Item>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("stored: Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "shared_interface_mutable_item_getter",
+        translation.rust,
+        r#"
+#[test]
+fn getter_round_trip_keeps_the_mutable_item_identity() {
+    assert_eq!(SharedItemSourceUse::run().unwrap(), 2);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_interface_helper_mutates_instance_field() {
+    let translation = translate_source(
+        r#"
+interface Counter { int next(); int current(); }
+class AnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int value = 0;
+            int bump() { this.value = this.value + 1; return value; }
+            public int next() { return this.bump(); }
+            public int current() { return this.value; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "stateful_anonymous_this_helper_mutation",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_helper_mutates_its_instance_field() {
+    let counter = AnonymousCounter::make();
+    assert_eq!(counter.next(), 1);
+    assert_eq!(counter.current(), 1);
+    assert_eq!(counter.next(), 2);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_interface_helper_reads_instance_field() {
+    let translation = translate_source(
+        r#"
+interface PairValues {
+    int one();
+    int twice();
+}
+class AnonymousPairValues {
+    static PairValues make() {
+        return new PairValues() {
+            int base = 4;
+            int value() { return this.base; }
+            public int one() { return this.value(); }
+            public int twice() { return this.value() * 2; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "stateful_anonymous_this_helper_field",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_helper_reads_its_instance_field() {
+    let values = AnonymousPairValues::make();
+    assert_eq!(values.one(), 4);
+    assert_eq!(values.twice(), 8);
+}
+"#,
+    );
+}
+
+#[test]
+fn fieldless_anonymous_interface_supports_this_helper_parameters() {
+    let translation = translate_source(
+        r#"
+interface PairValues {
+    int one();
+    int twice();
+}
+class AnonymousPairValues {
+    static PairValues make() {
+        return new PairValues() {
+            int plus(int value) { return value + 3; }
+            public int one() { return this.plus(1); }
+            public int twice() { return this.plus(5); }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "fieldless_anonymous_this_helper_parameter",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_helper_accepts_primitive_parameters() {
+    let values = AnonymousPairValues::make();
+    assert_eq!(values.one(), 4);
+    assert_eq!(values.twice(), 8);
+}
+"#,
+    );
+}
+
+#[test]
+fn fieldless_anonymous_interface_supports_this_helper_method() {
+    let translation = translate_source(
+        r#"
+interface PairValues {
+    int one();
+    int twice();
+}
+class AnonymousPairValues {
+    static PairValues make() {
+        return new PairValues() {
+            int base() { return 4; }
+            public int one() { return this.base(); }
+            public int twice() { return this.base() * 2; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "fieldless_anonymous_this_helper",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_helper_uses_its_own_receiver() {
+    let values = AnonymousPairValues::make();
+    assert_eq!(values.one(), 4);
+    assert_eq!(values.twice(), 8);
+}
+"#,
+    );
+}
+
+#[test]
+fn fieldless_multi_method_anonymous_interface_is_object_backed() {
+    let translation = translate_source(
+        r#"
+interface PairOps {
+    int add(int left, int right);
+    int subtract(int left, int right);
+}
+class AnonymousPairOps {
+    static PairOps make() {
+        return new PairOps() {
+            public int add(int left, int right) { return left + right; }
+            public int subtract(int left, int right) { return left - right; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("struct __JavaAnonymousPairOps_object"),
+        "{}",
+        translation.rust
+    );
+    assert!(!translation.rust.contains("<dyn PairOps>::anonymous()"));
+    cargo_test_translation(
+        "fieldless_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_object_implements_each_interface_method() {
+    let ops = AnonymousPairOps::make();
+    assert_eq!(ops.add(7, 4), 11);
+    assert_eq!(ops.subtract(7, 4), 3);
+}
+"#,
+    );
+}
+
+#[test]
+fn fieldless_anonymous_interface_inherits_default_method() {
+    let translation = translate_source(
+        r#"
+interface Named {
+    int value();
+    void add(int delta);
+    default int doubled() { return value() * 2; }
+}
+interface Offset {
+    int offset();
+    default int shifted() { return offset() + 1; }
+}
+interface Scaled extends Named, Offset {
+    int value();
+    void add(int delta);
+    int viaSuper();
+    default int tripled() { return value() * 3; }
+}
+class InheritedAnonymousValue {
+    static Scaled make() {
+        return new Scaled() {
+            int value = 7;
+            public int value() { return value; }
+            public void add(int delta) { this.value += delta; }
+            public int offset() { return 3; }
+            public int viaSuper() { return Scaled.super.tripled(); }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors()
+            && translation
+                .rust
+                .contains("struct __JavaAnonymousScaled_object"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "fieldless_anonymous_inherited_default",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_adapter_uses_inherited_default_methods() {
+    let value = InheritedAnonymousValue::make();
+    assert_eq!(value.value(), 7);
+    assert_eq!(value.doubled(), 14);
+    assert_eq!(value.tripled(), 21);
+    assert_eq!(value.shifted(), 4);
+    assert_eq!(value.via_super(), 21);
+    value.add(2);
+    assert_eq!(value.doubled(), 18);
+    assert_eq!(value.tripled(), 27);
+    assert_eq!(value.via_super(), 27);
+    assert_eq!(value.shifted(), 4);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_multi_method_anonymous_interface_preserves_instance_fields() {
+    let translation = translate_source(
+        r#"
+interface PairOps {
+    int add(int left, int right);
+    int subtract(int left, int right);
+}
+class StatefulAnonymousPairOps {
+    static PairOps make() {
+        return new PairOps() {
+            int offset = 5;
+            public int add(int left, int right) { return left + right + this.offset; }
+            public int subtract(int left, int right) { return left - right + offset; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("offset: i32"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "stateful_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_object_keeps_one_shared_instance_field_for_all_methods() {
+    let ops = StatefulAnonymousPairOps::make();
+    assert_eq!(ops.add(7, 4), 16);
+    assert_eq!(ops.subtract(7, 4), 8);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_multi_method_anonymous_interface_preserves_counter() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void add(int value);
+    int value();
+}
+class MutableAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int total = 1;
+            public void add(int value) { this.total += value; }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("total: std::cell::Cell<i32>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "mutable_stateful_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_counter_state_is_shared_between_mutator_and_reader() {
+    let counter = MutableAnonymousCounter::make();
+    assert_eq!(counter.value(), 1);
+    counter.add(2);
+    counter.add(4);
+    assert_eq!(counter.value(), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_multi_method_anonymous_interface_returns_updated_counter() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    int add(int value);
+    int value();
+}
+class ReturningMutableAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int total = 1;
+            public int add(int value) { this.total += value; return total; }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("total: std::cell::Cell<i32>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "returning_mutable_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_counter_returns_and_retains_the_updated_value() {
+    let counter = ReturningMutableAnonymousCounter::make();
+    assert_eq!(counter.add(2), 3);
+    assert_eq!(counter.add(4), 7);
+    assert_eq!(counter.value(), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_multi_method_anonymous_interface_preserves_boolean_field() {
+    let translation = translate_source(
+        r#"
+interface Flag {
+    void set(boolean value);
+    boolean value();
+}
+
+class MutableAnonymousFlag {
+    static Flag make() {
+        return new Flag() {
+            boolean enabled = false;
+            public void set(boolean value) { this.enabled = value; }
+            public boolean value() { return enabled; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("enabled: std::cell::Cell<bool>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "mutable_boolean_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_boolean_field_persists_across_methods() {
+    let flag = MutableAnonymousFlag::make();
+    assert!(!flag.value());
+    flag.set(true);
+    assert!(flag.value());
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_anonymous_interface_allows_guarded_primitive_update() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void addIf(boolean enabled, int value);
+    int value();
+}
+class GuardedMutableAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int total = 1;
+            public void addIf(boolean enabled, int value) {
+                if (enabled) { this.total += value; }
+            }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("total: std::cell::Cell<i32>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "guarded_mutable_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn guarded_update_keeps_the_adapter_instance_state() {
+    let counter = GuardedMutableAnonymousCounter::make();
+    counter.add_if(false, 9);
+    assert_eq!(counter.value(), 1);
+    counter.add_if(true, 4);
+    assert_eq!(counter.value(), 5);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_anonymous_interface_allows_two_branch_primitive_update() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void add(boolean enabled, int value);
+    int value();
+}
+class TwoBranchMutableAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int total = 10;
+            public void add(boolean enabled, int value) {
+                if (enabled) { this.total += value; } else { this.total -= value; }
+            }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "two_branch_mutable_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn both_branches_update_one_adapter_cell() {
+    let counter = TwoBranchMutableAnonymousCounter::make();
+    counter.add(true, 7);
+    counter.add(false, 4);
+    assert_eq!(counter.value(), 13);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_anonymous_interface_reads_cell_backed_condition_field() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void enable();
+    void add(int value);
+    int value();
+}
+class ConditionalMutableAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            boolean enabled = false;
+            int total = 1;
+            public void enable() { this.enabled = true; }
+            public void add(int value) { if (this.enabled) { this.total += value; } }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "conditional_mutable_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn guarded_update_reads_another_cell_backed_field() {
+    let counter = ConditionalMutableAnonymousCounter::make();
+    counter.add(9);
+    assert_eq!(counter.value(), 1);
+    counter.enable();
+    counter.add(4);
+    assert_eq!(counter.value(), 5);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_anonymous_interface_returns_after_guarded_update() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    int addIf(boolean enabled, int value);
+    int value();
+}
+class ReturningGuardedMutableAnonymousCounter {
+    static Counter make() {
+        return new Counter() {
+            int total = 1;
+            public int addIf(boolean enabled, int value) {
+                if (enabled) { this.total += value; }
+                return total;
+            }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "returning_guarded_mutable_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn guarded_mutator_returns_the_current_adapter_cell_value() {
+    let counter = ReturningGuardedMutableAnonymousCounter::make();
+    assert_eq!(counter.add_if(false, 9), 1);
+    assert_eq!(counter.add_if(true, 4), 5);
+    assert_eq!(counter.value(), 5);
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_anonymous_interface_allows_guarded_string_update() {
+    let translation = translate_source(
+        r#"
+interface Label {
+    String setIf(boolean enabled, String next);
+    String value();
+}
+class GuardedMutableAnonymousLabel {
+    static Label make() {
+        return new Label() {
+            String label = "initial";
+            public String setIf(boolean enabled, String next) {
+                if (enabled) { this.label = next; }
+                return label;
+            }
+            public String value() { return label; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("label: std::cell::RefCell<String>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "guarded_mutable_anonymous_string",
+        translation.rust,
+        r#"
+#[test]
+fn guarded_string_update_returns_owned_current_value() {
+    let label = GuardedMutableAnonymousLabel::make();
+    assert_eq!(label.set_if(false, "unused".to_string()), "initial");
+    assert_eq!(label.set_if(true, "next".to_string()), "next");
+    assert_eq!(label.value(), "next");
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_multi_method_anonymous_interface_preserves_string_field() {
+    let translation = translate_source(
+        r#"
+interface Label {
+    void set(String next);
+    String value();
+}
+class MutableAnonymousLabel {
+    static Label make() {
+        return new Label() {
+            String label = "initial";
+            public void set(String next) { this.label = next; }
+            public String value() { return label; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("label: std::cell::RefCell<String>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "mutable_string_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_string_field_persists_across_methods() {
+    let label = MutableAnonymousLabel::make();
+    assert_eq!(label.value(), "initial");
+    label.set("next".to_string());
+    assert_eq!(label.value(), "next");
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_multi_method_anonymous_interface_returns_updated_string() {
+    let translation = translate_source(
+        r#"
+interface Label {
+    String set(String next);
+    String value();
+}
+class ReturningMutableAnonymousLabel {
+    static Label make() {
+        return new Label() {
+            String label = "initial";
+            public String set(String next) { this.label = next; return label; }
+            public String value() { return label; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "returning_mutable_string_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_string_setter_returns_an_owned_updated_value() {
+    let label = ReturningMutableAnonymousLabel::make();
+    assert_eq!(label.set("next".to_string()), "next");
+    assert_eq!(label.value(), "next");
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_anonymous_interface_appends_string_field() {
+    let translation = translate_source(
+        r#"
+interface Label {
+    String append(String suffix);
+    String value();
+}
+class AppendingMutableAnonymousLabel {
+    static Label make() {
+        return new Label() {
+            String label = "a";
+            public String append(String suffix) { this.label = this.label + suffix; return label; }
+            public String value() { return label; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "appending_mutable_string_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_string_field_reads_before_replacing() {
+    let label = AppendingMutableAnonymousLabel::make();
+    assert_eq!(label.append("b".to_string()), "ab");
+    assert_eq!(label.append("c".to_string()), "abc");
+    assert_eq!(label.value(), "abc");
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_stateful_multi_method_anonymous_interface_keeps_multiple_fields() {
+    let translation = translate_source(
+        r#"
+interface State {
+    void add(int value);
+    int total();
+    void setLabel(String next);
+    String label();
+}
+class MultiFieldMutableAnonymousState {
+    static State make() {
+        return new State() {
+            int total = 1;
+            String label = "initial";
+            public void add(int value) { this.total += value; }
+            public int total() { return total; }
+            public void setLabel(String next) { this.label = next; }
+            public String label() { return label; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("total: std::cell::Cell<i32>")
+            && translation
+                .rust
+                .contains("label: std::cell::RefCell<String>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "multiple_mutable_fields_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn anonymous_object_keeps_independent_mutable_fields() {
+    let state = MultiFieldMutableAnonymousState::make();
+    state.add(4);
+    state.set_label("next".to_string());
+    assert_eq!(state.total(), 5);
+    assert_eq!(state.label(), "next");
+}
+"#,
+    );
+}
+
+#[test]
+fn mutable_multi_method_anonymous_objects_keep_distinct_instance_state() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void add(int value);
+    int value();
+}
+class DistinctAnonymousCounters {
+    static Counter make() {
+        return new Counter() {
+            int total = 1;
+            public void add(int value) { this.total += value; }
+            public int value() { return total; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "distinct_mutable_multi_method_anonymous_objects",
+        translation.rust,
+        r#"
+#[test]
+fn factory_calls_create_distinct_anonymous_instances() {
+    let first = DistinctAnonymousCounters::make();
+    let second = DistinctAnonymousCounters::make();
+    first.add(4);
+    second.add(9);
+    assert_eq!(first.value(), 5);
+    assert_eq!(second.value(), 10);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_anonymous_interface_allows_read_only_branching() {
+    let translation = translate_source(
+        r#"
+interface Selector { int choose(int value); }
+class BranchingAnonymousSelector {
+    static Selector make() {
+        return new Selector() {
+            int fallback = 9;
+            public int choose(int value) {
+                if (value > 0) { return value + fallback; }
+                return fallback;
+            }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "stateful_anonymous_interface_branching",
+        translation.rust,
+        r#"
+#[test]
+fn field_reads_survive_read_only_branching() {
+    let selector = BranchingAnonymousSelector::make();
+    assert_eq!(selector.choose(2), 11);
+    assert_eq!(selector.choose(0), 9);
+}
+"#,
+    );
+}
+
+#[test]
+fn stateful_multi_method_anonymous_interface_rebinds_nested_field_reads() {
+    let translation = translate_source(
+        r#"
+interface Selector {
+    int choose(int value);
+    int fallback();
+}
+class NestedFieldAnonymousSelector {
+    static Selector make() {
+        return new Selector() {
+            int fallback = 9;
+            public int choose(int value) { return value > 0 ? fallback + value : fallback; }
+            public int fallback() { return fallback; }
+        };
+    }
+}
+"#,
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "nested_field_multi_method_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn nested_read_only_expressions_use_anonymous_instance_state() {
+    let selector = NestedFieldAnonymousSelector::make();
+    assert_eq!(selector.choose(2), 11);
+    assert_eq!(selector.choose(0), 9);
+    assert_eq!(selector.fallback(), 9);
+}
+"#,
     );
 }
 

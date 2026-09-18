@@ -1122,7 +1122,13 @@ fn collect_anonymous_class_diagnostics_for_expr(
         }
         Expr::New { ty, args, body, .. } => {
             if anonymous_priority_queue_comparator_constructor_is_supported(ty, args)
-                || anonymous_zero_arg_interface_is_supported(
+                || anonymous_functional_interface_is_supported(
+                    ty,
+                    args,
+                    body.as_deref(),
+                    anonymous_context,
+                )
+                || anonymous_fieldless_interface_object_is_supported(
                     ty,
                     args,
                     body.as_deref(),
@@ -1184,7 +1190,11 @@ fn collect_anonymous_class_diagnostics_for_expr(
     }
 }
 
-fn anonymous_zero_arg_interface_is_supported(
+/// A non-functional source interface still needs an object, not a closure. The
+/// first general tier has no anonymous instance fields, but implements every
+/// abstract interface method with an ordinary body that does not require an
+/// anonymous `this` or `super` receiver.
+fn anonymous_fieldless_interface_object_is_supported(
     ty: &JavaType,
     args: &[Expr],
     body: Option<&[Member]>,
@@ -1202,6 +1212,299 @@ fn anonymous_zero_arg_interface_is_supported(
     if interface.kind != TypeKind::Interface {
         return false;
     }
+    let expected = anonymous_interface_lineage(interface, anonymous_context)
+        .into_iter()
+        .flat_map(|interface| interface.members.iter())
+        .filter_map(|member| match member {
+            Member::Method(method) if method.body.is_none() => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if expected.is_empty() {
+        return false;
+    }
+    let Some(body) = body else {
+        return false;
+    };
+    let fields = body
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if fields.iter().any(|field| field.initializer.is_none())
+        || (expected.len() == 1
+            && interface
+                .members
+                .iter()
+                .filter(|member| matches!(member, Member::Method(method) if method.body.is_none()))
+                .count()
+                == 1
+            && fields.is_empty())
+    {
+        return false;
+    }
+    let implementations = body
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    expected.iter().all(|expected_method| {
+            implementations.iter().any(|implementation| {
+                implementation.name == expected_method.name
+                    && implementation.params.len() == expected_method.params.len()
+                    && implementation.type_params.is_empty()
+                    && !implementation.modifiers.contains(&Modifier::Static)
+                    && !fields.iter().any(|field| {
+                        implementation
+                            .params
+                            .iter()
+                            .any(|param| param.name == field.name)
+                    })
+                    && implementation.body.as_ref().is_some_and(|body| {
+                        if fields.is_empty() {
+                            stateful_anonymous_read_only_block_is_supported(body)
+                        } else {
+                            stateful_anonymous_read_only_block_is_supported(body)
+                                || stateful_anonymous_counter_mutator_body(
+                                    body,
+                                    &expected_method.return_type,
+                                    &fields,
+                                )
+                                || stateful_anonymous_guarded_counter_mutator_body(
+                                    body,
+                                    &expected_method.return_type,
+                                    &fields,
+                                )
+                        }
+                    })
+            })
+        })
+        && implementations
+            .iter()
+            .filter(|method| {
+                !expected.iter().any(|expected_method| {
+                    method.name == expected_method.name
+                        && method.params.len() == expected_method.params.len()
+                })
+            })
+            .all(|helper| {
+                helper
+                    .params
+                    .iter()
+                    .all(|param| matches!(param.ty, JavaType::Primitive(_)))
+                    && helper.type_params.is_empty()
+                    && !helper.modifiers.contains(&Modifier::Static)
+                    && matches!(helper.return_type, JavaType::Primitive(_))
+                && helper.body.as_ref().is_some_and(|body| {
+                    matches!(body.statements.as_slice(), [Stmt::Return(Some(expr))]
+                        if !stateful_anonymous_return_expr_has_super(expr))
+                        || matches!(body.statements.as_slice(), [
+                            Stmt::Assign { target: Expr::FieldAccess(receiver, assigned), .. },
+                            Stmt::Return(Some(returned)),
+                        ] if matches!(receiver.as_ref(), Expr::This)
+                            && fields.iter().any(|field| field.name == crate::parser::to_snake_case_unescaped(assigned)
+                                && matches!(field.ty, JavaType::Primitive(_))
+                                && stateful_anonymous_counter_return_reads_field(returned, &field.name)))
+                })
+            })
+}
+
+/// The anonymous adapter must implement every source supertrait explicitly in
+/// Rust. Collect parents first so its eligibility check uses the same complete
+/// abstract surface as lowering.
+fn anonymous_interface_lineage<'a>(
+    interface: &'a TypeDecl,
+    program: &'a Program,
+) -> Vec<&'a TypeDecl> {
+    fn visit<'a>(
+        interface: &'a TypeDecl,
+        program: &'a Program,
+        seen: &mut Vec<String>,
+        out: &mut Vec<&'a TypeDecl>,
+    ) {
+        if !seen.iter().any(|name| name == &interface.name) {
+            seen.push(interface.name.clone());
+        } else {
+            return;
+        }
+        for parent_name in interface.extends.iter().chain(interface.implements.iter()) {
+            if let Some(parent) = find_type_by_erased_name(program, parent_name)
+                && parent.kind == TypeKind::Interface
+            {
+                visit(parent, program, seen, out);
+            }
+        }
+        out.push(interface);
+    }
+
+    let mut out = Vec::new();
+    visit(interface, program, &mut Vec::new(), &mut out);
+    out
+}
+
+/// A guarded primitive update is still ordinary anonymous-instance state: the
+/// condition is read through the adapter and the assignment updates its `Cell`
+/// only when that condition holds. Keep this deliberately narrower than a
+/// general mutable control-flow grammar: each present branch must update the
+/// same field. A following return is accepted only when it returns that field.
+fn stateful_anonymous_guarded_counter_mutator_body(
+    body: &Block,
+    return_type: &JavaType,
+    fields: &[&crate::java_ir::FieldDecl],
+) -> bool {
+    let (condition, then_block, else_block, returned) = match body.statements.as_slice() {
+        [
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            },
+        ] => (condition, then_block, else_block, None),
+        [
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            },
+            Stmt::Return(Some(returned)),
+        ] => (condition, then_block, else_block, Some(returned)),
+        _ => return false,
+    };
+    let [
+        Stmt::Assign {
+            target: Expr::FieldAccess(receiver, assigned),
+            ..
+        },
+    ] = then_block.statements.as_slice()
+    else {
+        return false;
+    };
+    let else_assigned = else_block.as_ref().map(|else_block| {
+        let [
+            Stmt::Assign {
+                target: Expr::FieldAccess(receiver, assigned),
+                ..
+            },
+        ] = else_block.statements.as_slice()
+        else {
+            return None;
+        };
+        matches!(receiver.as_ref(), Expr::This)
+            .then(|| crate::parser::to_snake_case_unescaped(assigned))
+    });
+    !stateful_anonymous_return_expr_has_super(condition)
+        && matches!(receiver.as_ref(), Expr::This)
+        && else_assigned.as_ref().is_none_or(|assigned_else| {
+            assigned_else.as_deref()
+                == Some(crate::parser::to_snake_case_unescaped(assigned).as_str())
+        })
+        && fields.iter().any(|field| {
+            field.name == crate::parser::to_snake_case_unescaped(assigned)
+                && (matches!(field.ty, JavaType::Primitive(_) | JavaType::String)
+                    || matches!(&field.ty, JavaType::Named { name, .. }
+                        if name.rsplit('.').next() == Some("String")))
+                && match returned {
+                    None => *return_type == JavaType::Void,
+                    Some(returned) => {
+                        anonymous_mutable_field_return_type_matches(return_type, &field.ty)
+                            && stateful_anonymous_counter_return_reads_field(returned, &field.name)
+                    }
+                }
+        })
+}
+
+/// A narrow mutable anonymous-object method: update one `int` instance field,
+/// optionally returning that same field. The latter is the Java idiom behind
+/// `int add(int n) { this.total += n; return total; }`.
+fn stateful_anonymous_counter_mutator_body(
+    body: &Block,
+    return_type: &JavaType,
+    fields: &[&crate::java_ir::FieldDecl],
+) -> bool {
+    let (assigned, returned) = match body.statements.as_slice() {
+        [
+            Stmt::Assign {
+                target: Expr::FieldAccess(receiver, assigned),
+                ..
+            },
+        ] if matches!(receiver.as_ref(), Expr::This) => (assigned, None),
+        [
+            Stmt::Assign {
+                target: Expr::FieldAccess(receiver, assigned),
+                ..
+            },
+            Stmt::Return(Some(returned)),
+        ] if matches!(receiver.as_ref(), Expr::This) => (assigned, Some(returned)),
+        _ => return false,
+    };
+    fields.iter().any(|field| {
+        field.name == crate::parser::to_snake_case_unescaped(assigned)
+            && (matches!(field.ty, JavaType::Primitive(_) | JavaType::String)
+                || matches!(&field.ty, JavaType::Named { name, .. }
+                    if name.rsplit('.').next() == Some("String")))
+            && match returned {
+                None => *return_type == JavaType::Void,
+                Some(returned) => {
+                    anonymous_mutable_field_return_type_matches(return_type, &field.ty)
+                        && !stateful_anonymous_return_expr_has_super(returned)
+                }
+            }
+    })
+}
+
+fn anonymous_mutable_field_return_type_matches(
+    return_type: &JavaType,
+    field_type: &JavaType,
+) -> bool {
+    return_type == field_type
+        || matches!(return_type, JavaType::String)
+            && matches!(field_type, JavaType::Named { name, .. }
+                if name.rsplit('.').next() == Some("String"))
+        || matches!(field_type, JavaType::String)
+            && matches!(return_type, JavaType::Named { name, .. }
+                if name.rsplit('.').next() == Some("String"))
+}
+
+fn stateful_anonymous_read_only_block_is_supported(body: &Block) -> bool {
+    body.statements.iter().all(|stmt| match stmt {
+        Stmt::Return(Some(expr)) => !stateful_anonymous_return_expr_has_super(expr),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            !stateful_anonymous_return_expr_has_super(condition)
+                && stateful_anonymous_read_only_block_is_supported(then_block)
+                && else_block
+                    .as_ref()
+                    .is_none_or(stateful_anonymous_read_only_block_is_supported)
+        }
+        _ => false,
+    })
+}
+
+fn anonymous_functional_interface_is_supported(
+    ty: &JavaType,
+    args: &[Expr],
+    body: Option<&[Member]>,
+    anonymous_context: &Program,
+) -> bool {
+    if !args.is_empty() {
+        return false;
+    }
+    let JavaType::Named { name, .. } = ty else {
+        return false;
+    };
+    let Some(interface) = find_type_by_erased_name(anonymous_context, name) else {
+        return false;
+    };
+    if interface.kind != TypeKind::Interface || interface.extends.is_some() {
+        return false;
+    }
     let mut methods = interface.members.iter().filter_map(|member| match member {
         Member::Method(method) if method.body.is_none() => Some(method),
         _ => None,
@@ -1210,24 +1513,142 @@ fn anonymous_zero_arg_interface_is_supported(
         return false;
     };
     if methods.next().is_some()
-        || !interface_method.params.is_empty()
         || !interface_method.type_params.is_empty()
         || !interface_method.throws.is_empty()
         || interface_method.modifiers.contains(&Modifier::Static)
     {
         return false;
     }
-    let Some([Member::Method(implementation)]) = body else {
+    let Some(body) = body else {
         return false;
     };
+    let methods = body
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let [implementation] = methods.as_slice() else {
+        return false;
+    };
+    let stateful_field_slice = body
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let stateful = !stateful_field_slice.is_empty()
+        && body.len() == stateful_field_slice.len() + 1
+        && stateful_field_slice
+            .iter()
+            .all(|field| field.initializer.is_some())
+        && implementation.body.as_ref().is_some_and(|body| {
+            matches!(body.statements.as_slice(), [Stmt::Return(Some(expr))]
+                if !stateful_anonymous_return_expr_has_super(expr))
+                || stateful_anonymous_counter_body(body, &stateful_field_slice)
+        });
+    if !stateful && body.len() != 1 {
+        return false;
+    }
     implementation.name == interface_method.name
-        && implementation.params.is_empty()
+        && implementation.params.len() == interface_method.params.len()
         && implementation.type_params.is_empty()
         && !implementation.modifiers.contains(&Modifier::Static)
+        && !stateful_field_slice.iter().any(|field| {
+            implementation
+                .params
+                .iter()
+                .any(|param| param.name == field.name)
+        })
         && implementation
             .body
             .as_ref()
-            .is_some_and(|body| !crate::java_ir::block_mentions_this_or_super(body))
+            .is_some_and(|body| stateful || !crate::java_ir::block_mentions_this_or_super(body))
+}
+
+fn stateful_anonymous_counter_body(body: &Block, fields: &[&crate::java_ir::FieldDecl]) -> bool {
+    matches!(body.statements.as_slice(), [
+        Stmt::Assign { target: Expr::FieldAccess(receiver, assigned), .. },
+        Stmt::Return(Some(returned_expr)),
+    ] if matches!(receiver.as_ref(), Expr::This)
+        && fields.iter().any(|field| field.name == crate::parser::to_snake_case_unescaped(assigned)
+            && matches!(field.ty, JavaType::Primitive(crate::java_ir::PrimitiveType::Int))
+            && stateful_anonymous_counter_return_reads_field(returned_expr, &field.name)))
+}
+
+fn stateful_anonymous_counter_return_reads_field(expr: &Expr, field: &str) -> bool {
+    matches!(expr, Expr::Var(name) if name == field)
+        || matches!(expr, Expr::FieldAccess(receiver, name)
+            if matches!(receiver.as_ref(), Expr::This) && name == field)
+}
+
+/// The stateful anonymous adapter does not yet have a superclass. Treat nested
+/// anonymous construction and lambdas conservatively as unsupported here; that
+/// keeps diagnostics aligned with the lowering boundary.
+fn stateful_anonymous_return_expr_has_super(expr: &Expr) -> bool {
+    match expr {
+        Expr::Super | Expr::New { .. } | Expr::Lambda { .. } => true,
+        Expr::This
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            stateful_anonymous_return_expr_has_super(receiver)
+        }
+        Expr::ArrayAccess(array, index) => {
+            stateful_anonymous_return_expr_has_super(array)
+                || stateful_anonymous_return_expr_has_super(index)
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(stateful_anonymous_return_expr_has_super)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|items| items.iter().any(stateful_anonymous_return_expr_has_super))
+        }
+        Expr::ArrayInitializer(items) => items.iter().any(stateful_anonymous_return_expr_has_super),
+        Expr::Binary { left, right, .. } => {
+            stateful_anonymous_return_expr_has_super(left)
+                || stateful_anonymous_return_expr_has_super(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            stateful_anonymous_return_expr_has_super(condition)
+                || stateful_anonymous_return_expr_has_super(then_expr)
+                || stateful_anonymous_return_expr_has_super(else_expr)
+        }
+        Expr::Switch { selector, cases } => {
+            stateful_anonymous_return_expr_has_super(selector)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| {
+                        matches!(label, SwitchLabel::Expr(expr)
+                        if stateful_anonymous_return_expr_has_super(expr))
+                    }) || stateful_anonymous_return_expr_has_super(&case.value)
+                })
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| stateful_anonymous_return_expr_has_super(receiver))
+                || args.iter().any(stateful_anonymous_return_expr_has_super)
+        }
+    }
 }
 
 fn anonymous_priority_queue_comparator_constructor_is_supported(

@@ -3,6 +3,7 @@ use new_java2rust::java_ir::{
     Stmt, UnaryOp, WildcardBound,
 };
 use new_java2rust::parser::parse_java_source;
+use new_java2rust::{facts::FactSet, resolve};
 
 fn fixture(path: &str) -> String {
     std::fs::read_to_string(std::path::Path::new("examples/java").join(path)).unwrap()
@@ -33,6 +34,109 @@ fn all_fixtures_parse_without_reader_fallback_nodes() {
         failures.is_empty(),
         "reader fallback nodes remain:\n{}",
         failures.join("\n")
+    );
+}
+
+#[test]
+fn parses_compound_assignment_inside_anonymous_functional_body() {
+    let source = r#"
+interface Counter { int add(int value); }
+class Holder {
+    Counter make() {
+        return new Counter() {
+            int total = 1;
+            public int add(int value) { this.total += value; return total; }
+        };
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let holder = parsed
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Holder")
+        .unwrap();
+    let make = holder
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "make" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Some(Stmt::Return(Some(Expr::New {
+        body: Some(body), ..
+    }))) = make.body.as_ref().and_then(|body| body.statements.first())
+    else {
+        panic!("unexpected make body: {make:#?}");
+    };
+    let add = body
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "add" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            add.body.as_ref().map(|body| body.statements.as_slice()),
+            Some([
+                Stmt::Assign {
+                    target: Expr::FieldAccess(receiver, field),
+                    value: Expr::Binary { op: BinaryOp::Add, .. },
+                },
+                Stmt::Return(Some(Expr::Var(returned))),
+            ]) if matches!(receiver.as_ref(), Expr::This) && field == "total" && returned == "total"
+        ),
+        "{add:#?}"
+    );
+
+    let resolved = resolve::resolve_program_with_source_program_and_facts(
+        &parsed.program,
+        parsed.diagnostics.clone(),
+        &parsed.program,
+        &FactSet::default(),
+    );
+    let holder = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Holder")
+        .unwrap();
+    let make = holder
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "make" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    let Some(Stmt::Return(Some(Expr::New {
+        body: Some(body), ..
+    }))) = make.body.as_ref().and_then(|body| body.statements.first())
+    else {
+        panic!("unexpected resolved make body: {make:#?}");
+    };
+    let add = body
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "add" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        matches!(
+            add.body.as_ref().map(|body| body.statements.as_slice()),
+            Some([
+                Stmt::Assign {
+                    target: Expr::FieldAccess(receiver, field),
+                    value: Expr::Binary { op: BinaryOp::Add, .. },
+                },
+                Stmt::Return(Some(Expr::Var(returned))),
+            ]) if matches!(receiver.as_ref(), Expr::This) && field == "total" && returned == "total"
+        ),
+        "{add:#?}"
     );
 }
 

@@ -1,15 +1,24 @@
 # 0023 — Non-static inner-class construction no longer always panics
 
-Status: **fixed for implemented SharedLocal receivers**
+Status: **fixed**
 (captured-inner callers, qualified `other.new Inner()` calls, and ordinary
 outer calls on an implemented shared outer handle now route through associated
-`_with_outer` companions; unsupported tiers such as SharedSync still report a
-translator diagnostic and lower to an explicit runtime handoff)
-Severity: closed for the checked `InnerCapture`/`QualifiedInnerCapture` shapes.
-The remaining unsupported cases are representation-tier coverage from
-[0002](0002-object-aliasing-has-no-representation.md), not this
-always-panicking lowering defect.
-Kind: fixed lowering gap; residual SharedSync support remains tracked by [0002](0002-object-aliasing-has-no-representation.md)
+`_with_outer` companions, including a static-reachable `Arc<Mutex<Outer>>`
+outer)
+Severity: closed for the checked `InnerCapture`/`QualifiedInnerCapture` and
+static-reachable shared-outer shapes. Remaining unsupported cases are outside
+this construction lowering path.
+
+Current proof: `output_markers::inner_capture_routes_shared_outer_handle_companion`
+verifies the generated shared-handle companion route, while
+`output_markers::top_level_constructor_does_not_report_same_simple_inner_capture_panic`
+guards against a false construction diagnostic caused by a same-simple-name
+inner type.
+
+Codex recheck 2026-09-18: the companion marker guard, the static-reachable
+`Arc<Mutex<Outer>>` identity runtime guard, and the qualified-inner Java/Rust
+differential all pass on the current worktree.
+Kind: fixed lowering gap
 
 ## Symptom
 
@@ -17,10 +26,10 @@ Non-static inner classes compile, and paths that already possess an outer handle
 now have non-panicking `_with_outer` constructor and method companions. Ordinary
 outer calls on implemented SharedLocal handles also dispatch through those
 companions, so the promoted differential fixtures execute without the previous
-runtime-loud constructor path. A separate `method_with_outer` body exists when
-lowering can make the body
-non-panicking; the unresolved part is routing ordinary calls to that companion
-once receivers themselves are represented as shared handles.
+runtime-loud constructor path. The same route now selects the enclosing type's
+actual implemented handle placement, including `Arc<Mutex<Outer>>` for a
+static-reachable outer; the remaining fallback is only for callers that have no
+implemented outer handle to pass.
 
 ```java
 public class InnerCapture {

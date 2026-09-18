@@ -196,10 +196,7 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
         return false;
     };
     let placement = facts.storage_placement_for(name);
-    placement.shared()
-        && placement.interior_mutable()
-        && !placement.sync()
-        && placement.is_implemented()
+    placement.shared() && placement.interior_mutable() && placement.is_implemented()
 }
 
 fn collect_in_type(

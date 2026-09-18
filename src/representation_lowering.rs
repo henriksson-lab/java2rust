@@ -1419,17 +1419,29 @@ pub(crate) fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
 /// which is how the shared representation reaches user generics at all
 /// ([0002b](../claude_audits/0002b-shared-representation-design.md)).
 ///
-/// `None` when any method takes `&mut self`: `Rc` has no `DerefMut`. That is the
-/// same precondition `storage_strategy::interface_surface_is_handle_forwardable`
-/// reports, checked here against the rendered surface so the two cannot drift.
+/// A direct `Rc<T>`/`Arc<T>` implementation is valid only for an `&self`-only
+/// surface. Mutable shared storage instead gets implementations for
+/// `Rc<RefCell<T>>` and `Arc<Mutex<T>>`, which acquire the handle's interior
+/// mutability per call. A borrowed return can be forwarded through a direct
+/// `Rc<T>`/`Arc<T>` because it is tied to the handle's own `&self` lifetime;
+/// it is deliberately not forwarded through either cell handle, whose guard
+/// would be dropped at the method boundary.
 pub(crate) fn shared_handle_forwarding_impl(
     trait_name: &str,
     signatures: &[String],
 ) -> Option<String> {
-    let methods = signatures
+    let direct_methods = signatures
         .iter()
-        .map(|signature| forwarded_trait_method(signature))
-        .collect::<Option<Vec<_>>>()?;
+        .map(|signature| forwarded_trait_method(signature, SharedTraitHandle::Direct))
+        .collect::<Option<Vec<_>>>();
+    let local_methods = signatures
+        .iter()
+        .map(|signature| forwarded_trait_method(signature, SharedTraitHandle::Local))
+        .collect::<Option<Vec<_>>>();
+    let sync_methods = signatures
+        .iter()
+        .map(|signature| forwarded_trait_method(signature, SharedTraitHandle::Sync))
+        .collect::<Option<Vec<_>>>();
     // An empty trait is *trivially* forwardable, and the impl is still required:
     // a Java class used as a bare type-parameter bound (`<T extends HeaderLine>`)
     // may declare no methods at all, and without `impl .. for Rc<..>` the bound
@@ -1447,28 +1459,51 @@ pub(crate) fn shared_handle_forwarding_impl(
     // ever targets concrete source types, never `Rc<dyn Trait>`. The `'static`
     // bound is required by the trait-object support methods (`as_any` and
     // `clone_box`) once the handle itself can be boxed as `dyn Trait`.
-    let body = methods.join("\n");
-    Some(
-        ["std::rc::Rc", "std::sync::Arc"]
-            .into_iter()
-            .map(|handle| {
-                format!(
-                    "impl<__JavaShared: {trait_name} + 'static> {trait_name} for {handle}<__JavaShared> {{\n{body}\n}}"
-                )
-            })
-            .collect::<Vec<_>>()
-            .join("\n\n"),
-    )
+    let mut implementations = Vec::new();
+    if let Some(methods) = direct_methods {
+        let body = methods.join("\n");
+        for handle in ["std::rc::Rc", "std::sync::Arc"] {
+            implementations.push(format!(
+                "impl<__JavaShared: {trait_name} + 'static> {trait_name} for {handle}<__JavaShared> {{\n{body}\n}}"
+            ));
+        }
+    }
+    for (handle, methods) in [
+        (
+            "std::rc::Rc<std::cell::RefCell<__JavaShared>>",
+            local_methods,
+        ),
+        (
+            "std::sync::Arc<std::sync::Mutex<__JavaShared>>",
+            sync_methods,
+        ),
+    ] {
+        if let Some(methods) = methods {
+            implementations.push(format!(
+                "impl<__JavaShared: {trait_name} + 'static> {trait_name} for {handle} {{\n{}\n}}",
+                methods.join("\n")
+            ));
+        }
+    }
+    (!implementations.is_empty()).then(|| implementations.join("\n\n"))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SharedTraitHandle {
+    Direct,
+    Local,
+    Sync,
 }
 
 /// Turns one rendered trait-method signature into a forwarding implementation.
 ///
 /// The signature is text this module just produced, so the parse is closed over
 /// our own output rather than arbitrary Rust: `    fn name<generics>(&self, a: A) -> R;`
-fn forwarded_trait_method(signature: &str) -> Option<String> {
+fn forwarded_trait_method(signature: &str, handle: SharedTraitHandle) -> Option<String> {
     let trimmed = signature.trim();
     let body = trimmed.strip_prefix("fn ")?.strip_suffix(';')?;
-    if trimmed.contains("&mut self") || !trimmed.contains("&self") {
+    let mutable_receiver = trimmed.contains("&mut self");
+    if !mutable_receiver && !trimmed.contains("&self") {
         return None;
     }
     let open = body.find('(')?;
@@ -1481,10 +1516,35 @@ fn forwarded_trait_method(signature: &str) -> Option<String> {
             "    {signature_without_semicolon} {{ std::boxed::Box::new(self.clone()) }}"
         ));
     }
+    if name == "as_any" && args.is_empty() {
+        let body = match handle {
+            SharedTraitHandle::Direct => "(**self).as_any()",
+            SharedTraitHandle::Local | SharedTraitHandle::Sync => "self",
+        };
+        return Some(format!("    {signature_without_semicolon} {{ {body} }}"));
+    }
+    if (signature_return_is_borrowed(signature) && handle != SharedTraitHandle::Direct)
+        || (mutable_receiver && handle == SharedTraitHandle::Direct)
+    {
+        return None;
+    }
+    let receiver = match handle {
+        SharedTraitHandle::Direct => "(**self)".to_string(),
+        SharedTraitHandle::Local if mutable_receiver => "self.borrow_mut()".to_string(),
+        SharedTraitHandle::Local => "self.borrow()".to_string(),
+        SharedTraitHandle::Sync if mutable_receiver => "self.lock().unwrap()".to_string(),
+        SharedTraitHandle::Sync => "self.lock().unwrap()".to_string(),
+    };
     Some(format!(
-        "    {signature_without_semicolon} {{ (**self).{name}({}) }}",
+        "    {signature_without_semicolon} {{ {receiver}.{name}({}) }}",
         args.join(", ")
     ))
+}
+
+fn signature_return_is_borrowed(signature: &str) -> bool {
+    signature
+        .split_once(" -> ")
+        .is_some_and(|(_, return_and_bounds)| return_and_bounds.trim_start().starts_with('&'))
 }
 
 fn matching_paren(text: &str, open: usize) -> Option<usize> {
@@ -2682,6 +2742,7 @@ interface Named {
     String name();
     int score(String prefix);
 }
+
 "#,
         );
         let resolved = resolve_program(&parsed.program, parsed.diagnostics);
@@ -2770,7 +2831,7 @@ class ExternalId {}
         assert_eq!(
             type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
             RepresentationTypeEmission::RawRustItem(
-                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
+                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<std::cell::RefCell<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { self.borrow().ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<std::sync::Mutex<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { self.lock().unwrap().ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
                     .to_string()
             )
         );
@@ -3201,7 +3262,7 @@ interface Mapper {
             .find(|ty| ty.name == "Mapper")
             .unwrap();
 
-        assert_eq!(
+        let RepresentationTypeEmission::RawRustItem(rendered) =
             type_emission_for_program_with_facts_and_exceptions(
                 &representations,
                 &resolved.program,
@@ -3209,17 +3270,23 @@ interface Mapper {
                 &signatures,
                 &FactSet::default(),
                 &ProgramExceptionPlan::default(),
-            ),
-            RepresentationTypeEmission::RawRustItem(
-                // The trailing `impl .. for Rc<..>` forwards the trait through a
-                // shared handle, so a wrapped value can satisfy a Java bound
-                // (claude_audits/0002b). `__JavaShared` rather than `T`: `id`
-                // declares its own `T` and an inner generic shadowing the impl's is
-                // E0403.
-                "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper>;\n}\n\nimpl dyn Mapper {\n    pub fn anonymous() -> std::boxed::Box<dyn Mapper> { panic!(\"java2rust: anonymous class body for Mapper requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn Mapper> {\n    fn clone(&self) -> Self { Mapper::clone_box(&**self) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::rc::Rc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: Mapper + 'static> Mapper for std::sync::Arc<__JavaShared> {\n    fn id<T>(&self, value: T) -> T where Self: Sized { (**self).id(value) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn Mapper> { std::boxed::Box::new(self.clone()) }\n}"
-                    .to_string()
             )
-        );
+        else {
+            panic!("Mapper must lower to a trait item");
+        };
+        // `__JavaShared` rather than `T`: `id` declares its own `T` and an
+        // inner generic shadowing the implementation's is E0403. The same
+        // method must remain callable through all four supported handle forms.
+        for expected in [
+            "pub trait Mapper {\n    fn id<T>(&self, value: T) -> T where Self: Sized;",
+            "Mapper for std::rc::Rc<__JavaShared>",
+            "Mapper for std::sync::Arc<__JavaShared>",
+            "Mapper for std::rc::Rc<std::cell::RefCell<__JavaShared>>",
+            "Mapper for std::sync::Arc<std::sync::Mutex<__JavaShared>>",
+            "fn id<T>(&self, value: T) -> T where Self: Sized { self.borrow().id(value) }",
+        ] {
+            assert!(rendered.contains(expected), "{rendered}");
+        }
     }
 
     #[test]
@@ -3477,7 +3544,7 @@ mod shared_handle_forwarding_tests {
             )
         );
         assert!(rendered.contains("fn id(&self) -> String { (**self).id() }"));
-        assert!(rendered.contains("fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }"));
+        assert!(rendered.contains("fn as_any(&self) -> &dyn std::any::Any { self }"));
     }
 
     #[test]
@@ -3513,19 +3580,47 @@ mod shared_handle_forwarding_tests {
         );
     }
 
-    /// `Rc` has no `DerefMut`, so a mutating surface has no forwarding impl at
-    /// all -- the whole trait is rejected, not the single method.
+    /// Mutating trait methods forward through the cell-backed shared handles.
     #[test]
-    fn a_mutating_method_rejects_the_whole_surface() {
+    fn a_mutating_method_forwards_through_cell_handles() {
+        let rendered = shared_handle_forwarding_impl(
+            "Shape",
+            &[
+                "    fn size(&self) -> i32;".to_string(),
+                "    fn grow(&mut self);".to_string(),
+            ],
+        )
+        .expect("cell-backed handles forward mutating surfaces");
+        assert!(rendered.contains("Shape for std::rc::Rc<std::cell::RefCell<__JavaShared>>"));
+        assert!(rendered.contains("fn size(&self) -> i32 { self.borrow().size() }"));
+        assert!(rendered.contains("fn grow(&mut self) { self.borrow_mut().grow() }"));
+        assert!(rendered.contains("Shape for std::sync::Arc<std::sync::Mutex<__JavaShared>>"));
+        assert!(rendered.contains("fn grow(&mut self) { self.lock().unwrap().grow() }"));
+        assert!(!rendered.contains("Shape for std::rc::Rc<__JavaShared>"));
+    }
+
+    #[test]
+    fn borrowed_returns_forward_through_direct_handles_only() {
+        let rendered = shared_handle_forwarding_impl(
+            "LabelSource",
+            &[
+                "    fn label(&self) -> &str;".to_string(),
+                "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
+            ],
+        )
+        .expect("direct handles can tie the returned borrow to &self");
         assert!(
-            shared_handle_forwarding_impl(
-                "Shape",
-                &[
-                    "    fn size(&self) -> i32;".to_string(),
-                    "    fn grow(&mut self);".to_string(),
-                ],
-            )
-            .is_none()
+            rendered.contains("LabelSource for std::rc::Rc<__JavaShared>"),
+            "{rendered}"
+        );
+        assert!(rendered.contains("fn label(&self) -> &str { (**self).label() }"));
+        assert!(
+            !rendered.contains("LabelSource for std::rc::Rc<std::cell::RefCell<__JavaShared>>"),
+            "{rendered}"
+        );
+        assert!(
+            !rendered.contains("LabelSource for std::sync::Arc<std::sync::Mutex<__JavaShared>>"),
+            "{rendered}"
         );
     }
 

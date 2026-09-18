@@ -2764,7 +2764,10 @@ fn struct_fields_for_type(
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
         fields.push(RustField {
             name: "__outer".to_string(),
-            ty: rc_refcell_type(RustType::Named(rust_name_for_java_named_type(outer_type))),
+            ty: shared_outer_handle_type(
+                facts.storage_placement_for(outer_type),
+                RustType::Named(rust_name_for_java_named_type(outer_type)),
+            ),
             is_pub: false,
             is_pub_crate: false,
         });
@@ -2960,14 +2963,18 @@ fn box_recursive_field_type(rust_ty: RustType) -> RustType {
     }
 }
 
-fn rc_refcell_type(inner: RustType) -> RustType {
-    crate::slot_render::rust_generic_type(
-        "std::rc::Rc",
-        vec![crate::slot_render::rust_generic_type(
-            "std::cell::RefCell",
-            vec![inner],
-        )],
-    )
+fn shared_outer_handle_type(
+    placement: crate::storage_strategy::StoragePlacement,
+    inner: RustType,
+) -> RustType {
+    let celled = placement
+        .cell_path()
+        .map(|cell| crate::slot_render::rust_generic_type(cell, vec![inner.clone()]))
+        .unwrap_or(inner);
+    placement
+        .handle_path()
+        .map(|handle| crate::slot_render::rust_generic_type(handle, vec![celled.clone()]))
+        .unwrap_or(celled)
 }
 
 fn source_field_is_public(field: &FieldDecl) -> bool {

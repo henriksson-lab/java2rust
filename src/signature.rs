@@ -8693,6 +8693,15 @@ fn method_param_shape_constraints_with_declared_source_types(
             &mut constraints,
             &source_receiver_binding_constraints(binding, usage),
         );
+        if type_param_bound_receiver_binding_mutates(binding, &type_env, usage) {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                    SignatureConstraint::MutableBinding,
+                ],
+            );
+        }
         if method_param_borrowed_content_policy_with_facts(ty, method, param, usage, facts)
             .is_none()
             && boundary_kind != Some(SignatureBoundaryKind::PublicApi)
@@ -9515,6 +9524,11 @@ pub fn signature_slot_dispatch_requirement_policy_with_effective_facts_in_scope(
     if signature_boundary_representation_fact_policy_with_effective_facts(java_ty, facts)
         .object_representation_facts()
         || !matches!(source_dispatch, DispatchShape::Concrete)
+        // A parsed source declaration is stronger than an unknown-runtime
+        // observation flowing back from a generic call.  In particular, a
+        // declared `Item item = source.item()` must retain its concrete
+        // receiver surface even when `source` is a type parameter.
+        || signature_declared_type_has_parsed_source_capability(java_ty, facts)
         || java_type_is_type_param_in_scope(java_ty, type_param_scope)
     {
         requirements.retain(|requirement| {
@@ -19959,6 +19973,44 @@ fn source_receiver_binding_constraints(
     constraints
 }
 
+/// A receiver whose declared type is a method type parameter has no concrete
+/// source owner of its own. Resolve its receiver calls through the declared
+/// bound instead, so `T extends Counter` calling a mutating `Counter` method
+/// becomes `&mut T` rather than an illegal `&T` call.
+fn type_param_bound_receiver_binding_mutates(
+    binding: &BindingUseFacts,
+    type_env: &TypeEnv,
+    usage: &UsageFacts,
+) -> bool {
+    let Some(type_param) = java_type_name(binding.java_ty()) else {
+        return false;
+    };
+    let Some(bound) = type_env.type_param_bound(type_param) else {
+        return false;
+    };
+    let Some(_bound_name) = java_type_name(bound) else {
+        return false;
+    };
+    binding.uses().iter().any(|binding_use| {
+        matches!(binding_use, BindingUse::ReceiverForCall { name, .. }
+            if source_method_usage_named_anywhere_mutates(usage, name))
+    })
+}
+
+/// `UsageFacts` deliberately keys source methods by their concrete declaring
+/// owner, while a generic receiver is keyed by its type parameter. At this
+/// boundary the declared bound guarantees that the invoked method exists; a
+/// matching mutating source implementation is sufficient evidence to require a
+/// mutable borrow. This is conservative for same-named unrelated methods, but
+/// preserves Rust legality and Java's permissive receiver semantics.
+fn source_method_usage_named_anywhere_mutates(usage: &UsageFacts, method_name: &str) -> bool {
+    let canonical_method = crate::parser::to_snake_case(method_name);
+    usage.method_entries().any(|(key, method_usage)| {
+        (key.method_name() == method_name || key.method_name() == canonical_method)
+            && method_usage.mutates_self()
+    })
+}
+
 fn source_method_usage_mutates_receiver(
     usage: &UsageFacts,
     receiver_type: &str,
@@ -24104,6 +24156,13 @@ fn source_method_return_should_borrow_object(
     if method_return_type_param_name(method).is_some() {
         return false;
     }
+    // A shared mutable value cannot be returned as a borrow of its element:
+    // its Rust carrier is `Rc<RefCell<T>>`/`Arc<Mutex<T>>`, and callers must
+    // receive a cloned handle in order to preserve Java object identity after
+    // the accessor returns.
+    if java_type_has_implemented_shared_storage(&method.return_type, &ty.name, facts) {
+        return false;
+    }
     if !java_return_type_can_borrow_as_object(&method.return_type, facts) {
         return false;
     }
@@ -24111,6 +24170,22 @@ fn source_method_return_should_borrow_object(
         return true;
     }
     direct_self_field_return_type(ty, method).is_some_and(|field_ty| field_ty == method.return_type)
+}
+
+fn java_type_has_implemented_shared_storage(
+    java_ty: &JavaType,
+    owner: &str,
+    facts: &FactSet,
+) -> bool {
+    let JavaType::Named { name, .. } = java_ty else {
+        return false;
+    };
+    shared_local_storage_owner_candidates(name, owner)
+        .iter()
+        .any(|candidate| {
+            let placement = facts.storage_placement_for(candidate);
+            placement.shared() && placement.is_implemented()
+        })
 }
 
 fn source_static_initialized_singleton_getter<'a>(

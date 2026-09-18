@@ -1,7 +1,8 @@
 # 0002b — Shared object representation design and rollout
 
-Status: **partially implemented** (`SharedImmutable` and the single-threaded
-`SharedLocal` tier landed; `SharedSync` remains open)
+Status: **partially implemented** (`SharedImmutable`, `SharedLocal`, and the
+base `SharedSync` tier landed; broad anonymous-class objects, colliding-parent
+interface contracts, and cell/lock borrowed-return trait surfaces remain open)
 Blocks: [0002](0002-object-aliasing-has-no-representation.md),
 [0023](done/0023-inner-class-construction-always-panics.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
@@ -14,24 +15,156 @@ later.** This is that paper.
 
 The early sections below are the original design. Later updates record the
 current implementation state: `SharedImmutable` handles, 0028 identity
-lowering, and the single-threaded `SharedLocal` receiver slices are landed;
-the synchronized mutable-handle tier is not.
+lowering, and `SharedLocal`/`SharedSync` receiver slices are landed; broad
+anonymous-class lowering, colliding interface contracts, and cell/lock
+borrowed-return forwarding remain.
 
-Codex verification 2026-09-17: the current `StoragePlacement` gate implements
-`Rc<RefCell<T>>` (`SharedLocal`) while continuing to reject
-`Arc<Mutex<T>>` (`SharedSync`). The Java/Rust differential oracles for mutable
-aliasing and qualified/ordinary inner capture pass:
+Codex verification 2026-09-18: the current `StoragePlacement` gate implements
+both `Rc<RefCell<T>>` (`SharedLocal`) and `Arc<Mutex<T>>` (`SharedSync`). The
+Java/Rust differential oracles for mutable aliasing and qualified/ordinary
+inner capture pass, and a generated-crate guard covers a static-reachable
+`Arc<Mutex<Outer>>` captured by a non-static inner:
 `differential::aliasing_shared_local_fixtures_match_java_output` and
 `differential::qualified_inner_capture_fixtures_match_java_output`; the output
 marker guard `inner_capture_routes_shared_outer_handle_companion` also passes.
+
+Codex verification 2026-09-18 callback intersection: the functional-interface
+adapter path now supports ordinary parameters while preserving a captured
+`SharedLocal` handle. The local interface slot is a `Box<dyn Interface>` and a
+read-modify-write through its closure evaluates the RHS before taking the
+`RefCell` write borrow. Guard:
+`idiom_gaps::parameterized_anonymous_callback_preserves_sharedlocal_capture_identity`.
+
+Codex verification 2026-09-18: the anonymous-interface boundary now has a
+small object-backed tier alongside the closure tier. An initialized anonymous
+field read through `this` is emitted in a local adapter struct, retaining its
+per-instance state; this is intentionally not yet the mutable/general
+anonymous-object representation.
+
+The same adapter now emits the whole source-superinterface chain with distinct
+contracts (including each comma-separated direct Java interface) when the
+anonymous target is a derived interface. This is required by Rust's explicit
+supertrait implementation rule and preserves inherited Java defaults without
+turning the object back into a closure. A repeated inherited abstract
+declaration is suppressed in the derived Rust trait, preventing two unrelated
+Rust methods from representing Java's one contract. Qualified interface-default
+calls (`Derived.super.defaultMethod()`) lower through that same adapter and see
+the current interior-mutable parent state. Class-`super` remains outside this
+interface-object slice. Colliding abstract signatures from unrelated parent
+interfaces remain a general interface-hierarchy representation issue, rather
+than an anonymous-adapter-only problem. Guard:
+`fixtures::fieldless_anonymous_interface_inherits_default_method`.
+
+That tier now includes interior-mutable primitive scalars: the exact
+single-field read-modify-write form (including `+=` after parser normalization)
+uses `Cell<T>`, allowing an anonymous functional object to retain state across
+calls with the trait's `&self` receiver. The multi-method form covers ordinary
+primitive assignment too, including `boolean`/`Cell<bool>`. This is local
+anonymous-instance storage only; it does not change `SharedLocal`/`SharedSync`
+object-handle policy or trait forwarding.
+
+An initialized `String` field has a separate narrow route through
+`RefCell<String>`: setters replace it, while reader and setter-return methods
+clone it before crossing the `&self` trait boundary. This avoids escaping a
+`Ref` guard and is not yet general reference-field support. Guards:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_preserves_string_field`
+and
+`fixtures::mutable_stateful_multi_method_anonymous_interface_returns_updated_string`.
+The `RefCell<String>` route also supports a read-modify-write string RHS by
+cloning the field before replacement; guard:
+`fixtures::mutable_stateful_anonymous_interface_appends_string_field`.
+
+These narrow mutable slots compose in one adapter: a supported primitive and a
+supported `String` field each retain independent state through their respective
+interior-mutable cells. Guard:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_keeps_multiple_fields`.
+
+The primitive-cell adapter also supports guarded void updates,
+`if (enabled) { this.total += value; }`, plus `if/else` when both branches
+update the same field. A condition that reads another cell-backed anonymous
+field projects it through `.get()` before branching. The selected branch updates
+the same `Cell`, retaining the instance state. This is intentionally narrower
+than general mutable control flow or definite-assignment reasoning.
+Guards: `fixtures::mutable_stateful_anonymous_interface_allows_guarded_primitive_update`
+and `fixtures::mutable_stateful_anonymous_interface_allows_two_branch_primitive_update`,
+plus `fixtures::mutable_stateful_anonymous_interface_reads_cell_backed_condition_field`.
+A guarded mutator may also return that same primitive field after the branch;
+the adapter returns its current `Cell` value rather than attempting to preserve
+a source-level local across the conditional. Guard:
+`fixtures::mutable_stateful_anonymous_interface_returns_after_guarded_update`.
+This guarded assignment/owned-return route also covers the existing
+`RefCell<String>` field slice; it clones the value across the trait boundary
+instead of leaking a `Ref` guard. Arbitrary reference fields remain open. Guard:
+`fixtures::mutable_stateful_anonymous_interface_allows_guarded_string_update`.
+
+The approved read-only `if`/`return` grammar now recursively rebinds bare
+anonymous field reads as well as explicit `this.field` reads, keeping every
+branch on the adapter's instance state. Guard:
+`fixtures::stateful_anonymous_interface_allows_read_only_branching`.
+Nested safe expression forms use the same rebinding traversal; guard:
+`fixtures::stateful_multi_method_anonymous_interface_rebinds_nested_field_reads`.
+The specialized one-method stateful adapter shares that traversal; guard:
+`fixtures::stateful_anonymous_functional_interface_rebinds_nested_bare_field_reads`.
+
+The counter recognizer canonically matches Java receiver-field spelling, so an
+explicit `this.totalValue` and the declaration's normalized `total_value` name
+remain one adapter field. Guard:
+`fixtures::stateful_anonymous_counter_rebinds_camel_case_source_field`.
+
+For a multi-method anonymous interface, that interior-mutable tier also admits
+the strict non-void update form that returns the updated primitive field. It is
+still one `Cell<T>` field and not a general mutable-object representation.
+Guard:
+`fixtures::mutable_stateful_multi_method_anonymous_interface_returns_updated_counter`.
+
+Codex verification 2026-09-18 shared trait forwarding: a mutating trait method
+now emits cell-handle implementations for both `Rc<RefCell<T>>` and
+`Arc<Mutex<T>>`; each call acquires its borrow or lock at the boundary. The
+generic-bound fixture `shared_mutating_interface_implementation_satisfies_generic_bound`
+checks the complete `T extends Counter` path and alias-observable result.
+The thread-reachable counterpart now checks the `Arc<Mutex<T>>` path through
+the same generic bound, including alias-observable mutation. Guard:
+`fixtures::shared_sync_mutating_interface_implementation_satisfies_generic_bound`.
+Reference-returning methods now forward through direct `Rc<T>`/`Arc<T>`
+handles, whose borrow is tied to their `&self` receiver. They remain excluded
+from cell/lock handles because a `Ref`/`MutexGuard` cannot soundly escape the
+forwarding implementation. Guard:
+`representation_lowering::shared_handle_forwarding_tests::borrowed_returns_forward_through_direct_handles_only`.
+
+The mutable interface-getter ABI is now covered. For
+`interface ItemSource { Item item(); }` implemented by a `Runnable` holder and
+called through `<T extends ItemSource>`, a parsed source `Item` remains
+concrete despite the generic call's unknown-runtime observation. Since the
+returned storage is shared and mutable, the trait and implementation return a
+cloned `Rc<RefCell<Item>>` handle rather than borrowing an `Item` through a
+temporary cell guard. Guard:
+`fixtures::shared_interface_getter_preserves_mutable_item_handle` proves the
+update is visible through a second holder alias.
+That owned carrier is also safe through the `SharedSync` forwarding tier: the
+temporary `MutexGuard` is dropped after producing the cloned item handle.
+Guard: `fixtures::shared_sync_interface_getter_preserves_mutable_item_handle`.
+The alias diagnostic treats that implemented `SharedSync` storage as a real
+shared carrier, matching the `Arc::clone` lowering rather than reporting an
+imaginary copied-object divergence.
+
+Codex recheck 2026-09-18: the remaining borrowed-return forwarding restriction
+has no current Java-source reproducer. Source-interface object getters use an
+owned handle ABI (`Rc<RefCell<T>>` or `Arc<Mutex<T>>`), so their temporary
+borrow/lock guard is dropped before the value crosses the trait boundary. The
+only `-> &...` forwarding case is the internal direct-handle rule, which
+deliberately excludes cell/lock handles because returning a `Ref` or
+`MutexGuard`-backed reference would be unsound. Retain the guard
+`representation_lowering::shared_handle_forwarding_tests::borrowed_returns_forward_through_direct_handles_only`
+if a future facade introduces a source-visible borrowed ABI.
 
 ## What one decision buys
 
 This table is the original design framing. Current status: `SharedImmutable`
 handles and [0028](done/0028-reference-equality-lowered-as-structural-equality.md)
 identity lowering have landed; the promoted mutable-alias and inner-capture
-paths use `SharedLocal`, while `SharedSync` and unsupported shared-receiver
-surfaces remain open.
+paths use `SharedLocal` or `SharedSync`; unsupported shared-receiver surfaces
+are now limited to borrowed-reference returns through a cell/lock handle, which
+would outlive its guard.
 
 | issue | today | under this design |
 |---|---|---|
@@ -2226,6 +2359,17 @@ traits whose emitted surface only requires the functional method plus
 `differential::anonymous_functional_interface_fixtures_match_java_output`
 (`tests/differential/AnonymousSupplier.java`); regression guard:
 `fixtures::anonymous_interface_return_uses_boxed_dyn_trait_slot`.
+
+## Update 2026-09-18 (Codex follow-up) — functional anonymous adapters carry arguments
+
+The same closure adapter now supports a single abstract interface method with
+parameters and a return value. Its closure bindings receive the trait method's
+slot shapes, and the generated adapter implements the corresponding method
+signature rather than falling through to `<dyn Trait>::anonymous()`. The
+`AnonymousInterface.IntPredicate` fixture verifies both positive and negative
+calls through the returned trait object. This remains a functional-interface
+slice, not general anonymous object lowering: anonymous bodies that require
+their own `this`/`super` identity remain loud unsupported cases.
 
 Codex follow-up 2026-09-17 closes the specific mutable-capture counterexample:
 storage analysis now descends into anonymous method bodies, so writes through a

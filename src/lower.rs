@@ -2542,6 +2542,7 @@ fn raw_interface_trait_item_with_default_methods(
                 ),
                 _ => None,
             })?;
+    let inherited_abstract_methods = inherited_abstract_interface_method_keys(ty, ctx);
     let mut methods = ty
         .members
         .iter()
@@ -2549,31 +2550,83 @@ fn raw_interface_trait_item_with_default_methods(
             Member::Method(method) if method.body.is_some() => Some(
                 interface_default_trait_method_item(ty, method, program, ctx),
             ),
-            Member::Method(method) => Some(trait_method_signature_with_receiver_and_return_shape(
-                ty,
-                method,
-                ctx.signatures,
-                ctx.facts,
-                trait_method_exception_plan(ty, method, program, ctx.exceptions),
-                trait_method_receiver_plan(ty, method, program, ctx.signatures),
-                trait_method_return_shape_plan(ty, method, program, ctx.signatures),
-                program,
-            )),
+            Member::Method(method)
+                if !inherited_abstract_methods
+                    .contains(&(method.name.clone(), method.params.len())) =>
+            {
+                Some(trait_method_signature_with_receiver_and_return_shape(
+                    ty,
+                    method,
+                    ctx.signatures,
+                    ctx.facts,
+                    trait_method_exception_plan(ty, method, program, ctx.exceptions),
+                    trait_method_receiver_plan(ty, method, program, ctx.signatures),
+                    trait_method_return_shape_plan(ty, method, program, ctx.signatures),
+                    program,
+                ))
+            }
             _ => None,
         })
         .collect::<Vec<_>>();
     methods.extend(trait_object_support_method_signatures(&trait_name));
     let supertraits = source_interface_supertrait_bounds(ty, ctx);
-    let closure_adapter =
-        crate::representation_lowering::zero_arg_closure_trait_impl(ty, &trait_name, ctx.facts)
-            .map(|item| format!("\n\n{item}"))
-            .unwrap_or_default();
+    let has_inherited_abstract_duplicate = ty.members.iter().any(|member| {
+        matches!(member, Member::Method(method)
+            if method.body.is_none()
+                && inherited_abstract_methods.contains(&(method.name.clone(), method.params.len())))
+    });
+    let closure_adapter = (!has_inherited_abstract_duplicate)
+        .then(|| {
+            crate::representation_lowering::zero_arg_closure_trait_impl(ty, &trait_name, ctx.facts)
+        })
+        .flatten()
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     Some(format!(
         "pub trait {trait_name}{supertraits} {{\n{}\n}}\n\n{}\n\n{}{closure_adapter}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name)
     ))
+}
+
+/// A Java subinterface may repeat an abstract method inherited from a parent.
+/// Rust would expose that as two unrelated trait methods and make ordinary
+/// calls ambiguous. The parent supertrait already carries the contract, so the
+/// child trait must omit only that duplicate abstract declaration. A child
+/// default body remains an override and is intentionally retained.
+fn inherited_abstract_interface_method_keys(
+    ty: &TypeDecl,
+    ctx: LowerCtx,
+) -> HashSet<(String, usize)> {
+    fn collect(
+        ty: &TypeDecl,
+        ctx: LowerCtx,
+        seen: &mut HashSet<String>,
+        out: &mut HashSet<(String, usize)>,
+    ) {
+        let Some(parent_name) = ty.extends.as_deref() else {
+            return;
+        };
+        let Some(parent) = find_context_type_decl_by_erased_name(ctx, parent_name) else {
+            return;
+        };
+        if parent.kind != TypeKind::Interface || !seen.insert(parent.name.clone()) {
+            return;
+        }
+        for member in &parent.members {
+            if let Member::Method(method) = member
+                && method.body.is_none()
+            {
+                out.insert((method.name.clone(), method.params.len()));
+            }
+        }
+        collect(parent, ctx, seen, out);
+    }
+
+    let mut out = HashSet::new();
+    collect(ty, ctx, &mut HashSet::new(), &mut out);
+    out
 }
 
 /// `: Super` bounds for an interface that extends other source interfaces.
@@ -4450,23 +4503,33 @@ fn outer_this_handle_constructor_companion(
         0,
         RustParam {
             name: "__outer".to_string(),
-            ty: rc_refcell_type(RustType::Named(
-                crate::java_naming::rust_name_for_java_named_type(outer_type),
-            )),
+            ty: shared_outer_handle_type(
+                ctx.facts.storage_placement_for(outer_type),
+                RustType::Named(crate::java_naming::rust_name_for_java_named_type(
+                    outer_type,
+                )),
+            ),
         },
     );
     Some(companion)
 }
 
-fn outer_this_companion_constructor_name(constructor: &str) -> String {
-    format!("{constructor}_with_outer")
+fn shared_outer_handle_type(
+    placement: crate::storage_strategy::StoragePlacement,
+    inner: RustType,
+) -> RustType {
+    let celled = placement
+        .cell_path()
+        .map(|cell| rust_generic_type(cell, vec![inner.clone()]))
+        .unwrap_or(inner);
+    placement
+        .handle_path()
+        .map(|handle| rust_generic_type(handle, vec![celled.clone()]))
+        .unwrap_or(celled)
 }
 
-fn rc_refcell_type(inner: RustType) -> RustType {
-    rust_generic_type(
-        "std::rc::Rc",
-        vec![rust_generic_type("std::cell::RefCell", vec![inner])],
-    )
+fn outer_this_companion_constructor_name(constructor: &str) -> String {
+    format!("{constructor}_with_outer")
 }
 
 fn wrap_same_outer_inner_constructor_calls_for_storage(
@@ -10383,6 +10446,11 @@ fn lower_stmt(
             }) {
                 local_plan.set_shape(shape);
             }
+            if let Some(shape) =
+                anonymous_functional_interface_local_shape(ty, initializer.as_ref(), env, ctx)
+            {
+                local_plan.set_shape(shape);
+            }
             // A local that is written later must be declared `mut`. Ask the
             // analysis about this statement's binding rather than a name set.
             // Union for the same reason as `binding_has_later_read`.
@@ -10705,6 +10773,15 @@ fn lower_stmt(
                     refine_assigned_local_shape(target, value, env, ctx);
                     return;
                 }
+                // A `RefCell` field write takes a mutable borrow of its
+                // receiver. Evaluate a right-hand side which reads that same
+                // receiver first, so its short-lived immutable borrow has
+                // ended before the write starts. This is the Java evaluation
+                // order for the simple local receiver case and is essential
+                // for closures that mutate a captured shared local.
+                let shared_local_rhs_needs_temporary =
+                    lower_shared_local_field_assignment_target(target, env, ctx).is_some()
+                        && shared_local_field_assignment_rhs_reads_receiver(target, value);
                 let lowered_value = lower_assignment_value_for_slot(
                     target,
                     value,
@@ -10747,16 +10824,21 @@ fn lower_stmt(
                     lowered_value,
                     ctx,
                 );
-                out.push(assignment_stmt(
-                    lowered_target,
-                    wrap_recursive_optional_field_assignment_value_if_needed(
-                        target,
-                        env,
-                        ctx,
-                        &assignment_slot,
-                        assigned_value,
-                    ),
-                ));
+                let assigned_value = wrap_recursive_optional_field_assignment_value_if_needed(
+                    target,
+                    env,
+                    ctx,
+                    &assignment_slot,
+                    assigned_value,
+                );
+                if shared_local_rhs_needs_temporary {
+                    out.push(ordered_assignment_block_stmt(vec![
+                        ordered_assignment_let_stmt(ORDERED_ASSIGNMENT_VALUE_TEMP, assigned_value),
+                        assignment_stmt(lowered_target, ordered_assignment_value_temp_expr()),
+                    ]));
+                } else {
+                    out.push(assignment_stmt(lowered_target, assigned_value));
+                }
                 refine_assigned_local_shape(target, value, env, ctx);
             }
         }
@@ -19787,7 +19869,7 @@ fn native_collections_sort_method_reference_returns_result(
     else {
         return false;
     };
-    let owner_key = SourceContextOwnerKey::new(&owner);
+    let owner_key = SourceContextOwnerKey::new(owner.as_str());
     let type_name = owner_key
         .find_context_type(ctx)
         .or_else(|| {
@@ -21055,7 +21137,9 @@ fn lower_outer_this_field_name(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Opt
     let current_type = ctx.current_type?;
     let outer_type = ctx.facts.captures.outer_this_type_for_type(current_type)?;
     signature_field_shape_for_type_aliases(ctx.signatures, outer_type, name)?;
-    Some(outer_this_field_projection(name))
+    Some(outer_this_captured_field_projection(
+        name, outer_type, false, ctx,
+    ))
 }
 
 fn lower_outer_this_field_assignment_target(
@@ -21072,7 +21156,32 @@ fn lower_outer_this_field_assignment_target(
     let current_type = ctx.current_type?;
     let outer_type = ctx.facts.captures.outer_this_type_for_type(current_type)?;
     signature_field_shape_for_type_aliases(ctx.signatures, outer_type, name)?;
-    Some(outer_this_field_mut_projection(name))
+    Some(outer_this_captured_field_projection(
+        name, outer_type, true, ctx,
+    ))
+}
+
+fn outer_this_captured_field_projection(
+    name: &str,
+    outer_type: &str,
+    mutable: bool,
+    ctx: LowerCtx,
+) -> RustExpr {
+    let placement = ctx.facts.storage_placement_for(outer_type);
+    if placement.shared() && placement.is_implemented() {
+        let receiver = field_projection(RustExpr::Var("self".to_string()), "__outer");
+        let receiver = if placement.interior_mutable() {
+            shared_storage_receiver_projection(receiver, placement, mutable)
+        } else {
+            receiver
+        };
+        return field_projection(receiver, &crate::parser::to_snake_case(name));
+    }
+    if mutable {
+        outer_this_field_mut_projection(name)
+    } else {
+        outer_this_field_projection(name)
+    }
 }
 
 fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
@@ -25179,6 +25288,11 @@ fn lower_shared_local_field_assignment_target(
         shared_storage_receiver_projection(lowered_receiver, placement, true),
         &crate::parser::to_snake_case(accessor_member_name(field)),
     ))
+}
+
+fn shared_local_field_assignment_rhs_reads_receiver(target: &Expr, value: &Expr) -> bool {
+    matches!(target, Expr::FieldAccess(receiver, _)
+        if matches!(receiver.as_ref(), Expr::Var(name) if expr_reads_name(value, name)))
 }
 
 fn lower_array_assignment_target_expr(
@@ -32068,7 +32182,7 @@ fn lower_typed_single_input_method_reference(
     let param_ty = render_callback_param_type(element_shape, ctx);
     match plan {
         MethodReferencePlan::AssociatedFunction { owner, method }
-            if owner == "Objects" && method == "non_null" =>
+            if owner.as_str() == "Objects" && method == "non_null" =>
         {
             Some(
                 typed_single_input_method_reference_callback_expr_with_facts(
@@ -40044,7 +40158,16 @@ fn lower_anonymous_class_new_for_boxed_dyn_slot(
             body: Some(body),
             resolved,
             ..
-        } => lower_zero_arg_anonymous_interface_expr(ty, body, resolved.as_ref(), env, ctx)
+        } => lower_functional_anonymous_interface_expr(ty, body, resolved.as_ref(), env, ctx)
+            .or_else(|| {
+                lower_fieldless_anonymous_interface_object_expr(
+                    ty,
+                    body,
+                    resolved.as_ref(),
+                    env,
+                    ctx,
+                )
+            })
             .unwrap_or_else(|| anonymous_dyn_trait_projection(&trait_name)),
         _ => anonymous_dyn_trait_projection(&trait_name),
     };
@@ -40079,6 +40202,52 @@ fn lower_anonymous_class_new_for_boxed_dyn_slot(
         },
         _ => return None,
     })
+}
+
+/// An anonymous implementation of a supported functional interface is stored
+/// as the generated closure adapter, not as the (non-instantiable) source
+/// interface. This has to happen while planning a local declaration, before
+/// its initializer is lowered for a destination slot.
+fn anonymous_functional_interface_local_shape(
+    declared_ty: &JavaType,
+    initializer: Option<&Expr>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustSlotShape> {
+    let Expr::New {
+        ty,
+        args,
+        body: Some(body),
+        resolved,
+        ..
+    } = initializer?
+    else {
+        return None;
+    };
+    if !args.is_empty() || !same_concrete_java_type(declared_ty, ty) {
+        return None;
+    }
+    let constructed_name = resolved
+        .as_ref()
+        .map(|resolved| resolved.declaring_type.as_str())
+        .or_else(|| concrete_java_type_name(ty))?;
+    let interface = find_context_type_decl_by_erased_name(ctx, constructed_name)?;
+    let trait_method = functional_interface_method(interface)?;
+    let implementation = anonymous_functional_method(body, trait_method)?;
+    if block_mentions_this_or_super(implementation.body.as_ref()?) {
+        return None;
+    }
+    let trait_name = if let Some(resolved) = resolved
+        && resolved.rust_name == "anonymous"
+    {
+        anonymous_resolved_trait_name(&resolved.declaring_type, env, ctx)
+    } else {
+        anonymous_class_trait_name(constructed_name, ctx)?
+    };
+    let mut shape = RustSlotShape::for_storage(declared_ty.clone());
+    shape.view = ViewShape::DynTraitView;
+    shape.dispatch = DispatchShape::BoxedDynTrait { trait_name };
+    Some(shape)
 }
 
 fn lower_anonymous_erased_facade_new_for_concrete_slot(
@@ -40134,7 +40303,14 @@ fn lower_anonymous_interface_new_expr(
         return None;
     }
     if let Some(body) = body
-        && let Some(lowered) = lower_zero_arg_anonymous_interface_expr(ty, body, resolved, env, ctx)
+        && let Some(lowered) =
+            lower_functional_anonymous_interface_expr(ty, body, resolved, env, ctx)
+    {
+        return Some(lowered);
+    }
+    if let Some(body) = body
+        && let Some(lowered) =
+            lower_fieldless_anonymous_interface_object_expr(ty, body, resolved, env, ctx)
     {
         return Some(lowered);
     }
@@ -40148,6 +40324,657 @@ fn lower_anonymous_interface_new_expr(
     let constructed_name = concrete_java_type_name(ty)?;
     let trait_name = anonymous_class_trait_name(constructed_name, ctx)?;
     Some(anonymous_dyn_trait_projection(&trait_name))
+}
+
+/// Lowers the first non-closure anonymous-object tier: a fieldless source
+/// interface implementation with two or more abstract methods. A narrow helper
+/// tier emits anonymous-only primitive helpers in an inherent
+/// impl, so interface methods may call them through `this` without pretending
+/// the anonymous object is a closure.
+fn lower_fieldless_anonymous_interface_object_expr(
+    ty: &JavaType,
+    body: &[Member],
+    resolved: Option<&ResolvedConstructor>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let constructed_name = resolved
+        .map(|resolved| resolved.declaring_type.as_str())
+        .or_else(|| concrete_java_type_name(ty))?;
+    let interface = find_context_type_decl_by_erased_name(ctx, constructed_name)?;
+    let trait_interfaces = anonymous_interface_lineage(interface, ctx);
+    let all_trait_method_count = trait_interfaces
+        .iter()
+        .flat_map(|interface| interface.members.iter())
+        .filter(|member| matches!(member, Member::Method(method) if method.body.is_none()))
+        .count();
+    let mut seen_trait_methods = HashSet::new();
+    let mut trait_methods = Vec::new();
+    for trait_interface in &trait_interfaces {
+        for member in &trait_interface.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.body.is_none()
+                && seen_trait_methods.insert((method.name.clone(), method.params.len()))
+            {
+                trait_methods.push((*trait_interface, method));
+            }
+        }
+    }
+    let fields = body
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if trait_methods.is_empty()
+        || (all_trait_method_count == 1
+            && interface
+                .members
+                .iter()
+                .filter(|member| matches!(member, Member::Method(method) if method.body.is_none()))
+                .count()
+                == 1
+            && fields.is_empty())
+        || fields.iter().any(|field| field.initializer.is_none())
+    {
+        return None;
+    }
+    let implementations = body
+        .iter()
+        .map(|member| match member {
+            Member::Method(method) => Some(method),
+            Member::Field(_) => None,
+            _ => None,
+        })
+        .filter_map(|method| method)
+        .collect::<Vec<_>>();
+    let helper_methods = implementations
+        .iter()
+        .copied()
+        .filter(|method| {
+            !trait_methods.iter().any(|(_, trait_method)| {
+                method.name == trait_method.name && method.params.len() == trait_method.params.len()
+            })
+        })
+        .collect::<Vec<_>>();
+    if helper_methods.iter().any(|helper| {
+        !helper
+            .params
+            .iter()
+            .all(|param| matches!(param.ty, JavaType::Primitive(_)))
+            || !helper.type_params.is_empty()
+            || helper.modifiers.contains(&Modifier::Static)
+            || !matches!(helper.return_type, JavaType::Primitive(_))
+            || !helper.body.as_ref().is_some_and(|body| {
+                matches!(body.statements.as_slice(), [Stmt::Return(Some(expr))]
+                    if !anonymous_return_expr_mentions_super(expr))
+                    || matches!(body.statements.as_slice(), [
+                        Stmt::Assign { target: Expr::FieldAccess(receiver, assigned), .. },
+                        Stmt::Return(Some(returned)),
+                    ] if matches!(receiver.as_ref(), Expr::This)
+                        && fields.iter().any(|field| field.name == crate::parser::to_snake_case_unescaped(assigned)
+                            && matches!(field.ty, JavaType::Primitive(_))
+                            && anonymous_counter_return_reads_field(returned, &field.name)))
+            })
+    }) {
+        return None;
+    }
+    let mutable_counter_fields = fields
+        .iter()
+        .filter_map(|field| {
+            let supported_type = matches!(field.ty, JavaType::Primitive(_) | JavaType::String)
+                || matches!(&field.ty, JavaType::Named { name, .. }
+                    if name.rsplit('.').next() == Some("String"));
+            supported_type.then_some(field.name.as_str())
+        })
+        .collect::<Vec<_>>();
+    let mutable_field_is_refcell = |field: &str| {
+        fields.iter().any(|candidate| {
+            candidate.name == field
+                && (matches!(candidate.ty, JavaType::String)
+                    || matches!(&candidate.ty, JavaType::Named { name, .. }
+                        if name.rsplit('.').next() == Some("String")))
+        })
+    };
+    let trait_name = if let Some(resolved) = resolved
+        && resolved.rust_name == "anonymous"
+    {
+        anonymous_resolved_trait_name(&resolved.declaring_type, env, ctx)
+    } else {
+        anonymous_class_trait_name(constructed_name, ctx)?
+    };
+    let mut rendered_methods = Vec::new();
+    for (trait_owner, trait_method) in trait_methods {
+        let implementation = implementations.iter().find(|implementation| {
+            implementation.name == trait_method.name
+                && implementation.params.len() == trait_method.params.len()
+                && implementation.type_params.is_empty()
+                && !implementation.modifiers.contains(&Modifier::Static)
+        })?;
+        let implementation_body = implementation.body.as_ref()?;
+        if fields.is_empty() && !anonymous_read_only_block_is_supported(implementation_body) {
+            return None;
+        }
+        let mutable_counter_field = match implementation_body.statements.as_slice() {
+            [
+                Stmt::Assign {
+                    target: Expr::FieldAccess(receiver, assigned),
+                    ..
+                },
+            ] if matches!(receiver.as_ref(), Expr::This)
+                && matches!(trait_method.return_type, JavaType::Void) =>
+            {
+                mutable_counter_fields
+                    .iter()
+                    .copied()
+                    .find(|field| crate::parser::to_snake_case_unescaped(assigned) == *field)
+            }
+            [
+                Stmt::Assign {
+                    target: Expr::FieldAccess(receiver, assigned),
+                    ..
+                },
+                Stmt::Return(Some(returned)),
+            ] if matches!(receiver.as_ref(), Expr::This) => {
+                mutable_counter_fields.iter().copied().find(|field| {
+                    crate::parser::to_snake_case_unescaped(assigned) == *field
+                        && fields.iter().any(|candidate| {
+                            candidate.name == *field
+                                && anonymous_mutable_field_return_type_matches(
+                                    &trait_method.return_type,
+                                    &candidate.ty,
+                                )
+                                && anonymous_counter_return_reads_field(returned, field)
+                        })
+                })
+            }
+            [
+                Stmt::If {
+                    condition,
+                    then_block,
+                    else_block,
+                },
+                rest @ ..,
+            ] if !anonymous_return_expr_mentions_super(condition)
+                && matches!(
+                    then_block.statements.as_slice(),
+                    [Stmt::Assign {
+                        target: Expr::FieldAccess(receiver, _),
+                        ..
+                    }] if matches!(receiver.as_ref(), Expr::This)
+                ) =>
+            {
+                let [
+                    Stmt::Assign {
+                        target: Expr::FieldAccess(receiver, assigned),
+                        ..
+                    },
+                ] = then_block.statements.as_slice()
+                else {
+                    unreachable!("guard excludes non-assignment anonymous mutator branches");
+                };
+                if !matches!(receiver.as_ref(), Expr::This) {
+                    return None;
+                }
+                let else_assigned = else_block.as_ref().map(|else_block| {
+                    let [
+                        Stmt::Assign {
+                            target: Expr::FieldAccess(receiver, assigned),
+                            ..
+                        },
+                    ] = else_block.statements.as_slice()
+                    else {
+                        return None;
+                    };
+                    matches!(receiver.as_ref(), Expr::This)
+                        .then(|| crate::parser::to_snake_case_unescaped(assigned))
+                });
+                if !else_assigned.as_ref().is_none_or(|assigned_else| {
+                    assigned_else.as_deref()
+                        == Some(crate::parser::to_snake_case_unescaped(assigned).as_str())
+                }) {
+                    return None;
+                }
+                mutable_counter_fields.iter().copied().find(|field| {
+                    crate::parser::to_snake_case_unescaped(assigned) == *field
+                        && match rest {
+                            [] => matches!(trait_method.return_type, JavaType::Void),
+                            [Stmt::Return(Some(returned))] => fields.iter().any(|candidate| {
+                                candidate.name == *field
+                                    && anonymous_mutable_field_return_type_matches(
+                                        &trait_method.return_type,
+                                        &candidate.ty,
+                                    )
+                                    && anonymous_counter_return_reads_field(returned, field)
+                            }),
+                            _ => false,
+                        }
+                })
+            }
+            _ => None,
+        };
+        let is_counter_mutator = mutable_counter_field.is_some();
+        let counter_returns_value =
+            is_counter_mutator && !matches!(trait_method.return_type, JavaType::Void);
+        let counter_field_is_refcell = mutable_counter_field.is_some_and(mutable_field_is_refcell);
+        if !fields.is_empty()
+            && !is_counter_mutator
+            && !anonymous_read_only_block_is_supported(implementation_body)
+        {
+            return None;
+        }
+        if fields.iter().any(|field| {
+            implementation
+                .params
+                .iter()
+                .any(|param| param.name == field.name)
+        }) {
+            return None;
+        }
+        let mut bound_body;
+        let implementation_body = if fields.is_empty() || is_counter_mutator {
+            implementation_body
+        } else {
+            bound_body = implementation_body.clone();
+            for field in &fields {
+                bound_body = bind_anonymous_field_reads_in_block(bound_body, &field.name)?;
+            }
+            &bound_body
+        };
+        let param_shapes = crate::representation_lowering::trait_method_param_shape_plan(
+            trait_owner,
+            trait_method,
+            ctx.program,
+            ctx.signatures,
+        );
+        let return_shape = (!matches!(trait_method.return_type, JavaType::Void)).then(|| {
+            crate::representation_lowering::trait_method_return_shape_plan(
+                trait_owner,
+                trait_method,
+                ctx.program,
+                ctx.signatures,
+            )
+            .unwrap_or_else(|| RustSlotShape::for_storage(trait_method.return_type.clone()))
+        });
+        let mut method_env = env.clone();
+        for (param, shape) in implementation.params.iter().zip(&param_shapes) {
+            method_env.insert_local_shape(param.name.clone(), shape.clone());
+        }
+        let liveness = crate::liveness::LivenessAnalysis::for_body(implementation_body);
+        let method_ctx = LowerCtx {
+            liveness: &liveness,
+            current_method: Some(&trait_method.name),
+            current_method_decl: Some(trait_method),
+            current_return_shape: return_shape.as_ref(),
+            ..ctx
+        };
+        let rust_method_name = trait_method
+            .rust_name
+            .clone()
+            .unwrap_or_else(|| crate::parser::to_snake_case(&trait_method.name));
+        let rendered_params = trait_method
+            .params
+            .iter()
+            .zip(&param_shapes)
+            .map(|(param, shape)| {
+                format!(
+                    "{}: {}",
+                    param.name,
+                    emit::emit_type(&rust_type_for_slot_with_facts(shape, ctx.facts))
+                )
+            })
+            .collect::<Vec<_>>();
+        let method_return = return_shape
+            .as_ref()
+            .map(|shape| {
+                format!(
+                    " -> {}",
+                    emit::emit_type(&rust_type_for_slot_with_facts(shape, ctx.facts))
+                )
+            })
+            .unwrap_or_default();
+        let method_body = if is_counter_mutator {
+            let (condition, value) = match implementation_body.statements.as_slice() {
+                [Stmt::Assign { value, .. }, ..] => (None, value),
+                [
+                    Stmt::If {
+                        condition,
+                        then_block,
+                        else_block,
+                    },
+                    ..,
+                ] => {
+                    let [Stmt::Assign { value, .. }] = then_block.statements.as_slice() else {
+                        return None;
+                    };
+                    let else_value = else_block
+                        .as_ref()
+                        .map(|else_block| {
+                            let [Stmt::Assign { value, .. }] = else_block.statements.as_slice()
+                            else {
+                                return None;
+                            };
+                            Some(value)
+                        })
+                        .flatten();
+                    (Some((condition, else_value)), value)
+                }
+                _ => return None,
+            };
+            let field = mutable_counter_field?;
+            let bound_value = bind_anonymous_counter_field_reads(value, field)?;
+            let field = crate::parser::to_snake_case(field);
+            let field_read = if counter_field_is_refcell {
+                format!("self.{field}.borrow().clone()")
+            } else {
+                format!("self.{field}.get()")
+            };
+            let rendered = emit::emit_expr(&lower_expr(&bound_value, &method_env, method_ctx))
+                .replace(&format!("self.{field}"), &field_read);
+            let update = if counter_field_is_refcell {
+                format!("self.{field}.replace({rendered});")
+            } else {
+                format!("self.{field}.set({rendered});")
+            };
+            let update = if let Some((condition, else_value)) = condition {
+                let mut bound_condition = condition.clone();
+                for candidate in &fields {
+                    bound_condition =
+                        bind_anonymous_counter_field_reads(&bound_condition, &candidate.name)?;
+                }
+                let mut rendered_condition =
+                    emit::emit_expr(&lower_expr(&bound_condition, &method_env, method_ctx));
+                for candidate in &mutable_counter_fields {
+                    let candidate = crate::parser::to_snake_case(candidate);
+                    let candidate_read = if mutable_field_is_refcell(&candidate) {
+                        format!("self.{candidate}.borrow().clone()")
+                    } else {
+                        format!("self.{candidate}.get()")
+                    };
+                    rendered_condition =
+                        rendered_condition.replace(&format!("self.{candidate}"), &candidate_read);
+                }
+                if let Some(else_value) = else_value {
+                    let bound_else_value = bind_anonymous_counter_field_reads(else_value, &field)?;
+                    let rendered_else =
+                        emit::emit_expr(&lower_expr(&bound_else_value, &method_env, method_ctx))
+                            .replace(&format!("self.{field}"), &field_read);
+                    let else_update = if counter_field_is_refcell {
+                        format!("self.{field}.replace({rendered_else});")
+                    } else {
+                        format!("self.{field}.set({rendered_else});")
+                    };
+                    format!(
+                        "if {rendered_condition} {{\n            {update}\n        }} else {{\n            {else_update}\n        }}"
+                    )
+                } else {
+                    format!("if {rendered_condition} {{\n            {update}\n        }}")
+                }
+            } else {
+                update
+            };
+            let returned = if counter_returns_value {
+                if counter_field_is_refcell {
+                    format!("        return self.{field}.borrow().clone();\n")
+                } else {
+                    format!("        return self.{field}.get();\n")
+                }
+            } else {
+                String::new()
+            };
+            format!("        {update}\n{returned}")
+        } else {
+            let mut rendered = emit::emit_statements(
+                &lower_block(implementation_body, &mut method_env, false, method_ctx),
+                2,
+            );
+            for field in &mutable_counter_fields {
+                let field = crate::parser::to_snake_case(field);
+                let field_read = if mutable_field_is_refcell(&field) {
+                    format!("self.{field}.borrow().clone()")
+                } else {
+                    format!("self.{field}.get()")
+                };
+                rendered = rendered.replace(&format!("self.{field}"), &field_read);
+            }
+            rendered
+        };
+        rendered_methods.push((
+            trait_owner.name.clone(),
+            format!(
+                "    fn {rust_method_name}(&self{}){method_return} {{\n{method_body}    }}",
+                if rendered_params.is_empty() {
+                    String::new()
+                } else {
+                    format!(", {}", rendered_params.join(", "))
+                },
+            ),
+        ));
+    }
+    let mut rendered_helpers = Vec::new();
+    for helper in helper_methods {
+        let helper_body = helper.body.as_ref()?;
+        let helper_return = RustSlotShape::for_storage(helper.return_type.clone());
+        let helper_liveness = crate::liveness::LivenessAnalysis::for_body(helper_body);
+        let helper_ctx = LowerCtx {
+            liveness: &helper_liveness,
+            current_method: Some(&helper.name),
+            current_method_decl: Some(helper),
+            current_return_shape: Some(&helper_return),
+            ..ctx
+        };
+        let mut helper_env = env.clone();
+        let rendered_params = helper
+            .params
+            .iter()
+            .map(|param| {
+                let shape = RustSlotShape::for_storage(param.ty.clone());
+                helper_env.insert_local_shape(param.name.clone(), shape.clone());
+                format!(
+                    "{}: {}",
+                    param.name,
+                    emit::emit_type(&rust_type_for_slot_with_facts(&shape, ctx.facts))
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut body = if let [
+            Stmt::Assign {
+                target: Expr::FieldAccess(receiver, assigned),
+                value,
+            },
+            Stmt::Return(Some(_)),
+        ] = helper_body.statements.as_slice()
+            && matches!(receiver.as_ref(), Expr::This)
+            && let Some(field) = fields.iter().find(|field| {
+                field.name == crate::parser::to_snake_case_unescaped(assigned)
+                    && matches!(field.ty, JavaType::Primitive(_))
+            }) {
+            let field_name = crate::parser::to_snake_case(&field.name);
+            let bound_value = bind_anonymous_counter_field_reads(value, &field.name)?;
+            let rendered = emit::emit_expr(&lower_expr(&bound_value, &helper_env, helper_ctx))
+                .replace(
+                    &format!("self.{field_name}"),
+                    &format!("self.{field_name}.get()"),
+                );
+            format!(
+                "        self.{field_name}.set({rendered});\n        return self.{field_name}.get();\n"
+            )
+        } else {
+            emit::emit_statements(
+                &lower_block(helper_body, &mut helper_env, false, helper_ctx),
+                2,
+            )
+        };
+        for field in &mutable_counter_fields {
+            let field = crate::parser::to_snake_case(field);
+            if body.contains(&format!("self.{field}.set(")) {
+                continue;
+            }
+            let field_read = if mutable_field_is_refcell(&field) {
+                format!("self.{field}.borrow().clone()")
+            } else {
+                format!("self.{field}.get()")
+            };
+            body = body.replace(&format!("self.{field}"), &field_read);
+        }
+        rendered_helpers.push(format!(
+            "    fn {}(&self{}) -> {} {{\n{body}    }}",
+            helper
+                .rust_name
+                .clone()
+                .unwrap_or_else(|| crate::parser::to_snake_case(&helper.name)),
+            if rendered_params.is_empty() {
+                String::new()
+            } else {
+                format!(", {}", rendered_params.join(", "))
+            },
+            emit::emit_type(&rust_type_for_slot_with_facts(&helper_return, ctx.facts)),
+        ));
+    }
+    let adapter_name = anonymous_functional_adapter_type_name(&trait_name, "object");
+    let rendered_fields = fields
+        .iter()
+        .map(|field| {
+            format!(
+                "    {}: {},",
+                crate::parser::to_snake_case(&field.name),
+                if mutable_counter_fields.contains(&field.name.as_str()) {
+                    if mutable_field_is_refcell(&field.name) {
+                        format!(
+                            "std::cell::RefCell<{}>",
+                            emit::emit_type(&rust_type_for_java_type_with_facts(
+                                &field.ty, ctx.facts
+                            ))
+                        )
+                    } else {
+                        format!(
+                            "std::cell::Cell<{}>",
+                            emit::emit_type(&rust_type_for_java_type_with_facts(
+                                &field.ty, ctx.facts
+                            ))
+                        )
+                    }
+                } else {
+                    emit::emit_type(&rust_type_for_java_type_with_facts(&field.ty, ctx.facts))
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let field_values = fields
+        .iter()
+        .map(|field| {
+            format!(
+                "{}: {},",
+                crate::parser::to_snake_case(&field.name),
+                if mutable_counter_fields.contains(&field.name.as_str()) {
+                    if mutable_field_is_refcell(&field.name) {
+                        format!(
+                            "std::cell::RefCell::new({})",
+                            emit::emit_expr(&lower_expr(
+                                field.initializer.as_ref().unwrap(),
+                                env,
+                                ctx
+                            ))
+                        )
+                    } else {
+                        format!(
+                            "std::cell::Cell::new({})",
+                            emit::emit_expr(&lower_expr(
+                                field.initializer.as_ref().unwrap(),
+                                env,
+                                ctx
+                            ))
+                        )
+                    }
+                } else {
+                    emit::emit_expr(&lower_expr(field.initializer.as_ref().unwrap(), env, ctx))
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let rendered_trait_impls = trait_interfaces
+        .iter()
+        .map(|trait_owner| {
+            let owner_trait_name = anonymous_class_trait_name(&trait_owner.name, ctx)?;
+            let methods = rendered_methods
+                .iter()
+                .filter(|(owner, _)| owner == &trait_owner.name)
+                .map(|(_, method)| method.as_str())
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(format!(
+                "impl {owner_trait_name} for {adapter_name} {{\n{methods}\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {owner_trait_name}> {{ std::boxed::Box::new(self.clone()) }}\n}}"
+            ))
+        })
+        .collect::<Option<Vec<_>>>()?
+        .join("\n\n");
+    let adapter_item = format!(
+        "#[derive(Clone)]\nstruct {adapter_name} {{\n{rendered_fields}\n}}\n\nimpl std::fmt::Display for {adapter_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{trait_name}@0\") }}\n}}\n\nimpl {adapter_name} {{\n{}\n}}\n\n{rendered_trait_impls}",
+        rendered_helpers.join("\n"),
+    );
+    Some(RustExpr::Block {
+        stmts: vec![RustStmt::Raw(adapter_item)],
+        tail: Some(Box::new(RustExpr::Raw(format!(
+            "std::boxed::Box::new({adapter_name} {{ {field_values} }}) as std::boxed::Box<dyn {trait_name}>"
+        )))),
+    })
+}
+
+/// Rust subtraits require an explicit implementation of each source
+/// super-interface. Parents come first so anonymous-object lowering can emit
+/// those impls before the derived trait implementation.
+fn anonymous_interface_lineage<'a>(
+    interface: &'a TypeDecl,
+    ctx: LowerCtx<'a>,
+) -> Vec<&'a TypeDecl> {
+    fn visit<'a>(
+        interface: &'a TypeDecl,
+        ctx: LowerCtx<'a>,
+        seen: &mut HashSet<String>,
+        out: &mut Vec<&'a TypeDecl>,
+    ) {
+        if !seen.insert(interface.name.clone()) {
+            return;
+        }
+        for parent_name in interface.extends.iter().chain(interface.implements.iter()) {
+            if let Some(parent) = find_context_type_decl_by_erased_name(ctx, parent_name)
+                && parent.kind == TypeKind::Interface
+            {
+                visit(parent, ctx, seen, out);
+            }
+        }
+        out.push(interface);
+    }
+
+    let mut out = Vec::new();
+    visit(interface, ctx, &mut HashSet::new(), &mut out);
+    out
+}
+
+/// Read-only control flow for an anonymous object with fields. This narrow
+/// grammar admits ordinary `if`/`return` decisions while keeping assignments,
+/// loops, calls to `super`, and other stateful control flow out of the adapter.
+fn anonymous_read_only_block_is_supported(block: &Block) -> bool {
+    block.statements.iter().all(|stmt| match stmt {
+        Stmt::Return(Some(expr)) => !anonymous_return_expr_mentions_super(expr),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            !anonymous_return_expr_mentions_super(condition)
+                && anonymous_read_only_block_is_supported(then_block)
+                && else_block
+                    .as_ref()
+                    .is_none_or(anonymous_read_only_block_is_supported)
+        }
+        _ => false,
+    })
 }
 
 fn constructor_expr_targets_source_type(
@@ -40172,7 +40999,7 @@ fn borrow_boxed_anonymous_trait_expr(boxed: RustExpr, trait_name: &str) -> RustE
     }
 }
 
-fn lower_zero_arg_anonymous_interface_expr(
+fn lower_functional_anonymous_interface_expr(
     ty: &JavaType,
     body: &[Member],
     resolved: Option<&ResolvedConstructor>,
@@ -40183,9 +41010,27 @@ fn lower_zero_arg_anonymous_interface_expr(
         .map(|resolved| resolved.declaring_type.as_str())
         .or_else(|| concrete_java_type_name(ty))?;
     let interface = find_context_type_decl_by_erased_name(ctx, constructed_name)?;
-    let trait_method = zero_arg_functional_interface_method(interface)?;
-    let implementation = anonymous_zero_arg_method_body(body, trait_method)?;
-    if block_mentions_this_or_super(implementation) {
+    // A source subinterface needs explicit Rust implementations of its parent
+    // traits. Route it through the object-backed adapter, which emits that
+    // chain, rather than the closure-only functional shortcut.
+    if interface.extends.is_some() {
+        return None;
+    }
+    let trait_method = functional_interface_method(interface)?;
+    if let Some(lowered) = lower_stateful_functional_anonymous_interface_expr(
+        ty,
+        body,
+        resolved,
+        env,
+        ctx,
+        interface,
+        trait_method,
+    ) {
+        return Some(lowered);
+    }
+    let implementation = anonymous_functional_method(body, trait_method)?;
+    let implementation_body = implementation.body.as_ref()?;
+    if block_mentions_this_or_super(implementation_body) {
         return None;
     }
     let trait_name = if let Some(resolved) = resolved
@@ -40196,40 +41041,96 @@ fn lower_zero_arg_anonymous_interface_expr(
         anonymous_class_trait_name(constructed_name, ctx)?
     };
     let mut closure_env = env.clone();
-    let liveness = crate::liveness::LivenessAnalysis::for_body(implementation);
+    let param_shapes = crate::representation_lowering::trait_method_param_shape_plan(
+        interface,
+        trait_method,
+        ctx.program,
+        ctx.signatures,
+    );
+    let return_shape = (!matches!(trait_method.return_type, JavaType::Void)).then(|| {
+        crate::representation_lowering::trait_method_return_shape_plan(
+            interface,
+            trait_method,
+            ctx.program,
+            ctx.signatures,
+        )
+        .unwrap_or_else(|| RustSlotShape::for_storage(trait_method.return_type.clone()))
+    });
+    for (param, shape) in implementation.params.iter().zip(&param_shapes) {
+        closure_env.insert_local_shape(param.name.clone(), shape.clone());
+    }
+    let liveness = crate::liveness::LivenessAnalysis::for_body(implementation_body);
     let closure_ctx = LowerCtx {
         liveness: &liveness,
         current_method: Some(&trait_method.name),
         current_method_decl: Some(trait_method),
+        current_return_shape: return_shape.as_ref(),
         ..ctx
     };
-    let body_stmts = lower_block(implementation, &mut closure_env, false, closure_ctx);
-    let capture_stmts = anonymous_closure_capture_clone_stmts(implementation, env);
+    let body_stmts = lower_block(implementation_body, &mut closure_env, false, closure_ctx);
+    let capture_stmts = anonymous_closure_capture_clone_stmts(implementation_body, env);
     let closure = RustExpr::Closure {
         is_move: true,
-        params: Vec::new(),
+        params: implementation
+            .params
+            .iter()
+            .zip(&param_shapes)
+            .map(|(param, shape)| RustClosureParam {
+                pattern: param.name.clone(),
+                ty: Some(emit::emit_type(&rust_type_for_slot_with_facts(
+                    shape, ctx.facts,
+                ))),
+            })
+            .collect(),
         return_type: None,
         body: RustClosureBody::Expr(Box::new(RustExpr::Block {
             stmts: body_stmts,
             tail: None,
         })),
     };
-    let adapter_name = anonymous_zero_arg_adapter_type_name(&trait_name, &trait_method.name);
+    let adapter_name = anonymous_functional_adapter_type_name(&trait_name, &trait_method.name);
+    let rendered_params = trait_method
+        .params
+        .iter()
+        .zip(&param_shapes)
+        .map(|(param, shape)| {
+            format!(
+                "{}: {}",
+                param.name,
+                emit::emit_type(&rust_type_for_slot_with_facts(shape, ctx.facts))
+            )
+        })
+        .collect::<Vec<_>>();
+    let param_types = rendered_params
+        .iter()
+        .map(|param| {
+            param
+                .rsplit_once(": ")
+                .map(|(_, ty)| ty)
+                .unwrap_or(param.as_str())
+        })
+        .collect::<Vec<_>>();
+    let method_args = trait_method
+        .params
+        .iter()
+        .map(|param| param.name.as_str())
+        .collect::<Vec<_>>();
     let (fn_type, method_return, method_body) =
         if matches!(trait_method.return_type, JavaType::Void) {
             (
-                "dyn Fn()".to_string(),
+                format!("dyn Fn({})", param_types.join(", ")),
                 String::new(),
-                "(self.__call)()".to_string(),
+                format!("(self.__call)({})", method_args.join(", ")),
             )
         } else {
-            let return_shape = RustSlotShape::for_storage(trait_method.return_type.clone());
-            let return_ty =
-                emit::emit_type(&rust_type_for_slot_with_facts(&return_shape, ctx.facts));
+            let return_ty = emit::emit_type(&rust_type_for_slot_with_facts(
+                return_shape.as_ref()?,
+                ctx.facts,
+            ));
             (
-                format!("dyn Fn() -> {return_ty}"),
+                format!("dyn Fn({}) -> {return_ty}", param_types.join(", ")),
                 format!(" -> {return_ty}"),
-                "(self.__call)()".to_string(),
+                format!("(self.__call)({})", method_args.join(", ")),
             )
         };
     let rust_method_name = trait_method
@@ -40248,6 +41149,11 @@ fn lower_zero_arg_anonymous_interface_expr(
         &fn_type,
         &trait_name,
         &rust_method_name,
+        &if rendered_params.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", rendered_params.join(", "))
+        },
         &method_return,
         &method_body,
         &trait_object_support_methods,
@@ -40265,17 +41171,426 @@ fn lower_zero_arg_anonymous_interface_expr(
     })
 }
 
+/// Lower the smallest stateful anonymous-object slice as an actual local
+/// struct. Closures cannot give `this` an identity, whereas this adapter can
+/// faithfully support initialized fields read through `this.field` in the one
+/// functional-interface method. Mutable fields and `super` need a broader
+/// anonymous object representation and intentionally stay outside this slice.
+fn lower_stateful_functional_anonymous_interface_expr(
+    ty: &JavaType,
+    body: &[Member],
+    resolved: Option<&ResolvedConstructor>,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    interface: &TypeDecl,
+    trait_method: &MethodDecl,
+) -> Option<RustExpr> {
+    let fields = body
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if fields.is_empty()
+        || body.len() != fields.len() + 1
+        || fields.iter().any(|field| field.initializer.is_none())
+    {
+        return None;
+    }
+    let implementation = body.iter().find_map(|member| match member {
+        Member::Method(method) => Some(method),
+        _ => None,
+    })?;
+    if implementation.name != trait_method.name
+        || implementation.params.len() != trait_method.params.len()
+        || !implementation.type_params.is_empty()
+        || implementation.modifiers.contains(&Modifier::Static)
+    {
+        return None;
+    }
+    let implementation_body = implementation.body.as_ref()?;
+    let mutable_counter = match implementation_body.statements.as_slice() {
+        [
+            Stmt::Assign {
+                target: Expr::FieldAccess(receiver, assigned),
+                value,
+            },
+            Stmt::Return(Some(returned_expr)),
+        ] if matches!(receiver.as_ref(), Expr::This) => fields.iter().find_map(|field| {
+            (field.name == crate::parser::to_snake_case_unescaped(assigned)
+                && matches!(field.ty, JavaType::Primitive(PrimitiveType::Int))
+                && anonymous_counter_return_reads_field(returned_expr, &field.name))
+            .then_some((field.name.as_str(), value))
+        }),
+        _ => None,
+    };
+    let read_only_return = match implementation_body.statements.as_slice() {
+        [Stmt::Return(Some(return_expr))] if !anonymous_return_expr_mentions_super(return_expr) => {
+            Some(return_expr)
+        }
+        _ => None,
+    };
+    if mutable_counter.is_none() && read_only_return.is_none() {
+        return None;
+    }
+    if mutable_counter.is_some_and(|(field, _)| {
+        implementation
+            .params
+            .iter()
+            .any(|param| param.name == field)
+    }) {
+        return None;
+    }
+    let mut bound_body;
+    let implementation_body = if mutable_counter.is_some() {
+        implementation_body
+    } else {
+        bound_body = implementation_body.clone();
+        for field in &fields {
+            bound_body = bind_anonymous_field_reads_in_block(bound_body, &field.name)?;
+        }
+        &bound_body
+    };
+    let constructed_name = resolved
+        .map(|resolved| resolved.declaring_type.as_str())
+        .or_else(|| concrete_java_type_name(ty))?;
+    let trait_name = if let Some(resolved) = resolved
+        && resolved.rust_name == "anonymous"
+    {
+        anonymous_resolved_trait_name(&resolved.declaring_type, env, ctx)
+    } else {
+        anonymous_class_trait_name(constructed_name, ctx)?
+    };
+    let mut method_env = env.clone();
+    let param_shapes = crate::representation_lowering::trait_method_param_shape_plan(
+        interface,
+        trait_method,
+        ctx.program,
+        ctx.signatures,
+    );
+    for (param, shape) in implementation.params.iter().zip(&param_shapes) {
+        method_env.insert_local_shape(param.name.clone(), shape.clone());
+    }
+    let return_shape = (!matches!(trait_method.return_type, JavaType::Void)).then(|| {
+        crate::representation_lowering::trait_method_return_shape_plan(
+            interface,
+            trait_method,
+            ctx.program,
+            ctx.signatures,
+        )
+        .unwrap_or_else(|| RustSlotShape::for_storage(trait_method.return_type.clone()))
+    });
+    let liveness = crate::liveness::LivenessAnalysis::for_body(implementation_body);
+    let method_ctx = LowerCtx {
+        liveness: &liveness,
+        current_method: Some(&trait_method.name),
+        current_method_decl: Some(trait_method),
+        current_return_shape: return_shape.as_ref(),
+        ..ctx
+    };
+    let method_body = if let Some((field_name, value)) = mutable_counter {
+        let source_field_name = field_name;
+        let field_name = crate::parser::to_snake_case(source_field_name);
+        let bound_value = bind_anonymous_counter_field_reads(value, source_field_name)?;
+        let rendered_value = emit::emit_expr(&lower_expr(&bound_value, &method_env, method_ctx))
+            .replace(
+                &format!("self.{field_name}"),
+                &format!("self.{field_name}.get()"),
+            );
+        format!(
+            "        self.{field_name}.set({rendered_value});\n        return self.{field_name}.get();\n"
+        )
+    } else {
+        emit::emit_statements(
+            &lower_block(implementation_body, &mut method_env, false, method_ctx),
+            2,
+        )
+    };
+    let adapter_name = anonymous_functional_adapter_type_name(&trait_name, &trait_method.name);
+    let rust_method_name = trait_method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&trait_method.name));
+    let rendered_params = trait_method
+        .params
+        .iter()
+        .zip(&param_shapes)
+        .map(|(param, shape)| {
+            format!(
+                "{}: {}",
+                param.name,
+                emit::emit_type(&rust_type_for_slot_with_facts(shape, ctx.facts))
+            )
+        })
+        .collect::<Vec<_>>();
+    let method_return = return_shape
+        .as_ref()
+        .map(|shape| {
+            format!(
+                " -> {}",
+                emit::emit_type(&rust_type_for_slot_with_facts(shape, ctx.facts))
+            )
+        })
+        .unwrap_or_default();
+    let rendered_fields = fields
+        .iter()
+        .map(|field| {
+            format!(
+                "    {}: {},",
+                crate::parser::to_snake_case(&field.name),
+                if mutable_counter.is_some_and(|(name, _)| name == field.name) {
+                    "std::cell::Cell<i32>".to_string()
+                } else {
+                    emit::emit_type(&rust_type_for_java_type_with_facts(&field.ty, ctx.facts))
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let field_values = fields
+        .iter()
+        .map(|field| {
+            format!(
+                "{}: {},",
+                crate::parser::to_snake_case(&field.name),
+                if mutable_counter.is_some_and(|(name, _)| name == field.name) {
+                    format!(
+                        "std::cell::Cell::new({})",
+                        emit::emit_expr(&lower_expr(field.initializer.as_ref().unwrap(), env, ctx))
+                    )
+                } else {
+                    emit::emit_expr(&lower_expr(field.initializer.as_ref().unwrap(), env, ctx))
+                }
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    let trait_object_support_methods = context_program_declares_type(ctx.program, &interface.name)
+        .then(|| format!("\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}"))
+        .unwrap_or_default();
+    let adapter_item = format!(
+        "#[derive(Clone)]\nstruct {adapter_name} {{\n{rendered_fields}\n}}\n\nimpl std::fmt::Display for {adapter_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ write!(f, \"{trait_name}@0\") }}\n}}\n\nimpl {trait_name} for {adapter_name} {{\n    fn {rust_method_name}(&self{}){method_return} {{\n{method_body}    }}{trait_object_support_methods}\n}}",
+        if rendered_params.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", rendered_params.join(", "))
+        },
+    );
+    Some(RustExpr::Block {
+        stmts: vec![RustStmt::Raw(adapter_item)],
+        tail: Some(Box::new(RustExpr::Raw(format!(
+            "std::boxed::Box::new({adapter_name} {{ {field_values} }}) as std::boxed::Box<dyn {trait_name}>"
+        )))),
+    })
+}
+
+fn anonymous_counter_return_reads_field(expr: &Expr, field: &str) -> bool {
+    matches!(expr, Expr::Var(name) if name == field)
+        || matches!(expr, Expr::FieldAccess(receiver, name)
+            if matches!(receiver.as_ref(), Expr::This) && name == field)
+}
+
+fn anonymous_mutable_field_return_type_matches(
+    return_type: &JavaType,
+    field_type: &JavaType,
+) -> bool {
+    return_type == field_type
+        || matches!(return_type, JavaType::String)
+            && matches!(field_type, JavaType::Named { name, .. }
+                if name.rsplit('.').next() == Some("String"))
+        || matches!(field_type, JavaType::String)
+            && matches!(return_type, JavaType::Named { name, .. }
+                if name.rsplit('.').next() == Some("String"))
+}
+
+/// The counter body has no local declarations. Within this deliberately small
+/// expression grammar, a bare matching name therefore resolves to the
+/// anonymous field after parameter shadowing has been ruled out above.
+fn bind_anonymous_counter_field_reads(expr: &Expr, field: &str) -> Option<Expr> {
+    match expr {
+        Expr::Var(name) if name == field => {
+            Some(Expr::FieldAccess(Box::new(Expr::This), field.to_string()))
+        }
+        Expr::This | Expr::Var(_) | Expr::Literal(_) => Some(expr.clone()),
+        Expr::FieldAccess(receiver, name) => Some(Expr::FieldAccess(
+            Box::new(bind_anonymous_counter_field_reads(receiver, field)?),
+            if matches!(receiver.as_ref(), Expr::This)
+                && crate::parser::to_snake_case_unescaped(name) == field
+            {
+                field.to_string()
+            } else {
+                name.clone()
+            },
+        )),
+        Expr::ArrayAccess(array, index) => Some(Expr::ArrayAccess(
+            Box::new(bind_anonymous_counter_field_reads(array, field)?),
+            Box::new(bind_anonymous_counter_field_reads(index, field)?),
+        )),
+        Expr::ArrayCreation {
+            element_type,
+            dimensions,
+            initializer,
+        } => Some(Expr::ArrayCreation {
+            element_type: element_type.clone(),
+            dimensions: dimensions
+                .iter()
+                .map(|expr| bind_anonymous_counter_field_reads(expr, field))
+                .collect::<Option<Vec<_>>>()?,
+            initializer: match initializer {
+                Some(items) => Some(
+                    items
+                        .iter()
+                        .map(|expr| bind_anonymous_counter_field_reads(expr, field))
+                        .collect::<Option<Vec<_>>>()?,
+                ),
+                None => None,
+            },
+        }),
+        Expr::ArrayInitializer(items) => Some(Expr::ArrayInitializer(
+            items
+                .iter()
+                .map(|expr| bind_anonymous_counter_field_reads(expr, field))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Expr::Binary { op, left, right } => Some(Expr::Binary {
+            op: *op,
+            left: Box::new(bind_anonymous_counter_field_reads(left, field)?),
+            right: Box::new(bind_anonymous_counter_field_reads(right, field)?),
+        }),
+        Expr::Unary { op, expr } => Some(Expr::Unary {
+            op: *op,
+            expr: Box::new(bind_anonymous_counter_field_reads(expr, field)?),
+        }),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => Some(Expr::Ternary {
+            condition: Box::new(bind_anonymous_counter_field_reads(condition, field)?),
+            then_expr: Box::new(bind_anonymous_counter_field_reads(then_expr, field)?),
+            else_expr: Box::new(bind_anonymous_counter_field_reads(else_expr, field)?),
+        }),
+        Expr::Switch { selector, cases } => Some(Expr::Switch {
+            selector: Box::new(bind_anonymous_counter_field_reads(selector, field)?),
+            cases: cases
+                .iter()
+                .map(|case| {
+                    Some(SwitchExprCase {
+                        labels: case
+                            .labels
+                            .iter()
+                            .map(|label| match label {
+                                SwitchLabel::Expr(expr) => Some(SwitchLabel::Expr(
+                                    bind_anonymous_counter_field_reads(expr, field)?,
+                                )),
+                                SwitchLabel::Default => Some(SwitchLabel::Default),
+                            })
+                            .collect::<Option<Vec<_>>>()?,
+                        value: bind_anonymous_counter_field_reads(&case.value, field)?,
+                    })
+                })
+                .collect::<Option<Vec<_>>>()?,
+        }),
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved,
+        } => Some(Expr::Call {
+            receiver: match receiver {
+                Some(expr) => Some(Box::new(bind_anonymous_counter_field_reads(expr, field)?)),
+                None => None,
+            },
+            name: name.clone(),
+            args: args
+                .iter()
+                .map(|expr| bind_anonymous_counter_field_reads(expr, field))
+                .collect::<Option<Vec<_>>>()?,
+            resolved: resolved.clone(),
+        }),
+        Expr::Cast { ty, expr } => Some(Expr::Cast {
+            ty: ty.clone(),
+            expr: Box::new(bind_anonymous_counter_field_reads(expr, field)?),
+        }),
+        Expr::InstanceOf { expr, ty, binding } => Some(Expr::InstanceOf {
+            expr: Box::new(bind_anonymous_counter_field_reads(expr, field)?),
+            ty: ty.clone(),
+            binding: binding.clone(),
+        }),
+        Expr::ClassLiteral(_) | Expr::Raw(_) => Some(expr.clone()),
+        _ => None,
+    }
+}
+
+/// Rebinds an anonymous instance field throughout the intentionally small
+/// read-only anonymous-object grammar. The representation gate has already
+/// rejected every other statement form, so refusing an unexpected statement
+/// here keeps eligibility and lowering aligned.
+fn bind_anonymous_field_reads_in_block(mut block: Block, field: &str) -> Option<Block> {
+    for stmt in &mut block.statements {
+        match stmt {
+            Stmt::Return(Some(expr)) => {
+                *expr = bind_anonymous_counter_field_reads(expr, field)?;
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                *condition = bind_anonymous_counter_field_reads(condition, field)?;
+                *then_block = bind_anonymous_field_reads_in_block(then_block.clone(), field)?;
+                if let Some(block) = else_block {
+                    *block = bind_anonymous_field_reads_in_block(block.clone(), field)?;
+                }
+            }
+            _ => return None,
+        }
+    }
+    Some(block)
+}
+
+fn anonymous_return_expr_mentions_super(expr: &Expr) -> bool {
+    match expr {
+        Expr::Super => true,
+        Expr::This | Expr::Literal(_) | Expr::Var(_) | Expr::ClassLiteral(_) | Expr::Raw(_)
+        | Expr::Unsupported { .. } | Expr::MethodReference { .. } => false,
+        Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. } | Expr::InstanceOf { expr: receiver, .. } => {
+            anonymous_return_expr_mentions_super(receiver)
+        }
+        Expr::ArrayAccess(array, index) => {
+            anonymous_return_expr_mentions_super(array) || anonymous_return_expr_mentions_super(index)
+        }
+        Expr::ArrayCreation { dimensions, initializer, .. } => dimensions.iter().any(anonymous_return_expr_mentions_super)
+            || initializer.as_ref().is_some_and(|items| items.iter().any(anonymous_return_expr_mentions_super)),
+        Expr::ArrayInitializer(items) => items.iter().any(anonymous_return_expr_mentions_super),
+        Expr::Binary { left, right, .. } => anonymous_return_expr_mentions_super(left) || anonymous_return_expr_mentions_super(right),
+        Expr::Ternary { condition, then_expr, else_expr } => anonymous_return_expr_mentions_super(condition)
+            || anonymous_return_expr_mentions_super(then_expr) || anonymous_return_expr_mentions_super(else_expr),
+        Expr::Switch { selector, cases } => anonymous_return_expr_mentions_super(selector)
+            || cases.iter().any(|case| case.labels.iter().any(|label| matches!(label, SwitchLabel::Expr(value) if anonymous_return_expr_mentions_super(value)))
+                || anonymous_return_expr_mentions_super(&case.value)),
+        Expr::Call { receiver, args, .. } => receiver.as_ref().is_some_and(|receiver| anonymous_return_expr_mentions_super(receiver))
+            || args.iter().any(anonymous_return_expr_mentions_super),
+        Expr::New { qualifier, args, body, .. } => qualifier.as_ref().is_some_and(|value| anonymous_return_expr_mentions_super(value))
+            || args.iter().any(anonymous_return_expr_mentions_super) || body.is_some(),
+        Expr::Lambda { .. } => true,
+    }
+}
+
 fn anonymous_zero_arg_adapter_item_source(
     adapter_name: &str,
     fn_type: &str,
     trait_name: &str,
     rust_method_name: &str,
+    method_params: &str,
     method_return: &str,
     method_body: &str,
     trait_object_support_methods: &str,
 ) -> String {
     format!(
-        "#[derive(Clone)]\nstruct {adapter_name} {{\n    __call: std::rc::Rc<{fn_type}>,\n}}\n\nimpl std::fmt::Display for {adapter_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{trait_name}@0\")\n    }}\n}}\n\nimpl {trait_name} for {adapter_name} {{\n    fn {rust_method_name}(&self){method_return} {{ {method_body} }}{trait_object_support_methods}\n}}"
+        "#[derive(Clone)]\nstruct {adapter_name} {{\n    __call: std::rc::Rc<{fn_type}>,\n}}\n\nimpl std::fmt::Display for {adapter_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{trait_name}@0\")\n    }}\n}}\n\nimpl {trait_name} for {adapter_name} {{\n    fn {rust_method_name}(&self{method_params}){method_return} {{ {method_body} }}{trait_object_support_methods}\n}}"
     )
 }
 
@@ -40290,7 +41605,7 @@ fn anonymous_zero_arg_adapter_box_expr_source(
     )
 }
 
-fn anonymous_zero_arg_adapter_type_name(trait_name: &str, method_name: &str) -> String {
+fn anonymous_functional_adapter_type_name(trait_name: &str, method_name: &str) -> String {
     fn push_sanitized(out: &mut String, text: &str) {
         for ch in text.chars() {
             if ch.is_ascii_alphanumeric() {
@@ -40318,7 +41633,7 @@ fn context_program_declares_type(program: &Program, type_name: &str) -> bool {
     program.types.iter().any(|ty| type_declares(ty, type_name))
 }
 
-fn zero_arg_functional_interface_method(ty: &TypeDecl) -> Option<&MethodDecl> {
+fn functional_interface_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     if ty.kind != TypeKind::Interface {
         return None;
     }
@@ -40329,7 +41644,6 @@ fn zero_arg_functional_interface_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     let method = methods.next()?;
     let MethodDecl { throws, .. } = method;
     if methods.next().is_some()
-        || !method.params.is_empty()
         || !method.type_params.is_empty()
         || !throws.is_empty()
         || method.modifiers.contains(&Modifier::Static)
@@ -40339,21 +41653,22 @@ fn zero_arg_functional_interface_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     Some(method)
 }
 
-fn anonymous_zero_arg_method_body<'a>(
+fn anonymous_functional_method<'a>(
     body: &'a [Member],
     trait_method: &MethodDecl,
-) -> Option<&'a Block> {
+) -> Option<&'a MethodDecl> {
     let [Member::Method(method)] = body else {
         return None;
     };
     if method.name != trait_method.name
-        || !method.params.is_empty()
+        || method.params.len() != trait_method.params.len()
         || !method.type_params.is_empty()
         || method.modifiers.contains(&Modifier::Static)
     {
         return None;
     }
-    method.body.as_ref()
+    method.body.as_ref()?;
+    Some(method)
 }
 
 fn anonymous_closure_capture_clone_stmts(body: &Block, env: &ShapeEnv) -> Vec<RustStmt> {
@@ -64031,7 +65346,7 @@ class Source {
         assert_eq!(
             plan_method_reference_with_shape_env("Mapper", "tag", &env, ctx),
             MethodReferencePlan::AssociatedFunction {
-                owner: "a.Mapper".to_string(),
+                owner: crate::java_signature::JavaOwnerKey::resolved_source("a.Mapper"),
                 method: "tag".to_string(),
             }
         );
