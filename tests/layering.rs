@@ -5953,7 +5953,7 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     assert!(usage_source.contains("pub fn is_lambda(&self) -> bool"));
     assert!(usage_source.contains("pub fn anonymous_method_parts(&self)"));
     let call_graph_source = usage_source
-        .split("#[derive(Debug, Clone, Default, PartialEq, Eq)]\npub struct CallGraph")
+        .split("#[derive(Debug, Clone, Default, PartialEq)]\npub struct CallGraph")
         .nth(1)
         .and_then(|tail| {
             tail.split("#[derive(Debug, Clone, PartialEq, Eq, Hash)]")

@@ -274,8 +274,82 @@ pub(crate) fn inherited_instance_method_refs_for_type<'a>(
         &mut seen_methods,
         &mut methods,
     );
+    // Interface dispatch resolves an abstract method inherited through *any*
+    // parent as a member of the child interface.  The default-method walk
+    // above deliberately excludes abstract methods for classes, but doing the
+    // same for an interface loses the signature alias for a second parent in
+    // `interface C extends A, B`.  Lowering then asks for `C::bMethod` even
+    // though only `B::bMethod` was planned.
+    if ty.kind == crate::java_ir::TypeKind::Interface {
+        collect_inherited_interface_contract_methods(
+            ty,
+            support_program,
+            &direct_method_rust_names,
+            &mut seen_methods,
+            &mut methods,
+        );
+    }
 
     methods
+}
+
+/// Every inherited instance contract of an interface, including abstract
+/// contracts.  This is intentionally narrower than the class default-method
+/// walk: a class's abstract interface methods are an implementation obligation,
+/// while a subinterface must expose them as its own callable surface.
+fn collect_inherited_interface_contract_methods<'a>(
+    ty: &TypeDecl,
+    support_program: &'a Program,
+    direct_method_rust_names: &HashSet<String>,
+    seen_methods: &mut HashSet<JavaCallableSlotKey>,
+    methods: &mut Vec<InheritedInstanceMethodRef<'a>>,
+) {
+    let mut pending = ty
+        .extends
+        .iter()
+        .chain(ty.implements.iter())
+        .cloned()
+        .map(|interface| (ty.name.clone(), interface))
+        .collect::<Vec<_>>();
+    let mut visited = HashSet::new();
+    while let Some((owner_name, name)) = pending.pop() {
+        let Some(interface) = find_type_decl_for_owner_context(support_program, &owner_name, &name)
+        else {
+            continue;
+        };
+        if interface.kind != crate::java_ir::TypeKind::Interface
+            || !visited.insert(interface.name.clone())
+        {
+            continue;
+        }
+        pending.extend(
+            interface
+                .extends
+                .iter()
+                .chain(interface.implements.iter())
+                .cloned()
+                .map(|parent| (interface.name.clone(), parent)),
+        );
+        for member in &interface.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if !is_inheritable_instance_method(method) {
+                continue;
+            }
+            let signature = JavaCallableSlotKey::source_method(method);
+            if !seen_methods.insert(signature) {
+                continue;
+            }
+            let rust_name = inherited_method_rust_name_for_child(method, direct_method_rust_names);
+            methods.push(InheritedInstanceMethodRef::new(
+                &interface.name,
+                interface,
+                method,
+                rust_name,
+            ));
+        }
+    }
 }
 
 /// Default methods a type inherits from the interfaces it implements.
@@ -815,7 +889,7 @@ fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeD
     None
 }
 
-fn find_type_decl_for_owner_context<'a>(
+pub(crate) fn find_type_decl_for_owner_context<'a>(
     program: &'a Program,
     owner_name: &str,
     type_name: &str,
@@ -1023,6 +1097,39 @@ mod tests {
         assert_eq!(inherited[0].method.name, "f");
         assert_eq!(inherited[0].method.params.len(), 2);
         assert_eq!(inherited[0].rust_name, "f_int_int");
+    }
+
+    #[test]
+    fn subinterface_inherits_abstract_contracts_from_every_parent() {
+        let mut left = interface("Left", Vec::new(), vec![method("left", Vec::new(), "left")]);
+        let mut right = interface(
+            "Right",
+            Vec::new(),
+            vec![method("right", Vec::new(), "right")],
+        );
+        for ty in [&mut left, &mut right] {
+            for member in &mut ty.members {
+                if let Member::Method(method) = member {
+                    method.body = None;
+                }
+            }
+        }
+        let child = TypeDecl {
+            implements: vec!["Right".to_string()],
+            ..interface("Child", vec!["Left"], Vec::new())
+        };
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![left, right, child],
+        };
+        let child = find_type_decl(&program, "Child").expect("child interface");
+        let inherited = inherited_instance_method_refs_for_type(child, &program);
+        let names = inherited
+            .iter()
+            .map(|method| method.method.name.as_str())
+            .collect::<HashSet<_>>();
+        assert_eq!(names, HashSet::from(["left", "right"]));
     }
 
     #[test]

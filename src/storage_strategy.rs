@@ -545,6 +545,11 @@ fn plan_storage_strategies_with_facts(
 
     let threaded = threaded_type_names(program, &declared);
     let static_reachable = static_reachable_type_names(program, &declared);
+    let all_static_reachable = statically_reachable_source_type_names(program);
+    let mut interfaces = BTreeSet::new();
+    for ty in &program.types {
+        collect_interface_type_names(ty, &mut interfaces);
+    }
     for ty in &program.types {
         collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
     }
@@ -553,6 +558,14 @@ fn plan_storage_strategies_with_facts(
     }
     for (name, facts) in types.iter_mut() {
         facts.static_reachable = static_reachable.contains(name);
+        if all_static_reachable.contains(name)
+            && source_type_has_interface_field(program, name, &interfaces)
+        {
+            // An interface field may hide interior mutable anonymous state.
+            // A static Arc<T> would require that opaque field to be Sync;
+            // holding T behind a Mutex only requires its interface to be Send.
+            facts.mutation_provably_absent = false;
+        }
         facts.surface_forwardable =
             type_interface_surface_is_handle_forwardable(name, program, usage);
     }
@@ -728,12 +741,108 @@ fn static_reachable_type_names(program: &Program, declared: &BTreeSet<String>) -
     reachable
 }
 
+pub(crate) fn statically_reachable_source_type_names(program: &Program) -> BTreeSet<String> {
+    let mut declared = BTreeSet::new();
+    for ty in &program.types {
+        collect_all_source_type_names(ty, &mut declared);
+    }
+    static_reachable_type_names(program, &declared)
+}
+
+fn collect_all_source_type_names(ty: &TypeDecl, into: &mut BTreeSet<String>) {
+    into.insert(ty.name.clone());
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_all_source_type_names(nested, into);
+        }
+    }
+}
+
+fn collect_interface_type_names(ty: &TypeDecl, into: &mut BTreeSet<String>) {
+    if ty.kind == TypeKind::Interface {
+        into.insert(ty.name.clone());
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_interface_type_names(nested, into);
+        }
+    }
+}
+
+fn source_type_has_interface_field(
+    program: &Program,
+    name: &str,
+    interfaces: &BTreeSet<String>,
+) -> bool {
+    fn find_type<'a>(types: &'a [TypeDecl], name: &str) -> Option<&'a TypeDecl> {
+        for ty in types {
+            if ty.name == name {
+                return Some(ty);
+            }
+            for member in &ty.members {
+                if let Member::Type(nested) = member
+                    && let Some(found) = find_type(std::slice::from_ref(nested), name)
+                {
+                    return Some(found);
+                }
+            }
+        }
+        None
+    }
+    fn has_interface_field(
+        ty: &TypeDecl,
+        program: &Program,
+        interfaces: &BTreeSet<String>,
+        declared: &BTreeSet<String>,
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        if !seen.insert(ty.name.clone()) {
+            return false;
+        }
+        if ty.members.iter().any(|member| {
+            matches!(member, Member::Field(field)
+                if !field.modifiers.contains(&Modifier::Static)
+                    && !declared_storage_type_names(&field.ty, &ty.name, interfaces).is_empty())
+        }) {
+            return true;
+        }
+        ty.extends.iter().any(|parent| {
+            let parent_ty = JavaType::Named {
+                name: parent.clone(),
+                args: Vec::new(),
+            };
+            declared_type_name(&parent_ty, &ty.name, declared)
+                .and_then(|resolved| find_type(&program.types, &resolved))
+                .is_some_and(|parent| {
+                    has_interface_field(parent, program, interfaces, declared, seen)
+                })
+        })
+    }
+    let mut declared = BTreeSet::new();
+    for ty in &program.types {
+        collect_all_source_type_names(ty, &mut declared);
+    }
+    find_type(&program.types, name).is_some_and(|ty| {
+        has_interface_field(ty, program, interfaces, &declared, &mut BTreeSet::new())
+    })
+}
+
 fn collect_static_reachability_edges(
     ty: &TypeDecl,
     declared: &BTreeSet<String>,
     fields_of: &mut BTreeMap<String, Vec<String>>,
     reachable: &mut BTreeSet<String>,
 ) {
+    if let Some(parent) = &ty.extends {
+        let parent_ty = JavaType::Named {
+            name: parent.clone(),
+            args: Vec::new(),
+        };
+        fields_of
+            .entry(ty.name.clone())
+            .or_default()
+            .extend(declared_storage_type_names(&parent_ty, &ty.name, declared));
+    }
     for member in &ty.members {
         match member {
             Member::Field(field) => {
@@ -1487,11 +1596,50 @@ fn collect_anonymous_body_facts_from_expr(
                 collect_anonymous_body_facts_from_expr(arg, owner, program, declared, locals, into);
             }
             if let Some(body) = body {
+                // Anonymous instance fields outlive construction just as
+                // captured locals do.  In particular, `new I() { T f = x;
+                // ... }` retains the *same* `T` object as `x`, rather than a
+                // value copy.  The field initializer is not part of a method
+                // body, so the capture walk below cannot see it.  Charge a
+                // bare-handle initializer to the field's declared type here
+                // before signature and slot planning choose whether `x` is a
+                // shared handle.
+                for member in body {
+                    if let Member::Field(field) = member {
+                        if let Some(initializer) = &field.initializer {
+                            collect_anonymous_body_facts_from_expr(
+                                initializer,
+                                owner,
+                                program,
+                                declared,
+                                locals,
+                                into,
+                            );
+                            if expr_is_bare_handle(initializer)
+                                && let Some(name) =
+                                    declared_type_name(&field.ty, &owner.name, declared)
+                                && let Some(facts) = into.get_mut(&name)
+                            {
+                                facts.escape = facts.escape.max(Escape::Stored);
+                            }
+                        }
+                    }
+                }
+                mark_anonymous_field_member_mutations(body, owner, declared, into);
+                // An anonymous object retains every enclosing local its
+                // methods read.  This is an alias even when the object has no
+                // Java field declaration for it: lowering materializes the
+                // capture as a Rust adapter field.  Mark it before lowering
+                // chooses that field's shape, otherwise `capture.clone()` is
+                // a clone of the source struct rather than a second Java
+                // handle (0002/0002b).
+                mark_anonymous_capture_aliases(body, owner, declared, locals, into);
                 for member in body {
                     if let Member::Method(method) = member
                         && let Some(body) = &method.body
                     {
                         let mut closure_locals = locals.clone();
+                        closure_locals.extend(local_types_from_params(&method.params));
                         collect_block_facts(
                             body,
                             owner,
@@ -1524,6 +1672,442 @@ fn collect_anonymous_body_facts_from_expr(
         },
         Expr::Literal(_)
         | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::MethodReference { .. }
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => {}
+    }
+}
+
+/// Anonymous instance fields do not belong to the enclosing source class, so
+/// the ordinary assignment walk cannot recover the type of
+/// `this.retained.member`.  A direct write through one of those fields still
+/// mutates the retained declared-class object after construction.
+fn mark_anonymous_field_member_mutations(
+    members: &[Member],
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    let fields = members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+                declared_type_name(&field.ty, &owner.name, declared)
+                    .map(|type_name| (crate::parser::to_snake_case(&field.name), type_name))
+            }
+            _ => None,
+        })
+        .collect::<BTreeMap<_, _>>();
+    fn visit_block(
+        block: &Block,
+        fields: &BTreeMap<String, String>,
+        into: &mut BTreeMap<String, TypeStorageFacts>,
+    ) {
+        for statement in &block.statements {
+            match statement {
+                Stmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    visit_block(then_block, fields, into);
+                    if let Some(else_block) = else_block {
+                        visit_block(else_block, fields, into);
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. }
+                | Stmt::Block(body)
+                | Stmt::LabeledBlock { body, .. } => visit_block(body, fields, into),
+                Stmt::For { init, body, .. } => {
+                    visit_block(
+                        &Block {
+                            statements: init.clone(),
+                        },
+                        fields,
+                        into,
+                    );
+                    visit_block(body, fields, into);
+                }
+                Stmt::EnhancedFor { body, .. } => visit_block(body, fields, into),
+                _ => {}
+            }
+            let Stmt::Assign {
+                target: Expr::FieldAccess(receiver, _),
+                ..
+            } = statement
+            else {
+                continue;
+            };
+            let Expr::FieldAccess(this, field) = receiver.as_ref() else {
+                continue;
+            };
+            if matches!(this.as_ref(), Expr::This)
+                && let Some(type_name) = fields.get(&crate::parser::to_snake_case(field))
+                && let Some(facts) = into.get_mut(type_name)
+            {
+                facts.mutated = true;
+            }
+        }
+    }
+    for method in members.iter().filter_map(|member| match member {
+        Member::Method(method) => method.body.as_ref(),
+        _ => None,
+    }) {
+        visit_block(method, &fields, into);
+    }
+}
+
+/// Mark declared-class locals retained by an anonymous object's methods as
+/// aliases.  The separate lexical scope is important: a method parameter or a
+/// local declared in the anonymous method must not be mistaken for an outer
+/// capture with the same source name.
+fn mark_anonymous_capture_aliases(
+    members: &[Member],
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    outer_locals: &BTreeMap<String, JavaType>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    for member in members {
+        if let Member::Method(method) = member
+            && let Some(body) = &method.body
+        {
+            let mut bound = method
+                .params
+                .iter()
+                .map(|param| param.name.clone())
+                .collect::<BTreeSet<_>>();
+            mark_captures_in_block(body, owner, declared, outer_locals, &mut bound, into);
+        }
+    }
+}
+
+fn mark_captured_local(
+    name: &str,
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    outer_locals: &BTreeMap<String, JavaType>,
+    bound: &BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    if !bound.contains(name)
+        && let Some(ty) = outer_locals.get(name)
+        && let Some(type_name) = declared_type_name(ty, &owner.name, declared)
+        && let Some(facts) = into.get_mut(&type_name)
+    {
+        facts.locally_aliased = true;
+    }
+}
+
+fn mark_captures_in_block(
+    block: &Block,
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    outer_locals: &BTreeMap<String, JavaType>,
+    bound: &mut BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    for stmt in &block.statements {
+        mark_captures_in_stmt(stmt, owner, declared, outer_locals, bound, into);
+    }
+}
+
+fn mark_captures_in_stmt(
+    stmt: &Stmt,
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    outer_locals: &BTreeMap<String, JavaType>,
+    bound: &mut BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    match stmt {
+        Stmt::VarDecl {
+            name, initializer, ..
+        } => {
+            if let Some(initializer) = initializer {
+                mark_captures_in_expr(initializer, owner, declared, outer_locals, bound, into);
+            }
+            bound.insert(name.clone());
+        }
+        Stmt::Assign { target, value } => {
+            mark_captures_in_expr(target, owner, declared, outer_locals, bound, into);
+            mark_captures_in_expr(value, owner, declared, outer_locals, bound, into);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            mark_captures_in_expr(expr, owner, declared, outer_locals, bound, into);
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            mark_captures_in_expr(condition, owner, declared, outer_locals, bound, into);
+            mark_captures_in_block(
+                then_block,
+                owner,
+                declared,
+                outer_locals,
+                &mut bound.clone(),
+                into,
+            );
+            if let Some(else_block) = else_block {
+                mark_captures_in_block(
+                    else_block,
+                    owner,
+                    declared,
+                    outer_locals,
+                    &mut bound.clone(),
+                    into,
+                );
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            mark_captures_in_expr(condition, owner, declared, outer_locals, bound, into);
+            mark_captures_in_block(
+                body,
+                owner,
+                declared,
+                outer_locals,
+                &mut bound.clone(),
+                into,
+            );
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            let mut loop_bound = bound.clone();
+            for init in init {
+                mark_captures_in_stmt(init, owner, declared, outer_locals, &mut loop_bound, into);
+            }
+            if let Some(condition) = condition {
+                mark_captures_in_expr(condition, owner, declared, outer_locals, &loop_bound, into);
+            }
+            for update in update {
+                mark_captures_in_expr(update, owner, declared, outer_locals, &loop_bound, into);
+            }
+            mark_captures_in_block(body, owner, declared, outer_locals, &mut loop_bound, into);
+        }
+        Stmt::EnhancedFor {
+            var_name,
+            iterable,
+            body,
+            ..
+        } => {
+            mark_captures_in_expr(iterable, owner, declared, outer_locals, bound, into);
+            let mut loop_bound = bound.clone();
+            loop_bound.insert(var_name.clone());
+            mark_captures_in_block(body, owner, declared, outer_locals, &mut loop_bound, into);
+        }
+        Stmt::Switch { selector, cases } => {
+            mark_captures_in_expr(selector, owner, declared, outer_locals, bound, into);
+            for case in cases {
+                let mut case_bound = bound.clone();
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(label) = label {
+                        mark_captures_in_expr(
+                            label,
+                            owner,
+                            declared,
+                            outer_locals,
+                            &case_bound,
+                            into,
+                        );
+                    }
+                }
+                for stmt in &case.statements {
+                    mark_captures_in_stmt(
+                        stmt,
+                        owner,
+                        declared,
+                        outer_locals,
+                        &mut case_bound,
+                        into,
+                    );
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut try_bound = bound.clone();
+            for resource in resources {
+                mark_captures_in_stmt(
+                    resource,
+                    owner,
+                    declared,
+                    outer_locals,
+                    &mut try_bound,
+                    into,
+                );
+            }
+            mark_captures_in_block(body, owner, declared, outer_locals, &mut try_bound, into);
+            for catch in catches {
+                let mut catch_bound = bound.clone();
+                catch_bound.insert(catch.name.clone());
+                mark_captures_in_block(
+                    &catch.body,
+                    owner,
+                    declared,
+                    outer_locals,
+                    &mut catch_bound,
+                    into,
+                );
+            }
+            if let Some(finally_block) = finally_block {
+                mark_captures_in_block(
+                    finally_block,
+                    owner,
+                    declared,
+                    outer_locals,
+                    &mut bound.clone(),
+                    into,
+                );
+            }
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                mark_captures_in_expr(arg, owner, declared, outer_locals, bound, into);
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            mark_captures_in_block(
+                block,
+                owner,
+                declared,
+                outer_locals,
+                &mut bound.clone(),
+                into,
+            );
+        }
+        Stmt::Return(None)
+        | Stmt::LocalType(_)
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn mark_captures_in_expr(
+    expr: &Expr,
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    outer_locals: &BTreeMap<String, JavaType>,
+    bound: &BTreeSet<String>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    match expr {
+        Expr::Var(name) => mark_captured_local(name, owner, declared, outer_locals, bound, into),
+        Expr::FieldAccess(receiver, _)
+        | Expr::Unary { expr: receiver, .. }
+        | Expr::Cast { expr: receiver, .. }
+        | Expr::InstanceOf { expr: receiver, .. } => {
+            mark_captures_in_expr(receiver, owner, declared, outer_locals, bound, into);
+        }
+        Expr::ArrayAccess(array, index) => {
+            mark_captures_in_expr(array, owner, declared, outer_locals, bound, into);
+            mark_captures_in_expr(index, owner, declared, outer_locals, bound, into);
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                mark_captures_in_expr(dimension, owner, declared, outer_locals, bound, into);
+            }
+            if let Some(initializer) = initializer {
+                for item in initializer {
+                    mark_captures_in_expr(item, owner, declared, outer_locals, bound, into);
+                }
+            }
+        }
+        Expr::ArrayInitializer(items) => {
+            for item in items {
+                mark_captures_in_expr(item, owner, declared, outer_locals, bound, into);
+            }
+        }
+        Expr::Binary { left, right, .. } => {
+            mark_captures_in_expr(left, owner, declared, outer_locals, bound, into);
+            mark_captures_in_expr(right, owner, declared, outer_locals, bound, into);
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            for child in [condition, then_expr, else_expr] {
+                mark_captures_in_expr(child, owner, declared, outer_locals, bound, into);
+            }
+        }
+        Expr::Switch { selector, cases } => {
+            mark_captures_in_expr(selector, owner, declared, outer_locals, bound, into);
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(label) = label {
+                        mark_captures_in_expr(label, owner, declared, outer_locals, bound, into);
+                    }
+                }
+                mark_captures_in_expr(&case.value, owner, declared, outer_locals, bound, into);
+            }
+        }
+        Expr::Call { receiver, args, .. } => {
+            if let Some(receiver) = receiver {
+                mark_captures_in_expr(receiver, owner, declared, outer_locals, bound, into);
+            }
+            for arg in args {
+                mark_captures_in_expr(arg, owner, declared, outer_locals, bound, into);
+            }
+        }
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                mark_captures_in_expr(qualifier, owner, declared, outer_locals, bound, into);
+            }
+            for arg in args {
+                mark_captures_in_expr(arg, owner, declared, outer_locals, bound, into);
+            }
+            if let Some(body) = body {
+                mark_anonymous_capture_aliases(body, owner, declared, outer_locals, into);
+            }
+        }
+        Expr::Lambda { params, body } => {
+            let mut lambda_bound = bound.clone();
+            lambda_bound.extend(params.iter().map(|param| param.name.clone()));
+            match body {
+                LambdaBody::Expr(expr) => {
+                    mark_captures_in_expr(expr, owner, declared, outer_locals, &lambda_bound, into)
+                }
+                LambdaBody::Block(block) => mark_captures_in_block(
+                    block,
+                    owner,
+                    declared,
+                    outer_locals,
+                    &mut lambda_bound,
+                    into,
+                ),
+            }
+        }
+        Expr::Literal(_)
         | Expr::This
         | Expr::Super
         | Expr::MethodReference { .. }
@@ -2134,6 +2718,43 @@ public class Outer {
     }
 
     #[test]
+    fn statically_reachable_interface_container_needs_sync_cell() {
+        let strategy = strategy_of(
+            r#"
+interface Counter { int read(); }
+class Holder {
+    Counter counter = new Counter() {
+        int value = 1;
+        public int read() { return value; }
+    };
+}
+class Root { static Holder holder = new Holder(); }
+"#,
+            "Holder",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn statically_reachable_subclass_inherits_interface_cell_requirement() {
+        let strategy = strategy_of(
+            r#"
+interface Counter { int read(); }
+class Base {
+    Counter counter = new Counter() {
+        int value = 1;
+        public int read() { return value; }
+    };
+}
+class Child extends Base {}
+class Root { static Child holder = new Child(); }
+"#,
+            "Child",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
     fn static_reachability_sees_array_element_types() {
         let strategy = strategy_of(
             r#"
@@ -2240,6 +2861,113 @@ public class Outer {
         assert!(facts.mutated);
         assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
         assert!(facts.placement().is_implemented());
+    }
+
+    #[test]
+    fn anonymous_object_capture_marks_mutated_factory_argument_shared_local() {
+        let facts = facts_of(
+            r#"
+interface Reader { int read(); }
+class Node { int value; Node(int value) { this.value = value; } }
+class CapturedMutableAnonymousReader {
+    static Reader make(Node node) {
+        return new Reader() { public int read() { return node.value; } };
+    }
+    static int run() {
+        Node node = new Node(3);
+        Reader reader = make(node);
+        node.value = 8;
+        return reader.read();
+    }
+}
+"#,
+            "Node",
+        );
+        assert!(
+            facts.locally_aliased(),
+            "anonymous capture must retain the factory argument: {facts:?}"
+        );
+        assert!(
+            facts.mutated(),
+            "the caller mutates the captured node: {facts:?}"
+        );
+        assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn anonymous_object_field_initializer_marks_factory_argument_stored() {
+        let facts = facts_of(
+            r#"
+interface Reader { int read(); }
+class Node { int value; Node(int value) { this.value = value; } }
+class FieldInitializedAnonymousReader {
+    static Reader make(Node node) {
+        return new Reader() {
+            Node retained = node;
+            public int read() { return this.retained.value; }
+        };
+    }
+    static int run() {
+        Node node = new Node(3);
+        Reader reader = make(node);
+        node.value = 8;
+        return reader.read();
+    }
+}
+"#,
+            "Node",
+        );
+        assert_eq!(facts.escape(), Escape::Stored, "{facts:?}");
+        assert!(facts.mutated(), "{facts:?}");
+        assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn nested_anonymous_field_member_write_marks_retained_type_mutable() {
+        let facts = facts_of(
+            r#"
+interface Reader { int write(boolean enabled, int value); }
+class Node { int value; Node(int value) { this.value = value; } }
+class NestedAnonymousFieldWrite {
+    static Reader make(Node node) {
+        return new Reader() {
+            Node retained = node;
+            public int write(boolean enabled, int value) {
+                if (enabled) { this.retained.value = value; }
+                return this.retained.value;
+            }
+        };
+    }
+}
+"#,
+            "Node",
+        );
+        assert_eq!(facts.escape(), Escape::Stored, "{facts:?}");
+        assert!(facts.mutated(), "{facts:?}");
+        assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn anonymous_method_parameter_shadowing_is_not_an_outer_capture() {
+        let facts = facts_of(
+            r#"
+interface Reader { int read(Node node); }
+class Node { int value; Node(int value) { this.value = value; } }
+class ShadowedAnonymousReader {
+    static Reader make(Node node) {
+        return new Reader() {
+            public int read(Node node) { return node.value; }
+        };
+    }
+}
+"#,
+            "Node",
+        );
+        assert!(
+            !facts.locally_aliased(),
+            "the anonymous method parameter shadows the factory parameter: {facts:?}"
+        );
+        assert_eq!(facts.strategy(), StorageStrategy::Value);
     }
 
     #[test]

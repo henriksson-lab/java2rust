@@ -253,8 +253,32 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                     representations,
                 )
             } else {
-                rust_type_for_java_type_with_facts(&shape.java_ty, facts)
+                // Signature planning starts conservatively, so a source
+                // carrier can still arrive here as a concrete slot.  Render
+                // through the representation map rather than leaking its
+                // nominal Java payload type into a carrier-typed signature.
+                rust_type_for_java_type_with_facts_and_representations(
+                    &shape.java_ty,
+                    facts,
+                    representations,
+                )
             }
+        }
+        (_, DispatchShape::BoxedDynTrait { trait_name }) if matches!(&shape.java_ty, JavaType::Named { args, .. } if !args.is_empty()) => {
+            rust_boxed_dyn_trait_type(parameterized_dyn_trait_path(
+                trait_name,
+                &shape.java_ty,
+                &effective_facts,
+                representations,
+            ))
+        }
+        (_, DispatchShape::DynTrait { trait_name }) if matches!(&shape.java_ty, JavaType::Named { args, .. } if !args.is_empty()) => {
+            RustType::DynTrait(parameterized_dyn_trait_path(
+                trait_name,
+                &shape.java_ty,
+                &effective_facts,
+                representations,
+            ))
         }
         _ => render_slot_value_rust_type_policy_with_effective_facts(
             &slot_value_rust_type_policy_with_effective_facts(shape, &effective_facts),
@@ -612,6 +636,37 @@ pub(crate) fn shared_handle_construction_expr(
         return rendered;
     };
     let placement = facts.storage_placement_for(name);
+    if !placement.is_implemented() || !placement.shared() {
+        return rendered;
+    }
+    storage_placement_construction_expr(placement, rendered)
+}
+
+/// Fresh construction for a representation-planned slot. A source hierarchy
+/// carrier may be shared by the representation plan even when ordinary facts
+/// do not mark the Java base class as shared.
+pub(crate) fn shared_handle_construction_expr_with_representations(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+    rendered: RustExpr,
+) -> RustExpr {
+    if !matches!(
+        shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) || shape.optional_element_type().is_some()
+    {
+        return rendered;
+    }
+    let JavaType::Named { name, .. } = &shape.java_ty else {
+        return rendered;
+    };
+    let fact_placement = facts.storage_placement_for(name);
+    let placement = if fact_placement.is_implemented() && fact_placement.shared() {
+        fact_placement
+    } else {
+        representations.storage_placement_for(name)
+    };
     if !placement.is_implemented() || !placement.shared() {
         return rendered;
     }
@@ -982,7 +1037,9 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
         ));
     }
 
-    if let Some(dispatch_ty) = rust_type_for_representation_dispatch(ty, representations) {
+    if let Some(dispatch_ty) =
+        rust_type_for_representation_dispatch(ty, &effective_facts, representations)
+    {
         return dispatch_ty;
     }
 
@@ -1674,7 +1731,7 @@ fn rust_type_for_java_generic_arg_with_representations(
         return RustType::Named(rust_name_for_java_named_type(name));
     }
     if let Some(dispatch_ty) =
-        rust_type_for_facade_aware_representation_dispatch(ty, representations)
+        rust_type_for_facade_aware_representation_dispatch(ty, facts, representations)
     {
         return dispatch_ty;
     }
@@ -1745,19 +1802,51 @@ fn rust_type_for_representation_storage_placement(
 
 fn rust_type_for_representation_dispatch(
     ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> Option<RustType> {
     match representations.dispatch_for(ty) {
         DispatchShape::ClosedEnum { enum_name } => Some(RustType::Named(enum_name)),
         DispatchShape::ErasedObject => Some(erased_object_rust_type()),
-        DispatchShape::BoxedDynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(trait_name)),
-        DispatchShape::DynTrait { trait_name } => Some(RustType::DynTrait(trait_name)),
+        DispatchShape::BoxedDynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(
+            parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
+        )),
+        DispatchShape::DynTrait { trait_name } => Some(RustType::DynTrait(
+            parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
+        )),
         DispatchShape::Concrete => None,
     }
 }
 
+pub(crate) fn parameterized_dyn_trait_path(
+    trait_name: &str,
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> String {
+    let JavaType::Named { args, .. } = java_ty else {
+        return trait_name.to_string();
+    };
+    if args.is_empty() {
+        return trait_name.to_string();
+    }
+    let args = args
+        .iter()
+        .map(|arg| {
+            crate::emit::emit_type(&rust_type_for_java_generic_arg_with_representations(
+                arg,
+                facts,
+                representations,
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{trait_name}<{args}>")
+}
+
 fn rust_type_for_facade_aware_representation_dispatch(
     ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> Option<RustType> {
     if builtin_or_conservative_erased_external_representation(ty, representations) {
@@ -1765,8 +1854,10 @@ fn rust_type_for_facade_aware_representation_dispatch(
     }
     let dispatch = representations.dispatch_for(ty);
     match dispatch {
-        DispatchShape::DynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(trait_name)),
-        _ => rust_type_for_representation_dispatch(ty, representations),
+        DispatchShape::DynTrait { trait_name } => Some(rust_boxed_dyn_trait_type(
+            parameterized_dyn_trait_path(&trait_name, ty, facts, representations),
+        )),
+        _ => rust_type_for_representation_dispatch(ty, facts, representations),
     }
 }
 
@@ -1929,7 +2020,7 @@ fn java_set_element_uses_hash_free_carrier_with_representations(
         return false;
     }
     java_set_element_uses_hash_free_carrier(element_ty, facts)
-        || rust_type_for_representation_dispatch(element_ty, representations).is_some()
+        || rust_type_for_representation_dispatch(element_ty, facts, representations).is_some()
 }
 
 fn builtin_or_conservative_erased_external_representation(

@@ -1737,7 +1737,7 @@ impl ProgramSymbols {
 
     fn compute_methods_for_hierarchy(&self, type_name: &str) -> Vec<MethodSymbol> {
         let mut out = Vec::new();
-        let mut seen_signatures = HashSet::new();
+        let mut seen_signatures = HashMap::new();
         let mut visited = HashSet::new();
         self.collect_methods_for_hierarchy(
             self.source_type_name(type_name),
@@ -1754,7 +1754,7 @@ impl ProgramSymbols {
         type_name: &str,
         substitutions: &HashMap<String, JavaType>,
         visited: &mut HashSet<String>,
-        seen_signatures: &mut HashSet<String>,
+        seen_signatures: &mut HashMap<String, usize>,
         out: &mut Vec<MethodSymbol>,
     ) {
         let type_name = self.source_type_name(type_name).to_string();
@@ -1765,7 +1765,25 @@ impl ProgramSymbols {
         if let Some(methods) = self.methods_by_type.get(&type_name) {
             for method in methods {
                 let substituted = substitute_method_symbol(method, substitutions);
-                if seen_signatures.insert(method_signature_key(&substituted)) {
+                let key = method_signature_key(&substituted);
+                if let Some(&index) = seen_signatures.get(&key) {
+                    let inherited = &out[index];
+                    let facts = FactSet::default();
+                    if java_type_assignable(
+                        &substituted.return_type,
+                        &inherited.return_type,
+                        self,
+                        &facts,
+                    ) && !java_type_assignable(
+                        &inherited.return_type,
+                        &substituted.return_type,
+                        self,
+                        &facts,
+                    ) {
+                        out[index] = substituted;
+                    }
+                } else {
+                    seen_signatures.insert(key, out.len());
                     out.push(substituted);
                 }
             }
@@ -5100,8 +5118,12 @@ fn resolve_same_class_call(
             method.java_name == name && params_accept_arg_count(&method.params, arg_types.len())
         })
         .collect::<Vec<_>>();
-    let candidates =
-        deduplicated_effective_method_candidates(candidates, receiver_actual_ty, symbols);
+    let candidates = deduplicated_effective_method_candidates(
+        candidates,
+        receiver_actual_ty,
+        symbols,
+        external_facts,
+    );
     if candidates.is_empty() {
         return Ok(None);
     }
@@ -5211,16 +5233,41 @@ fn deduplicated_effective_method_candidates<'a>(
     candidates: Vec<&'a MethodSymbol>,
     receiver_actual_ty: Option<&JavaType>,
     symbols: &ProgramSymbols,
+    external_facts: &FactSet,
 ) -> Vec<&'a MethodSymbol> {
-    let mut seen = HashSet::new();
-    candidates
-        .into_iter()
-        .filter(|method| {
-            let substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
-            let substituted = substitute_method_symbol(method, &substitutions);
-            seen.insert(method_signature_key(&substituted))
-        })
-        .collect()
+    let mut selected = Vec::new();
+    let mut indexes = HashMap::new();
+    for method in candidates {
+        let substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
+        let substituted = substitute_method_symbol(method, &substitutions);
+        let key = method_signature_key(&substituted);
+        if let Some(&index) = indexes.get(&key) {
+            let existing: &MethodSymbol = selected[index];
+            let existing_substitutions =
+                receiver_type_substitutions(existing, receiver_actual_ty, symbols);
+            let existing_effective = substitute_method_symbol(existing, &existing_substitutions);
+            // A Java interface inherits one contract for matching parameter
+            // signatures, with the most specific covariant return regardless
+            // of the parents' source order.
+            if java_type_assignable(
+                &substituted.return_type,
+                &existing_effective.return_type,
+                symbols,
+                external_facts,
+            ) && !java_type_assignable(
+                &existing_effective.return_type,
+                &substituted.return_type,
+                symbols,
+                external_facts,
+            ) {
+                selected[index] = method;
+            }
+        } else {
+            indexes.insert(key, selected.len());
+            selected.push(method);
+        }
+    }
+    selected
 }
 
 fn method_type_substitutions(
@@ -5332,7 +5379,7 @@ fn collect_method_type_substitutions(
     }
 }
 
-fn substitute_method_type_variables(
+pub(crate) fn substitute_method_type_variables(
     ty: &JavaType,
     substitutions: &HashMap<String, JavaType>,
 ) -> JavaType {

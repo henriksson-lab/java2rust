@@ -4,8 +4,8 @@ use crate::binding_id::BindingId;
 use crate::facts::{ExceptionKind, FactSet, NullabilityState, TrivialAccessorKind};
 use crate::java_ir::{
     BinaryOp, Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Literal, Member,
-    Modifier, Param, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel, TypeDecl,
-    UnaryOp,
+    Modifier, Param, PrimitiveType, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel,
+    TypeDecl, UnaryOp,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
 use crate::stdlib::is_content_read_method;
@@ -19,10 +19,11 @@ pub struct UsageFacts {
     constructors: HashMap<UsageConstructorKey, MethodUsageFacts>,
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct CallGraph {
     nodes: HashSet<CallableKey>,
     edges: Vec<CallGraphEdge>,
+    anonymous_methods: HashMap<CallableKey, crate::java_ir::MethodDecl>,
 }
 
 impl CallGraph {
@@ -34,6 +35,10 @@ impl CallGraph {
         &self.edges
     }
 
+    pub(crate) fn anonymous_methods(&self) -> &HashMap<CallableKey, crate::java_ir::MethodDecl> {
+        &self.anonymous_methods
+    }
+
     #[cfg(test)]
     pub(crate) fn from_edges(edges: Vec<CallGraphEdge>) -> Self {
         Self {
@@ -42,6 +47,7 @@ impl CallGraph {
                 .flat_map(|edge| [edge.caller.clone(), edge.callee.clone()])
                 .collect(),
             edges,
+            anonymous_methods: HashMap::new(),
         }
     }
 
@@ -49,6 +55,7 @@ impl CallGraph {
         Self {
             nodes: nodes.into_iter().collect(),
             edges: Vec::new(),
+            anonymous_methods: HashMap::new(),
         }
     }
 }
@@ -317,6 +324,7 @@ pub enum CallGraphEdgeKind {
     ConstructorDelegationSuper,
     AnonymousClassConstructor,
     AnonymousClassMethod,
+    AnonymousOverrideContract,
     LambdaBody,
     HandledExceptionBoundary,
     UnresolvedExternalMethodCall,
@@ -1684,7 +1692,7 @@ pub fn build_call_graph(program: &Program) -> CallGraph {
 pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGraph {
     let mut graph = CallGraph::default();
     for ty in &program.types {
-        build_type_call_graph(ty, &mut graph, facts);
+        build_type_call_graph(ty, program, &mut graph, facts);
     }
     graph
 }
@@ -1844,7 +1852,7 @@ fn insert_usage_type_param_bounds(
     }
 }
 
-fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph, facts: &FactSet) {
+fn build_type_call_graph(ty: &TypeDecl, program: &Program, graph: &mut CallGraph, facts: &FactSet) {
     let internal_methods = all_method_names(ty);
     for member in &ty.members {
         match member {
@@ -1856,6 +1864,7 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph, facts: &FactSet) 
                         ty.name.clone(),
                         internal_methods.clone(),
                         caller,
+                        program,
                     );
                     collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
@@ -1868,36 +1877,44 @@ fn build_type_call_graph(ty: &TypeDecl, graph: &mut CallGraph, facts: &FactSet) 
                         ty.name.clone(),
                         internal_methods.clone(),
                         caller,
+                        program,
                     );
                     collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
             }
-            Member::Type(nested) => build_type_call_graph(nested, graph, facts),
+            Member::Type(nested) => build_type_call_graph(nested, program, graph, facts),
             _ => {}
         }
     }
 }
 
 #[derive(Debug, Clone)]
-struct CallGraphBuildContext {
+struct CallGraphBuildContext<'a> {
     current_type: String,
     internal_methods: HashSet<String>,
     current_callable: CallableKey,
+    program: &'a Program,
+    anonymous_super_type: Option<&'a TypeDecl>,
+    anonymous_method_param_types: HashMap<String, JavaType>,
     next_lambda_ordinal: usize,
     next_anonymous_ordinal: usize,
     handled_catch_types: Vec<JavaType>,
 }
 
-impl CallGraphBuildContext {
+impl<'a> CallGraphBuildContext<'a> {
     fn new(
         current_type: String,
         internal_methods: HashSet<String>,
         current_callable: CallableKey,
+        program: &'a Program,
     ) -> Self {
         Self {
             current_type,
             internal_methods,
             current_callable,
+            program,
+            anonymous_super_type: None,
+            anonymous_method_param_types: HashMap::new(),
             next_lambda_ordinal: 0,
             next_anonymous_ordinal: 0,
             handled_catch_types: Vec::new(),
@@ -1909,6 +1926,9 @@ impl CallGraphBuildContext {
             current_type: self.current_type.clone(),
             internal_methods: self.internal_methods.clone(),
             current_callable,
+            program: self.program,
+            anonymous_super_type: self.anonymous_super_type,
+            anonymous_method_param_types: self.anonymous_method_param_types.clone(),
             next_lambda_ordinal: 0,
             next_anonymous_ordinal: 0,
             handled_catch_types: Vec::new(),
@@ -1964,7 +1984,7 @@ fn all_method_names(ty: &TypeDecl) -> HashSet<String> {
 fn collect_call_graph_edges_from_block(
     block: &Block,
     graph: &mut CallGraph,
-    context: &mut CallGraphBuildContext,
+    context: &mut CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) {
     for stmt in &block.statements {
@@ -1975,7 +1995,7 @@ fn collect_call_graph_edges_from_block(
 fn collect_call_graph_edges_from_stmt(
     stmt: &Stmt,
     graph: &mut CallGraph,
-    context: &mut CallGraphBuildContext,
+    context: &mut CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) {
     match stmt {
@@ -2092,7 +2112,7 @@ fn collect_call_graph_edges_from_stmt(
                 collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
         }
-        Stmt::LocalType(ty) => build_type_call_graph(ty, graph, facts),
+        Stmt::LocalType(ty) => build_type_call_graph(ty, context.program, graph, facts),
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_call_graph_edges_from_block(block, graph, context, facts)
         }
@@ -2102,7 +2122,7 @@ fn collect_call_graph_edges_from_stmt(
 fn collect_call_graph_edges_from_expr(
     expr: &Expr,
     graph: &mut CallGraph,
-    context: &mut CallGraphBuildContext,
+    context: &mut CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) {
     match expr {
@@ -2113,7 +2133,7 @@ fn collect_call_graph_edges_from_expr(
             resolved,
         } => {
             let (callee, edge_kind) =
-                call_graph_method_target(receiver.as_deref(), name, args.len(), resolved, context);
+                call_graph_method_target(receiver.as_deref(), name, args, resolved, context);
             add_call_graph_edge(graph, context, callee, edge_kind, facts);
             if let Some(receiver) = receiver {
                 collect_call_graph_edges_from_expr(receiver, graph, context, facts);
@@ -2150,9 +2170,22 @@ fn collect_call_graph_edges_from_expr(
                 collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
             if let Some(body) = body {
+                let anonymous_base = match ty {
+                    JavaType::Named { name, .. } => {
+                        crate::inherited_members::find_type_decl_for_owner_context(
+                            context.program,
+                            &context.current_type,
+                            name,
+                        )
+                    }
+                    _ => None,
+                };
                 for member in body {
                     if let Member::Method(method) = member {
                         let anonymous = context.next_anonymous_method(method.name.clone());
+                        graph
+                            .anonymous_methods
+                            .insert(anonymous.clone(), method.clone());
                         add_call_graph_edge(
                             graph,
                             context,
@@ -2160,8 +2193,29 @@ fn collect_call_graph_edges_from_expr(
                             CallGraphEdgeKind::AnonymousClassMethod,
                             facts,
                         );
+                        if let Some(base) = anonymous_base {
+                            for contract in
+                                anonymous_override_contract_keys(base, method, context.program)
+                            {
+                                let edge = CallGraphEdge {
+                                    caller: contract.clone(),
+                                    callee: anonymous.clone(),
+                                    kind: CallGraphEdgeKind::AnonymousOverrideContract,
+                                };
+                                graph.nodes.insert(contract);
+                                if !graph.edges.contains(&edge) {
+                                    graph.edges.push(edge);
+                                }
+                            }
+                        }
                         if let Some(body) = &method.body {
                             let mut child = context.child_for(anonymous);
+                            child.anonymous_super_type = anonymous_base;
+                            child.anonymous_method_param_types = method
+                                .params
+                                .iter()
+                                .map(|param| (param.name.clone(), param.ty.clone()))
+                                .collect();
                             collect_call_graph_edges_from_block(body, graph, &mut child, facts);
                         }
                     }
@@ -2254,13 +2308,19 @@ fn collect_call_graph_edges_from_expr(
 fn call_graph_method_target(
     receiver: Option<&Expr>,
     name: &str,
-    arg_count: usize,
+    args: &[Expr],
     resolved: &Option<ResolvedCall>,
-    context: &CallGraphBuildContext,
+    context: &CallGraphBuildContext<'_>,
 ) -> (CallableKey, CallGraphEdgeKind) {
     if matches!(receiver, Some(Expr::Super)) {
+        if let Some(base) = context.anonymous_super_type
+            && let Some(target) =
+                anonymous_super_method_key(base, name, args, resolved.as_ref(), context)
+        {
+            return (target, CallGraphEdgeKind::DirectMethodCall);
+        }
         return (
-            CallableKey::external_method(Some("super"), name, arg_count),
+            CallableKey::external_method(Some("super"), name, args.len()),
             CallGraphEdgeKind::UnresolvedExternalMethodCall,
         );
     }
@@ -2282,15 +2342,154 @@ fn call_graph_method_target(
         CallableKey::external_method(
             receiver.and_then(expr_call_graph_type_name),
             name,
-            arg_count,
+            args.len(),
         ),
         CallGraphEdgeKind::UnresolvedExternalMethodCall,
     )
 }
 
+fn anonymous_override_contract_keys(
+    base: &TypeDecl,
+    override_method: &crate::java_ir::MethodDecl,
+    program: &Program,
+) -> Vec<CallableKey> {
+    let wanted_name = &override_method.name;
+    let wanted_params = crate::java_signature::erased_param_types(&override_method.params);
+    let mut contracts = Vec::new();
+    let mut pending = vec![base];
+    let mut visited = HashSet::new();
+    while let Some(owner) = pending.pop() {
+        if !visited.insert(owner.name.clone()) {
+            continue;
+        }
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.modifiers.contains(&Modifier::Static)
+                || method.modifiers.contains(&Modifier::Private)
+                || &method.name != wanted_name
+            {
+                continue;
+            }
+            let effective_params = if owner.kind == crate::java_ir::TypeKind::Interface {
+                crate::representation_lowering::interface_method_types_in_target(
+                    program, base, owner, method,
+                )
+                .1
+            } else {
+                method.params.iter().map(|param| param.ty.clone()).collect()
+            };
+            let erased_params = method
+                .params
+                .iter()
+                .zip(&effective_params)
+                .map(|(param, ty)| crate::java_signature::erased_type_name(ty, param.is_varargs))
+                .collect::<Vec<_>>();
+            if erased_params != wanted_params {
+                continue;
+            }
+            let key = CallableKey::source_method_for_type(owner, method);
+            if !contracts.contains(&key) {
+                contracts.push(key);
+            }
+        }
+        for parent in owner.extends.iter().chain(owner.implements.iter()) {
+            if let Some(parent) = crate::inherited_members::find_type_decl_for_owner_context(
+                program,
+                &owner.name,
+                parent,
+            ) {
+                pending.push(parent);
+            }
+        }
+    }
+    contracts
+}
+
+fn anonymous_super_method_key(
+    base: &TypeDecl,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&ResolvedCall>,
+    context: &CallGraphBuildContext<'_>,
+) -> Option<CallableKey> {
+    let mut candidates = base
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method)
+                if !method.modifiers.contains(&Modifier::Static)
+                    && method.name == name
+                    && method.params.len() == args.len() =>
+            {
+                Some((base, method))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    candidates.extend(
+        crate::inherited_members::inherited_instance_method_refs_for_type(base, context.program)
+            .into_iter()
+            .filter(|inherited| {
+                inherited.method().name == name && inherited.method().params.len() == args.len()
+            })
+            .map(|inherited| (inherited.declaring_ty(), inherited.method())),
+    );
+    if let Some(resolved) = resolved {
+        let selected = candidates
+            .iter()
+            .copied()
+            .filter(|(_, method)| source_method_rust_name(method) == resolved.rust_name)
+            .collect::<Vec<_>>();
+        if let [(owner, method)] = selected.as_slice() {
+            return Some(CallableKey::source_method_for_type(owner, method));
+        }
+    }
+    let arg_types = args
+        .iter()
+        .map(|arg| anonymous_call_graph_arg_type(arg, context))
+        .collect::<Option<Vec<_>>>();
+    if let Some(arg_types) = arg_types {
+        let selected = candidates
+            .iter()
+            .copied()
+            .filter(|(_, method)| {
+                method
+                    .params
+                    .iter()
+                    .zip(&arg_types)
+                    .all(|(param, actual)| param.ty == *actual)
+            })
+            .collect::<Vec<_>>();
+        if let [(owner, method)] = selected.as_slice() {
+            return Some(CallableKey::source_method_for_type(owner, method));
+        }
+    }
+    match candidates.as_slice() {
+        [(owner, method)] => Some(CallableKey::source_method_for_type(owner, method)),
+        _ => None,
+    }
+}
+
+fn anonymous_call_graph_arg_type(
+    expr: &Expr,
+    context: &CallGraphBuildContext<'_>,
+) -> Option<JavaType> {
+    match expr {
+        Expr::Var(name) => context.anonymous_method_param_types.get(name).cloned(),
+        Expr::Literal(Literal::Int(_)) => Some(JavaType::Primitive(PrimitiveType::Int)),
+        Expr::Literal(Literal::Long(_)) => Some(JavaType::Primitive(PrimitiveType::Long)),
+        Expr::Literal(Literal::String(_)) => Some(JavaType::String),
+        Expr::Literal(Literal::Bool(_)) => Some(JavaType::Primitive(PrimitiveType::Boolean)),
+        Expr::Cast { ty, .. } => Some(ty.clone()),
+        _ => None,
+    }
+}
+
 fn add_call_graph_edge(
     graph: &mut CallGraph,
-    context: &CallGraphBuildContext,
+    context: &CallGraphBuildContext<'_>,
     callee: CallableKey,
     kind: CallGraphEdgeKind,
     facts: &FactSet,

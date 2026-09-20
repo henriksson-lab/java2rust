@@ -1953,15 +1953,25 @@ pub(crate) fn static_storage_element_write_projection(
     index: RustExpr,
     value: RustExpr,
 ) -> RustStmt {
-    let initialized = method_call_projection(
-        static_storage_guard_projection(storage_name),
-        "get_or_insert_with",
-        vec![zero_arg_closure_expr(initial)],
-    );
+    let initialized = static_storage_initialized_mut_projection(storage_name, initial);
     RustStmt::Assign {
         target: RustExpr::Index(Box::new(initialized), Box::new(index)),
         value,
     }
+}
+
+/// Borrow the persistent value of a static field for one short mutating
+/// collection operation. Callers must evaluate Java arguments first: holding
+/// this guard while lowering an argument that reads the same static deadlocks.
+pub(crate) fn static_storage_initialized_mut_projection(
+    storage_name: &str,
+    initial: RustExpr,
+) -> RustExpr {
+    method_call_projection(
+        static_storage_guard_projection(storage_name),
+        "get_or_insert_with",
+        vec![zero_arg_closure_expr(initial)],
+    )
 }
 
 pub(crate) fn static_storage_setter_body_projection(storage_name: &str) -> RustStmt {

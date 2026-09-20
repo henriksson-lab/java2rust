@@ -1026,6 +1026,16 @@ impl ShapeEnv {
         self.local_shapes.get(name)
     }
 
+    /// Local bindings available at the current lowering site. Anonymous-object
+    /// lowering uses this to materialize captured outer values as adapter
+    /// fields instead of leaving generated trait methods to capture a function
+    /// environment.
+    pub(crate) fn local_shapes(&self) -> impl Iterator<Item = (&str, &RustSlotShape)> {
+        self.local_shapes
+            .iter()
+            .map(|(name, shape)| (name.as_str(), shape))
+    }
+
     pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
         self.field_shapes.get(name).or_else(|| {
             name.strip_prefix("this.")

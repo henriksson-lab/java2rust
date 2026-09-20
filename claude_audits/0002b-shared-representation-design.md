@@ -1,8 +1,120 @@
 # 0002b — Shared object representation design and rollout
 
 Status: **partially implemented** (`SharedImmutable`, `SharedLocal`, and the
-base `SharedSync` tier landed; broad anonymous-class objects, colliding-parent
-interface contracts, and cell/lock borrowed-return trait surfaces remain open)
+base `SharedSync` tier landed; bounded class-anonymous carriers and source-level
+interface upcasts landed; broad anonymous-class objects and cell/lock
+borrowed-return trait surfaces remain open)
+
+Codex verification 2026-09-19: a local variable initialized with a stateful
+anonymous interface object now has the same boxed trait slot as a returned
+object, avoiding an unsized `dyn Trait` local and default-initializer fallback.
+The bounded sequential mutator path can lower locals before, between, and after
+ordered top-level `this.field` writes while preserving the same receiver state. The
+Java oracle `repro/AnonymousInterfacePostWriteLocal.java` and the generated
+Rust fixture `anonymous_interface_method_reads_local_after_field_write` both
+produce `66`. `repro/AnonymousInterfaceTwoWrites.java` and its generated Rust
+fixture produce `1818`; `repro/AnonymousInterfaceVoidTwoWrites.java` and its
+generated Rust fixture produce `10`. A recursive receiver-aware `if`/`else`
+statement path preserves branch-local declarations, outer-local reassignment,
+and writes to distinct anonymous fields. The Java/Rust pairs
+`repro/AnonymousInterfaceNestedBranchWrites.java` and
+`repro/AnonymousInterfaceNestedOuterLocal.java` produce `688` and `571`.
+`repro/AnonymousInterfaceFieldNames.java` produces `60`, guarding against
+rewriting a longer field name or a string literal during cell-read projection.
+The recursive path also admits unlabeled `while` loops with receiver-cell writes,
+including `break`/`continue` and a condition that rereads a mutated cell. Java
+oracles `repro/AnonymousInterfaceWhileWrites.java` and
+`repro/AnonymousInterfaceWhileControl.java` match generated Rust at `810` and
+`566`. Unlabeled `do`/`for` loops execute the condition or update on a
+`continue` path: `repro/AnonymousInterfaceDoWhileWrites.java` and
+`repro/AnonymousInterfaceForWrites.java` match generated Rust at `566` and
+`1010`. A branch-local `String` literal assignment reaches the owned
+`RefCell<String>` slot, guarded by
+`repro/AnonymousInterfaceNestedStringWrite.java` at `455`. Ordinary call
+statements now pass through both mutable and read-only interface method
+bodies; `repro/AnonymousInterfaceCapturedCall.java` and
+`repro/AnonymousInterfaceReadOnlyCall.java` prove that calls through a captured
+shared handle mutate the same source object (`405` and `632`). This does not
+establish all expression-statement forms: explicit `this` integer-field
+prefix/postfix `++` and `--` also pass through the cell-write path, guarded by
+`repro/AnonymousInterfaceIncrementStatements.java` (`355`) and
+`repro/AnonymousInterfaceDecrementStatements.java` (`311`). The mutable
+interface receiver renderer now supports active labels on `for`, `while`, and
+`do/while` loops, including labeled jumps from nested loops. Java oracles
+`repro/AnonymousInterfaceLabeledFor.java`,
+`repro/AnonymousInterfaceLabeledWhile.java`, and
+`repro/AnonymousInterfaceLabeledDoWhile.java` match generated Rust at `1310`,
+`19419`, and `9409`. Their focused fixtures and all 92 anonymous fixtures pass;
+the 1,093 library tests also pass. Scoped ordinary and labeled blocks now run
+through the same receiver-aware paths in both mutable interface and class
+carriers; Java/Rust pairs `repro/AnonymousInterfaceLabeledBlock.java` and
+`repro/AnonymousClassLabeledBlock.java` agree on `9209` and `93`, including a
+class `super` call in a composed return after the block. All 94 anonymous fixtures and
+1,093 library tests passed at that checkpoint. A further Java/Rust pair,
+`repro/AnonymousLabeledBlockUnlabeledJumps.java`, agrees on `1313` after both
+renderers give enclosing loops explicit Rust labels. This preserves Java's
+unlabeled `break`/`continue` targets when they cross a labeled block; all 95
+anonymous fixtures and 1,093 library tests passed at that checkpoint. Numeric
+returns with `super` nested beneath multiple arithmetic operators or unary
+negation now lower recursively. Java/Rust
+`repro/AnonymousClassNestedSuperExpression.java` agrees on `16`, `-8`, and two
+caught array-index failures; all 96 anonymous fixtures and 1,093 library tests
+passed at that checkpoint. The mutable-interface receiver path now admits a
+named local initialized from a matching shared anonymous field. Its handle is
+cloned, not moved from `&self`; a trivial accessor setter on that local uses
+the ordinary shared-field assignment path with a mutable borrow and ordered
+RHS evaluation. The same scoped receiver-aware path accepts direct field
+assignment through a field-derived reference local, including a local declared
+inside an `if` branch; its eligibility walk discards alias provenance on
+reassignment. Unit guard
+`representation::tests::receiver_statement_reference_alias_loses_field_provenance_on_reassignment`
+checks that boundary. Java/Rust
+`repro/AnonymousInterfaceReferenceLocal.java` agree on `6968`, including caller
+and adapter observation of the same mutated node.
+The mutable-interface receiver path now also admits an enhanced `for` over a
+matching primitive-array method parameter. Its loop binding is scoped, and
+active labels preserve `continue`/`break` while receiver-cell writes persist
+across calls. Java/Rust `repro/AnonymousInterfaceEnhancedFor.java` agree on
+`499`. A stateful interface-anonymous method with a guarded direct exception
+construction now follows its solved virtual `Result` contract. The field-read
+binder preserves non-anonymous `new` expressions in the throw path; normal
+returns are wrapped in `Ok`, while the thrown path returns an error. Java
+`repro/AnonymousInterfaceDirectThrowContract.java` prints `2` and `caught`;
+`anonymous_interface_direct_throw_promotes_virtual_contract` verifies the
+generated Rust. A read-only fallible array-return method now wraps its normal
+return in `Ok`, and a fallible `void` receiver-write method returns `Ok(())`
+after success. Java/Rust oracles
+`repro/AnonymousInterfaceReadOnlyArrayResult.java` and
+`repro/AnonymousInterfaceFallibleVoidMutator.java` agree on `17`/`caught` and
+`5`/`caught`. A read-only guarded explicit throw also passes its virtual
+`Result` contract (`repro/AnonymousInterfaceReadOnlyDirectThrow.java`,
+`8`/`caught`). Duplicate inherited method contracts are no longer represented
+by a single anonymous override edge: both parent declarations get the
+fallibility result, and the synthesized target adapter method uses the
+declaration owner's exception plan. Java/Rust
+`repro/AnonymousDuplicateParentThrowContract.java` agree on `9`/`caught`
+through the target and both parent interfaces; the fallibility unit guard
+checks both edges without promoting the factory. All 103 anonymous fixtures
+and 1,095 library tests pass at that checkpoint. A colliding generic return
+contract keeps the result ABI through the joined and both parent interfaces
+(`repro/AnonymousGenericCollisionThrow.java`, `15`/`caught`). For a collision
+whose generic parameter specializes from `T` to `String`, the target adapter
+now keys synthesized contracts by effective parameter types rather than raw
+declaration erasure, avoiding duplicate Rust method definitions. The anonymous
+override graph also matches specialized parameters, so both parent slots get
+the fallibility result. Java/Rust
+`repro/AnonymousGenericParameterCollisionThrow.java` agree on `2`/`caught`
+through the two parent interfaces; direct joined calls are ambiguous in Java.
+A class-anonymous method now keeps a field-derived shared local across a
+branch member write and a composed `super` return. Its capability check
+tracks the local alias by scope, and the class renderer sends the write through
+ordinary typed statement lowering. Java/Rust
+`repro/AnonymousClassReferenceLocalAlias.java` agree on `75`, including the
+caller's view of the mutated node. A capability unit guard rejects an alias
+after reassignment. All 106 anonymous fixtures and 1,096
+library tests pass. Other throwing expression and
+special-case method-body shapes, reference-local origins, enhanced-for iterable forms, label placements, and
+broader class-adapter statement rebinding remain open.
 Blocks: [0002](0002-object-aliasing-has-no-representation.md),
 [0023](done/0023-inner-class-construction-always-panics.md),
 and all of [CONCURRENCY-SCOPE](../CONCURRENCY-SCOPE.md)
@@ -15,8 +127,8 @@ later.** This is that paper.
 
 The early sections below are the original design. Later updates record the
 current implementation state: `SharedImmutable` handles, 0028 identity
-lowering, and `SharedLocal`/`SharedSync` receiver slices are landed; broad
-anonymous-class lowering, colliding interface contracts, and cell/lock
+lowering, `SharedLocal`/`SharedSync` receiver slices, and source-level
+interface upcasts are landed; broad anonymous-class lowering and cell/lock
 borrowed-return forwarding remain.
 
 Codex verification 2026-09-18: the current `StoragePlacement` gate implements
@@ -41,19 +153,557 @@ field read through `this` is emitted in a local adapter struct, retaining its
 per-instance state; this is intentionally not yet the mutable/general
 anonymous-object representation.
 
+The multi-method object adapter now also admits an initialized read-only named
+source field. Its declaration and initializer use the same storage slot shape,
+and that shape is seeded into every generated interface method before ordinary
+field access lowering. Anonymous field initializers now participate in storage
+planning: `Node node = incoming` marks `Node` as stored, so a caller mutation
+and the adapter field use the same `Rc<RefCell<Node>>`. `NamedFieldObject`
+mutates its caller-owned node from `61` to `67` after construction and two
+adapter reads return `134`; the storage-plan guard is
+`storage_strategy::tests::anonymous_object_field_initializer_marks_factory_argument_stored`.
+Interface object adapters now materialize only factory locals read by an
+anonymous method body. Field initializer-only parameters are not captured as
+borrowed struct fields, avoiding an invalid escaping lifetime while the
+declared anonymous field retains ownership of its lowered initializer. Existing
+fieldless and mutable-capture adapter guards remain green.
+
+Codex verification 2026-09-19: eligible anonymous interfaces now try the
+object-backed adapter before the functional shortcut. A one-method object with
+instance state and a fieldless object with multiple methods therefore share
+the same per-method capture rebinding, while a fieldless one-method interface
+still uses the closure adapter. The new fieldless `CapturedPairOps` fixture
+returns `14` from two methods reading the escaped factory value. The mutable
+`CapturedCounter` fixture retains both factory `bonus = 2` and its own
+`Cell<i32>` total across two calls, returning `3` then `7`. Java
+[`repro/AnonymousObjectCapturePaths.java`](repro/AnonymousObjectCapturePaths.java)
+prints the same `14`, `3`, `7`, `7`, including a second alias to the same
+counter. The full `fixtures` anonymous subset passes 58/58 after routing
+object-backed forms through the common path and sharing class dispatch storage.
+
+Codex verification 2026-09-19: the static-reachability closure now includes
+declared interfaces as well as classes. A statically reachable class that owns
+an interface field gets a sync cell (`Arc<Mutex<T>>`), so the field's
+`Box<dyn Interface + Send>` does not also have to be `Sync`. The anonymous
+adapter for that interface uses `Arc<Mutex<Adapter>>`. The Java oracle
+[`repro/AnonymousInterfaceTransitiveStatic.java`](repro/AnonymousInterfaceTransitiveStatic.java)
+and `fixtures::statically_reachable_field_carries_anonymous_interface_safely`
+both return `4`; `storage_strategy::constructor_mutation_tests::statically_reachable_interface_container_needs_sync_cell`
+pins the placement. This is a
+specific source-field reachability path, not a claim of complete object-graph
+or collection-element coverage. A follow-up also propagates static
+reachability across class inheritance, including an inherited interface field
+in a flattened subclass. The Java oracle
+[`repro/AnonymousInterfaceInheritedStatic.java`](repro/AnonymousInterfaceInheritedStatic.java)
+and `fixtures::static_subclass_reaches_inherited_anonymous_interface_field`
+both return `4`; the placement guard is
+`storage_strategy::constructor_mutation_tests::statically_reachable_subclass_inherits_interface_cell_requirement`.
+The full library suite passes 1087/1087 after this follow-up.
+
+Codex verification 2026-09-19: static array elements and local generic-list
+elements can each own a stateful anonymous interface object. The local
+collection insertion shape now retains `BoxedDynTrait` from its storage slot,
+so `Vec::push` receives the owned `Box<dyn Trait>` rather than a borrowed
+trait view. The Java oracle
+[`repro/AnonymousInterfaceCollection.java`](repro/AnonymousInterfaceCollection.java)
+and `fixtures::{static_array_element_carries_anonymous_interface_state,
+local_generic_collection_element_carries_anonymous_interface_state}` return
+`4` for both paths. Static generic-list mutation is now also covered for
+`add`, indexed insertion, `set`, and `remove(index)`: a
+zero-argument static collection initializer uses the ordinary collection
+constructor lowering, and these operations use the guarded persistent vector
+after evaluating its argument. The
+[`repro/AnonymousInterfaceStaticList.java`](repro/AnonymousInterfaceStaticList.java)
+oracle and `fixtures::static_generic_collection_element_carries_anonymous_interface_state`
+return `4` for aliasing and `307` after structural edits. An owned
+`List.get`-as-`List.add` argument reads the same static before the lock and
+clones the anonymous-object handle; `set` and `remove(index)` return owned
+interface values without double boxing, preserving aliases after removal.
+Other mutating static collection methods are not covered;
+they can still act on the getter's cloned vector unless given the same
+storage-aware lowering.
+
+Default-bearing interface traits now emit shared-handle forwarding from their
+canonical method signatures, including default methods; calls are qualified
+by the exact trait to avoid parent/child name collisions such as `as_any`.
+The inherited-default and colliding-parent default fixtures both compile and
+run through an `Rc`-backed anonymous object.
+Trait-to-implementation forwarding now uses the canonical rendered trait
+parameter shape rather than a stale signature-plan shape; an owned `String`
+or `Vec` trait argument is borrowed when the concrete implementation accepts
+`&str` or a slice. Guards:
+`fixtures::dyn_trait_interface_parameters_use_trait_object_views`,
+`fixtures::interface_forwarder_borrows_owned_array_for_slice_implementation`,
+and `representation_lowering::trait_impl_forwarded_arg_tests`.
+
 The same adapter now emits the whole source-superinterface chain with distinct
 contracts (including each comma-separated direct Java interface) when the
 anonymous target is a derived interface. This is required by Rust's explicit
 supertrait implementation rule and preserves inherited Java defaults without
 turning the object back into a closure. A repeated inherited abstract
-declaration is suppressed in the derived Rust trait, preventing two unrelated
-Rust methods from representing Java's one contract. Qualified interface-default
+declaration is collapsed to one method in the derived Rust trait, preventing
+two unrelated Rust methods from representing Java's one contract. Qualified interface-default
 calls (`Derived.super.defaultMethod()`) lower through that same adapter and see
 the current interior-mutable parent state. Class-`super` remains outside this
-interface-object slice. Colliding abstract signatures from unrelated parent
-interfaces remain a general interface-hierarchy representation issue, rather
-than an anonymous-adapter-only problem. Guard:
-`fixtures::fieldless_anonymous_interface_inherits_default_method`.
+interface-object slice. Colliding abstract signatures from unrelated parents
+now become one canonical Java method contract on the combined Rust trait;
+adapters implement every parent plus that canonical target surface, and named
+implementations use the same plan. The key is method name plus erased parameter
+types, so same-arity overloads do not collide. Guards:
+`fixtures::fieldless_anonymous_interface_inherits_default_method`,
+`fixtures::anonymous_interface_collapses_matching_parent_contracts`, and
+`fixtures::anonymous_interface_matches_overloads_by_erased_parameter_contract`.
+This also applies inside a derived-interface default body: when two
+abstract-only parents contribute one erased contract, the derived trait owns
+that canonical method and redundant parent bounds are omitted so ordinary Rust
+method lookup is unambiguous. Guard:
+`fixtures::anonymous_interface_default_method_uses_canonical_colliding_parent_contract`.
+For a derived trait without default methods, the anonymous adapter also
+implements that contract when it comes from only one parent, and when the
+child directly redeclares it. A local declared as
+the parent interface now retains the parent's boxed-trait dispatch instead of
+the initializer child's dispatch, so the owned `From<Box<dyn Child>>` upcast
+runs before later calls. This covers both the first and second parent in a
+comma-separated `extends` declaration. Guards:
+`fixtures::anonymous_interface_upcasts_to_parent_at_local_assignment` and
+`fixtures::anonymous_interface_redeclared_parent_contract_has_both_trait_impls`.
+Covariant inherited contracts are now selected independently of parent order:
+`Object value()` and `String value()` combine as `String value()` on the child,
+for both anonymous adapters and named implementers. Calls through either child
+resolve as `String`, while a named implementation of the `Object` parent boxes
+its covariant result for that parent trait. The executable
+[`AnonymousCovariantParentContract.java`](repro/AnonymousCovariantParentContract.java)
+oracle prints `16`, matching
+`fixtures::anonymous_interface_collisions_select_covariant_return_independent_of_parent_order`.
+This verifies the `Object`/`String` slice, not arbitrary covariant reference
+hierarchies.
+Generic specialization has a passing bounded interface-chain path, but remains
+incomplete for general defaults and shared mutable generic carriers. In the executable
+[`AnonymousGenericContractCollision.java`](repro/AnonymousGenericContractCollision.java)
+oracle, `Source<T>.value()` and `Named.value()` meet as `String value()` on a
+`Source<String>, Named` child and print `5`. The canonical contract planner
+now substitutes arguments through successive `extends` edges, so the derived
+trait emits `value(): String`; a focused unit test also checks that
+`Source<T>.echo(T)` becomes `echo(String): String` through `Relay<String>`.
+The generic parent traits now declare their type parameters, and parameterized
+trait-object slots, adapter implementations, and owned upcast carriers agree on
+`Source<String>` and `Relay<String>` rather than leaving `T` or `U` free.
+The longer [`AnonymousGenericContractChain.java`](repro/AnonymousGenericContractChain.java)
+oracle prints `12` for a `Source<T> <- Relay<U> <- Joined` chain with both
+`value()` and `echo(T)`. A passing generated-crate contract test,
+`fixtures::anonymous_generic_parent_contract_specializes_adapter_and_upcast`,
+checks the result `12`, including inherited methods on `Relay`. The
+parameterized `Joined` to `Source<String>` assignment now reaches its generated
+owned upcast; the formerly reported same-trait coercion was a stale local
+dispatch shape and is fixed for non-generic parent assignments.
+The hierarchy reachability check now traverses every interface parent and
+erases type arguments only for matching, while preserving explicit package
+qualification and ambiguous-name safeguards (guard:
+`lower::tests::source_subtype_conversion_follows_parameterized_interface_chain`
+plus the existing combined-context identity tests).
+The ancestor-instantiation planner now composes `Relay<String>` and
+`Source<String>` from the chain (guard:
+`representation_lowering::type_emission_tests::ancestor_instantiations_compose_type_arguments_across_interface_edges`),
+and type arguments are threaded through trait emission, object slots, adapters,
+forwarding implementations, and upcasts for this chain. Generic immutable
+interfaces use direct `Rc`/`Arc` forwarding only: direct and `RefCell`/`Mutex`
+blanket implementations for the same parameterized trait overlap under Rust
+coherence. A distinct carrier type is still needed for both handle forms to
+coexist, and this fixture does not prove general generic defaults or arbitrary
+reference-covariant collisions.
+
+Codex verification 2026-09-19: the bounded generic-default path now declares
+`SourceWithDefault<T>` with an owned `T` return and lowers a default body that
+returns another owned `T` without inventing a `Clone` bound. A call on a
+derived boxed interface is routed through its parameterized parent upcast,
+so the inherited default dispatches on the same anonymous adapter. Upcasting
+an existing boxed interface value clones its handle before conversion: Java's
+source and parent variables remain usable aliases. The executable
+[`AnonymousGenericDefault.java`](repro/AnonymousGenericDefault.java) and
+`fixtures::anonymous_generic_parent_default_method_preserves_specialized_contract`
+agree on `10` for the generic return and `15` for an inherited default with
+an integer argument; all 81 anonymous fixtures and 1,091 library tests passed
+after the added argument check.
+This verifies one generic default body and inherited call shape, not every
+generic default, collision, or mutable shared-carrier combination.
+
+Codex verification 2026-09-18: each derived-parent pair emits an owned carrier
+and `From<Box<dyn Derived>> for Box<dyn Parent>`. The borrowed-parameter path
+now selects that conversion with fully named source and target box types before
+projecting `&dyn Parent`, avoiding Rust's ambiguous `Into`/`AsRef` inference.
+The executable Java oracle [`repro/InterfaceUpcast.java`](repro/InterfaceUpcast.java)
+and `fixtures::anonymous_interface_upcasts_to_parent_at_source_call_argument`
+pass. Class-anonymous carriers use a separate bounded path: a local anonymous
+Rust struct is returned through its source hierarchy carrier, not as the
+concrete Java superclass struct.
+The class-super oracle establishes the required representation boundary:
+[`repro/AnonymousClassSuper.java`](repro/AnonymousClassSuper.java) now lowers
+through `BaseValue::Anonymous(Rc<dyn BaseAnonymousDispatch>)`. The local
+adapter composes its initialized `Base`, forwards `value(int)` through the
+carrier, and its Java `super.value(input)` calls that composed base directly;
+the executable fixture returns `14`. An inherited base field read through the
+returned carrier (`make().offset`) is dispatched through a virtual getter and
+returns `3`. A value-copy fallback is semantically invalid and is not used.
+Within that same bounded class-adapter grammar, one override may call another
+through `this` (`this.doubled(input)`), which lowers to the adapter's virtual
+method and preserves the anonymous override; the oracle's `forwarded()` path
+returns `14`.
+
+The class carrier's anonymous dispatch handle is now shared independently of
+whether an outer storage slot also selects `Rc`. Body lowering preserves the
+carrier shape rather than turning it into erased `Object`, and slot-aware fresh
+construction applies the representation plan's handle placement. The
+[`repro/AnonymousClassAlias.java`](repro/AnonymousClassAlias.java) Java oracle
+and `fixtures::anonymous_source_class_assignment_shares_mutable_instance_state`
+both return `12` after writes through two base-typed aliases. General
+anonymous-class statement lowering still lies outside this bounded adapter.
+
+For a class carrier reachable from a process-wide static, the anonymous
+variant instead stores `Arc<Mutex<dyn BaseAnonymousDispatch + Send>>`; its
+forwarding and field access lock the payload and identity uses `Arc::ptr_eq`.
+Static field initialization now routes an anonymous constructor through the
+same slot-aware lowering rather than falling back to a closed-enum default.
+The [Java oracle](repro/AnonymousClassStatic.java) and
+`fixtures::static_reachable_anonymous_class_keeps_dispatch_and_state` return
+`4`. The related directly static-stored interface case now uses a `Send`
+supertrait and only `Arc<Mutex<T>>` shared forwarding; eligible fieldless
+one-method objects use the sendable object adapter instead of the local `Rc`
+closure adapter. The
+[`repro/AnonymousInterfaceStatic.java`](repro/AnonymousInterfaceStatic.java)
+Java oracle and
+`fixtures::{static_reachable_anonymous_interface_keeps_dispatch_and_state,
+static_reachable_single_method_anonymous_interface_uses_send_object}` agree
+on `4`, inherited default `8`, and single-method `5`. Detection currently
+covers directly declared process-wide static interface fields, not transitive
+reachability through every source object graph.
+The same class slice preserves a sequential run of ordinary initialized locals
+before the return, including a local initialized by a direct `super` call (`int
+base = super.value(input); return base * 2;`). Each initializer is rebound
+through the adapter before it becomes a Rust local, retaining Java evaluation
+order. Broader local control flow and mutation remain outside this class path.
+Initialized immutable primitive or `String` anonymous-class fields are now
+adapter-owned
+state rather than discarded local syntax. Bare and `this.field` reads rebind
+to `self` in the class-super path; the oracle's
+`super.adjusted(input) + this.bonus` returns `9`. Field mutation and
+arbitrary reference/shared captures remain separate work. A primitive factory
+value may initialize that adapter
+field (`int capturedBonus = bonus`); its `this.capturedBonus` read survives the
+return boundary and is execution-guarded by the same oracle. An owned `String`
+field may likewise initialize from a borrowed factory parameter; the oracle
+returns `"left"` through its `label()` override after the carrier boundary.
+The same oracle also covers the exact primitive update form
+`int next = this.total + input; this.total = next; return total;`: the adapter
+stores `total` in `Cell<i32>`, evaluates the local before the write, and two
+`tick` calls through one returned `Base` carrier retain the state and sum to
+`7`. The equivalent parser-normalized `+=` form is also covered. General
+class-anonymous mutation/control flow and
+arbitrary reference/shared captures remain outside this class path.
+Read-only lexical captures now become class-adapter fields rendered with their
+planned slot shapes, so `captureOnly(11)` returns a carrier whose later method
+call reads `11` without referring to the factory's Rust scope. A captured
+mutable-object field read is also receiver-aware: after the caller changes
+`CapturedNode.value` from `3` to `12`, the returned carrier observes `Ok(12)`
+through its planned shared handle; the oracle's `node.read()` call uses the
+same projected receiver, including when reached through an anonymous-only
+`this.helperObserved()` call. One projected captured-object mutating-call/read pair
+is also covered: an override uses `node.set(17)` then `node.read()`, and the
+caller observes `Ok(17)` through its original handle. Broader captured-object
+statement/control flow remains outside this class path.
+For the exact owned-`String` local-and-update form `String next = value;
+this.mutableLabel = next; return mutableLabel;`, the class adapter uses
+`RefCell<String>`: replacement owns the borrowed parameter and reads clone the
+value before it leaves the `&self` dispatch boundary. The oracle sets and then
+reads `"right"` through the same returned carrier. Arbitrary reference fields
+and compound String expressions remain outside this class path.
+The primitive class path also covers the exact guarded update
+`if (enabled) { this.total += input; } return total;`. A simple local or
+parameter condition controls one adapter-field write; the oracle writes `4`
+with `true` and observes `4` after a later `false` call. General branches and
+control-flow nesting remain outside this class path.
+
+The guarded primitive update now also accepts an `if/else` whose two branches
+write the same adapter `Cell` field. The class oracle applies `+2` in the true
+branch and `+2 * 3` in the false branch, observing `8` after both calls;
+bare Java field reads in the final return are rebound to the same cell.
+The identical bounded grammar is valid for an owned `String` field through
+`RefCell<String>`: `conditionalLabel(true)` writes `"yes"`, and the following
+false call writes and returns `"no"` through the escaped carrier.
+
+Receiver-aware ordinary locals now have a bounded class-adapter form: a method
+may initialize any sequential run of locals from adapter fields, lexical
+captures, earlier locals, a direct composed-base call, or `this.helper()` and
+return a local or primitive arithmetic rooted in it. Initializers are rendered
+through the adapter receiver (`self.captured_bonus` / `self.helper_total()`),
+so they do not refer to the factory scope after the anonymous object escapes.
+The class-super fixture's `localPlus()` returns `9` from `int local =
+this.capturedBonus; return local + input;`; `chainedLocalPlus()` verifies a
+two-local chain; and `manyLocalPlus()` verifies a three-local sequence whose
+first initializer calls the sibling helper before it combines captured state.
+That same adapter-local renderer now supports local reassignment, ordinary
+expression statements, and nested `if`/`else` blocks whose conditions read
+adapter state or locals. `localControl(true, 4)` follows a nested branch and
+returns `10`; the false branch returns `4`. Field writes remain on the separate
+`Cell`/`RefCell` storage path but are now emitted by this renderer too, so they
+can interleave with local control flow: `interleavedUpdate` initializes a local
+from `this.total`, writes the `Cell` in each branch, and returns `5`/`6` for
+the true/false paths. Loops/try scopes and unmodeled reference-field layouts
+are not yet admitted by this tier.
+Captured mutable-object receivers are rebound through their adapter field in
+the same renderer. `capturedConditional` calls `node.set(value)` only in its
+true branch and then calls `node.read()`; the caller observes the shared node
+through both paths (`12 + 12 = 24`), demonstrating that the branch did not
+fall back to a factory-scope reference or a value copy.
+Class `super` is available in branch-local returns as well: `branchSuper` uses
+`super.branchSuper(input) + this.capturedBonus` only in its true branch and
+returns `9`, while the false branch returns the captured adapter field (`5`).
+An unlabeled `while` loop now uses the same renderer: `loopUpdate` advances an
+adapter-local counter and writes `this.total` on each iteration, returning `3`
+through the escaped carrier. A basic unlabeled C-style `for` is lowered with
+the same initializer/condition/body/update order as an explicit Rust `while`;
+`forUpdate` exercises `local++` and returns `4`. An unlabeled `break` is also
+safe in the rendered loop body: `breakUpdate` exits after two adapter `Cell`
+writes and returns `2`. Unlabeled `continue` is renderer-contextual: it is a
+direct Rust continue for `while`, runs the post-body update before continuing a
+C-style `for`, and rechecks the condition before continuing a `do`/`while`.
+The three guards return `2`, `2`, and `1` respectively. Bounded ordinary and
+labeled blocks are now covered by the same renderer; enhanced-for forms beyond
+the bounded primitive-array parameter case and try scopes remain outside this tier.
+The same post-body update route also covers assignment-form updates:
+`forAssignmentUpdate` uses `local = local + 1` and returns `3` after three
+adapter `Cell` writes.
+The class adapter also preserves labeled `while`, C-style `for`, and `do` loops
+with labeled `continue` and `break`. Its capability check admits only active
+loop labels; the renderer carries each target's continuation action so a `for`
+update or `do` post-condition executes before a labeled jump, including a
+jump from a nested loop. The mutation scan sees writes nested in those loops.
+The Java
+[`AnonymousClassLabeledWhile.java`](repro/AnonymousClassLabeledWhile.java)
+oracle and
+`fixtures::anonymous_source_class_labeled_while_rebinds_receiver_and_control_flow`
+agree on `9`, `15`, `13`, and `11` for the three loop forms
+and an inner-to-outer labeled continue. The 81 anonymous fixtures and 1,091
+library tests passed at that checkpoint. Bounded labeled blocks are now
+covered as noted above; other enhanced-for forms remain open.
+Receiver-aware branch expressions now include unary `!`, `-`, and `+` for the
+primitive tier. `unaryBranch(false, 4)` negates its condition and returns the
+adapter capture (`5`); the true path returns `-4`.
+An unlabeled `do`/`while` emits a Rust `loop` with its condition checked after
+the rebounded body. `doWhileUpdate(0)` therefore writes the escaped `Cell`
+once and returns `1`, demonstrating body-before-condition ordering. Adapter
+local declarations retain their Java primitive/String type in generated Rust,
+so literal initializers used in later wrapping arithmetic do not become
+ambiguous.
+Direct arithmetic needs no synthetic local: `directFieldPlus()` returns
+`this.capturedBonus + input` through the same receiver-aware adapter operands,
+also yielding `9` in the executable carrier fixture.
+
+### Next class-adapter milestone
+
+The remaining class-anonymous boundary is no longer a carrier representation
+choice. It is general method-body rebinding: transform anonymous `this` field
+and helper projections, captures, and `super` calls into an adapter-local IR
+before ordinary statement lowering. The current renderer owns primitive/String
+locals, adapter-field writes, and nested conditionals, but a full pass must
+still cover arbitrary reference fields, other labeled statements, broader enhanced `for` and try
+scopes, and broader receiver expressions.
+
+The planner and renderer must advance together: a receiver-field write through
+an adapter-local is not admitted until the same per-anonymous-body capability
+record proves that normal statement lowering can consume the local's slot
+shape. This keeps an unsupported body from silently falling back to a nominal
+base value while the general adapter-local IR is introduced.
+
+The class-carrier reproducer
+[`repro/AnonymousClassDirectMemberWrite.java`](repro/AnonymousClassDirectMemberWrite.java):
+`this.node.value = value` in a `Base` override must mutate the caller's node
+through the adapter field rather than make anonymous construction fall back to
+the nominal base. The class capability record now recognizes the exact
+write/read pair, storage facts mark the retained declared-class field mutable,
+and lowering emits its `Rc<RefCell<Node>>` receiver write. The fixture guard
+`fixtures::anonymous_class_carrier_writes_through_named_reference_field`
+also preserves a primitive method local before that write:
+`int next = value + 1; this.node.value = next; return this.node.value;`
+returns `24`. Replacement of the adapter field, arbitrary member targets, and
+control-flow-containing writes remain separate work.
+
+Storage planning now also walks nested anonymous method blocks when it records
+direct member writes through an anonymous field. Thus an `if (enabled) {
+this.node.value = value; }` body selects `SharedLocal` for `Node`. The class
+capability record and local-statement renderer now admit that same direct
+nested target: a local `next` is computed first, the true branch writes `24`
+through the shared receiver, while the false branch writes `26` through that
+same caller-visible handle.
+Guards: `storage_strategy::tests::nested_anonymous_field_member_write_marks_retained_type_mutable`
+and `fixtures::anonymous_class_carrier_writes_through_named_reference_field`.
+The same class field initializer now clones an existing same-typed factory
+handle rather than moving it into the carrier. That lets the factory retain its
+alias after construction; a `while` body writes `29` through the adapter field
+and the factory observes `29` through its original handle. Guard:
+`fixtures::anonymous_class_carrier_writes_through_named_reference_field`.
+
+The first named reference-field milestone now uses that required slot plan: an
+anonymous class field's declaration is rendered from its owned storage shape
+and its initializer is lowered into that same assignment slot. Thus `new
+CapturedNode(7)` becomes `Rc<RefCell<CapturedNode>>` in both places, and a
+`this.localNode.read()`, `this.localNode.value`, or
+`this.localNode.set(value)` receiver is lowered via the ordinary shared-handle
+projection rather than a raw `self.local_node` receiver.
+`AnonymousClassSuper.fieldNodeValue()` and `fieldNodeMutate()` return `7` and
+`17` through the escaped `BaseValue` carrier. The same field may be
+initialized from an externally aliased `CapturedNode`: later external mutation
+is read as `12`, and an adapter mutation is read as `17` through the original
+handle. This does not yet admit arrays, generic/reference assignment, nullable
+reference fields, or arbitrary reference-valued control flow.
+The same named-field slot may now be replaced by a plain construction: a
+mutable `CapturedNode localNode` is stored as
+`RefCell<Rc<RefCell<CapturedNode>>>`, and `this.localNode = new
+CapturedNode(value)` lowers the RHS into the field's existing slot before
+replacing that outer cell. The escaped carrier's subsequent read returns the
+replacement value (`21`). Assignment from arbitrary reference expressions,
+nullable/generic fields, and nested reference control flow remain open.
+Assignment between same-typed adapter fields also preserves the planned
+handle: `this.targetNode = this.sourceNode` clones the source handle into the
+target field's outer cell rather than cloning a `CapturedNode` payload. The
+carrier fixture reads `11` afterward. Cross-typed conversion and arbitrary RHS
+expressions still require the general typed-local rebinding pass.
+Codex verification 2026-09-19: a nested `if` can replace a named anonymous
+class field's handle without replacing a separately held source alias. The
+[`AnonymousClassNestedReference.java`](repro/AnonymousClassNestedReference.java)
+oracle and
+`fixtures::anonymous_class_nested_reference_field_replacement_preserves_source_alias`
+both return `373`: the adapter first reads `3`, then reads its replacement
+`7`, while the source alias still reads `3`. This narrows, but does not close,
+the nested-reference-control-flow boundary above.
+
+A parameter-to-field ownership boundary is now covered for a shared,
+single-threaded named source class. The Java oracle
+[`AnonymousClassParameterFieldAlias.java`](repro/AnonymousClassParameterFieldAlias.java)
+returns `733` after two factory calls, one replacing its field and one keeping
+the source reference. The translated `make` now accepts
+`Rc<ParameterBranchNode>`, its call sites clone that handle, and the anonymous
+field retains a clone in `RefCell<Rc<ParameterBranchNode>>`. Guard:
+`fixtures::anonymous_class_factory_parameter_field_keeps_shared_handle`
+asserts that ABI shape and runs the generated crate to `733`. It also checks
+`this.node == original` before and after replacement through `Rc::ptr_eq`:
+both factory objects initially share the caller's handle, and only the first
+loses that identity after replacing its own field. The parameter
+ownership choice is restricted to methods that retain the parameter in an
+anonymous field; a blanket shared-immutable parameter widening did not pass
+the broader fixture run and would change unrelated method ABIs. Cross-thread
+`Arc` capture and indirect
+reference initializers remain outside this proven slice.
+That rebinding pass now has its first named-local slice: a `CapturedNode`
+local is declared with its planned shared slot type, retained in the adapter
+block environment, and ordinary member access uses the normal handle receiver.
+The carrier oracle reads `31` from `local.value`; assigning that local to an
+anonymous reference field then reads `29`. Reassignment uses the same local
+slot: `local = new CapturedNode(41)` replaces the handle and later reads `41`.
+A same-typed anonymous field may initialize that local by cloning its planned
+handle; the local reads `7`, then `local.set(43)` is observed through the
+original adapter field as `43`. Nested scopes and arbitrary reference
+initializers remain open.
+Two same-typed named locals now use the same owned-slot conversion: the second
+clones the first handle, so `second.set(48)` is observed through `first` as
+`48` rather than moving the handle or copying its payload.
+The same conversion applies on reassignment: after `second = first`, a
+mutation through `second` is visible through `first` as `52`.
+Codex verification 2026-09-19: nested class-adapter `if` and `while` bodies
+inherit the method-local slot environment. A `CapturedNode local =
+this.localNode` handle can be used inside a branch or loop, and writes through
+it remain visible through the escaped carrier field. The executable
+`AnonymousClassSuper` fixture checks `localNodeNestedBranch()` returns `53`
+and `localNodeNestedLoop()` returns `9`. The same environment handoff is now
+used by `do/while`; C-style `for` also includes its initializer declarations
+in the loop-local shape environment. The executable fixture now checks both
+additional loop forms with a named reference local and two writes through its
+shared handle, each returning `9` through the escaped carrier field.
+The fixture also caught a borrow-order defect: `local.set(local.read() + 1)`
+previously panicked because the mutable receiver borrow started before the
+argument's read. The adapter statement renderer now evaluates arguments into
+temporaries before calling through a local receiver when an argument reads
+that same receiver. The loop guard executes that exact self-referential form
+twice and observes the final value `9` through the carrier field.
+Capture discovery for class-anonymous methods now tracks local declarations
+within their lexical blocks and selects each method's own free reads from the
+adapter's captured fields. A method-local `bonus` returns its assigned `13`
+rather than the factory's `5`; sibling methods can still read the factory
+capture while their parameter or local also bears that name. The
+`AnonymousClassSuper` fixture checks the combined result `27`, and
+[`repro/AnonymousCaptureShadow.java`](repro/AnonymousCaptureShadow.java)
+compiles and prints `27` with Java 19.
+Object-backed interface adapters now use the same scoped free-read discovery
+and select captures per implementation method. Their field/capture rebinder
+stops converting a bare name after a local declaration shadows it, while an
+explicit `this.field` still addresses the instance. The focused
+`stateful_anonymous_interface_distinguishes_capture_from_sibling_local_shadow`
+fixture returns `25` across a factory capture, sibling local, and explicit
+field read. The Java reproducer
+[`repro/AnonymousInterfaceCaptureShadow.java`](repro/AnonymousInterfaceCaptureShadow.java)
+also prints `25`. The related 19 stateful anonymous-interface fixtures pass.
+The read-only object adapter now also admits reassignment of a method local
+declared earlier in the same lexical scope, including from a nested `if/else`
+branch. Its representation gate checks the same declaration condition, so a
+bare anonymous-field write cannot enter that local path. The executable
+`stateful_anonymous_interface_reassigns_receiver_aware_local_in_branch`
+fixture and Java
+[`repro/AnonymousInterfaceLocalBranch.java`](repro/AnonymousInterfaceLocalBranch.java)
+both return `6` when the false branch reads the factory capture and `7` when
+the true branch uses a local with the same name. General reference-valued
+statements remain open.
+The same declaration-aware capability and scoped rebinder now admit ordinary
+method-local updates in unlabeled `while`, `do/while`, and C-style `for`
+statements without mutating anonymous instance fields. The executable
+`stateful_anonymous_interface_reassigns_locals_across_loop_forms` fixture and
+Java [`repro/AnonymousInterfaceLocalLoops.java`](repro/AnonymousInterfaceLocalLoops.java)
+agree on six results: `5`, `3`, `5` for the basic loop forms, `3` for a `while`
+break, `5` for a `for` continue, and `2` when a `for` initializer shadows the
+factory capture. Bounded labeled `while`, `for`, and `do/while` loops are now
+covered separately above; other labeled statement forms, enhanced-for beyond
+primitive array parameters, try scopes, and
+general reference-valued interface statements remain outside this capability.
+The current focused `AnonymousClassSuper` fixture is retained as the executable
+baseline while that generalized rebinding pass is introduced.
+Anonymous-only helper methods are emitted in an adapter inherent impl, so a
+base override may call `this.helperTotal()` without treating the helper as a
+base override. The oracle writes `6` into the adapter `Cell` then reads `6`
+through that helper path.
+Carrier forwarding also reserves a collision-free internal payload binding: a
+Java parameter named `__java_carrier_payload` remains the method argument and
+returns `19`, while the generated match arm picks a suffixed payload binding.
+
+The same carrier contract now includes inherited source-class instance methods.
+An anonymous override of `Parent.inherited(int)` on a `Base extends Parent`
+adapter dispatches `super.inherited(input)` to its composed `Base`, while
+adapters that do not override the inherited method forward it normally. The
+class-super oracle verifies the override returns `7`; the representation-level
+guard verifies that the object-safe dispatch trait includes the inherited
+signature.
+
+The representation planner now records every unambiguous source class used as
+an anonymous-class target (`anonymous_class_base_requires_virtual_carrier`),
+including a regression guard for `new Base() {}`. It promotes that base to a
+carrier with an anonymous virtual payload and suppresses the diagnostic only
+for the verified class-super slice; broader adapter bodies remain diagnostic
+visible.
+Investigation of the oracle also established a prerequisite that was not
+visible at the representation boundary: source method signatures currently
+render `Base` directly even when slot dispatch chooses `BaseValue`. Therefore
+carrier-aware source signature rendering is now guarded even when signature
+planning began with a conservative concrete shape. Ordinary named-base
+construction and the virtual payload remain the next steps. Source carrier
+forwarding now also accepts parameterized instance methods (rather than only
+zero-argument accessors), which is required for the `value(int)` class-super
+oracle. The anonymous-base planning signal now also emits the global,
+object-safe `BaseAnonymousDispatch` surface from that callable base API; the
+local adapter implements this trait. Its boxed trait object has a generated
+clone companion, so the carrier can retain ordinary Java assignment and return
+flow. Promoting the plan before named construction and the payload exist would
+still leave anonymous construction unsupported.
+That payload also supplies composed-base forwarding for every non-overridden
+object-safe method, so an empty anonymous subclass is executable rather than a
+planner-only signal: `new Base(8) {}` returns the carrier and inherited
+`value(1)` returns `9` in the class oracle.
 
 That tier now includes interior-mutable primitive scalars: the exact
 single-field read-modify-write form (including `+=` after parser normalization)
@@ -97,6 +747,14 @@ This guarded assignment/owned-return route also covers the existing
 instead of leaking a `Ref` guard. Arbitrary reference fields remain open. Guard:
 `fixtures::mutable_stateful_anonymous_interface_allows_guarded_string_update`.
 
+The interface adapter also admits one receiver-aware mutable reference form:
+`this.node.value = value` where `node` is an initialized named source-object
+field. Representation eligibility and rendering share that exact capability;
+ordinary lowering projects the planned `Rc<RefCell<Node>>` receiver for the
+write, so the adapter and its original caller observe the same `8`. This is
+not general reference-field mutation or a general mutable-body grammar. Guard:
+`fixtures::stateful_anonymous_interface_writes_through_named_reference_field`.
+
 The approved read-only `if`/`return` grammar now recursively rebinds bare
 anonymous field reads as well as explicit `this.field` reads, keeping every
 branch on the adapter's instance state. Guard:
@@ -116,6 +774,45 @@ the strict non-void update form that returns the updated primitive field. It is
 still one `Cell<T>` field and not a general mutable-object representation.
 Guard:
 `fixtures::mutable_stateful_multi_method_anonymous_interface_returns_updated_counter`.
+
+The same adapter now preserves Java statement order for initialized primitive
+or `String` locals preceding that update: `int next = total + delta;
+this.total = next; return total;` becomes a local computed from `Cell::get()`,
+followed by one `Cell::set()` and the post-update return. A `String` field uses
+an owned clone from `RefCell<String>` before its replacement. Multiple such
+locals, their local reassignments, and bounded `if`/`else` local updates are
+supported before that final write; loops, try scopes, receiver mutation before
+it, and general control flow remain outside this tier. Guards:
+`fixtures::mutable_stateful_anonymous_interface_updates_field_through_local_variable`
+and
+`fixtures::mutable_stateful_anonymous_interface_updates_string_field_through_local_variable`,
+and
+`fixtures::mutable_stateful_anonymous_interface_conditionally_updates_string_local_before_field_write`,
+and
+`fixtures::mutable_stateful_anonymous_interface_conditionally_updates_local_before_field_write`.
+
+For the read-only object-backed path, captured factory values are now emitted
+as cloned adapter fields and rebound through `self` in the generated trait
+methods. That keeps captured state associated with the returned anonymous
+object rather than an invalid Rust function-item environment. The supported
+slice is cloned capture reads; mutation of a captured local remains a separate
+shared-handle problem. Guard:
+`fixtures::stateful_anonymous_interface_retains_captured_factory_values`.
+Owned `String` captures use the same cloned adapter-field route; guard:
+`fixtures::stateful_anonymous_interface_retains_captured_string_value`.
+The mutable-alias oracle is
+[`repro/AnonymousCapturedMutableAlias.java`](repro/AnonymousCapturedMutableAlias.java).
+It requires one `SharedLocal` `Node` handle to flow from the factory argument
+into the adapter field and remain observable after a caller-side mutation;
+direct cloned capture is intentionally not accepted for that shape. The storage
+planner now detects the anonymous method's lexically free declared-class locals
+and marks them locally aliased before adapter lowering; the complete path is
+guarded by
+`fixtures::stateful_anonymous_interface_preserves_captured_mutable_alias`.
+Assignment to a captured Java local remains outside this adapter tier.
+Read-only local declarations use the same field rebinding and remain aligned
+between representation analysis and lowering; guard:
+`fixtures::stateful_anonymous_interface_reads_field_through_local_variable`.
 
 Codex verification 2026-09-18 shared trait forwarding: a mutating trait method
 now emits cell-handle implementations for both `Rc<RefCell<T>>` and
@@ -2378,3 +3075,157 @@ context `Action` fixture executes and observes `"23"` through its alias. This
 does not claim general anonymous-object support: interfaces with parameters,
 anonymous bodies using `this`/`super`, and more complex receiver adaptation
 remain outside the closure-adapter boundary.
+
+## Update 2026-09-18 — interface-upcast handoff is closed for owned arguments
+
+The generated source trait surface includes an identity-preserving carrier and
+`From<Box<dyn Derived>> for Box<dyn Parent>` implementation for each Java
+interface parent. At a receiverless/static-call argument, lowering now invokes
+that `Into` implementation with both box types explicit, then projects the
+result to `&dyn Parent`. The Java oracle
+[`repro/InterfaceUpcast.java`](repro/InterfaceUpcast.java) and the generated
+fixture pass. Class-anonymous carriers and class `super` remain separate open
+work.
+
+## Update 2026-09-19 — bounded class-anonymous enhanced-for lowering
+
+The class-anonymous adapter now accepts an enhanced `for` over a primitive
+array method parameter, including receiver-state writes and labeled
+`break`/`continue`. Its dispatch and carrier methods use a borrowed slice for
+that array parameter, matching the ordinary source-method ABI instead of
+passing a `Vec` across the virtual boundary. The Java oracle
+[`repro/AnonymousClassEnhancedFor.java`](repro/AnonymousClassEnhancedFor.java)
+prints `13`; `fixtures::anonymous_source_class_enhanced_for_rebinds_array_parameter_and_state`
+executes the translated result with the same value. This is a bounded path:
+enhanced-for over other collection or array expressions, mutable array views,
+and the remaining anonymous-object cases are not established by this fixture.
+
+## Update 2026-09-19 — virtual array ABI follows solved method contracts
+
+A class-anonymous carrier now renders primitive-array parameter types from the
+source method's solved signature and carries its exception result type through
+the dispatch trait, carrier, and non-overridden adapter forwarder. This avoids
+advertising `&[i32] -> i32` when the base method actually requires
+`&mut [i32] -> Result<i32, JavaException>`. The exact resolved source call
+also marks a caller array local mutable even when semantic usage classifies the
+boundary as `KnownContentRead`; that classification does not cancel a `&mut`
+callee ABI. [`repro/AnonymousClassArrayMutation.java`](repro/AnonymousClassArrayMutation.java)
+prints `10`, matched by
+`fixtures::anonymous_source_class_inherited_method_mutates_array_argument`.
+The signature-level regression is
+`signature::tests::mutable_array_argument_marks_caller_local_binding_mutable`.
+This establishes mutable-array forwarding through an inherited base method,
+not general enhanced-for over mutable arrays or all fallible overrides.
+
+## Update 2026-09-19 — anonymous override honors a fallible base ABI
+
+The class-anonymous override renderer now receives the base method's solved
+parameter shapes and exception result contract. For supported ordinary
+statements it returns `Ok(...)` at explicit value returns and lowers checked
+primitive-array reads in propagating mode. Two Java oracles pin both sides:
+[`repro/AnonymousClassFallibleOverride.java`](repro/AnonymousClassFallibleOverride.java)
+prints `0` when an override replaces a throwing base array access with a
+non-throwing `length` read;
+[`repro/AnonymousClassFallibleBody.java`](repro/AnonymousClassFallibleBody.java)
+prints `7` and `caught` when the override itself selects `values[1]` and is
+called with a valid then empty array. The translated fixtures
+`anonymous_source_class_override_preserves_fallible_base_contract` and
+`anonymous_source_class_override_propagates_its_own_array_failure` pass. This
+does not establish other `super` targets, all throwing expressions, or every
+special-case anonymous method renderer under a fallible contract.
+
+## Update 2026-09-19 — fallible same-method class-super forwarding
+
+An anonymous override can now return its base method's fallible result
+directly, or bind it to a method local with `?` before computing a further
+value. The latter used to assign `Result<i32, JavaException>` to an `i32`
+local. Because anonymous `super` resolution does not always supply the
+ordinary callable-analysis result bit, the adapter also recognizes a
+same-method `super` call under its solved fallible contract. The Java oracle
+[`repro/AnonymousClassFallibleSuper.java`](repro/AnonymousClassFallibleSuper.java)
+prints `7`, `8`, `caught`, `caught`; the translated fixture
+`anonymous_source_class_fallible_super_return_preserves_result` verifies both
+values and both error paths. At this checkpoint, calls to a different `super`
+method and more complex control flow remained outside the verified slice.
+
+## Update 2026-09-19 — class-super calls use the selected target
+
+The class-anonymous adapter no longer substitutes the override's own method
+name for `super.other(...)`. It uses the resolved Rust target when available;
+otherwise it selects a source declaration by exact Java name and argument
+types, rejecting ambiguous matches. That avoids treating `checked` and
+`checkedViaLocal` as one Rust prefix family, and selects `base(int)` when a
+`base(String)` overload is present. The same selected declaration supplies
+fallibility for a local initialized from `super.checked(values)`, so an array
+error propagates before the local is bound. The Java oracle
+[`repro/AnonymousClassOtherSuperTarget.java`](repro/AnonymousClassOtherSuperTarget.java)
+printed `21`, `8`, `caught` at this checkpoint; the translated fixture
+`anonymous_source_class_super_call_uses_the_resolved_other_method` matches.
+This does not establish every argument coercion or nested expression form for
+class-`super` calls.
+
+## Update 2026-09-19 — nested class-super arithmetic preserves target and errors
+
+The class-anonymous return-expression renderer now selects the actual
+`super.base(value + 1)` target when the call is an arithmetic operand, rather
+than substituting the current override's base method. It handles either
+operand position, and applies `?` to a fallible `super.checked(values)` call
+before `wrapping_add`, so empty-array failures propagate through the fallible
+override contract. Numeric literals used as the receiver of `wrapping_add`
+retain their Java `int`/`long` type. The expanded Java oracle
+[`repro/AnonymousClassOtherSuperTarget.java`](repro/AnonymousClassOtherSuperTarget.java)
+printed `21`, `9`, `9`, `8`, `8`, `8`, then three `caught` lines at this
+checkpoint. The translated
+fixture `anonymous_source_class_super_call_uses_the_resolved_other_method`
+matches these values and error paths. The 1,092 library tests and 87
+anonymous fixtures passed. A separate fallibility-plan gap remained: an
+otherwise-infallible base method is not yet promoted to a `Result` contract
+solely because its anonymous override calls a fallible different `super`
+method. At this checkpoint, the fixture gave its `checkedExpr` contracts
+their own checked array access.
+
+## Update 2026-09-19 — anonymous override fallibility reaches the virtual slot
+
+The call graph now records an explicit relationship between an anonymous
+method and the exact inherited or direct base method contract it overrides.
+Fallibility equalizes across that relationship; constructing the anonymous
+object does not itself call the override and therefore does not make the
+factory fallible. Within an anonymous method, a class-`super` call can target
+the selected source method even when a same-named overload exists: the
+resolved Rust name is used when available, otherwise known Java argument
+types disambiguate the candidate. The expanded
+[`repro/AnonymousClassOtherSuperTarget.java`](repro/AnonymousClassOtherSuperTarget.java)
+prints `21`, `9`, `9`, four `8` lines, then four `caught` lines. The translated
+fixture verifies the same values and errors, including `checkedByOverride`,
+whose base declaration returns `-4` and is fallible only because its anonymous
+override calls `super.checked(values)`. The unit test
+`exception_plan::tests::fallible_anonymous_override_promotes_base_contract_not_factory`
+checks the contract, caller, factory, and nonthrowing `String` overload
+separately. At this checkpoint, all 1,093 library tests and 87 anonymous
+fixtures passed. Direct throwing expressions in an otherwise-infallible
+anonymous override were not yet separately seeded into the fallibility plan.
+The broader verification
+remains red in this worktree: `cargo test --test layering -- --quiet` has seven
+source-structure failures, and `cargo test --test fixtures -- --quiet` has
+20 failures, including non-anonymous simple-class and stream cases. These
+results are not evidence of overall audit closure.
+
+## Update 2026-09-19 — direct anonymous-body throws join the contract plan
+
+The call graph now retains anonymous method declarations under their callable
+keys. The existing fallibility seed checks can therefore inspect anonymous
+bodies for integer division, `Math.toIntExact`, nullable-receiver dereference,
+and explicit `throw`, then equalize the result with the selected base virtual
+contract. The class-anonymous statement renderer also supports an explicit
+throw of a newly constructed exception with literal arguments, including a
+guarded throw followed by a literal return. Java oracles
+[`repro/AnonymousClassDirectArrayContract.java`](repro/AnonymousClassDirectArrayContract.java)
+and [`repro/AnonymousClassDirectThrowContract.java`](repro/AnonymousClassDirectThrowContract.java)
+each print a value followed by `caught`; the translated fixtures verify `5`
+and `7` respectively and an error for each throwing path. The expanded
+`exception_plan::tests::fallible_anonymous_override_promotes_base_contract_not_factory`
+also checks direct array and explicit-throw promotion without making the
+factory fallible. All 1,093 library tests and 89 anonymous fixtures pass.
+The same seven layering tests remain red; the full fixture suite was not
+rerun at this checkpoint. Other exception expression shapes and the broader
+anonymous-object requirements remain open.

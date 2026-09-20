@@ -592,14 +592,75 @@ pub fn plan_program_fallibility(
             entry.reasons.push(FallibilityReason::DirectThrow);
         }
     }
+    // Anonymous methods are not members of a named TypeDecl, so the ordinary
+    // source-method seed passes above cannot inspect their bodies. The call
+    // graph retains their declarations under the same callable identities
+    // used by its override-contract edges.
+    for (key, method) in call_graph.anonymous_methods() {
+        let Some(body) = &method.body else {
+            continue;
+        };
+        let nullable_params = nullable_reference_param_names(&method.params);
+        let reasons = [
+            (
+                block_has_unhandled_integer_div_rem(body),
+                FallibilityReason::IntegerDivRemThrow,
+            ),
+            (
+                block_has_unhandled_math_to_int_exact(body),
+                FallibilityReason::MathToIntExactThrow,
+            ),
+            (
+                !nullable_params.is_empty()
+                    && block_has_unhandled_nullable_receiver_deref(body, &nullable_params),
+                FallibilityReason::NullReceiverThrow,
+            ),
+            (
+                block_has_unhandled_direct_throw(body, facts, &[]),
+                FallibilityReason::DirectThrow,
+            ),
+        ];
+        for (applies, reason) in reasons {
+            if applies {
+                let entry = callables.entry(key.clone()).or_default();
+                entry.returns_result = true;
+                if !entry.reasons.contains(&reason) {
+                    entry.reasons.push(reason);
+                }
+            }
+        }
+    }
     let override_groups = override_groups_for_program(program);
     let mut solve_iterations = 0usize;
     loop {
         solve_iterations += 1;
         let mut changed = false;
         for edge in call_graph.edges() {
-            if edge.kind() == crate::usage::CallGraphEdgeKind::HandledExceptionBoundary {
-                continue;
+            match edge.kind() {
+                crate::usage::CallGraphEdgeKind::HandledExceptionBoundary
+                | crate::usage::CallGraphEdgeKind::AnonymousClassMethod => continue,
+                crate::usage::CallGraphEdgeKind::AnonymousOverrideContract => {
+                    // An anonymous implementation and its virtual base slot
+                    // have one Rust return ABI. This is a contract equality,
+                    // not a call from the constructing method into the body.
+                    let returns_result = [edge.caller(), edge.callee()]
+                        .into_iter()
+                        .any(|key| callables.get(key).is_some_and(|f| f.returns_result));
+                    if returns_result {
+                        for key in [edge.caller(), edge.callee()] {
+                            let entry = callables.entry(key.clone()).or_default();
+                            if !entry.returns_result {
+                                entry.returns_result = true;
+                                entry
+                                    .reasons
+                                    .push(FallibilityReason::PropagatedFromOverride);
+                                changed = true;
+                            }
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
             }
             let callee_returns_result = callables
                 .get(edge.callee())
@@ -2436,6 +2497,183 @@ class FixedMetric implements Metric {
         }
 
         let _semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    }
+
+    #[test]
+    fn fallible_anonymous_override_promotes_base_contract_not_factory() {
+        let parsed = parse_java_source(
+            r#"
+class Base {
+    Base() {}
+    int checked(int[] values) { return values[0]; }
+    int checked(String ignored) { return -6; }
+    int slot(int[] values) { return -1; }
+    int direct(int[] values) { return -3; }
+    int explicit(boolean fail) { return -9; }
+}
+class Use {
+    static Base make() {
+        return new Base() {
+            @Override int slot(int[] values) {
+                return super.checked(values) + 1;
+            }
+            @Override int direct(int[] values) { return values[0]; }
+            @Override int explicit(boolean fail) {
+                if (fail) throw new IllegalStateException("boom");
+                return 7;
+            }
+        };
+    }
+    static int run(int[] values) { return make().slot(values); }
+    static int runDirect(int[] values) { return make().direct(values); }
+    static int runExplicit(boolean fail) { return make().explicit(fail); }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        let method_key = |type_name: &str, method_name: &str| {
+            let ty = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == type_name)
+                .expect("source type");
+            let method = ty
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == method_name => Some(method),
+                    _ => None,
+                })
+                .expect("source method");
+            CallableKey::source_method_for_type(ty, method)
+        };
+        let slot = method_key("Base", "slot");
+        let direct = method_key("Base", "direct");
+        let explicit = method_key("Base", "explicit");
+        let factory = method_key("Use", "make");
+        let caller = method_key("Use", "run");
+        let direct_caller = method_key("Use", "runDirect");
+        let explicit_caller = method_key("Use", "runExplicit");
+        let base = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+        let checked_string = base
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method)
+                    if method.name == "checked" && method.params[0].ty == JavaType::String =>
+                {
+                    Some(CallableKey::source_method_for_type(base, method))
+                }
+                _ => None,
+            })
+            .expect("nonthrowing overload");
+        let anonymous = call_graph
+            .edges()
+            .iter()
+            .find(|edge| edge.kind() == crate::usage::CallGraphEdgeKind::AnonymousOverrideContract)
+            .map(|edge| edge.callee().clone())
+            .expect("anonymous override contract edge");
+
+        assert!(fallibility.returns_result(&anonymous));
+        assert!(fallibility.returns_result(&slot));
+        assert!(fallibility.returns_result(&caller));
+        assert!(fallibility.returns_result(&direct));
+        assert!(fallibility.returns_result(&direct_caller));
+        assert!(fallibility.returns_result(&explicit));
+        assert!(fallibility.returns_result(&explicit_caller));
+        assert!(!fallibility.returns_result(&factory));
+        assert!(!fallibility.returns_result(&checked_string));
+    }
+
+    #[test]
+    fn fallible_anonymous_duplicate_parent_contracts_share_result_abi() {
+        let parsed = parse_java_source(
+            r#"
+interface LeftCheck { int value(boolean fail); }
+interface RightCheck { int value(boolean fail); }
+interface BothCheck extends LeftCheck, RightCheck {}
+interface GenericEcho<T> { T echo(T input, boolean fail); }
+interface StringEcho { String echo(String input, boolean fail); }
+interface JoinedEcho extends GenericEcho<String>, StringEcho {}
+class Use {
+    static BothCheck make() {
+        return new BothCheck() {
+            int total = 3;
+            public int value(boolean fail) {
+                if (fail) throw new IllegalStateException("boom");
+                return this.total;
+            }
+        };
+    }
+    static JoinedEcho makeEcho() {
+        return new JoinedEcho() {
+            int marker = 1;
+            public String echo(String input, boolean fail) {
+                if (fail) throw new IllegalStateException("boom");
+                return input;
+            }
+        };
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        for parent_name in ["LeftCheck", "RightCheck", "GenericEcho", "StringEcho"] {
+            let parent = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == parent_name)
+                .expect("parent interface");
+            let method = parent
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) => Some(method),
+                    _ => None,
+                })
+                .expect("parent contract");
+            let key = CallableKey::source_method_for_type(parent, method);
+            assert!(
+                fallibility.returns_result(&key),
+                "{parent_name} stays infallible"
+            );
+            assert!(call_graph.edges().iter().any(|edge| {
+                edge.kind() == crate::usage::CallGraphEdgeKind::AnonymousOverrideContract
+                    && edge.caller() == &key
+            }));
+        }
+        let factory = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Use")
+            .expect("factory owner");
+        for factory_name in ["make", "makeEcho"] {
+            let make = factory
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == factory_name => Some(method),
+                    _ => None,
+                })
+                .expect("factory method");
+            assert!(
+                !fallibility.returns_result(&CallableKey::source_method_for_type(factory, make))
+            );
+        }
     }
 
     #[test]

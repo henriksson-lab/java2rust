@@ -2847,13 +2847,53 @@ fn apply_new_target_with_optional_representations(
     {
         return sequence_like;
     }
-    function_call_projection(
+    let constructed = function_call_projection(
         constructor_owner_associated_path_projection(
             target.owner_shape(),
             target.rust_name(),
             facts,
         ),
         args,
+    );
+    wrap_source_hierarchy_carrier_constructor_value(constructed, target, representations)
+}
+
+fn wrap_source_hierarchy_carrier_constructor_value(
+    constructed: RustExpr,
+    target: &NewTargetPlan,
+    representations: Option<&RepresentationPlan>,
+) -> RustExpr {
+    let Some(representations) = representations else {
+        return constructed;
+    };
+    let owner_name = match &target.owner_shape().java_ty {
+        crate::java_ir::JavaType::Named { name, .. } | crate::java_ir::JavaType::Unknown(name) => {
+            name.as_str()
+        }
+        _ => {
+            return constructed;
+        }
+    };
+    if owner_name.is_empty() {
+        return constructed;
+    }
+    let Some(representation) = representations.type_representation(owner_name) else {
+        return constructed;
+    };
+    let crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+        carrier_name,
+        variants,
+    } = representation.representation()
+    else {
+        return constructed;
+    };
+    let owner_variant = crate::java_naming::rust_name_for_java_named_type(owner_name);
+    if !variants.iter().any(|variant| variant == &owner_variant) {
+        return constructed;
+    }
+    function_call_projection(
+        RustExpr::path([carrier_name.as_str(), owner_variant.as_str()]),
+        vec![constructed],
     )
 }
 

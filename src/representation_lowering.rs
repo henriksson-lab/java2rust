@@ -83,9 +83,16 @@ fn type_emission_for_with_facts_and_exceptions(
     };
     match representation.representation() {
         ObjectRepresentation::ConcreteStruct => RepresentationTypeEmission::LowerAsConcreteStruct,
-        ObjectRepresentation::DynTrait { trait_name } => RepresentationTypeEmission::RawRustItem(
-            trait_item_for_type(ty, trait_name, signatures, facts, exceptions),
-        ),
+        ObjectRepresentation::DynTrait { trait_name } => {
+            RepresentationTypeEmission::RawRustItem(trait_item_for_type(
+                ty,
+                trait_name,
+                signatures,
+                facts,
+                exceptions,
+                representations.storage_placement_for(&ty.name).sync(),
+            ))
+        }
         ObjectRepresentation::JavaEnum {
             enum_name,
             variants,
@@ -148,6 +155,8 @@ pub(crate) fn source_hierarchy_carrier_item_for_type(
     ty: &TypeDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+    support_program: &Program,
 ) -> Option<String> {
     let representation = representations.type_representation(&ty.name)?;
     let ObjectRepresentation::SourceHierarchyCarrier {
@@ -157,14 +166,167 @@ pub(crate) fn source_hierarchy_carrier_item_for_type(
     else {
         return None;
     };
+    let virtual_dispatch_trait = representations
+        .anonymous_class_base_requires_virtual_carrier(&ty.name)
+        .then(|| source_hierarchy_virtual_dispatch_trait_name(&ty.name));
     Some(source_hierarchy_carrier_item(
         carrier_name,
         variants,
         representations,
         facts,
         signatures,
+        exceptions,
         ty,
+        support_program,
+        virtual_dispatch_trait.as_deref(),
     ))
+}
+
+/// The object-safe surface an anonymous subclass uses when it occupies a
+/// source-class carrier.  It is emitted independently of the carrier enum so
+/// the eventual anonymous payload and ordinary named variants have one ABI.
+pub(crate) fn source_hierarchy_virtual_dispatch_trait_item_for_type(
+    representations: &RepresentationPlan,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+    support_program: &Program,
+) -> Option<String> {
+    if ty.kind != TypeKind::Class
+        || !representations.anonymous_class_base_requires_virtual_carrier(&ty.name)
+    {
+        return None;
+    }
+    let trait_name = source_hierarchy_virtual_dispatch_trait_name(&ty.name);
+    let methods = ty
+        .members
+        .iter()
+        .filter_map(|member| {
+            let Member::Method(method) = member else {
+                return None;
+            };
+            source_hierarchy_virtual_dispatch_method_signature(
+                ty,
+                method,
+                signatures,
+                facts,
+                exceptions.method_plan(ty, method),
+            )
+        })
+        .chain(
+            crate::inherited_members::inherited_instance_method_refs_for_type(ty, support_program)
+                .into_iter()
+                .filter_map(|inherited| {
+                    source_hierarchy_virtual_dispatch_method_signature(
+                        ty,
+                        inherited.method(),
+                        signatures,
+                        facts,
+                        exceptions.method_plan(inherited.declaring_ty(), inherited.method()),
+                    )
+                }),
+        )
+        .collect::<Vec<_>>();
+    let field_getters = ty
+        .members
+        .iter()
+        .filter_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            (!field.modifiers.contains(&Modifier::Static)).then(|| {
+                let getter = source_hierarchy_virtual_dispatch_field_getter_name(&field.name);
+                let return_ty = emit_type(&rust_type_for_java_type_with_facts(&field.ty, facts));
+                format!("    fn {getter}(&self) -> {return_ty};")
+            })
+        })
+        .collect::<Vec<_>>();
+    let clone_trait_name = format!("{trait_name}Clone");
+    let mut items = methods;
+    items.extend(field_getters);
+    Some(format!(
+        "pub trait {clone_trait_name} {{\n    fn clone_box(&self) -> Box<dyn {trait_name}>;\n}}\n\nimpl<T> {clone_trait_name} for T\nwhere\n    T: {trait_name} + Clone + 'static,\n{{\n    fn clone_box(&self) -> Box<dyn {trait_name}> {{ Box::new(self.clone()) }}\n}}\n\nimpl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}\n\npub trait {trait_name}: {clone_trait_name} {{\n{}\n}}",
+        items.join("\n"),
+    ))
+}
+
+pub(crate) fn source_hierarchy_virtual_dispatch_trait_name(type_name: &str) -> String {
+    format!(
+        "{}AnonymousDispatch",
+        rust_name_for_java_named_type(type_name)
+    )
+}
+
+pub(crate) fn source_hierarchy_virtual_dispatch_field_getter_name(field_name: &str) -> String {
+    format!("__java_field_{}", crate::parser::to_snake_case(field_name))
+}
+
+fn source_hierarchy_virtual_dispatch_method_signature(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+) -> Option<String> {
+    if method.modifiers.contains(&Modifier::Static) || !method.type_params.is_empty() {
+        return None;
+    }
+    let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(method));
+    let params = method
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, param)| {
+            let name = rust_identifier_token(&crate::parser::to_snake_case(&param.name));
+            let ty = source_hierarchy_virtual_param_type(owner, method, index, signatures, facts);
+            format!(", {name}: {ty}")
+        })
+        .collect::<String>();
+    let return_ty = source_hierarchy_virtual_return_type(method, facts, exceptions);
+    Some(format!("    fn {rust_name}(&self{params}) -> {return_ty};"))
+}
+
+/// Borrowed source parameters must use the solved source-method ABI at the
+/// virtual carrier boundary. Primitive arrays may be `&[T]` or `&mut [T]`,
+/// while ordinary Java strings are often `&str` rather than owned `String`.
+pub(crate) fn source_hierarchy_virtual_param_type(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    index: usize,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+) -> String {
+    let ty = &method.params[index].ty;
+    if matches!(ty, JavaType::String)
+        || matches!(ty, JavaType::Array(element) if matches!(element.as_ref(), JavaType::Primitive(_)))
+    {
+        if let Some(plan) = signatures.method_param_plans(owner, method)
+            && let Some(param) = plan.get(index)
+        {
+            return emit_type(&rust_type_for_slot_with_facts(&param.shape(), facts));
+        }
+        if let JavaType::Array(element) = ty {
+            return format!(
+                "&[{}]",
+                emit_type(&rust_type_for_java_type_with_facts(element, facts))
+            );
+        }
+    }
+    emit_type(&rust_type_for_java_type_with_facts(ty, facts))
+}
+
+pub(crate) fn source_hierarchy_virtual_return_type(
+    method: &MethodDecl,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+) -> String {
+    let ty = rust_type_for_java_type_with_facts(&method.return_type, facts);
+    emit_type(&if exceptions.wrap_returns_in_result() {
+        exception_result_type(ty)
+    } else {
+        ty
+    })
 }
 
 fn closed_enum_carrier_item(enum_name: &str, variants: &[String], facts: &FactSet) -> String {
@@ -177,19 +339,45 @@ fn source_hierarchy_carrier_item(
     representations: &RepresentationPlan,
     facts: &FactSet,
     signatures: &SignaturePlan,
+    exceptions: &ProgramExceptionPlan,
     ty: &TypeDecl,
+    support_program: &Program,
+    virtual_dispatch_trait: Option<&str>,
 ) -> String {
-    let mut item = source_hierarchy_carrier_enum_item(enum_name, variants, representations);
+    let anonymous_sync =
+        virtual_dispatch_trait.is_some() && representations.storage_placement_for(&ty.name).sync();
+    let mut item = source_hierarchy_carrier_enum_item(
+        enum_name,
+        variants,
+        representations,
+        virtual_dispatch_trait,
+        anonymous_sync,
+    );
     let mut impl_members = Vec::new();
     impl_members.extend(source_hierarchy_carrier_field_accessors(
-        variants, facts, signatures, ty,
+        variants,
+        facts,
+        signatures,
+        ty,
+        virtual_dispatch_trait.is_some(),
+        anonymous_sync,
     ));
     impl_members.extend(source_hierarchy_carrier_forwarding_methods(
-        enum_name, variants, facts, ty,
+        enum_name,
+        variants,
+        facts,
+        signatures,
+        exceptions,
+        ty,
+        support_program,
+        virtual_dispatch_trait,
+        anonymous_sync,
     ));
     impl_members.push(source_hierarchy_carrier_identity_method(
         variants,
         representations,
+        virtual_dispatch_trait.is_some(),
+        anonymous_sync,
     ));
     if !impl_members.is_empty() {
         item.push_str("\n\n");
@@ -204,8 +392,10 @@ fn source_hierarchy_carrier_item(
 fn source_hierarchy_carrier_identity_method(
     variants: &[String],
     representations: &RepresentationPlan,
+    has_anonymous_variant: bool,
+    anonymous_sync: bool,
 ) -> String {
-    let arms = variants
+    let mut arms = variants
         .iter()
         .map(|variant| {
             let placement = storage_placement_for_emitted_type_name(representations, variant);
@@ -221,8 +411,18 @@ fn source_hierarchy_carrier_identity_method(
             };
             format!("            (Self::{variant}(left), Self::{variant}(right)) => {comparison},")
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    if has_anonymous_variant {
+        let handle = if anonymous_sync {
+            "std::sync::Arc"
+        } else {
+            "std::rc::Rc"
+        };
+        arms.push(format!(
+            "            (Self::Anonymous(left), Self::Anonymous(right)) => {handle}::ptr_eq(left, right),"
+        ));
+    }
+    let arms = arms.join("\n");
     format!(
         "    pub fn java_identity_eq(&self, other: &Self) -> bool {{\n        match (self, other) {{\n{arms}\n            _ => false,\n        }}\n    }}"
     )
@@ -232,8 +432,10 @@ fn source_hierarchy_carrier_enum_item(
     enum_name: &str,
     variants: &[String],
     representations: &RepresentationPlan,
+    virtual_dispatch_trait: Option<&str>,
+    anonymous_sync: bool,
 ) -> String {
-    let variants = variants
+    let mut variants = variants
         .iter()
         .map(|variant| {
             format!(
@@ -241,8 +443,16 @@ fn source_hierarchy_carrier_enum_item(
                 source_hierarchy_carrier_variant_payload_type(variant, representations)
             )
         })
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    if let Some(trait_name) = virtual_dispatch_trait {
+        let payload = if anonymous_sync {
+            format!("std::sync::Arc<std::sync::Mutex<dyn {trait_name} + Send>>")
+        } else {
+            format!("std::rc::Rc<dyn {trait_name}>")
+        };
+        variants.push(format!("    Anonymous({payload}),"));
+    }
+    let variants = variants.join("\n");
     format!("#[derive(Clone)]\npub enum {enum_name} {{\n{variants}\n}}")
 }
 
@@ -269,7 +479,12 @@ fn source_hierarchy_carrier_forwarding_methods(
     enum_name: &str,
     variants: &[String],
     facts: &FactSet,
+    signatures: &SignaturePlan,
+    exceptions: &ProgramExceptionPlan,
     ty: &TypeDecl,
+    support_program: &Program,
+    virtual_dispatch_trait: Option<&str>,
+    anonymous_sync: bool,
 ) -> Vec<String> {
     ty.members
         .iter()
@@ -277,8 +492,35 @@ fn source_hierarchy_carrier_forwarding_methods(
             let Member::Method(method) = member else {
                 return None;
             };
-            source_hierarchy_carrier_forwarding_method(enum_name, variants, facts, method)
+            source_hierarchy_carrier_forwarding_method(
+                enum_name,
+                variants,
+                facts,
+                signatures,
+                exceptions.method_plan(ty, method),
+                ty,
+                method,
+                virtual_dispatch_trait,
+                anonymous_sync,
+            )
         })
+        .chain(
+            crate::inherited_members::inherited_instance_method_refs_for_type(ty, support_program)
+                .into_iter()
+                .filter_map(|inherited| {
+                    source_hierarchy_carrier_forwarding_method(
+                        enum_name,
+                        variants,
+                        facts,
+                        signatures,
+                        exceptions.method_plan(inherited.declaring_ty(), inherited.method()),
+                        ty,
+                        inherited.method(),
+                        virtual_dispatch_trait,
+                        anonymous_sync,
+                    )
+                }),
+        )
         .collect()
 }
 
@@ -286,23 +528,67 @@ fn source_hierarchy_carrier_forwarding_method(
     _enum_name: &str,
     variants: &[String],
     facts: &FactSet,
+    signatures: &SignaturePlan,
+    exceptions: MethodExceptionPlan,
+    owner: &TypeDecl,
     method: &MethodDecl,
+    virtual_dispatch_trait: Option<&str>,
+    anonymous_sync: bool,
 ) -> Option<String> {
-    if method.modifiers.contains(&Modifier::Static) || !method.params.is_empty() {
+    if method.modifiers.contains(&Modifier::Static) {
         return None;
     }
     let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(method));
-    let return_ty = emit_type(&rust_type_for_java_type_with_facts(
-        &method.return_type,
-        facts,
-    ));
-    let arms = variants
+    let return_ty = source_hierarchy_virtual_return_type(method, facts, exceptions);
+    let params = method
+        .params
         .iter()
-        .map(|variant| format!("            Self::{variant}(value) => value.{rust_name}(),"))
+        .enumerate()
+        .map(|(index, param)| {
+            let name = rust_identifier_token(&crate::parser::to_snake_case(&param.name));
+            let ty = source_hierarchy_virtual_param_type(owner, method, index, signatures, facts);
+            (name, ty)
+        })
+        .collect::<Vec<_>>();
+    let parameter_declarations = params
+        .iter()
+        .map(|(name, ty)| format!(", {name}: {ty}"))
+        .collect::<String>();
+    let arguments = params
+        .iter()
+        .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join(", ");
+    // The enum payload binding shares the method body scope with Java
+    // parameters. A user parameter named `value` used to shadow it and made
+    // every forwarding arm pass the payload to itself.
+    let mut carrier_binding = "__java_carrier_payload".to_string();
+    let mut suffix = 0usize;
+    while params.iter().any(|(name, _)| name == &carrier_binding) {
+        suffix += 1;
+        carrier_binding = format!("__java_carrier_payload_{suffix}");
+    }
+    let mut arms = variants
+        .iter()
+        .map(|variant| {
+            format!(
+                "            Self::{variant}({carrier_binding}) => {carrier_binding}.{rust_name}({arguments}),"
+            )
+        })
+        .collect::<Vec<_>>();
+    if virtual_dispatch_trait.is_some() {
+        let receiver = if anonymous_sync {
+            format!("{carrier_binding}.lock().unwrap()")
+        } else {
+            carrier_binding.clone()
+        };
+        arms.push(format!(
+            "            Self::Anonymous({carrier_binding}) => {receiver}.{rust_name}({arguments}),"
+        ));
+    }
+    let arms = arms.join("\n");
     Some(format!(
-        "    pub fn {rust_name}(&self) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+        "    pub fn {rust_name}(&self{parameter_declarations}) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
     ))
 }
 
@@ -311,6 +597,8 @@ fn source_hierarchy_carrier_field_accessors(
     facts: &FactSet,
     signatures: &SignaturePlan,
     ty: &TypeDecl,
+    has_anonymous_variant: bool,
+    anonymous_sync: bool,
 ) -> Vec<String> {
     ty.members
         .iter()
@@ -318,7 +606,15 @@ fn source_hierarchy_carrier_field_accessors(
             let Member::Field(field) = member else {
                 return None;
             };
-            source_hierarchy_carrier_field_accessor(variants, facts, signatures, ty, field)
+            source_hierarchy_carrier_field_accessor(
+                variants,
+                facts,
+                signatures,
+                ty,
+                field,
+                has_anonymous_variant,
+                anonymous_sync,
+            )
         })
         .collect()
 }
@@ -329,6 +625,8 @@ fn source_hierarchy_carrier_field_accessor(
     signatures: &SignaturePlan,
     ty: &TypeDecl,
     field: &FieldDecl,
+    has_anonymous_variant: bool,
+    anonymous_sync: bool,
 ) -> Option<String> {
     if field.modifiers.contains(&Modifier::Static) {
         return None;
@@ -341,11 +639,22 @@ fn source_hierarchy_carrier_field_accessor(
     } else {
         format!("value.{rust_name}.clone()")
     };
-    let arms = variants
+    let mut arms = variants
         .iter()
         .map(|variant| format!("            Self::{variant}(value) => {projection},"))
-        .collect::<Vec<_>>()
-        .join("\n");
+        .collect::<Vec<_>>();
+    if has_anonymous_variant {
+        let getter = source_hierarchy_virtual_dispatch_field_getter_name(&field.name);
+        let receiver = if anonymous_sync {
+            "value.lock().unwrap()"
+        } else {
+            "value"
+        };
+        arms.push(format!(
+            "            Self::Anonymous(value) => {receiver}.{getter}(),"
+        ));
+    }
+    let arms = arms.join("\n");
     Some(format!(
         "    pub fn {rust_name}(&self) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
     ))
@@ -478,7 +787,7 @@ fn java_enum_constructor_field_arg_indices(constructor: &ConstructorDecl) -> Vec
         .collect()
 }
 
-fn rust_identifier_token(name: &str) -> String {
+pub(crate) fn rust_identifier_token(name: &str) -> String {
     if crate::java_naming::rust_keyword_is_rawable_identifier(name) {
         format!("r#{name}")
     } else {
@@ -575,7 +884,14 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
     match representation.representation() {
         ObjectRepresentation::DynTrait { trait_name } => {
             RepresentationTypeEmission::RawRustItem(trait_item_for_type_with_program(
-                ty, trait_name, program, signatures, facts, exceptions,
+                ty,
+                trait_name,
+                program,
+                signatures,
+                facts,
+                exceptions,
+                representations,
+                source_interface_requires_send(program, ty, representations),
             ))
         }
         _ => type_emission_for_with_facts_and_exceptions(
@@ -586,6 +902,24 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
             exceptions,
         ),
     }
+}
+
+/// Interface objects are normally local `Box<dyn Trait>` values. Any interface
+/// reachable from a process-wide static, including through class fields,
+/// needs its trait object to be `Send`.
+pub(crate) fn source_interface_requires_send(
+    program: &Program,
+    interface: &TypeDecl,
+    representations: &RepresentationPlan,
+) -> bool {
+    if representations
+        .storage_placement_for(&interface.name)
+        .sync()
+    {
+        return true;
+    }
+    crate::storage_strategy::statically_reachable_source_type_names(program)
+        .contains(&interface.name)
 }
 
 #[cfg(test)]
@@ -1233,6 +1567,7 @@ fn trait_item_for_type(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
+    sync_trait: bool,
 ) -> String {
     let trait_name = rust_name_for_java_named_type(trait_name);
     let mut methods = ty
@@ -1250,18 +1585,283 @@ fn trait_item_for_type(
         })
         .collect::<Vec<_>>();
     methods.extend(trait_object_support_method_signatures(&trait_name));
-    let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
+    let forwarding = shared_handle_forwarding_impl_with_policy(&trait_name, &methods, sync_trait)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
-    let closure_adapter = zero_arg_closure_trait_impl(ty, &trait_name, facts)
+    let closure_adapter = (!sync_trait)
+        .then(|| zero_arg_closure_trait_impl(ty, &trait_name, facts))
+        .flatten()
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
     format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}",
+        "pub trait {trait_name}{send_bound} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
-        boxed_dyn_trait_clone_impl(&trait_name)
+        boxed_dyn_trait_clone_impl(&trait_name),
+        send_bound = if sync_trait { ": Send" } else { "" },
     )
+}
+
+/// Rust has no owned trait-object upcast from `Box<dyn Derived>` to
+/// `Box<dyn Parent>`.  Java does, so materialize a local carrier for every
+/// reachable source parent: the derived box implements the parent's canonical
+/// abstract surface, then `From` can box that carrier without losing identity.
+struct InterfaceAncestorInstantiation<'a> {
+    interface: &'a TypeDecl,
+    args: Vec<JavaType>,
+}
+
+fn interface_ancestor_instantiations<'a>(
+    program: &'a Program,
+    interface: &'a TypeDecl,
+) -> Vec<InterfaceAncestorInstantiation<'a>> {
+    fn visit<'a>(
+        program: &'a Program,
+        interface: &'a TypeDecl,
+        substitutions: &HashMap<String, JavaType>,
+        seen: &mut HashSet<String>,
+        out: &mut Vec<InterfaceAncestorInstantiation<'a>>,
+    ) {
+        for parent_name in interface.extends.iter().chain(interface.implements.iter()) {
+            let JavaType::Named { name, args } = crate::parser::parse_hierarchy_type(parent_name)
+            else {
+                continue;
+            };
+            let Some(parent) = find_type_decl_for_owner_context(program, &interface.name, &name)
+            else {
+                continue;
+            };
+            if parent.kind != TypeKind::Interface || !seen.insert(parent.name.clone()) {
+                continue;
+            }
+            let args = parent
+                .type_params
+                .iter()
+                .enumerate()
+                .map(|(index, type_param)| {
+                    let actual = args.get(index).cloned().unwrap_or_else(|| JavaType::Named {
+                        name: type_param.clone(),
+                        args: Vec::new(),
+                    });
+                    crate::resolve::substitute_method_type_variables(&actual, substitutions)
+                })
+                .collect::<Vec<_>>();
+            let parent_substitutions = parent
+                .type_params
+                .iter()
+                .cloned()
+                .zip(args.iter().cloned())
+                .collect::<HashMap<_, _>>();
+            out.push(InterfaceAncestorInstantiation {
+                interface: parent,
+                args,
+            });
+            visit(program, parent, &parent_substitutions, seen, out);
+        }
+    }
+
+    let mut ancestors = Vec::new();
+    visit(
+        program,
+        interface,
+        &HashMap::new(),
+        &mut HashSet::new(),
+        &mut ancestors,
+    );
+    ancestors
+}
+
+pub(crate) fn interface_method_types_in_target(
+    program: &Program,
+    target: &TypeDecl,
+    owner: &TypeDecl,
+    method: &MethodDecl,
+) -> (JavaType, Vec<JavaType>) {
+    let substitutions = interface_ancestor_instantiations(program, target)
+        .into_iter()
+        .find(|ancestor| ancestor.interface.name == owner.name)
+        .map(|ancestor| {
+            owner
+                .type_params
+                .iter()
+                .cloned()
+                .zip(ancestor.args)
+                .filter(|(name, _)| !method.type_params.contains(name))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
+    let return_type =
+        crate::resolve::substitute_method_type_variables(&method.return_type, &substitutions);
+    let param_types = method
+        .params
+        .iter()
+        .map(|param| crate::resolve::substitute_method_type_variables(&param.ty, &substitutions))
+        .collect::<Vec<_>>();
+    (return_type, param_types)
+}
+
+pub(crate) fn interface_type_arguments_in_target(
+    program: &Program,
+    target: &TypeDecl,
+    owner: &TypeDecl,
+) -> Option<Vec<JavaType>> {
+    (target.name != owner.name)
+        .then(|| interface_ancestor_instantiations(program, target))?
+        .into_iter()
+        .find(|ancestor| ancestor.interface.name == owner.name)
+        .map(|ancestor| ancestor.args)
+}
+
+fn boxed_interface_upcast_impls(
+    ty: &TypeDecl,
+    derived_trait_name: &str,
+    program: &Program,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    if ty.kind != TypeKind::Interface {
+        return None;
+    }
+    let parents = interface_ancestor_instantiations(program, ty);
+    let derived_contracts = specialized_interface_abstract_contracts(program, ty);
+    let derived_trait_path =
+        parameterized_interface_trait_path(derived_trait_name, &ty.type_params);
+    let generic_impl_params = if ty.type_params.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "<{}>",
+            ty.type_params
+                .iter()
+                .map(|name| format!("{name}: 'static"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    (!parents.is_empty()).then(|| {
+        parents
+            .into_iter()
+            .map(|parent_instantiation| {
+                let parent = parent_instantiation.interface;
+                let parent_trait_name = rust_name_for_java_named_type(&parent.name);
+                let parent_trait_path = crate::slot_render::parameterized_dyn_trait_path(
+                    &parent_trait_name,
+                    &JavaType::Named {
+                        name: parent.name.clone(),
+                        args: parent_instantiation.args.clone(),
+                    },
+                    &crate::effective_facts::EffectiveFacts::new(facts),
+                    representations,
+                );
+                let substitutions = parent
+                    .type_params
+                    .iter()
+                    .cloned()
+                    .zip(parent_instantiation.args.iter().cloned())
+                    .collect::<HashMap<_, _>>();
+                let mut parent_signatures = specialized_interface_abstract_contracts(program, parent)
+                    .into_iter()
+                    .map(|contract| {
+                        let owner = contract.owner;
+                        let method = contract.method;
+                        let return_type = crate::resolve::substitute_method_type_variables(
+                            &contract.return_type,
+                            &substitutions,
+                        );
+                        let param_types = contract
+                            .param_types
+                            .iter()
+                            .map(|ty| crate::resolve::substitute_method_type_variables(ty, &substitutions))
+                            .collect::<Vec<_>>();
+                        let return_shape = if return_type != method.return_type
+                            || matches!(&return_type, JavaType::Named { name, args }
+                                if args.is_empty() && ty.type_params.contains(name))
+                        {
+                            Some(RustSlotShape::for_storage(return_type.clone()))
+                        } else {
+                            trait_method_return_shape_plan(owner, method, program, signatures)
+                        };
+                        let signature = trait_method_signature_with_receiver_and_return_shape_and_params(
+                            owner,
+                            method,
+                            signatures,
+                            facts,
+                            trait_method_exception_plan(owner, method, program, exceptions),
+                            trait_method_receiver_plan(owner, method, program, signatures),
+                            return_shape,
+                            program,
+                            Some(&param_types),
+                        );
+                        let covariant_erased_return = derived_contracts.iter().any(|contract| {
+                            contract.method.name == method.name
+                                && crate::java_signature::erased_param_types(&contract.method.params)
+                                    == crate::java_signature::erased_param_types(&method.params)
+                                && interface_contract_return_refines(
+                                    program,
+                                    &contract.return_type,
+                                    &return_type,
+                                )
+                                && matches!(&return_type, JavaType::Named { name, .. }
+                                    if matches!(name.as_str(), "Object" | "java.lang.Object"))
+                        });
+                        (signature, covariant_erased_return)
+                    })
+                    .collect::<Vec<_>>();
+                parent_signatures.extend(
+                    trait_object_support_method_signatures(&parent_trait_path)
+                        .into_iter()
+                        .map(|signature| (signature, false)),
+                );
+                let methods = parent_signatures
+                    .iter()
+                    .map(|(signature, covariant_erased_return)| {
+                        if *covariant_erased_return {
+                            return forwarded_covariant_object_upcast_method(signature);
+                        }
+                        forwarded_trait_method(signature, SharedTraitHandle::Direct, None)
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .expect("parent interface methods have an &self receiver")
+                    .into_iter()
+                    .map(|method| method.replace("(**self)", "(*self.0)"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                let carrier_name = format!(
+                    "__JavaInterfaceUpcast{derived_trait_name}To{parent_trait_name}"
+                );
+                let carrier_path =
+                    parameterized_interface_trait_path(&carrier_name, &ty.type_params);
+                let carrier_declaration = if ty.type_params.is_empty() {
+                    format!(
+                        "#[derive(Clone)]\nstruct {carrier_name}(std::boxed::Box<dyn {derived_trait_path}>);"
+                    )
+                } else {
+                    format!(
+                        "struct {carrier_name}{generic_impl_params}(std::boxed::Box<dyn {derived_trait_path}>);\n\nimpl{generic_impl_params} Clone for {carrier_path} {{\n    fn clone(&self) -> Self {{ Self(self.0.clone()) }}\n}}"
+                    )
+                };
+                format!(
+                    "{carrier_declaration}\n\nimpl{generic_impl_params} {parent_trait_path} for {carrier_path} {{\n{methods}\n}}\n\nimpl{generic_impl_params} From<std::boxed::Box<dyn {derived_trait_path}>> for std::boxed::Box<dyn {parent_trait_path}> {{\n    fn from(value: std::boxed::Box<dyn {derived_trait_path}>) -> Self {{ std::boxed::Box::new({carrier_name}(value)) }}\n}}"
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n\n")
+    })
+}
+
+fn forwarded_covariant_object_upcast_method(signature: &str) -> Option<String> {
+    let signature_without_semicolon = signature.trim().strip_suffix(';')?;
+    let body = signature_without_semicolon.strip_prefix("fn ")?;
+    let open = body.find('(')?;
+    let name = body[..open].split('<').next()?.trim();
+    let close = matching_paren(body, open)?;
+    let args = forwarded_argument_names(&body[open + 1..close])?;
+    Some(format!(
+        "    {signature_without_semicolon} {{ std::boxed::Box::new((*self.0).{name}({})) as std::boxed::Box<dyn std::any::Any> }}",
+        args.join(", ")
+    ))
 }
 
 fn trait_item_for_type_with_program(
@@ -1271,38 +1871,273 @@ fn trait_item_for_type_with_program(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
+    sync_trait: bool,
 ) -> String {
     let trait_name = rust_name_for_java_named_type(trait_name);
-    let mut methods = ty
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Method(method) => Some(trait_method_signature_with_receiver_and_return_shape(
-                ty,
+    let trait_path = parameterized_interface_trait_path(&trait_name, &ty.type_params);
+    let mut methods = specialized_interface_abstract_contracts(program, ty)
+        .into_iter()
+        .map(|contract| {
+            let owner = contract.owner;
+            let method = contract.method;
+            let return_shape = if contract.return_type != method.return_type
+                || matches!(&contract.return_type, JavaType::Named { name, args }
+                    if args.is_empty() && ty.type_params.contains(name))
+            {
+                Some(RustSlotShape::for_storage(contract.return_type))
+            } else {
+                trait_method_return_shape_plan(owner, method, program, signatures)
+            };
+            trait_method_signature_with_receiver_and_return_shape_and_params(
+                owner,
                 method,
                 signatures,
                 facts,
-                trait_method_exception_plan(ty, method, program, exceptions),
-                trait_method_receiver_plan(ty, method, program, signatures),
-                trait_method_return_shape_plan(ty, method, program, signatures),
+                trait_method_exception_plan(owner, method, program, exceptions),
+                trait_method_receiver_plan(owner, method, program, signatures),
+                return_shape,
                 program,
-            )),
-            _ => None,
+                Some(&contract.param_types),
+            )
         })
         .collect::<Vec<_>>();
-    methods.extend(trait_object_support_method_signatures(&trait_name));
-    let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
-        .map(|item| format!("\n\n{item}"))
-        .unwrap_or_default();
-    let closure_adapter = zero_arg_closure_trait_impl(ty, &trait_name, facts)
-        .map(|item| format!("\n\n{item}"))
-        .unwrap_or_default();
-    format!(
-        "pub trait {trait_name} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}",
-        methods.join("\n"),
-        dyn_trait_anonymous_impl(&trait_name),
-        boxed_dyn_trait_clone_impl(&trait_name)
+    methods.extend(trait_object_support_method_signatures(&trait_path));
+    let forwarding = shared_handle_forwarding_impl_with_policy_and_generics(
+        &trait_path,
+        &ty.type_params,
+        &methods,
+        sync_trait,
     )
+    .map(|item| format!("\n\n{item}"))
+    .unwrap_or_default();
+    let closure_adapter = (!sync_trait && ty.type_params.is_empty())
+        .then(|| zero_arg_closure_trait_impl(ty, &trait_name, facts))
+        .flatten()
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
+    let upcasts = boxed_interface_upcast_impls(
+        ty,
+        &trait_name,
+        program,
+        signatures,
+        facts,
+        exceptions,
+        representations,
+    )
+    .map(|item| format!("\n\n{item}"))
+    .unwrap_or_default();
+    format!(
+        "pub trait {trait_path}{send_bound} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}{upcasts}",
+        methods.join("\n"),
+        dyn_trait_anonymous_impl_with_generics(&trait_path, &ty.type_params),
+        boxed_dyn_trait_clone_impl_with_generics(&trait_path, &ty.type_params),
+        send_bound = if sync_trait { ": Send" } else { "" },
+    )
+}
+
+pub(crate) fn parameterized_interface_trait_path(
+    trait_name: &str,
+    type_params: &[String],
+) -> String {
+    if type_params.is_empty() {
+        trait_name.to_string()
+    } else {
+        format!("{trait_name}<{}>", type_params.join(", "))
+    }
+}
+
+/// An inherited Java method is viewed through the type arguments on each
+/// `extends` edge.  Keep its declaration for signature/exception lookup, but
+/// record the effective types separately; replacing only the owner name loses
+/// `Source<String>.value(): String` when the declaration returns `T`.
+pub(crate) struct SpecializedInterfaceContract<'a> {
+    pub(crate) owner: &'a TypeDecl,
+    pub(crate) method: &'a MethodDecl,
+    pub(crate) return_type: JavaType,
+    pub(crate) param_types: Vec<JavaType>,
+    depth: usize,
+}
+
+fn interface_contract_return_refines(
+    program: &Program,
+    candidate: &JavaType,
+    inherited: &JavaType,
+) -> bool {
+    if candidate == inherited {
+        return false;
+    }
+    let is_object = |ty: &JavaType| {
+        matches!(ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
+            if matches!(name.as_str(), "Object" | "java.lang.Object"))
+    };
+    if is_object(inherited) {
+        return matches!(
+            candidate,
+            JavaType::String | JavaType::Named { .. } | JavaType::Array(_)
+        );
+    }
+    let (
+        JavaType::Named {
+            name: candidate, ..
+        },
+        JavaType::Named { name: target, .. },
+    ) = (candidate, inherited)
+    else {
+        return false;
+    };
+    let mut pending = vec![candidate.clone()];
+    let mut seen = HashSet::new();
+    while let Some(name) = pending.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        let Some(ty) = find_type_decl_for_owner_context(program, &name, &name) else {
+            continue;
+        };
+        for parent in ty.extends.iter().chain(ty.implements.iter()) {
+            let JavaType::Named { name: parent, .. } = crate::parser::parse_hierarchy_type(parent)
+            else {
+                continue;
+            };
+            if parent == *target {
+                return true;
+            }
+            pending.push(parent);
+        }
+    }
+    false
+}
+
+pub(crate) fn specialized_interface_abstract_contracts<'a>(
+    program: &'a Program,
+    interface: &'a TypeDecl,
+) -> Vec<SpecializedInterfaceContract<'a>> {
+    fn visit<'a>(
+        program: &'a Program,
+        interface: &'a TypeDecl,
+        substitutions: &HashMap<String, JavaType>,
+        depth: usize,
+        path: &mut HashSet<String>,
+        out: &mut Vec<SpecializedInterfaceContract<'a>>,
+    ) {
+        if !path.insert(interface.name.clone()) {
+            return;
+        }
+        for parent_name in interface.extends.iter().chain(interface.implements.iter()) {
+            let JavaType::Named { name, args } = crate::parser::parse_hierarchy_type(parent_name)
+            else {
+                continue;
+            };
+            let Some(parent) = find_type_decl_for_owner_context(program, &interface.name, &name)
+            else {
+                continue;
+            };
+            if parent.kind != TypeKind::Interface {
+                continue;
+            }
+            let parent_substitutions = parent
+                .type_params
+                .iter()
+                .enumerate()
+                .map(|(index, type_param)| {
+                    let actual = args.get(index).cloned().unwrap_or_else(|| JavaType::Named {
+                        name: type_param.clone(),
+                        args: Vec::new(),
+                    });
+                    (
+                        type_param.clone(),
+                        crate::resolve::substitute_method_type_variables(&actual, substitutions),
+                    )
+                })
+                .collect::<HashMap<_, _>>();
+            visit(program, parent, &parent_substitutions, depth + 1, path, out);
+        }
+        for member in &interface.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.body.is_some() || method.modifiers.contains(&Modifier::Static) {
+                continue;
+            }
+            let visible_substitutions = substitutions
+                .iter()
+                .filter(|(name, _)| !method.type_params.contains(name))
+                .map(|(name, ty)| (name.clone(), ty.clone()))
+                .collect::<HashMap<_, _>>();
+            let return_type = crate::resolve::substitute_method_type_variables(
+                &method.return_type,
+                &visible_substitutions,
+            );
+            let param_types = method
+                .params
+                .iter()
+                .map(|param| {
+                    crate::resolve::substitute_method_type_variables(
+                        &param.ty,
+                        &visible_substitutions,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let key = (
+                method.name.as_str(),
+                method
+                    .params
+                    .iter()
+                    .zip(&param_types)
+                    .map(|(param, ty)| {
+                        crate::java_signature::erased_type_name(ty, param.is_varargs)
+                    })
+                    .collect::<Vec<_>>(),
+            );
+            let contract = SpecializedInterfaceContract {
+                owner: interface,
+                method,
+                return_type,
+                param_types,
+                depth,
+            };
+            if let Some(index) = out.iter().position(|existing| {
+                existing.method.name == key.0
+                    && existing
+                        .method
+                        .params
+                        .iter()
+                        .zip(&existing.param_types)
+                        .map(|(param, ty)| {
+                            crate::java_signature::erased_type_name(ty, param.is_varargs)
+                        })
+                        .collect::<Vec<_>>()
+                        == key.1
+            }) {
+                // Java's combined contract keeps a covariant return even
+                // when the more general parent appeared first. A child
+                // declaration with the same return replaces inherited copies.
+                if interface_contract_return_refines(
+                    program,
+                    &contract.return_type,
+                    &out[index].return_type,
+                ) || (contract.return_type == out[index].return_type && depth < out[index].depth)
+                {
+                    out[index] = contract;
+                }
+            } else {
+                out.push(contract);
+            }
+        }
+        path.remove(&interface.name);
+    }
+
+    let mut contracts = Vec::new();
+    visit(
+        program,
+        interface,
+        &HashMap::new(),
+        0,
+        &mut HashSet::new(),
+        &mut contracts,
+    );
+    contracts
 }
 
 pub(crate) fn zero_arg_closure_trait_impl(
@@ -1361,21 +2196,21 @@ fn trait_impl_for_type(
 ) -> Option<String> {
     let trait_name = rust_name_for_java_named_type(trait_name);
     let impl_type_name = rust_name_for_java_named_type(&ty.name);
-    let methods = interface
-        .members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Method(interface_method) => trait_impl_method(
+    let methods = specialized_interface_abstract_contracts(program, interface)
+        .into_iter()
+        .filter_map(|contract| {
+            let method_owner = contract.owner;
+            let interface_method = contract.method;
+            trait_impl_method(
                 ty,
-                interface,
+                method_owner,
                 interface_method,
                 program,
-                trait_method_receiver_plan(interface, interface_method, program, signatures),
+                trait_method_receiver_plan(method_owner, interface_method, program, signatures),
                 signatures,
                 facts,
-                trait_method_exception_plan(interface, interface_method, program, exceptions),
-            ),
-            _ => None,
+                trait_method_exception_plan(method_owner, interface_method, program, exceptions),
+            )
         })
         .collect::<Vec<_>>();
     let mut methods = methods;
@@ -1412,6 +2247,28 @@ pub(crate) fn boxed_dyn_trait_clone_impl(trait_name: &str) -> String {
     )
 }
 
+pub(crate) fn boxed_dyn_trait_clone_impl_with_generics(
+    trait_path: &str,
+    type_params: &[String],
+) -> String {
+    if type_params.is_empty() {
+        return boxed_dyn_trait_clone_impl(trait_path);
+    }
+    let impl_params = type_params
+        .iter()
+        .map(|name| format!("{name}: 'static"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let value_path = trait_value_path(trait_path);
+    format!(
+        "impl<{impl_params}> Clone for std::boxed::Box<dyn {trait_path}> {{\n    fn clone(&self) -> Self {{ {value_path}::clone_box(&**self) }}\n}}"
+    )
+}
+
+fn trait_value_path(trait_path: &str) -> String {
+    trait_path.replacen('<', "::<", 1)
+}
+
 /// Forwards a trait through a shared handle: `impl<T: Trait> Trait for Rc<T>`.
 ///
 /// `Rc<T>` does not implement what `T` implements, so without this a wrapped
@@ -1430,17 +2287,43 @@ pub(crate) fn shared_handle_forwarding_impl(
     trait_name: &str,
     signatures: &[String],
 ) -> Option<String> {
+    shared_handle_forwarding_impl_with_policy(trait_name, signatures, false)
+}
+
+/// A `Send`-bound interface cannot be implemented by an `Rc` wrapper or an
+/// unconstrained `Arc<T>`. Its shared forwarding uses only `Arc<Mutex<T>>`;
+/// the trait bound itself ensures `T: Send` for that implementation.
+pub(crate) fn shared_handle_forwarding_impl_with_policy(
+    trait_name: &str,
+    signatures: &[String],
+    sync_trait: bool,
+) -> Option<String> {
+    shared_handle_forwarding_impl_with_policy_and_generics(trait_name, &[], signatures, sync_trait)
+}
+
+pub(crate) fn shared_handle_forwarding_impl_with_policy_and_generics(
+    trait_name: &str,
+    type_params: &[String],
+    signatures: &[String],
+    sync_trait: bool,
+) -> Option<String> {
     let direct_methods = signatures
         .iter()
-        .map(|signature| forwarded_trait_method(signature, SharedTraitHandle::Direct))
+        .map(|signature| {
+            forwarded_trait_method(signature, SharedTraitHandle::Direct, Some(trait_name))
+        })
         .collect::<Option<Vec<_>>>();
     let local_methods = signatures
         .iter()
-        .map(|signature| forwarded_trait_method(signature, SharedTraitHandle::Local))
+        .map(|signature| {
+            forwarded_trait_method(signature, SharedTraitHandle::Local, Some(trait_name))
+        })
         .collect::<Option<Vec<_>>>();
     let sync_methods = signatures
         .iter()
-        .map(|signature| forwarded_trait_method(signature, SharedTraitHandle::Sync))
+        .map(|signature| {
+            forwarded_trait_method(signature, SharedTraitHandle::Sync, Some(trait_name))
+        })
         .collect::<Option<Vec<_>>>();
     // An empty trait is *trivially* forwardable, and the impl is still required:
     // a Java class used as a bare type-parameter bound (`<T extends HeaderLine>`)
@@ -1460,27 +2343,57 @@ pub(crate) fn shared_handle_forwarding_impl(
     // bound is required by the trait-object support methods (`as_any` and
     // `clone_box`) once the handle itself can be boxed as `dyn Trait`.
     let mut implementations = Vec::new();
-    if let Some(methods) = direct_methods {
+    // A parameterized trait admits downstream implementations such as
+    // `Source<Local> for RefCell<T>` under Rust's orphan rules. That makes
+    // blanket forwarding for both `Rc<T>` and `Rc<RefCell<T>>` overlap.
+    // Keep the direct handle for an immutable generic surface; mutable
+    // generic surfaces still use the cell handle below. Supporting both at
+    // once requires a distinct generated carrier newtype.
+    let generic_direct_only = !type_params.is_empty() && direct_methods.is_some() && !sync_trait;
+    let impl_prefix = if type_params.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}, ",
+            type_params
+                .iter()
+                .map(|name| format!("{name}: 'static"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    if let Some(methods) = direct_methods
+        && !sync_trait
+    {
         let body = methods.join("\n");
         for handle in ["std::rc::Rc", "std::sync::Arc"] {
             implementations.push(format!(
-                "impl<__JavaShared: {trait_name} + 'static> {trait_name} for {handle}<__JavaShared> {{\n{body}\n}}"
+                "impl<{impl_prefix}__JavaShared: {trait_name} + 'static> {trait_name} for {handle}<__JavaShared> {{\n{body}\n}}"
             ));
         }
     }
-    for (handle, methods) in [
+    let cell_handles = [
         (
             "std::rc::Rc<std::cell::RefCell<__JavaShared>>",
-            local_methods,
+            if sync_trait || generic_direct_only {
+                None
+            } else {
+                local_methods
+            },
         ),
         (
             "std::sync::Arc<std::sync::Mutex<__JavaShared>>",
-            sync_methods,
+            if generic_direct_only {
+                None
+            } else {
+                sync_methods
+            },
         ),
-    ] {
+    ];
+    for (handle, methods) in cell_handles {
         if let Some(methods) = methods {
             implementations.push(format!(
-                "impl<__JavaShared: {trait_name} + 'static> {trait_name} for {handle} {{\n{}\n}}",
+                "impl<{impl_prefix}__JavaShared: {trait_name} + 'static> {trait_name} for {handle} {{\n{}\n}}",
                 methods.join("\n")
             ));
         }
@@ -1499,7 +2412,11 @@ enum SharedTraitHandle {
 ///
 /// The signature is text this module just produced, so the parse is closed over
 /// our own output rather than arbitrary Rust: `    fn name<generics>(&self, a: A) -> R;`
-fn forwarded_trait_method(signature: &str, handle: SharedTraitHandle) -> Option<String> {
+fn forwarded_trait_method(
+    signature: &str,
+    handle: SharedTraitHandle,
+    trait_name: Option<&str>,
+) -> Option<String> {
     let trimmed = signature.trim();
     let body = trimmed.strip_prefix("fn ")?.strip_suffix(';')?;
     let mutable_receiver = trimmed.contains("&mut self");
@@ -1517,9 +2434,15 @@ fn forwarded_trait_method(signature: &str, handle: SharedTraitHandle) -> Option<
         ));
     }
     if name == "as_any" && args.is_empty() {
-        let body = match handle {
-            SharedTraitHandle::Direct => "(**self).as_any()",
-            SharedTraitHandle::Local | SharedTraitHandle::Sync => "self",
+        let body = match (handle, trait_name) {
+            (SharedTraitHandle::Direct, Some(trait_name)) => {
+                let trait_name = trait_value_path(trait_name);
+                return Some(format!(
+                    "    {signature_without_semicolon} {{ {trait_name}::as_any(&**self) }}"
+                ));
+            }
+            (SharedTraitHandle::Direct, None) => "(**self).as_any()",
+            (SharedTraitHandle::Local | SharedTraitHandle::Sync, _) => "self",
         };
         return Some(format!("    {signature_without_semicolon} {{ {body} }}"));
     }
@@ -1535,10 +2458,28 @@ fn forwarded_trait_method(signature: &str, handle: SharedTraitHandle) -> Option<
         SharedTraitHandle::Sync if mutable_receiver => "self.lock().unwrap()".to_string(),
         SharedTraitHandle::Sync => "self.lock().unwrap()".to_string(),
     };
-    Some(format!(
-        "    {signature_without_semicolon} {{ {receiver}.{name}({}) }}",
-        args.join(", ")
-    ))
+    if let Some(trait_name) = trait_name {
+        let trait_name = trait_value_path(trait_name);
+        let borrow = if mutable_receiver { "&mut *" } else { "&*" };
+        let receiver = match handle {
+            SharedTraitHandle::Direct => "&**self".to_string(),
+            SharedTraitHandle::Local | SharedTraitHandle::Sync => {
+                format!("{borrow}{receiver}")
+            }
+        };
+        let arguments = std::iter::once(receiver)
+            .chain(args)
+            .collect::<Vec<_>>()
+            .join(", ");
+        Some(format!(
+            "    {signature_without_semicolon} {{ {trait_name}::{name}({arguments}) }}"
+        ))
+    } else {
+        Some(format!(
+            "    {signature_without_semicolon} {{ {receiver}.{name}({}) }}",
+            args.join(", ")
+        ))
+    }
 }
 
 fn signature_return_is_borrowed(signature: &str) -> bool {
@@ -1607,6 +2548,23 @@ pub(crate) fn dyn_trait_anonymous_impl(trait_name: &str) -> String {
     )
 }
 
+pub(crate) fn dyn_trait_anonymous_impl_with_generics(
+    trait_path: &str,
+    type_params: &[String],
+) -> String {
+    if type_params.is_empty() {
+        return dyn_trait_anonymous_impl(trait_path);
+    }
+    let impl_params = type_params
+        .iter()
+        .map(|name| format!("{name}: 'static"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "impl<{impl_params}> dyn {trait_path} {{\n    pub fn anonymous() -> std::boxed::Box<dyn {trait_path}> {{ panic!(\"java2rust: anonymous class body for {trait_path} requires object lowering\") }}\n}}"
+    )
+}
+
 fn trait_impl_method(
     ty: &TypeDecl,
     interface: &TypeDecl,
@@ -1647,8 +2605,21 @@ fn trait_impl_method(
             .compile_error_body(&signature),
         );
     };
+    let covariant_object_return = |candidate: &MethodDecl| {
+        !interface_exceptions.wrap_returns_in_result()
+            && matches!(&interface_method.return_type, JavaType::Named { name, .. } | JavaType::Unknown(name)
+            if matches!(name.as_str(), "Object" | "java.lang.Object"))
+            && interface_contract_return_refines(
+                program,
+                &candidate.return_type,
+                &interface_method.return_type,
+            )
+            && trait_impl_method_compatibility_error(interface_method, candidate)
+                == Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch)
+    };
     let compatible = candidates.iter().copied().find(|(_, candidate)| {
         trait_impl_method_compatibility_error(interface_method, candidate).is_none()
+            || covariant_object_return(candidate)
     });
     // A `default` method that nothing overrides keeps the interface's body --
     // that is what `default` means. Candidates are gathered by *name*, so an
@@ -1666,6 +2637,7 @@ fn trait_impl_method(
     let (implementing_owner, implementing_method) = compatible.unwrap_or(candidates[0]);
     if let Some(message) =
         trait_impl_method_compatibility_error(interface_method, implementing_method)
+            .filter(|_| !covariant_object_return(implementing_method))
     {
         return Some(
             trait_impl_method_message_policy(
@@ -1694,6 +2666,8 @@ fn trait_impl_method(
         .unwrap_or_else(|| {
             signatures.required_method_signature(implementing_owner, implementing_method)
         });
+    let trait_param_shapes =
+        trait_method_param_shape_plan(interface, interface_method, program, signatures);
     let args = interface_signature
         .params()
         .iter()
@@ -1703,7 +2677,8 @@ fn trait_impl_method(
                 .params()
                 .get(index)
                 .map(|param| param.shape());
-            trait_impl_forwarded_arg(param.name(), param.shape(), implementation_shape)
+            let trait_shape = trait_param_shapes.get(index).unwrap_or(&param.shape());
+            trait_impl_forwarded_arg(param.name(), trait_shape, implementation_shape)
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -1719,6 +2694,11 @@ fn trait_impl_method(
     };
     let implementing_owner_name = rust_name_for_java_named_type(&forwarding_owner.name);
     let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
+    let call = if covariant_object_return(implementing_method) {
+        format!("std::boxed::Box::new({call}) as std::boxed::Box<dyn std::any::Any>")
+    } else {
+        call
+    };
     let call = adapt_trait_impl_forwarded_return(
         call,
         trait_return_shape_for_body
@@ -1804,6 +2784,24 @@ fn trait_impl_forwarded_arg(
     implementation_shape: Option<&RustSlotShape>,
 ) -> String {
     if implementation_shape.is_some_and(|shape| {
+        trait_shape.ownership == OwnershipShape::Owned
+            && trait_shape.view == ViewShape::Native
+            && shape.ownership == OwnershipShape::SharedBorrow
+            && shape.view == ViewShape::Str
+            && shape.java_ty == trait_shape.java_ty
+    }) {
+        return format!("&{arg_name}");
+    }
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.ownership == OwnershipShape::Owned
+            && trait_shape.view == ViewShape::Native
+            && shape.ownership == OwnershipShape::SharedBorrow
+            && shape.view == ViewShape::Slice
+            && shape.java_ty == trait_shape.java_ty
+    }) {
+        return format!("&{arg_name}");
+    }
+    if implementation_shape.is_some_and(|shape| {
         trait_shape.ownership == OwnershipShape::SharedBorrow
             && trait_shape.view == ViewShape::Slice
             && shape.ownership == OwnershipShape::Owned
@@ -1822,6 +2820,35 @@ fn trait_impl_forwarded_arg(
         return format!("{arg_name}.to_string()");
     }
     arg_name.to_string()
+}
+
+#[cfg(test)]
+mod trait_impl_forwarded_arg_tests {
+    use super::*;
+
+    #[test]
+    fn owned_trait_values_borrow_for_string_and_array_views() {
+        let owned_string = RustSlotShape::for_storage(JavaType::String);
+        let mut borrowed_string = owned_string.clone();
+        borrowed_string.ownership = OwnershipShape::SharedBorrow;
+        borrowed_string.view = ViewShape::Str;
+        assert_eq!(
+            trait_impl_forwarded_arg("sample", &owned_string, Some(&borrowed_string)),
+            "&sample"
+        );
+
+        let array = JavaType::Array(Box::new(JavaType::Primitive(
+            crate::java_ir::PrimitiveType::Int,
+        )));
+        let owned_array = RustSlotShape::for_storage(array);
+        let mut borrowed_slice = owned_array.clone();
+        borrowed_slice.ownership = OwnershipShape::SharedBorrow;
+        borrowed_slice.view = ViewShape::Slice;
+        assert_eq!(
+            trait_impl_forwarded_arg("values", &owned_array, Some(&borrowed_slice)),
+            "&values"
+        );
+    }
 }
 
 fn enum_trait_impl_method_body(ty: &TypeDecl, interface_method: &MethodDecl) -> Option<String> {
@@ -1979,6 +3006,30 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     return_shape_override: Option<RustSlotShape>,
     program: &Program,
 ) -> String {
+    trait_method_signature_with_receiver_and_return_shape_and_params(
+        ty,
+        method,
+        signatures,
+        facts,
+        exceptions,
+        receiver_override,
+        return_shape_override,
+        program,
+        None,
+    )
+}
+
+fn trait_method_signature_with_receiver_and_return_shape_and_params(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+    receiver_override: Option<ReceiverPlan>,
+    return_shape_override: Option<RustSlotShape>,
+    program: &Program,
+    specialized_param_types: Option<&[JavaType]>,
+) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
     if !method.modifiers.contains(&Modifier::Static) {
@@ -1989,7 +3040,19 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     }
     let param_shapes = trait_method_param_shape_plan(ty, method, program, signatures);
     params.extend(signature.params().iter().enumerate().map(|(index, param)| {
-        let shape = param_shapes.get(index).unwrap_or(&param.shape());
+        let specialized = specialized_param_types
+            .and_then(|types| types.get(index))
+            .filter(|ty| {
+                method
+                    .params
+                    .get(index)
+                    .is_some_and(|original| &original.ty != *ty)
+            })
+            .map(|ty| RustSlotShape::for_storage(ty.clone()));
+        let shape = specialized
+            .as_ref()
+            .or_else(|| param_shapes.get(index))
+            .unwrap_or(&param.shape());
         format!(
             "{}: {}",
             param.name(),
@@ -2543,11 +3606,15 @@ fn collect_type_decl_matches<'a>(
 mod type_emission_tests {
     use super::{
         RepresentationTypeEmission, TraitImplMethodCompatibilityError,
-        TraitImplMethodFallbackPolicy, TraitImplMethodMessagePolicy, raw_type_item_for_with_facts,
-        trait_impl_emissions_for_type_with_facts, trait_impl_method_message_policy,
+        TraitImplMethodFallbackPolicy, TraitImplMethodMessagePolicy,
+        interface_ancestor_instantiations, raw_type_item_for_with_facts,
+        source_hierarchy_carrier_forwarding_method,
+        source_hierarchy_virtual_dispatch_trait_item_for_type,
+        specialized_interface_abstract_contracts, trait_impl_emissions_for_type_with_facts,
+        trait_impl_method_message_policy, trait_item_for_type_with_program,
         type_emission_for_program_with_facts_and_exceptions, type_emission_for_with_facts,
     };
-    use crate::exception_plan::ProgramExceptionPlan;
+    use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan};
     use crate::facts::{
         FactProvenance, FactSet, HierarchyOverride, HierarchyStrategy, TypeCapabilityOverride,
     };
@@ -2556,8 +3623,295 @@ mod type_emission_tests {
     use crate::representation::{ObjectRepresentation, plan_representations};
     use crate::resolve::resolve_program;
     use crate::semantic_analysis::analyze_program;
-    use crate::signature::solve_signatures_with_facts;
+    use crate::signature::{SignaturePlan, solve_signatures_with_facts};
     use crate::usage::{analyze_usage, analyze_usage_with_facts};
+
+    #[test]
+    fn ancestor_instantiations_compose_type_arguments_across_interface_edges() {
+        let parsed = parse_java_source(
+            r#"
+interface Source<T> { T value(); }
+interface Relay<U> extends Source<U> {}
+interface Joined extends Relay<String> {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let joined = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Joined")
+            .unwrap();
+        let ancestors = interface_ancestor_instantiations(&resolved.program, joined);
+        assert_eq!(ancestors.len(), 2);
+        assert_eq!(ancestors[0].interface.name, "Relay");
+        assert_eq!(ancestors[0].args, vec![JavaType::String]);
+        assert_eq!(ancestors[1].interface.name, "Source");
+        assert_eq!(ancestors[1].args, vec![JavaType::String]);
+    }
+
+    #[test]
+    fn inherited_generic_contracts_substitute_type_arguments_through_interface_chain() {
+        let parsed = parse_java_source(
+            r#"
+interface Source<T> { T value(); T echo(T input); }
+interface Relay<U> extends Source<U> {}
+interface Named { String value(); }
+interface Joined extends Relay<String>, Named {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        for (name, type_param) in [("Source", "T"), ("Relay", "U")] {
+            let interface = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == name)
+                .unwrap();
+            let rendered = trait_item_for_type_with_program(
+                interface,
+                &interface.name,
+                &resolved.program,
+                &signatures,
+                &semantic.facts,
+                &ProgramExceptionPlan::default(),
+                &representations,
+                false,
+            );
+            assert!(
+                rendered.contains(&format!("pub trait {name}<{type_param}>")),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("fn value(&self) -> {type_param};")),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!(
+                    "fn echo(&self, input: {type_param}) -> {type_param};"
+                )),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains(&format!("impl<{type_param}: 'static, __JavaShared:")),
+                "{rendered}"
+            );
+        }
+        let source_ty = JavaType::Named {
+            name: "Source".to_string(),
+            args: vec![JavaType::String],
+        };
+        let mut source_slot = crate::slot_shape::RustSlotShape::for_storage(source_ty);
+        source_slot.view = crate::slot_shape::ViewShape::DynTraitView;
+        source_slot.dispatch = crate::slot_shape::DispatchShape::BoxedDynTrait {
+            trait_name: "Source".to_string(),
+        };
+        assert_eq!(
+            crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                    &source_slot,
+                    &semantic.facts,
+                    &representations,
+                )
+            ),
+            "Box<dyn Source<String>>"
+        );
+        let joined = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Joined")
+            .unwrap();
+        let contracts = specialized_interface_abstract_contracts(&resolved.program, joined);
+        assert_eq!(contracts.len(), 2);
+        let value = contracts
+            .iter()
+            .find(|contract| contract.method.name == "value")
+            .unwrap();
+        assert_eq!(value.return_type, JavaType::String);
+        let echo = contracts
+            .iter()
+            .find(|contract| contract.method.name == "echo")
+            .unwrap();
+        assert_eq!(echo.return_type, JavaType::String);
+        assert_eq!(echo.param_types, vec![JavaType::String]);
+
+        let rendered = trait_item_for_type_with_program(
+            joined,
+            &joined.name,
+            &resolved.program,
+            &signatures,
+            &semantic.facts,
+            &ProgramExceptionPlan::default(),
+            &representations,
+            false,
+        );
+        assert!(
+            rendered.contains("fn value(&self) -> String;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("fn echo(&self, input: String) -> String;"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl Source<String> for __JavaInterfaceUpcastJoinedToSource"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl Relay<String> for __JavaInterfaceUpcastJoinedToRelay"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn colliding_parent_contracts_choose_covariant_return_in_either_order() {
+        let parsed = parse_java_source(
+            r#"
+interface General { Object value(); }
+interface Specific { String value(); }
+interface GeneralFirst extends General, Specific {}
+interface SpecificFirst extends Specific, General {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        for name in ["GeneralFirst", "SpecificFirst"] {
+            let combined = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == name)
+                .unwrap();
+            let contracts = specialized_interface_abstract_contracts(&resolved.program, combined);
+            assert_eq!(contracts.len(), 1, "{name}");
+            assert_eq!(contracts[0].return_type, JavaType::String, "{name}");
+        }
+    }
+
+    #[test]
+    fn source_hierarchy_carrier_forwards_parameterized_instance_methods() {
+        let parsed = parse_java_source("class Base { int value(int input) { return input; } }");
+        let method = parsed.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("base method");
+
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string()],
+            &FactSet::default(),
+            &SignaturePlan::default(),
+            MethodExceptionPlan::new(false),
+            &parsed.program.types[0],
+            method,
+            None,
+            false,
+        )
+        .expect("instance method forwards");
+
+        assert!(
+            rendered.contains("pub fn value(&self, input: i32) -> i32"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "Self::Base(__java_carrier_payload) => __java_carrier_payload.value(input)"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn anonymous_class_base_emits_object_safe_parameterized_dispatch_surface() {
+        let parsed = parse_java_source(
+            "class Base { int value(int input) { return input; } } class Use { Base make() { return new Base() {}; } }",
+        );
+        let facts = FactSet::default();
+        let plan = plan_representations(&parsed.program, &facts);
+        let base = parsed
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+
+        let rendered = source_hierarchy_virtual_dispatch_trait_item_for_type(
+            &plan,
+            base,
+            &SignaturePlan::default(),
+            &facts,
+            &ProgramExceptionPlan::default(),
+            &parsed.program,
+        )
+        .expect("anonymous base gets a dispatch surface");
+        assert!(
+            rendered.contains("pub trait BaseAnonymousDispatchClone"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("impl Clone for Box<dyn BaseAnonymousDispatch>"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("pub trait BaseAnonymousDispatch"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("fn value(&self, input: i32) -> i32;"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn anonymous_carrier_dispatch_includes_same_source_superclass_method() {
+        let parsed = parse_java_source(
+            "class Parent { int inherited(int value) { return value; } } class Base extends Parent {} class Use { Base make() { return new Base() {}; } }",
+        );
+        let facts = FactSet::default();
+        let plan = plan_representations(&parsed.program, &facts);
+        let base = parsed
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+        let inherited = crate::inherited_members::inherited_instance_method_refs_for_type(
+            base,
+            &parsed.program,
+        );
+        assert!(
+            inherited
+                .iter()
+                .any(|method| method.method().name == "inherited"),
+            "{inherited:?}"
+        );
+        let rendered = source_hierarchy_virtual_dispatch_trait_item_for_type(
+            &plan,
+            base,
+            &SignaturePlan::default(),
+            &facts,
+            &ProgramExceptionPlan::default(),
+            &parsed.program,
+        )
+        .expect("anonymous base gets a dispatch surface");
+        assert!(
+            rendered.contains("fn inherited(&self, value: i32) -> i32;"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn raw_type_item_bridge_is_test_only_projection_of_type_emission() {
@@ -2831,7 +4185,7 @@ class ExternalId {}
         assert_eq!(
             type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
             RepresentationTypeEmission::RawRustItem(
-                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { (**self).ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { (**self).as_any() }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<std::cell::RefCell<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { self.borrow().ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<std::sync::Mutex<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { self.lock().unwrap().ids(values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
+                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&**self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { IdSource::as_any(&**self) }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<__JavaShared> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&**self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { IdSource::as_any(&**self) }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<std::cell::RefCell<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&*self.borrow(), values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<std::sync::Mutex<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&*self.lock().unwrap(), values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
                     .to_string()
             )
         );
@@ -3183,7 +4537,7 @@ class OverloadedNamed implements Named {
         assert!(!impls[0].contains("compile_error!"), "{}", impls[0]);
         assert!(
             impls[0].contains(
-                "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, prefix) }"
+                "fn score(&self, prefix: String) -> i32 { OverloadedNamed::score_string(self, &prefix) }"
             ),
             "{}",
             impls[0]
@@ -3283,7 +4637,7 @@ interface Mapper {
             "Mapper for std::sync::Arc<__JavaShared>",
             "Mapper for std::rc::Rc<std::cell::RefCell<__JavaShared>>",
             "Mapper for std::sync::Arc<std::sync::Mutex<__JavaShared>>",
-            "fn id<T>(&self, value: T) -> T where Self: Sized { self.borrow().id(value) }",
+            "fn id<T>(&self, value: T) -> T where Self: Sized { Mapper::id(&*self.borrow(), value) }",
         ] {
             assert!(rendered.contains(expected), "{rendered}");
         }
@@ -3543,7 +4897,7 @@ mod shared_handle_forwarding_tests {
                 "impl<__JavaShared: Named + 'static> Named for std::rc::Rc<__JavaShared>"
             )
         );
-        assert!(rendered.contains("fn id(&self) -> String { (**self).id() }"));
+        assert!(rendered.contains("fn id(&self) -> String { Named::id(&**self) }"));
         assert!(rendered.contains("fn as_any(&self) -> &dyn std::any::Any { self }"));
     }
 
@@ -3575,7 +4929,7 @@ mod shared_handle_forwarding_tests {
         )
         .expect("forwards");
         assert!(
-            rendered.contains("{ (**self).put(key, value) }"),
+            rendered.contains("{ Sink::put(&**self, key, value) }"),
             "{rendered}"
         );
     }
@@ -3592,10 +4946,12 @@ mod shared_handle_forwarding_tests {
         )
         .expect("cell-backed handles forward mutating surfaces");
         assert!(rendered.contains("Shape for std::rc::Rc<std::cell::RefCell<__JavaShared>>"));
-        assert!(rendered.contains("fn size(&self) -> i32 { self.borrow().size() }"));
-        assert!(rendered.contains("fn grow(&mut self) { self.borrow_mut().grow() }"));
+        assert!(rendered.contains("fn size(&self) -> i32 { Shape::size(&*self.borrow()) }"));
+        assert!(rendered.contains("fn grow(&mut self) { Shape::grow(&mut *self.borrow_mut()) }"));
         assert!(rendered.contains("Shape for std::sync::Arc<std::sync::Mutex<__JavaShared>>"));
-        assert!(rendered.contains("fn grow(&mut self) { self.lock().unwrap().grow() }"));
+        assert!(
+            rendered.contains("fn grow(&mut self) { Shape::grow(&mut *self.lock().unwrap()) }")
+        );
         assert!(!rendered.contains("Shape for std::rc::Rc<__JavaShared>"));
     }
 
@@ -3613,7 +4969,7 @@ mod shared_handle_forwarding_tests {
             rendered.contains("LabelSource for std::rc::Rc<__JavaShared>"),
             "{rendered}"
         );
-        assert!(rendered.contains("fn label(&self) -> &str { (**self).label() }"));
+        assert!(rendered.contains("fn label(&self) -> &str { LabelSource::label(&**self) }"));
         assert!(
             !rendered.contains("LabelSource for std::rc::Rc<std::cell::RefCell<__JavaShared>>"),
             "{rendered}"

@@ -4466,9 +4466,10 @@ fn propagate_resolved_source_mutable_argument_binding_constraints(
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
-            if !resolved_source_call_propagates_signature_constraints(call_site.boundary()) {
-                continue;
-            }
+            // Semantic facts can classify a parsed-source receiver as
+            // `KnownContentRead`. That boundary is useful for ownership
+            // inference, but an exact resolved source target still requires a
+            // mutable caller binding when its parameter ABI is `&mut`.
             for binding in method_usage.all_binding_facts() {
                 for usage in binding.uses() {
                     let BindingUse::PassedToCall {
@@ -4574,14 +4575,10 @@ fn propagate_resolved_source_mutable_receiver_binding_constraints(
 }
 
 fn callee_param_requires_mutable_binding(constraints: &[SignatureConstraint]) -> bool {
-    constraints.iter().any(|constraint| {
-        matches!(
-            constraint,
-            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow)
-        )
-    }) && constraints
-        .iter()
-        .any(|constraint| matches!(constraint, SignatureConstraint::MutableBinding))
+    // The caller must be able to hand out `&mut` even when the callee only
+    // mutates an array element and never reassigns its parameter binding.
+    // Requiring the callee's own `MutableBinding` flag misses that case.
+    mutable_borrow_param_constraints(constraints)
 }
 
 fn propagated_callee_param_constraints(
@@ -15056,6 +15053,46 @@ mod tests {
 
     fn binding_fact(name: &str, binding: Option<BindingId>) -> BindingUseFacts {
         BindingUseFacts::new(name, binding, JavaType::String, Vec::new())
+    }
+
+    #[test]
+    fn mutable_array_argument_marks_caller_local_binding_mutable() {
+        let parsed = crate::parser::parse_java_source(
+            "class ArrayWriteBase { ArrayWriteBase() {} int bump(int[] values) { values[0] = values[0] + 1; return values[0]; } } class ArrayWriteAnonymousClass { static ArrayWriteBase make() { return new ArrayWriteBase() {}; } static int run() { int[] values = {4}; ArrayWriteBase value = make(); return value.bump(values) + values[0]; } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let semantic =
+            crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &facts);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let use_type = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "ArrayWriteAnonymousClass")
+            .unwrap();
+        let run = use_type
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "run" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let local = signatures
+            .required_method_signature(use_type, run)
+            .locals()
+            .iter()
+            .find(|local| local.name() == "values")
+            .unwrap();
+        assert!(local.binding_mutable(), "{local:?}");
     }
 
     #[test]
