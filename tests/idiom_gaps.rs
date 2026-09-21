@@ -43558,6 +43558,221 @@ public class ProgressMeter {
 }
 
 #[test]
+fn audit_0066_inherited_source_summary_overloads_keep_distinct_surfaces() {
+    let target = r#"
+class SummaryOverloadChild extends SummaryOverloadBase {
+    int useInt() {
+        return convert(7);
+    }
+
+    String useString() {
+        return convert("x");
+    }
+}
+"#;
+    let summary = r#"
+class SummaryOverloadBase {
+    protected int convert(int value) {
+        return value + 1;
+    }
+
+    protected String convert(String value) {
+        return value + "!";
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_summary_sources(
+        target,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn convert_int(&self, _arg0: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn convert_string(&self, _arg0: String) -> String")
+            && translation.rust.contains("return self.convert_int(7);")
+            && translation
+                .rust
+                .contains("return self.convert_string(\"x\".to_string());")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "audit_0066_inherited_source_summary_overloads",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn audit_0067_source_summary_overload_identity_covers_all_callable_kinds() {
+    let target = r#"
+class UsesSummaryCallableOverloads {
+    SummaryFactory factory;
+
+    int instanceInt() {
+        return factory.pick(7);
+    }
+
+    String instanceString() {
+        return factory.pick("x");
+    }
+
+    SummaryFactory constructInt() {
+        return new SummaryFactory(7);
+    }
+
+    SummaryFactory constructString() {
+        return new SummaryFactory("x");
+    }
+
+    int staticInt() {
+        return SummaryFactory.select(7);
+    }
+
+    String staticString() {
+        return SummaryFactory.select("x");
+    }
+}
+"#;
+    let summary = r#"
+class SummaryFactory {
+    SummaryFactory(int value) {}
+    SummaryFactory(String value) {}
+    int pick(int value) { return value; }
+    String pick(String value) { return value; }
+    static int select(int value) { return value; }
+    static String select(String value) { return value; }
+}
+"#;
+
+    let translation = translate_source_with_context_summary_sources(
+        target,
+        &[summary.to_string()],
+        &FactSet::default(),
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_int<T0>(_arg0: T0) -> Self")
+            && translation
+                .rust
+                .contains("pub fn new_string<T0>(_arg0: T0) -> Self")
+            && translation
+                .rust
+                .contains("pub fn pick_int(&self, _arg0: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn pick_string(&self, _arg0: String) -> String")
+            && translation
+                .rust
+                .contains("pub fn select_int(_arg0: i32) -> i32")
+            && translation
+                .rust
+                .contains("pub fn select_string(_arg0: String) -> String")
+            && translation.rust.contains("SummaryFactory::new_int(7)")
+            && translation
+                .rust
+                .contains("SummaryFactory::new_string(\"x\".to_string())")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "audit_0067_source_summary_callable_overloads",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn audit_0068_package_qualified_source_summary_identity_stays_distinct() {
+    let target = r#"
+package app;
+
+class UsesPackageQualifiedSummaries {
+    int leftValue() {
+        return left.Constants.VALUE;
+    }
+
+    int rightValue() {
+        return right.Constants.VALUE;
+    }
+
+    String leftName(left.Service service) {
+        return service.name();
+    }
+
+    int rightCode(right.Service service) {
+        return service.code();
+    }
+}
+"#;
+    let left_summary = r#"
+package left;
+
+class Constants {
+    static final int VALUE = 11;
+}
+
+class Service {
+    String name() { return "left"; }
+}
+"#;
+    let right_summary = r#"
+package right;
+
+class Constants {
+    static final int VALUE = 22;
+}
+
+class Service {
+    int code() { return 22; }
+}
+"#;
+
+    let translation = translate_source_with_context_summary_sources(
+        target,
+        &[left_summary.to_string(), right_summary.to_string()],
+        &FactSet::default(),
+    );
+    assert!(
+        translation.rust.contains("pub struct LeftConstants;")
+            && translation.rust.contains("pub struct RightConstants;")
+            && translation.rust.contains("pub const VALUE: i32 = 11;")
+            && translation.rust.contains("pub const VALUE: i32 = 22;")
+            && translation.rust.contains("pub struct LeftService;")
+            && translation.rust.contains("pub struct RightService;")
+            && translation.rust.contains("return LeftConstants::VALUE;")
+            && translation.rust.contains("return RightConstants::VALUE;")
+            && translation.rust.contains("service: LeftService")
+            && translation.rust.contains("service: RightService")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "audit_0068_package_qualified_source_summary_identity",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn two_dimensional_numeric_arrays_lower_to_ndarray_array2() {
     let translation = translate_source(
         r#"

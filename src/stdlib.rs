@@ -14125,27 +14125,6 @@ fn substitute_source_summary_type(
     }
 }
 
-fn source_summary_inherited_method_will_be_lowered(
-    ty: &TypeDecl,
-    emitted_program: &Program,
-    source_summary_program: &Program,
-    source_summary_types: &BTreeSet<String>,
-    target: &MethodDecl,
-) -> bool {
-    source_summary_supertypes_for_emitted_type(
-        ty,
-        emitted_program,
-        source_summary_program,
-        source_summary_types,
-    )
-    .into_iter()
-    .any(|summary_super| {
-        source_summary_method_hierarchy(summary_super, source_summary_program)
-            .into_iter()
-            .any(|method| source_methods_match(method, target))
-    })
-}
-
 fn source_static_final_field_names(ty: &TypeDecl) -> BTreeSet<String> {
     ty.members
         .iter()
@@ -15045,15 +15024,6 @@ impl ExternalApiFacadeSupport {
                         continue;
                     }
                     if source_method_hierarchy_contains_method(program, ty, method_owner, method) {
-                        continue;
-                    }
-                    if source_summary_inherited_method_will_be_lowered(
-                        ty,
-                        program,
-                        source_summary_program,
-                        source_summary_types,
-                        method,
-                    ) {
                         continue;
                     }
                     let return_type = external_facade_method_return_type_with_facts(
