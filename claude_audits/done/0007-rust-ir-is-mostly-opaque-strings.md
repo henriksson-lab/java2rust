@@ -4,13 +4,21 @@ Status: **done for the audited raw-boundary cleanup scope**.
 Severity: high — this is the mechanism the convergence plan is fighting
 Kind: IR modelling gap
 
-Current status 2026-08-29 (Codex audit pass):
+Current status 2026-09-21 (Codex closure recheck):
 
-- Still open, but no longer in the broad producer state described by the
-  original counts below. A production-only scan before test modules finds
+- Done for the audited raw-boundary cleanup scope. The historical broad
+  producer state described by the original counts below is gone. A
+  production-only scan before test modules finds
   `RustExpr::Raw` matching concentrated in the named compatibility/recovery
   paths in `coercion.rs`, `item_assembly.rs`, `lower.rs`, and `slot_render.rs`,
   plus the emitter and the central constructor in `rust_ir.rs`.
+- The anti-regression inventory is live in
+  `layering::production_formatted_raw_constructors_stay_in_named_boundaries`.
+  The closure recheck found five regrown formatted `Raw` constructors in
+  `lower.rs`: source-object `Display` fallback is now a structured
+  `RustItem::Impl`, while four genuinely opaque compatibility expressions
+  enter through `RustExpr::raw_leaf`. The focused inventory, raw-leaf boundary
+  guards, raw-focused unit suite, `cargo check`, and formatting check pass.
 - The optional string-view and optional-construction cluster in `coercion.rs`
   is already guarded as intentional compatibility: structured `Some(...)`
   normalization avoids whole-expression rendering, while raw string-view

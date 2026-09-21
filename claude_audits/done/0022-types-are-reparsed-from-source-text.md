@@ -56,7 +56,7 @@ The grammar provides structured nodes for exactly this — `array_type`,
 
 ## The pattern
 
-This is [0007](../0007-rust-ir-is-mostly-opaque-strings.md) at the *input* end of
+This is [0007](0007-rust-ir-is-mostly-opaque-strings.md) at the *input* end of
 the pipeline. The output end makes decisions by inspecting rendered Rust text;
 the input end makes decisions by inspecting raw Java text. In both cases a
 structured representation exists and is bypassed, and in both cases the cost is

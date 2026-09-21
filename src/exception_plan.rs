@@ -1853,13 +1853,6 @@ pub fn plan_try_stmt<'a>(
                 }
                 return TryStmtPlan::Unsupported;
             }
-            if completion == TryBlockCompletion::Terminates
-                && catches
-                    .iter()
-                    .any(|catch| !block_terminates_with_exception_boundary(&catch.body))
-            {
-                return TryStmtPlan::Unsupported;
-            }
             return TryStmtPlan::CatchFinally {
                 body,
                 catches,

@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 438;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 440;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 0;
 
 #[test]
@@ -1477,6 +1477,7 @@ fn finally_completion_fixtures_match_java_output() {
         "CatchFinallyLabeledContinue",
         "TryCatchFinallyBodyBreak",
         "TryCatchReturnFinally",
+        "TryCatchFinallyTryReturnCatchFallthrough",
         "TryWithResourcesFinally",
         "TryWithResourcesFinallyBodyBreak",
         "TryWithResourcesFinallyBodyContinue",
@@ -1512,6 +1513,25 @@ fn finally_completion_fixtures_match_java_output() {
 }
 
 #[test]
+fn try_catch_finally_try_return_catch_fallthrough_matches_java_output() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java", "rustc"] {
+        assert!(
+            have_tool(tool),
+            "required differential test tool `{tool}` is not available"
+        );
+    }
+    let class = "TryCatchFinallyTryReturnCatchFallthrough";
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential")
+        .join(format!("{class}.java"));
+    compare_fixture(&translator, &fixture, class)
+        .unwrap_or_else(|report| panic!("{class}: {report}"));
+}
+
+#[test]
 fn known_gap_fixtures_are_valid_java_and_match_expected_failure_mode() {
     for tool in ["javac", "java", "rustc"] {
         assert!(
@@ -1533,6 +1553,46 @@ fn known_gap_fixtures_are_valid_java_and_match_expected_failure_mode() {
         actual_paths.len(),
         EXPECTED_KNOWN_GAP_FIXTURES,
         "known-gap fixture count changed; update EXPECTED_KNOWN_GAP_FIXTURES intentionally"
+    );
+}
+
+#[test]
+fn twr_mixed_completion_fence_is_valid_java_and_precise() {
+    let translator = translator_binary().unwrap_or_else(|| {
+        panic!("translator binary not built; run `cargo build --release` before differential tests")
+    });
+    for tool in ["javac", "java"] {
+        assert!(
+            have_tool(tool),
+            "required fence test tool `{tool}` is not available"
+        );
+    }
+
+    let class = "TryWithResourcesMixedCompletionFence";
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/fenced")
+        .join(format!("{class}.java"));
+    let work = std::env::temp_dir().join("new_java2rust_twr_mixed_completion_fence");
+    let _ = std::fs::remove_dir_all(&work);
+    std::fs::create_dir_all(&work).expect("create fence work directory");
+    let java_source = work.join(format!("{class}.java"));
+    std::fs::copy(&fixture, &java_source).expect("copy fence fixture");
+    assert_eq!(
+        run_java(&work, &java_source, class).expect("fence fixture must be valid Java"),
+        "ok,caught:finally"
+    );
+
+    let translated = Command::new(&translator)
+        .arg(&java_source)
+        .output()
+        .expect("run translator for fence fixture");
+    assert!(translated.status.success());
+    let rust = String::from_utf8_lossy(&translated.stdout);
+    assert!(
+        rust.contains("compile_error!(\"unsupported Java statement: try/catch/finally\")")
+            && !rust.contains("__java_twr_result")
+            && !rust.contains("resource.close()"),
+        "resource-bearing mixed completion must stop at the precise fence before partial cleanup lowering:\n{rust}"
     );
 }
 

@@ -2636,7 +2636,7 @@ fn declaration_context_usage_lookups_use_java_callable_keys() {
         (
             "storage_strategy",
             include_str!("../src/storage_strategy.rs"),
-            ".source_method_usage(implementor, method)",
+            ".source_method_usage(ty, method)",
         ),
         (
             "semantic_analysis",
@@ -2795,7 +2795,7 @@ fn receiver_fallback_owner_candidates_stay_wrapped_until_lookup() {
         "SourceContextOwnerKey should not expose an eager raw-string downgrade helper"
     );
     let owner_key_users = lower_source
-        .split("struct SourceContextOwnerKey(String);")
+        .split("struct SourceContextOwnerKey(crate::java_signature::JavaOwnerKey);")
         .nth(1)
         .expect("SourceContextOwnerKey declaration should remain discoverable");
     assert!(
@@ -7005,7 +7005,7 @@ fn callable_analysis_shell_keeps_legacy_lowering_inputs_while_migrating() {
     );
     let resolve_source = include_str!("../src/resolve.rs");
     assert!(resolve_source.contains("FieldKey::named("));
-    assert!(resolve_source.contains("declaration.owner.clone()"));
+    assert!(resolve_source.contains("declaration.owner.as_str()"));
     assert!(resolve_source.contains("declaration.field.name.clone()"));
     assert!(include_str!("../src/stdlib.rs").contains("FieldKey::named(owner, field_name)"));
     assert!(
@@ -8384,10 +8384,18 @@ fn coercion_plan_owns_borrowed_element_recovery_fallback_policy() {
 
 #[test]
 fn lower_consumes_cast_and_instanceof_plans_without_rechecking_representation_facts() {
-    let lower_source = include_str!("../src/lower.rs");
-    let cast_instanceof_branch = lower_source
-        .rsplit("Expr::Cast { ty, expr } =>")
+    let lower_source = include_str!("../src/lower.rs")
+        .split("#[cfg(test)]\nmod tests")
         .next()
+        .expect("production lower.rs source should precede tests");
+    let expression_lowering = lower_source
+        .split("fn lower_expr_with_refinements")
+        .nth(1)
+        .and_then(|tail| tail.split("fn lower_callback_lambda_expr").next())
+        .expect("expression lowering function should be present");
+    let cast_instanceof_branch = expression_lowering
+        .split("Expr::Cast { ty, expr } =>")
+        .nth(1)
         .and_then(|tail| tail.split("Expr::ClassLiteral(ty)").next())
         .expect("cast and instanceof lowering branch should be present");
     let conversion_source = include_str!("../src/conversion_plan.rs");

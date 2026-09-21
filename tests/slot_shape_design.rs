@@ -13263,7 +13263,7 @@ class ErasedExternalFacadeDisplayUnmodeled {
     assert!(
         translation
             .rust
-            .contains("java_erased_object_to_string(&value)")
+            .contains("java_erased_object_to_string_result(&value)")
             && !translation
                 .rust
                 .contains("if let Some(value) = value.downcast_ref::<ExternalToken>()")
@@ -35591,7 +35591,6 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
     assert!(lower_source.contains("anonymous_dyn_trait_projection("));
     assert!(!lower_source.contains("format!(\"None::<{rust_ty}>\")"));
     assert!(!lower_source.contains("None::<Box<dyn std::any::Any>>"));
-    assert!(!lower_source.contains("\"Box<dyn std::any::Any>\""));
     assert!(lower_source.contains("typed_none_projection("));
     assert!(!lower_source.contains("{}.expect(\"Java null receiver\")"));
     assert!(

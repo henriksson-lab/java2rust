@@ -9,6 +9,25 @@ platform, or explicit external `toString` capability evidence remains a loud
 unsupported boundary; fabricating a value there would reintroduce the silent
 semantic corruption this audit was opened to remove.
 
+Closure re-audit 2026-09-21: the superseded 2026-09-02 regressions are all
+represented by current Java-oracle gates, including nullable `Map.get` locals,
+idempotent nullable receiver projection, nullable array length, enum values,
+nested map reads, and borrowed map-entry primitive use. The focused
+`null_representation_fixtures_match_java_output`,
+`nullable_map_get_fixtures_match_java_output`, and
+`borrowed_element_discharge_fixtures_match_java_output` gates cover those
+boundaries; the unknown external erased-display case remains deliberately loud
+and has its own negative generated-crate guard. No Java fixture remains in the
+executable known-gap directory.
+
+The fresh closure run also found and repaired two current adapter gaps rather
+than relying on the historical status: tracked maps promoted for live-entry
+identity now acquire read/write guards before `entrySet` contains/remove view
+operations, and `List<Integer>.get(...)` reaches the slot conversion plan
+before the generic nullable-boxed-primitive shortcut, so assignment to an
+`int` consumes `RecoverOwnedCopyValue`. The map-view, borrowed-element, and
+nullable-map differential gates pass with those repairs.
+
 Codex follow-up 2026-09-21 interface-map parameter boundary:
 `InterfaceMapEntryParameterMutation.java` is promoted. A source helper taking
 `Map<String, Integer>` now receives a generic tracked-map handle, so HashMap,
@@ -1168,9 +1187,9 @@ Method: differential testing against `javac`/`java` as oracle, per the recipe in
 compiled-Rust-output comparison, not a reading of the emitted text. Repros are
 in `repro/` beside this file, named as they would be in `tests/differential/`.
 
-Follows [0052](done/0052-the-example-corpora-are-asserted-on-but-never-compiled.md) — the original 23-fixture differential corpus
+Follows [0052](0052-the-example-corpora-are-asserted-on-but-never-compiled.md) — the original 23-fixture differential corpus
 contained **zero** uses of `null`, so none of this was reachable by any test.
-Extends [0034](done/0034-object-array-allocation-produces-an-empty-vec.md),
+Extends [0034](0034-object-array-allocation-produces-an-empty-vec.md),
 whose fix traded a length bug for the value bug in §1.
 
 ---

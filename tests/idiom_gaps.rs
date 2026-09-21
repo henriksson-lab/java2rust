@@ -32355,6 +32355,112 @@ mod generated_tests {
 }
 
 #[test]
+fn try_catch_finally_try_return_with_fallthrough_catch_preserves_pending_return() {
+    let translation = translate_source(
+        r#"
+class TryCatchFinallyTryReturnCatchFallthrough {
+    static String runOne(String input) {
+        String out = "";
+        try {
+            Integer.parseInt(input);
+            return "ok";
+        } catch (NumberFormatException ex) {
+            out = "caught";
+        } finally {
+            out += ":finally";
+        }
+        return out;
+    }
+
+    static String runAlwaysThrow() {
+        String out = "";
+        try {
+            throw new NumberFormatException("bad");
+        } catch (NumberFormatException ex) {
+            out = "caught";
+        } finally {
+            out += ":finally";
+        }
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Result<Option<String>, JavaException>")
+            && translation.rust.contains("__java_try_result")
+            && !translation
+                .rust
+                .contains("unsupported Java statement: try/catch/finally")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "try_catch_finally_try_return_catch_fallthrough",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn pending_try_return_survives_only_when_the_catch_does_not_run() {
+        assert_eq!(TryCatchFinallyTryReturnCatchFallthrough::run_one("1"), "ok".to_string());
+        assert_eq!(TryCatchFinallyTryReturnCatchFallthrough::run_one("x"), "caught:finally".to_string());
+        assert_eq!(TryCatchFinallyTryReturnCatchFallthrough::run_always_throw(), "caught:finally".to_string());
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn try_with_resources_mixed_return_and_fallthrough_catch_is_explicitly_fenced() {
+    let translation = translate_source(
+        r#"
+class TryWithResourcesMixedCompletionFence {
+    static class Resource implements AutoCloseable {
+        public void close() {}
+    }
+
+    static String run(boolean fail) {
+        String out = "";
+        try (Resource resource = new Resource()) {
+            if (fail) {
+                throw new RuntimeException("bad");
+            }
+            return "ok";
+        } catch (RuntimeException ex) {
+            out = "caught";
+        } finally {
+            out += ":finally";
+        }
+        return out;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("unsupported Java statement: try/catch/finally")
+            && translation.rust.contains("compile_error!")
+            && !translation.rust.contains("return \"ok\".to_string();"),
+        "unsupported mixed resource completion must fail at translation instead of emitting partial cleanup semantics:\n{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn try_catch_finally_mixed_throw_return_overrides_catch_break() {
     let translation = translate_source(
         r#"
@@ -33195,7 +33301,7 @@ fn translates_jaligner_try_catch_finally_cleanup_without_placeholder() {
             .contains("let __java_try_result = match (|| -> Result<(), JavaException>")
             && translation
                 .rust
-                .contains("sequence = Some(Box::new(resource.read()?) as Box<dyn std::any::Any>);")
+                .contains("sequence = Some(resource.read()?);")
             && !translation
                 .rust
                 .contains("sequence = Some(Box::new(Some(Box::new(resource.read()?)")

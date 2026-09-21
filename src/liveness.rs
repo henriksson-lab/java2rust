@@ -686,6 +686,13 @@ impl LivenessAnalysis {
                 }
                 live = self.block_live_in(body, &live, loop_live);
                 self.add_live_floor_to_block(body, &guarded_floor);
+                // A terminating guarded body (for example, `return`) clears
+                // its normal predecessor set. Catch and finally regions are
+                // still reachable across that abrupt completion, so their
+                // reads/writes must also flow back to statements before the
+                // try. Without this union a local assigned only by catch or
+                // finally was rendered immutable when the try returned.
+                live.extend(guarded_floor);
                 for stmt in resources.iter().rev() {
                     live = self.stmt_live_in(stmt, &live, loop_live);
                 }
@@ -821,6 +828,48 @@ mod tests {
         assert!(!bindings.contains(&catch_binding));
         assert!(bindings.contains(&outer_binding));
         assert!(bindings.contains(&other_binding));
+    }
+
+    #[test]
+    fn catch_and_finally_writes_reach_declaration_before_terminating_try_body() {
+        let declaration = decl("out", var("initial"));
+        let try_stmt = Stmt::Try {
+            resources: Vec::new(),
+            body: Block {
+                statements: vec![Stmt::Return(Some(var("result")))],
+            },
+            catches: vec![CatchClause {
+                types: vec![crate::java_ir::JavaType::Named {
+                    name: "RuntimeException".to_string(),
+                    args: Vec::new(),
+                }],
+                name: "ex".to_string(),
+                source_name: "ex".to_string(),
+                body: Block {
+                    statements: vec![Stmt::Assign {
+                        target: var("out"),
+                        value: var("caught"),
+                    }],
+                },
+                binding: None,
+            }],
+            finally_block: Some(Block {
+                statements: vec![Stmt::Assign {
+                    target: var("out"),
+                    value: var("finalized"),
+                }],
+            }),
+        };
+        let body = Block {
+            statements: vec![declaration, try_stmt],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+
+        assert_eq!(
+            analysis.binding_is_mutated_after(&body.statements[0], "out"),
+            Some(true),
+            "abrupt completion of the guarded body must not erase catch/finally writes"
+        );
     }
 
     /// Two sibling scopes each declaring `x` are different variables. A live set

@@ -115,7 +115,7 @@ change hides real gaps. Land the diagnostic first.
 ## Relationship to other findings
 
 The generalisable lesson is the same as
-[0007](../0007-rust-ir-is-mostly-opaque-strings.md): an escape hatch that discards
+[0007](0007-rust-ir-is-mostly-opaque-strings.md): an escape hatch that discards
 structure (`RustExpr::Raw`, `Box<dyn Any>`) postpones the failure to a place
 where the cause is no longer recoverable. Fallbacks should stay typed and name
 their cause.

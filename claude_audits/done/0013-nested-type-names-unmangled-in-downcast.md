@@ -45,7 +45,7 @@ The general defect is that Java type names reach the emitter as `String` and can
 be interpolated anywhere without conversion. A `RustTypeName` newtype that can
 only be constructed by the mapping function would make this class unrepresentable.
 That is a small instance of the argument in
-[0007](../0007-rust-ir-is-mostly-opaque-strings.md): the bug exists because the
+[0007](0007-rust-ir-is-mostly-opaque-strings.md): the bug exists because the
 type is `String`.
 
 Cheap interim guard: assert in the emitter that no rendered type path contains

@@ -109,7 +109,7 @@ this class recurs.
 ## The general shape
 
 This is the input-side twin of
-[0007](../0007-rust-ir-is-mostly-opaque-strings.md)'s complaint. There, decisions
+[0007](0007-rust-ir-is-mostly-opaque-strings.md)'s complaint. There, decisions
 are made by re-rendering a structure to text and inspecting the text; here, a
 decision was made by re-*building* a structure that was already in hand. Both
 are "reconstruct what you already have, then re-derive from it", and both cost

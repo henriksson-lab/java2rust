@@ -2877,22 +2877,13 @@ fn wrap_source_hierarchy_carrier_constructor_value(
     if owner_name.is_empty() {
         return constructed;
     }
-    let Some(representation) = representations.type_representation(owner_name) else {
-        return constructed;
-    };
-    let crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
-        carrier_name,
-        variants,
-    } = representation.representation()
+    let Some((carrier_name, owner_variant)) =
+        representations.source_hierarchy_carrier_constructor_parts(owner_name)
     else {
         return constructed;
     };
-    let owner_variant = crate::java_naming::rust_name_for_java_named_type(owner_name);
-    if !variants.iter().any(|variant| variant == &owner_variant) {
-        return constructed;
-    }
     function_call_projection(
-        RustExpr::path([carrier_name.as_str(), owner_variant.as_str()]),
+        RustExpr::path([carrier_name, owner_variant.as_str()]),
         vec![constructed],
     )
 }

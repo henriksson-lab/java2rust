@@ -245,7 +245,7 @@ re-introduced, never if behaviour regresses:
 `stream_shape_does_not_own_lowered_actual_types` (3).
 
 **These are not worthless.** They are layering guards, and layering is exactly what
-[0007](../claude_audits/0007-rust-ir-is-mostly-opaque-strings.md) is about — a plan
+[0007](0007-rust-ir-is-mostly-opaque-strings.md) is about — a plan
 module that starts building `RustExpr` is a real regression and these catch it. The
 problem is the *ratio*: 36 tests and 386 assertions of substring-matching is a lot
 of red for a rename, and none of it is evidence that a translation is correct. They

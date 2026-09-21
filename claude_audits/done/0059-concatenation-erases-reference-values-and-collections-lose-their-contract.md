@@ -8,6 +8,23 @@ payloads. An external erased value with no source body, modeled platform
 carrier, or explicit `toString(): String` capability remains intentionally
 loud: its Java dynamic display is not inferable from the available program.
 Status: **fixed/fenced for the audited surface**.
+Closure re-audit 2026-09-21: the original concat, ordering, nullable map-result,
+set-construction, and enum-body failures, plus the 2026-09-02 adjacent R1-R6
+regressions, are all represented by current Java-oracle or generated-crate
+gates. The focused erased-display, map-view contract, borrowed-element, and
+live `Map.Entry` gates cover the repaired carriers. Unknown external erased
+display and truly opaque entries remain deliberately loud without the runtime
+type or key/value evidence required to reproduce Java dispatch. No Java
+fixture remains in the executable known-gap directory.
+
+That closure run found two real adapter regressions and fixed them before this
+move: `entrySet` contains/remove operations now borrow promoted shared tracked
+maps through `RwLock` read/write guards, and boxed primitive sequence elements
+are copied out when a primitive slot consumes `List.get`. The focused map-view
+and borrowed-element Java-oracle suites pass, alongside nullable-map and live
+`Map.Entry` gates; the unknown external-display guard remains deliberately
+loud through the result-aware erased-display helper.
+
 Codex follow-up 2026-09-21 interface-map parameter pass:
 `tests/differential/InterfaceMapEntryParameterMutation.java` is promoted. A
 source method declared against `Map<K,V>` is generic over the concrete tracked
@@ -203,7 +220,7 @@ to the native collection iterator, and its direct `next` projection uses the
 backing map's optional key carrier rather than emitting `.iterator()` on a Rust
 `Vec`. Mixed source/native `Map.Entry` node identity remains open.
 
-Codex probe 2026-09-20: [`repro/SourceMapEntryValue.java`](repro/SourceMapEntryValue.java)
+Codex probe 2026-09-20: [`repro/SourceMapEntryValue.java`](../repro/SourceMapEntryValue.java)
 confirms the remaining opaque-entry model gap with a source class implementing
 `Map.Entry<String,Integer>`. The stronger Java oracle prints
 `1:custom(k=2):k:2:2`: an interface call changes the value, the implementation's

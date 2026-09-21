@@ -1334,17 +1334,32 @@ fn collect_source_object_to_string_fallback_items(
         }
     }
     if source_object_to_string_needs_display_fallback(ty, ctx) {
-        let rust_use_name = rust_use_name_for_source_type(ty);
-        let generic_params = ty.type_params.join(", ");
-        let impl_generics = if generic_params.is_empty() {
-            String::new()
-        } else {
-            format!("<{generic_params}>")
-        };
         let java_display = format!("{}@0", source_object_java_class_name(ty, ctx));
-        items.push(RustItem::Raw(format!(
-            "impl{impl_generics} std::fmt::Display for {rust_use_name}{impl_generics} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        f.write_str({java_display:?})\n    }}\n}}"
-        )));
+        items.push(RustItem::Impl(RustImpl {
+            target: source_object_fallback_impl_target(ty),
+            trait_name: Some("std::fmt::Display".to_string()),
+            associated_consts: Vec::new(),
+            functions: vec![RustFunction {
+                name: "fmt".to_string(),
+                type_params: Vec::new(),
+                params: vec![RustParam {
+                    name: "f".to_string(),
+                    ty: RustType::Ref {
+                        mutable: true,
+                        lifetime: None,
+                        inner: Box::new(RustType::Named("std::fmt::Formatter<'_>".to_string())),
+                    },
+                }],
+                return_type: Some(RustType::Named("std::fmt::Result".to_string())),
+                body: vec![RustStmt::Return(Some(receiver_method_call_projection(
+                    RustExpr::Var("f".to_string()),
+                    "write_str",
+                    vec![RustExpr::Literal(format!("{java_display:?}"))],
+                )))],
+                is_pub: false,
+                receiver: Some(RustReceiver::Shared),
+            }],
+        }));
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
@@ -18963,6 +18978,9 @@ fn lower_try_stmt(
             let catches_have_value_return = planned_catches
                 .iter()
                 .any(|catch| block_contains_value_return(&catch.body));
+            let catches_can_fall_through = planned_catches.iter().any(|catch| {
+                plan_block_exception_completion(&catch.body) == TryBlockCompletion::FallsThroughUnit
+            });
             let try_ok_type = if matches!(completion, TryBlockCompletion::FallsThroughUnit) {
                 RustType::Unit
             } else {
@@ -19004,6 +19022,22 @@ fn lower_try_stmt(
                     ok_type,
                     try_body,
                     catch_arms,
+                    finally_body,
+                    wrap_returns_in_ok,
+                );
+            }
+            if matches!(completion, TryBlockCompletion::Terminates) && catches_can_fall_through {
+                return try_catch_finally_terminating_try_fallthrough_catch_scope_stmt(
+                    ok_type,
+                    try_body,
+                    catch_arms,
+                    planned_catches
+                        .iter()
+                        .map(|catch| {
+                            plan_block_exception_completion(&catch.body)
+                                == TryBlockCompletion::FallsThroughUnit
+                        })
+                        .collect(),
                     finally_body,
                     wrap_returns_in_ok,
                 );
@@ -19077,6 +19111,90 @@ fn lower_try_stmt(
         wrap_returns_in_ok,
         matches!(completion, TryBlockCompletion::FallsThroughUnit),
     )
+}
+
+fn try_catch_finally_terminating_try_fallthrough_catch_scope_stmt(
+    ok_type: RustType,
+    mut try_body: Vec<RustStmt>,
+    catches: Vec<CatchRenderArm>,
+    catch_falls_through: Vec<bool>,
+    finally_body: Vec<RustStmt>,
+    outer_returns_result: bool,
+) -> RustStmt {
+    let optional_result_type = exception_result_type(RustType::Option(Box::new(ok_type)));
+    rewrite_returns_as_optional_pending_returns(&mut try_body);
+
+    let mut match_arms = vec![RustMatchArm {
+        pattern: "Ok(value)".to_string(),
+        body: RustExpr::Call {
+            function: Box::new(RustExpr::path(["Ok"])),
+            args: vec![RustExpr::Var("value".to_string())],
+        },
+    }];
+    for (catch, falls_through) in catches.into_iter().zip(catch_falls_through) {
+        let pattern = loop_catch_guard_pattern(catch.variable_name(), catch.class_names().to_vec());
+        let mut catch_body = catch.into_body();
+        if falls_through {
+            catch_body.push(RustStmt::Return(Some(ok_none_expr())));
+        } else {
+            rewrite_returns_as_optional_pending_returns(&mut catch_body);
+        }
+        match_arms.push(RustMatchArm {
+            pattern,
+            body: loop_result_scope_call_expr(optional_result_type.clone(), catch_body),
+        });
+    }
+    match_arms.push(RustMatchArm {
+        pattern: "Err(ex)".to_string(),
+        body: RustExpr::Call {
+            function: Box::new(RustExpr::path(["Err"])),
+            args: vec![RustExpr::Var("ex".to_string())],
+        },
+    });
+
+    let mut scope_body = vec![RustStmt::Let {
+        mutable: false,
+        name: "__java_try_result".to_string(),
+        ty: None,
+        value: Some(RustExpr::Match {
+            expr: Box::new(loop_result_scope_call_expr(
+                optional_result_type.clone(),
+                try_body,
+            )),
+            arms: match_arms,
+        }),
+    }];
+    scope_body.extend(finally_body);
+    if rust_stmts_definitely_terminate_local(&scope_body) {
+        return RustStmt::Expr(RustExpr::Block {
+            stmts: scope_body,
+            tail: None,
+        });
+    }
+    let pending_expr = if outer_returns_result {
+        RustExpr::Try(Box::new(RustExpr::Var("__java_try_result".to_string())))
+    } else {
+        unwrap_result_or_panic_uncaught_java_exception(RustExpr::Var(
+            "__java_try_result".to_string(),
+        ))
+    };
+    scope_body.push(RustStmt::IfLet {
+        pattern: "Some(value)".to_string(),
+        expr: pending_expr,
+        then_body: vec![RustStmt::Return(Some(if outer_returns_result {
+            RustExpr::Call {
+                function: Box::new(RustExpr::path(["Ok"])),
+                args: vec![RustExpr::Var("value".to_string())],
+            }
+        } else {
+            RustExpr::Var("value".to_string())
+        }))],
+        else_body: Vec::new(),
+    });
+    RustStmt::Expr(RustExpr::Block {
+        stmts: scope_body,
+        tail: None,
+    })
 }
 
 fn try_catch_finally_optional_return_scope_stmt(
@@ -37811,7 +37929,7 @@ fn adapt_source_subtype_to_supertype_argument(
         // upcast implementation is specifically between the boxed carriers.
         let target_ty = format!("std::boxed::Box<dyn {target_trait}>");
         let converted = function_call_projection(
-            RustExpr::Raw(format!(
+            RustExpr::raw_leaf(format!(
                 "<{actual_ty} as std::convert::Into<{target_ty}>>::into"
             )),
             vec![lowered],
@@ -39402,7 +39520,6 @@ fn java_type_is_in_scope_type_parameter(java_ty: &JavaType, ctx: LowerCtx) -> bo
     ctx.current_type
         .and_then(|current_type| {
             find_exact_context_type_by_name_in_lower_ctx(ctx, current_type)
-                .or_else(|| find_context_type_by_key_in_lower_ctx(ctx, current_type))
                 .or_else(|| SourceContextOwnerKey::new(current_type).find_context_type(ctx))
         })
         .is_some_and(|ty| ty.type_params.iter().any(|param| param == type_name))
@@ -43379,7 +43496,7 @@ fn lower_anonymous_source_class_object_expr(
     } else {
         format!("std::rc::Rc::new({adapter_value})")
     };
-    Some(RustExpr::Raw(format!(
+    Some(RustExpr::raw_leaf(format!(
         "{{\n    #[derive(Clone)]\n    struct {adapter_name} {{ __base: {base_rust_name}{adapter_fields} }}\n\n    {helper_impl}\n\n    impl {dispatch_trait} for {adapter_name} {{\n{}\n    }}\n\n    {carrier_name}::Anonymous({dispatch_handle})\n}}",
         impl_items.join("\n"),
         helper_impl = (!helper_methods.is_empty())
@@ -47806,7 +47923,7 @@ fn lower_object_backed_anonymous_interface_expr(
     };
     Some(RustExpr::Block {
         stmts: vec![RustStmt::Raw(adapter_item)],
-        tail: Some(Box::new(RustExpr::Raw(format!(
+        tail: Some(Box::new(RustExpr::raw_leaf(format!(
             "std::boxed::Box::new({shared_adapter}) as std::boxed::Box<dyn {trait_name}>"
         )))),
     })
@@ -48397,7 +48514,7 @@ fn lower_stateful_functional_anonymous_interface_expr(
     );
     Some(RustExpr::Block {
         stmts: vec![RustStmt::Raw(adapter_item)],
-        tail: Some(Box::new(RustExpr::Raw(format!(
+        tail: Some(Box::new(RustExpr::raw_leaf(format!(
             "std::boxed::Box::new({adapter_name} {{ {field_values} }}) as std::boxed::Box<dyn {trait_name}>"
         )))),
     })
@@ -49315,15 +49432,25 @@ fn lower_expr_for_slot_with_refinements(
     }
     if let Some(target) = slot_target_shape(&slot)
         && let JavaType::Primitive(primitive) = target.java_ty
-        && let Some(lowered) = lower_optional_boxed_primitive_expr_for_primitive_context(
+    {
+        // A sequence `get` produces a borrowed element.  Route it through the
+        // slot-aware sequence adapter before the broader nullable-boxed-
+        // primitive shortcut so `RecoverOwnedCopyValue` can discharge the
+        // borrow for primitive locals/returns/arguments.
+        if let Some(lowered) =
+            lower_sequence_get_call_expr_for_slot(expr, env, &slot, ctx, refinements)
+        {
+            return lowered;
+        }
+        if let Some(lowered) = lower_optional_boxed_primitive_expr_for_primitive_context(
             expr,
             primitive,
             env,
             ctx,
             refinements,
-        )
-    {
-        return lowered;
+        ) {
+            return lowered;
+        }
     }
     if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
         && ctx.representations.source_map_entry_uses_value_carrier()
@@ -61238,7 +61365,7 @@ fn lower_map_key_set_unsupported_mutation_from_backing_map(
 
     let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
     let mut stmts = vec![RustStmt::Let {
-        mutable: false,
+        mutable: expr_is_shared_native_map(map_receiver, env),
         name: "__java_map_key_set_unsupported_map".to_string(),
         ty: None,
         value: Some(mutable_map_view_backing_borrow(
@@ -61353,7 +61480,7 @@ fn lower_map_key_set_remove_all_from_backing_map(
                 value: Some(lowered_arg),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -61513,7 +61640,7 @@ fn lower_map_key_set_retain_all_from_backing_map(
                 value: Some(lowered_keys),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -61624,6 +61751,13 @@ fn mutable_map_view_backing_borrow(
     lowered_map: RustExpr,
     env: &ShapeEnv,
 ) -> RustExpr {
+    if expr_is_shared_native_map(map_receiver, env) {
+        return receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(lowered_map, "write", Vec::new()),
+            "unwrap",
+            Vec::new(),
+        );
+    }
     let already_mutable_borrow = matches!(
         map_receiver,
         Expr::Var(name)
@@ -61642,6 +61776,13 @@ fn mutable_map_view_backing_borrow(
 }
 
 fn map_view_backing_borrow(map_receiver: &Expr, lowered_map: RustExpr, env: &ShapeEnv) -> RustExpr {
+    if expr_is_shared_native_map(map_receiver, env) {
+        return receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(lowered_map, "read", Vec::new()),
+            "unwrap",
+            Vec::new(),
+        );
+    }
     let already_borrowed = matches!(
         map_receiver,
         Expr::Var(name)
@@ -61942,7 +62083,7 @@ fn lower_map_entry_set_unsupported_mutation_from_backing_map(
 
     let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
     let mut stmts = vec![RustStmt::Let {
-        mutable: false,
+        mutable: expr_is_shared_native_map(map_receiver, env),
         name: "__java_map_entry_set_unsupported_map".to_string(),
         ty: None,
         value: Some(mutable_map_view_backing_borrow(
@@ -62063,7 +62204,7 @@ fn lower_map_entry_set_retain_all_from_backing_map(
                 value: Some(lowered_entries),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -62161,7 +62302,7 @@ fn lower_map_entry_set_remove_all_from_backing_map(
         return Some(RustExpr::Block {
             stmts: vec![
                 RustStmt::Let {
-                    mutable: false,
+                    mutable: expr_is_shared_native_map(map_receiver, env),
                     name: map_name.to_string(),
                     ty: None,
                     value: Some(mutable_map_view_backing_borrow(
@@ -62204,7 +62345,7 @@ fn lower_map_entry_set_remove_all_from_backing_map(
                 value: Some(lowered_entries),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -62421,10 +62562,7 @@ fn lower_map_entry_set_contains_next_from_backing_map(
                 mutable: false,
                 name: map_name.to_string(),
                 ty: None,
-                value: Some(RustExpr::Unary {
-                    op: "&".to_string(),
-                    expr: Box::new(lowered_map),
-                }),
+                value: Some(map_view_backing_borrow(map_receiver, lowered_map, env)),
             },
             RustStmt::Let {
                 mutable: false,
@@ -62524,7 +62662,7 @@ fn lower_map_entry_set_remove_from_backing_map(
     Some(RustExpr::Block {
         stmts: vec![
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -62619,7 +62757,7 @@ fn lower_map_entry_set_remove_local_from_backing_map(
                 value: Some(value),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -62789,7 +62927,7 @@ fn lower_map_entry_set_remove_simple_entry_from_backing_map(
     Some(RustExpr::Block {
         stmts: vec![
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.clone(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -62862,7 +63000,7 @@ fn lower_map_entry_set_remove_typed_entry_from_backing_map(
                 value: Some(value),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.clone(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -63386,7 +63524,7 @@ fn lower_map_values_unsupported_mutation_from_backing_map(
 
     let lowered_map = lower_expr_with_refinements(map_receiver, env, ctx, refinements);
     let mut stmts = vec![RustStmt::Let {
-        mutable: false,
+        mutable: expr_is_shared_native_map(map_receiver, env),
         name: "__java_map_values_unsupported_map".to_string(),
         ty: None,
         value: Some(mutable_map_view_backing_borrow(
@@ -63592,7 +63730,7 @@ fn lower_map_values_remove_from_backing_map(
     Some(RustExpr::Block {
         stmts: vec![
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -63686,7 +63824,7 @@ fn lower_map_values_remove_all_from_backing_map(
                 value: Some(lowered_arg),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -63770,7 +63908,7 @@ fn lower_map_values_retain_all_from_backing_map(
                 value: Some(lowered_values),
             },
             RustStmt::Let {
-                mutable: false,
+                mutable: expr_is_shared_native_map(map_receiver, env),
                 name: map_name.to_string(),
                 ty: None,
                 value: Some(mutable_map_view_backing_borrow(
@@ -77643,7 +77781,8 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_set_remove_map = &mut values;"),
+            translation
+                .contains("let mut __java_map_entry_set_remove_map = values.write().unwrap();"),
             "{translation}"
         );
         assert!(
@@ -77678,7 +77817,7 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_set_contains_map = &values;"),
+            translation.contains("let __java_map_entry_set_contains_map = values.read().unwrap();"),
             "{translation}"
         );
         assert!(
@@ -81393,6 +81532,31 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
         );
         assert!(
             translation.contains("if let Some(value) = value.downcast_ref::<Path>()"),
+            "{translation}"
+        );
+    }
+
+    #[test]
+    fn sequence_get_into_primitive_local_consumes_copy_recovery_plan() {
+        let translation = crate::translate_source(
+            r#"
+            import java.util.ArrayList;
+            import java.util.Arrays;
+            import java.util.List;
+
+            public class SequenceGetPrimitiveLocal {
+                public static int run() {
+                    List<Integer> values = new ArrayList<>(Arrays.asList(1, 2));
+                    int second = values.get(1);
+                    return second;
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translation.contains("let second: i32 = *values.get(1 as usize)"),
             "{translation}"
         );
     }

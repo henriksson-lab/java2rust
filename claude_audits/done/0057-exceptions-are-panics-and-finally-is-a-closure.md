@@ -1,7 +1,37 @@
 # 0057 — Java exceptions still leak as panics, and general `finally` completion is not represented
 
 Recorded 2026-08-23.
-Status: **done for the audited actual-error scope**.
+Status: **done/fenced for the audited actual-error scope**.
+
+Codex closure pass 2026-09-21: a systematic recheck of the completion planner
+found one unfenced valid-Java matrix cell despite the earlier closure claim: a
+terminating value-returning `try`, a catch that falls through, and an ordinary
+fall-through `finally`. The translator emitted the generic unsupported
+statement for Java that prints `ok,caught:finally`. Plain catch/finally lowering
+now carries `Result<Option<ReturnValue>, JavaException>` across that mixed
+completion, runs `finally`, resumes the saved return only on `Some`, and lets a
+fall-through catch continue after the statement. The same probe exposed a
+write-analysis defect: a terminating guarded body erased catch/finally writes
+before they reached a declaration preceding the try. The liveness relation now
+unions that guarded write floor back across abrupt completion. Permanent gates:
+`idiom_gaps::try_catch_finally_try_return_with_fallthrough_catch_preserves_pending_return`,
+`liveness::tests::catch_and_finally_writes_reach_declaration_before_terminating_try_body`,
+and Java/Rust oracle
+`TryCatchFinallyTryReturnCatchFallthrough` in
+`finally_completion_fixtures_match_java_output`.
+
+The remaining unsupported completion cells are explicit fences, not latent
+closure-crossing Rust. In particular, the resource-bearing version of that
+mixed return/fall-through-catch shape still requires a unified completion and
+suppressed-exception carrier; it emits the owned
+`unsupported Java statement: try/catch/finally` compile error before any
+partial cleanup lowering. Guard:
+`idiom_gaps::try_with_resources_mixed_return_and_fallthrough_catch_is_explicitly_fenced`.
+The focused finally and exception oracle loops, generated-crate tests, direct
+liveness test, formatting, and test compilation are the closure gates. A future
+unified completion enum can replace these bounded carriers and loud fences as
+design work, but is not needed to prevent a known silent answer, Rust panic in
+a catchable path, or invalid closure-crossing Rust in the audited matrix.
 
 Codex follow-up 2026-09-17 fallibility traversal completion: the fallibility
 planner now descends into both operands of array access and the qualifier of a
@@ -697,7 +727,7 @@ source `String` as a String slot, and `NewStringCtor.java` is promoted into the
 50-fixture differential suite. `StringEqualsVsEq.java` is not an exception or
 constructor gap; its `String ==` behaviour is the documented String-identity
 policy boundary in
-[0028](done/0028-reference-equality-lowered-as-structural-equality.md) and is
+[0028](0028-reference-equality-lowered-as-structural-equality.md) and is
 covered as an executable known gap in `tests/differential/known-gaps/`.
 
 Updated 2026-08-24 fifth pass: `Integer.parseInt` in a fallible context now
@@ -945,7 +975,7 @@ Every one of these was verified byte-for-byte against the Java oracle.
 | `String.charAt`/`substring` invalid bounds throw `StringIndexOutOfBoundsException` | `tests/differential/StringBoundsException.java` |
 
 The remaining divergent `String ==` policy case is tracked by
-[0028](done/0028-reference-equality-lowered-as-structural-equality.md), not this
+[0028](0028-reference-equality-lowered-as-structural-equality.md), not this
 exception/finally audit. It is still executable coverage via
 `tests/differential/known-gaps/StringEqualsVsEq.java`, where the Java oracle and
 current `java_string_identity` warning are both checked.

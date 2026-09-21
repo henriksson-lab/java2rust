@@ -288,7 +288,7 @@ pub enum RustExpr {
         /// `apply_optional_borrowed_element_target_view` actually ask.
         ///
         /// Recording the resulting slot shape answers it exactly, which is
-        /// [0007](../claude_audits/0007-rust-ir-is-mostly-opaque-strings.md)'s
+        /// [0007](../claude_audits/done/0007-rust-ir-is-mostly-opaque-strings.md)'s
         /// step 1: `LoweredExpr { expr, shape, actual }`. `None` means the
         /// producer did not record one — never "no shape" — so a query stays
         /// monotone.

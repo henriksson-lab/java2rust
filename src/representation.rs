@@ -1750,6 +1750,30 @@ impl RepresentationPlan {
             .or_else(|| self.unique_type_representation_by_simple_name(type_name))
     }
 
+    /// Returns the Rust carrier and variant used to construct a source value
+    /// whose declared type is the root of a hierarchy carrier.
+    ///
+    /// Lowering layers consume this projection instead of reopening the
+    /// representation axis and matching `ObjectRepresentation` themselves.
+    pub(crate) fn source_hierarchy_carrier_constructor_parts(
+        &self,
+        type_name: &str,
+    ) -> Option<(&str, String)> {
+        let representation = self.type_representation(type_name)?;
+        let ObjectRepresentation::SourceHierarchyCarrier {
+            carrier_name,
+            variants,
+        } = representation.representation()
+        else {
+            return None;
+        };
+        let variant = crate::java_naming::rust_name_for_java_named_type(type_name);
+        variants
+            .iter()
+            .any(|candidate| candidate == &variant)
+            .then_some((carrier_name.as_str(), variant))
+    }
+
     pub fn representation_for(&self, java_ty: &JavaType) -> ObjectRepresentation {
         self.representation_lookup_policy(java_ty)
             .representation()

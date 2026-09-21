@@ -185,13 +185,13 @@ Suggested approach, consistent with the convergence plan but sharper:
 
 The reason this is Tier 5 rather than Tier 1, despite being the biggest defect:
 it is the one that most needs the shape tag from
-[0007](0007-rust-ir-is-mostly-opaque-strings.md) to exist first, and it benefits
+[0007](done/0007-rust-ir-is-mostly-opaque-strings.md) to exist first, and it benefits
 from the migration ergonomics learned in Tier 3.
 
 ### Tier 6 — structural, only after the above
 
 - **Mandatory shape tags on lowered expressions**
-  ([0007](0007-rust-ir-is-mostly-opaque-strings.md)). 58% of `RustExpr` is
+  ([0007](done/0007-rust-ir-is-mostly-opaque-strings.md)). 58% of `RustExpr` is
   `Raw(String)`, forcing 55 distinct substring checks in `coercion.rs` —
   including `contains(" + ")` to detect an operator and a match against an
   emitted `/* TODO */` comment. Make `Raw` constructible only through a helper
