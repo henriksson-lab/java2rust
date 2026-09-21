@@ -3,7 +3,7 @@ use std::fs;
 
 #[path = "common/mod.rs"]
 mod common;
-use common::{GeneratedCrateModule, cargo_check_generated_modules};
+use common::{GeneratedCrateModule, cargo_check_generated_modules, cargo_test_generated_modules};
 
 use new_java2rust::binding_id::BindingKind;
 use new_java2rust::call_lowering::{apply_call_target, apply_new_target_with_facts};
@@ -5024,36 +5024,59 @@ class Num implements Expr {}
 fn generic_source_supertype_into_bound_gets_static_for_erased_boxing() {
     let translation = translate_source(
         r#"
-class Base {}
-class Mid extends Base {}
+class Base {
+    String label() { return "base"; }
+}
+class Mid extends Base {
+    String label() { return "mid"; }
+}
 
 class GenericStandards<T extends Mid> {
-    java.util.List<Base> lines;
+    java.util.List<Base> lines = new java.util.ArrayList<Base>();
 
     void add(T line) {
         lines.add(line);
+    }
+
+    String firstLabel() {
+        return lines.get(0).label();
+    }
+}
+
+class UseGenericStandards {
+    static String run() {
+        GenericStandards<Mid> standards = new GenericStandards<Mid>();
+        standards.add(new Mid());
+        return standards.firstLabel();
     }
 }
 "#,
     );
 
     assert!(
-        translation
-            .rust
-            .contains("impl<T: MidBound + Into<Base> + 'static> GenericStandards<T>"),
+        translation.rust.contains("pub enum BaseValue")
+            && translation.rust.contains("Into<BaseValue>")
+            && translation.rust.contains("lines: Vec<BaseValue>")
+            && translation.rust.contains("self.lines.push(line.into())")
+            && translation.rust.contains("impl From<Mid> for BaseValue")
+            && !translation.rust.contains("impl From<Mid> for Base {")
+            && !translation.rust.contains("unsupported Java class upcast"),
         "{}",
         translation.rust
     );
-    assert!(
-        translation
-            .rust
-            .contains("impl From<Mid> for Base")
-            && translation.rust.contains(
-                "panic!(\"unsupported Java class upcast: Mid to Base requires class hierarchy lowering\")"
-            )
-            && translation.rust.contains("line.into()"),
-        "{}",
-        translation.rust
+
+    cargo_test_generated_modules(
+        "generic_source_supertype_collection_field_uses_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn generic_source_supertype_collection_field_dispatches() {
+    assert_eq!(UseGenericStandards::run(), "mid".to_string());
+}
+"#,
+        }],
     );
 }
 

@@ -3263,7 +3263,8 @@ fn add_method_field_dependency_edges(
         match field_use {
             FieldUse::AssignedSubtypeToField { .. }
             | FieldUse::AssignedSubtypeToCallArgument { .. }
-            | FieldUse::AssignedSubtypeToReturn { .. } => {}
+            | FieldUse::AssignedSubtypeToReturn { .. }
+            | FieldUse::AssignedSubtypeToCollectionElement { .. } => {}
             FieldUse::AssignedFromCall {
                 field_name,
                 name,
@@ -3333,7 +3334,8 @@ fn add_constructor_field_dependency_edges(
         match field_use {
             FieldUse::AssignedSubtypeToField { .. }
             | FieldUse::AssignedSubtypeToCallArgument { .. }
-            | FieldUse::AssignedSubtypeToReturn { .. } => {}
+            | FieldUse::AssignedSubtypeToReturn { .. }
+            | FieldUse::AssignedSubtypeToCollectionElement { .. } => {}
             FieldUse::AssignedFromCall {
                 field_name,
                 name,
@@ -8718,7 +8720,7 @@ fn collect_type_signatures(
     {
         let field = inherited.field();
         let declaring_type = inherited.declaring_type();
-        let field_key = FieldKey::rust_identity(&ty.name, &field.name);
+        let field_key = FieldKey::rust_identity(&ty.name, inherited.rust_name());
         let declaring_ty = find_signature_type_decl(support_program, declaring_type);
         let mut field_constraints =
             constraints
@@ -22060,8 +22062,12 @@ fn local_plan(
         // after which the nullability constraint cannot add `Option`.
         java_ty = crate::types::optional_java_type(java_ty);
     }
-    let shape = if declared_typed_initializer_should_anchor_local_type(&java_ty, initializer, facts)
-    {
+    let shape = if declared_typed_initializer_should_anchor_local_type(
+        &java_ty,
+        initializer,
+        representations,
+        facts,
+    ) {
         RustSlotShape::for_storage(java_ty.clone())
     } else if local_constraints_select_concrete_borrowed_value(
         &java_ty,
@@ -22173,6 +22179,7 @@ fn local_constraints_without_stale_nullable_call_result<'a>(
 fn declared_typed_initializer_should_anchor_local_type(
     declared_ty: &JavaType,
     initializer: Option<&Expr>,
+    representations: &RepresentationPlan,
     facts: &FactSet,
 ) -> bool {
     if matches!(
@@ -22208,6 +22215,24 @@ fn declared_typed_initializer_should_anchor_local_type(
             .is_some_and(|return_ty| {
                 return_type_can_initialize_declared_type(return_ty, declared_ty)
             }),
+        Some(Expr::Cast { ty, .. }) if ty == declared_ty => {
+            let Some(name) = java_type_name(declared_ty) else {
+                return false;
+            };
+            // A carrier selected for an ancestor is a call-boundary view, not
+            // the runtime type recovered by an exact erased-object downcast.
+            // Keep the concrete subtype handle in the local and convert it at
+            // the later supertype slot.  A cast to the represented root itself
+            // still uses that root's carrier.
+            representations
+                .type_representation(name)
+                .is_some_and(|representation| {
+                    matches!(
+                        representation.representation(),
+                        crate::representation::ObjectRepresentation::ConcreteStruct
+                    )
+                })
+        }
         _ => false,
     }
 }

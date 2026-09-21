@@ -1037,6 +1037,11 @@ pub enum FieldUse {
         target_type: JavaType,
         actual_type: JavaType,
     },
+    AssignedSubtypeToCollectionElement {
+        field_name: String,
+        element_type: JavaType,
+        actual_type: JavaType,
+    },
     AssignedFromCall {
         field_name: String,
         name: String,
@@ -3599,22 +3604,31 @@ fn assigned_subtype_local_actual_type(
     semantic_facts: &FactSet,
 ) -> Option<JavaType> {
     let actual_ty = crate::types::infer_expr_type(value, type_env);
-    if actual_ty != *target_ty
+    assigned_subtype_actual_type(&actual_ty, target_ty, type_env, semantic_facts)
+}
+
+fn assigned_subtype_actual_type(
+    actual_ty: &JavaType,
+    target_ty: &JavaType,
+    type_env: &TypeEnv,
+    semantic_facts: &FactSet,
+) -> Option<JavaType> {
+    if actual_ty != target_ty
         && semantic_facts
-            .hierarchy_subtype_policy(&actual_ty, target_ty)
+            .hierarchy_subtype_policy(actual_ty, target_ty)
             .reaches()
     {
-        return Some(actual_ty);
+        return Some(actual_ty.clone());
     }
     if let Some(bound_ty) = assigned_subtype_actual_type_from_type_param_bound(
-        &actual_ty,
+        actual_ty,
         target_ty,
         type_env,
         semantic_facts,
     ) {
         return Some(bound_ty);
     }
-    assigned_subtype_actual_type_from_source_hierarchy_alias(&actual_ty, target_ty, semantic_facts)
+    assigned_subtype_actual_type_from_source_hierarchy_alias(actual_ty, target_ty, semantic_facts)
 }
 
 fn assigned_subtype_actual_type_from_type_param_bound(
@@ -4011,6 +4025,7 @@ fn analyze_expr_with_context(
                         arg_index,
                         arg,
                         receiver_type.as_ref(),
+                        field_names,
                         type_env,
                         semantic_facts,
                     );
@@ -4775,11 +4790,14 @@ fn record_collection_element_subtype_use(
     arg_index: usize,
     arg: &Expr,
     receiver_type: Option<&JavaType>,
+    field_names: &HashSet<String>,
     type_env: &TypeEnv,
     semantic_facts: &FactSet,
 ) {
-    let Expr::Var(collection_name) = receiver else {
-        return;
+    let (collection_name, targets_field) = match receiver {
+        Expr::Var(name) => (name, is_unshadowed_field_name(facts, field_names, name)),
+        Expr::FieldAccess(owner, name) if matches!(owner.as_ref(), Expr::This) => (name, true),
+        _ => return,
     };
     let Some(receiver_type) = receiver_type else {
         return;
@@ -4794,6 +4812,16 @@ fn record_collection_element_subtype_use(
     else {
         return;
     };
+    if targets_field {
+        facts
+            .field_uses
+            .push(FieldUse::AssignedSubtypeToCollectionElement {
+                field_name: collection_name.clone(),
+                element_type,
+                actual_type,
+            });
+        return;
+    }
     let collection_binding = facts.visible_binding_id_for_name(collection_name);
     record_use(
         facts,
@@ -4823,8 +4851,16 @@ fn record_call_argument_subtype_use(
     else {
         return;
     };
-    let Some(actual_type) =
-        assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts)
+    let local_actual = match arg {
+        Expr::Var(binding_name) => agreed_binding_java_type(facts, binding_name),
+        _ => None,
+    };
+    let Some(actual_type) = local_actual
+        .as_ref()
+        .and_then(|actual| {
+            assigned_subtype_actual_type(actual, target_type, type_env, semantic_facts)
+        })
+        .or_else(|| assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts))
     else {
         return;
     };
@@ -5818,6 +5854,40 @@ class Savings extends Account {
     }
 
     #[test]
+    fn collection_field_add_bound_subtype_records_field_element_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Base {}
+class Mid extends Base {}
+class Standards<T extends Mid> {
+    java.util.List<Base> lines = new java.util.ArrayList<Base>();
+
+    void add(T line) {
+        this.lines.add(line);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Standards", "add");
+        let method_usage = usage
+            .method_usage_by_key(&method)
+            .expect("method usage facts");
+
+        assert!(method_usage.field_uses().iter().any(|use_site| {
+            matches!(
+                use_site,
+                FieldUse::AssignedSubtypeToCollectionElement {
+                    field_name,
+                    element_type: JavaType::Named { name: element_name, .. },
+                    actual_type: JavaType::Named { name: actual_name, .. },
+                } if field_name == "lines" && element_name == "Base" && actual_name == "Mid"
+            )
+        }));
+    }
+
+    #[test]
     fn source_method_known_subtype_argument_records_target_subtype_dispatch_use() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -5853,6 +5923,46 @@ class Use {
                 } if target_name == "Base" && actual_name == "Sub"
             )
         }));
+    }
+
+    #[test]
+    fn erased_downcast_local_passed_to_source_supertype_records_dispatch_use() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class HeaderLine {}
+class CompoundLine extends HeaderLine {}
+class FormatLine extends CompoundLine {}
+class Use {
+    static void accept(CompoundLine line) {}
+    static void run() {
+        Object erased = new FormatLine();
+        FormatLine format = (FormatLine) erased;
+        accept(format);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("Use", "run");
+        let binding = usage
+            .method_usage_by_key(&method)
+            .and_then(|method| method.current_visible_binding_facts_for_name("format"))
+            .expect("downcast local binding");
+
+        assert!(
+            binding.uses().iter().any(|use_site| {
+                matches!(
+                    use_site,
+                    BindingUse::AssignedSubtypeToCallArgument {
+                        target_type: JavaType::Named { name: target_name, .. },
+                        actual_type: JavaType::Named { name: actual_name, .. },
+                    } if target_name == "CompoundLine" && actual_name == "FormatLine"
+                )
+            }),
+            "uses={:?}",
+            binding.uses()
+        );
     }
 
     #[test]

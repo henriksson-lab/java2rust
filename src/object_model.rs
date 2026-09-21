@@ -630,6 +630,9 @@ pub fn dispatch_requirements_from_usage(usage: &UsageFacts) -> UsageDispatchRequ
                 FieldUse::AssignedSubtypeToField { field_type, .. } => Some(field_type),
                 FieldUse::AssignedSubtypeToCallArgument { target_type, .. } => Some(target_type),
                 FieldUse::AssignedSubtypeToReturn { target_type, .. } => Some(target_type),
+                FieldUse::AssignedSubtypeToCollectionElement { element_type, .. } => {
+                    Some(element_type)
+                }
                 _ => None,
             };
             let Some(subtype_target) = subtype_target else {

@@ -310,15 +310,27 @@ pub(crate) fn plan_constructor_field_values_with_inherited_field_refs<'a>(
     inherited_fields: Vec<crate::inherited_members::InheritedInstanceFieldRef<'a>>,
     facts: &FactSet,
 ) -> Vec<ConstructorFieldValuePlan<'a>> {
-    let mut plans = plan_constructor_field_values_with_inherited_field_decls(
-        ty,
-        body,
-        signatures,
-        inherited_fields
-            .iter()
-            .map(|inherited| inherited.field())
-            .collect(),
-    );
+    let mut plans =
+        plan_constructor_field_values_with_inherited_field_decls(ty, body, signatures, Vec::new());
+    let assigned = constructor_field_assignments(body);
+    plans.extend(inherited_fields.iter().map(|inherited| {
+        let field = inherited.field();
+        let base_name =
+            crate::java_naming::allocate_rust_ident(&field.name, &std::collections::HashSet::new());
+        let rust_name = crate::inherited_members::inherited_instance_field_rust_name(
+            ty,
+            inherited,
+            &inherited_fields,
+            &base_name,
+        );
+        let shape = signatures.required_field_shape(&ty.name, &rust_name);
+        let visible_assignments = if rust_name == base_name {
+            assigned.as_slice()
+        } else {
+            &[]
+        };
+        plan_constructor_field_value(field, shape, visible_assignments).with_field_name(rust_name)
+    }));
     plans.extend(
         crate::inherited_members::external_inherited_instance_fields_for_type(ty, facts)
             .into_iter()
@@ -371,6 +383,28 @@ impl<'a> ConstructorFieldValuePlan<'a> {
             ConstructorFieldValuePlan::Assigned { field_name, .. }
             | ConstructorFieldValuePlan::FieldInitializer { field_name, .. }
             | ConstructorFieldValuePlan::Default { field_name, .. } => field_name,
+        }
+    }
+
+    fn with_field_name(self, field_name: String) -> Self {
+        match self {
+            ConstructorFieldValuePlan::Assigned { value, shape, .. } => {
+                ConstructorFieldValuePlan::Assigned {
+                    field_name,
+                    value,
+                    shape,
+                }
+            }
+            ConstructorFieldValuePlan::FieldInitializer { value, shape, .. } => {
+                ConstructorFieldValuePlan::FieldInitializer {
+                    field_name,
+                    value,
+                    shape,
+                }
+            }
+            ConstructorFieldValuePlan::Default { shape, .. } => {
+                ConstructorFieldValuePlan::Default { field_name, shape }
+            }
         }
     }
 }

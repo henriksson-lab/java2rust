@@ -352,6 +352,7 @@ struct LowerCtx<'a> {
     liveness: &'a crate::liveness::LivenessAnalysis,
     result_propagation_mode: ResultPropagationMode,
     lowering_inherited_method_body: bool,
+    inherited_method_declaring_type: Option<&'a TypeDecl>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -496,6 +497,7 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         try_capture_preinitialized_names: None,
         result_propagation_mode: ResultPropagationMode::UncaughtPanic,
         lowering_inherited_method_body: false,
+        inherited_method_declaring_type: None,
     };
     let uses_source_map_entry_values = program_uses_source_map_entry_values(program);
     let uses_map_entry_value_carrier =
@@ -1969,9 +1971,39 @@ fn seed_inherited_instance_fields(
         crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
     {
         let field = inherited.field();
-        let shape = signatures.required_field_shape(&ty.name, &field.name);
-        env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
-        env.insert_field_shape(field.name.clone(), shape);
+        let rust_name = inherited.rust_name();
+        let shape = signatures.required_field_shape(&ty.name, rust_name);
+        env.insert_type_field_shape(&ty.name, rust_name.to_string(), shape.clone());
+        env.insert_field_shape(rust_name.to_string(), shape.clone());
+        if rust_name == field.name {
+            env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
+            env.insert_field_shape(field.name.clone(), shape);
+        }
+    }
+}
+
+fn seed_inherited_method_declaring_fields(env: &mut ShapeEnv, ty: &TypeDecl, ctx: LowerCtx) {
+    let Some(declaring_ty) = ctx.inherited_method_declaring_type else {
+        return;
+    };
+    for member in &declaring_ty.members {
+        let Member::Field(field) = member else {
+            continue;
+        };
+        if field.modifiers.contains(&Modifier::Static) {
+            continue;
+        }
+        let Some(rust_name) = inherited_field_storage_rust_name(ty, declaring_ty, &field.name, ctx)
+        else {
+            continue;
+        };
+        let shape = ctx.signatures.required_field_shape(&ty.name, &rust_name);
+        env.insert_field_shape_with_access_name_and_java_type(
+            field.name.clone(),
+            rust_name,
+            shape,
+            field.ty.clone(),
+        );
     }
 }
 
@@ -10386,6 +10418,7 @@ fn lower_method_with_exception_owner(
         current_return_shape: return_shape_for_body.as_ref(),
         current_local_shapes: method_signature.locals(),
         lowering_inherited_method_body: ty.name != exception_ty.name,
+        inherited_method_declaring_type: (ty.name != exception_ty.name).then_some(exception_ty),
         ..ctx
     };
     let mut env = shape_env_for_method(ty, method, method_signature, method_ctx.signatures);
@@ -10406,6 +10439,7 @@ fn lower_method_with_exception_owner(
         method_ctx.signatures,
         method_ctx.support_local_type_program,
     );
+    seed_inherited_method_declaring_fields(&mut env, ty, method_ctx);
     seed_external_inherited_instance_fields(&mut env, ty, method_ctx.signatures, method_ctx.facts);
     let exception_plan = method_ctx
         .callable_analysis
@@ -13019,7 +13053,13 @@ fn lower_create_graphics_expr_for_graphics_slot(
 fn current_instance_field_shape(expr: &Expr, ctx: LowerCtx) -> Option<RustSlotShape> {
     let field = current_instance_field_name(expr)?;
     let type_name = ctx.current_type?;
-    signature_field_shape_for_type_aliases(ctx.signatures, type_name, field).cloned()
+    let storage_name = inherited_method_instance_field_rust_name(field, ctx);
+    signature_field_shape_for_type_aliases(
+        ctx.signatures,
+        type_name,
+        storage_name.as_deref().unwrap_or(field),
+    )
+    .cloned()
 }
 
 fn current_instance_field_shape_with_env(
@@ -13110,6 +13150,9 @@ fn current_instance_field_name(expr: &Expr) -> Option<&str> {
 }
 
 fn current_type_source_instance_field_rust_name(field_name: &str, ctx: LowerCtx) -> Option<String> {
+    if let Some(rust_name) = inherited_method_instance_field_rust_name(field_name, ctx) {
+        return Some(rust_name);
+    }
     let current_type = ctx.current_type?;
     SourceContextOwnerKey::new(current_type)
         .find_context_type(ctx)
@@ -13127,6 +13170,73 @@ fn current_type_source_instance_field_rust_name(field_name: &str, ctx: LowerCtx)
                 })
                 .then(|| crate::java_naming::source_instance_field_rust_name(ty, &semantic_name))
         })
+}
+
+fn inherited_method_instance_field_rust_name(field_name: &str, ctx: LowerCtx) -> Option<String> {
+    let declaring_ty = ctx.inherited_method_declaring_type?;
+    let emitted_type_name = ctx.current_type?;
+    let emitted_ty = SourceContextOwnerKey::new(emitted_type_name).find_context_type(ctx)?;
+    let semantic_name = crate::parser::to_snake_case_unescaped(
+        field_name.strip_prefix("this.").unwrap_or(field_name),
+    );
+    if !declaring_ty.members.iter().any(|member| {
+        matches!(member, Member::Field(field)
+            if !field.modifiers.contains(&Modifier::Static) && field.name == semantic_name)
+    }) {
+        return None;
+    }
+    inherited_field_storage_rust_name(emitted_ty, declaring_ty, &semantic_name, ctx)
+}
+
+fn inherited_field_storage_rust_name(
+    emitted_ty: &TypeDecl,
+    declaring_ty: &TypeDecl,
+    semantic_name: &str,
+    ctx: LowerCtx,
+) -> Option<String> {
+    let support_programs = source_super_constructor_inherited_context_programs(ctx);
+    // A method may be declared on an intermediate class while the field it
+    // mutates is inherited from a more distant ancestor. Resolve the actual
+    // field declaration before choosing its flattened storage slot.
+    let declaring_ty = if declaring_ty.members.iter().any(|member| {
+        matches!(member, Member::Field(field)
+            if !field.modifiers.contains(&Modifier::Static) && field.name == semantic_name)
+    }) {
+        declaring_ty
+    } else {
+        crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+            declaring_ty,
+            &support_programs,
+        )
+        .into_iter()
+        .find(|inherited| inherited.field().name == semantic_name)
+        .and_then(|inherited| {
+            find_context_type_decl_by_erased_name(ctx, inherited.declaring_type())
+        })
+        .unwrap_or(declaring_ty)
+    };
+    if emitted_ty.name == declaring_ty.name {
+        return Some(crate::java_naming::source_instance_field_rust_name(
+            declaring_ty,
+            semantic_name,
+        ));
+    }
+    let inherited_fields =
+        crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+            emitted_ty,
+            &support_programs,
+        );
+    let inherited = inherited_fields.iter().find(|inherited| {
+        crate::facts::external_type_name_matches(inherited.declaring_type(), &declaring_ty.name)
+            && inherited.field().name == semantic_name
+    })?;
+    Some(
+        crate::inherited_members::inherited_instance_field_rust_name_for_type_in_programs(
+            emitted_ty,
+            inherited,
+            &support_programs,
+        ),
+    )
 }
 
 fn source_java_enum_instance_field_accessor_name(name: &str, ctx: LowerCtx) -> Option<String> {
@@ -23168,7 +23278,11 @@ fn lower_expr_with_refinements(
     match expr {
         Expr::Literal(lit) => lower_literal_expr(lit, ctx),
         Expr::Var(name) => {
-            if let Some(field_name) = source_java_enum_instance_field_accessor_name(name, ctx) {
+            if let Some(field_name) = inherited_method_instance_field_rust_name(name, ctx) {
+                field_projection(this_expr(), &field_name)
+            } else if let Some(field_name) =
+                source_java_enum_instance_field_accessor_name(name, ctx)
+            {
                 receiver_method_call_projection_exact(this_expr(), &field_name, Vec::new())
             } else if let Some(expr) = lower_outer_this_field_name(name, env, ctx) {
                 expr
@@ -23628,7 +23742,8 @@ fn lower_expr_with_refinements(
             let target = match plan {
                 CallExprPlan::TrivialAccessorGetter {
                     receiver,
-                    field_name,
+                    field_owner,
+                    mut field_name,
                 } => {
                     if receiver.is_none()
                         && (ctx.lowering_inherited_method_body
@@ -23676,6 +23791,140 @@ fn lower_expr_with_refinements(
                         let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
                         concrete_java_type_name(&receiver_ty).map(str::to_string)
                     });
+                    if let Some(receiver) = receiver
+                        && let Some(receiver_owner) = source_receiver_owner_key(receiver, env, ctx)
+                        && !crate::facts::external_type_name_matches(
+                            receiver_owner.as_str(),
+                            &field_owner,
+                        )
+                    {
+                        return receiver_method_call_projection_exact(
+                            lower_expr_with_refinements(receiver, env, ctx, refinements),
+                            &crate::parser::to_snake_case(name),
+                            Vec::new(),
+                        );
+                    }
+                    if let (Some(receiver), Some(resolved)) = (receiver, resolved.as_ref())
+                        && let Some(receiver_owner) = source_receiver_owner_key(receiver, env, ctx)
+                        && !crate::facts::external_type_name_matches(
+                            receiver_owner.as_str(),
+                            &resolved.declaring_type,
+                        )
+                    {
+                        return receiver_method_call_projection_exact(
+                            lower_expr_with_refinements(receiver, env, ctx, refinements),
+                            &crate::parser::to_snake_case(name),
+                            Vec::new(),
+                        );
+                    }
+                    let accessor_field_name = accessor_member_name(&field_name);
+                    if let (Some(receiver), Some(receiver_owner)) =
+                        (receiver, receiver_owner.as_deref())
+                        && let Some(receiver_ty) =
+                            SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+                        && receiver_ty.members.iter().any(|member| {
+                            matches!(member, Member::Field(field)
+                                if !field.modifiers.contains(&Modifier::Static)
+                                    && field.name == accessor_field_name)
+                        })
+                        && crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+                            receiver_ty,
+                            &source_super_constructor_inherited_context_programs(ctx),
+                        )
+                        .iter()
+                        .any(|inherited| inherited.field().name == accessor_field_name)
+                    {
+                        // The same Java spelling denotes distinct slots in the
+                        // receiver and its superclass. A field-only accessor
+                        // plan has discarded which method body owns the read,
+                        // so preserve Java dispatch and call the already
+                        // emitted inherited/overriding method instead.
+                        return receiver_method_call_projection_exact(
+                            lower_expr_with_refinements(receiver, env, ctx, refinements),
+                            &crate::parser::to_snake_case(name),
+                            Vec::new(),
+                        );
+                    }
+                    if let Some(receiver_owner) = receiver_owner.as_deref()
+                        && let Some(receiver_ty) =
+                            SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+                        && let Some(field_owner_ty) =
+                            SourceContextOwnerKey::new(field_owner.as_str()).find_context_type(ctx)
+                        && let Some(storage_name) = inherited_field_storage_rust_name(
+                            receiver_ty,
+                            field_owner_ty,
+                            accessor_member_name(&field_name),
+                            ctx,
+                        )
+                    {
+                        field_name = storage_name;
+                    }
+                    if let (Some(receiver), Some(receiver_owner), Some(resolved)) =
+                        (receiver, receiver_owner.as_deref(), resolved.as_ref())
+                        && !crate::facts::external_type_name_matches(
+                            receiver_owner,
+                            &resolved.declaring_type,
+                        )
+                        && let Some(receiver_ty) =
+                            SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+                        && crate::inherited_members::inherited_instance_method_refs_for_type(
+                            receiver_ty,
+                            ctx.program,
+                        )
+                        .into_iter()
+                        .any(|inherited| {
+                            inherited.method().name == name.as_str()
+                                && inherited.method().params.len() == args.len()
+                        })
+                    {
+                        return receiver_method_call_projection_exact(
+                            lower_expr_with_refinements(receiver, env, ctx, refinements),
+                            &crate::parser::to_snake_case(name),
+                            Vec::new(),
+                        );
+                    }
+                    if let Some(receiver_owner) = receiver_owner.as_deref()
+                        && let Some(receiver_ty) =
+                            SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+                        && let Some(inherited) =
+                            crate::inherited_members::inherited_instance_method_refs_for_type(
+                                receiver_ty,
+                                ctx.program,
+                            )
+                            .into_iter()
+                            .find(|inherited| {
+                                inherited.method().name == name.as_str()
+                                    && inherited.method().params.is_empty()
+                                    && trivial_returned_instance_field_name(inherited.method())
+                                        .as_deref()
+                                        == Some(accessor_member_name(&field_name))
+                            })
+                        && let Some(storage_name) = inherited_field_storage_rust_name(
+                            receiver_ty,
+                            inherited.declaring_ty(),
+                            accessor_member_name(&field_name),
+                            ctx,
+                        )
+                    {
+                        field_name = storage_name;
+                    }
+                    if !field_name.starts_with("__java_hidden_")
+                        && let (Some(receiver_owner), Some(resolved)) =
+                            (receiver_owner.as_deref(), resolved.as_ref())
+                        && let Some(receiver_ty) =
+                            SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+                        && let Some(declaring_ty) =
+                            SourceContextOwnerKey::new(resolved.declaring_type.as_str())
+                                .find_context_type(ctx)
+                        && let Some(storage_name) = inherited_field_storage_rust_name(
+                            receiver_ty,
+                            declaring_ty,
+                            accessor_member_name(&field_name),
+                            ctx,
+                        )
+                    {
+                        field_name = storage_name;
+                    }
                     if receiver_member_field_shape(&field_name, env, ctx, receiver_owner.as_deref())
                         .is_some_and(|shape| shape.optional_element_type().is_some())
                         || resolved.as_ref().is_some_and(|resolved| {
@@ -31991,6 +32240,7 @@ fn lower_args_for_call_target(
     ctx: LowerCtx,
     fallback_signature: Option<&crate::signature::MethodSignaturePlan>,
 ) -> Vec<RustExpr> {
+    let mut native_collection_arg_shapes = None;
     if let CallTargetPlan::NativeCollectionMethod { method, .. } = target
         && matches!(
             method,
@@ -32061,6 +32311,9 @@ fn lower_args_for_call_target(
     if let Some(collection_plan) =
         native_collection_argument_plan_for_target(target, call_receiver, args.len(), env, ctx)
     {
+        if let ArgumentLoweringPlan::Shaped(shapes) = &collection_plan {
+            native_collection_arg_shapes = Some(shapes.clone());
+        }
         plan = collection_plan;
     }
     if let Some(parse_plan) = native_numeric_parse_argument_plan(target, args, env, ctx) {
@@ -32276,8 +32529,63 @@ fn lower_args_for_call_target(
                 .unwrap_or_else(|| lower_unshaped_argument(arg, env, ctx))
             })
             .collect(),
-        _ => lower_args_with_plan(args, env, plan, ctx),
+        _ => normalize_native_collection_carrier_args(
+            lower_args_with_plan(args, env, plan, ctx),
+            native_collection_arg_shapes.as_deref(),
+            ctx,
+        ),
     }
+}
+
+fn normalize_native_collection_carrier_args(
+    args: Vec<RustExpr>,
+    shapes: Option<&[RustSlotShape]>,
+    ctx: LowerCtx,
+) -> Vec<RustExpr> {
+    let Some(shapes) = shapes else {
+        return args;
+    };
+    args.into_iter()
+        .enumerate()
+        .map(|(index, arg)| {
+            let Some(shape) = shapes.get(index) else {
+                return arg;
+            };
+            if !source_subtype_target_uses_closed_enum_carrier(shape) {
+                return arg;
+            }
+            let JavaType::Named { name, .. } = &shape.java_ty else {
+                return arg;
+            };
+            let placement = ctx.facts.storage_placement_for(name);
+            let arg = placement
+                .handle_path()
+                .and_then(|wrapper| storage_wrapper_call_inner(arg.clone(), wrapper))
+                .unwrap_or(arg);
+            placement
+                .cell_path()
+                .and_then(|wrapper| storage_wrapper_call_inner(arg.clone(), wrapper))
+                .unwrap_or(arg)
+        })
+        .collect()
+}
+
+fn storage_wrapper_call_inner(expr: RustExpr, wrapper: &str) -> Option<RustExpr> {
+    let RustExpr::Call { function, mut args } = expr.unshaped().clone() else {
+        return None;
+    };
+    let RustExpr::Path(path) = function.unshaped() else {
+        return None;
+    };
+    if !path
+        .iter()
+        .map(String::as_str)
+        .eq(wrapper.split("::").chain(std::iter::once("new")))
+        || args.len() != 1
+    {
+        return None;
+    }
+    args.pop()
 }
 
 fn lower_arrays_as_list_nullable_args(
@@ -43147,6 +43455,11 @@ fn lower_anonymous_source_class_override_method(
         .join(", ");
     let super_call = format!("{base_rust_name}::{rust_name}(&self.__base, {forwarded_args})");
     let exceptions = ctx.exceptions.method_plan(exception_owner, contract_method);
+    let return_shape = (!matches!(contract_method.return_type, JavaType::Void)).then(|| {
+        ctx.signatures
+            .method_return_shape(exception_owner, contract_method)
+            .unwrap_or_else(|| RustSlotShape::for_storage(contract_method.return_type.clone()))
+    });
     let mut method_env = env.clone();
     if let Some(param_plans) = ctx.signatures.method_param_plans(base, contract_method) {
         for (param, plan) in method.params.iter().zip(param_plans) {
@@ -43157,6 +43470,7 @@ fn lower_anonymous_source_class_override_method(
         current_type: Some(&base.name),
         current_method: Some(&method.name),
         current_method_decl: Some(method),
+        current_return_shape: return_shape.as_ref(),
         result_propagation_mode: if exceptions.wrap_returns_in_result() {
             ResultPropagationMode::Propagate
         } else {
@@ -44605,6 +44919,17 @@ fn anonymous_source_class_local_statement_body(
                 Stmt::EnhancedFor { body, .. } => {
                     assigned_locals(&body.statements, out)?;
                 }
+                Stmt::Try {
+                    resources,
+                    body,
+                    catches,
+                    finally_block,
+                } if resources.is_empty() && !catches.is_empty() && finally_block.is_none() => {
+                    assigned_locals(&body.statements, out)?;
+                    for catch in catches {
+                        assigned_locals(&catch.body.statements, out)?;
+                    }
+                }
                 _ => return None,
             }
         }
@@ -45388,6 +45713,22 @@ fn anonymous_source_class_local_statement_body(
                         "'{rust_loop_label}: for {mutable}{var_name} in {iterable}.iter().copied() {{ {body}}} "
                     ));
                 }
+                Stmt::Try {
+                    resources,
+                    catches,
+                    finally_block,
+                    ..
+                } if resources.is_empty() && !catches.is_empty() && finally_block.is_none() => {
+                    let lowered = lower_block(
+                        &Block {
+                            statements: vec![statement.clone()],
+                        },
+                        &mut local_env,
+                        wrap_returns_in_ok,
+                        ctx,
+                    );
+                    rendered.push_str(&emit::emit_statements(&lowered, 0));
+                }
                 _ => return None,
             }
         }
@@ -45839,19 +46180,25 @@ fn anonymous_source_class_direct_super_call_returns_result(
 }
 
 /// Materialized primitive and String fields use cells behind `&self` dispatch.
-fn render_anonymous_interface_cell_reads(rendered: String, fields: &[&FieldDecl]) -> String {
+fn render_anonymous_interface_cell_reads(
+    rendered: String,
+    fields: &[&FieldDecl],
+    mutated_fields: &HashSet<String>,
+) -> String {
     let field_reads = fields
         .iter()
         .filter_map(|field| {
             let is_string = matches!(field.ty, JavaType::String)
                 || matches!(&field.ty, JavaType::Named { name, .. }
                     if name.rsplit('.').next() == Some("String"));
-            if !is_string && !matches!(field.ty, JavaType::Primitive(_)) {
+            let is_mutated_reference = matches!(field.ty, JavaType::Named { .. })
+                && mutated_fields.contains(&crate::parser::to_snake_case(&field.name));
+            if !is_string && !matches!(field.ty, JavaType::Primitive(_)) && !is_mutated_reference {
                 return None;
             }
             let name = crate::parser::to_snake_case(&field.name);
             let access = format!("self.{name}");
-            let read = if is_string {
+            let read = if is_string || is_mutated_reference {
                 format!("{access}.borrow().clone()")
             } else {
                 format!("{access}.get()")
@@ -45916,6 +46263,7 @@ fn render_anonymous_interface_for_update(
     env: &ShapeEnv,
     ctx: LowerCtx,
     fields: &[&FieldDecl],
+    mutated_fields: &HashSet<String>,
 ) -> Option<String> {
     match update {
         Expr::Unary {
@@ -45957,8 +46305,11 @@ fn render_anonymous_interface_for_update(
                     )
                 },
             );
-            let value =
-                render_anonymous_interface_cell_reads(emit::emit_expr(&lowered_value), fields);
+            let value = render_anonymous_interface_cell_reads(
+                emit::emit_expr(&lowered_value),
+                fields,
+                mutated_fields,
+            );
             Some(format!("{} = {value};", crate::parser::to_snake_case(name)))
         }
         _ => None,
@@ -45970,6 +46321,7 @@ fn lower_anonymous_interface_receiver_statement_block(
     env: &mut ShapeEnv,
     ctx: LowerCtx,
     fields: &[&FieldDecl],
+    mutated_fields: &HashSet<String>,
     indent: usize,
     continue_action: Option<&str>,
     break_action: Option<&str>,
@@ -46019,8 +46371,18 @@ fn lower_anonymous_interface_receiver_statement_block(
                 {
                     return None;
                 }
+                let field_name = crate::parser::to_snake_case(field);
+                let receiver = if mutated_fields.contains(&field_name) {
+                    RustExpr::MethodCall {
+                        receiver: Box::new(value.clone()),
+                        method: "borrow".to_string(),
+                        args: Vec::new(),
+                    }
+                } else {
+                    value.clone()
+                };
                 *value = RustExpr::MethodCall {
-                    receiver: Box::new(value.clone()),
+                    receiver: Box::new(receiver),
                     method: "clone".to_string(),
                     args: Vec::new(),
                 };
@@ -46029,7 +46391,13 @@ fn lower_anonymous_interface_receiver_statement_block(
             Stmt::Expr(update @ Expr::Unary { expr, .. })
                 if matches!(expr.as_ref(), Expr::Var(_)) =>
             {
-                let update = render_anonymous_interface_for_update(update, env, ctx, fields)?;
+                let update = render_anonymous_interface_for_update(
+                    update,
+                    env,
+                    ctx,
+                    fields,
+                    mutated_fields,
+                )?;
                 rendered.push_str(&format!("{padding}{update}\n"));
             }
             Stmt::Expr(Expr::Unary { op, expr })
@@ -46066,12 +46434,15 @@ fn lower_anonymous_interface_receiver_statement_block(
                         ctx,
                     )),
                     fields,
+                    mutated_fields,
                 );
                 let field_name = crate::parser::to_snake_case(&field_name);
-                let is_string = matches!(field_decl.ty, JavaType::String)
+                let uses_refcell = matches!(field_decl.ty, JavaType::String)
                     || matches!(&field_decl.ty, JavaType::Named { name, .. }
-                        if name.rsplit('.').next() == Some("String"));
-                let update = if is_string { "replace" } else { "set" };
+                        if name.rsplit('.').next() == Some("String"))
+                    || (matches!(field_decl.ty, JavaType::Named { .. })
+                        && mutated_fields.contains(&field_name));
+                let update = if uses_refcell { "replace" } else { "set" };
                 rendered.push_str(&format!("{padding}self.{field_name}.{update}({value});\n"));
             }
             Stmt::If {
@@ -46082,6 +46453,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                 let condition = render_anonymous_interface_cell_reads(
                     emit::emit_expr(&lower_expr(condition, env, ctx)),
                     fields,
+                    mutated_fields,
                 );
                 let mut then_env = env.clone();
                 let then_rendered = lower_anonymous_interface_receiver_statement_block(
@@ -46089,6 +46461,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut then_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 1,
                     continue_action,
                     break_action,
@@ -46104,6 +46477,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                         &mut else_env,
                         ctx,
                         fields,
+                        mutated_fields,
                         indent + 1,
                         continue_action,
                         break_action,
@@ -46120,6 +46494,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut block_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 1,
                     continue_action,
                     break_action,
@@ -46142,6 +46517,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                 let condition = render_anonymous_interface_cell_reads(
                     emit::emit_expr(&lower_expr(condition, env, ctx)),
                     fields,
+                    mutated_fields,
                 );
                 let rust_loop_label = label
                     .as_ref()
@@ -46159,6 +46535,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut body_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 1,
                     Some(&continue_code),
                     Some(&break_code),
@@ -46176,6 +46553,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                 let condition = render_anonymous_interface_cell_reads(
                     emit::emit_expr(&lower_expr(condition, env, ctx)),
                     fields,
+                    mutated_fields,
                 );
                 let rust_loop_label = label
                     .as_ref()
@@ -46195,6 +46573,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut body_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 1,
                     Some(&continue_code),
                     Some(&break_code),
@@ -46219,6 +46598,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut for_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 1,
                     None,
                     None,
@@ -46230,13 +46610,20 @@ fn lower_anonymous_interface_receiver_statement_block(
                         render_anonymous_interface_cell_reads(
                             emit::emit_expr(&lower_expr(condition, &for_env, ctx)),
                             fields,
+                            mutated_fields,
                         )
                     })
                     .unwrap_or_else(|| "true".to_string());
                 let updates = update
                     .iter()
                     .map(|update| {
-                        render_anonymous_interface_for_update(update, &for_env, ctx, fields)
+                        render_anonymous_interface_for_update(
+                            update,
+                            &for_env,
+                            ctx,
+                            fields,
+                            mutated_fields,
+                        )
                     })
                     .collect::<Option<Vec<_>>>()?
                     .join(" ");
@@ -46256,6 +46643,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut body_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 2,
                     Some(&continue_code),
                     Some(&break_code),
@@ -46310,6 +46698,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                     &mut body_env,
                     ctx,
                     fields,
+                    mutated_fields,
                     indent + 1,
                     Some(&continue_code),
                     Some(&break_code),
@@ -46352,6 +46741,7 @@ fn lower_anonymous_interface_receiver_statement_block(
                         indent,
                     ),
                     fields,
+                    mutated_fields,
                 ));
             }
         }
@@ -46554,6 +46944,11 @@ fn lower_object_backed_anonymous_interface_expr(
                 .count()
                 == 1
             && fields.is_empty()
+            && body
+                .iter()
+                .filter(|member| matches!(member, Member::Method(_)))
+                .count()
+                == 1
             && !sync_trait)
         || fields.iter().any(|field| field.initializer.is_none())
     {
@@ -46568,6 +46963,7 @@ fn lower_object_backed_anonymous_interface_expr(
         })
         .filter_map(|method| method)
         .collect::<Vec<_>>();
+    let mutated_fields = anonymous_source_class_mutated_field_names(body, &fields)?;
     let effective_method_types = |owner: &TypeDecl, method: &MethodDecl| {
         let declaring_owner = trait_interfaces
             .iter()
@@ -46633,7 +47029,9 @@ fn lower_object_backed_anonymous_interface_expr(
         .filter_map(|field| {
             let supported_type = matches!(field.ty, JavaType::Primitive(_) | JavaType::String)
                 || matches!(&field.ty, JavaType::Named { name, .. }
-                    if name.rsplit('.').next() == Some("String"));
+                    if name.rsplit('.').next() == Some("String"))
+                || (matches!(field.ty, JavaType::Named { .. })
+                    && mutated_fields.contains(&crate::parser::to_snake_case(&field.name)));
             supported_type.then_some(field.name.as_str())
         })
         .collect::<Vec<_>>();
@@ -46642,7 +47040,9 @@ fn lower_object_backed_anonymous_interface_expr(
             candidate.name == field
                 && (matches!(candidate.ty, JavaType::String)
                     || matches!(&candidate.ty, JavaType::Named { name, .. }
-                        if name.rsplit('.').next() == Some("String")))
+                        if name.rsplit('.').next() == Some("String"))
+                    || (matches!(candidate.ty, JavaType::Named { .. })
+                        && mutated_fields.contains(&crate::parser::to_snake_case(&candidate.name))))
         })
     };
     let trait_name = if let Some(resolved) = resolved
@@ -46968,6 +47368,7 @@ fn lower_object_backed_anonymous_interface_expr(
                 &mut method_env,
                 method_ctx,
                 &fields,
+                &mutated_fields,
                 2,
                 None,
                 None,
@@ -46978,8 +47379,9 @@ fn lower_object_backed_anonymous_interface_expr(
             for candidate in &fields {
                 bound_body = bind_anonymous_field_reads_in_block(bound_body, &candidate.name)?;
             }
-            let render_field_reads =
-                |rendered: String| render_anonymous_interface_cell_reads(rendered, &fields);
+            let render_field_reads = |rendered: String| {
+                render_anonymous_interface_cell_reads(rendered, &fields, &mutated_fields)
+            };
             let mut rendered_body = String::new();
             let mut segment_start = 0;
             for (write_index, write_field) in writes {
@@ -47167,7 +47569,7 @@ fn lower_object_backed_anonymous_interface_expr(
                 ),
                 2,
             );
-            render_anonymous_interface_cell_reads(rendered, &fields)
+            render_anonymous_interface_cell_reads(rendered, &fields, &mutated_fields)
         };
         if exceptions.wrap_returns_in_result()
             && matches!(effective_return_type, JavaType::Void)
@@ -47281,8 +47683,10 @@ fn lower_object_backed_anonymous_interface_expr(
                     if mutable_field_is_refcell(&field.name) {
                         format!(
                             "std::cell::RefCell<{}>",
-                            emit::emit_type(&rust_type_for_java_type_with_facts(
-                                &field.ty, ctx.facts
+                            emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                                &RustSlotShape::for_storage(field.ty.clone()),
+                                ctx.facts,
+                                ctx.representations,
                             ))
                         )
                     } else {
@@ -47317,36 +47721,33 @@ fn lower_object_backed_anonymous_interface_expr(
     let field_values = fields
         .iter()
         .map(|field| {
+            let initializer = field.initializer.as_ref().unwrap();
+            let lowered_initializer = if matches!(field.ty, JavaType::Named { .. })
+                && let Expr::Var(source) = initializer
+                && env
+                    .local_shape(source)
+                    .is_some_and(|actual| actual.java_ty == field.ty)
+            {
+                format!("{}.clone()", crate::parser::to_snake_case(source))
+            } else {
+                emit::emit_expr(&lower_expr_for_slot(
+                    initializer,
+                    env,
+                    Slot::Assignment(RustSlotShape::for_storage(field.ty.clone())),
+                    ctx,
+                ))
+            };
             format!(
                 "{}: {},",
                 crate::parser::to_snake_case(&field.name),
                 if mutable_counter_fields.contains(&field.name.as_str()) {
                     if mutable_field_is_refcell(&field.name) {
-                        format!(
-                            "std::cell::RefCell::new({})",
-                            emit::emit_expr(&lower_expr(
-                                field.initializer.as_ref().unwrap(),
-                                env,
-                                ctx
-                            ))
-                        )
+                        format!("std::cell::RefCell::new({})", lowered_initializer)
                     } else {
-                        format!(
-                            "std::cell::Cell::new({})",
-                            emit::emit_expr(&lower_expr(
-                                field.initializer.as_ref().unwrap(),
-                                env,
-                                ctx
-                            ))
-                        )
+                        format!("std::cell::Cell::new({})", lowered_initializer)
                     }
                 } else {
-                    emit::emit_expr(&lower_expr_for_slot(
-                        field.initializer.as_ref().unwrap(),
-                        env,
-                        Slot::Assignment(RustSlotShape::for_storage(field.ty.clone())),
-                        ctx,
-                    ))
+                    lowered_initializer
                 }
             )
         })
@@ -47522,6 +47923,18 @@ fn anonymous_read_only_block_is_supported(block: &Block) -> bool {
                     }
                 }
                 Stmt::Break(None) | Stmt::Continue(None) if in_loop => {}
+                Stmt::Try {
+                    resources,
+                    body,
+                    catches,
+                    finally_block,
+                } if resources.is_empty()
+                    && !catches.is_empty()
+                    && finally_block.is_none()
+                    && supported(body, &mut locals.clone(), in_loop)
+                    && catches
+                        .iter()
+                        .all(|catch| supported(&catch.body, &mut locals.clone(), in_loop)) => {}
                 _ => return false,
             }
         }
@@ -48258,6 +48671,23 @@ fn bind_anonymous_field_reads_in_scoped_block(
                 }
                 let loop_shadowed = shadowed || var_name == field || source_var_name == field;
                 bind_anonymous_field_reads_in_scoped_block(body, field, loop_shadowed)?;
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } if resources.is_empty() && !catches.is_empty() && finally_block.is_none() => {
+                bind_anonymous_field_reads_in_scoped_block(body, field, shadowed)?;
+                for catch in catches {
+                    let catch_shadowed =
+                        shadowed || catch.name == field || catch.source_name == field;
+                    bind_anonymous_field_reads_in_scoped_block(
+                        &mut catch.body,
+                        field,
+                        catch_shadowed,
+                    )?;
+                }
             }
             Stmt::Break(_) | Stmt::Continue(_) => {}
             _ => return None,
@@ -51794,7 +52224,8 @@ fn lower_current_trivial_accessor_getter_for_slot(
     }
     let CallExprPlan::TrivialAccessorGetter {
         receiver,
-        field_name,
+        field_owner,
+        mut field_name,
     } = plan_call_expr_with_lower_context(
         receiver.as_deref(),
         name,
@@ -51806,6 +52237,91 @@ fn lower_current_trivial_accessor_getter_for_slot(
     else {
         return None;
     };
+    if let (Some(receiver), Some(resolved)) = (receiver.as_ref(), resolved.as_ref())
+        && let Some(receiver_owner) = source_receiver_owner_key(receiver, env, ctx)
+        && !crate::facts::external_type_name_matches(
+            receiver_owner.as_str(),
+            &resolved.declaring_type,
+        )
+    {
+        // Resolution identifies an inherited accessor. Inlining it as a
+        // receiver field loses the declaring class's slot when fields hide.
+        return None;
+    }
+    if let Some(receiver) = receiver.as_ref()
+        && let Some(receiver_owner) = source_receiver_owner_key(receiver, env, ctx)
+        && !crate::facts::external_type_name_matches(receiver_owner.as_str(), &field_owner)
+    {
+        // The accessor belongs to a different source owner than the concrete
+        // receiver.  Keep the method call so inherited dispatch (and hidden
+        // superclass field identity) is preserved.
+        return None;
+    }
+    if let Some(receiver) = receiver.as_ref()
+        && let Some(receiver_owner) = source_receiver_owner_key(receiver, env, ctx)
+        && receiver_owner
+            .find_context_type(ctx)
+            .is_some_and(|receiver_ty| receiver_ty.extends.is_some())
+    {
+        // A field-only plan cannot preserve the declaring method owner after
+        // inheritance (including field hiding and overrides). The emitted
+        // subclass method already has the correct owner-aware field routing.
+        return None;
+    }
+    if let Some(field_owner_decl) = find_context_type_decl_by_erased_name(ctx, &field_owner)
+        && field_owner_decl.members.iter().any(|member| {
+            matches!(member, Member::Field(field)
+                if !field.modifiers.contains(&Modifier::Static)
+                    && field.name == accessor_member_name(&field_name))
+        })
+        && crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+            field_owner_decl,
+            &source_super_constructor_inherited_context_programs(ctx),
+        )
+        .iter()
+        .any(|inherited| inherited.field().name == accessor_member_name(&field_name))
+    {
+        return None;
+    }
+    if let Some(receiver) = receiver.as_ref() {
+        let receiver_ty = crate::types::infer_expr_type(receiver, env.type_env());
+        if let Some(receiver_owner) = concrete_java_type_name(&receiver_ty)
+            && !crate::facts::external_type_name_matches(receiver_owner, &field_owner)
+        {
+            return None;
+        }
+        if let Some(receiver_owner) = concrete_java_type_name(&receiver_ty)
+            && let Some(receiver_decl) =
+                SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+            && receiver_decl.members.iter().any(|member| {
+                matches!(member, Member::Field(field)
+                    if !field.modifiers.contains(&Modifier::Static)
+                        && field.name == accessor_member_name(&field_name))
+            })
+            && crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+                receiver_decl,
+                &source_super_constructor_inherited_context_programs(ctx),
+            )
+            .iter()
+            .any(|inherited| inherited.field().name == accessor_member_name(&field_name))
+        {
+            return None;
+        }
+        if let Some(receiver_owner) = concrete_java_type_name(&receiver_ty)
+            && let Some(receiver_decl) =
+                SourceContextOwnerKey::new(receiver_owner).find_context_type(ctx)
+            && let Some(field_owner_decl) =
+                SourceContextOwnerKey::new(field_owner.as_str()).find_context_type(ctx)
+            && let Some(storage_name) = inherited_field_storage_rust_name(
+                receiver_decl,
+                field_owner_decl,
+                accessor_member_name(&field_name),
+                ctx,
+            )
+        {
+            field_name = storage_name;
+        }
+    }
     // A getter declared on a superclass may be overridden below it.  Inlining
     // its field on a source-hierarchy carrier changes Java virtual dispatch
     // (`Account.balance()` became `AccountValue::amount()`), so leave it as a
@@ -58025,9 +58541,6 @@ fn lower_emitted_source_mutating_super_copyback_call(
         super_ty,
         &source_super_constructor_inherited_context_programs(ctx),
     );
-    if source_instance_fields_overlap_direct_subclass_fields(current_ty, &super_fields) {
-        return None;
-    }
     if !super_method_body_is_copyback_safe(method, &super_fields) {
         return None;
     }
@@ -58061,10 +58574,25 @@ fn lower_emitted_source_mutating_super_copyback_call(
         });
     }
     for field_name in super_fields {
+        let declaring_ty = if super_ty.members.iter().any(|member| {
+            matches!(member, Member::Field(field)
+                if !field.modifiers.contains(&Modifier::Static) && field.name == field_name)
+        }) {
+            super_ty
+        } else {
+            let inherited =
+                crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+                    super_ty,
+                    &source_super_constructor_inherited_context_programs(ctx),
+                )
+                .into_iter()
+                .find(|inherited| inherited.field().name == field_name)?;
+            find_context_type_decl_by_erased_name(ctx, inherited.declaring_type())?
+        };
         let super_field_name =
-            crate::java_naming::source_instance_field_rust_name(super_ty, &field_name);
+            inherited_field_storage_rust_name(super_ty, declaring_ty, &field_name, ctx)?;
         let current_field_name =
-            crate::java_naming::source_instance_field_rust_name(current_ty, &field_name);
+            inherited_field_storage_rust_name(current_ty, declaring_ty, &field_name, ctx)?;
         stmts.push(RustStmt::Assign {
             target: field_projection(RustExpr::Var("self".to_string()), &current_field_name),
             value: field_projection(RustExpr::Var(super_local.to_string()), &super_field_name),
@@ -58075,28 +58603,6 @@ fn lower_emitted_source_mutating_super_copyback_call(
         tail: (returns_result || !matches!(return_type, JavaType::Void))
             .then(|| Box::new(RustExpr::Var(result_local.to_string()))),
     })
-}
-
-fn source_instance_fields_overlap_direct_subclass_fields(
-    current_ty: &TypeDecl,
-    super_fields: &[String],
-) -> bool {
-    let direct_fields = direct_source_instance_field_names(current_ty);
-    super_fields
-        .iter()
-        .any(|field_name| direct_fields.contains(field_name))
-}
-
-fn direct_source_instance_field_names(ty: &TypeDecl) -> HashSet<String> {
-    ty.members
-        .iter()
-        .filter_map(|member| match member {
-            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
-                Some(field.name.clone())
-            }
-            _ => None,
-        })
-        .collect()
 }
 
 fn super_method_body_is_copyback_safe(method: &MethodDecl, super_fields: &[String]) -> bool {
@@ -58800,7 +59306,10 @@ fn emitted_source_super_receiver_literal(
             let super_field_name =
                 crate::java_naming::source_instance_field_rust_name(super_ty, &field_name);
             let current_field_name =
-                crate::java_naming::source_instance_field_rust_name(current_ty, &field_name);
+                inherited_field_storage_rust_name(current_ty, super_ty, &field_name, ctx)
+                    .unwrap_or_else(|| {
+                        crate::java_naming::source_instance_field_rust_name(current_ty, &field_name)
+                    });
             (
                 super_field_name,
                 field_projection(RustExpr::Var("self".to_string()), &current_field_name),
@@ -64518,6 +65027,7 @@ fn source_trivial_accessor_getter_lowered_type(
     let CallExprPlan::TrivialAccessorGetter {
         receiver,
         field_name,
+        ..
     } = plan_call_expr_with_lower_context(
         receiver.as_deref(),
         name,
@@ -69093,6 +69603,7 @@ mod tests {
             liveness,
             result_propagation_mode: ResultPropagationMode::UncaughtPanic,
             lowering_inherited_method_body: false,
+            inherited_method_declaring_type: None,
         }
     }
 
@@ -78871,6 +79382,7 @@ class NumericBox {
             liveness,
             result_propagation_mode: ResultPropagationMode::UncaughtPanic,
             lowering_inherited_method_body: false,
+            inherited_method_declaring_type: None,
         };
 
         let lowered = lower_expr(&Expr::Raw("helper(value.unwrap())".to_string()), &env, ctx);

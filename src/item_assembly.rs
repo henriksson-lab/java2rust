@@ -147,19 +147,37 @@ pub(crate) fn rust_bounds_for_java_type_param(
     bound: &JavaType,
     support_programs: &[&Program],
 ) -> Vec<String> {
-    let JavaType::Named { name: bound, .. } = bound else {
+    let JavaType::Named {
+        name: bound_name,
+        args,
+    } = bound
+    else {
         return Vec::new();
     };
-    if source_type_bound_is_trait_like(bound, support_programs) {
-        return vec![rust_name_for_java_named_type(bound)];
+    if source_type_bound_is_trait_like(bound_name, support_programs) {
+        let trait_name = rust_name_for_java_named_type(bound_name);
+        if args.is_empty() {
+            return vec![trait_name];
+        }
+        let args = args
+            .iter()
+            .map(|arg| {
+                crate::emit::emit_type(&rust_type_for_java_type_with_facts(
+                    arg,
+                    &FactSet::default(),
+                ))
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        return vec![format!("{trait_name}<{args}>")];
     }
-    if source_type_bound_is_class_like(bound, support_programs) {
-        return vec![crate::representation_lowering::source_class_bound_trait_name(bound)];
+    if source_type_bound_is_class_like(bound_name, support_programs) {
+        return vec![crate::representation_lowering::source_class_bound_trait_name(bound_name)];
     }
     // The bound names a library type rather than a source one. Dropping it left
     // the parameter with no capability at all, so `T extends Comparable<T>`
     // lost `compareTo`.
-    jdk_type_param_bound_rust_bounds(bound)
+    jdk_type_param_bound_rust_bounds(bound_name)
 }
 
 /// Whether any declared type-parameter bound in the program projects to a Rust
@@ -589,8 +607,13 @@ fn stmt_clones_class_type_param_param_to_owned_local_before_later_read(
             initializer: Some(initializer),
             ..
         } => {
-            later_param_read
-                && java_type_contains_type_param(ty, type_param)
+            // Class type parameters are passed by shared reference.  Producing
+            // an owned local of the same type therefore clones the parameter
+            // even when this is its final source-level read (for example,
+            // `T value = present ? line : null`).  Liveness only decides
+            // whether an owned parameter may be moved; it cannot turn `&T`
+            // into `T`.
+            java_type_contains_type_param(ty, type_param)
                 && expr_reads_named_type_param_param(initializer, param_names)
         }
         Stmt::If {
@@ -2815,9 +2838,9 @@ fn struct_fields_for_type(
         crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
             .into_iter()
             .map(|inherited| RustField {
-                name: inherited.field().name.clone(),
+                name: inherited.rust_name().to_string(),
                 ty: rust_type_for_slot_maybe_with_representations(
-                    &signatures.required_field_shape(&ty.name, &inherited.field().name),
+                    &signatures.required_field_shape(&ty.name, inherited.rust_name()),
                     facts,
                     representations,
                 ),

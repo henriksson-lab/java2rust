@@ -17501,7 +17501,8 @@ class Standards<T extends CompoundLine> {
         translation
             .rust
             .contains("pub enum HeaderLineValue")
-            && translation.rust.contains("Clone + Into<HeaderLineValue>")
+            && translation.rust.contains("Clone + std::any::Any")
+            && translation.rust.contains("Into<HeaderLineValue>")
             && translation.rust.contains("std::rc::Rc::new(line.into())")
             && translation.rust.contains("lines.push(value.ok_or_else")
             && translation.rust.contains(".into().into()")
@@ -17696,13 +17697,25 @@ class FormatLine extends CompoundLine {
     assert!(
         translation
             .rust
-            .contains("impl From<std::rc::Rc<FormatLine>> for CompoundLine")
+            .contains("pub enum CompoundLineValue")
+            && translation
+                .rust
+                .contains("impl From<std::rc::Rc<FormatLine>> for CompoundLineValue")
+            && translation
+                .rust
+                .contains("pub fn same(&self, other: &CompoundLineValue)")
             && translation
                 .rust
                 .contains(".same(&that.clone()/* TODO(translation): validate added clone */.into())")
             && translation
                 .rust
-                .contains("unsupported Java String reference identity comparison requires string identity representation"),
+                .contains("unsupported Java String reference identity comparison requires string identity representation")
+            && !translation
+                .rust
+                .contains("impl From<std::rc::Rc<FormatLine>> for CompoundLine {")
+            && !translation.rust.contains(
+                "unsupported Java class upcast: FormatLine to CompoundLine requires class hierarchy lowering"
+            ),
         "{}",
         translation.rust
     );
@@ -22301,7 +22314,7 @@ fn mutating_super_copyback_includes_same_file_inherited_fields() {
 }
 
 #[test]
-fn mutating_super_copyback_refuses_hidden_superclass_field() {
+fn mutating_super_copyback_preserves_hidden_superclass_field() {
     let source = r#"
 class SuperMutateHiddenField {
     static class Base {
@@ -22317,19 +22330,48 @@ class SuperMutateHiddenField {
         }
         int derivedValue() { return n; }
     }
+    static String run() {
+        Derived value = new Derived();
+        value.bump();
+        return value.baseValue() + "," + value.derivedValue();
+    }
 }
 "#;
     let translation = translate_source(source);
 
     assert!(
-        translation.rust.contains(
-            "compile_error!(\"unsupported Java mutating super call: SuperMutateHiddenField.Base.bump requires class hierarchy lowering\")"
-        ) && !translation
+        !translation.diagnostics.has_code("unsupported_inheritance"),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation
             .rust
-            .contains("let mut __java_super = SuperMutateHiddenField_Base")
-            && !translation.rust.contains("self.n = __java_super.n;"),
+            .contains("__java_hidden_super_mutate_hidden_field_base_n: i32")
+            && translation.rust.contains(
+                "SuperMutateHiddenField_Base { n: self.__java_hidden_super_mutate_hidden_field_base_n }"
+            )
+            && translation.rust.contains(
+                "self.__java_hidden_super_mutate_hidden_field_base_n = __java_super.n;"
+            )
+            && translation
+                .rust
+                .contains("return self.__java_hidden_super_mutate_hidden_field_base_n;")
+            && !translation
+                .rust
+                .contains("unsupported Java mutating super call"),
         "{}",
         translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "mutating_super_copyback_hidden_superclass_field",
+        translation.rust,
+        r#"
+#[test]
+fn superclass_and_derived_hidden_slots_mutate_independently() {
+    assert_eq!(SuperMutateHiddenField::run(), "1,10");
+}
+"#,
     );
 }
 

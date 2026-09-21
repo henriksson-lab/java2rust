@@ -1,7 +1,34 @@
 # 0058 — A class upcast discards the object; `super.m()` returns `Default`; `instanceof` is exact-type
 
 Recorded 2026-08-23.
-Status: **open, narrowed to class hierarchy carrier**.
+Status: **fixed/fenced for parsed source hierarchies**.
+
+Closure re-audit 2026-09-21: the current source-hierarchy carrier preserves
+subtype payloads, virtual dispatch, and shared-handle identity across direct,
+nested, generic, collection, erased-object cast, call-argument, and used
+`instanceof` supertype views. A borrowed erased `Object -> FormatLine` recovery
+now keeps `Rc<FormatLine>` concrete until the `CompoundLineValue` call boundary;
+the old loud `From<Rc<FormatLine>> for CompoundLine` residue is rejected by the
+focused guard. Direct `super.m()` and the bounded mutating-super copyback path
+also preserve independently hidden superclass/subclass fields. Proven carrier
+and concrete-copyback edges no longer emit the stale
+`unsupported_inheritance` diagnostic; all promoted inheritance differential
+fixtures explicitly assert that absence, while unknown, ambiguous,
+source-summary, and otherwise unrepresented edges remain loud.
+
+Closure gates include
+`differential::inheritance_upcast_fixtures_match_java_output`,
+`differential::super_call_fixtures_match_java_output`,
+`differential::promoted_inheritance_fixtures_have_no_unsupported_inheritance_diagnostic`,
+`idiom_gaps::mutating_super_copyback_preserves_hidden_superclass_field`,
+`idiom_gaps::borrowed_downcast_source_subtype_argument_upcasts_after_clone_recovery`,
+`idiom_gaps::erased_object_source_hierarchy_carrier_identity_preserves_variant_handle_identity`,
+and
+`slot_shape_design::generic_source_supertype_into_bound_gets_static_for_erased_boxing`.
+No inheritance fixture remains in the executable known-gap harness. This
+closure does **not** claim that arbitrary external Java inheritance is modeled:
+external conversions still require an explicit adapter/model and unsupported
+external edges remain fenced by their loud fallback.
 
 Codex follow-up 2026-09-15 explicit exception self-cast:
 general cast lowering now routes `(Throwable) this` for a source exception

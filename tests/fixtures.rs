@@ -101,6 +101,72 @@ fn adapter_and_caller_observe_the_same_reference_field_handle() {
 }
 
 #[test]
+fn anonymous_interface_named_reference_field_replacement_preserves_aliases() {
+    let translation = translate_source(
+        r#"
+interface Replacer {
+    int replace(boolean enabled);
+    int read();
+    boolean sameOriginal();
+}
+class ReplaceNode {
+    int value;
+    ReplaceNode(int value) { this.value = value; }
+    int read() { return this.value; }
+}
+class AnonymousInterfaceReferenceReplacement {
+    static Replacer make(ReplaceNode original) {
+        return new Replacer() {
+            ReplaceNode node = original;
+            public int replace(boolean enabled) {
+                if (enabled) { this.node = new ReplaceNode(7); }
+                return this.node.read();
+            }
+            public int read() { return this.node.read(); }
+            public boolean sameOriginal() { return this.node == original; }
+        };
+    }
+    static int run() {
+        ReplaceNode original = new ReplaceNode(3);
+        Replacer first = make(original);
+        Replacer second = make(original);
+        if (!first.sameOriginal() || !second.sameOriginal()) { return -1; }
+        int retained = first.replace(false);
+        if (!first.sameOriginal()) { return -2; }
+        int replaced = first.replace(true);
+        if (first.sameOriginal() || !second.sameOriginal()) { return -3; }
+        return retained * 10000 + replaced * 1000 + first.read() * 100
+            + second.read() * 10 + original.read();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("node: std::cell::RefCell<std::rc::Rc<ReplaceNode>>"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "anonymous_interface_named_reference_replacement",
+        translation.rust,
+        r#"
+#[test]
+fn replacement_is_local_to_one_adapter_field() {
+    assert_eq!(AnonymousInterfaceReferenceReplacement::run(), 37733);
+}
+"#,
+    );
+}
+
+#[test]
 fn anonymous_class_carrier_writes_through_named_reference_field() {
     let translation = translate_source(
         r#"
@@ -2008,6 +2074,46 @@ fn generic_bound_keeps_the_shared_counter_identity() {
 }
 
 #[test]
+fn parameterized_mutable_interface_uses_nonoverlapping_shared_carriers() {
+    let translation = translate_source(include_str!(
+        "../claude_audits/repro/GenericMutableSharedInterface.java"
+    ));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub struct __JavaDirectGenericCellLocalCarrier")
+            && translation
+                .rust
+                .contains("GenericCell<T> for std::rc::Rc<std::cell::RefCell<__JavaShared>>")
+            && translation
+                .rust
+                .contains("impl GenericCell<String> for GenericStringCell")
+            && translation.rust.contains("T: GenericCell<String> + Clone"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "generic_mutable_shared_interface",
+        translation.rust,
+        r#"
+#[test]
+fn generic_bound_mutation_is_visible_through_the_original_alias() {
+    assert_eq!(
+        GenericMutableSharedInterface::run().unwrap().as_deref(),
+        Some("right")
+    );
+}
+"#,
+    );
+}
+
+#[test]
 fn shared_sync_mutating_interface_implementation_satisfies_generic_bound() {
     let translation = translate_source(
         r#"
@@ -2329,6 +2435,55 @@ fn anonymous_helper_uses_its_own_receiver() {
     let values = AnonymousPairValues::make();
     assert_eq!(values.one(), 4);
     assert_eq!(values.twice(), 8);
+}
+"#,
+    );
+}
+
+#[test]
+fn fieldless_functional_anonymous_interface_supports_private_this_helper() {
+    let translation = translate_source(
+        r#"
+interface IntValue { int get(); }
+class AnonymousPrivateHelper {
+    static IntValue make(int seed) {
+        return new IntValue() {
+            private int adjusted(int value) { return value + 2; }
+            public int get() { return this.adjusted(seed); }
+        };
+    }
+    static int run() { return make(5).get(); }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class")
+            && translation
+                .rust
+                .contains("struct __JavaAnonymousIntValue_object")
+            && translation
+                .rust
+                .contains("fn adjusted(&self, value: i32) -> i32")
+            && translation.rust.contains("self.adjusted(self.seed)"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "fieldless_functional_anonymous_private_this_helper",
+        translation.rust,
+        r#"
+#[test]
+fn private_helper_runs_on_the_anonymous_receiver() {
+    assert_eq!(AnonymousPrivateHelper::run(), 7);
 }
 "#,
     );
@@ -2660,6 +2815,69 @@ class GenericAnonymousDefault {
 fn generic_parent_default_dispatches_through_the_anonymous_object() {
     assert_eq!(GenericAnonymousDefault::run(), 10);
     assert_eq!(GenericAnonymousDefault::run_args(), 15);
+}
+"#,
+    );
+}
+
+#[test]
+fn audited_anonymous_generic_contract_chain_has_no_false_unsupported_diagnostic() {
+    let translation = translate_source(include_str!(
+        "../claude_audits/repro/AnonymousGenericContractChain.java"
+    ));
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "audited_anonymous_generic_contract_chain",
+        translation.rust,
+        r#"
+#[test]
+fn exact_repro_preserves_specialized_parent_and_joined_contracts() {
+    let source: Box<dyn ChainSource<String>> = AnonymousGenericContractChain::make().into();
+    let joined = AnonymousGenericContractChain::make();
+    assert_eq!(source.value().len() as i32
+        + joined.value().len() as i32
+        + joined.echo("hi".to_string()).len() as i32, 12);
+}
+"#,
+    );
+}
+
+#[test]
+fn audited_anonymous_generic_default_has_no_false_unsupported_diagnostic() {
+    let translation = translate_source(include_str!(
+        "../claude_audits/repro/AnonymousGenericDefault.java"
+    ));
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "audited_anonymous_generic_default",
+        translation.rust,
+        r#"
+#[test]
+fn exact_repro_preserves_specialized_inherited_defaults() {
+    let source = AnonymousGenericDefault::make();
+    let parent: Box<dyn GenericDefaultSource<String>> = source.clone().into();
+    assert_eq!(({
+        let source_parent: Box<dyn GenericDefaultSource<String>> = source.clone().into();
+        source_parent.forwarded().len()
+    } + parent.forwarded().len()) as i32, 10);
+    assert_eq!({
+        let source_parent: Box<dyn GenericDefaultSource<String>> = source.into();
+        source_parent.plus(2)
+    } + parent.plus(3), 15);
 }
 "#,
     );
@@ -5172,6 +5390,43 @@ fn override_throw_is_catchable_through_base_slot() {
 }
 
 #[test]
+fn anonymous_class_and_interface_try_catch_bodies_preserve_dispatch_and_state() {
+    let translation = translate_source(include_str!(
+        "../claude_audits/repro/AnonymousTryCatchBodies.java"
+    ));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("struct __JavaAnonymousAnonymousTryCatchBaseClassObject")
+            && translation
+                .rust
+                .contains("struct __JavaAnonymousAnonymousTryCatchReader_object")
+            && !translation.rust.contains("return Default::default();"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "anonymous_try_catch_bodies",
+        translation.rust,
+        r#"
+#[test]
+fn catch_only_bodies_keep_anonymous_dispatch_and_interface_fields() {
+    assert_eq!(AnonymousTryCatchBodies::class_valid().unwrap(), 3);
+    assert_eq!(AnonymousTryCatchBodies::class_caught().unwrap(), 7);
+    assert_eq!(AnonymousTryCatchBodies::interface_valid().unwrap(), 5);
+    assert_eq!(AnonymousTryCatchBodies::interface_caught().unwrap(), 9);
+}
+"#,
+    );
+}
+
+#[test]
 fn anonymous_source_class_labeled_block_preserves_receiver_and_super() {
     let translation = translate_source(
         r#"
@@ -5600,6 +5855,38 @@ class InheritedCounterRoot {
 #[test]
 fn static_child_retains_inherited_interface_state() {
     assert_eq!(InheritedCounterRoot::run(), 4);
+}
+"#,
+    );
+}
+
+#[test]
+fn audited_inherited_static_anonymous_interface_has_no_false_hierarchy_diagnostic() {
+    let translation = translate_source(include_str!(
+        "../claude_audits/repro/AnonymousInterfaceInheritedStatic.java"
+    ));
+    assert!(
+        !translation.diagnostics.has_code("unsupported_inheritance"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        !translation
+            .diagnostics
+            .has_code("unsupported_anonymous_class"),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    cargo_test_translation(
+        "audited_inherited_static_anonymous_interface",
+        translation.rust,
+        r#"
+#[test]
+fn exact_repro_preserves_inherited_member_and_anonymous_state() {
+    let holder = AnonymousInterfaceInheritedStatic::__static_holder();
+    assert_eq!(holder.lock().unwrap().run(), 4);
 }
 "#,
     );

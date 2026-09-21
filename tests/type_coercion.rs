@@ -4978,6 +4978,7 @@ fn instanceof_recovers_erased_object_against_source_hierarchy_carrier() {
         check,
         InstanceOfCheck::ErasedObjectClosedEnum {
             enum_name: "AnimalValue".to_string(),
+            carrier_type: "AnimalValue".to_string(),
             variants: vec!["Animal".to_string(), "Dog".to_string()],
         }
     );

@@ -11927,9 +11927,11 @@ pub(crate) fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfChec
             "is_some_and",
             vec![optional_erased_object_is_instance_closure_leaf(target_type)],
         ),
-        InstanceOfCheck::ErasedObjectClosedEnum { variants, .. } => {
-            erased_object_closed_enum_instanceof_projection(expr, variants)
-        }
+        InstanceOfCheck::ErasedObjectClosedEnum {
+            carrier_type,
+            variants,
+            ..
+        } => erased_object_closed_enum_instanceof_projection(expr, carrier_type, variants),
         InstanceOfCheck::AlwaysTrue => RustExpr::Literal("true".to_string()),
         InstanceOfCheck::Unsupported {
             actual_dispatch,
@@ -11997,9 +11999,13 @@ pub(crate) fn instanceof_pattern_downcast_ref_projection(
         }
         InstanceOfCheck::ErasedObjectClosedEnum {
             enum_name,
+            carrier_type,
             variants,
         } => Some(erased_object_closed_enum_pattern_downcast_projection(
-            expr, enum_name, variants,
+            expr,
+            enum_name,
+            carrier_type,
+            variants,
         )),
         _ => None,
     }
@@ -12007,13 +12013,19 @@ pub(crate) fn instanceof_pattern_downcast_ref_projection(
 
 fn erased_object_closed_enum_instanceof_projection(
     expr: RustExpr,
+    carrier_type: &str,
     variants: &[String],
 ) -> RustExpr {
     let object_name = "__java_instanceof_value".to_string();
     let object = RustExpr::Var(object_name.clone());
-    let mut checks = variants.iter().map(|variant| {
-        erased_object_is_type_projection(object.clone(), &normalize_emitted_java_type_name(variant))
-    });
+    let mut runtime_types = std::iter::once(carrier_type.to_string()).chain(
+        variants
+            .iter()
+            .map(|variant| normalize_emitted_java_type_name(variant)),
+    );
+    let mut checks = runtime_types
+        .by_ref()
+        .map(|runtime_type| erased_object_is_type_projection(object.clone(), &runtime_type));
     let Some(first) = checks.next() else {
         return RustExpr::Literal("false".to_string());
     };
@@ -12036,11 +12048,12 @@ fn erased_object_closed_enum_instanceof_projection(
 fn erased_object_closed_enum_pattern_downcast_projection(
     expr: RustExpr,
     enum_name: &str,
+    carrier_type: &str,
     variants: &[String],
 ) -> RustExpr {
     let object_name = "__java_instanceof_value".to_string();
     let object = RustExpr::Var(object_name.clone());
-    let tail = variants.iter().rev().fold(
+    let variant_tail = variants.iter().rev().fold(
         RustExpr::Path(vec!["None".to_string()]),
         |else_expr, variant| {
             let variant = normalize_emitted_java_type_name(variant);
@@ -12061,6 +12074,21 @@ fn erased_object_closed_enum_pattern_downcast_projection(
             }
         },
     );
+    let carrier_downcast = method_expect_projection(
+        erased_object_downcast_ref_projection(object.clone(), carrier_type),
+        crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
+    );
+    let tail = RustExpr::If {
+        condition: Box::new(erased_object_is_type_projection(
+            object.clone(),
+            carrier_type,
+        )),
+        then_expr: Box::new(RustExpr::Call {
+            function: Box::new(RustExpr::path(["Some"])),
+            args: vec![apply_clone_projection(carrier_downcast)],
+        }),
+        else_expr: Box::new(variant_tail),
+    };
     RustExpr::Block {
         stmts: vec![RustStmt::Let {
             mutable: false,
@@ -23090,11 +23118,16 @@ mod tests {
 
         let erased_carrier_check = InstanceOfCheck::ErasedObjectClosedEnum {
             enum_name: "AnimalValue".to_string(),
+            carrier_type: "AnimalValue".to_string(),
             variants: vec!["Animal".to_string(), "Dog".to_string()],
         };
         let erased_carrier_predicate =
             instanceof_check_projection(RustExpr::Var("object".to_string()), &erased_carrier_check);
         let rendered = emit::emit_expr(&erased_carrier_predicate);
+        assert!(
+            rendered.contains("__java_instanceof_value.is::<AnimalValue>()"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("__java_instanceof_value.is::<Animal>()"),
             "{rendered}"
@@ -23109,6 +23142,10 @@ mod tests {
         )
         .expect("erased-object source carrier instanceof should expose pattern recovery");
         let rendered = emit::emit_expr(&erased_carrier_downcast);
+        assert!(
+            rendered.contains("Some(__java_instanceof_value.downcast_ref::<AnimalValue>().expect(\"invalid Java cast\").clone())"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("Some(AnimalValue::Animal(__java_instanceof_value.downcast_ref::<Animal>().expect(\"invalid Java cast\").clone()))"),
             "{rendered}"

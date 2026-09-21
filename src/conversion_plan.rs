@@ -2927,6 +2927,7 @@ pub enum InstanceOfCheck {
     },
     ErasedObjectClosedEnum {
         enum_name: String,
+        carrier_type: String,
         variants: Vec<String>,
     },
     AlwaysTrue,
@@ -3196,6 +3197,7 @@ pub fn plan_instanceof_check_with_facts(
             if !variants.is_empty() {
                 return InstanceOfCheck::ErasedObjectClosedEnum {
                     enum_name: enum_name.clone(),
+                    carrier_type: erased_runtime_target_type(target, enum_name.clone(), facts),
                     variants,
                 };
             }

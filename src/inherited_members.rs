@@ -125,13 +125,15 @@ impl ExternalInheritedInstanceMethod {
 pub(crate) struct InheritedInstanceField {
     declaring_type: String,
     field: FieldDecl,
+    rust_name: String,
 }
 
 impl InheritedInstanceField {
-    pub(crate) fn new(declaring_type: String, field: FieldDecl) -> Self {
+    pub(crate) fn new(declaring_type: String, field: FieldDecl, rust_name: String) -> Self {
         Self {
             declaring_type,
             field,
+            rust_name,
         }
     }
 
@@ -141,6 +143,10 @@ impl InheritedInstanceField {
 
     pub(crate) fn field(&self) -> &FieldDecl {
         &self.field
+    }
+
+    pub(crate) fn rust_name(&self) -> &str {
+        &self.rust_name
     }
 }
 
@@ -217,6 +223,11 @@ pub(crate) fn inherited_instance_fields_for_type(
             InheritedInstanceField::new(
                 inherited.declaring_type().to_string(),
                 inherited.field().clone(),
+                inherited_instance_field_rust_name_for_type_in_programs(
+                    ty,
+                    &inherited,
+                    &[support_program],
+                ),
             )
         })
         .collect()
@@ -685,7 +696,6 @@ pub(crate) fn inherited_instance_field_refs_for_type_in_programs<'a>(
     support_programs: &[&'a Program],
 ) -> Vec<InheritedInstanceFieldRef<'a>> {
     let mut fields = Vec::new();
-    let mut seen_fields = direct_instance_field_names(ty);
     let mut current = ty.extends.as_deref();
     let mut owner_context = ty.name.clone();
     let mut visited_types = HashSet::new();
@@ -709,9 +719,7 @@ pub(crate) fn inherited_instance_field_refs_for_type_in_programs<'a>(
             if is_static_field(field) {
                 continue;
             }
-            if seen_fields.insert(rust_field_name(&field.name)) {
-                fields.push(InheritedInstanceFieldRef::new(&super_ty.name, field));
-            }
+            fields.push(InheritedInstanceFieldRef::new(&super_ty.name, field));
         }
 
         owner_context = super_ty.name.clone();
@@ -719,6 +727,54 @@ pub(crate) fn inherited_instance_field_refs_for_type_in_programs<'a>(
     }
 
     fields
+}
+
+pub(crate) fn inherited_instance_field_rust_name_for_type_in_programs(
+    ty: &TypeDecl,
+    inherited: &InheritedInstanceFieldRef<'_>,
+    support_programs: &[&Program],
+) -> String {
+    let base_name = find_unique_type_decl_for_owner_context_in_programs(
+        support_programs,
+        &ty.name,
+        inherited.declaring_type(),
+    )
+    .map(|owner| {
+        crate::java_naming::source_instance_field_rust_name(owner, &inherited.field().name)
+    })
+    .unwrap_or_else(|| rust_field_name(&inherited.field().name));
+    let inherited_fields = inherited_instance_field_refs_for_type_in_programs(ty, support_programs);
+    inherited_instance_field_rust_name(ty, inherited, &inherited_fields, &base_name)
+}
+
+pub(crate) fn inherited_instance_field_rust_name(
+    ty: &TypeDecl,
+    inherited: &InheritedInstanceFieldRef<'_>,
+    inherited_fields: &[InheritedInstanceFieldRef<'_>],
+    base_name: &str,
+) -> String {
+    let direct_count = ty
+        .members
+        .iter()
+        .filter(|member| {
+            matches!(member, Member::Field(field)
+                if !is_static_field(field) && rust_field_name(&field.name) == base_name)
+        })
+        .count();
+    let inherited_count = inherited_fields
+        .iter()
+        .filter(|candidate| rust_field_name(&candidate.field().name) == base_name)
+        .count();
+    if direct_count + inherited_count <= 1 {
+        return base_name.to_string();
+    }
+    format!(
+        "__java_hidden_{}_{}",
+        crate::parser::to_snake_case(&crate::java_naming::rust_name_for_java_named_type(
+            inherited.declaring_type()
+        )),
+        base_name
+    )
 }
 
 fn find_unique_type_decl_in_programs<'a>(

@@ -2121,6 +2121,7 @@ pub enum ArgumentLoweringPlan {
 pub(crate) enum TrivialAccessorCallPlan<'a> {
     Getter {
         receiver: Option<&'a Expr>,
+        field_owner: String,
         field_name: String,
     },
     Setter {
@@ -2134,6 +2135,7 @@ pub(crate) enum TrivialAccessorCallPlan<'a> {
 pub enum CallExprPlan<'a> {
     TrivialAccessorGetter {
         receiver: Option<&'a Expr>,
+        field_owner: String,
         field_name: String,
     },
     Target(CallTargetPlan<'a>),
@@ -2212,6 +2214,7 @@ pub(crate) fn plan_trivial_accessor_call<'a>(
         TrivialAccessorKind::Getter { field } if args.is_empty() => {
             Some(TrivialAccessorCallPlan::Getter {
                 receiver,
+                field_owner: field.type_name().to_string(),
                 field_name: field.field_name().to_string(),
             })
         }
@@ -2393,11 +2396,13 @@ pub fn plan_call_expr_with_external_index<'a>(
 ) -> CallExprPlan<'a> {
     if let Some(TrivialAccessorCallPlan::Getter {
         receiver,
+        field_owner,
         field_name,
     }) = plan_trivial_accessor_call(receiver, name, args, resolved, facts)
     {
         return CallExprPlan::TrivialAccessorGetter {
             receiver,
+            field_owner,
             field_name,
         };
     }

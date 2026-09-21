@@ -18,7 +18,7 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 437;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 438;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 0;
 
 #[test]
@@ -772,6 +772,12 @@ fn anonymous_functional_interface_fixtures_match_java_output() {
         "AnonymousSupplier",
     )
     .unwrap();
+    compare_fixture(
+        &translator,
+        &root.join("AnonymousPrivateHelper.java"),
+        "AnonymousPrivateHelper",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -1053,11 +1059,15 @@ fn inheritance_upcast_fixtures_match_java_output() {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
     let fixtures = [
+        "BorrowedErasedSubtypeArgument",
         "ErasedCarrierIdentity",
         "ErasedObjectSupertypeCast",
         "ExplicitInheritanceUpcast",
         "InheritanceUpcast",
+        "InstanceofSupertype",
         "NestedInheritanceUpcast",
+        "PatternInstanceofSupertype",
+        "PatternInstanceofSupertypeTernary",
         "PolymorphicListUpcast",
         "PatternInstanceofSupertypeUsed",
     ];
@@ -1075,6 +1085,33 @@ fn inheritance_upcast_fixtures_match_java_output() {
         "inheritance-upcast fixture output differs from Java:\n\n{}",
         failures.join("\n\n")
     );
+}
+
+#[test]
+fn promoted_inheritance_fixtures_have_no_unsupported_inheritance_diagnostic() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    for class in [
+        "BorrowedErasedSubtypeArgument",
+        "ErasedCarrierIdentity",
+        "ErasedObjectSupertypeCast",
+        "ExplicitInheritanceUpcast",
+        "InheritanceUpcast",
+        "InstanceofSupertype",
+        "NestedInheritanceUpcast",
+        "PatternInstanceofSupertype",
+        "PatternInstanceofSupertypeTernary",
+        "PatternInstanceofSupertypeUsed",
+        "PolymorphicListUpcast",
+    ] {
+        let fixture = root.join(format!("{class}.java"));
+        let source = std::fs::read_to_string(&fixture).expect("inheritance differential fixture");
+        let translation = new_java2rust::translate_source(&source);
+        assert!(
+            !translation.diagnostics.has_code("unsupported_inheritance"),
+            "{class}: {:?}",
+            translation.diagnostics.iter().collect::<Vec<_>>()
+        );
+    }
 }
 
 #[test]

@@ -42,6 +42,11 @@ pub struct RepresentationPlan {
     nullable_live_static_native_map_field_keys: HashSet<(String, String)>,
     nullable_live_static_native_map_field_values: HashSet<(String, String)>,
     hierarchy_edges_by_subtype: HashMap<String, Vec<ObjectHierarchyEdge>>,
+    /// Concrete inheritance edges proven safe by the existing source-member
+    /// flattening path. Keep this separate from polymorphic hierarchy
+    /// representations: these edges are represented only for the concrete,
+    /// statically constructed leaf shape recorded below.
+    concretely_lowered_hierarchy_edges: BTreeSet<(String, String)>,
     diagnostics: Vec<RepresentationDiagnostic>,
     /// Source classes anonymously subclassed somewhere in the translated
     /// program. Unlike a named subtype, an anonymous subtype cannot appear as
@@ -252,7 +257,192 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     expand_source_hierarchy_carrier_variants(&mut plan);
     collect_anonymous_erased_boundary_representations(program, &effective_facts, &mut plan);
     promote_anonymous_class_bases_to_source_hierarchy_carriers(&mut plan);
+    record_statically_constructed_concrete_leaf_hierarchy_edges(program, &mut plan);
+    record_simple_super_copyback_hierarchy_edges(program, &mut plan);
     plan
+}
+
+/// Record the deliberately small concrete `super.m()` subset whose lowering
+/// reconstructs the superclass shell, invokes a field-local mutator, and
+/// copies the superclass fields back.  This proof is intentionally narrower
+/// than merely seeing `extends` or `super`: arbitrary calls and summary-only
+/// ancestors must retain the unsupported diagnostic.
+fn record_simple_super_copyback_hierarchy_edges(program: &Program, plan: &mut RepresentationPlan) {
+    for subtype in all_types(program) {
+        let Some(super_name) = subtype.extends.as_deref() else {
+            continue;
+        };
+        let Some(superclass) = find_type_by_erased_name(program, super_name) else {
+            continue;
+        };
+        if !matches!(
+            plan.type_representation(&subtype.name)
+                .map(TypeRepresentation::representation),
+            Some(ObjectRepresentation::ConcreteStruct)
+        ) || !matches!(
+            plan.type_representation(&superclass.name)
+                .map(TypeRepresentation::representation),
+            Some(ObjectRepresentation::ConcreteStruct)
+        ) {
+            continue;
+        }
+        let mut super_fields = superclass
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+                    Some(field.name.clone())
+                }
+                _ => None,
+            })
+            .collect::<HashSet<_>>();
+        super_fields.extend(
+            crate::inherited_members::inherited_instance_field_refs_for_type_in_programs(
+                superclass,
+                &[program],
+            )
+            .into_iter()
+            .map(|inherited| inherited.field().name.clone()),
+        );
+        let proven = subtype.members.iter().any(|member| {
+            let Member::Method(method) = member else {
+                return false;
+            };
+            let Some(body) = method.body.as_ref() else {
+                return false;
+            };
+            body.statements.iter().any(|stmt| {
+                let Stmt::Expr(Expr::Call {
+                    receiver: Some(receiver),
+                    name,
+                    args,
+                    ..
+                }) = stmt
+                else {
+                    return false;
+                };
+                if !matches!(receiver.as_ref(), Expr::Super) {
+                    return false;
+                }
+                superclass.members.iter().any(|member| {
+                    let Member::Method(super_method) = member else {
+                        return false;
+                    };
+                    super_method.name == *name
+                        && super_method.params.len() == args.len()
+                        && super_method.body.as_ref().is_some_and(|body| {
+                            !body.statements.is_empty()
+                                && body.statements.iter().all(|stmt| {
+                                    simple_super_copyback_mutation_stmt(stmt, &super_fields)
+                                })
+                        })
+                })
+            })
+        });
+        if proven {
+            plan.concretely_lowered_hierarchy_edges
+                .insert((subtype.name.clone(), superclass.name.clone()));
+        }
+    }
+}
+
+fn simple_super_copyback_mutation_stmt(stmt: &Stmt, fields: &HashSet<String>) -> bool {
+    match stmt {
+        Stmt::Assign { target, value } => {
+            simple_super_copyback_field_target(target, fields)
+                && simple_super_copyback_value_expr(value, fields)
+        }
+        Stmt::Expr(Expr::Unary { expr, .. }) => simple_super_copyback_field_target(expr, fields),
+        _ => false,
+    }
+}
+
+fn simple_super_copyback_field_target(expr: &Expr, fields: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Var(name) => fields.contains(name.as_str()),
+        Expr::FieldAccess(receiver, name) => {
+            matches!(receiver.as_ref(), Expr::This) && fields.contains(name.as_str())
+        }
+        _ => false,
+    }
+}
+
+fn simple_super_copyback_value_expr(expr: &Expr, fields: &HashSet<String>) -> bool {
+    match expr {
+        Expr::Literal(_) => true,
+        Expr::Var(name) => fields.contains(name.as_str()),
+        Expr::FieldAccess(receiver, name) => {
+            matches!(receiver.as_ref(), Expr::This) && fields.contains(name.as_str())
+        }
+        Expr::Binary { left, right, .. } => {
+            simple_super_copyback_value_expr(left, fields)
+                && simple_super_copyback_value_expr(right, fields)
+        }
+        Expr::Unary { expr, .. } => simple_super_copyback_value_expr(expr, fields),
+        _ => false,
+    }
+}
+
+fn record_statically_constructed_concrete_leaf_hierarchy_edges(
+    program: &Program,
+    plan: &mut RepresentationPlan,
+) {
+    let statically_constructed_types = all_types(program)
+        .into_iter()
+        .flat_map(|ty| &ty.members)
+        .filter_map(|member| match member {
+            Member::Field(field) if field.modifiers.contains(&Modifier::Static) => {
+                let JavaType::Named { name: field_ty, .. } = &field.ty else {
+                    return None;
+                };
+                let Some(Expr::New {
+                    ty: JavaType::Named { name: new_ty, .. },
+                    body: None,
+                    ..
+                }) = field.initializer.as_ref()
+                else {
+                    return None;
+                };
+                crate::facts::external_type_name_matches(field_ty, new_ty).then(|| field_ty.clone())
+            }
+            _ => None,
+        })
+        .collect::<BTreeSet<_>>();
+
+    for subtype in all_types(program) {
+        let Some(super_name) = subtype.extends.as_deref() else {
+            continue;
+        };
+        if subtype.kind != TypeKind::Class
+            || !subtype.implements.is_empty()
+            || !subtype.members.is_empty()
+            || !statically_constructed_types
+                .iter()
+                .any(|name| crate::facts::external_type_name_matches(name, &subtype.name))
+        {
+            continue;
+        }
+        let Some(superclass) = find_type_by_erased_name(program, super_name) else {
+            continue;
+        };
+        if superclass.kind != TypeKind::Class
+            || superclass.modifiers.contains(&Modifier::Abstract)
+            || !matches!(
+                plan.type_representation(&subtype.name)
+                    .map(|entry| &entry.representation),
+                Some(ObjectRepresentation::ConcreteStruct)
+            )
+            || !matches!(
+                plan.type_representation(super_name)
+                    .map(|entry| &entry.representation),
+                Some(ObjectRepresentation::ConcreteStruct)
+            )
+        {
+            continue;
+        }
+        plan.concretely_lowered_hierarchy_edges
+            .insert((subtype.name.clone(), super_name.to_string()));
+    }
 }
 
 fn live_native_map_fields(program: &Program, static_fields: bool) -> HashSet<(String, String)> {
@@ -1725,12 +1915,37 @@ impl RepresentationPlan {
 
     fn hierarchy_edge_diagnostic_input(&self, ty: &TypeDecl) -> ObjectHierarchyEdgeDiagnosticInput {
         let edges = self.hierarchy_edges_for_subtype(&ty.name);
+        let subtype_owns_source_carrier =
+            self.type_representation(&ty.name)
+                .is_some_and(|representation| {
+                    matches!(
+                        representation.representation(),
+                        ObjectRepresentation::SourceHierarchyCarrier { .. }
+                    )
+                });
         let represented_super_names = edges
             .iter()
             .map(|edge| edge.super_name())
             .chain(ty.extends.iter().map(String::as_str))
             .chain(ty.implements.iter().map(String::as_str))
-            .filter(|super_name| self.hierarchy_edge_is_represented(super_name))
+            .filter(|super_name| {
+                // A selected source carrier owns the complete concrete shell
+                // of its root, including flattened inherited state and direct
+                // `super` behavior.  Its own extends edge is therefore part of
+                // the represented carrier, even when the ancestor does not
+                // independently need a polymorphic carrier.
+                subtype_owns_source_carrier
+                    || self.hierarchy_edge_is_represented(super_name)
+                    || self.concretely_lowered_hierarchy_edges.iter().any(
+                        |(subtype, represented_super)| {
+                            crate::facts::external_type_name_matches(subtype, &ty.name)
+                                && crate::facts::external_type_name_matches(
+                                    represented_super,
+                                    super_name,
+                                )
+                        },
+                    )
+            })
             .map(str::to_string)
             .collect::<BTreeSet<_>>();
         ObjectHierarchyEdgeDiagnosticInput::new(
@@ -3050,6 +3265,36 @@ fn anonymous_source_class_local_statement_body_is_supported(
                 &mut aliases.clone(),
             )
         }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.is_empty()
+                && !catches.is_empty()
+                && finally_block.is_none()
+                && anonymous_source_class_local_statement_body_is_supported(
+                    &body.statements,
+                    field_names,
+                    may_continue,
+                    active_break_labels,
+                    active_continue_labels,
+                    params,
+                    &mut aliases.clone(),
+                )
+                && catches.iter().all(|catch| {
+                    anonymous_source_class_local_statement_body_is_supported(
+                        &catch.body.statements,
+                        field_names,
+                        may_continue,
+                        active_break_labels,
+                        active_continue_labels,
+                        params,
+                        &mut aliases.clone(),
+                    )
+                })
+        }
         _ => false,
     };
         if admitted {
@@ -3086,6 +3331,14 @@ fn anonymous_source_class_local_statement_body_is_supported(
                     ..
                 }) if let Expr::Var(name) = left.as_ref() => {
                     aliases.remove(name);
+                }
+                Stmt::Try { .. } => {
+                    // A path inside the try or one catch may reassign a
+                    // reference local. Forget field-alias provenance at the
+                    // join rather than accepting a later member write based
+                    // on a path-sensitive fact this bounded checker does not
+                    // retain.
+                    aliases.clear();
                 }
                 _ => {}
             }
@@ -3280,14 +3533,15 @@ fn anonymous_fieldless_interface_object_is_supported(
     if interface.kind != TypeKind::Interface {
         return false;
     }
-    let expected = anonymous_interface_lineage(interface, anonymous_context)
-        .into_iter()
-        .flat_map(|interface| interface.members.iter())
-        .filter_map(|member| match member {
-            Member::Method(method) if method.body.is_none() => Some(method),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    // Use the same canonical, specialized contracts as adapter lowering.  A
+    // raw lineage walk leaves `T` unsubstituted in contracts such as
+    // `Relay<String> extends Source<String>` and retains duplicate inherited
+    // declarations.  That made an otherwise supported adapter look as though
+    // it had omitted `echo(Object)` or supplied an extra helper method.
+    let expected = crate::representation_lowering::specialized_interface_abstract_contracts(
+        anonymous_context,
+        interface,
+    );
     if expected.is_empty() {
         return false;
     }
@@ -3309,7 +3563,12 @@ fn anonymous_fieldless_interface_object_is_supported(
                 .filter(|member| matches!(member, Member::Method(method) if method.body.is_none()))
                 .count()
                 == 1
-            && fields.is_empty())
+            && fields.is_empty()
+            && body
+                .iter()
+                .filter(|member| matches!(member, Member::Method(_)))
+                .count()
+                == 1)
     {
         return false;
     }
@@ -3320,11 +3579,21 @@ fn anonymous_fieldless_interface_object_is_supported(
             _ => None,
         })
         .collect::<Vec<_>>();
-    expected.iter().all(|expected_method| {
+    expected.iter().all(|expected_contract| {
             implementations.iter().any(|implementation| {
-                implementation.name == expected_method.name
-                    && crate::java_signature::erased_param_types(&implementation.params)
-                        == crate::java_signature::erased_param_types(&expected_method.params)
+                implementation.name == expected_contract.method.name
+                    && implementation.params.len() == expected_contract.param_types.len()
+                    && implementation.params.iter().zip(&expected_contract.param_types).all(
+                        |(implementation_param, expected_ty)| {
+                            crate::java_signature::erased_type_name(
+                                &implementation_param.ty,
+                                implementation_param.is_varargs,
+                            ) == crate::java_signature::erased_type_name(
+                                expected_ty,
+                                implementation_param.is_varargs,
+                            )
+                        },
+                    )
                     && implementation.type_params.is_empty()
                     && !implementation.modifiers.contains(&Modifier::Static)
                     && !fields.iter().any(|field| {
@@ -3340,29 +3609,29 @@ fn anonymous_fieldless_interface_object_is_supported(
                             stateful_anonymous_read_only_block_is_supported(body)
                                 || stateful_anonymous_counter_mutator_body(
                                     body,
-                                    &expected_method.return_type,
+                                    &expected_contract.return_type,
                                     &fields,
                                 )
                                 || stateful_anonymous_sequential_mutator_body(
                                     body,
-                                    &expected_method.return_type,
+                                    &expected_contract.return_type,
                                     &fields,
                                 )
                                 .is_some()
                                 || stateful_anonymous_receiver_statement_body_is_supported(
                                     body,
-                                    &expected_method.return_type,
+                                    &expected_contract.return_type,
                                     &fields,
-                                    &expected_method.params,
+                                    &implementation.params,
                                 )
                                 || stateful_anonymous_guarded_counter_mutator_body(
                                     body,
-                                    &expected_method.return_type,
+                                    &expected_contract.return_type,
                                     &fields,
                                 )
                                 || stateful_anonymous_reference_member_write_body(
                                     body,
-                                    &expected_method.return_type,
+                                    &expected_contract.return_type,
                                     &fields,
                                 )
                         }
@@ -3372,10 +3641,20 @@ fn anonymous_fieldless_interface_object_is_supported(
         && implementations
             .iter()
             .filter(|method| {
-                !expected.iter().any(|expected_method| {
-                    method.name == expected_method.name
-                        && crate::java_signature::erased_param_types(&method.params)
-                            == crate::java_signature::erased_param_types(&expected_method.params)
+                !expected.iter().any(|expected_contract| {
+                    method.name == expected_contract.method.name
+                        && method.params.len() == expected_contract.param_types.len()
+                        && method.params.iter().zip(&expected_contract.param_types).all(
+                            |(implementation_param, expected_ty)| {
+                                crate::java_signature::erased_type_name(
+                                    &implementation_param.ty,
+                                    implementation_param.is_varargs,
+                                ) == crate::java_signature::erased_type_name(
+                                    expected_ty,
+                                    implementation_param.is_varargs,
+                                )
+                            },
+                        )
                 })
             })
             .all(|helper| {
@@ -3423,39 +3702,6 @@ fn stateful_anonymous_reference_member_write_body(
                                 && matches!(candidate.ty, JavaType::Named { .. })
                         }))
     )
-}
-
-/// The anonymous adapter must implement every source supertrait explicitly in
-/// Rust. Collect parents first so its eligibility check uses the same complete
-/// abstract surface as lowering.
-fn anonymous_interface_lineage<'a>(
-    interface: &'a TypeDecl,
-    program: &'a Program,
-) -> Vec<&'a TypeDecl> {
-    fn visit<'a>(
-        interface: &'a TypeDecl,
-        program: &'a Program,
-        seen: &mut Vec<String>,
-        out: &mut Vec<&'a TypeDecl>,
-    ) {
-        if !seen.iter().any(|name| name == &interface.name) {
-            seen.push(interface.name.clone());
-        } else {
-            return;
-        }
-        for parent_name in interface.extends.iter().chain(interface.implements.iter()) {
-            if let Some(parent) = find_type_by_erased_name(program, parent_name)
-                && parent.kind == TypeKind::Interface
-            {
-                visit(parent, program, seen, out);
-            }
-        }
-        out.push(interface);
-    }
-
-    let mut out = Vec::new();
-    visit(interface, program, &mut Vec::new(), &mut out);
-    out
 }
 
 /// A guarded primitive update is still ordinary anonymous-instance state: the
@@ -3744,9 +3990,10 @@ pub(crate) fn stateful_anonymous_receiver_statement_body_is_supported(
                     && !stateful_anonymous_return_expr_has_super(value)
                     && fields.iter().any(|field| {
                         field.name == crate::parser::to_snake_case_unescaped(assigned)
-                            && (matches!(field.ty, JavaType::Primitive(_) | JavaType::String)
-                                || matches!(&field.ty, JavaType::Named { name, .. }
-                                if name.rsplit('.').next() == Some("String")))
+                            && matches!(
+                                field.ty,
+                                JavaType::Primitive(_) | JavaType::String | JavaType::Named { .. }
+                            )
                     }) =>
                 {
                     *writes += 1;
@@ -4147,6 +4394,18 @@ fn stateful_anonymous_read_only_block_is_supported(body: &Block) -> bool {
                     }
                 }
                 Stmt::Break(None) | Stmt::Continue(None) if in_loop => {}
+                Stmt::Try {
+                    resources,
+                    body,
+                    catches,
+                    finally_block,
+                } if resources.is_empty()
+                    && !catches.is_empty()
+                    && finally_block.is_none()
+                    && supported(body, &mut locals.clone(), in_loop)
+                    && catches
+                        .iter()
+                        .all(|catch| supported(&catch.body, &mut locals.clone(), in_loop)) => {}
                 _ => return false,
             }
         }
@@ -4257,7 +4516,19 @@ fn stateful_anonymous_counter_return_reads_field(expr: &Expr, field: &str) -> bo
 /// keeps diagnostics aligned with the lowering boundary.
 fn stateful_anonymous_return_expr_has_super(expr: &Expr) -> bool {
     match expr {
-        Expr::Super | Expr::New { .. } | Expr::Lambda { .. } => true,
+        Expr::Super | Expr::Lambda { .. } => true,
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            body.is_some()
+                || qualifier
+                    .as_ref()
+                    .is_some_and(|qualifier| stateful_anonymous_return_expr_has_super(qualifier))
+                || args.iter().any(stateful_anonymous_return_expr_has_super)
+        }
         Expr::This
         | Expr::Literal(_)
         | Expr::Var(_)
