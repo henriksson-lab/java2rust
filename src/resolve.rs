@@ -238,6 +238,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
     let mut diagnostics = diagnostics;
     let mut program = program.clone();
     qualify_nested_type_names(&mut program);
+    qualify_imported_jdk_map_entry_implements(&mut program);
     assign_local_binding_ids(&mut program);
     let mut program_counts = ProgramMethodCounts::new();
     for ty in &program.types {
@@ -263,6 +264,56 @@ pub fn resolve_program_with_source_symbols_and_facts(
         program,
         diagnostics,
         facts,
+    }
+}
+
+fn qualify_imported_jdk_map_entry_implements(program: &mut Program) {
+    let imports_map = program
+        .imports
+        .iter()
+        .any(|import| !import.is_static && import.path == "java.util.Map");
+    let imports_entry = program
+        .imports
+        .iter()
+        .any(|import| !import.is_static && import.path == "java.util.Map.Entry");
+    if !imports_map && !imports_entry {
+        return;
+    }
+    fn source_declares_simple_name(ty: &TypeDecl, simple: &str) -> bool {
+        ty.name.rsplit('.').next() == Some(simple)
+            || ty.members.iter().any(|member| match member {
+                Member::Type(nested) => source_declares_simple_name(nested, simple),
+                _ => false,
+            })
+    }
+    let source_declares_map = program
+        .types
+        .iter()
+        .any(|ty| source_declares_simple_name(ty, "Map"));
+    let source_declares_entry = program
+        .types
+        .iter()
+        .any(|ty| source_declares_simple_name(ty, "Entry"));
+    fn qualify_type(ty: &mut TypeDecl, map: bool, entry: bool) {
+        for implemented in &mut ty.implements {
+            let head = implemented.split('<').next().unwrap_or(implemented).trim();
+            let qualifies = (map && head == "Map.Entry") || (entry && head == "Entry");
+            if qualifies {
+                *implemented = implemented.replacen(head, "java.util.Map.Entry", 1);
+            }
+        }
+        for member in &mut ty.members {
+            if let Member::Type(nested) = member {
+                qualify_type(nested, map, entry);
+            }
+        }
+    }
+    for ty in &mut program.types {
+        qualify_type(
+            ty,
+            imports_map && !source_declares_map,
+            imports_entry && !source_declares_entry,
+        );
     }
 }
 
@@ -7889,6 +7940,40 @@ fn collect_assignment_target_name(expr: &Expr, out: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn imported_jdk_map_entry_implementation_is_qualified() {
+        let parsed = crate::parser::parse_java_source(
+            "import java.util.Map; class Holder { static class Entry implements Map.Entry<String, Integer> { public String getKey() { return null; } public Integer getValue() { return null; } public Integer setValue(Integer value) { return value; } } }",
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let entry = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Type(nested) => Some(nested),
+                _ => None,
+            })
+            .expect("nested Entry");
+        assert!(entry.implements[0].starts_with("java.util.Map.Entry<"));
+    }
+
+    #[test]
+    fn source_map_shadows_imported_jdk_map_entry_implementation() {
+        let parsed = crate::parser::parse_java_source(
+            "import java.util.Map; class Holder { static class Map { interface Entry {} } static class Use implements Map.Entry {} }",
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let implementation = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Type(nested) if nested.name.ends_with(".Use") => Some(nested),
+                _ => None,
+            })
+            .expect("nested implementation");
+        assert_eq!(implementation.implements, vec!["Holder.Map.Entry"]);
+    }
 
     #[test]
     fn sibling_qualified_nested_types_stay_concrete_in_local_declarations() {

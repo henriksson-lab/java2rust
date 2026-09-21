@@ -21,7 +21,8 @@ use crate::shape_projection::{
     rust_slot_shape_from_facade_arg_slot,
 };
 use crate::slot_render::{
-    dyn_trait_rust_path, rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
+    dyn_trait_rust_path, rust_type_for_java_type_with_facts,
+    rust_type_for_java_type_with_facts_and_representations, rust_type_for_slot_with_facts,
 };
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape};
 use crate::types::{
@@ -6210,6 +6211,46 @@ impl<T: Ord> JavaComparable for T {
     )
 }
 
+pub(crate) fn java_map_entry_value_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"/// Dynamic Java `Map.Entry<K,V>` behavior. A tuple snapshot cannot
+/// preserve a source implementation's `toString`, `setValue`, or identity.
+pub trait JavaMapEntry<K, V> {
+    fn get_key(&self) -> Result<Option<K>, JavaException>;
+    fn get_value(&self) -> Result<Option<V>, JavaException>;
+    fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException>;
+    fn java_to_string(&self) -> Result<String, JavaException>;
+}
+
+pub struct JavaMapEntryValue<K, V> {
+    entry: std::rc::Rc<dyn JavaMapEntry<K, V>>,
+}
+
+impl<K, V> Clone for JavaMapEntryValue<K, V> {
+    fn clone(&self) -> Self {
+        Self { entry: self.entry.clone() }
+    }
+}
+
+impl<K, V> JavaMapEntryValue<K, V> {
+    pub fn from_entry<E: JavaMapEntry<K, V> + 'static>(entry: E) -> Self {
+        Self { entry: std::rc::Rc::new(entry) }
+    }
+
+    pub fn get_key(&self) -> Result<Option<K>, JavaException> { self.entry.get_key() }
+    pub fn get_value(&self) -> Result<Option<V>, JavaException> { self.entry.get_value() }
+    pub fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException> {
+        self.entry.set_value(value)
+    }
+    pub fn java_to_string(&self) -> Result<String, JavaException> {
+        self.entry.java_to_string()
+    }
+}
+"#
+        .to_string(),
+    )
+}
+
 pub(crate) fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -7651,32 +7692,163 @@ impl<T: PartialEq + JavaArraysDeepToStringElement> JavaArraysDeepToStringElement
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub trait JavaEntrySlot<J> {
+    fn matches_java_entry(&self, value: &Option<J>) -> bool;
+}
+
+impl<T: PartialEq> JavaEntrySlot<T> for T {
+    fn matches_java_entry(&self, value: &Option<T>) -> bool {
+        value.as_ref().is_some_and(|value| self == value)
+    }
+}
+
+impl<T: PartialEq> JavaEntrySlot<T> for Option<T> {
+    fn matches_java_entry(&self, value: &Option<T>) -> bool {
+        self == value
+    }
+}
+
 pub struct JavaLinkedHashMap<K, V> {
     entries: Vec<(K, V)>,
+    entry_ids: Vec<u64>,
+    entry_observers: Vec<Vec<std::sync::Weak<dyn Fn(&V) + Send + Sync>>>,
+    next_entry_id: u64,
+}
+
+impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for JavaLinkedHashMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavaLinkedHashMap")
+            .field("entries", &self.entries)
+            .finish()
+    }
+}
+
+impl<K: Clone, V: Clone> Clone for JavaLinkedHashMap<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            entry_ids: self.entry_ids.clone(),
+            entry_observers: vec![Vec::new(); self.entries.len()],
+            next_entry_id: self.next_entry_id,
+        }
+    }
+}
+
+impl<K: PartialEq, V: PartialEq> PartialEq for JavaLinkedHashMap<K, V> {
+    fn eq(&self, other: &Self) -> bool { self.entries == other.entries }
+}
+
+impl<K: Eq, V: Eq> Eq for JavaLinkedHashMap<K, V> {}
+
+impl<K: PartialEq, V> Default for JavaLinkedHashMap<K, V> {
+    fn default() -> Self { Self::new() }
 }
 
 impl<K: PartialEq, V> JavaLinkedHashMap<K, V> {
     pub fn new() -> JavaLinkedHashMap<K, V> {
         JavaLinkedHashMap {
             entries: Vec::new(),
+            entry_ids: Vec::new(),
+            entry_observers: Vec::new(),
+            next_entry_id: 0,
         }
     }
 
     pub fn with_capacity(capacity: usize) -> JavaLinkedHashMap<K, V> {
         JavaLinkedHashMap {
             entries: Vec::with_capacity(capacity),
+            entry_ids: Vec::with_capacity(capacity),
+            entry_observers: Vec::with_capacity(capacity),
+            next_entry_id: 0,
         }
     }
 
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
-        if let Some((_, existing)) = self.entries.iter_mut().find(|(entry_key, _)| entry_key == &key)
-        {
-            Some(std::mem::replace(existing, value))
+        if let Some(index) = self.entries.iter().position(|(entry_key, _)| entry_key == &key) {
+            let previous = std::mem::replace(&mut self.entries[index].1, value);
+            self.notify_entry_observers(index);
+            Some(previous)
         } else {
+            let entry_id = self.next_entry_id;
+            self.next_entry_id = self.next_entry_id.checked_add(1).expect("Java map entry ID overflow");
             self.entries.push((key, value));
+            self.entry_ids.push(entry_id);
+            self.entry_observers.push(Vec::new());
             None
         }
+    }
+
+    fn notify_entry_observers(&mut self, index: usize) {
+        let value = &self.entries[index].1;
+        self.entry_observers[index].retain(|observer| {
+            if let Some(observer) = observer.upgrade() {
+                observer(value);
+                true
+            } else {
+                false
+            }
+        });
+    }
+
+    pub fn observe_entry_by_id(&mut self, entry_id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool {
+        let Some(index) = self.entry_ids.iter().position(|id| *id == entry_id) else {
+            return false;
+        };
+        self.entry_observers[index].push(std::sync::Arc::downgrade(&observer));
+        true
+    }
+
+    pub fn entry_id<Q>(&self, key: &Q) -> Option<u64>
+    where
+        K: std::borrow::Borrow<Q>,
+        Q: PartialEq + ?Sized,
+    {
+        self.entries
+            .iter()
+            .position(|(entry_key, _)| entry_key.borrow() == key)
+            .map(|index| self.entry_ids[index])
+    }
+
+    pub fn first_entry_id(&self) -> Option<u64> {
+        self.entry_ids.first().copied()
+    }
+
+    pub fn contains_java_entry<JK, JV>(&self, key: &Option<JK>, value: &Option<JV>) -> bool
+    where
+        K: JavaEntrySlot<JK>,
+        V: JavaEntrySlot<JV>,
+    {
+        self.entries.iter().any(|(entry_key, entry_value)| {
+            entry_key.matches_java_entry(key) && entry_value.matches_java_entry(value)
+        })
+    }
+
+    pub fn remove_java_entry<JK, JV>(&mut self, key: &Option<JK>, value: &Option<JV>) -> bool
+    where
+        K: JavaEntrySlot<JK>,
+        V: JavaEntrySlot<JV>,
+    {
+        let Some(index) = self.entries.iter().position(|(entry_key, entry_value)| {
+            entry_key.matches_java_entry(key) && entry_value.matches_java_entry(value)
+        }) else {
+            return false;
+        };
+        self.entry_ids.remove(index);
+        self.entry_observers.remove(index);
+        self.entries.remove(index);
+        true
+    }
+
+    pub fn entry_by_id(&self, entry_id: u64) -> Option<(&K, &V)> {
+        let index = self.entry_ids.iter().position(|id| *id == entry_id)?;
+        self.entries.get(index).map(|(key, value)| (key, value))
+    }
+
+    pub fn replace_entry_value_by_id(&mut self, entry_id: u64, value: V) -> Option<V> {
+        let index = self.entry_ids.iter().position(|id| *id == entry_id)?;
+        let previous = std::mem::replace(&mut self.entries[index].1, value);
+        self.notify_entry_observers(index);
+        Some(previous)
     }
 
     pub fn get<Q>(&self, key: &Q) -> Option<&V>
@@ -7699,6 +7871,8 @@ impl<K: PartialEq, V> JavaLinkedHashMap<K, V> {
             .entries
             .iter()
             .position(|(entry_key, _)| entry_key.borrow() == key)?;
+        self.entry_ids.remove(index);
+        self.entry_observers.remove(index);
         Some(self.entries.remove(index).1)
     }
 
@@ -7727,6 +7901,12 @@ impl<K: PartialEq, V> JavaLinkedHashMap<K, V> {
         self.entries.is_empty()
     }
 
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.entry_ids.clear();
+        self.entry_observers.clear();
+    }
+
     pub fn keys(&self) -> impl Iterator<Item = &K> {
         self.entries.iter().map(|(key, _)| key)
     }
@@ -7749,7 +7929,235 @@ impl<K: PartialEq, V> JavaLinkedHashMap<K, V> {
     where
         F: FnMut(&K, &V) -> bool,
     {
-        self.entries.retain(|(key, value)| f(key, value));
+        let mut index = 0;
+        let mut retained_ids = Vec::with_capacity(self.entry_ids.len());
+        let mut retained_observers = Vec::with_capacity(self.entry_observers.len());
+        self.entries.retain(|(key, value)| {
+            let keep = f(key, value);
+            if keep {
+                retained_ids.push(self.entry_ids[index]);
+                retained_observers.push(std::mem::take(&mut self.entry_observers[index]));
+            }
+            index += 1;
+            keep
+        });
+        self.entry_ids = retained_ids;
+        self.entry_observers = retained_observers;
+    }
+}
+
+/// A native entry keeps the identity of the map node it came from. Once that
+/// node is removed, the entry retains its own value rather than attaching to
+/// a later entry with the same key.
+pub trait JavaLiveEntryMap<K, V> {
+    fn first_entry_id(&self) -> Option<u64>;
+    fn len(&self) -> usize;
+    fn entry_by_id(&self, entry_id: u64) -> Option<(&K, &V)>;
+    fn observe_entry_by_id(&mut self, entry_id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool;
+    fn replace_entry_value_by_id(&mut self, entry_id: u64, value: V) -> Option<V>;
+}
+
+/// Adapts a map's Rust value storage to Java's nullable `Map.Entry` result.
+/// The storage value can be either `V` or `Option<V>`; the Java-facing entry
+/// contract remains `JavaMapEntry<JK, JV>` in both cases.
+pub trait JavaLiveEntrySlot<JK, K, JV, M>: Clone + 'static {
+    fn entry_from_id(map: std::sync::Arc<std::sync::RwLock<M>>, id: u64) -> Option<JavaMapEntryValue<JK, JV>>;
+}
+
+impl<JK, K, JV, S, M> JavaLiveEntrySlot<JK, K, JV, M> for S
+where
+    JK: 'static,
+    K: Clone + 'static,
+    JV: 'static,
+    S: Clone + Send + 'static,
+    M: JavaLiveEntryMap<K, S> + 'static,
+    JavaLinkedHashMapLiveEntry<K, S, M>: JavaMapEntry<JK, JV> + 'static,
+{
+    fn entry_from_id(map: std::sync::Arc<std::sync::RwLock<M>>, id: u64) -> Option<JavaMapEntryValue<JK, JV>> {
+        JavaLinkedHashMapLiveEntry::from_id(map, id).map(JavaMapEntryValue::from_entry)
+    }
+}
+
+impl<K: PartialEq, V> JavaLiveEntryMap<K, V> for JavaLinkedHashMap<K, V> {
+    fn first_entry_id(&self) -> Option<u64> {
+        JavaLinkedHashMap::first_entry_id(self)
+    }
+    fn len(&self) -> usize {
+        JavaLinkedHashMap::len(self)
+    }
+    fn entry_by_id(&self, entry_id: u64) -> Option<(&K, &V)> {
+        JavaLinkedHashMap::entry_by_id(self, entry_id)
+    }
+    fn observe_entry_by_id(&mut self, entry_id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool {
+        JavaLinkedHashMap::observe_entry_by_id(self, entry_id, observer)
+    }
+    fn replace_entry_value_by_id(&mut self, entry_id: u64, value: V) -> Option<V> {
+        JavaLinkedHashMap::replace_entry_value_by_id(self, entry_id, value)
+    }
+}
+
+pub struct JavaLinkedHashMapLiveEntry<K, V, M = JavaLinkedHashMap<K, V>> {
+    map: std::sync::Arc<std::sync::RwLock<M>>,
+    entry_id: u64,
+    key: K,
+    detached_value: std::sync::Arc<std::sync::Mutex<V>>,
+    _observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>,
+}
+
+pub type JavaHashMapLiveEntry<K, V> = JavaLinkedHashMapLiveEntry<K, V, JavaTrackedHashMap<K, V>>;
+pub type JavaTreeMapLiveEntry<K, V> = JavaLinkedHashMapLiveEntry<K, V, JavaTrackedTreeMap<K, V>>;
+
+impl<K: Clone, V: Clone + Send + 'static, M: JavaLiveEntryMap<K, V>> JavaLinkedHashMapLiveEntry<K, V, M> {
+    pub fn from_id(
+        map: std::sync::Arc<std::sync::RwLock<M>>,
+        entry_id: u64,
+    ) -> Option<Self> {
+        let (key, value) = {
+            let borrowed = map.read().unwrap();
+            let (key, value) = borrowed.entry_by_id(entry_id)?;
+            (key.clone(), value.clone())
+        };
+        let detached_value = std::sync::Arc::new(std::sync::Mutex::new(value));
+        let observed_value = detached_value.clone();
+        let observer: std::sync::Arc<dyn Fn(&V) + Send + Sync> = std::sync::Arc::new(move |value: &V| {
+            *observed_value.lock().unwrap() = value.clone();
+        });
+        if !map.write().unwrap().observe_entry_by_id(entry_id, observer.clone()) {
+            return None;
+        }
+        Some(Self {
+            map,
+            entry_id,
+            key,
+            detached_value,
+            _observer: observer,
+        })
+    }
+
+    fn current_value(&self) -> V {
+        self.detached_value.lock().unwrap().clone()
+    }
+}
+
+impl<K, V, M> JavaMapEntry<K, V> for JavaLinkedHashMapLiveEntry<K, V, M>
+where
+    K: Clone + JavaArraysDeepToStringElement,
+    V: Clone + Send + JavaArraysDeepToStringElement + 'static,
+    M: JavaLiveEntryMap<K, V>,
+{
+    fn get_key(&self) -> Result<Option<K>, JavaException> {
+        Ok(Some(self.key.clone()))
+    }
+
+    fn get_value(&self) -> Result<Option<V>, JavaException> {
+        Ok(Some(self.current_value()))
+    }
+
+    fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException> {
+        let value = value.ok_or_else(|| {
+            JavaException::new("NullPointerException", "Map.Entry.setValue(null) requires a nullable map value carrier".to_string())
+        })?;
+        let previous = self.current_value();
+        if self.map.write().unwrap().replace_entry_value_by_id(self.entry_id, value.clone()).is_none() {
+            *self.detached_value.lock().unwrap() = value;
+        }
+        Ok(Some(previous))
+    }
+
+    fn java_to_string(&self) -> Result<String, JavaException> {
+        Ok(format!("{}={}",
+            self.key.java_arrays_deep_to_string(),
+            self.current_value().java_arrays_deep_to_string()))
+    }
+}
+
+impl<K, V, M> JavaMapEntry<K, V> for JavaLinkedHashMapLiveEntry<K, Option<V>, M>
+where
+    K: Clone + JavaArraysDeepToStringElement,
+    V: Clone + Send + JavaArraysDeepToStringElement + 'static,
+    M: JavaLiveEntryMap<K, Option<V>>,
+{
+    fn get_key(&self) -> Result<Option<K>, JavaException> {
+        Ok(Some(self.key.clone()))
+    }
+
+    fn get_value(&self) -> Result<Option<V>, JavaException> {
+        Ok(self.current_value())
+    }
+
+    fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException> {
+        let previous = self.current_value();
+        if self.map.write().unwrap().replace_entry_value_by_id(self.entry_id, value.clone()).is_none() {
+            *self.detached_value.lock().unwrap() = value;
+        }
+        Ok(previous)
+    }
+
+    fn java_to_string(&self) -> Result<String, JavaException> {
+        Ok(format!("{}={}",
+            self.key.java_arrays_deep_to_string(),
+            self.current_value().java_arrays_deep_to_string()))
+    }
+}
+
+impl<K, V, M> JavaMapEntry<K, V> for JavaLinkedHashMapLiveEntry<Option<K>, V, M>
+where
+    K: Clone + JavaArraysDeepToStringElement,
+    V: Clone + Send + JavaArraysDeepToStringElement + 'static,
+    M: JavaLiveEntryMap<Option<K>, V>,
+{
+    fn get_key(&self) -> Result<Option<K>, JavaException> {
+        Ok(self.key.clone())
+    }
+
+    fn get_value(&self) -> Result<Option<V>, JavaException> {
+        Ok(Some(self.current_value()))
+    }
+
+    fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException> {
+        let value = value.ok_or_else(|| {
+            JavaException::new("NullPointerException", "Map.Entry.setValue(null) requires a nullable map value carrier".to_string())
+        })?;
+        let previous = self.current_value();
+        if self.map.write().unwrap().replace_entry_value_by_id(self.entry_id, value.clone()).is_none() {
+            *self.detached_value.lock().unwrap() = value;
+        }
+        Ok(Some(previous))
+    }
+
+    fn java_to_string(&self) -> Result<String, JavaException> {
+        Ok(format!("{}={}",
+            self.key.java_arrays_deep_to_string(),
+            self.current_value().java_arrays_deep_to_string()))
+    }
+}
+
+impl<K, V, M> JavaMapEntry<K, V> for JavaLinkedHashMapLiveEntry<Option<K>, Option<V>, M>
+where
+    K: Clone + JavaArraysDeepToStringElement,
+    V: Clone + Send + JavaArraysDeepToStringElement + 'static,
+    M: JavaLiveEntryMap<Option<K>, Option<V>>,
+{
+    fn get_key(&self) -> Result<Option<K>, JavaException> {
+        Ok(self.key.clone())
+    }
+
+    fn get_value(&self) -> Result<Option<V>, JavaException> {
+        Ok(self.current_value())
+    }
+
+    fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException> {
+        let previous = self.current_value();
+        if self.map.write().unwrap().replace_entry_value_by_id(self.entry_id, value.clone()).is_none() {
+            *self.detached_value.lock().unwrap() = value;
+        }
+        Ok(previous)
+    }
+
+    fn java_to_string(&self) -> Result<String, JavaException> {
+        Ok(format!("{}={}",
+            self.key.java_arrays_deep_to_string(),
+            self.current_value().java_arrays_deep_to_string()))
     }
 }
 
@@ -7803,6 +8211,356 @@ impl<K: Eq + std::hash::Hash, V> From<JavaLinkedHashMap<K, V>> for std::collecti
     fn from(value: JavaLinkedHashMap<K, V>) -> Self {
         value.entries.into_iter().collect()
     }
+}
+
+/// A live-entry sidecar around the existing hash table. Keeping the table
+/// itself intact preserves its iteration order when an entry escapes.
+pub struct JavaTrackedHashMap<K, V> {
+    entries: std::collections::HashMap<K, V>,
+    entry_ids: Vec<(K, u64, Vec<std::sync::Weak<dyn Fn(&V) + Send + Sync>>)>,
+    next_entry_id: u64,
+}
+
+impl<K: Eq + std::hash::Hash + Clone, V: Clone> Clone for JavaTrackedHashMap<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            entry_ids: self.entry_ids.iter().map(|(key, id, _)| (key.clone(), *id, Vec::new())).collect(),
+            next_entry_id: self.next_entry_id,
+        }
+    }
+}
+
+impl<K: Eq + std::hash::Hash + std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for JavaTrackedHashMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavaTrackedHashMap").field("entries", &self.entries).finish()
+    }
+}
+
+impl<K: Eq + std::hash::Hash, V: PartialEq> PartialEq for JavaTrackedHashMap<K, V> {
+    fn eq(&self, other: &Self) -> bool { self.entries == other.entries }
+}
+
+impl<K: Eq + std::hash::Hash, V: Eq> Eq for JavaTrackedHashMap<K, V> {}
+
+impl<K: Eq + std::hash::Hash + Clone, V> Default for JavaTrackedHashMap<K, V> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<K: Eq + std::hash::Hash + Clone, V> From<std::collections::HashMap<K, V>> for JavaTrackedHashMap<K, V> {
+    fn from(entries: std::collections::HashMap<K, V>) -> Self {
+        let mut next_entry_id = 0u64;
+        let entry_ids = entries.keys().map(|key| {
+            let id = next_entry_id;
+            next_entry_id = next_entry_id.checked_add(1).expect("Java map entry ID overflow");
+            (key.clone(), id, Vec::new())
+        }).collect();
+        Self { entries, entry_ids, next_entry_id }
+    }
+}
+
+impl<K: Eq + std::hash::Hash + Clone, V> JavaTrackedHashMap<K, V> {
+    pub fn new() -> Self { std::collections::HashMap::new().into() }
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if let Some((_, _, observers)) = self.entry_ids.iter_mut().find(|(stored, _, _)| stored == &key) {
+            let previous = self.entries.insert(key.clone(), value);
+            let current = self.entries.get(&key).expect("tracked map key disappeared");
+            observers.retain(|weak| {
+                if let Some(observer) = weak.upgrade() { observer(current); true } else { false }
+            });
+            previous
+        } else {
+            let id = self.next_entry_id;
+            self.next_entry_id = id.checked_add(1).expect("Java map entry ID overflow");
+            self.entry_ids.push((key.clone(), id, Vec::new()));
+            self.entries.insert(key, value)
+        }
+    }
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where K: std::borrow::Borrow<Q>, Q: std::hash::Hash + Eq + ?Sized {
+        self.entries.get(key)
+    }
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where K: std::borrow::Borrow<Q>, Q: std::hash::Hash + Eq + ?Sized {
+        let previous = self.entries.remove(key)?;
+        self.entry_ids.retain(|(stored, _, _)| stored.borrow() != key);
+        Some(previous)
+    }
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where K: std::borrow::Borrow<Q>, Q: std::hash::Hash + Eq + ?Sized {
+        self.entries.contains_key(key)
+    }
+    pub fn contains_value(&self, value: &V) -> bool where V: PartialEq {
+        self.entries.values().any(|current| current == value)
+    }
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.entry_ids.clear();
+    }
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, values: I) {
+        for (key, value) in values { self.insert(key, value); }
+    }
+    pub fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, mut predicate: F) {
+        self.entries.retain(|key, value| predicate(key, value));
+        self.entry_ids.retain(|(key, _, _)| self.entries.contains_key(key));
+        for (key, _, observers) in &mut self.entry_ids {
+            let value = self.entries.get(key).expect("retained map key disappeared");
+            observers.retain(|weak| {
+                if let Some(observer) = weak.upgrade() { observer(value); true } else { false }
+            });
+        }
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &K> { self.entries.keys() }
+    pub fn values(&self) -> impl Iterator<Item = &V> { self.entries.values() }
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> { self.entries.iter() }
+    pub fn first_entry_id(&self) -> Option<u64> {
+        let key = self.entries.keys().next()?;
+        self.entry_ids.iter().find(|(stored, _, _)| stored == key).map(|(_, id, _)| *id)
+    }
+    pub fn entry_id<Q>(&self, key: &Q) -> Option<u64>
+    where K: std::borrow::Borrow<Q>, Q: Eq + ?Sized {
+        self.entry_ids.iter().find(|(stored, _, _)| stored.borrow() == key).map(|(_, id, _)| *id)
+    }
+    pub fn contains_java_entry<JK, JV>(&self, key: &Option<JK>, value: &Option<JV>) -> bool
+    where K: JavaEntrySlot<JK>, V: JavaEntrySlot<JV> {
+        self.entries.iter().any(|(k, v)| k.matches_java_entry(key) && v.matches_java_entry(value))
+    }
+    pub fn remove_java_entry<JK, JV>(&mut self, key: &Option<JK>, value: &Option<JV>) -> bool
+    where K: JavaEntrySlot<JK>, V: JavaEntrySlot<JV> {
+        let Some(found) = self.entries.iter().find(|(k, v)| (*k).matches_java_entry(key) && (*v).matches_java_entry(value)).map(|(k, _)| k.clone()) else { return false; };
+        self.remove(&found).is_some()
+    }
+    pub fn entry_by_id(&self, id: u64) -> Option<(&K, &V)> {
+        let key = &self.entry_ids.iter().find(|(_, stored_id, _)| *stored_id == id)?.0;
+        self.entries.get_key_value(key)
+    }
+    pub fn observe_entry_by_id(&mut self, id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool {
+        let Some((_, _, observers)) = self.entry_ids.iter_mut().find(|(_, stored_id, _)| *stored_id == id) else { return false; };
+        observers.push(std::sync::Arc::downgrade(&observer));
+        true
+    }
+    pub fn replace_entry_value_by_id(&mut self, id: u64, value: V) -> Option<V> {
+        let (key, _, observers) = self.entry_ids.iter_mut().find(|(_, stored_id, _)| *stored_id == id)?;
+        let current = self.entries.get_mut(key)?;
+        let previous = std::mem::replace(current, value);
+        observers.retain(|weak| {
+            if let Some(observer) = weak.upgrade() { observer(current); true } else { false }
+        });
+        Some(previous)
+    }
+}
+
+impl<K: Eq + std::hash::Hash + Clone, V> JavaLiveEntryMap<K, V> for JavaTrackedHashMap<K, V> {
+    fn first_entry_id(&self) -> Option<u64> { JavaTrackedHashMap::first_entry_id(self) }
+    fn len(&self) -> usize { JavaTrackedHashMap::len(self) }
+    fn entry_by_id(&self, id: u64) -> Option<(&K, &V)> { JavaTrackedHashMap::entry_by_id(self, id) }
+    fn observe_entry_by_id(&mut self, id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool { JavaTrackedHashMap::observe_entry_by_id(self, id, observer) }
+    fn replace_entry_value_by_id(&mut self, id: u64, value: V) -> Option<V> { JavaTrackedHashMap::replace_entry_value_by_id(self, id, value) }
+}
+
+impl<K: Eq + std::hash::Hash + Clone, V> std::iter::FromIterator<(K, V)> for JavaTrackedHashMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(values: I) -> Self {
+        let mut map = Self::new();
+        map.extend(values);
+        map
+    }
+}
+
+impl<K, V> IntoIterator for JavaTrackedHashMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::collections::hash_map::IntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+}
+
+impl<K: Eq + std::hash::Hash + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringElement> std::fmt::Display for JavaTrackedHashMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("{")?;
+        for (index, (key, value)) in self.entries.iter().enumerate() {
+            if index > 0 { f.write_str(", ")?; }
+            write!(f, "{}={}", key.java_arrays_deep_to_string(), value.java_arrays_deep_to_string())?;
+        }
+        f.write_str("}")
+    }
+}
+
+impl<K: Eq + std::hash::Hash + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for JavaTrackedHashMap<K, V> {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
+}
+
+/// A sorted map with stable node IDs for live `Map.Entry` values. An entry
+/// removed and reinserted under the same key receives a different ID.
+pub struct JavaTrackedTreeMap<K, V> {
+    entries: std::collections::BTreeMap<K, V>,
+    entry_ids: Vec<(K, u64, Vec<std::sync::Weak<dyn Fn(&V) + Send + Sync>>)>,
+    next_entry_id: u64,
+}
+
+impl<K: Ord + Clone, V: Clone> Clone for JavaTrackedTreeMap<K, V> {
+    fn clone(&self) -> Self {
+        Self {
+            entries: self.entries.clone(),
+            entry_ids: self.entry_ids.iter().map(|(key, id, _)| (key.clone(), *id, Vec::new())).collect(),
+            next_entry_id: self.next_entry_id,
+        }
+    }
+}
+
+impl<K: Ord + std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for JavaTrackedTreeMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavaTrackedTreeMap").field("entries", &self.entries).finish()
+    }
+}
+
+impl<K: Ord, V: PartialEq> PartialEq for JavaTrackedTreeMap<K, V> {
+    fn eq(&self, other: &Self) -> bool { self.entries == other.entries }
+}
+impl<K: Ord, V: Eq> Eq for JavaTrackedTreeMap<K, V> {}
+
+impl<K: Ord + Clone, V> Default for JavaTrackedTreeMap<K, V> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<K: Ord + Clone, V> From<std::collections::BTreeMap<K, V>> for JavaTrackedTreeMap<K, V> {
+    fn from(entries: std::collections::BTreeMap<K, V>) -> Self {
+        let mut next_entry_id = 0u64;
+        let entry_ids = entries.keys().map(|key| {
+            let id = next_entry_id;
+            next_entry_id = id.checked_add(1).expect("Java map entry ID overflow");
+            (key.clone(), id, Vec::new())
+        }).collect();
+        Self { entries, entry_ids, next_entry_id }
+    }
+}
+
+impl<K: Ord + Clone, V> JavaTrackedTreeMap<K, V> {
+    pub fn new() -> Self { std::collections::BTreeMap::new().into() }
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if let Some((_, _, observers)) = self.entry_ids.iter_mut().find(|(stored, _, _)| stored == &key) {
+            let previous = self.entries.insert(key.clone(), value);
+            let current = self.entries.get(&key).expect("tracked map key disappeared");
+            observers.retain(|weak| {
+                if let Some(observer) = weak.upgrade() { observer(current); true } else { false }
+            });
+            previous
+        } else {
+            let id = self.next_entry_id;
+            self.next_entry_id = id.checked_add(1).expect("Java map entry ID overflow");
+            self.entry_ids.push((key.clone(), id, Vec::new()));
+            self.entries.insert(key, value)
+        }
+    }
+    pub fn get<Q>(&self, key: &Q) -> Option<&V>
+    where K: std::borrow::Borrow<Q>, Q: Ord + ?Sized { self.entries.get(key) }
+    pub fn remove<Q>(&mut self, key: &Q) -> Option<V>
+    where K: std::borrow::Borrow<Q>, Q: Ord + ?Sized {
+        let previous = self.entries.remove(key)?;
+        self.entry_ids.retain(|(stored, _, _)| stored.borrow() != key);
+        Some(previous)
+    }
+    pub fn contains_key<Q>(&self, key: &Q) -> bool
+    where K: std::borrow::Borrow<Q>, Q: Ord + ?Sized { self.entries.contains_key(key) }
+    pub fn contains_value(&self, value: &V) -> bool where V: PartialEq {
+        self.entries.values().any(|current| current == value)
+    }
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn clear(&mut self) { self.entries.clear(); self.entry_ids.clear(); }
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, values: I) {
+        for (key, value) in values { self.insert(key, value); }
+    }
+    pub fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, mut predicate: F) {
+        self.entries.retain(|key, value| predicate(key, value));
+        self.entry_ids.retain(|(key, _, _)| self.entries.contains_key(key));
+        for (key, _, observers) in &mut self.entry_ids {
+            let value = self.entries.get(key).expect("retained map key disappeared");
+            observers.retain(|weak| {
+                if let Some(observer) = weak.upgrade() { observer(value); true } else { false }
+            });
+        }
+    }
+    pub fn keys(&self) -> impl Iterator<Item = &K> { self.entries.keys() }
+    pub fn values(&self) -> impl Iterator<Item = &V> { self.entries.values() }
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> { self.entries.iter() }
+    pub fn range<Q, R>(&self, bounds: R) -> std::collections::btree_map::Range<'_, K, V>
+    where K: std::borrow::Borrow<Q>, Q: Ord + ?Sized, R: std::ops::RangeBounds<Q> {
+        self.entries.range(bounds)
+    }
+    pub fn first_key_value(&self) -> Option<(&K, &V)> { self.entries.first_key_value() }
+    pub fn last_key_value(&self) -> Option<(&K, &V)> { self.entries.last_key_value() }
+    pub fn first_entry_id(&self) -> Option<u64> {
+        let key = self.entries.keys().next()?;
+        self.entry_ids.iter().find(|(stored, _, _)| stored == key).map(|(_, id, _)| *id)
+    }
+    pub fn entry_id<Q>(&self, key: &Q) -> Option<u64>
+    where K: std::borrow::Borrow<Q>, Q: Ord + ?Sized {
+        self.entry_ids.iter().find(|(stored, _, _)| stored.borrow() == key).map(|(_, id, _)| *id)
+    }
+    pub fn contains_java_entry<JK, JV>(&self, key: &Option<JK>, value: &Option<JV>) -> bool
+    where K: JavaEntrySlot<JK>, V: JavaEntrySlot<JV> {
+        self.entries.iter().any(|(k, v)| k.matches_java_entry(key) && v.matches_java_entry(value))
+    }
+    pub fn remove_java_entry<JK, JV>(&mut self, key: &Option<JK>, value: &Option<JV>) -> bool
+    where K: JavaEntrySlot<JK>, V: JavaEntrySlot<JV> {
+        let Some(found) = self.entries.iter().find(|(k, v)| (*k).matches_java_entry(key) && (*v).matches_java_entry(value)).map(|(k, _)| k.clone()) else { return false; };
+        self.remove(&found).is_some()
+    }
+    pub fn entry_by_id(&self, id: u64) -> Option<(&K, &V)> {
+        let key = &self.entry_ids.iter().find(|(_, stored_id, _)| *stored_id == id)?.0;
+        self.entries.get_key_value(key)
+    }
+    pub fn observe_entry_by_id(&mut self, id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool {
+        let Some((_, _, observers)) = self.entry_ids.iter_mut().find(|(_, stored_id, _)| *stored_id == id) else { return false; };
+        observers.push(std::sync::Arc::downgrade(&observer));
+        true
+    }
+    pub fn replace_entry_value_by_id(&mut self, id: u64, value: V) -> Option<V> {
+        let (key, _, observers) = self.entry_ids.iter_mut().find(|(_, stored_id, _)| *stored_id == id)?;
+        let current = self.entries.get_mut(key)?;
+        let previous = std::mem::replace(current, value);
+        observers.retain(|weak| {
+            if let Some(observer) = weak.upgrade() { observer(current); true } else { false }
+        });
+        Some(previous)
+    }
+}
+
+impl<K: Ord + Clone, V> JavaLiveEntryMap<K, V> for JavaTrackedTreeMap<K, V> {
+    fn first_entry_id(&self) -> Option<u64> { JavaTrackedTreeMap::first_entry_id(self) }
+    fn len(&self) -> usize { JavaTrackedTreeMap::len(self) }
+    fn entry_by_id(&self, id: u64) -> Option<(&K, &V)> { JavaTrackedTreeMap::entry_by_id(self, id) }
+    fn observe_entry_by_id(&mut self, id: u64, observer: std::sync::Arc<dyn Fn(&V) + Send + Sync>) -> bool { JavaTrackedTreeMap::observe_entry_by_id(self, id, observer) }
+    fn replace_entry_value_by_id(&mut self, id: u64, value: V) -> Option<V> { JavaTrackedTreeMap::replace_entry_value_by_id(self, id, value) }
+}
+
+impl<K: Ord + Clone, V> std::iter::FromIterator<(K, V)> for JavaTrackedTreeMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(values: I) -> Self {
+        let mut map = Self::new();
+        map.extend(values);
+        map
+    }
+}
+
+impl<K, V> IntoIterator for JavaTrackedTreeMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::collections::btree_map::IntoIter<K, V>;
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+}
+
+impl<K: Ord + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringElement> std::fmt::Display for JavaTrackedTreeMap<K, V> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("{")?;
+        for (index, (key, value)) in self.entries.iter().enumerate() {
+            if index > 0 { f.write_str(", ")?; }
+            write!(f, "{}={}", key.java_arrays_deep_to_string(), value.java_arrays_deep_to_string())?;
+        }
+        f.write_str("}")
+    }
+}
+
+impl<K: Ord + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for JavaTrackedTreeMap<K, V> {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
 }
 
 impl<T: Clone> JavaIterator<T> {
@@ -9018,12 +9776,41 @@ pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts
     representations: Option<&RepresentationPlan>,
 ) -> crate::rust_ir::RustItem {
     let source_to_string_downcasts =
-        source_erased_object_to_string_downcasts(source_downcast_programs, representations);
+        source_erased_object_to_string_downcasts(source_downcast_programs, facts, representations);
+    let source_to_string_result_downcasts = source_erased_object_to_string_downcasts_with_result(
+        source_downcast_programs,
+        facts,
+        representations,
+        true,
+    );
+    let source_clone_downcasts =
+        source_erased_object_clone_downcasts(source_downcast_programs, representations);
     let platform_to_string_downcasts = platform_erased_object_to_string_downcasts(programs);
     let java_class_to_string_downcast =
         java_class_erased_object_to_string_downcast(programs, facts);
     let external_to_string_downcasts = external_erased_object_to_string_downcasts(programs, facts);
     let collection_to_string_downcasts = collection_erased_object_to_string_downcasts(programs);
+    let typed_map_entry_to_string_downcasts =
+        typed_map_entry_erased_object_to_string_downcasts(programs, facts, representations);
+    let typed_map_entry_clone_downcasts =
+        typed_map_entry_erased_object_clone_downcasts(programs, facts, representations);
+    let source_map_entry_value_rust_types =
+        source_map_entry_value_erased_object_rust_types(programs, facts, representations);
+    let source_map_entry_value_to_string_downcasts = source_map_entry_value_rust_types
+        .iter()
+        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return java_erased_display_unwrap(value.java_to_string()); }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source_map_entry_value_result_downcasts = source_map_entry_value_rust_types
+        .iter()
+        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return value.java_to_string(); }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let source_map_entry_value_clone_downcasts = source_map_entry_value_rust_types
+        .iter()
+        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"))
+        .collect::<Vec<_>>()
+        .join("\n");
     let vec_to_string_downcasts = erased_vec_to_string_downcasts();
     let java_string_identity_erased_support = if facts.java_string_identity_representation {
         r#"impl JavaErasedCollectionDisplayElement for JavaString {
@@ -9054,19 +9841,66 @@ impl JavaErasedOptionalDisplayElement for JavaString {
     } else {
         ""
     };
+    let java_string_identity_clone_downcast = if facts.java_string_identity_representation {
+        "    if let Some(value) = value.downcast_ref::<JavaString>() { return Box::new(value.clone()); }"
+    } else {
+        ""
+    };
+    let java_string_identity_erased_equals = if facts.java_string_identity_representation {
+        r#"    if let Some(left) = left.downcast_ref::<JavaString>() {
+        if let Some(right) = right.downcast_ref::<JavaString>() {
+            return left.java_equals(right);
+        }
+        return right.downcast_ref::<String>().is_some_and(|right| left.as_str() == right);
+    }
+"#
+    } else {
+        ""
+    };
     crate::rust_ir::RustItem::Raw(format!(
         r#"pub fn java_is_serializable<T: ?Sized>(_value: &T) -> bool {{
     true
 }}
 
-pub fn java_clone_erased_object_ref<T: ?Sized>(_value: &T) -> std::boxed::Box<dyn std::any::Any> {{
-    std::boxed::Box::new(())
+pub fn java_clone_erased_object_ref<T: std::any::Any>(value: &T) -> std::boxed::Box<dyn std::any::Any> {{
+    let value: &dyn std::any::Any = value;
+    if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
+        return java_clone_erased_any_ref(value.as_ref());
+    }}
+    java_clone_erased_any_ref(value)
+}}
+
+fn java_clone_erased_any_ref(value: &dyn std::any::Any) -> std::boxed::Box<dyn std::any::Any> {{
+    if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
+        return java_clone_erased_any_ref(value.as_ref());
+    }}
+    if let Some(value) = value.downcast_ref::<std::rc::Rc<std::boxed::Box<dyn std::any::Any>>>() {{
+        return Box::new(value.clone());
+    }}
+    if let Some(value) = value.downcast_ref::<std::sync::Arc<std::boxed::Box<dyn std::any::Any>>>() {{
+        return Box::new(value.clone());
+    }}
+    if let Some(value) = value.downcast_ref::<String>() {{ return Box::new(value.clone()); }}
+{java_string_identity_clone_downcast}
+    if let Some(value) = value.downcast_ref::<JavaPlainObject>() {{ return Box::new(value.clone()); }}
+    if let Some(value) = value.downcast_ref::<bool>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<char>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<i8>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<i16>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<i32>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<i64>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<f32>() {{ return Box::new(*value); }}
+    if let Some(value) = value.downcast_ref::<f64>() {{ return Box::new(*value); }}
+{source_clone_downcasts}
+{typed_map_entry_clone_downcasts}
+{source_map_entry_value_clone_downcasts}
+    panic!("unsupported Java erased object clone: runtime target is erased")
 }}
 
 pub fn java_clone_erased_object_vec_ref(
-    _value: &Vec<std::boxed::Box<dyn std::any::Any>>,
+    value: &[std::boxed::Box<dyn std::any::Any>],
 ) -> Vec<std::boxed::Box<dyn std::any::Any>> {{
-    Vec::new()
+    value.iter().map(java_clone_erased_object_ref).collect()
 }}
 
 pub fn java_clone_optional_erased_object_vec_ref(
@@ -9087,8 +9921,83 @@ impl JavaPlainObject {{
     }}
 }}
 
+pub trait JavaErasedDisplayResult {{
+    fn into_java_erased_display_result(self) -> Result<String, JavaException>;
+}}
+
+impl JavaErasedDisplayResult for String {{
+    fn into_java_erased_display_result(self) -> Result<String, JavaException> {{ Ok(self) }}
+}}
+
+impl JavaErasedDisplayResult for Result<String, JavaException> {{
+    fn into_java_erased_display_result(self) -> Result<String, JavaException> {{ self }}
+}}
+
+fn java_erased_display_unwrap<T: JavaErasedDisplayResult>(value: T) -> String {{
+    value.into_java_erased_display_result()
+        .unwrap_or_else(|error| panic!("uncaught Java exception: {{:?}}", error))
+}}
+
+pub fn java_erased_object_to_string_result<T: std::any::Any>(value: &T) -> Result<String, JavaException> {{
+    java_erased_any_to_string_result(value)
+}}
+
+fn java_erased_any_to_string_result(value: &dyn std::any::Any) -> Result<String, JavaException> {{
+    if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
+        return java_erased_any_to_string_result(value.as_ref());
+    }}
+    if let Some(value) = value.downcast_ref::<std::rc::Rc<std::boxed::Box<dyn std::any::Any>>>() {{
+        return java_erased_any_to_string_result(value.as_ref().as_ref());
+    }}
+    if let Some(value) = value.downcast_ref::<std::sync::Arc<std::boxed::Box<dyn std::any::Any>>>() {{
+        return java_erased_any_to_string_result(value.as_ref().as_ref());
+    }}
+{source_map_entry_value_result_downcasts}
+{source_to_string_result_downcasts}
+    Ok(java_erased_any_to_string(value))
+}}
+
 pub fn java_erased_object_to_string<T: std::any::Any>(value: &T) -> String {{
     java_erased_any_to_string(value)
+}}
+
+pub fn java_generic_optional_to_string<T: std::any::Any>(value: &Option<T>) -> String {{
+    value
+        .as_ref()
+        .map(|item| java_erased_any_to_string(item))
+        .unwrap_or_else(|| "null".to_string())
+}}
+
+pub fn java_erased_any_equals(left: &dyn std::any::Any, right: &dyn std::any::Any) -> bool {{
+{java_string_identity_erased_equals}
+    if let Some(left) = left.downcast_ref::<String>() {{
+        return right.downcast_ref::<String>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<bool>() {{
+        return right.downcast_ref::<bool>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<char>() {{
+        return right.downcast_ref::<char>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<i8>() {{
+        return right.downcast_ref::<i8>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<i16>() {{
+        return right.downcast_ref::<i16>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<i32>() {{
+        return right.downcast_ref::<i32>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<i64>() {{
+        return right.downcast_ref::<i64>().is_some_and(|right| left == right);
+    }}
+    if let Some(left) = left.downcast_ref::<f32>() {{
+        return right.downcast_ref::<f32>().is_some_and(|right| left.to_bits() == right.to_bits() || (left.is_nan() && right.is_nan()));
+    }}
+    if let Some(left) = left.downcast_ref::<f64>() {{
+        return right.downcast_ref::<f64>().is_some_and(|right| left.to_bits() == right.to_bits() || (left.is_nan() && right.is_nan()));
+    }}
+    panic!("unsupported Java erased object equals: runtime target is erased")
 }}
 
 trait JavaErasedCollectionDisplayElement {{
@@ -9313,6 +10222,8 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     if let Some((key, entry_value)) = value.downcast_ref::<(String, f64)>() {{
         return format!("{{}}={{}}", key, java_double_to_string(*entry_value));
     }}
+{typed_map_entry_to_string_downcasts}
+{source_map_entry_value_to_string_downcasts}
 {java_class_to_string_downcast}
 {platform_to_string_downcasts}
 {external_to_string_downcasts}
@@ -9347,6 +10258,291 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
     panic!("unsupported Java erased object display: runtime target is erased")
 }}"#
     ))
+}
+
+fn source_erased_object_clone_downcasts(
+    programs: &[&Program],
+    representations: Option<&RepresentationPlan>,
+) -> String {
+    let mut arms = BTreeSet::new();
+    for program in programs {
+        for ty in &program.types {
+            collect_source_erased_object_clone_downcasts(ty, false, representations, &mut arms);
+        }
+    }
+    arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn collect_source_erased_object_clone_downcasts(
+    ty: &TypeDecl,
+    nested: bool,
+    representations: Option<&RepresentationPlan>,
+    arms: &mut BTreeSet<String>,
+) {
+    if ty.type_params.is_empty()
+        && !matches!(ty.kind, TypeKind::Interface)
+        && !source_type_is_erased_alias(ty, representations)
+        && !source_type_is_source_hierarchy_carrier_root(ty, representations)
+        && representations
+            .and_then(|plan| plan.type_representation(&ty.name))
+            .is_none_or(|planned| {
+                matches!(
+                    planned.representation(),
+                    ObjectRepresentation::ConcreteStruct | ObjectRepresentation::JavaEnum { .. }
+                )
+            })
+    {
+        let rust_name = rust_name_for_java_named_type(&ty.name);
+        for handle in ["std::rc::Rc", "std::sync::Arc"] {
+            let rust_type = format!("{handle}<{rust_name}>");
+            arms.insert(format!(
+                "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"
+            ));
+        }
+        let simple_clone_fields = ty.members.iter().all(|member| match member {
+            Member::Field(field) if !field.modifiers.contains(&Modifier::Static) => {
+                matches!(field.ty, JavaType::Primitive(_) | JavaType::String)
+            }
+            _ => true,
+        });
+        if simple_clone_fields
+            && (!nested || ty.modifiers.contains(&Modifier::Static))
+            && ty.extends.is_none()
+        {
+            arms.insert(format!(
+                "    if let Some(value) = value.downcast_ref::<{rust_name}>() {{ return Box::new(value.clone()); }}"
+            ));
+        }
+    }
+    for member in &ty.members {
+        if let Member::Type(nested_ty) = member {
+            collect_source_erased_object_clone_downcasts(nested_ty, true, representations, arms);
+        }
+    }
+}
+
+fn typed_map_entry_erased_object_to_string_downcasts(
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> String {
+    typed_map_entry_erased_object_rust_types(programs, facts, representations, false)
+        .into_iter()
+        .map(|(rust_type, key_nullable, value_nullable)| {
+            let key_display = if key_nullable {
+                "key.as_ref().map(|value| java_erased_any_to_string(value)).unwrap_or_else(|| \"null\".to_string())"
+            } else {
+                "java_erased_any_to_string(key)"
+            };
+            let value_display = if value_nullable {
+                "entry_value.as_ref().map(|value| java_erased_any_to_string(value)).unwrap_or_else(|| \"null\".to_string())"
+            } else {
+                "java_erased_any_to_string(entry_value)"
+            };
+            format!(
+                "    if let Some((key, entry_value)) = value.downcast_ref::<{rust_type}>() {{\n        return format!(\"{{}}={{}}\", {key_display}, {value_display});\n    }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn source_map_entry_value_erased_object_rust_types(
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> BTreeSet<String> {
+    let Some(representations) = representations else {
+        return BTreeSet::new();
+    };
+    if !representations.source_map_entry_uses_value_carrier() {
+        return BTreeSet::new();
+    }
+    let type_param_names = programs
+        .iter()
+        .flat_map(|program| collect_program_type_param_names(program))
+        .collect::<BTreeSet<_>>();
+    let mut types = BTreeSet::new();
+    for program in programs {
+        walk_program_declared_types(program, &mut |ty| {
+            let JavaType::Named { name, args } = ty else {
+                return;
+            };
+            if args.len() != 2
+                || !matches!(
+                    canonical_external_receiver_type_key(name).as_str(),
+                    "Entry" | "Map.Entry" | "java.util.Map.Entry"
+                )
+                || args
+                    .iter()
+                    .any(|arg| java_type_mentions_any_type_param(arg, &type_param_names))
+            {
+                return;
+            }
+            let rust_type =
+                rust_type_for_java_type_with_facts_and_representations(ty, facts, representations);
+            let rust_type = crate::emit::emit_type(&rust_type);
+            if rust_type.starts_with("JavaMapEntryValue<") {
+                types.insert(rust_type);
+            }
+        });
+    }
+    types
+}
+
+fn typed_map_entry_erased_object_rust_types(
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+    only_cloneable: bool,
+) -> BTreeSet<(String, bool, bool)> {
+    let mut types = BTreeSet::new();
+    let type_param_names = programs
+        .iter()
+        .flat_map(|program| collect_program_type_param_names(program))
+        .collect::<BTreeSet<_>>();
+    for program in programs {
+        let mut collect = |ty: &JavaType, null_components: [bool; 2]| {
+            let JavaType::Named { name, args } = ty else {
+                return;
+            };
+            if args.len() != 2
+                || args
+                    .iter()
+                    .any(|arg| java_type_mentions_any_type_param(arg, &type_param_names))
+                || (only_cloneable && !args.iter().all(typed_map_entry_cloneable_component))
+                || (only_cloneable
+                    && args.iter().any(|arg| match arg {
+                        JavaType::Named { name, .. } => programs.iter().any(|source_program| {
+                            find_source_type_decl(source_program, name).is_some()
+                        }),
+                        _ => false,
+                    }))
+            {
+                return;
+            }
+            let is_entry = matches!(
+                canonical_external_receiver_type_key(name).as_str(),
+                "Entry" | "Map.Entry" | "java.util.Map.Entry"
+            ) || matches!(
+                name.as_str(),
+                "AbstractMap.SimpleEntry"
+                    | "java.util.AbstractMap.SimpleEntry"
+                    | "AbstractMap.SimpleImmutableEntry"
+                    | "java.util.AbstractMap.SimpleImmutableEntry"
+            );
+            if !is_entry
+                || programs
+                    .iter()
+                    .any(|source_program| find_source_type_decl(source_program, name).is_some())
+            {
+                return;
+            }
+            let entry_type = JavaType::Named {
+                name: "java.util.Map.Entry".to_string(),
+                args: args.clone(),
+            };
+            let mut rust_type = if let Some(representations) = representations {
+                rust_type_for_java_type_with_facts_and_representations(
+                    &entry_type,
+                    facts,
+                    representations,
+                )
+            } else {
+                rust_type_for_java_type_with_facts(&entry_type, facts)
+            };
+            if !matches!(rust_type, crate::rust_ir::RustType::Tuple(_)) {
+                // Tuple downcasts below project `.0`/`.1`. A source entry's
+                // virtual carrier must instead dispatch its own methods; do
+                // not emit a tuple destructure that makes the crate invalid.
+                return;
+            }
+            if let crate::rust_ir::RustType::Tuple(elements) = &mut rust_type {
+                for (element, is_null) in elements.iter_mut().zip(null_components) {
+                    if is_null && !matches!(element, crate::rust_ir::RustType::Option(_)) {
+                        *element = crate::rust_ir::RustType::Option(Box::new(element.clone()));
+                    }
+                }
+            }
+            let (key_nullable, value_nullable) = match &rust_type {
+                crate::rust_ir::RustType::Tuple(elements) if elements.len() == 2 => (
+                    matches!(elements[0], crate::rust_ir::RustType::Option(_)),
+                    matches!(elements[1], crate::rust_ir::RustType::Option(_)),
+                ),
+                _ => (false, false),
+            };
+            types.insert((
+                crate::emit::emit_type(&rust_type),
+                key_nullable,
+                value_nullable,
+            ));
+        };
+        walk_program_declared_types(program, &mut |ty| collect(ty, [false, false]));
+        crate::semantic_analysis::walk_program_exprs(program, &mut |expr| {
+            if let Expr::New {
+                ty,
+                args,
+                body: None,
+                ..
+            } = expr
+            {
+                collect(
+                    ty,
+                    [
+                        args.first()
+                            .is_some_and(|arg| matches!(arg, Expr::Literal(Literal::Null))),
+                        args.get(1)
+                            .is_some_and(|arg| matches!(arg, Expr::Literal(Literal::Null))),
+                    ],
+                );
+            }
+        });
+    }
+    types
+}
+
+fn typed_map_entry_erased_object_clone_downcasts(
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> String {
+    typed_map_entry_erased_object_rust_types(programs, facts, representations, true)
+        .into_iter()
+        .map(|(rust_type, _, _)| {
+            format!(
+                "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn typed_map_entry_cloneable_component(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Primitive(_) | JavaType::String => true,
+        JavaType::Named { name, args } if args.is_empty() => matches!(
+            canonical_external_receiver_type_key(name).as_str(),
+            "String"
+                | "java.lang.String"
+                | "Boolean"
+                | "java.lang.Boolean"
+                | "Byte"
+                | "java.lang.Byte"
+                | "Short"
+                | "java.lang.Short"
+                | "Integer"
+                | "java.lang.Integer"
+                | "Long"
+                | "java.lang.Long"
+                | "Float"
+                | "java.lang.Float"
+                | "Double"
+                | "java.lang.Double"
+                | "Character"
+                | "java.lang.Character"
+        ),
+        _ => false,
+    }
 }
 
 fn collection_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
@@ -9860,7 +11056,13 @@ fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
 
 fn erased_display_to_string_downcast_arms(rust_type: &str) -> String {
     format!(
-        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return (*value).to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return value.to_string();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return value.to_string();\n    }}"
+        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return java_erased_display_unwrap(value.to_string());\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return java_erased_display_unwrap((*value).to_string());\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return java_erased_display_unwrap(value.to_string());\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return java_erased_display_unwrap(value.to_string());\n    }}"
+    )
+}
+
+fn erased_display_to_string_result_downcast_arms(rust_type: &str) -> String {
+    format!(
+        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return value.to_string().into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return (*value).to_string().into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return value.to_string().into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return value.to_string().into_java_erased_display_result();\n    }}"
     )
 }
 
@@ -9931,10 +11133,27 @@ fn external_erased_object_to_string_downcasts(programs: &[&Program], facts: &Fac
             continue;
         };
         for rust_name in external_display_downcast_rust_names(programs, external_type) {
+            if programs
+                .iter()
+                .any(|program| program_has_source_type_with_rust_name(program, &rust_name))
+            {
+                continue;
+            }
             arms.insert(erased_display_to_string_downcast_arms(&rust_name));
         }
     }
     arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn program_has_source_type_with_rust_name(program: &Program, rust_name: &str) -> bool {
+    fn matches(ty: &TypeDecl, rust_name: &str) -> bool {
+        rust_name_for_java_named_type(&ty.name) == rust_name
+            || ty
+                .members
+                .iter()
+                .any(|member| matches!(member, Member::Type(nested) if matches(nested, rust_name)))
+    }
+    program.types.iter().any(|ty| matches(ty, rust_name))
 }
 
 fn external_display_downcast_rust_names(
@@ -9953,7 +11172,7 @@ fn external_display_downcast_rust_names(
     names
 }
 
-fn program_mentions_java_type(program: &Program, target_simple_name: &str) -> bool {
+pub(crate) fn program_mentions_java_type(program: &Program, target_simple_name: &str) -> bool {
     program
         .types
         .iter()
@@ -10339,7 +11558,17 @@ fn external_receiver_name_matches_simple(name: &str, target_simple_name: &str) -
 
 fn source_erased_object_to_string_downcasts(
     programs: &[&Program],
+    facts: &FactSet,
     representations: Option<&RepresentationPlan>,
+) -> String {
+    source_erased_object_to_string_downcasts_with_result(programs, facts, representations, false)
+}
+
+fn source_erased_object_to_string_downcasts_with_result(
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+    result_mode: bool,
 ) -> String {
     let mut arms = BTreeSet::new();
     for program in programs {
@@ -10348,17 +11577,276 @@ fn source_erased_object_to_string_downcasts(
                 ty,
                 program,
                 representations,
+                result_mode,
                 &mut arms,
             );
         }
     }
+    let type_param_names = programs
+        .iter()
+        .flat_map(|program| collect_program_type_param_names(program))
+        .collect::<BTreeSet<_>>();
+    for program in programs {
+        walk_program_declared_types(program, &mut |ty| {
+            collect_source_generic_display_arm_for_java_type(
+                ty,
+                programs,
+                facts,
+                representations,
+                &type_param_names,
+                result_mode,
+                &mut arms,
+            );
+        });
+        crate::semantic_analysis::walk_program_exprs(program, &mut |expr| {
+            let Expr::New { ty, body: None, .. } = expr else {
+                return;
+            };
+            collect_source_generic_display_arm_for_java_type(
+                ty,
+                programs,
+                facts,
+                representations,
+                &type_param_names,
+                result_mode,
+                &mut arms,
+            );
+        });
+    }
     arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+fn collect_source_generic_display_arm_for_java_type(
+    ty: &JavaType,
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+    type_param_names: &BTreeSet<String>,
+    result_mode: bool,
+    arms: &mut BTreeSet<String>,
+) {
+    match ty {
+        JavaType::Named { name, args } => {
+            for arg in args {
+                collect_source_generic_display_arm_for_java_type(
+                    arg,
+                    programs,
+                    facts,
+                    representations,
+                    type_param_names,
+                    result_mode,
+                    arms,
+                );
+            }
+            if args.is_empty()
+                || args
+                    .iter()
+                    .any(|arg| java_type_mentions_any_type_param(arg, type_param_names))
+            {
+                return;
+            }
+            let matches = programs
+                .iter()
+                .filter_map(|source_program| {
+                    find_source_type_decl(source_program, name).map(|decl| (*source_program, decl))
+                })
+                .collect::<Vec<_>>();
+            let [(source_program, decl)] = matches.as_slice() else {
+                return;
+            };
+            if decl.type_params.len() != args.len()
+                || source_type_is_erased_alias(decl, representations)
+                || source_type_is_source_hierarchy_carrier_root(decl, representations)
+                || !source_type_has_java_object_stringification(decl, source_program)
+            {
+                return;
+            }
+            let concrete_type = JavaType::Named {
+                name: decl.name.clone(),
+                args: args.clone(),
+            };
+            let rust_type = if let Some(representations) = representations {
+                rust_type_for_java_type_with_facts_and_representations(
+                    &concrete_type,
+                    facts,
+                    representations,
+                )
+            } else {
+                rust_type_for_java_type_with_facts(&concrete_type, facts)
+            };
+            let rust_type = crate::emit::emit_type(&rust_type);
+            arms.insert(if result_mode {
+                erased_display_to_string_result_downcast_arms(&rust_type)
+            } else {
+                erased_display_to_string_downcast_arms(&rust_type)
+            });
+        }
+        JavaType::Array(element) => collect_source_generic_display_arm_for_java_type(
+            element,
+            programs,
+            facts,
+            representations,
+            type_param_names,
+            result_mode,
+            arms,
+        ),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            collect_source_generic_display_arm_for_java_type(
+                bound,
+                programs,
+                facts,
+                representations,
+                type_param_names,
+                result_mode,
+                arms,
+            );
+        }
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Unknown(_)
+        | JavaType::Wildcard(None) => {}
+    }
+}
+
+fn walk_program_declared_types(program: &Program, visit: &mut impl FnMut(&JavaType)) {
+    for ty in &program.types {
+        walk_type_declared_types(ty, visit);
+    }
+}
+
+fn walk_type_declared_types(ty: &TypeDecl, visit: &mut impl FnMut(&JavaType)) {
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => {
+                visit(&field.ty);
+            }
+            Member::Method(method) => {
+                visit(&method.return_type);
+                for param in &method.params {
+                    visit(&param.ty);
+                }
+                if let Some(body) = &method.body {
+                    walk_block_declared_types(body, visit);
+                }
+            }
+            Member::Constructor(constructor) => {
+                for param in &constructor.params {
+                    visit(&param.ty);
+                }
+                if let Some(body) = &constructor.body {
+                    walk_block_declared_types(body, visit);
+                }
+            }
+            Member::Type(nested) => walk_type_declared_types(nested, visit),
+            Member::Unsupported { .. } => {}
+        }
+    }
+    for init in &ty.static_init_blocks {
+        walk_block_declared_types(&init.block, visit);
+    }
+}
+
+fn walk_block_declared_types(block: &Block, visit: &mut impl FnMut(&JavaType)) {
+    for stmt in &block.statements {
+        walk_stmt_declared_types(stmt, visit);
+    }
+}
+
+fn walk_stmt_declared_types(stmt: &Stmt, visit: &mut impl FnMut(&JavaType)) {
+    match stmt {
+        Stmt::VarDecl { ty, .. } => visit(ty),
+        Stmt::EnhancedFor { var_type, body, .. } => {
+            visit(var_type);
+            walk_block_declared_types(body, visit);
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            walk_block_declared_types(then_block, visit);
+            if let Some(else_block) = else_block {
+                walk_block_declared_types(else_block, visit);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } => {
+            walk_block_declared_types(body, visit);
+        }
+        Stmt::For { init, body, .. } => {
+            for stmt in init {
+                walk_stmt_declared_types(stmt, visit);
+            }
+            walk_block_declared_types(body, visit);
+        }
+        Stmt::Switch { cases, .. } => {
+            for case in cases {
+                for stmt in &case.statements {
+                    walk_stmt_declared_types(stmt, visit);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for resource in resources {
+                walk_stmt_declared_types(resource, visit);
+            }
+            walk_block_declared_types(body, visit);
+            for catch in catches {
+                for ty in &catch.types {
+                    visit(ty);
+                }
+                walk_block_declared_types(&catch.body, visit);
+            }
+            if let Some(finally_block) = finally_block {
+                walk_block_declared_types(finally_block, visit);
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            walk_block_declared_types(block, visit);
+        }
+        Stmt::LocalType(ty) => walk_type_declared_types(ty, visit),
+        Stmt::Assign { .. }
+        | Stmt::Expr(_)
+        | Stmt::Return(_)
+        | Stmt::Throw(_)
+        | Stmt::ConstructorInvocation { .. }
+        | Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn java_type_mentions_any_type_param(ty: &JavaType, names: &BTreeSet<String>) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            names.contains(name)
+                || args
+                    .iter()
+                    .any(|arg| java_type_mentions_any_type_param(arg, names))
+        }
+        JavaType::Unknown(name) => names.contains(name),
+        JavaType::Array(element) => java_type_mentions_any_type_param(element, names),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            java_type_mentions_any_type_param(bound, names)
+        }
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {
+            false
+        }
+    }
 }
 
 fn collect_source_erased_object_to_string_downcasts(
     ty: &TypeDecl,
     program: &Program,
     representations: Option<&RepresentationPlan>,
+    result_mode: bool,
     arms: &mut BTreeSet<String>,
 ) {
     if ty.type_params.is_empty()
@@ -10367,7 +11855,30 @@ fn collect_source_erased_object_to_string_downcasts(
         && source_type_has_java_object_stringification(ty, program)
     {
         let rust_name = rust_name_for_java_named_type(&ty.name);
-        arms.insert(erased_display_to_string_downcast_arms(&rust_name));
+        let has_to_string_name_collision = ty.members.iter().any(|member| {
+            matches!(member, Member::Method(method) if crate::parser::to_snake_case(&method.name) == "to_string")
+        }) && !source_type_has_effective_java_to_string(ty, program);
+        if has_to_string_name_collision && !result_mode {
+            let java_name = if ty.name.contains('.') {
+                ty.name.clone()
+            } else {
+                program
+                    .package
+                    .as_deref()
+                    .filter(|package| !package.is_empty())
+                    .map(|package| format!("{package}.{}", ty.name))
+                    .unwrap_or_else(|| ty.name.clone())
+            };
+            arms.insert(erased_display_object_fallback_downcast_arms(
+                &rust_name, &java_name,
+            ));
+        } else if !has_to_string_name_collision {
+            arms.insert(if result_mode {
+                erased_display_to_string_result_downcast_arms(&rust_name)
+            } else {
+                erased_display_to_string_downcast_arms(&rust_name)
+            });
+        }
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
@@ -10375,10 +11886,19 @@ fn collect_source_erased_object_to_string_downcasts(
                 nested,
                 program,
                 representations,
+                result_mode,
                 arms,
             );
         }
     }
+}
+
+fn erased_display_object_fallback_downcast_arms(rust_type: &str, java_name: &str) -> String {
+    let fallback = format!("{}@0", java_name);
+    let fallback_literal = format!("{fallback:?}");
+    format!(
+        "    if value.is::<{rust_type}>() || value.is::<&{rust_type}>() || value.is::<std::rc::Rc<{rust_type}>>() || value.is::<std::sync::Arc<{rust_type}>>() {{\n        return {fallback_literal}.to_string();\n    }}"
+    )
 }
 
 fn source_type_is_erased_alias(
@@ -10439,6 +11959,7 @@ fn source_type_declares_java_to_string(ty: &TypeDecl) -> bool {
 
 fn source_method_is_java_to_string(method: &crate::java_ir::MethodDecl) -> bool {
     method.params.is_empty()
+        && !method.modifiers.contains(&crate::java_ir::Modifier::Static)
         && matches!(method.name.as_str(), "toString" | "to_string")
         && matches!(method.return_type, JavaType::String)
 }
@@ -16396,7 +17917,7 @@ impl ExternalApiFacadeSupport {
             &owner,
             method_name,
             arg_count,
-        ) && self.has_method_named(&owner, method_name)
+        ) && self.has_static_method_named(&owner, method_name)
             && !self.has_method_signature(&owner, method_name, arg_count)
         {
             rename_facade_method(&method, method_name, &format!("{method_name}_{arg_count}"))
@@ -16432,6 +17953,12 @@ impl ExternalApiFacadeSupport {
         let mut changed = false;
         let receiver_kind = facade_method_receiver_kind(&method);
         if receiver_kind == FacadeMethodReceiverKind::Static {
+            if method_name == "to_string" {
+                // Rust cannot overload an associated function and an instance
+                // method by receiver. The generated instance Object fallback
+                // is not a Java implementation; keep the static utility name.
+                changed |= self.remove_instance_methods_named(&owner, method_name);
+            }
             changed |= self.remove_weak_instance_methods_named(&owner, method_name);
         } else if self.has_static_method_named(&owner, method_name)
             && (static_utility_facade_method_owns_name(&owner, method_name)
@@ -16650,6 +18177,18 @@ impl ExternalApiFacadeSupport {
             methods.remove(&weak);
         }
         true
+    }
+
+    fn remove_instance_methods_named(&mut self, owner: &str, method: &str) -> bool {
+        let Some(methods) = self.impls.get_mut(owner) else {
+            return false;
+        };
+        let before = methods.len();
+        methods.retain(|body| {
+            !facade_method_has_name(body, method)
+                || facade_method_receiver_kind(body) == FacadeMethodReceiverKind::Static
+        });
+        methods.len() != before
     }
 
     fn replace_weak_method_return(
@@ -19167,6 +20706,21 @@ mod stdlib_support_item_tests {
     }
 
     #[test]
+    fn erased_object_array_clone_keeps_elements() {
+        let program = crate::parser::parse_java_source("class ErasedArrayClone {}").program;
+        let support = raw_support_item_text(
+            java_erased_object_runtime_support_item_with_source_programs_facts_and_representations(
+                &[&program],
+                &[&program],
+                &FactSet::default(),
+                None,
+            ),
+        );
+        assert!(support.contains("value.iter().map(java_clone_erased_object_ref).collect()"));
+        assert!(!support.contains("_value: &Vec<std::boxed::Box<dyn std::any::Any>>"));
+    }
+
+    #[test]
     fn java_class_support_item_declares_public_token_type() {
         let support = raw_support_item_text(java_class_support_item());
         assert!(support.contains("pub struct JavaClass<T>"));
@@ -19289,6 +20843,31 @@ mod stdlib_support_item_tests {
 #[cfg(test)]
 mod external_facade_support_tests {
     use super::*;
+
+    #[test]
+    fn static_to_string_owns_external_facade_name_in_either_insertion_order() {
+        let static_method =
+            "    pub fn to_string<T0>(_arg0: T0) -> String { String::new() }".to_string();
+        let instance_fallback =
+            "    pub fn to_string(&self) -> String { panic!(\"unsupported Java external facade toString\") }"
+                .to_string();
+        for methods in [
+            [static_method.clone(), instance_fallback.clone()],
+            [instance_fallback.clone(), static_method.clone()],
+        ] {
+            let mut support = ExternalApiFacadeSupport::default();
+            for method in methods {
+                support.add_method("Objects".to_string(), method);
+            }
+            let emitted = support.impls.get("Objects").expect("Objects facade");
+            assert_eq!(emitted.len(), 1, "{emitted:?}");
+            assert!(
+                emitted
+                    .iter()
+                    .any(|method| method.contains("pub fn to_string<T0>"))
+            );
+        }
+    }
 
     fn render_external_api_facade_support_items(
         program: &Program,
@@ -19908,6 +21487,29 @@ class SetDisplay {
             "{support}"
         );
         assert!(!support.contains("Default::default()"), "{support}");
+    }
+
+    #[test]
+    fn source_generic_display_downcasts_only_concrete_instantiations() {
+        let program = crate::parser::parse_java_source(
+            r#"
+class GenericDisplay<T> {
+    static class Cell<U> {
+        U value;
+        Cell(U value) { this.value = value; }
+        public String toString() { return "cell"; }
+    }
+    Object unresolved(T value) { return new Cell<T>(value); }
+    static Object concrete() { return new Cell<String>("a"); }
+    static Object diamond() { Cell<Integer> value = new Cell<>(2); return value; }
+}
+"#,
+        )
+        .program;
+        let arms = source_erased_object_to_string_downcasts(&[&program], &FactSet::default(), None);
+        assert!(arms.contains("downcast_ref::<Cell<String>>()"), "{arms}");
+        assert!(arms.contains("downcast_ref::<Cell<i32>>()"), "{arms}");
+        assert!(!arms.contains("Cell<T>"), "{arms}");
     }
 }
 
@@ -23027,7 +24629,8 @@ pub(crate) fn external_facade_receiver_call_is_noop_method(
 }
 
 fn static_utility_facade_method_owns_name(owner: &str, method: &str) -> bool {
-    canonical_external_receiver_type_key(owner) == "Objects" && method == "equals"
+    method == "to_string"
+        || (canonical_external_receiver_type_key(owner) == "Objects" && method == "equals")
 }
 
 fn external_facade_objects_to_string_method_needs_arity_suffix(
@@ -26026,6 +27629,24 @@ fn rust_method_ident_for_arity(name: &str, arg_count: usize) -> String {
 
 fn valid_rust_method_ident(name: &str) -> bool {
     valid_rust_field_ident(name)
+}
+
+pub(crate) fn program_uses_source_map_entry_values(program: &Program) -> bool {
+    fn source_type_implements_entry(ty: &crate::java_ir::TypeDecl) -> bool {
+        source_type_directly_implements_jdk_map_entry(ty)
+            || ty.members.iter().any(|member| match member {
+                crate::java_ir::Member::Type(nested) => source_type_implements_entry(nested),
+                _ => false,
+            })
+    }
+
+    program.types.iter().any(source_type_implements_entry)
+}
+
+pub(crate) fn source_type_directly_implements_jdk_map_entry(ty: &crate::java_ir::TypeDecl) -> bool {
+    ty.implements
+        .iter()
+        .any(|name| name.split('<').next().map(str::trim) == Some("java.util.Map.Entry"))
 }
 
 pub(crate) fn program_uses_java_platform_facades(program: &Program) -> bool {

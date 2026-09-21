@@ -6753,6 +6753,43 @@ fn expr_is_self_call(expr: &Expr, method_name: &str) -> bool {
     )
 }
 
+pub(crate) fn walk_program_exprs(program: &Program, visit: &mut impl FnMut(&Expr)) {
+    for ty in &program.types {
+        walk_type_exprs(ty, visit);
+    }
+}
+
+fn walk_type_exprs(ty: &TypeDecl, visit: &mut impl FnMut(&Expr)) {
+    for member in &ty.members {
+        walk_member_exprs(member, visit);
+    }
+    for block in &ty.static_init_blocks {
+        walk_block_exprs(&block.block, visit);
+    }
+}
+
+fn walk_member_exprs(member: &Member, visit: &mut impl FnMut(&Expr)) {
+    match member {
+        Member::Field(field) => {
+            if let Some(expr) = &field.initializer {
+                walk_expr(expr, visit);
+            }
+        }
+        Member::Method(method) => {
+            if let Some(body) = &method.body {
+                walk_block_exprs(body, visit);
+            }
+        }
+        Member::Constructor(constructor) => {
+            if let Some(body) = &constructor.body {
+                walk_block_exprs(body, visit);
+            }
+        }
+        Member::Type(ty) => walk_type_exprs(ty, visit),
+        Member::Unsupported { .. } => {}
+    }
+}
+
 fn walk_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
     match stmt {
         Stmt::VarDecl {
@@ -6834,12 +6871,16 @@ fn walk_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
             }
         }
         Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => walk_block_exprs(body, visit),
+        Stmt::LocalType(ty) => walk_type_exprs(ty, visit),
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                walk_expr(arg, visit);
+            }
+        }
         Stmt::VarDecl {
             initializer: None, ..
         }
         | Stmt::Return(None)
-        | Stmt::LocalType(_)
-        | Stmt::ConstructorInvocation { .. }
         | Stmt::Break(_)
         | Stmt::Continue(_)
         | Stmt::Unsupported(_) => {}
@@ -6915,13 +6956,21 @@ fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
             }
         }
         Expr::New {
-            qualifier, args, ..
+            qualifier,
+            args,
+            body,
+            ..
         } => {
             if let Some(qualifier) = qualifier {
                 walk_expr(qualifier, visit);
             }
             for arg in args {
                 walk_expr(arg, visit);
+            }
+            if let Some(body) = body {
+                for member in body {
+                    walk_member_exprs(member, visit);
+                }
             }
         }
         Expr::Lambda { body, .. } => match body {

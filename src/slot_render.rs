@@ -907,6 +907,11 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
     representations: &RepresentationPlan,
 ) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
+    if let Some(carrier) =
+        source_map_entry_value_carrier_type(ty, &effective_facts, representations)
+    {
+        return carrier;
+    }
     if let JavaType::Named { name, args } = ty
         && (!args.is_empty() || crate::stdlib::java_collection_kind_for_name(name).is_some())
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
@@ -1713,6 +1718,9 @@ fn rust_type_for_java_generic_arg_with_representations(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let Some(carrier) = source_map_entry_value_carrier_type(ty, facts, representations) {
+        return carrier;
+    }
     if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
         return rust_type_for_java_generic_arg_with_representations(bound, facts, representations);
     }
@@ -1741,6 +1749,35 @@ fn rust_type_for_java_generic_arg_with_representations(
         return storage_ty;
     }
     rust_type_for_java_generic_arg_with_effective_facts(ty, facts)
+}
+
+fn source_map_entry_value_carrier_type(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> Option<RustType> {
+    if !representations.source_map_entry_uses_value_carrier() {
+        return None;
+    }
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    if args.len() != 2
+        || !matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "Entry" | "Map.Entry" | "java.util.Map.Entry"
+        )
+    {
+        return None;
+    }
+    Some(rust_generic_type(
+        "JavaMapEntryValue",
+        args.iter()
+            .map(|arg| {
+                rust_type_for_java_generic_arg_with_representations(arg, facts, representations)
+            })
+            .collect(),
+    ))
 }
 
 fn rust_type_for_optional_element_arg_with_representations(

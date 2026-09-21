@@ -1007,6 +1007,7 @@ pub enum BindingUse {
         boundary: CallArgumentBoundary,
         has_literal_null_arg: bool,
         literal_null_arg_indices: Vec<usize>,
+        argument_bindings: Vec<(usize, BindingId)>,
     },
     StoredInField {
         field_name: String,
@@ -1072,6 +1073,7 @@ pub struct CallSiteUse {
     receiver_type: Option<JavaType>,
     null_arg_indices: Vec<usize>,
     nullable_source_call_arg_indices: Vec<usize>,
+    argument_bindings: Vec<(usize, BindingId)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedCall>,
 }
@@ -1109,6 +1111,10 @@ impl CallSiteUse {
         &self.nullable_source_call_arg_indices
     }
 
+    pub fn argument_bindings(&self) -> &[(usize, BindingId)] {
+        &self.argument_bindings
+    }
+
     pub fn boundary(&self) -> CallArgumentBoundary {
         self.boundary
     }
@@ -1124,6 +1130,7 @@ pub struct ConstructorCallSiteUse {
     arg_count: usize,
     null_arg_indices: Vec<usize>,
     nullable_source_call_arg_indices: Vec<usize>,
+    argument_bindings: Vec<(usize, BindingId)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedConstructor>,
 }
@@ -1143,6 +1150,10 @@ impl ConstructorCallSiteUse {
 
     pub fn nullable_source_call_arg_indices(&self) -> &[usize] {
         &self.nullable_source_call_arg_indices
+    }
+
+    pub fn argument_bindings(&self) -> &[(usize, BindingId)] {
+        &self.argument_bindings
     }
 
     pub fn boundary(&self) -> CallArgumentBoundary {
@@ -3435,6 +3446,7 @@ fn analyze_stmt(
                     args,
                     source_return_nullability,
                 ),
+                argument_bindings: call_argument_bindings(args, facts),
                 boundary: policy.boundary,
                 resolved: resolved.clone(),
             });
@@ -3755,6 +3767,20 @@ fn null_argument_indices(args: &[Expr]) -> Vec<usize> {
         .collect()
 }
 
+fn call_argument_bindings(args: &[Expr], facts: &MethodUsageFacts) -> Vec<(usize, BindingId)> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            let Expr::Var(name) = arg else {
+                return None;
+            };
+            facts
+                .visible_binding_id_for_name(name)
+                .map(|binding| (index, binding))
+        })
+        .collect()
+}
+
 fn expr_is_null_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(crate::java_ir::Literal::Null))
 }
@@ -3935,6 +3961,7 @@ fn analyze_expr_with_context(
                 semantic_facts,
                 result_returned,
             );
+            let argument_bindings = call_argument_bindings(args, facts);
             facts.call_sites.push(CallSiteUse {
                 name: name.clone(),
                 arg_count: args.len(),
@@ -3949,6 +3976,7 @@ fn analyze_expr_with_context(
                     args,
                     source_return_nullability,
                 ),
+                argument_bindings: argument_bindings.clone(),
                 boundary: call_boundary,
                 resolved: usage_resolved.clone(),
             });
@@ -3969,6 +3997,7 @@ fn analyze_expr_with_context(
                         boundary: call_boundary,
                         has_literal_null_arg: args.iter().any(expr_is_null_literal),
                         literal_null_arg_indices: null_argument_indices(args),
+                        argument_bindings,
                     },
                 );
             }
@@ -4337,6 +4366,7 @@ fn analyze_expr_with_context(
                     args,
                     source_return_nullability,
                 ),
+                argument_bindings: call_argument_bindings(args, facts),
                 boundary: constructor_invocation_boundary_policy_for_expr(resolved.as_ref()),
                 resolved: resolved.clone(),
             });

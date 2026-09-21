@@ -210,7 +210,7 @@ fn jdk_type_param_bound_rust_bounds(bound: &str) -> Vec<String> {
     }
 }
 
-fn rust_impl_params_for_source_type(
+pub(crate) fn rust_impl_params_for_source_type(
     ty: &TypeDecl,
     support_program: &Program,
     representations: Option<&RepresentationPlan>,
@@ -226,6 +226,10 @@ fn rust_impl_params_for_source_type(
             if source_type_param_needs_clone_bound(ty, name) {
                 bounds.push("Clone".to_string());
             }
+            // Java type arguments are heap objects with runtime class identity.
+            // Generic source bodies may stringify a nullable T through the
+            // erased-object display dispatcher, which needs Rust Any.
+            bounds.push("std::any::Any".to_string());
             if let Some(Some(JavaType::Named { name: bound, .. })) = ty.type_param_bounds.get(index)
             {
                 let into_bounds = source_type_param_into_supertype_bounds(
@@ -826,12 +830,25 @@ fn source_method_needs_class_type_param_clone_bound(
     type_param: &str,
     fields: &HashMap<String, JavaType>,
 ) -> bool {
-    if !java_type_contains_type_param(&method.return_type, type_param) {
-        return false;
-    }
     let Some(body) = &method.body else {
         return false;
     };
+    if body.statements.iter().any(|stmt| {
+        matches!(stmt,
+            Stmt::VarDecl { ty, initializer: Some(initializer), .. }
+                if java_type_contains_type_param(ty, type_param)
+                    && expr_java_type(initializer, fields).is_some_and(|field_ty| {
+                        java_type_contains_type_param(&field_ty, type_param)
+                    })
+        )
+    }) {
+        // Reading a generic field into an owned local cannot move the field;
+        // the emitted `.cloned()` requires this capability on the class impl.
+        return true;
+    }
+    if !java_type_contains_type_param(&method.return_type, type_param) {
+        return false;
+    }
     body.statements.iter().any(|stmt| {
         method_return_expr(stmt).is_some_and(|expr| {
             expr_recovers_owned_class_type_param_from_field(expr, type_param, fields)
@@ -2885,12 +2902,69 @@ fn rust_type_for_instance_field(
     representations: Option<&RepresentationPlan>,
 ) -> RustType {
     let rust_ty = rust_type_for_slot_maybe_with_representations(shape, facts, representations);
+    let rust_ty = if representations.is_some_and(|representations| {
+        representations.field_needs_live_native_map(&owner.name, field_name)
+    }) {
+        live_native_map_field_rust_type(
+            rust_ty,
+            representations.is_some_and(|representations| {
+                representations.live_native_map_field_has_nullable_key(&owner.name, field_name)
+            }),
+            representations.is_some_and(|representations| {
+                representations.live_native_map_field_has_nullable_value(&owner.name, field_name)
+            }),
+        )
+        .unwrap_or_else(|| {
+            panic!(
+                "live native-map field must render as a supported concrete map: {}::{field_name}",
+                owner.name
+            )
+        })
+    } else {
+        rust_ty
+    };
     if instance_field_is_self_referential(owner, field_name, shape)
         && !field_type_is_shared_handle(shape, facts)
     {
         return box_recursive_field_type(rust_ty);
     }
     rust_ty
+}
+
+fn live_native_map_field_rust_type(
+    base: RustType,
+    nullable_key: bool,
+    nullable_value: bool,
+) -> Option<RustType> {
+    let RustType::Generic { base, args } = base else {
+        return None;
+    };
+    if args.len() != 2 {
+        return None;
+    }
+    let tracked_base = if base.ends_with("HashMap") && !base.ends_with("LinkedHashMap") {
+        "JavaTrackedHashMap"
+    } else if base.ends_with("BTreeMap") {
+        "JavaTrackedTreeMap"
+    } else if base.ends_with("JavaLinkedHashMap") {
+        "JavaLinkedHashMap"
+    } else {
+        return None;
+    };
+    let mut args = args;
+    if nullable_key && !matches!(args[0], RustType::Option(_)) {
+        args[0] = RustType::Option(Box::new(args[0].clone()));
+    }
+    if nullable_value && !matches!(args[1], RustType::Option(_)) {
+        args[1] = RustType::Option(Box::new(args[1].clone()));
+    }
+    Some(crate::slot_render::rust_generic_type(
+        "std::sync::Arc",
+        vec![crate::slot_render::rust_generic_type(
+            "std::sync::RwLock",
+            vec![crate::slot_render::rust_generic_type(tracked_base, args)],
+        )],
+    ))
 }
 
 fn rust_type_for_slot_maybe_with_representations(

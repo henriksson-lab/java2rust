@@ -3897,8 +3897,8 @@ fn stdlib_erased_display_downcast_collectors_stay_internal() {
         stdlib_full_source
             .matches("erased_display_to_string_downcast_arms(")
             .count(),
-        4,
-        "platform, external, and source erased-display collectors should share one carrier-arm template"
+        5,
+        "platform, external, ordinary source, and concrete generic-source erased-display collectors should share one carrier-arm template"
     );
     assert!(stdlib_full_source.contains("pub(crate) fn platform_type_has_erased_display_support"));
     assert!(!stdlib_full_source.contains("pub fn platform_type_has_erased_display_support"));

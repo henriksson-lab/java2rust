@@ -53,6 +53,9 @@ pub struct ShapeEnv {
     map_entry_set_view_receivers_by_binding: HashMap<BindingId, Expr>,
     map_entry_value_receivers: HashMap<String, Expr>,
     map_entry_value_receivers_by_binding: HashMap<BindingId, Expr>,
+    shared_native_map_locals: HashSet<BindingId>,
+    shared_native_map_fields: HashSet<String>,
+    live_native_map_entry_locals: HashSet<BindingId>,
     unmodifiable_collection_view_sources: HashMap<String, Expr>,
     unmodifiable_collection_view_sources_by_binding: HashMap<BindingId, Expr>,
     immutable_collection_view_locals: HashMap<String, ImmutableCollectionViewMutationProfile>,
@@ -75,6 +78,41 @@ impl ShapeEnv {
 
     pub fn type_env(&self) -> &TypeEnv {
         &self.types
+    }
+
+    pub(crate) fn mark_shared_native_map_local(&mut self, name: &str) {
+        if let Some(binding) = self.binding_ids.get(name) {
+            self.shared_native_map_locals.insert(binding.clone());
+        }
+    }
+
+    pub(crate) fn is_shared_native_map_local(&self, name: &str) -> bool {
+        self.binding_ids
+            .get(name)
+            .is_some_and(|binding| self.shared_native_map_locals.contains(binding))
+    }
+
+    pub(crate) fn mark_shared_native_map_field(&mut self, name: impl Into<String>) {
+        self.shared_native_map_fields.insert(name.into());
+    }
+
+    pub(crate) fn is_shared_native_map_field(&self, name: &str) -> bool {
+        self.shared_native_map_fields.contains(name)
+            || self
+                .instance_field_access_name(name)
+                .is_some_and(|access| self.shared_native_map_fields.contains(access))
+    }
+
+    pub(crate) fn mark_live_native_map_entry_local(&mut self, name: &str) {
+        if let Some(binding) = self.binding_ids.get(name) {
+            self.live_native_map_entry_locals.insert(binding.clone());
+        }
+    }
+
+    pub(crate) fn is_live_native_map_entry_local(&self, name: &str) -> bool {
+        self.binding_ids
+            .get(name)
+            .is_some_and(|binding| self.live_native_map_entry_locals.contains(binding))
     }
 
     pub(crate) fn insert_map_key_set_view_receiver(
@@ -1257,36 +1295,32 @@ pub fn infer_expr_shape_with_context(
             name,
             args,
             resolved: Some(call),
-        } => {
-            native_java_call_expr_shape(receiver.as_deref(), name, args.len(), Some(call), env, ctx)
-                .or_else(|| {
-                    external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx)
+        } => native_java_call_expr_shape(receiver.as_deref(), name, args, Some(call), env, ctx)
+            .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
+            .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
+            .or_else(|| {
+                java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx)
+            })
+            .or_else(|| {
+                ctx.signatures.and_then(|signatures| {
+                    resolved_call_return_shape_by_java_key(call, name, args.len(), signatures)
+                        .or_else(|| {
+                            signatures.method_return_shape_by_rust_name(
+                                &call.declaring_type,
+                                &call.rust_name,
+                            )
+                        })
                 })
-                .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
-                .or_else(|| {
-                    java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx)
-                })
-                .or_else(|| {
-                    ctx.signatures.and_then(|signatures| {
-                        resolved_call_return_shape_by_java_key(call, name, args.len(), signatures)
-                            .or_else(|| {
-                                signatures.method_return_shape_by_rust_name(
-                                    &call.declaring_type,
-                                    &call.rust_name,
-                                )
-                            })
-                    })
-                })
-                .unwrap_or_else(|| {
-                    value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
-                })
-        }
+            })
+            .unwrap_or_else(|| {
+                value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
+            }),
         Expr::Call {
             receiver,
             name,
             args,
             resolved: None,
-        } => native_java_call_expr_shape(receiver.as_deref(), name, args.len(), None, env, ctx)
+        } => native_java_call_expr_shape(receiver.as_deref(), name, args, None, env, ctx)
             .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
             .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
             .or_else(|| {
@@ -1330,7 +1364,7 @@ fn resolved_call_return_shape_by_java_key(
 fn native_java_call_expr_shape(
     receiver: Option<&Expr>,
     name: &str,
-    arg_count: usize,
+    args: &[Expr],
     resolved: Option<&crate::java_ir::ResolvedCall>,
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
@@ -1346,11 +1380,26 @@ fn native_java_call_expr_shape(
     let target = crate::call_plan::plan_call_target_with_facts_and_arity(
         receiver,
         name,
-        arg_count,
+        args.len(),
         resolved,
         facts,
         env.type_env(),
     );
+    if matches!(
+        target,
+        crate::call_plan::CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsToString,
+        }
+    ) && let [_, default] = args
+        && (matches!(default, Expr::Literal(crate::java_ir::Literal::Null))
+            || infer_expr_shape_with_context(default, env, ctx)
+                .optional_element_type()
+                .is_some())
+    {
+        return Some(RustSlotShape::for_storage(
+            crate::types::optional_java_type(JavaType::String),
+        ));
+    }
     if let crate::call_plan::CallTargetPlan::NativeCollectionMethod {
         receiver, method, ..
     } = &target

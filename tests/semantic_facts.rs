@@ -8909,6 +8909,7 @@ class ReadOnlyExternalReceiverParam {
                 boundary: CallArgumentBoundary::KnownContentRead,
                 has_literal_null_arg: false,
                 literal_null_arg_indices: Vec::new(),
+                argument_bindings: Vec::new(),
             },
             BindingUse::ContentRead,
         ]

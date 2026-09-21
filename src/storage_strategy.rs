@@ -1384,6 +1384,15 @@ fn collect_stmt_facts(
             body,
             ..
         } => {
+            // Each iteration gives the loop variable another reference to the
+            // element, while the array/collection keeps its original reference.
+            // Cloning an inline source object here would lose member writes and
+            // reference identity; select a shared carrier for its source type.
+            if let Some(name) = declared_type_name(var_type, &owner.name, declared)
+                && let Some(facts) = into.get_mut(&name)
+            {
+                facts.locally_aliased = true;
+            }
             let mut nested_locals = locals.clone();
             nested_locals.insert(var_name.clone(), var_type.clone());
             collect_block_facts(
@@ -2688,6 +2697,24 @@ public class Outer {
             break;
         }
         return a.v;
+    }
+}
+"#,
+            "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn enhanced_for_source_element_keeps_array_and_loop_alias_shared() {
+        let strategy = strategy_of(
+            r#"
+public class Outer {
+    static final class Cell { int value; }
+    static int run() {
+        Cell[] values = {new Cell()};
+        for (Cell value : values) { value.value = 9; }
+        return values[0].value;
     }
 }
 "#,

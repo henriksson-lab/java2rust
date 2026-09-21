@@ -29,6 +29,18 @@ use crate::slot_shape::DispatchShape;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepresentationPlan {
     types: HashMap<String, TypeRepresentation>,
+    /// A source `java.util.Map.Entry` implementation needs a virtual value
+    /// carrier; tuple snapshots cannot retain its override or shared state.
+    source_map_entry_value_carrier: bool,
+    /// Concrete native-map fields whose entries escape as Java `Map.Entry`
+    /// values. These fields need a shared tracked-map handle so an entry and
+    /// subsequent field accesses observe the same map node.
+    live_native_map_fields: HashSet<(String, String)>,
+    live_static_native_map_fields: HashSet<(String, String)>,
+    nullable_live_native_map_field_keys: HashSet<(String, String)>,
+    nullable_live_native_map_field_values: HashSet<(String, String)>,
+    nullable_live_static_native_map_field_keys: HashSet<(String, String)>,
+    nullable_live_static_native_map_field_values: HashSet<(String, String)>,
     hierarchy_edges_by_subtype: HashMap<String, Vec<ObjectHierarchyEdge>>,
     diagnostics: Vec<RepresentationDiagnostic>,
     /// Source classes anonymously subclassed somewhere in the translated
@@ -172,6 +184,23 @@ impl SourceSummarySuperclassBoundaryPolicy {
 
 pub fn plan_representations(program: &Program, facts: &FactSet) -> RepresentationPlan {
     let mut plan = RepresentationPlan::default();
+    plan.live_native_map_fields = live_native_map_fields(program, false);
+    plan.live_static_native_map_fields = live_native_map_fields(program, true);
+    let (nullable_keys, nullable_values) =
+        nullable_live_native_map_field_slots(program, &plan.live_native_map_fields);
+    plan.nullable_live_native_map_field_keys = nullable_keys;
+    plan.nullable_live_native_map_field_values = nullable_values;
+    let (nullable_static_keys, nullable_static_values) =
+        nullable_live_native_map_field_slots(program, &plan.live_static_native_map_fields);
+    plan.nullable_live_static_native_map_field_keys = nullable_static_keys;
+    plan.nullable_live_static_native_map_field_values = nullable_static_values;
+    plan.source_map_entry_value_carrier =
+        crate::stdlib::program_uses_source_map_entry_values(program)
+            || !plan.live_native_map_fields.is_empty()
+            || !plan.live_static_native_map_fields.is_empty()
+            || program_has_live_native_map_parameter(program)
+            || program_has_mutated_live_native_map_local(program)
+            || program_has_escaping_inline_native_map_entry(program);
     let effective_facts = EffectiveFacts::new(facts);
     let usage = crate::usage::analyze_usage_with_facts(program, facts);
     plan.storage =
@@ -224,6 +253,1107 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     collect_anonymous_erased_boundary_representations(program, &effective_facts, &mut plan);
     promote_anonymous_class_bases_to_source_hierarchy_carriers(&mut plan);
     plan
+}
+
+fn live_native_map_fields(program: &Program, static_fields: bool) -> HashSet<(String, String)> {
+    let mut fields = HashSet::new();
+    for ty in &program.types {
+        for member in &ty.members {
+            let Member::Field(field) = member else {
+                continue;
+            };
+            if field.modifiers.contains(&Modifier::Static) != static_fields
+                || !matches!(&field.ty, JavaType::Named { name, .. }
+                    if matches!(name.as_str(), "Map" | "java.util.Map" | "SortedMap" | "java.util.SortedMap" | "NavigableMap" | "java.util.NavigableMap" | "HashMap" | "java.util.HashMap" | "LinkedHashMap" | "java.util.LinkedHashMap" | "TreeMap" | "java.util.TreeMap"))
+            {
+                continue;
+            }
+            let source_name = field.name.as_str();
+            let rust_name = crate::parser::to_snake_case(source_name);
+            let used = ty.members.iter().any(|member| match member {
+                Member::Method(method) => method.body.as_ref().is_some_and(|body| {
+                    body.statements.iter().any(|stmt| {
+                        stmt_uses_native_map_entry_next_on_field(stmt, source_name, &rust_name)
+                    })
+                }),
+                Member::Constructor(ctor) => ctor.body.as_ref().is_some_and(|body| {
+                    body.statements.iter().any(|stmt| {
+                        stmt_uses_native_map_entry_next_on_field(stmt, source_name, &rust_name)
+                    })
+                }),
+                _ => false,
+            });
+            if used {
+                fields.insert((ty.name.clone(), field.name.clone()));
+            }
+        }
+    }
+    fields
+}
+
+fn program_has_live_native_map_parameter(program: &Program) -> bool {
+    program.types.iter().any(type_has_live_native_map_parameter)
+}
+
+fn program_has_mutated_live_native_map_local(program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(type_has_mutated_live_native_map_local)
+}
+
+fn program_has_escaping_inline_native_map_entry(program: &Program) -> bool {
+    program
+        .types
+        .iter()
+        .any(type_has_escaping_inline_native_map_entry)
+}
+
+fn type_has_escaping_inline_native_map_entry(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Field(field) => field
+            .initializer
+            .as_ref()
+            .is_some_and(expr_has_escaping_inline_native_map_entry),
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_has_escaping_inline_native_map_entry),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_has_escaping_inline_native_map_entry),
+        Member::Type(nested) => type_has_escaping_inline_native_map_entry(nested),
+        _ => false,
+    })
+}
+
+fn block_has_escaping_inline_native_map_entry(block: &Block) -> bool {
+    block
+        .statements
+        .iter()
+        .any(stmt_has_escaping_inline_native_map_entry)
+}
+
+fn stmt_has_escaping_inline_native_map_entry(stmt: &Stmt) -> bool {
+    let in_expr = |expr: &Expr| expr_has_escaping_inline_native_map_entry(expr);
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            initializer.as_ref().is_some_and(in_expr)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => in_expr(expr),
+        Stmt::Assign { target, value } => in_expr(target) || in_expr(value),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            in_expr(condition)
+                || block_has_escaping_inline_native_map_entry(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_escaping_inline_native_map_entry)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            body, condition, ..
+        } => in_expr(condition) || block_has_escaping_inline_native_map_entry(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter().any(stmt_has_escaping_inline_native_map_entry)
+                || condition.as_ref().is_some_and(in_expr)
+                || update.iter().any(in_expr)
+                || block_has_escaping_inline_native_map_entry(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            in_expr(iterable) || block_has_escaping_inline_native_map_entry(body)
+        }
+        Stmt::Switch { selector, cases } => {
+            in_expr(selector)
+                || cases.iter().any(|case| {
+                    case.statements
+                        .iter()
+                        .any(stmt_has_escaping_inline_native_map_entry)
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(stmt_has_escaping_inline_native_map_entry)
+                || block_has_escaping_inline_native_map_entry(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_has_escaping_inline_native_map_entry(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_escaping_inline_native_map_entry)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_has_escaping_inline_native_map_entry(block)
+        }
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(in_expr),
+        _ => false,
+    }
+}
+
+fn expr_has_escaping_inline_native_map_entry(expr: &Expr) -> bool {
+    let nested = |expr: &Expr| expr_has_escaping_inline_native_map_entry(expr);
+    match expr {
+        Expr::Call { receiver, args, .. } => {
+            args.iter()
+                .any(|arg| map_entry_next_backing_field(arg).is_some())
+                || receiver.as_deref().is_some_and(nested)
+                || args.iter().any(nested)
+        }
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            args.iter()
+                .any(|arg| map_entry_next_backing_field(arg).is_some())
+                || qualifier.as_deref().is_some_and(nested)
+                || args.iter().any(nested)
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Field(field) => field.initializer.as_ref().is_some_and(nested),
+                        Member::Method(method) => method
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_escaping_inline_native_map_entry),
+                        Member::Constructor(constructor) => constructor
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_escaping_inline_native_map_entry),
+                        Member::Type(nested) => type_has_escaping_inline_native_map_entry(nested),
+                        _ => false,
+                    })
+                })
+        }
+        Expr::FieldAccess(inner, _)
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::InstanceOf { expr: inner, .. } => nested(inner),
+        Expr::ArrayAccess(left, right) | Expr::Binary { left, right, .. } => {
+            nested(left) || nested(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => nested(condition) || nested(then_expr) || nested(else_expr),
+        Expr::Switch { selector, cases } => {
+            nested(selector) || cases.iter().any(|case| nested(&case.value))
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(nested)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(nested))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(nested),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => nested(expr),
+            LambdaBody::Block(block) => block_has_escaping_inline_native_map_entry(block),
+        },
+        _ => false,
+    }
+}
+
+fn type_has_mutated_live_native_map_local(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => method
+            .body
+            .as_ref()
+            .is_some_and(block_has_mutated_live_native_map_local),
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_has_mutated_live_native_map_local),
+        Member::Type(nested) => type_has_mutated_live_native_map_local(nested),
+        _ => false,
+    })
+}
+
+fn block_has_mutated_live_native_map_local(block: &Block) -> bool {
+    for (index, stmt) in block.statements.iter().enumerate() {
+        if let Stmt::VarDecl {
+            source_name,
+            initializer: Some(initializer),
+            ..
+        } = stmt
+            && map_entry_next_backing_field(initializer).is_some()
+        {
+            let mut aliases = HashSet::from([source_name.clone()]);
+            if statements_require_live_map_entry_alias(&block.statements[index + 1..], &mut aliases)
+            {
+                return true;
+            }
+        }
+        if stmt_has_nested_mutated_live_native_map_local(stmt) {
+            return true;
+        }
+    }
+    false
+}
+
+fn statements_require_live_map_entry_alias(
+    statements: &[Stmt],
+    aliases: &mut HashSet<String>,
+) -> bool {
+    for stmt in statements {
+        if aliases.iter().any(|alias| {
+            stmt_mutates_map_entry_local(stmt, alias)
+                || stmt_passes_map_entry_local_as_argument(stmt, alias)
+        }) {
+            return true;
+        }
+        match stmt {
+            Stmt::VarDecl {
+                source_name: alias,
+                initializer: Some(Expr::Var(source)),
+                ..
+            }
+            | Stmt::Assign {
+                target: Expr::Var(alias),
+                value: Expr::Var(source),
+            } if aliases.contains(source) => {
+                aliases.insert(alias.clone());
+            }
+            _ => {}
+        }
+        if nested_stmt_requires_live_map_entry_alias(stmt, aliases) {
+            return true;
+        }
+    }
+    false
+}
+
+fn nested_stmt_requires_live_map_entry_alias(stmt: &Stmt, aliases: &HashSet<String>) -> bool {
+    let in_block = |block: &Block| {
+        statements_require_live_map_entry_alias(&block.statements, &mut aliases.clone())
+    };
+    match stmt {
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => in_block(then_block) || else_block.as_ref().is_some_and(in_block),
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => in_block(body),
+        Stmt::For { init, body, .. } => {
+            let mut loop_aliases = aliases.clone();
+            statements_require_live_map_entry_alias(init, &mut loop_aliases)
+                || statements_require_live_map_entry_alias(&body.statements, &mut loop_aliases)
+        }
+        Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+            statements_require_live_map_entry_alias(&case.statements, &mut aliases.clone())
+        }),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut try_aliases = aliases.clone();
+            statements_require_live_map_entry_alias(resources, &mut try_aliases)
+                || statements_require_live_map_entry_alias(&body.statements, &mut try_aliases)
+                || catches.iter().any(|catch| in_block(&catch.body))
+                || finally_block.as_ref().is_some_and(in_block)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_has_nested_mutated_live_native_map_local(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_has_mutated_live_native_map_local(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_has_mutated_live_native_map_local)
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => block_has_mutated_live_native_map_local(body),
+        Stmt::For { init, body, .. } => {
+            block_has_mutated_live_native_map_local(&Block {
+                statements: init.clone(),
+            }) || block_has_mutated_live_native_map_local(body)
+        }
+        Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+            block_has_mutated_live_native_map_local(&Block {
+                statements: case.statements.clone(),
+            })
+        }),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            block_has_mutated_live_native_map_local(&Block {
+                statements: resources.clone(),
+            }) || block_has_mutated_live_native_map_local(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_has_mutated_live_native_map_local(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_has_mutated_live_native_map_local)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_mutates_map_entry_local(stmt: &Stmt, local: &str) -> bool {
+    let in_expr = |expr: &Expr| expr_mutates_map_entry_local(expr, local);
+    let in_block = |block: &Block| {
+        block
+            .statements
+            .iter()
+            .any(|stmt| stmt_mutates_map_entry_local(stmt, local))
+    };
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            initializer.as_ref().is_some_and(in_expr)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => in_expr(expr),
+        Stmt::Assign { target, value } => in_expr(target) || in_expr(value),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            in_expr(condition) || in_block(then_block) || else_block.as_ref().is_some_and(in_block)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            body, condition, ..
+        } => in_expr(condition) || in_block(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_mutates_map_entry_local(stmt, local))
+                || condition.as_ref().is_some_and(in_expr)
+                || update.iter().any(in_expr)
+                || in_block(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => in_expr(iterable) || in_block(body),
+        Stmt::Switch { selector, cases } => {
+            in_expr(selector)
+                || cases.iter().any(|case| {
+                    case.statements
+                        .iter()
+                        .any(|stmt| stmt_mutates_map_entry_local(stmt, local))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_mutates_map_entry_local(stmt, local))
+                || in_block(body)
+                || catches.iter().any(|catch| in_block(&catch.body))
+                || finally_block.as_ref().is_some_and(in_block)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => in_block(block),
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(in_expr),
+        _ => false,
+    }
+}
+
+fn expr_mutates_map_entry_local(expr: &Expr, local: &str) -> bool {
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            (matches!(name.as_str(), "setValue" | "set_value")
+                && matches!(receiver.as_deref(), Some(Expr::Var(name)) if name == local))
+                || receiver
+                    .as_deref()
+                    .is_some_and(|expr| expr_mutates_map_entry_local(expr, local))
+                || args
+                    .iter()
+                    .any(|expr| expr_mutates_map_entry_local(expr, local))
+        }
+        Expr::FieldAccess(inner, _)
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::InstanceOf { expr: inner, .. } => expr_mutates_map_entry_local(inner, local),
+        Expr::ArrayAccess(left, right) | Expr::Binary { left, right, .. } => {
+            expr_mutates_map_entry_local(left, local) || expr_mutates_map_entry_local(right, local)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_mutates_map_entry_local(condition, local)
+                || expr_mutates_map_entry_local(then_expr, local)
+                || expr_mutates_map_entry_local(else_expr, local)
+        }
+        _ => false,
+    }
+}
+
+fn stmt_passes_map_entry_local_as_argument(stmt: &Stmt, local: &str) -> bool {
+    let in_expr = |expr: &Expr| expr_passes_map_entry_local_as_argument(expr, local);
+    let in_block = |block: &Block| {
+        block
+            .statements
+            .iter()
+            .any(|stmt| stmt_passes_map_entry_local_as_argument(stmt, local))
+    };
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            initializer.as_ref().is_some_and(in_expr)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => in_expr(expr),
+        Stmt::Assign { target, value } => in_expr(target) || in_expr(value),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            in_expr(condition) || in_block(then_block) || else_block.as_ref().is_some_and(in_block)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            body, condition, ..
+        } => in_expr(condition) || in_block(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_passes_map_entry_local_as_argument(stmt, local))
+                || condition.as_ref().is_some_and(in_expr)
+                || update.iter().any(in_expr)
+                || in_block(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => in_expr(iterable) || in_block(body),
+        Stmt::Switch { selector, cases } => {
+            in_expr(selector)
+                || cases.iter().any(|case| {
+                    case.statements
+                        .iter()
+                        .any(|stmt| stmt_passes_map_entry_local_as_argument(stmt, local))
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_passes_map_entry_local_as_argument(stmt, local))
+                || in_block(body)
+                || catches.iter().any(|catch| in_block(&catch.body))
+                || finally_block.as_ref().is_some_and(in_block)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => in_block(block),
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(in_expr),
+        _ => false,
+    }
+}
+
+fn expr_passes_map_entry_local_as_argument(expr: &Expr, local: &str) -> bool {
+    let nested = |expr: &Expr| expr_passes_map_entry_local_as_argument(expr, local);
+    match expr {
+        Expr::Call { receiver, args, .. } => {
+            args.iter()
+                .any(|arg| matches!(arg, Expr::Var(name) if name == local))
+                || receiver.as_deref().is_some_and(nested)
+                || args.iter().any(nested)
+        }
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            args.iter()
+                .any(|arg| matches!(arg, Expr::Var(name) if name == local))
+                || qualifier.as_deref().is_some_and(nested)
+                || args.iter().any(nested)
+        }
+        Expr::FieldAccess(inner, _)
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::InstanceOf { expr: inner, .. } => nested(inner),
+        Expr::ArrayAccess(left, right) | Expr::Binary { left, right, .. } => {
+            nested(left) || nested(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => nested(condition) || nested(then_expr) || nested(else_expr),
+        Expr::Switch { selector, cases } => {
+            nested(selector) || cases.iter().any(|case| nested(&case.value))
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(nested)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(nested))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(nested),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => nested(expr),
+            LambdaBody::Block(block) => block
+                .statements
+                .iter()
+                .any(|stmt| stmt_passes_map_entry_local_as_argument(stmt, local)),
+        },
+        _ => false,
+    }
+}
+
+fn type_has_live_native_map_parameter(ty: &TypeDecl) -> bool {
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => method.body.as_ref().is_some_and(|body| {
+            method.params.iter().any(|param| {
+                matches!(&param.ty, JavaType::Named { name, .. }
+                    if matches!(name.as_str(),
+                        "Map" | "java.util.Map"
+                            | "SortedMap" | "java.util.SortedMap"
+                            | "NavigableMap" | "java.util.NavigableMap"
+                            | "HashMap" | "java.util.HashMap"
+                            | "LinkedHashMap" | "java.util.LinkedHashMap"
+                            | "TreeMap" | "java.util.TreeMap"))
+                    && body.statements.iter().any(|stmt| {
+                        stmt_uses_native_map_entry_next_on_field(
+                            stmt,
+                            &param.source_name,
+                            &crate::parser::to_snake_case(&param.source_name),
+                        )
+                    })
+            })
+        }),
+        Member::Type(nested) => type_has_live_native_map_parameter(nested),
+        _ => false,
+    })
+}
+
+fn nullable_live_native_map_field_slots(
+    program: &Program,
+    live_fields: &HashSet<(String, String)>,
+) -> (HashSet<(String, String)>, HashSet<(String, String)>) {
+    let mut nullable_keys = HashSet::new();
+    let mut nullable_values = HashSet::new();
+    for ty in &program.types {
+        for member in &ty.members {
+            let Member::Field(field) = member else {
+                continue;
+            };
+            let key = (ty.name.clone(), field.name.clone());
+            if !live_fields.contains(&key) {
+                continue;
+            }
+            let rust_name = crate::parser::to_snake_case(&field.name);
+            let mut slots = (false, false);
+            for member in &ty.members {
+                match member {
+                    Member::Method(method) => {
+                        if let Some(body) = &method.body {
+                            merge_nullable_map_slots(
+                                &mut slots,
+                                block_nullable_map_field_put_slots(body, &field.name, &rust_name),
+                            );
+                        }
+                    }
+                    Member::Constructor(ctor) => {
+                        if let Some(body) = &ctor.body {
+                            merge_nullable_map_slots(
+                                &mut slots,
+                                block_nullable_map_field_put_slots(body, &field.name, &rust_name),
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if slots.0 {
+                nullable_keys.insert(key.clone());
+            }
+            if slots.1 {
+                nullable_values.insert(key);
+            }
+        }
+    }
+    (nullable_keys, nullable_values)
+}
+
+fn merge_nullable_map_slots(target: &mut (bool, bool), next: (bool, bool)) {
+    target.0 |= next.0;
+    target.1 |= next.1;
+}
+
+fn block_nullable_map_field_put_slots(
+    block: &Block,
+    source_name: &str,
+    rust_name: &str,
+) -> (bool, bool) {
+    let mut slots = (false, false);
+    for stmt in &block.statements {
+        merge_nullable_map_slots(
+            &mut slots,
+            stmt_nullable_map_field_put_slots(stmt, source_name, rust_name),
+        );
+    }
+    slots
+}
+
+fn stmt_nullable_map_field_put_slots(
+    stmt: &Stmt,
+    source_name: &str,
+    rust_name: &str,
+) -> (bool, bool) {
+    let expr_slots = |expr: &Expr| expr_nullable_map_field_put_slots(expr, source_name, rust_name);
+    let block_slots =
+        |block: &Block| block_nullable_map_field_put_slots(block, source_name, rust_name);
+    let mut slots = (false, false);
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            if let Some(expr) = initializer {
+                merge_nullable_map_slots(&mut slots, expr_slots(expr));
+            }
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
+            merge_nullable_map_slots(&mut slots, expr_slots(expr));
+        }
+        Stmt::Assign { target, value } => {
+            merge_nullable_map_slots(&mut slots, expr_slots(target));
+            merge_nullable_map_slots(&mut slots, expr_slots(value));
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            merge_nullable_map_slots(&mut slots, expr_slots(condition));
+            merge_nullable_map_slots(&mut slots, block_slots(then_block));
+            if let Some(block) = else_block {
+                merge_nullable_map_slots(&mut slots, block_slots(block));
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            merge_nullable_map_slots(&mut slots, expr_slots(condition));
+            merge_nullable_map_slots(&mut slots, block_slots(body));
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            for stmt in init {
+                merge_nullable_map_slots(
+                    &mut slots,
+                    stmt_nullable_map_field_put_slots(stmt, source_name, rust_name),
+                );
+            }
+            if let Some(condition) = condition {
+                merge_nullable_map_slots(&mut slots, expr_slots(condition));
+            }
+            for expr in update {
+                merge_nullable_map_slots(&mut slots, expr_slots(expr));
+            }
+            merge_nullable_map_slots(&mut slots, block_slots(body));
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            merge_nullable_map_slots(&mut slots, expr_slots(iterable));
+            merge_nullable_map_slots(&mut slots, block_slots(body));
+        }
+        Stmt::Switch { selector, cases } => {
+            merge_nullable_map_slots(&mut slots, expr_slots(selector));
+            for case in cases {
+                for stmt in &case.statements {
+                    merge_nullable_map_slots(
+                        &mut slots,
+                        stmt_nullable_map_field_put_slots(stmt, source_name, rust_name),
+                    );
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            for stmt in resources {
+                merge_nullable_map_slots(
+                    &mut slots,
+                    stmt_nullable_map_field_put_slots(stmt, source_name, rust_name),
+                );
+            }
+            merge_nullable_map_slots(&mut slots, block_slots(body));
+            for catch in catches {
+                merge_nullable_map_slots(&mut slots, block_slots(&catch.body));
+            }
+            if let Some(block) = finally_block {
+                merge_nullable_map_slots(&mut slots, block_slots(block));
+            }
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            merge_nullable_map_slots(&mut slots, block_slots(block));
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for expr in args {
+                merge_nullable_map_slots(&mut slots, expr_slots(expr));
+            }
+        }
+        _ => {}
+    }
+    slots
+}
+
+fn expr_nullable_map_field_put_slots(
+    expr: &Expr,
+    source_name: &str,
+    rust_name: &str,
+) -> (bool, bool) {
+    let nested = |expr: &Expr| expr_nullable_map_field_put_slots(expr, source_name, rust_name);
+    let mut slots = (false, false);
+    match expr {
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } => {
+            if matches!(name.as_str(), "put" | "putIfAbsent" | "put_if_absent")
+                && args.len() == 2
+                && receiver.as_deref().is_some_and(|receiver| {
+                    expr_is_named_instance_field(receiver, source_name, rust_name)
+                })
+            {
+                slots.0 |= matches!(args[0], Expr::Literal(crate::java_ir::Literal::Null));
+                slots.1 |= matches!(args[1], Expr::Literal(crate::java_ir::Literal::Null));
+            }
+            if let Some(receiver) = receiver {
+                merge_nullable_map_slots(&mut slots, nested(receiver));
+            }
+            for arg in args {
+                merge_nullable_map_slots(&mut slots, nested(arg));
+            }
+        }
+        Expr::New {
+            qualifier, args, ..
+        } => {
+            if let Some(qualifier) = qualifier {
+                merge_nullable_map_slots(&mut slots, nested(qualifier));
+            }
+            for arg in args {
+                merge_nullable_map_slots(&mut slots, nested(arg));
+            }
+        }
+        Expr::FieldAccess(inner, _)
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::InstanceOf { expr: inner, .. } => {
+            merge_nullable_map_slots(&mut slots, nested(inner));
+        }
+        Expr::ArrayAccess(left, right) | Expr::Binary { left, right, .. } => {
+            merge_nullable_map_slots(&mut slots, nested(left));
+            merge_nullable_map_slots(&mut slots, nested(right));
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            merge_nullable_map_slots(&mut slots, nested(condition));
+            merge_nullable_map_slots(&mut slots, nested(then_expr));
+            merge_nullable_map_slots(&mut slots, nested(else_expr));
+        }
+        Expr::Switch { selector, cases } => {
+            merge_nullable_map_slots(&mut slots, nested(selector));
+            for case in cases {
+                merge_nullable_map_slots(&mut slots, nested(&case.value));
+            }
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            for dimension in dimensions {
+                merge_nullable_map_slots(&mut slots, nested(dimension));
+            }
+            if let Some(values) = initializer {
+                for value in values {
+                    merge_nullable_map_slots(&mut slots, nested(value));
+                }
+            }
+        }
+        Expr::ArrayInitializer(values) => {
+            for value in values {
+                merge_nullable_map_slots(&mut slots, nested(value));
+            }
+        }
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => merge_nullable_map_slots(&mut slots, nested(expr)),
+            LambdaBody::Block(block) => merge_nullable_map_slots(
+                &mut slots,
+                block_nullable_map_field_put_slots(block, source_name, rust_name),
+            ),
+        },
+        _ => {}
+    }
+    slots
+}
+
+fn expr_is_named_instance_field(expr: &Expr, source_name: &str, rust_name: &str) -> bool {
+    matches!(expr, Expr::Var(name) if name == source_name || name == rust_name)
+        || matches!(expr, Expr::FieldAccess(receiver, name)
+            if (name == source_name || name == rust_name)
+                && (matches!(receiver.as_ref(), Expr::This)
+                    || matches!(receiver.as_ref(), Expr::Var(value) if value == "this")))
+}
+
+fn map_entry_next_backing_field<'a>(expr: &'a Expr) -> Option<&'a Expr> {
+    let Expr::Call {
+        receiver: Some(iterator),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "next" || !args.is_empty() {
+        return None;
+    }
+    let Expr::Call {
+        receiver: Some(entry_set),
+        name,
+        args,
+        ..
+    } = iterator.as_ref()
+    else {
+        return None;
+    };
+    if name != "iterator" || !args.is_empty() {
+        return None;
+    }
+    let Expr::Call {
+        receiver: Some(map),
+        name,
+        args,
+        ..
+    } = entry_set.as_ref()
+    else {
+        return None;
+    };
+    (matches!(name.as_str(), "entrySet" | "entry_set") && args.is_empty()).then_some(map.as_ref())
+}
+
+fn expr_uses_native_map_entry_next_on_field(
+    expr: &Expr,
+    source_name: &str,
+    rust_name: &str,
+) -> bool {
+    if map_entry_next_backing_field(expr)
+        .is_some_and(|map| expr_is_named_instance_field(map, source_name, rust_name))
+    {
+        return true;
+    }
+    let nested =
+        |expr: &Expr| expr_uses_native_map_entry_next_on_field(expr, source_name, rust_name);
+    match expr {
+        Expr::Call { receiver, args, .. } => {
+            receiver.as_deref().is_some_and(nested) || args.iter().any(nested)
+        }
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier.as_deref().is_some_and(nested)
+                || args.iter().any(nested)
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Field(field) => field.initializer.as_ref().is_some_and(nested),
+                        Member::Method(method) => method.body.as_ref().is_some_and(|body| {
+                            body.statements.iter().any(|stmt| {
+                                stmt_uses_native_map_entry_next_on_field(
+                                    stmt,
+                                    source_name,
+                                    rust_name,
+                                )
+                            })
+                        }),
+                        _ => false,
+                    })
+                })
+        }
+        Expr::FieldAccess(inner, _)
+        | Expr::Unary { expr: inner, .. }
+        | Expr::Cast { expr: inner, .. }
+        | Expr::InstanceOf { expr: inner, .. } => nested(inner),
+        Expr::ArrayAccess(left, right) | Expr::Binary { left, right, .. } => {
+            nested(left) || nested(right)
+        }
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => nested(condition) || nested(then_expr) || nested(else_expr),
+        Expr::Switch { selector, cases } => {
+            nested(selector) || cases.iter().any(|case| nested(&case.value))
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions.iter().any(nested)
+                || initializer
+                    .as_ref()
+                    .is_some_and(|values| values.iter().any(nested))
+        }
+        Expr::ArrayInitializer(values) => values.iter().any(nested),
+        Expr::Lambda { body, .. } => match body {
+            LambdaBody::Expr(expr) => nested(expr),
+            LambdaBody::Block(block) => block
+                .statements
+                .iter()
+                .any(|stmt| stmt_uses_native_map_entry_next_on_field(stmt, source_name, rust_name)),
+        },
+        _ => false,
+    }
+}
+
+fn stmt_uses_native_map_entry_next_on_field(
+    stmt: &Stmt,
+    source_name: &str,
+    rust_name: &str,
+) -> bool {
+    let in_expr =
+        |expr: &Expr| expr_uses_native_map_entry_next_on_field(expr, source_name, rust_name);
+    let in_block = |block: &Block| {
+        block
+            .statements
+            .iter()
+            .any(|stmt| stmt_uses_native_map_entry_next_on_field(stmt, source_name, rust_name))
+    };
+    match stmt {
+        Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
+            initializer.as_ref().is_some_and(in_expr)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => in_expr(expr),
+        Stmt::Assign { target, value } => in_expr(target) || in_expr(value),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            in_expr(condition) || in_block(then_block) || else_block.as_ref().is_some_and(in_block)
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => in_expr(condition) || in_block(body),
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_uses_native_map_entry_next_on_field(stmt, source_name, rust_name))
+                || condition.as_ref().is_some_and(in_expr)
+                || update.iter().any(in_expr)
+                || in_block(body)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => in_expr(iterable) || in_block(body),
+        Stmt::Switch { selector, cases } => {
+            in_expr(selector)
+                || cases.iter().any(|case| {
+                    case.statements.iter().any(|stmt| {
+                        stmt_uses_native_map_entry_next_on_field(stmt, source_name, rust_name)
+                    })
+                })
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_uses_native_map_entry_next_on_field(stmt, source_name, rust_name))
+                || in_block(body)
+                || catches.iter().any(|catch| in_block(&catch.body))
+                || finally_block.as_ref().is_some_and(in_block)
+        }
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => in_block(block),
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(in_expr),
+        _ => false,
+    }
 }
 
 fn promote_anonymous_class_bases_to_source_hierarchy_carriers(plan: &mut RepresentationPlan) {
@@ -372,6 +1502,54 @@ fn external_final_facade_should_keep_concrete_dispatch(
 }
 
 impl RepresentationPlan {
+    pub fn source_map_entry_uses_value_carrier(&self) -> bool {
+        self.source_map_entry_value_carrier
+    }
+
+    pub(crate) fn field_needs_live_native_map(&self, owner: &str, field: &str) -> bool {
+        field_key_set_contains(&self.live_native_map_fields, owner, field)
+    }
+
+    pub(crate) fn static_field_needs_live_native_map(&self, owner: &str, field: &str) -> bool {
+        field_key_set_contains(&self.live_static_native_map_fields, owner, field)
+    }
+
+    pub(crate) fn live_static_native_map_field_has_nullable_key(
+        &self,
+        owner: &str,
+        field: &str,
+    ) -> bool {
+        field_key_set_contains(
+            &self.nullable_live_static_native_map_field_keys,
+            owner,
+            field,
+        )
+    }
+
+    pub(crate) fn live_static_native_map_field_has_nullable_value(
+        &self,
+        owner: &str,
+        field: &str,
+    ) -> bool {
+        field_key_set_contains(
+            &self.nullable_live_static_native_map_field_values,
+            owner,
+            field,
+        )
+    }
+
+    pub(crate) fn live_native_map_field_has_nullable_key(&self, owner: &str, field: &str) -> bool {
+        field_key_set_contains(&self.nullable_live_native_map_field_keys, owner, field)
+    }
+
+    pub(crate) fn live_native_map_field_has_nullable_value(
+        &self,
+        owner: &str,
+        field: &str,
+    ) -> bool {
+        field_key_set_contains(&self.nullable_live_native_map_field_values, owner, field)
+    }
+
     pub fn type_representations(&self) -> impl Iterator<Item = &TypeRepresentation> {
         self.types.values()
     }
@@ -563,6 +1741,14 @@ impl RepresentationPlan {
             represented_super_names,
         )
     }
+}
+
+fn field_key_set_contains(fields: &HashSet<(String, String)>, owner: &str, field: &str) -> bool {
+    fields.contains(&(owner.to_string(), field.to_string()))
+        || (!owner.contains('.')
+            && fields.iter().any(|(candidate, candidate_field)| {
+                candidate.rsplit('.').next() == Some(owner) && candidate_field == field
+            }))
 }
 
 pub fn representation_dispatch_policy(
@@ -3628,6 +4814,155 @@ mod tests {
     use super::*;
     use crate::diagnostics::Span;
     use crate::java_ir::{MethodDecl, PrimitiveType, TypeKind};
+
+    #[test]
+    fn map_field_entry_escape_requires_live_native_map_storage() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+class FieldEntries {
+    LinkedHashMap<String, Integer> values = new LinkedHashMap<>();
+    Integer mutate() {
+        values.put(null, null);
+        Map.Entry<String, Integer> entry = values.entrySet().iterator().next();
+        return entry.setValue(7);
+    }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(plan.field_needs_live_native_map("FieldEntries", "values"));
+        assert!(plan.live_native_map_field_has_nullable_key("FieldEntries", "values"));
+        assert!(plan.live_native_map_field_has_nullable_value("FieldEntries", "values"));
+        assert!(plan.source_map_entry_uses_value_carrier());
+    }
+
+    #[test]
+    fn static_map_field_entry_escape_requires_synchronized_live_storage() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.LinkedHashMap;
+import java.util.Map;
+class StaticFieldEntries {
+    static LinkedHashMap<String, Integer> values = new LinkedHashMap<>();
+    static Integer mutate() {
+        values.put(null, null);
+        Map.Entry<String, Integer> entry = values.entrySet().iterator().next();
+        return entry.setValue(7);
+    }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(plan.static_field_needs_live_native_map("StaticFieldEntries", "values"));
+        assert!(plan.live_static_native_map_field_has_nullable_key("StaticFieldEntries", "values"));
+        assert!(
+            plan.live_static_native_map_field_has_nullable_value("StaticFieldEntries", "values")
+        );
+        assert!(plan.source_map_entry_uses_value_carrier());
+    }
+
+    #[test]
+    fn interface_map_parameter_entry_escape_requires_live_value_carrier() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.Map;
+class InterfaceMapEntries {
+    static Integer mutate(Map<String, Integer> values) {
+        Map.Entry<String, Integer> entry = values.entrySet().iterator().next();
+        return entry.setValue(7);
+    }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(plan.source_map_entry_uses_value_carrier());
+    }
+
+    #[test]
+    fn mutated_interface_map_local_entry_requires_live_value_carrier() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.HashMap;
+import java.util.Map;
+class InterfaceMapLocalEntries {
+    static Integer mutate() {
+        Map<String, Integer> values = new HashMap<>();
+        values.put("a", 1);
+        Map.Entry<String, Integer> entry = values.entrySet().iterator().next();
+        return entry.setValue(7);
+    }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(plan.source_map_entry_uses_value_carrier());
+    }
+
+    #[test]
+    fn inline_native_map_entry_argument_requires_live_value_carrier() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.HashMap;
+import java.util.Map;
+class InlineMapEntryArgument {
+    static Integer mutate(Map.Entry<String, Integer> entry) {
+        return entry.setValue(7);
+    }
+    static Integer call() {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("a", 1);
+        return mutate(values.entrySet().iterator().next());
+    }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(plan.source_map_entry_uses_value_carrier());
+    }
+
+    #[test]
+    fn read_only_native_map_entry_local_keeps_snapshot_representation() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.HashMap;
+import java.util.Map;
+class ReadOnlyMapLocalEntries {
+    static Integer read() {
+        Map<String, Integer> values = new HashMap<>();
+        values.put("a", 1);
+        Map.Entry<String, Integer> entry = values.entrySet().iterator().next();
+        return entry.getValue();
+    }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(!plan.source_map_entry_uses_value_carrier());
+    }
+
+    #[test]
+    fn ordinary_map_field_does_not_require_live_entry_storage() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.LinkedHashMap;
+class PlainFieldMap {
+    LinkedHashMap<String, Integer> values = new LinkedHashMap<>();
+    Integer read() { return values.get("a"); }
+}
+"#,
+        );
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+
+        assert!(!plan.field_needs_live_native_map("PlainFieldMap", "values"));
+    }
 
     #[test]
     fn receiver_statement_reference_alias_loses_field_provenance_on_reassignment() {

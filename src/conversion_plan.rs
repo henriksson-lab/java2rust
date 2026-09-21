@@ -1595,6 +1595,14 @@ pub fn ownership_coercion_policy_with_effective_facts(
         && target.view == ViewShape::Native
         && crate::types::sequence_element_type(&actual.java_ty).is_some()
     {
+        if let Some((sequence, optional_sequence)) =
+            erased_object_clone_recovery_sequence(actual, target)
+        {
+            return OwnershipCoercionPolicy::RecoverErasedObjectClone {
+                sequence,
+                optional_sequence,
+            };
+        }
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
         let policy = clone_recovery_policy_from_capability(capability.recovery());

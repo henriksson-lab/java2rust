@@ -83,6 +83,7 @@ pub enum JavaDisplayPlan {
     OptionalDisplayValue,
     OptionalBorrowedValue,
     OptionalBorrowedDisplayValue,
+    OptionalBorrowedOptionalValue,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1741,6 +1742,10 @@ pub(crate) fn parenthesize_borrowed_method_receiver(receiver: RustExpr) -> RustE
 
 pub(crate) fn force_shared_borrow_projection(expr: RustExpr) -> RustExpr {
     RustExpr::shaped(RustExprShape::Borrowed, shared_borrow_expr(expr))
+}
+
+pub(crate) fn force_mutable_borrow_projection(expr: RustExpr) -> RustExpr {
+    RustExpr::shaped(RustExprShape::MutBorrowed, mutable_borrow_expr(expr))
 }
 
 pub(crate) fn propagate_result_projection(expr: RustExpr) -> RustExpr {
@@ -4527,6 +4532,13 @@ pub(crate) fn string_substring_result_projection(
     }
 }
 
+pub(crate) fn string_substring_to_end_result_projection(
+    receiver: RustExpr,
+    begin: RustExpr,
+) -> RustExpr {
+    string_substring_to_end_projection_with(receiver, begin, true)
+}
+
 fn string_char_at_index_to_usize_projection(index: RustExpr) -> RustExpr {
     index_to_usize_projection(index, IndexToUsizeProjection::JavaStringCharAt)
 }
@@ -4735,6 +4747,41 @@ pub(crate) fn string_substring_projection(
     RustExpr::Call {
         function: Box::new(RustExpr::path(["java_string_substring"])),
         args: vec![string_view_argument_projection(receiver), begin, end],
+    }
+}
+
+pub(crate) fn string_substring_to_end_projection(receiver: RustExpr, begin: RustExpr) -> RustExpr {
+    string_substring_to_end_projection_with(receiver, begin, false)
+}
+
+fn string_substring_to_end_projection_with(
+    receiver: RustExpr,
+    begin: RustExpr,
+    fallible: bool,
+) -> RustExpr {
+    let receiver_name = "__java_string_receiver";
+    let receiver_var = RustExpr::Var(receiver_name.to_string());
+    let call = if fallible {
+        string_substring_result_projection(
+            receiver_var.clone(),
+            begin,
+            len_i32_projection(receiver_var),
+        )
+    } else {
+        string_substring_projection(
+            receiver_var.clone(),
+            begin,
+            len_i32_projection(receiver_var),
+        )
+    };
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: receiver_name.to_string(),
+            ty: None,
+            value: Some(receiver),
+        }],
+        tail: Some(Box::new(call)),
     }
 }
 
@@ -5405,17 +5452,6 @@ pub(crate) fn java_list_iterator_from_collection_at_result_projection(
 
 pub(crate) fn sequence_iter_cloned_projection(receiver: RustExpr) -> RustExpr {
     zero_arg_method_projection(zero_arg_method_projection(receiver, "iter"), "cloned")
-}
-
-pub(crate) fn optional_sequence_iter_cloned_unwrap_projection(receiver: RustExpr) -> RustExpr {
-    method_call_projection(
-        sequence_iter_cloned_projection(receiver),
-        "map",
-        vec![single_param_closure_expr(
-            "value",
-            method_expect_projection(RustExpr::Var("value".to_string()), "Java null receiver"),
-        )],
-    )
 }
 
 pub(crate) fn erased_object_sequence_iter_cloned_projection(receiver: RustExpr) -> RustExpr {
@@ -10687,6 +10723,25 @@ pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExp
         JavaDisplayPlan::OptionalBorrowedValue => optional_borrowed_value_display_projection(expr),
         JavaDisplayPlan::OptionalBorrowedDisplayValue => {
             optional_borrowed_to_string_value_display_projection(expr)
+        }
+        JavaDisplayPlan::OptionalBorrowedOptionalValue => {
+            let present_value = method_call_projection(
+                parenthesize_raw_method_receiver(recover_optional_display_receiver(expr)),
+                "and_then",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![RustClosureParam {
+                        pattern: "value".to_string(),
+                        ty: None,
+                    }],
+                    body: RustClosureBody::Expr(Box::new(zero_arg_method_projection(
+                        RustExpr::Var("value".to_string()),
+                        "as_ref",
+                    ))),
+                }],
+            );
+            apply_java_display_plan(present_value, JavaDisplayPlan::OptionalBorrowedValue)
         }
     }
 }
@@ -22854,26 +22909,11 @@ mod tests {
                 && !lower_source.contains("borrowed_string_literal_temporary_plan(raw"),
             "borrowed string temporary hoisting should recover expression-shaped Raw before using structured temporary helpers"
         );
-        let borrowed_structured_optional_erased_source = lower_source
-            .split("fn borrowed_structured_optional_erased_string_literal_temporary")
-            .nth(1)
-            .and_then(|tail| tail.split("fn erased_any_box_type_name").next())
-            .expect("structured optional erased string literal helper should remain discoverable");
         assert!(
-            borrowed_structured_optional_erased_source
-                .contains("optional_erased_boxed_string_literal_initializer(&args[0])")
-                && borrowed_structured_optional_erased_source
-                    .contains("fn structured_string_literal_to_string_initializer")
-                && !borrowed_structured_optional_erased_source
-                    .contains("RustExpr::Literal(rendered) | RustExpr::Raw(rendered)")
-                && !borrowed_structured_optional_erased_source
-                    .contains("RustExpr::Raw(rendered) =>")
-                && !borrowed_structured_optional_erased_source
-                    .contains("emit::emit_expr(&args[0])")
-                && !borrowed_structured_optional_erased_source.contains("Some(Box::new({}) as {})")
-                && !borrowed_structured_optional_erased_source
-                    .contains("borrowed_string_literal_temporary_plan(&raw"),
-            "structured optional erased string literal hoists should inspect the boxed expression instead of rendering it"
+            !lower_source
+                .contains("fn borrowed_structured_optional_erased_string_literal_temporary")
+                && !lower_source.contains("fn optional_erased_boxed_string_literal_initializer"),
+            "owned boxed erased strings must not be rewritten into borrowed array elements"
         );
     }
 

@@ -18,8 +18,484 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 379;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 437;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 0;
+
+#[test]
+fn generic_source_erased_display_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/GenericErasedDisplay.java");
+    compare_fixture(&translator, &fixture, "GenericErasedDisplay").unwrap();
+}
+
+#[test]
+fn typed_map_entries_erased_to_object_keep_key_value_display() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedMapEntryTypedDisplay.java");
+    compare_fixture(&translator, &fixture, "ErasedMapEntryTypedDisplay").unwrap();
+}
+
+#[test]
+fn source_map_entry_values_keep_virtual_methods_and_aliases() {
+    let translator = translator_binary().expect("translator binary built");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    for name in [
+        "SourceMapEntryValue",
+        "SourceMapEntryImported",
+        "SourceMapEntryNullableValue",
+        "SourceMapEntryDirect",
+    ] {
+        compare_fixture(&translator, &root.join(format!("{name}.java")), name).unwrap();
+    }
+}
+
+#[test]
+fn mixed_source_and_native_map_entries_keep_live_dispatch() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/MixedSourceAndNativeMapEntry.java");
+    compare_fixture(&translator, &fixture, "MixedSourceAndNativeMapEntry").unwrap();
+}
+
+#[test]
+fn mixed_source_and_hash_map_entries_keep_live_dispatch() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/MixedSourceAndHashMapEntryAlias.java");
+    compare_fixture(&translator, &fixture, "MixedSourceAndHashMapEntryAlias").unwrap();
+}
+
+#[test]
+fn mixed_source_and_tree_map_entries_keep_live_sorted_dispatch() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/MixedSourceAndTreeMapEntryAlias.java");
+    compare_fixture(&translator, &fixture, "MixedSourceAndTreeMapEntryAlias").unwrap();
+}
+
+#[test]
+fn tree_map_entry_parameter_mutation_reaches_caller() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/TreeMapEntryParameterMutation.java");
+    compare_fixture(&translator, &fixture, "TreeMapEntryParameterMutation").unwrap();
+}
+
+#[test]
+fn hash_and_linked_map_entry_parameter_mutations_reach_callers() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/HashAndLinkedMapEntryParameterMutation.java");
+    compare_fixture(
+        &translator,
+        &fixture,
+        "HashAndLinkedMapEntryParameterMutation",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nullable_map_entry_parameter_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapEntryParameterMutation.java");
+    compare_fixture(&translator, &fixture, "NullableMapEntryParameterMutation").unwrap();
+}
+
+#[test]
+fn interface_map_entry_parameter_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/InterfaceMapEntryParameterMutation.java");
+    compare_fixture(&translator, &fixture, "InterfaceMapEntryParameterMutation").unwrap();
+}
+
+#[test]
+fn interface_map_field_entry_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/InterfaceMapFieldEntryMutation.java");
+    compare_fixture(&translator, &fixture, "InterfaceMapFieldEntryMutation").unwrap();
+}
+
+#[test]
+fn interface_map_local_entry_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/InterfaceMapLocalEntryMutation.java");
+    compare_fixture(&translator, &fixture, "InterfaceMapLocalEntryMutation").unwrap();
+}
+
+#[test]
+fn map_field_entry_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/MapFieldEntryMutation.java");
+    compare_fixture(&translator, &fixture, "MapFieldEntryMutation").unwrap();
+}
+
+#[test]
+fn nullable_map_field_entry_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapFieldEntryMutation.java");
+    compare_fixture(&translator, &fixture, "NullableMapFieldEntryMutation").unwrap();
+}
+
+#[test]
+fn static_map_field_entry_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/StaticMapFieldEntryMutation.java");
+    compare_fixture(&translator, &fixture, "StaticMapFieldEntryMutation").unwrap();
+}
+
+#[test]
+fn nullable_static_map_field_entry_mutation_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableStaticMapFieldEntryMutation.java");
+    compare_fixture(&translator, &fixture, "NullableStaticMapFieldEntryMutation").unwrap();
+}
+
+#[test]
+fn nullable_hash_map_value_concat_matches_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
+    for name in ["MapPutNullValue", "NullableHashMapValueConcat"] {
+        compare_fixture(&translator, &root.join(format!("{name}.java")), name).unwrap();
+    }
+}
+
+#[test]
+fn mixed_source_and_hash_map_entry_views_follow_live_values() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/MixedSourceAndHashMapEntryViews.java");
+    compare_fixture(&translator, &fixture, "MixedSourceAndHashMapEntryViews").unwrap();
+}
+
+#[test]
+fn hash_map_inline_entry_argument_keeps_live_set_value() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/HashMapInlineEntrySetValue.java");
+    compare_fixture(&translator, &fixture, "HashMapInlineEntrySetValue").unwrap();
+}
+
+#[test]
+fn nested_map_entry_mutation_keeps_live_backing_map() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NestedMapEntryMutation.java");
+    compare_fixture(&translator, &fixture, "NestedMapEntryMutation").unwrap();
+}
+
+#[test]
+fn assigned_map_entry_alias_mutation_keeps_live_backing_map() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/AssignedMapEntryAliasMutation.java");
+    compare_fixture(&translator, &fixture, "AssignedMapEntryAliasMutation").unwrap();
+}
+
+#[test]
+fn nested_assigned_map_entry_alias_mutation_keeps_live_backing_map() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NestedAssignedMapEntryAliasMutation.java");
+    compare_fixture(&translator, &fixture, "NestedAssignedMapEntryAliasMutation").unwrap();
+}
+
+#[test]
+fn nullable_map_get_switch_selectors_raise_catchable_null_pointer() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapGetSwitchCatch.java");
+    compare_fixture(&translator, &fixture, "NullableMapGetSwitchCatch").unwrap();
+}
+
+#[test]
+fn nullable_map_get_primitive_contexts_raise_catchable_null_pointer() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapGetPrimitiveContexts.java");
+    compare_fixture(&translator, &fixture, "NullableMapGetPrimitiveContexts").unwrap();
+}
+
+#[test]
+fn inline_array_temporary_elements_survive_checked_access() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/InlineArrayTemporaryAccess.java");
+    compare_fixture(&translator, &fixture, "InlineArrayTemporaryAccess").unwrap();
+}
+
+#[test]
+fn wildcard_map_entry_access_and_display_match_java() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/WildcardMapEntryAccess.java");
+    compare_fixture(&translator, &fixture, "WildcardMapEntryAccess").unwrap();
+}
+
+#[test]
+fn nullable_hash_map_entry_unboxing_raises_catchable_null_pointer() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableHashMapEntryUnboxingCatch.java");
+    compare_fixture(&translator, &fixture, "NullableHashMapEntryUnboxingCatch").unwrap();
+}
+
+#[test]
+fn nullable_map_entry_primitive_contexts_raise_catchable_null_pointer() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapEntryPrimitiveReturnCatch.java");
+    compare_fixture(
+        &translator,
+        &fixture,
+        "NullableMapEntryPrimitiveReturnCatch",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nullable_map_entry_boolean_condition_raises_catchable_null_pointer() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapEntryBooleanConditionCatch.java");
+    compare_fixture(
+        &translator,
+        &fixture,
+        "NullableMapEntryBooleanConditionCatch",
+    )
+    .unwrap();
+}
+
+#[test]
+fn nullable_map_entry_string_switch_raises_catchable_null_pointer() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapEntryStringSwitchCatch.java");
+    compare_fixture(&translator, &fixture, "NullableMapEntryStringSwitchCatch").unwrap();
+}
+
+#[test]
+fn source_map_entry_nullable_accessors_compare_to_null() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/SourceMapEntryNullComparison.java");
+    compare_fixture(&translator, &fixture, "SourceMapEntryNullComparison").unwrap();
+}
+
+#[test]
+fn generic_source_map_entry_keeps_virtual_methods_and_aliases() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/GenericSourceMapEntry.java");
+    compare_fixture(&translator, &fixture, "GenericSourceMapEntry").unwrap();
+}
+
+#[test]
+fn nullable_map_entry_value_deref_is_catchable() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapEntryValueCatch.java");
+    compare_fixture(&translator, &fixture, "NullableMapEntryValueCatch").unwrap();
+}
+
+#[test]
+fn nullable_map_key_variable_is_not_collapsed_to_empty_string() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapKeyVariable.java");
+    compare_fixture(&translator, &fixture, "NullableMapKeyVariable").unwrap();
+}
+
+#[test]
+fn nullable_map_key_parameter_is_not_collapsed_to_empty_string() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapKeyParameter.java");
+    compare_fixture(&translator, &fixture, "NullableMapKeyParameter").unwrap();
+}
+
+#[test]
+fn nullable_map_key_constructor_parameter_is_not_collapsed_to_empty_string() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableMapKeyConstructor.java");
+    compare_fixture(&translator, &fixture, "NullableMapKeyConstructor").unwrap();
+}
+
+#[test]
+fn source_map_entry_erased_to_object_keeps_dynamic_display() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/SourceMapEntryErased.java");
+    compare_fixture(&translator, &fixture, "SourceMapEntryErased").unwrap();
+}
+
+#[test]
+fn source_map_entry_erased_display_exception_is_catchable() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/SourceMapEntryErasedThrow.java");
+    compare_fixture(&translator, &fixture, "SourceMapEntryErasedThrow").unwrap();
+}
+
+#[test]
+fn objects_to_string_erased_throw_is_catchable() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ObjectsToStringErasedThrow.java");
+    compare_fixture(&translator, &fixture, "ObjectsToStringErasedThrow").unwrap();
+}
+
+#[test]
+fn erased_object_array_elements_keep_their_dynamic_display() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedObjectArrayElements.java");
+    compare_fixture(&translator, &fixture, "ErasedObjectArrayElements").unwrap();
+}
+
+#[test]
+fn erased_object_array_round_trip_keeps_elements_and_length() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedObjectArrayRoundTrip.java");
+    compare_fixture(&translator, &fixture, "ErasedObjectArrayRoundTrip").unwrap();
+}
+
+#[test]
+fn erased_source_argument_keeps_dynamic_display() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedSourceArgumentDisplay.java");
+    compare_fixture(&translator, &fixture, "ErasedSourceArgumentDisplay").unwrap();
+}
+
+#[test]
+fn nullable_boxed_field_getter_preserves_optional_carrier() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableBoxedFieldGetter.java");
+    compare_fixture(&translator, &fixture, "NullableBoxedFieldGetter").unwrap();
+}
+
+#[test]
+fn nullable_erased_to_string_raises_catchable_npe() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableErasedToStringCatch.java");
+    compare_fixture(&translator, &fixture, "NullableErasedToStringCatch").unwrap();
+}
+
+#[test]
+fn nullable_receiver_matrix_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableReceiverMatrix.java");
+    compare_fixture(&translator, &fixture, "NullableReceiverMatrix").unwrap();
+}
+
+#[test]
+fn nullable_enhanced_for_receivers_raise_catchable_npe() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/NullableEnhancedForCatch.java");
+    compare_fixture(&translator, &fixture, "NullableEnhancedForCatch").unwrap();
+    for class in ["EnhancedForArray", "EnhancedForCollection"] {
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/differential")
+            .join(format!("{class}.java"));
+        compare_fixture(&translator, &fixture, class).unwrap();
+    }
+}
+
+#[test]
+fn generic_nullable_field_display_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/GenericNullableFieldDisplay.java");
+    compare_fixture(&translator, &fixture, "GenericNullableFieldDisplay").unwrap();
+}
+
+#[test]
+fn generic_nullable_stringification_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/GenericNullableStringification.java");
+    compare_fixture(&translator, &fixture, "GenericNullableStringification").unwrap();
+}
+
+#[test]
+fn generic_nullable_formatting_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/GenericNullableFormatting.java");
+    compare_fixture(&translator, &fixture, "GenericNullableFormatting").unwrap();
+}
+
+#[test]
+fn string_format_locale_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/StringFormatLocale.java");
+    compare_fixture(&translator, &fixture, "StringFormatLocale").unwrap();
+}
+
+#[test]
+fn generic_objects_to_string_default_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/GenericObjectsToStringDefault.java");
+    compare_fixture(&translator, &fixture, "GenericObjectsToStringDefault").unwrap();
+}
+
+#[test]
+fn objects_to_string_default_evaluation_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ObjectsToStringNullDefault.java");
+    compare_fixture(&translator, &fixture, "ObjectsToStringNullDefault").unwrap();
+}
+
+#[test]
+fn source_objects_to_string_shadows_java_utility() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/SourceObjectsToStringShadow.java");
+    compare_fixture(&translator, &fixture, "SourceObjectsToStringShadow").unwrap();
+}
+
+#[test]
+fn erased_string_identity_equals_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedStringIdentityEquals.java");
+    compare_fixture(&translator, &fixture, "ErasedStringIdentityEquals").unwrap();
+}
+
+#[test]
+fn erased_string_alias_display_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/differential/ErasedStringAliasDisplay.java");
+    compare_fixture(&translator, &fixture, "ErasedStringAliasDisplay").unwrap();
+}
+
+#[test]
+fn nullable_objects_equals_matches_java_output() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/NullableObjectsEquals.java");
+    compare_fixture(&translator, &fixture, "NullableObjectsEquals").unwrap();
+}
 
 #[test]
 fn translated_output_matches_java_output() {
@@ -157,6 +633,7 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedMapEntryDisplay",
         "ErasedMapEntryDoubleDisplay",
         "ErasedMapEntryIntegerDisplay",
+        "ErasedMapEntryTypedDisplay",
         "ErasedNullableArrayListDisplay",
         "ErasedNullableBooleanArrayListDisplay",
         "ErasedNullableByteArrayListDisplay",
@@ -169,6 +646,8 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedOptionalCollectionDisplay",
         "ErasedOptionalDisplay",
         "ErasedOptionalObjectDisplay",
+        "ErasedObjectArrayElements",
+        "ErasedObjectArrayRoundTrip",
         "ErasedPathDisplay",
         "ErasedPatternDisplay",
         "ErasedPlatformDisplay",
@@ -177,6 +656,8 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedPriorityQueueLongDisplay",
         "ErasedRandomDisplay",
         "ErasedSimpleImmutableEntryDisplay",
+        "ErasedSourceArgumentDisplay",
+        "ErasedStringAliasDisplay",
         "ErasedStringBuilderDisplay",
         "ErasedStringTokenizerDisplay",
         "ErasedTreeMapBooleanDisplay",
@@ -188,6 +669,11 @@ fn erased_display_fixtures_match_java_output() {
         "ErasedUriDisplay",
         "ErasedUrlDisplay",
         "ErasedZipEntryDisplay",
+        "GenericErasedDisplay",
+        "GenericNullableFieldDisplay",
+        "GenericNullableStringification",
+        "SourceMapEntryErased",
+        "SourceMapEntryErasedThrow",
     ];
     let mut failures = Vec::new();
     for class in fixtures {
@@ -332,6 +818,9 @@ fn null_representation_fixtures_match_java_output() {
 
     let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential");
     let fixtures = [
+        "ErasedObjectArrayElements",
+        "ErasedObjectArrayRoundTrip",
+        "InlineArrayTemporaryAccess",
         "NullBasics",
         "NullFieldDefault",
         "NullObjectReturn",
@@ -349,7 +838,13 @@ fn null_representation_fixtures_match_java_output() {
         "NullStringArray",
         "BoxedPrimitiveOperatorNullCatch",
         "NullableArrayLengthCatch",
+        "NullableBoxedFieldGetter",
+        "NullableErasedToStringCatch",
+        "NullableEnhancedForCatch",
         "NullableFieldReceiverCatch",
+        "NullableMapEntryValueCatch",
+        "NullableObjectsEquals",
+        "NullableReceiverMatrix",
         "NullableUnboxSwitchCatch",
         "NullableUnboxArrayDimensionCatch",
         "NullableUnboxArrayIndexCatch",
@@ -863,7 +1358,9 @@ fn list_exception_fixtures_match_java_output() {
         "NullArgCatch",
         "NullCallArgCatch",
         "NullableArrayLengthCatch",
+        "NullableErasedToStringCatch",
         "NullableFieldReceiverCatch",
+        "NullableReceiverMatrix",
         "NullableUnboxSwitchCatch",
         "NullableUnboxArrayDimensionCatch",
         "NullableUnboxArrayIndexCatch",

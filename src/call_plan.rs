@@ -4720,7 +4720,21 @@ fn plan_native_java_static_call<'a>(
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
     let receiver_key =
         crate::javalibs::native_java_static_owner_alias(&receiver_key).unwrap_or(&receiver_key);
-    if unqualified_lowercase_native_static_owner_alias(receiver_name, receiver_key) {
+    let unbound_lowercase_string_format = receiver_name == "string"
+        && receiver_key == "String"
+        && name == "format"
+        && types.local_type(receiver_name).is_none()
+        && types.field_type(receiver_name).is_none()
+        && types.static_type_alias(receiver_name).is_none();
+    let imported_lowercase_native_owner = types
+        .static_type_alias(receiver_name)
+        .is_some_and(|alias| native_static_owner_qualified_names(receiver_key).contains(&alias))
+        && types.local_type(receiver_name).is_none()
+        && types.field_type(receiver_name).is_none();
+    if unqualified_lowercase_native_static_owner_alias(receiver_name, receiver_key)
+        && !unbound_lowercase_string_format
+        && !imported_lowercase_native_owner
+    {
         return None;
     }
     let receiver_simple = receiver_key.rsplit('.').next().unwrap_or(receiver_key);
@@ -7406,6 +7420,85 @@ mod tests {
     use crate::facts::ExternalApiEffectFact;
     use crate::java_ir::Literal;
     use crate::types::optional_java_type;
+
+    #[test]
+    fn lowercase_string_format_owner_requires_an_unbound_name() {
+        let receiver = Expr::Var("string".to_string());
+        let facts = FactSet::default();
+        let mut types = TypeEnv::default();
+
+        assert!(matches!(
+            plan_native_java_static_call(Some(&receiver), "format", 1, None, &facts, &types, None,),
+            Some(CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::StringFormat
+            })
+        ));
+
+        types.insert_local("string", JavaType::String);
+        assert!(
+            plan_native_java_static_call(Some(&receiver), "format", 1, None, &facts, &types, None,)
+                .is_none()
+        );
+
+        let mut types = TypeEnv::default();
+        types.insert_static_type_alias("string", "string");
+        assert!(
+            plan_native_java_static_call(Some(&receiver), "format", 1, None, &facts, &types, None,)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn lowercase_imported_objects_owner_keeps_native_static_dispatch() {
+        let receiver = Expr::Var("objects".to_string());
+        let facts = FactSet::default();
+        let mut types = TypeEnv::default();
+        types.insert_static_type_alias("objects", "java.util.Objects");
+
+        assert!(matches!(
+            plan_native_java_static_call(
+                Some(&receiver),
+                "toString",
+                2,
+                None,
+                &facts,
+                &types,
+                None,
+            ),
+            Some(CallTargetPlan::NativeJavaStatic {
+                method: NativeJavaStaticMethod::ObjectsToString
+            })
+        ));
+
+        types.insert_local("objects", JavaType::String);
+        assert!(
+            plan_native_java_static_call(
+                Some(&receiver),
+                "toString",
+                2,
+                None,
+                &facts,
+                &types,
+                None,
+            )
+            .is_none()
+        );
+
+        let mut types = TypeEnv::default();
+        types.insert_static_type_alias("objects", "Objects");
+        assert!(
+            plan_native_java_static_call(
+                Some(&receiver),
+                "toString",
+                2,
+                None,
+                &facts,
+                &types,
+                None,
+            )
+            .is_none()
+        );
+    }
 
     #[test]
     fn facade_abi_argument_plan_prefers_abi_slot_over_argument_effect() {

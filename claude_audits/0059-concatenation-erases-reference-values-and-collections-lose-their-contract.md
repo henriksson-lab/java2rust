@@ -1,15 +1,413 @@
 # 0059 — String concatenation erases reference values; ordered collections lose their contract
 
 Recorded 2026-08-23.
-Status: **open, concrete repros mitigated**.
+Closed 2026-09-21. All named repros are promoted, the differential known-gap
+inventory is empty, native collection contracts are represented by real
+carriers, and wildcard `Map.Entry<?, ?>` access/display now preserves erased
+payloads. An external erased value with no source body, modeled platform
+carrier, or explicit `toString(): String` capability remains intentionally
+loud: its Java dynamic display is not inferable from the available program.
+Status: **fixed/fenced for the audited surface**.
+Codex follow-up 2026-09-21 interface-map parameter pass:
+`tests/differential/InterfaceMapEntryParameterMutation.java` is promoted. A
+source method declared against `Map<K,V>` is generic over the concrete tracked
+map carrier, while its key/value storage remains generic enough for nullable
+or present-only callers. HashMap, LinkedHashMap, and TreeMap mutations all
+remain visible to the caller instead of lowering the entry as a tuple snapshot.
+The adjacent `InterfaceMapFieldEntryMutation.java` oracle covers instance
+`Map`/`SortedMap` fields and a static `Map` field, including nullable storage.
+Interface-declared fields select the tracked hash/sorted carrier from their
+Rust storage kind rather than falling back to a tuple entry.
+`InterfaceMapLocalEntryMutation.java` closes the matching local-variable
+boundary for `Map` and `SortedMap`, including backing-map `size`/`get` reads
+after live entry mutation.
+Codex follow-up 2026-09-21 field-carrier pass:
+`tests/differential/MapFieldEntryMutation.java` is promoted. A concrete native
+map field whose entry escapes now uses a shared tracked-map carrier; ordinary
+field map calls borrow the same handle and the live entry keeps its stable node
+ID. The oracle covers HashMap, LinkedHashMap, and TreeMap; Java and Rust both
+print `1:7:7,2:8:8,4:9:9:a`, including reads through each backing field and
+retained entry plus sorted TreeMap order.
+The adjacent `NullableMapFieldEntryMutation.java` oracle is promoted too.
+Literal-null key/value evidence now shapes the live tracked field's Rust generic
+arguments while its Java-facing entry contract stays unchanged; Java and Rust
+print `null:7,null:8,null:9:a`.
+`tests/differential/StaticMapFieldEntryMutation.java` is promoted too. The
+tracked native-map handle and its entry observer now use synchronized
+`Arc/RwLock/Weak` storage, so a process-wide static field remains `Send` and the
+escaped entry mutates the same map node. Java and Rust both print `1:7:7`.
+The expanded oracle now covers HashMap, LinkedHashMap, and TreeMap, and
+`NullableStaticMapFieldEntryMutation.java` covers nullable static key/value
+storage. The shared map lock is an `RwLock`, allowing multiple reads in one
+Java expression while keeping writes synchronized.
+Codex follow-up 2026-09-21: `MixedSourceAndTreeMapEntryAlias.java` is promoted
+to `tests/differential/`. A live entry from a local `TreeMap` now keeps a
+stable node ID in a tracked `BTreeMap` carrier. `setValue` updates the backing
+map, later `put` updates the entry observer, and removal/reinsertion under the
+same key leaves the old entry detached. The Java oracle also checks sorted
+`firstKey` and `keySet` iteration; a generated-crate runtime guard checks the
+same node lifecycle. A follow-up oracle also checks `lowerKey`, `floorKey`,
+`ceilingKey`, and `higherKey` after promotion, plus live and detached
+`entrySet().contains` behavior. The tracked carrier delegates sorted range
+queries to its backing `BTreeMap`; other map carriers and arbitrary opaque
+entries remain outside this verified slice.
+`TreeMapEntryParameterMutation.java` is now promoted to `tests/differential/`:
+Java and Rust both print `1:7:a` after a source helper mutates a live entry
+obtained from a `TreeMap` parameter. The caller promotes the local map to a
+shared tracked carrier before the call, and the callee receives that handle
+instead of a borrowed `BTreeMap`. Unresolved/external map parameters and
+general collection-field carriers remain outside this verified slice.
+`HashAndLinkedMapEntryParameterMutation.java` extends that same source-method
+boundary to `HashMap` and `LinkedHashMap`. The hash-map caller observes the
+updated value, while the linked map retains insertion order after its entry
+update. Both paths use the existing live-entry carrier with an owned shared
+handle at the callee, not a tuple snapshot.
+`NullableMapEntryParameterMutation.java` is now promoted too. A live
+native-map source parameter is generic over its Rust key and value storage, while a
+runtime adapter exposes the same nullable Java `Map.Entry<K,V>` contract for
+both `V` and `Option<V>`. The Java and Rust oracles print
+`null:7,null:8,null:9:t`; the direct
+nullable-map `get` concat path remains promoted under
+`NullableHashMapValueConcat.java` for all three concrete map carriers.
 Severity: **medium/high** — the original broad concat, collection-order,
 collection-mutation, enum-body, modeled display, and internal collection-carrier
 divergences are now covered by differential or generated-crate fixtures. The
 remaining semantic risk is narrower but still real: an arbitrary external value
 erased behind `Object` cannot recover Java dynamic `toString()` unless source
 downcast evidence, platform support, or an explicit external display-capability
-fact is available.
+fact is available. Native/source mixed `Map.Entry` live-view identity is now
+covered for local `LinkedHashMap` and `HashMap` entries; broader map carriers
+and arbitrary opaque entries remain open.
 Kind: behavioural (differential), JDK facades / collections / enums.
+**Closed.**
+
+Codex follow-up 2026-09-21: `MixedSourceAndHashMapEntryAlias.java` is promoted
+to `tests/differential/`; Java and translated Rust both print `2:2` after
+mutating a `HashMap` entry through a second `Map.Entry` reference. The local
+map is wrapped in `JavaTrackedHashMap` only when its entry escapes. This keeps
+the original Rust hash table and its iteration order while tracking stable
+entry IDs and value observers. The generic live-entry carrier now supports
+both ordered and hash maps. A generated-crate test checks update visibility
+and detachment after remove/reinsert. Unknown external map/entry carriers
+remain open.
+
+The adjacent `MixedSourceAndHashMapEntryViews.java` oracle checks that
+`entrySet().contains/remove` sees a live value after `map.put` replaces it;
+translated Rust and Java both produce `true:3:true:false`. The generated
+runtime guard also checks that wrapping an existing Rust hash table preserves
+its first iterator key.
+
+Codex follow-up 2026-09-21: `HashMapInlineEntrySetValue.java` was added to
+`tests/differential/`. An `entrySet().iterator().next()` passed directly to a
+source `Map.Entry` method now uses the same live carrier as an entry local.
+The oracle covers initializer calls and standalone call statements on
+`HashMap`, plus an initializer call on `LinkedHashMap`; `setValue` changes the
+backing map in every case. Lowering promotes only a supported local backing
+map before evaluating the expression. The representation planner recognizes
+the direct entry escape without relying on an unrelated source-defined
+`Map.Entry` implementation, and mutable entry parameters borrow the temporary
+carrier mutably. Direct source parameters for the three supported native map
+carriers and interface-typed `Map`/`SortedMap`/`NavigableMap` parameters are
+covered by the newer pass above; external and unresolved parameters remain
+outside this verified slice.
+
+Codex follow-up 2026-09-21: the neighboring source `Map.Entry` carrier now
+compares nullable virtual `getKey`/`getValue` results to Java `null` through the
+same optional result used by direct calls. The permanent oracle is
+`tests/differential/SourceMapEntryNullComparison.java`; this closes the
+source/mixed entry null-comparison slice, not the unknown external erased
+display capability gap.
+
+Codex follow-up 2026-09-21: `MixedSourceAndNativeMapEntry.java` is promoted to
+`tests/differential/` and matches Java at
+`1:a:a=5:5:true:true:1:2:source(k=4):4:5:5:9:7:null=null:null:null:null=null:true:true:true:true:true:5:8:5:10:null`.
+When a local `LinkedHashMap` entry escapes beside a source `Map.Entry`, lowering
+promotes that local map to `Arc<RwLock<JavaLinkedHashMap<...>>>`, constructs a
+`JavaMapEntryValue` backed by the map's stable node ID, and borrows the map for
+subsequent native calls. `entrySet().contains/remove` now compares the virtual
+key/value through the shared map, including optional key/value carriers. The
+oracle checks source virtual dispatch, live native `setValue`/`put`, remove and
+same-key reinsertion without reattachment, plus null-key/null-value entry
+display, mutation, and null comparisons. Exhausted `entrySet` iteration in
+this shared-map path raises a catchable `NoSuchElementException`. This closes
+that bounded repro, not arbitrary external
+entries or every map receiver/escape shape.
+
+The same oracle now assigns the native entry to a second `Map.Entry` local,
+mutates through that alias, and observes the write through the original. The
+alias diagnostic exempts this case only when the original local came from the
+shared ordered-map entry path; an ordinary native tuple snapshot keeps its
+diagnostic. The generated carrier's clone shares its `Rc` entry object rather
+than copying key/value state.
+Representation planning now follows aliases passed to source helpers and map
+view operations as escape evidence. The HashMap live-view and TreeMap alias
+fixtures therefore select the tracked carrier without unused source `Entry`
+declarations; read-only entry locals still keep the snapshot representation.
+The same escape analysis now descends through loops, enhanced loops, switches,
+`try`/catch/finally blocks, labeled blocks, and constructor arguments.
+`NestedMapEntryMutation.java` checks that mutations under a loop, switch, and
+finally block all update the original HashMap node.
+`AssignedMapEntryAliasMutation.java` covers an alias declared without an
+initializer and assigned later. Assignment-slot lowering now retains the
+declared `Map.Entry<K,V>` carrier instead of accidentally erasing the alias to
+`Object`; mutation through that assigned alias remains visible through the
+backing LinkedHashMap and the original entry.
+Alias discovery is scope-aware as well: aliases introduced or assigned inside
+a nested structured block inherit the outer live entry identity.
+`NestedAssignedMapEntryAliasMutation.java` checks this branch-local handoff.
+The oracle also passes the live entry into a source method accepting
+`Map.Entry<String,Integer>` and checks the mutation through the caller's map.
+That method returns the previous value as nullable, including a null old value
+from the null-key map. The return-nullability solver now recognizes direct
+`Map.Entry` accessor calls on interface-typed parameters; the focused
+`map_entry_accessor_returned_from_source_helper_stays_nullable` test pins the
+signature constraint.
+
+Historical runtime checkpoint before the lowering change: the mixed
+source/native entry repro still failed to compile because a native
+`entrySet().iterator().next()` local was a `(K, V)`
+snapshot, while mixed `Map.Entry` dispatch emits `get_key`, `get_value`, and
+`set_value` calls. The insertion-ordered map runtime now assigns a stable ID to
+each entry node, preserving that ID across value replacement and invalidating it
+on removal (including `retain`); reinserting the same key receives a new ID.
+It also has `JavaLinkedHashMapLiveEntry`, which implements virtual entry
+operations using a shared map handle, node ID, and update-observed detached
+value. The adapter covers bare and nullable key/value carriers without adding
+an extra `Option` layer: nullable values accept `setValue(null)`, and nullable
+keys return Java null from `getKey()`. The generated-crate test
+`linked_hash_map_entry_ids_survive_updates_but_not_remove_reinsert` checks both
+ID behavior and live/detached virtual dispatch, including `put` immediately
+before removal with no intervening entry read. The local ordered-map lowering
+path above now constructs this carrier.
+
+Codex follow-up 2026-09-21: `NullableMapKeyConstructor.java` now checks the
+ordered map's nullable-key carrier across a source-constructor call. Constructor
+argument binding facts propagate nullability and native collection carrier
+type to the callee; the mutable parameter requirement also reaches the caller
+local. The Java/Rust oracle is permanent in `tests/differential/`. Mixed
+source/native `Map.Entry` node identity remains open.
+
+Codex follow-up 2026-09-21: `NullableMapKeyParameter.java` now checks the
+native map-key carrier across a source-method boundary. Signature propagation
+keeps the callee's `Map` parameter and caller map locals on an optional key
+carrier when a call passes a nullable key or the method inserts a literal-null
+key; present string keys adapt to that same contract. The fixture is permanent in
+`tests/differential/`; mixed source/native `Map.Entry` node identity remains
+open.
+
+Codex follow-up 2026-09-21: `NullableMapKeyVariable.java` is promoted to the
+permanent differential suite. A null key passed through a local binding now
+survives `put`, `containsKey`, `get`, and `keySet().iterator().next()`; the
+Java/Rust output is `true:false:1:null`. The key-set iterator call is retargeted
+to the native collection iterator, and its direct `next` projection uses the
+backing map's optional key carrier rather than emitting `.iterator()` on a Rust
+`Vec`. Mixed source/native `Map.Entry` node identity remains open.
+
+Codex probe 2026-09-20: [`repro/SourceMapEntryValue.java`](repro/SourceMapEntryValue.java)
+confirms the remaining opaque-entry model gap with a source class implementing
+`Map.Entry<String,Integer>`. The stronger Java oracle prints
+`1:custom(k=2):k:2:2`: an interface call changes the value, the implementation's
+custom `toString()` runs, and the concrete alias sees the mutation. At filing,
+generated Rust did not compile: it treated the interface slot as a
+`(String,i32)` tuple, tried to assign the concrete shared handle to that tuple,
+and called `set_value` on it.
+The concrete object itself is already placed in `Rc<RefCell<Entry>>`, so the
+storage planner has the sharing fact; the missing piece is a `Map.Entry` value
+carrier that retains and dispatches through that handle. A tuple conversion
+would lose the observable override and shared state.
+
+Codex follow-up 2026-09-20: generated runtime support now contains a
+`JavaMapEntryValue<K,V>` dynamic carrier and `JavaMapEntry<K,V>` contract. A
+generated-crate test checks virtual custom display, nullable value mutation,
+and a second alias observing the same state. Source-entry adapter generation
+and interface-slot selection are now wired for non-generic source classes
+directly implementing `java.util.Map.Entry`, including the common
+`import java.util.Map; implements Map.Entry` spelling. The carrier forwards
+`getKey`, `getValue`, `setValue`, and `toString` through the actual shared
+handle and retains Java exception results rather than making them infallible.
+The source implementation's `setValue` parameter and key/value/old-value
+returns now retain nullable storage in signature planning; a resolved-source
+unit test pins the fully qualified interface recognition and both parameter
+and return constraints. Source local old values from `Map.Entry` accessors now
+retain nullable boxed storage before the primitive unboxing baseline runs.
+The original FQN repro compiles and runs as generated Rust with Java's exact
+`1:custom(k=2):k:2:2` output. `SourceMapEntryImported.java` matches Java at
+`1:imported(k=3):3`; `SourceMapEntryNullableValue.java` checks null old/new
+values against Java at `null:nullable(n=4):4:nullable(n=null):null`.
+`SourceMapEntryDirect.java` additionally passes a freshly constructed source
+entry directly into an interface-typed parameter and matches Java at
+`direct(k=5):5`. All four fixtures live in `tests/differential/`; the focused Java-vs-Rust
+oracle and generated-crate tests pass. The alias diagnostic now recognizes
+the source shared-handle-to-entry-carrier upcast instead of rejecting the
+imported variant after successful lowering. Arbitrary external implementations
+and mixed native entry-set tuple/carrier flows remain unproven; the audit is
+still open.
+
+`GenericSourceMapEntry.java` now lives in `tests/differential/` and matches
+Java's `1:generic(k=2):k:2:2:2:null` output, including a nullable mutation
+observed through the concrete alias. The four failures exposed by the audit
+repro were fixed together: native tuple-entry recognition no longer mistakes
+the source class `Entry<K,V>` for JDK `Map.Entry`; shared-handle companions
+retain the enclosing class's type arguments; an owned local read of a generic
+field supplies the required class `Clone` bound; and source-entry adapters now
+emit for generic implementations, cloning borrowed generic getter results into
+the owned `JavaMapEntry` contract. The audit repro copy remains as history;
+the permanent oracle no longer depends on `claude_audits/`.
+
+`NullableMapEntryValueCatch.java` is also promoted. A native entry snapshot
+with an optional stored value now waits until `getValue().intValue()` to
+convert null into a catchable NPE; a present value still reads normally.
+Map-key nullability is planned separately from value nullability, so a null
+key no longer becomes an empty string before `getKey().length()` dereferences
+it. Present/null key lookup, `getOrDefault`, `containsKey`, and removal keep
+using that key carrier; key-set and entry-set contains/remove share the same
+backing-map behavior. The Java/Rust oracle is
+`npe:a:7:npe-key:2:1:true:2:9:1:2:0:true:true:true:true:0`.
+
+Historical probe before promotion: `repro/MixedSourceAndNativeMapEntry.java` combines a
+source `Map.Entry` implementation with `LinkedHashMap.entrySet().iterator().next()`.
+Java returns `1:a:a=5:5:true:true:0:2:source(k=4):4`. Generated Rust fails to compile because
+the native iterator local is a `(String, i32)` snapshot while the program-wide
+source-entry switch lowers its `setValue` and display as carrier methods.
+Merely dispatching on the tuple would still miss Java's live backing-map
+mutation. A key-only backing-map rewrite was tried and rolled back: it matched
+this live case but regressed `MapEntryDetachedContract` after remove-and-reinsert
+under the same key, where the old Java entry is no longer the new map node.
+The local entry needs node identity (or an equivalent shared map-view carrier),
+not just its key. The promoted oracle above now supplies that bounded carrier;
+the repro copy remains here as audit history.
+
+Codex follow-up 2026-09-21: `SourceMapEntryErased.java` now checks an entry
+constructed through the source implementation, stored as `Map.Entry`, then
+erased to `Object` before concatenation and direct `Object.toString()`.
+Lowering boxes a clone of the shared entry carrier at the erasure boundary;
+the erased-object runtime recognizes its parameterized carrier and invokes
+virtual `java_to_string`, preserving `entry(k=5):entry(k=5)` against Java.
+
+Codex follow-up 2026-09-21: `SourceMapEntryErasedThrow.java` extends that
+boundary to throwing virtual display. A new result-bearing erased-display path
+propagates exceptions through `Object` concatenation, `Object.toString()`, and
+`String.valueOf(Object)` and `Objects.toString(Object)` inside Java `try`, while ordinary uncaught calls
+retain an explicit panic boundary. The Java/Rust oracle checks
+`caught-concat:caught-method:caught-value:caught-objects:caught-concat:caught-method` across
+an interface-carrier erasure and a direct source-object erasure. The
+source display downcast uses a typed `String`/`Result<String, JavaException>`
+adapter, so a fallible source `toString()` no longer makes the generated
+erased-display helper fail to compile. Unknown external dynamic display,
+generic source implementations, and mixed native tuple/carrier entries still
+need broader modeling. The combined `Objects.toString(Object)` and
+`Object.toString()` probe also exposed a generated-facade collision: utility
+classes and boxed primitive facades emitted both an instance fallback and a
+static `to_string` with the same Rust name (`E0592`). Static `to_string` now
+owns that facade name and removes the unmodeled instance fallback regardless
+of insertion order. `ObjectsToStringErasedThrow.java` and the expanded
+`SourceMapEntryErasedThrow.java` are permanent differential oracles; the former
+also remains under `repro/` as the minimal historical failure.
+
+Codex follow-up 2026-09-20: a simple source class held as `Object` now survives
+an owned `Object` method-argument handoff without tripping the erased-clone
+fallback. Runtime clone downcasts are emitted for concrete source classes whose
+instance fields are primitive/String (and for `Rc`/`Arc` handles to emitted
+concrete source types); opaque or non-cloneable payloads still fail loudly.
+`ErasedSourceArgumentDisplay` checks that a nested source `Payload.toString()`
+returns `P7` through `show(Object)` against Java. This is not the arbitrary
+external display-capability model or the opaque `Map.Entry` carrier.
+The focused oracle and the full `erased_display_fixtures_match_java_output`
+group pass (72 fixtures, 481.84 s); `cargo test --lib`, `cargo check --tests`,
+`cargo fmt --check`, and `git diff --check` also pass at this checkpoint.
+
+Codex follow-up 2026-09-20: concrete typed `SimpleEntry` and
+`SimpleImmutableEntry` constructor types now contribute erased-object tuple
+display downcasts, so keys need not be `String` and values need not occur in a
+fixed handwritten pair list. The erased-object clone helper no longer replaces
+an `Object` argument with `()`; it clones known scalar and typed-entry runtime
+targets and fails loudly for unknown targets. `ErasedMapEntryTypedDisplay`
+checks `(Integer,String)`, `(Character,Double)`, and a null-bearing
+`(String,String)` entry across an `Object` method-argument boundary. This does
+not supply the still-open arbitrary opaque entry-value model.
+The same runtime-support pass replaced the empty-vector stub in
+`java_clone_erased_object_vec_ref` with element-wise erased cloning. The
+generated-crate array helper check passes. `Object[]` accesses now select
+dynamic erased display, and boxed String literals stay owned;
+`ErasedObjectArrayElements` pins String, integer, and null elements. A direct
+`Object[]` method return now uses an owned vector and the erased-element clone
+helper instead of an unsized slice or invalid `to_vec()`;
+`ErasedObjectArrayRoundTrip` checks length and element display. Java array
+alias identity across that boundary remains outside these fixtures.
+
+Codex follow-up 2026-09-20: `GenericObjectsToStringDefault.java` matches Java
+for generic String, boxed integer, source-defined `toString()`, and null values
+through the two-argument `Objects.toString` route. Imported lowercase
+`objects` now reaches native static dispatch without allowing a local or
+source `Objects` alias to impersonate the JDK owner. The default expression
+still evaluates eagerly, as checked by `ObjectsToStringNullDefault.java`;
+`GenericObjectsToStringDefault.java` also checks value-before-default side
+effects (`12`) and default-before-virtual-`toString()` effects (`123`) for a
+definitely present value, plus dynamic display from a present erased `Object`.
+`SourceObjectsToStringShadow.java` guards the opposite boundary: a source class
+named `Objects` with a static `toString` overload must not be rewritten as the
+JDK utility. Its generated erased-display support also uses the normal Object
+fallback when that static overload prevents an instance `to_string` method
+from being emitted. The same fixture now calls inherited `Object.toString()`
+through `new Objects()`; a collision-specific `Display` implementation makes
+the ordinary Rust `.to_string()` call compile and return `Objects@0`, while
+external display downcasts cannot claim a source type with the same Rust name.
+
+Codex follow-up 2026-09-20: `String.format(Locale.US, ...)` with literal or
+runtime templates had fallen through to invalid `String::format_N(...)` calls.
+The call receiver reached planning as unbound lowercase `string`; the generic
+lowercase-owner guard rejected native static dispatch. Native `String.format`
+now accepts that one unbound spelling while local and source-type aliases still
+shadow it. `StringFormatLocale.java` matches Java for literal and runtime
+templates, and the existing Locale-overload generated-crate test passes.
+
+Codex follow-up 2026-09-20: `GenericNullableFormatting.java` promotes generic
+nullable values through `Objects.toString(T)` and `String.format("%s", T)`.
+The format path now uses the existing Java-aware nullable generic display
+helper instead of requesting Rust `Display` on `Option<T>`. The Java/Rust
+oracle agrees for String, null, boxed integer, and source-defined `toString()`
+values (`x:x,null:null,2:2,payload:payload`).
+
+Codex follow-up 2026-09-20: `tests/differential/GenericNullableFieldDisplay.java`
+pins a generic concat/display boundary shared with 0056. Java's
+`"Box(" + value + ")"` renders present `T` values and null field values.
+The fixture initially failed at `Option<T>::to_string()` and an unnecessary
+constructor `Option<T>` clone; both paths now match its Java oracle at
+`Box(a),Box(null),Box(2),Box(payload)`.
+
+The promoted generic nullable-display fixture also passes with a source-defined
+`Payload.toString()` value (`Box(payload)`), confirming the generic dispatcher
+uses the source method rather than only primitive/String formatting.
+
+`GenericNullableStringification.java` also passes the Java oracle for
+`String.valueOf(T)` and `StringBuilder.append(T)` across String, null, integer,
+and source-defined values. The three stringification routes now share the
+nullable generic display helper instead of imposing `Display` or
+`JavaAppendValue` on `&T`.
+
+Codex follow-up 2026-09-20: `ErasedStringAliasDisplay.java` and
+`ErasedStringIdentityEquals.java` now pin an erased `Object` local initialized
+from a `String` that is read again. The erased slot receives a clone of the
+ordinary owned String or the identity-preserving `JavaString` Arc handle,
+instead of moving the original binding. The identity fixture also checks
+virtual `String.equals` through `Object` alongside Java reference `==`.
+
+Codex follow-up 2026-09-20: single-store generic constructor transfer now
+moves its nullable parameter instead of adding an invalid `Option<T>` clone.
+Generic null-aware display now uses the erased-object runtime dispatcher for
+present `T` values, while absent values render `null`. The fixture was
+promoted to the differential suite and matches Java at
+`Box(a),Box(null),Box(2),Box(payload)`.
+
+Codex follow-up 2026-09-20: `tests/differential/GenericErasedDisplay.java`
+is promoted. A source generic class with a declared `toString()` no longer
+loses display when a concrete `new Box<String>(...)` value is boxed as
+`Object`: Java and Rust match for both explicit `Box<String>` construction
+and `Box<Integer>` initialized with diamond syntax. The source downcast
+collector now generates arms for concrete source generic instantiations
+found in constructor expressions or declared slots. This leaves unknown
+external erased values and generic instantiations without concrete source
+evidence loud, not solved.
 
 Codex follow-up 2026-09-15 `Queue.poll()` nullable local pass:
 `Queue<T>.poll()` now reports an optional element-borrow return shape instead
@@ -2460,3 +2858,15 @@ StringBuilder(...); builder.toString()` while preserving Java's null-receiver
 failure for `toString()`. Focused guard:
 `cargo test --test differential erased_string_builder_display_matches_java_output -- --nocapture`;
 the broader `erased_display_fixtures_match_java_output` oracle now passes too.
+
+Codex follow-up 2026-09-21 wildcard `Map.Entry` boundary pass: a
+`Map.Entry<?, ?>` parameter is represented as an erased key/value tuple, but
+its accessors and display path previously tried to call `Clone`/`ToString`
+directly on `Box<dyn Any>`. Accessor returns now clone through
+`java_clone_erased_object_ref` and preserve the nullable `Object` return slot;
+entry display borrows each erased tuple field through
+`java_erased_object_to_string`. `tests/differential/WildcardMapEntryAccess.java`
+matches Java for string and boxed numeric payloads, and
+`slot_shape_design::wildcard_map_entry_object_accessors_clone_erased_payloads`
+compile-checks the generated crate. Truly opaque entry implementations whose
+key/value cannot be extracted remain intentionally loud.

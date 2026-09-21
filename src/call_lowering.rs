@@ -51,8 +51,9 @@ use crate::coercion::{
     string_join_collection_projection, string_join_varargs_projection,
     string_last_index_of_projection, string_literal_from_rust_char_literal_expr,
     string_matches_projection, string_replace_all_projection, string_replace_first_projection,
-    string_split_projection, string_substring_projection, string_to_char_array_projection,
-    strip_redundant_java_null_expect_after_unwrap, system_exit_projection, thread_sleep_projection,
+    string_split_projection, string_substring_projection, string_substring_to_end_projection,
+    string_to_char_array_projection, strip_redundant_java_null_expect_after_unwrap,
+    system_exit_projection, thread_sleep_projection,
     unwrap_result_or_panic_uncaught_java_exception,
 };
 use crate::facts::FactSet;
@@ -548,8 +549,7 @@ fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
         1 => {
             let mut args = args.into_iter();
             let begin = args.next().unwrap();
-            let end = len_i32_projection(receiver.clone());
-            string_substring_projection(receiver, begin, end)
+            string_substring_to_end_projection(receiver, begin)
         }
         2 => {
             let mut args = args.into_iter();
@@ -3402,6 +3402,34 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&lowered),
             "value.chars().nth((index) as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string())).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        );
+    }
+
+    #[test]
+    fn one_arg_substring_evaluates_receiver_once() {
+        let receiver = Expr::Var("value".to_string());
+        let target = CallTargetPlan::NativeJavaInstance {
+            receiver: &receiver,
+            method: NativeJavaInstanceMethod::StringSubstring,
+        };
+        let lowered = apply_call_target(
+            &target,
+            Some(RustExpr::Call {
+                function: Box::new(RustExpr::Var("make_value".to_string())),
+                args: Vec::new(),
+            }),
+            vec![RustExpr::Literal("1".to_string())],
+        );
+        let rendered = emit::emit_expr(&lowered);
+
+        assert_eq!(rendered.matches("make_value()").count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("let __java_string_receiver = make_value()"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_string_receiver.len() as i32"),
+            "{rendered}"
         );
     }
 

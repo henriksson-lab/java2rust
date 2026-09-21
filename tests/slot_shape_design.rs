@@ -13262,6 +13262,60 @@ class ErasedExternalFacadeDisplayUnmodeled {
 }
 
 #[test]
+fn wildcard_map_entry_object_accessors_clone_erased_payloads() {
+    let translation = translate_source(
+        r#"
+import java.util.Map;
+
+class WildcardMapEntryObjectAccess {
+    Object key(Map.Entry<?, ?> entry) {
+        return entry.getKey();
+    }
+
+    Object value(Map.Entry<?, ?> entry) {
+        return entry.getValue();
+    }
+
+    String show(Map.Entry<?, ?> entry) {
+        return "entry=" + entry;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("java_clone_erased_object_ref(&(entry.0))")
+            && translation
+                .rust
+                .contains("java_clone_erased_object_ref(&(entry.1))")
+            && !translation
+                .rust
+                .contains("Box::new(entry.0.clone()) as Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("Box::new(entry.1.clone()) as Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "wildcard_map_entry_object_accessors_clone_erased_payloads",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn erased_external_object_display_keeps_package_qualified_to_string_capability_distinct() {
     let mut facts = FactSet::default();
     facts.external_api_effect_facts.push(ExternalApiEffectFact {

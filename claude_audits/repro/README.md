@@ -3,6 +3,31 @@
 Small Java files used to validate the findings in `claude_audits/`.
 Each is deliberately minimal — one behaviour per file.
 
+The passing source-`Map.Entry` oracles (`SourceMapEntryValue.java`,
+`SourceMapEntryImported.java`, and `SourceMapEntryNullableValue.java`) also live
+under `tests/differential/`, where the permanent Java/Rust gate runs them. The
+direct-construction and erased-`Object` variants (`SourceMapEntryDirect.java`,
+`SourceMapEntryErased.java`, and `SourceMapEntryErasedThrow.java`) live there too,
+without duplicate audit copies.
+`ObjectsToStringErasedThrow.java` is also copied to `tests/differential/` as a
+permanent regression for the static/instance facade-name collision.
+`GenericSourceMapEntry.java` is also promoted to `tests/differential/`.
+`NullableMapEntryValueCatch.java` is copied there as a permanent null-key and
+null-value entry-dereference oracle.
+`NullableMapKeyVariable.java` is copied there as a permanent variable-null-key
+and key-set iterator oracle.
+`NullableMapKeyParameter.java` is copied there as a permanent nullable-key
+method-parameter and caller-carrier oracle.
+`NullableMapKeyConstructor.java` is copied there as a permanent constructor
+parameter and caller-carrier oracle.
+`MixedSourceAndNativeMapEntry.java` is copied to `tests/differential/` as a
+permanent live/detached source/native entry oracle, including nullable entries.
+`MixedSourceAndHashMapEntryAlias.java` is copied to `tests/differential/` as a
+permanent live HashMap entry-alias oracle (`2:2`), with generated-crate coverage
+for update visibility and remove/reinsert detachment.
+The copies here preserve the audit trail; deleting `claude_audits/` after all audits
+close will not delete those regression tests.
+
 ## Files that reproduce a confirmed defect
 
 | file | issue | what goes wrong |

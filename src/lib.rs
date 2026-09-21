@@ -1198,6 +1198,7 @@ fn translate_parsed_source_with_batch_context(
         &resolved.program,
         &context.semantic.usage,
         &context.semantic.facts,
+        &context.representations,
         lowered.diagnostics_mut(),
     );
     let (file, diagnostics) = lowered.into_parts();
@@ -1405,6 +1406,7 @@ fn translate_parsed_source_with_context(
         &resolved.program,
         &semantic.usage,
         &semantic.facts,
+        &representations,
         lowered.diagnostics_mut(),
     );
     let (file, diagnostics) = lowered.into_parts();
@@ -1613,13 +1615,14 @@ fn report_post_lowering_translation_diagnostics(
     program: &Program,
     usage: &usage::UsageFacts,
     facts: &FactSet,
+    representations: &representation::RepresentationPlan,
     diagnostics: &mut DiagnosticBag,
 ) {
     // Lowering copies where Java aliased, because there is no shared
     // representation to lower an alias into. Where that copy is observable the
     // output compiles and computes a different answer, so it is reported here
     // rather than left to be discovered downstream.
-    aliasing::report_observable_aliases(program, usage, facts, diagnostics);
+    aliasing::report_observable_aliases(program, usage, facts, representations, diagnostics);
     // Step 2 of the 0002b design: the decision rule runs, lowering does not
     // change, and every type the plan says should be shared while lowering
     // holds it by value is reported. That list is the work queue for the

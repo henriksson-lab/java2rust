@@ -367,6 +367,7 @@ pub enum SignatureConstraint {
     RequiredDispatch(DispatchShape),
     RequiredStorageNullability(NullabilityState),
     NullableSequenceElement,
+    NullableMapKey,
     MutableBinding,
     StorageSlot,
 }
@@ -1590,6 +1591,7 @@ pub struct ConstructorConstraintSet {
     public_api: bool,
     param_names: Vec<String>,
     param_index_by_name: HashMap<String, usize>,
+    param_java_types: Vec<JavaType>,
     params: Vec<Vec<SignatureConstraint>>,
     locals: Vec<LocalConstraintSet>,
     local_index_by_name: HashMap<String, usize>,
@@ -4035,6 +4037,16 @@ fn apply_signature_propagation_sweep_with_stats(
             },
         ) | record_signature_propagation_arm(
             &mut stats,
+            "constructor_argument_collection_carrier_to_callee",
+            || {
+                propagate_constructor_argument_collection_carrier_java_types_to_callees(
+                    constraints,
+                    usage,
+                    scope,
+                )
+            },
+        ) | record_signature_propagation_arm(
+            &mut stats,
             "constructor_call_argument_to_callee",
             || {
                 propagate_constructor_call_argument_constraints_to_callees(
@@ -4055,6 +4067,8 @@ fn apply_signature_propagation_sweep_with_stats(
             },
         ) | record_signature_propagation_arm(&mut stats, "null_call_argument_to_callee", || {
             propagate_null_call_argument_constraints_to_callees(constraints, usage, scope)
+        }) | record_signature_propagation_arm(&mut stats, "nullable_map_key_carrier", || {
+            propagate_nullable_map_key_carriers(constraints, usage, scope)
         }) | record_signature_propagation_arm(&mut stats, "call_result_to_binding", || {
             propagate_call_result_constraints_to_bindings(constraints, usage, scope)
         }) | record_signature_propagation_arm(
@@ -4498,6 +4512,33 @@ fn propagate_resolved_source_mutable_argument_binding_constraints(
                 }
             }
         }
+        for call_site in method_usage.constructor_call_sites() {
+            let Some(callee_key) = call_site
+                .resolved()
+                .map(ConstructorKey::resolved_constructor)
+            else {
+                continue;
+            };
+            let Some(callee_constraints) = constraints.constructors.get(&callee_key) else {
+                continue;
+            };
+            for (index, binding_id) in call_site.argument_bindings() {
+                if !callee_constraints
+                    .params
+                    .get(*index)
+                    .is_some_and(|param| callee_param_requires_mutable_binding(param))
+                {
+                    continue;
+                }
+                if let Some(binding) = method_usage.binding_facts_for_declaration_id(binding_id) {
+                    pending.push((
+                        caller_key.clone(),
+                        binding.clone(),
+                        SignatureConstraint::MutableBinding,
+                    ));
+                }
+            }
+        }
     }
     let mut changed = false;
     for (method_key, binding, constraint) in pending {
@@ -4877,6 +4918,81 @@ fn propagate_call_argument_collection_carrier_java_types_to_callees(
     changed
 }
 
+fn propagate_constructor_argument_collection_carrier_java_types_to_callees(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    if scope.is_some_and(|scope| !scope.has_constructor_binding_target()) {
+        return false;
+    }
+    let mut pending = Vec::new();
+    for (usage_key, method_usage) in usage.method_entries() {
+        let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        let Some(caller_constraints) = constraints.methods.get(&caller_key) else {
+            continue;
+        };
+        for call_site in method_usage.constructor_call_sites() {
+            let Some(callee_key) = call_site
+                .resolved()
+                .map(ConstructorKey::resolved_constructor)
+            else {
+                continue;
+            };
+            let Some(callee_constraints) = constraints.constructors.get(&callee_key) else {
+                continue;
+            };
+            if callee_constraints.public_api {
+                continue;
+            }
+            for (index, binding_id) in call_site.argument_bindings() {
+                let Some(binding) = method_usage.binding_facts_for_declaration_id(binding_id)
+                else {
+                    continue;
+                };
+                let Some(target) = callee_constraints.param_java_types.get(*index) else {
+                    continue;
+                };
+                let actual = effective_method_binding_java_type(caller_constraints, binding);
+                if let Some(refined) =
+                    refined_collection_carrier_java_type_for_slot(&actual, target)
+                {
+                    pending.push((callee_key.clone(), *index, refined));
+                }
+            }
+        }
+    }
+    let mut grouped = HashMap::<(ConstructorKey, usize), Vec<JavaType>>::new();
+    for (key, index, java_ty) in pending {
+        grouped.entry((key, index)).or_default().push(java_ty);
+    }
+    let mut changed = false;
+    for ((key, index), types) in grouped {
+        let Some(refined) = types.first() else {
+            continue;
+        };
+        if types.iter().any(|ty| ty != refined) {
+            continue;
+        }
+        let Some(current) = constraints
+            .constructors
+            .get_mut(&key)
+            .and_then(|constructor| constructor.param_java_types.get_mut(index))
+        else {
+            continue;
+        };
+        if *current != *refined
+            && refined_collection_carrier_java_type_for_slot(refined, current).is_some()
+        {
+            *current = refined.clone();
+            changed = true;
+        }
+    }
+    changed
+}
+
 fn effective_method_binding_java_type(
     method_constraints: &MethodConstraintSet,
     binding: &BindingUseFacts,
@@ -5155,7 +5271,9 @@ fn propagate_null_call_argument_constraints_to_callees(
 ) -> bool {
     let mut method_pending = Vec::new();
     let mut constructor_pending = Vec::new();
-    for method_usage in usage.method_usages() {
+    for (caller_usage_key, method_usage) in usage.method_entries() {
+        let caller_constraints = method_key_for_usage(constraints, caller_usage_key)
+            .and_then(|key| constraints.methods.get(&key));
         for call_site in method_usage.call_sites() {
             let Some(resolved) = call_site.resolved() else {
                 continue;
@@ -5166,10 +5284,21 @@ fn propagate_null_call_argument_constraints_to_callees(
             if !constraints.methods.contains_key(&callee_key) {
                 continue;
             }
+            let nullable_binding_arg_indices = call_site
+                .argument_bindings()
+                .iter()
+                .filter_map(|(index, binding_id)| {
+                    let binding = method_usage.binding_facts_for_declaration_id(binding_id)?;
+                    caller_constraints
+                        .is_some_and(|caller| method_binding_has_nullable_storage(caller, binding))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
             for arg_index in call_site
                 .null_arg_indices()
                 .iter()
                 .chain(call_site.nullable_source_call_arg_indices().iter())
+                .chain(nullable_binding_arg_indices)
             {
                 method_pending.push((callee_key.clone(), *arg_index));
             }
@@ -5185,16 +5314,30 @@ fn propagate_null_call_argument_constraints_to_callees(
             if !constraints.constructors.contains_key(&callee_key) {
                 continue;
             }
+            let nullable_binding_arg_indices = call_site
+                .argument_bindings()
+                .iter()
+                .filter_map(|(index, binding_id)| {
+                    let binding = method_usage.binding_facts_for_declaration_id(binding_id)?;
+                    caller_constraints
+                        .is_some_and(|caller| method_binding_has_nullable_storage(caller, binding))
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
             for arg_index in call_site
                 .null_arg_indices()
                 .iter()
                 .chain(call_site.nullable_source_call_arg_indices().iter())
+                .chain(nullable_binding_arg_indices)
             {
                 constructor_pending.push((callee_key.clone(), *arg_index));
             }
         }
     }
-    for constructor_usage in usage.constructor_usages() {
+    for (caller_usage_key, constructor_usage) in usage.constructor_entries() {
+        let caller_constraints = constraints
+            .constructors
+            .get(&ConstructorKey::from_usage_key(caller_usage_key));
         for call_site in constructor_usage.call_sites() {
             let Some(resolved) = call_site.resolved() else {
                 continue;
@@ -5224,10 +5367,23 @@ fn propagate_null_call_argument_constraints_to_callees(
             if !constraints.constructors.contains_key(&callee_key) {
                 continue;
             }
+            let nullable_binding_arg_indices = call_site
+                .argument_bindings()
+                .iter()
+                .filter_map(|(index, binding_id)| {
+                    let binding = constructor_usage.binding_facts_for_declaration_id(binding_id)?;
+                    caller_constraints
+                        .is_some_and(|caller| {
+                            constructor_binding_has_nullable_storage(caller, binding)
+                        })
+                        .then_some(index)
+                })
+                .collect::<Vec<_>>();
             for arg_index in call_site
                 .null_arg_indices()
                 .iter()
                 .chain(call_site.nullable_source_call_arg_indices().iter())
+                .chain(nullable_binding_arg_indices)
             {
                 constructor_pending.push((callee_key.clone(), *arg_index));
             }
@@ -5267,6 +5423,244 @@ fn propagate_null_call_argument_constraints_to_callees(
                 scope,
             );
         }
+    }
+    changed
+}
+
+fn method_binding_has_nullable_storage(
+    method: &MethodConstraintSet,
+    binding: &BindingUseFacts,
+) -> bool {
+    let constraints = match binding.binding().map(BindingId::kind) {
+        Some(BindingKind::Local | BindingKind::LoopVariable | BindingKind::CatchParam) => method
+            .local_by_binding(binding.binding().expect("local binding id"))
+            .map(|local| local.constraints.as_slice()),
+        Some(BindingKind::Param) => method
+            .param_index(binding.name())
+            .and_then(|index| method.params.get(index))
+            .map(Vec::as_slice),
+        _ => None,
+    };
+    constraints.is_some_and(|constraints| {
+        constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                SignatureConstraint::RequiredStorageNullability(
+                    NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
+                )
+            )
+        })
+    })
+}
+
+fn constructor_binding_has_nullable_storage(
+    constructor: &ConstructorConstraintSet,
+    binding: &BindingUseFacts,
+) -> bool {
+    let constraints = match binding.binding().map(BindingId::kind) {
+        Some(BindingKind::Local | BindingKind::LoopVariable | BindingKind::CatchParam) => {
+            constructor
+                .local_by_binding(binding.binding().expect("local binding id"))
+                .map(|local| local.constraints.as_slice())
+        }
+        Some(BindingKind::Param) => constructor
+            .param_index(binding.name())
+            .and_then(|index| constructor.params.get(index))
+            .map(Vec::as_slice),
+        _ => None,
+    };
+    constraints.is_some_and(|constraints| {
+        constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                SignatureConstraint::RequiredStorageNullability(
+                    NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
+                )
+            )
+        })
+    })
+}
+
+fn propagate_nullable_map_key_carriers(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+    scope: Option<SignatureMutationScope<'_>>,
+) -> bool {
+    let mut pending = Vec::new();
+    let mut constructor_pending = Vec::new();
+    for (usage_key, method_usage) in usage.method_entries() {
+        let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
+            continue;
+        };
+        let Some(caller_constraints) = constraints.methods.get(&caller_key) else {
+            continue;
+        };
+        for map_binding in method_usage.all_binding_facts() {
+            if map_binding.binding().is_none() {
+                continue;
+            }
+            if matches!(
+                crate::stdlib::java_collection_kind_for_type(map_binding.java_ty()),
+                Some(crate::stdlib::JavaCollectionKind::SortedMap)
+            ) || crate::stdlib::java_map_type_args(map_binding.java_ty()).is_none()
+            {
+                continue;
+            }
+            let nullable_key_put = map_binding.uses().iter().any(|usage| {
+                let BindingUse::ReceiverForCall {
+                    name,
+                    argument_bindings,
+                    ..
+                } = usage
+                else {
+                    return false;
+                };
+                matches!(name.as_str(), "put" | "putIfAbsent" | "put_if_absent")
+                    && argument_bindings.iter().any(|(index, key_binding)| {
+                        *index == 0
+                            && method_usage
+                                .binding_facts_for_declaration_id(key_binding)
+                                .is_some_and(|key| {
+                                    method_binding_has_nullable_storage(caller_constraints, key)
+                                })
+                    })
+            });
+            if nullable_key_put {
+                pending.push((caller_key.clone(), map_binding.clone()));
+            }
+        }
+        for call_site in method_usage.call_sites() {
+            let Some(callee_key) = call_site
+                .resolved()
+                .and_then(|resolved| method_key_for_resolved_call(constraints, resolved))
+            else {
+                continue;
+            };
+            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
+                continue;
+            };
+            for (index, binding_id) in call_site.argument_bindings() {
+                if !callee_constraints
+                    .params
+                    .get(*index)
+                    .is_some_and(|param| param.contains(&SignatureConstraint::NullableMapKey))
+                {
+                    continue;
+                }
+                if let Some(binding) = method_usage.binding_facts_for_declaration_id(binding_id) {
+                    pending.push((caller_key.clone(), binding.clone()));
+                }
+            }
+        }
+        for call_site in method_usage.constructor_call_sites() {
+            let Some(callee_key) = call_site
+                .resolved()
+                .map(ConstructorKey::resolved_constructor)
+            else {
+                continue;
+            };
+            let Some(callee_constraints) = constraints.constructors.get(&callee_key) else {
+                continue;
+            };
+            for (index, binding_id) in call_site.argument_bindings() {
+                if !callee_constraints
+                    .params
+                    .get(*index)
+                    .is_some_and(|param| param.contains(&SignatureConstraint::NullableMapKey))
+                {
+                    continue;
+                }
+                if let Some(binding) = method_usage.binding_facts_for_declaration_id(binding_id) {
+                    pending.push((caller_key.clone(), binding.clone()));
+                }
+            }
+        }
+    }
+    for (usage_key, constructor_usage) in usage.constructor_entries() {
+        let caller_key = ConstructorKey::from_usage_key(usage_key);
+        let Some(caller_constraints) = constraints.constructors.get(&caller_key) else {
+            continue;
+        };
+        for map_binding in constructor_usage.all_binding_facts() {
+            if map_binding.binding().is_none()
+                || matches!(
+                    crate::stdlib::java_collection_kind_for_type(map_binding.java_ty()),
+                    Some(crate::stdlib::JavaCollectionKind::SortedMap)
+                )
+                || crate::stdlib::java_map_type_args(map_binding.java_ty()).is_none()
+            {
+                continue;
+            }
+            let nullable_key_put = map_binding.uses().iter().any(|usage| {
+                let BindingUse::ReceiverForCall {
+                    name,
+                    argument_bindings,
+                    ..
+                } = usage
+                else {
+                    return false;
+                };
+                matches!(name.as_str(), "put" | "putIfAbsent" | "put_if_absent")
+                    && argument_bindings.iter().any(|(index, key_binding)| {
+                        *index == 0
+                            && constructor_usage
+                                .binding_facts_for_declaration_id(key_binding)
+                                .is_some_and(|key| {
+                                    constructor_binding_has_nullable_storage(
+                                        caller_constraints,
+                                        key,
+                                    )
+                                })
+                    })
+            });
+            if nullable_key_put {
+                constructor_pending.push((caller_key.clone(), map_binding.clone()));
+            }
+        }
+        for call_site in constructor_usage.constructor_call_sites() {
+            let Some(callee_key) = call_site
+                .resolved()
+                .map(ConstructorKey::resolved_constructor)
+            else {
+                continue;
+            };
+            let Some(callee_constraints) = constraints.constructors.get(&callee_key) else {
+                continue;
+            };
+            for (index, binding_id) in call_site.argument_bindings() {
+                if !callee_constraints
+                    .params
+                    .get(*index)
+                    .is_some_and(|param| param.contains(&SignatureConstraint::NullableMapKey))
+                {
+                    continue;
+                }
+                if let Some(binding) =
+                    constructor_usage.binding_facts_for_declaration_id(binding_id)
+                {
+                    constructor_pending.push((caller_key.clone(), binding.clone()));
+                }
+            }
+        }
+    }
+    let mut changed = false;
+    for (method_key, binding) in pending {
+        changed |= add_method_binding_fact_constraint_scoped(
+            constraints,
+            &method_key,
+            &binding,
+            SignatureConstraint::NullableMapKey,
+            scope,
+        );
+    }
+    for (constructor_key, binding) in constructor_pending {
+        changed |= add_constructor_binding_fact_constraint_scoped(
+            constraints,
+            &constructor_key,
+            &binding,
+            SignatureConstraint::NullableMapKey,
+            scope,
+        );
     }
     changed
 }
@@ -8275,9 +8669,12 @@ fn collect_type_signatures(
                                     .and_then(|constraints| constraints.params.get(index))
                                     .cloned()
                                     .unwrap_or_default();
+                                let java_ty = constructor_constraints
+                                    .and_then(|constraints| constraints.param_java_types.get(index))
+                                    .unwrap_or(&param.ty);
                                 constrained_param_plan(
                                     param,
-                                    &param.ty,
+                                    java_ty,
                                     Some(&ty.name),
                                     representations,
                                     &constraints,
@@ -8662,6 +9059,12 @@ fn method_param_shape_constraints_with_declared_source_types(
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
     }
     if let Some(binding) = binding {
+        if native_map_literal_null_key_type(binding).is_some() {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::NullableMapKey],
+            );
+        }
         push_unique_signature_constraints(
             &mut constraints,
             &external_receiver_binding_constraints_with_declared_source_types(
@@ -8868,6 +9271,19 @@ fn method_param_shape_constraints_with_declared_source_types(
             &mut constraints,
             &[SignatureConstraint::RequiredOwnership(
                 OwnershipShape::SharedBorrow,
+            )],
+        );
+    }
+    if crate::stdlib::source_type_directly_implements_jdk_map_entry(ty)
+        && method.name == "setValue"
+        && method.params.len() == 1
+        && !matches!(param.ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        retain_only_storage_nullability(&mut constraints, NullabilityState::MaybeNull);
+        push_unique_signature_constraints(
+            &mut constraints,
+            &[SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
             )],
         );
     }
@@ -9810,6 +10226,12 @@ fn constructor_param_shape_constraints_with_declared_source_types(
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
     }
     if let Some(binding) = binding {
+        if native_map_literal_null_key_type(binding).is_some() {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::NullableMapKey],
+            );
+        }
         let type_env = signature_type_param_env_for_constructor(ty, ctor);
         push_unique_signature_constraints(
             &mut constraints,
@@ -9894,6 +10316,7 @@ fn constrained_param_plan(
     }) {
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
     }
+    let java_ty = local_java_type_with_signature_constraints(java_ty, &constraints);
     let shape = solve_signature_shape_with_facts(
         representations,
         SignatureShapeRequest::new(
@@ -10048,7 +10471,7 @@ impl MergedSignatureConstraints {
         if let Some(requirement) = &self.slot_view_req {
             apply_required_view(&mut shape, requirement.clone());
         }
-        normalize_borrowed_array_slot_view(&mut shape);
+        normalize_array_slot_view(&mut shape);
         shape
     }
 
@@ -10136,23 +10559,25 @@ impl MergedSignatureConstraints {
                 self.storage_slot =
                     merge_signature_flag_requirement_policy(self.storage_slot, true).kept();
             }
-            SignatureConstraint::NullableSequenceElement => {}
+            SignatureConstraint::NullableSequenceElement | SignatureConstraint::NullableMapKey => {}
         }
     }
 }
 
-fn normalize_borrowed_array_slot_view(shape: &mut RustSlotShape) {
-    if !matches!(
-        shape.ownership,
-        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
-    ) || shape.view != ViewShape::Native
-    {
-        return;
-    }
+fn normalize_array_slot_view(shape: &mut RustSlotShape) {
     let is_array_like = matches!(shape.java_ty, JavaType::Array(_))
         || optional_element_type(&shape.java_ty)
             .is_some_and(|element_ty| matches!(element_ty, JavaType::Array(_)));
-    if is_array_like {
+    if !is_array_like {
+        return;
+    }
+    if shape.ownership == OwnershipShape::Owned && shape.view == ViewShape::Slice {
+        apply_required_view(shape, ViewShape::Native);
+    } else if matches!(
+        shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) && shape.view == ViewShape::Native
+    {
         apply_required_view(shape, ViewShape::Slice);
     }
 }
@@ -10220,7 +10645,7 @@ pub fn signature_constraint_provenance(
         SignatureConstraint::RequiredStorageNullability(NullabilityState::Unknown) => {
             SignatureConstraintProvenance::UnknownStorageRequirement
         }
-        SignatureConstraint::NullableSequenceElement => {
+        SignatureConstraint::NullableSequenceElement | SignatureConstraint::NullableMapKey => {
             SignatureConstraintProvenance::OptionalStorageRequirement
         }
         SignatureConstraint::MutableBinding => {
@@ -11547,6 +11972,11 @@ fn collect_type_signature_constraints(
                         public_api: signature_member_api_boundary_policy(&ctor.modifiers)
                             .public_api(),
                         param_index_by_name: index_names(&param_names),
+                        param_java_types: ctor
+                            .params
+                            .iter()
+                            .map(|param| param.ty.clone())
+                            .collect(),
                         local_index_by_name: index_local_constraints(&locals),
                         local_index_by_binding: index_local_constraints_by_binding(&locals),
                         param_names,
@@ -12066,7 +12496,7 @@ fn source_method_return_nullability_constraints_with_context(
         return Vec::new();
     };
     let source_nullability =
-        collect_binding_nullability_state_map_with_params(body, &method.params);
+        collect_binding_nullability_state_map_with_params_and_context(body, &method.params, ctx);
     let mut states = Vec::new();
     let mut scopes = source_nullability_scopes_for_method(method);
     collect_source_return_nullability_states_from_stmts(
@@ -12271,7 +12701,7 @@ impl<'a> SourceReturnNullabilityContext<'a> {
     fn for_method(
         ty: &'a TypeDecl,
         method: &'a MethodDecl,
-        _body: &Block,
+        body: &Block,
         facts: &'a FactSet,
         active_calls: Vec<SourceReturnNullabilityCallKey>,
     ) -> Self {
@@ -12300,6 +12730,16 @@ impl<'a> SourceReturnNullabilityContext<'a> {
                 field_names.insert(crate::parser::to_snake_case(&field.name));
                 binding_types.insert(field.name.clone(), field.ty.clone());
                 binding_types.insert(crate::parser::to_snake_case(&field.name), field.ty.clone());
+            }
+        }
+        for stmt in &body.statements {
+            if let Stmt::VarDecl {
+                ty, source_name, ..
+            } = stmt
+            {
+                binding_types
+                    .entry(source_name.clone())
+                    .or_insert_with(|| ty.clone());
             }
         }
         Self {
@@ -12335,6 +12775,9 @@ impl<'a> SourceReturnNullabilityContext<'a> {
     }
 
     fn expr_nullability_state(&self, expr: &Expr) -> Option<NullabilityState> {
+        if jdk_map_entry_nullable_accessor_initializer(expr, &self.binding_types) {
+            return Some(NullabilityState::MaybeNull);
+        }
         if let Some(state) = self.type_param_bound_call_nullability_state(expr) {
             return Some(state);
         }
@@ -12520,6 +12963,14 @@ fn collect_binding_nullability_state_map_with_params(
     block: &Block,
     params: &[Param],
 ) -> SourceNullabilityMap {
+    collect_binding_nullability_state_map_with_params_and_context(block, params, None)
+}
+
+fn collect_binding_nullability_state_map_with_params_and_context(
+    block: &Block,
+    params: &[Param],
+    ctx: Option<&SourceReturnNullabilityContext<'_>>,
+) -> SourceNullabilityMap {
     let mut by_name = HashMap::<String, NullabilityState>::new();
     collect_binding_nullability_states_from_stmts(&block.statements, &mut by_name);
     for duplicate in collect_duplicate_declared_local_names(block) {
@@ -12534,6 +12985,7 @@ fn collect_binding_nullability_state_map_with_params(
         &mut scopes,
         &mut by_binding,
         &mut return_by_binding,
+        ctx,
     );
     SourceNullabilityMap {
         by_name,
@@ -13491,6 +13943,17 @@ fn collect_null_comparison_assignment(
 fn source_expr_nullability_state(expr: &Expr) -> Option<NullabilityState> {
     match expr {
         Expr::Literal(Literal::Null) => Some(NullabilityState::DefinitelyNull),
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            resolved: None,
+        } if matches!(name.as_str(), "toString" | "to_string")
+            && matches!(args.as_slice(), [_, Expr::Literal(Literal::Null)])
+            && matches!(receiver.as_ref(), Expr::Var(owner) if matches!(owner.as_str(), "Objects" | "objects" | "java.util.Objects")) =>
+        {
+            Some(NullabilityState::MaybeNull)
+        }
         Expr::Ternary {
             then_expr,
             else_expr,
@@ -13607,6 +14070,7 @@ fn collect_binding_nullability_states_by_binding_from_stmts(
     scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
+    ctx: Option<&SourceReturnNullabilityContext<'_>>,
 ) {
     for stmt in statements {
         collect_binding_nullability_states_by_binding_from_stmt(
@@ -13614,6 +14078,7 @@ fn collect_binding_nullability_states_by_binding_from_stmts(
             scopes,
             states,
             return_states,
+            ctx,
         );
     }
 }
@@ -13623,6 +14088,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
     scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
+    ctx: Option<&SourceReturnNullabilityContext<'_>>,
 ) {
     match stmt {
         Stmt::VarDecl {
@@ -13632,13 +14098,18 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             ..
         } => {
             if let (Some(binding), Some(initializer)) = (binding, initializer)
-                && let Some(state) = source_expr_nullability_state(initializer)
+                && let Some(state) = source_expr_nullability_state(initializer).or_else(|| {
+                    ctx.and_then(|ctx| ctx.field_nullability_for_expr(initializer, scopes))
+                })
             {
                 merge_binding_nullability_state_by_id(states, binding, state);
                 merge_binding_nullability_state_by_id(return_states, binding, state);
             }
             if let (Some(binding), Some(initializer)) = (binding, initializer)
-                && let Some(state) = source_return_direct_nullability_state(initializer)
+                && let Some(state) =
+                    source_return_direct_nullability_state(initializer).or_else(|| {
+                        ctx.and_then(|ctx| ctx.field_nullability_for_expr(initializer, scopes))
+                    })
             {
                 merge_binding_nullability_state_by_id(return_states, binding, state);
             }
@@ -13658,6 +14129,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             if let Expr::Var(name) = target
                 && let Some(binding) = scoped_binding(scopes, name).cloned()
                 && let Some(state) = source_expr_nullability_state(value)
+                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(value, scopes)))
             {
                 merge_binding_nullability_state_by_id(states, &binding, state);
                 merge_binding_nullability_state_by_id(return_states, &binding, state);
@@ -13665,6 +14137,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
             if let Expr::Var(name) = target
                 && let Some(binding) = scoped_binding(scopes, name).cloned()
                 && let Some(state) = source_return_direct_nullability_state(value)
+                    .or_else(|| ctx.and_then(|ctx| ctx.field_nullability_for_expr(value, scopes)))
             {
                 merge_binding_nullability_state_by_id(return_states, &binding, state);
             }
@@ -13702,6 +14175,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             if let Some(else_block) = else_block {
                 let mut else_scope = SourceScope::default();
@@ -13712,6 +14186,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                     scopes,
                     states,
                     return_states,
+                    ctx,
                 );
             }
         }
@@ -13732,6 +14207,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
         }
         Stmt::DoWhile {
@@ -13743,6 +14219,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             collect_binding_nullability_states_by_binding_from_expr(
                 condition,
@@ -13764,6 +14241,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             if let Some(condition) = condition {
                 collect_binding_nullability_states_by_binding_from_expr(
@@ -13792,6 +14270,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             scopes.pop();
         }
@@ -13817,6 +14296,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             scopes.pop();
         }
@@ -13846,6 +14326,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                     scopes,
                     states,
                     return_states,
+                    ctx,
                 );
                 scopes.pop();
             }
@@ -13861,6 +14342,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             collect_binding_nullability_states_by_binding_from_child_block(
                 body,
@@ -13868,6 +14350,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
             for catch in catches {
                 scopes.push(SourceScope::default());
@@ -13879,6 +14362,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                     scopes,
                     states,
                     return_states,
+                    ctx,
                 );
                 scopes.pop();
             }
@@ -13889,6 +14373,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                     scopes,
                     states,
                     return_states,
+                    ctx,
                 );
             }
         }
@@ -13899,6 +14384,7 @@ fn collect_binding_nullability_states_by_binding_from_stmt(
                 scopes,
                 states,
                 return_states,
+                ctx,
             );
         }
         Stmt::ConstructorInvocation { args, .. } => {
@@ -13925,6 +14411,7 @@ fn collect_binding_nullability_states_by_binding_from_child_block(
     scopes: &mut Vec<SourceScope>,
     states: &mut HashMap<BindingId, NullabilityState>,
     return_states: &mut HashMap<BindingId, NullabilityState>,
+    ctx: Option<&SourceReturnNullabilityContext<'_>>,
 ) {
     scopes.push(scope);
     collect_binding_nullability_states_by_binding_from_stmts(
@@ -13932,6 +14419,7 @@ fn collect_binding_nullability_states_by_binding_from_child_block(
         scopes,
         states,
         return_states,
+        ctx,
     );
     scopes.pop();
 }
@@ -14166,6 +14654,7 @@ fn collect_binding_nullability_states_by_binding_from_expr(
                                     scopes,
                                     states,
                                     return_states,
+                                    None,
                                 );
                             }
                         }
@@ -14177,6 +14666,7 @@ fn collect_binding_nullability_states_by_binding_from_expr(
                                     scopes,
                                     states,
                                     return_states,
+                                    None,
                                 );
                             }
                         }
@@ -14493,6 +14983,18 @@ fn collect_local_constraint_sets_from_stmts(
                     facts,
                     declared_source_types,
                 );
+                if usage
+                    .and_then(|usage| usage.binding_facts_for_declaration_id(&binding))
+                    .is_some_and(|binding_usage| {
+                        native_map_nullable_variable_key_type(binding_usage, source_nullability)
+                            .is_some()
+                    })
+                {
+                    push_unique_signature_constraints(
+                        &mut constraints,
+                        &[SignatureConstraint::NullableMapKey],
+                    );
+                }
                 if initializer.as_ref().is_some_and(|initializer| {
                     local_initializer_requires_owned_storage(initializer, ty)
                 }) {
@@ -14517,6 +15019,19 @@ fn collect_local_constraint_sets_from_stmts(
                     let source_constraints = source_nullability
                         .constraints_for_declaration(name, declared_binding.as_ref());
                     push_unique_signature_constraints(&mut constraints, &source_constraints);
+                }
+                if !matches!(ty, JavaType::Primitive(_) | JavaType::Void)
+                    && initializer.as_ref().is_some_and(|initializer| {
+                        jdk_map_entry_nullable_accessor_initializer(initializer, local_types)
+                    })
+                {
+                    retain_only_storage_nullability(&mut constraints, NullabilityState::MaybeNull);
+                    push_unique_signature_constraints(
+                        &mut constraints,
+                        &[SignatureConstraint::RequiredStorageNullability(
+                            NullabilityState::MaybeNull,
+                        )],
+                    );
                 }
                 apply_capture_constraints(&mut constraints, captured, name, ty, facts);
                 let java_ty = initializer
@@ -14768,6 +15283,39 @@ fn collect_local_constraint_sets_from_stmts(
             | Stmt::Unsupported(_) => {}
         }
     }
+}
+
+fn jdk_map_entry_nullable_accessor_initializer(
+    initializer: &Expr,
+    local_types: &HashMap<String, JavaType>,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = initializer
+    else {
+        return false;
+    };
+    if !matches!(
+        (name.as_str(), args.len()),
+        ("getKey" | "getValue", 0) | ("setValue", 1)
+    ) {
+        return false;
+    }
+    let Expr::Var(receiver_name) = receiver.as_ref() else {
+        return false;
+    };
+    matches!(
+        local_types.get(receiver_name),
+        Some(JavaType::Named { name, args })
+            if args.len() == 2
+                && matches!(
+                    crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                    "Entry" | "Map.Entry" | "java.util.Map.Entry"
+                )
+    )
 }
 
 fn local_initializer_requires_owned_storage(initializer: &Expr, ty: &JavaType) -> bool {
@@ -15050,6 +15598,114 @@ mod tests {
     use crate::java_ir::{Block, Expr, LambdaParam, Literal, TypeKind};
     use crate::rust_ir::RustType;
     use crate::usage::UsageMethodKey;
+
+    #[test]
+    fn qualified_jdk_map_entry_implementation_survives_resolution() {
+        let source = "class Holder { static class Entry implements java.util.Map.Entry<String, Integer> { public String getKey() { return null; } public Integer getValue() { return null; } public Integer setValue(Integer value) { return value; } } }";
+        let parsed = crate::parser::parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let entry = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .expect("nested entry");
+        assert!(
+            crate::stdlib::source_type_directly_implements_jdk_map_entry(entry),
+            "resolved interfaces: {:?}",
+            entry.implements
+        );
+        let method = entry
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "setValue" => Some(method),
+                _ => None,
+            })
+            .expect("setValue method");
+        let nullable = SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull);
+        let usage = UsageFacts::default();
+        let facts = FactSet::default();
+        let declared_source_types = HashSet::new();
+        let param_constraints = method_param_shape_constraints_with_declared_source_types(
+            entry,
+            method,
+            &method.params[0],
+            &usage,
+            &facts,
+            &declared_source_types,
+        );
+        assert!(param_constraints.contains(&nullable));
+        let return_constraints = method_return_shape_constraints_with_declared_source_types(
+            entry,
+            method,
+            &usage,
+            &facts,
+            &declared_source_types,
+        );
+        assert!(return_constraints.contains(&nullable));
+    }
+
+    #[test]
+    fn map_entry_accessor_returned_from_source_helper_stays_nullable() {
+        let parsed = crate::parser::parse_java_source(
+            "class Caller { static Integer bump(java.util.Map.Entry<String, Integer> entry) { return entry.setValue(10); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let owner = &resolved.program.types[0];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("helper method");
+        let constraints = method_return_shape_constraints_with_declared_source_types(
+            owner,
+            method,
+            &UsageFacts::default(),
+            &FactSet::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
+            ))
+        );
+    }
+
+    #[test]
+    fn map_entry_accessor_returned_from_top_level_local_stays_nullable() {
+        let parsed = crate::parser::parse_java_source(
+            "class Caller { static Integer bump(java.util.TreeMap<String, Integer> map) { java.util.Map.Entry<String, Integer> entry = map.entrySet().iterator().next(); return entry.setValue(7); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let owner = &resolved.program.types[0];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("helper method");
+        let constraints = method_return_shape_constraints_with_declared_source_types(
+            owner,
+            method,
+            &UsageFacts::default(),
+            &FactSet::default(),
+            &HashSet::new(),
+        );
+        assert!(
+            constraints.contains(&SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
+            )),
+            "{constraints:?}"
+        );
+    }
 
     fn binding_fact(name: &str, binding: Option<BindingId>) -> BindingUseFacts {
         BindingUseFacts::new(name, binding, JavaType::String, Vec::new())
@@ -15876,6 +16532,7 @@ class FormatLine extends CompoundLine {
                 boundary: CallArgumentBoundary::Unknown,
                 has_literal_null_arg: true,
                 literal_null_arg_indices: vec![1],
+                argument_bindings: Vec::new(),
             }],
         );
 
@@ -15903,11 +16560,78 @@ class FormatLine extends CompoundLine {
                 boundary: CallArgumentBoundary::Unknown,
                 has_literal_null_arg: true,
                 literal_null_arg_indices: vec![0],
+                argument_bindings: Vec::new(),
             }],
         );
         assert!(
             native_collection_literal_null_element_type(&key_null_binding).is_none(),
             "a null map key must not make the map value nullable"
+        );
+        assert_eq!(
+            native_map_literal_null_key_type(&key_null_binding),
+            Some(optional_java_type(JavaType::String))
+        );
+        assert_eq!(
+            local_java_type_with_signature_constraints(
+                key_null_binding.java_ty(),
+                &[SignatureConstraint::NullableMapKey]
+            ),
+            JavaType::Named {
+                name: "HashMap".to_string(),
+                args: vec![optional_java_type(JavaType::String), JavaType::String],
+            }
+        );
+        assert_eq!(
+            local_java_type_with_signature_constraints(
+                key_null_binding.java_ty(),
+                &[
+                    SignatureConstraint::NullableMapKey,
+                    SignatureConstraint::NullableSequenceElement,
+                ]
+            ),
+            JavaType::Named {
+                name: "HashMap".to_string(),
+                args: vec![
+                    optional_java_type(JavaType::String),
+                    optional_java_type(JavaType::String),
+                ],
+            }
+        );
+    }
+
+    #[test]
+    fn nullable_map_key_argument_uses_exact_binding_identity() {
+        let key = BindingId::new(BindingKind::Local, "key", 0);
+        let shadow = BindingId::new(BindingKind::Local, "key", 1);
+        let map = BindingUseFacts::new(
+            "values",
+            None,
+            JavaType::Named {
+                name: "LinkedHashMap".to_string(),
+                args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+            },
+            vec![BindingUse::ReceiverForCall {
+                name: "put".to_string(),
+                boundary: CallArgumentBoundary::Unknown,
+                has_literal_null_arg: false,
+                literal_null_arg_indices: Vec::new(),
+                argument_bindings: vec![(0, key.clone())],
+            }],
+        );
+        let mut nullability = SourceNullabilityMap::default();
+        nullability
+            .by_binding
+            .insert(shadow, NullabilityState::DefinitelyNull);
+        assert_eq!(
+            native_map_nullable_variable_key_type(&map, &nullability),
+            None
+        );
+        nullability
+            .by_binding
+            .insert(key, NullabilityState::DefinitelyNull);
+        assert_eq!(
+            native_map_nullable_variable_key_type(&map, &nullability),
+            Some(optional_java_type(JavaType::String))
         );
     }
 
@@ -17250,6 +17974,74 @@ class Manifest {
             typed_source_method_return_nullability_constraints(&ty, &method, &facts),
             vec![SignatureConstraint::RequiredStorageNullability(
                 NullabilityState::DefinitelyNonNull
+            )]
+        );
+    }
+
+    #[test]
+    fn source_return_nullability_tracks_field_value_through_returned_local() {
+        let old = BindingId::new(BindingKind::Local, "old", 0);
+        let method = MethodDecl {
+            name: "replace".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::String,
+            throws: Vec::new(),
+            params: Vec::new(),
+            modifiers: Vec::new(),
+            body: Some(Block {
+                statements: vec![
+                    Stmt::VarDecl {
+                        ty: JavaType::String,
+                        name: "old".to_string(),
+                        source_name: "old".to_string(),
+                        initializer: Some(Expr::FieldAccess(
+                            Box::new(Expr::This),
+                            "value".to_string(),
+                        )),
+                        binding: Some(old),
+                    },
+                    Stmt::Return(Some(Expr::Var("old".to_string()))),
+                ],
+            }),
+            span: Span::default(),
+        };
+        let ty = TypeDecl {
+            kind: TypeKind::Class,
+            name: "FieldReturnAlias".to_string(),
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            modifiers: Vec::new(),
+            extends: None,
+            implements: Vec::new(),
+            permits: Vec::new(),
+            members: vec![
+                crate::java_ir::Member::Field(FieldDecl {
+                    name: "value".to_string(),
+                    ty: JavaType::String,
+                    modifiers: Vec::new(),
+                    initializer: None,
+                    span: Span::default(),
+                }),
+                crate::java_ir::Member::Method(method.clone()),
+            ],
+            static_init_blocks: Vec::new(),
+            span: Span::default(),
+        };
+        let mut facts = FactSet::default();
+        facts
+            .field_nullability_facts
+            .push(crate::facts::FieldNullabilityFact {
+                field: crate::facts::FieldKey::named("FieldReturnAlias", "value"),
+                state: NullabilityState::MaybeNull,
+                provenance: crate::facts::FieldNullabilityProvenance::ConstructorAssignments,
+            });
+
+        assert_eq!(
+            typed_source_method_return_nullability_constraints(&ty, &method, &facts),
+            vec![SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
             )]
         );
     }
@@ -19060,6 +19852,7 @@ class Manifest {
                 boundary: CallArgumentBoundary::InternalSameType,
                 has_literal_null_arg: false,
                 literal_null_arg_indices: Vec::new(),
+                argument_bindings: Vec::new(),
             }],
         );
 
@@ -19273,6 +20066,22 @@ class Manifest {
                 OwnershipShape::Owned
             )]
         );
+    }
+
+    #[test]
+    fn owned_array_return_cannot_keep_an_unsized_slice_view() {
+        let shape = apply_signature_constraints(
+            RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::Named {
+                name: "Object".to_string(),
+                args: Vec::new(),
+            }))),
+            &[
+                SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                SignatureConstraint::RequiredView(ViewShape::Slice),
+            ],
+        );
+        assert_eq!(shape.ownership, OwnershipShape::Owned);
+        assert_eq!(shape.view, ViewShape::Native);
     }
 
     #[test]
@@ -19499,6 +20308,12 @@ fn local_shape_constraints_with_usage_and_effective_facts(
                 &[SignatureConstraint::NullableSequenceElement],
             );
         }
+        if native_map_literal_null_key_type(binding).is_some() {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::NullableMapKey],
+            );
+        }
         push_unique_signature_constraints(
             &mut constraints,
             &external_call_return_binding_constraints(binding, facts),
@@ -19588,29 +20403,107 @@ fn native_collection_literal_null_element_type(binding: &BindingUseFacts) -> Opt
     Some(crate::types::optional_java_type(element_ty))
 }
 
+fn native_map_literal_null_key_type(binding: &BindingUseFacts) -> Option<JavaType> {
+    if matches!(
+        crate::stdlib::java_collection_kind_for_type(binding.java_ty()),
+        Some(crate::stdlib::JavaCollectionKind::SortedMap)
+    ) {
+        return None;
+    }
+    let (key_ty, _) = crate::stdlib::java_map_type_args(binding.java_ty())?;
+    if !binding.uses().iter().any(|usage| {
+        matches!(usage,
+            BindingUse::ReceiverForCall { name, literal_null_arg_indices, .. }
+                if matches!(name.as_str(), "put" | "putIfAbsent" | "put_if_absent")
+                    && literal_null_arg_indices.contains(&0)
+        )
+    }) || crate::types::optional_element_type(key_ty).is_some()
+        || matches!(key_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return None;
+    }
+    Some(crate::types::optional_java_type(key_ty.clone()))
+}
+
+fn native_map_nullable_variable_key_type(
+    binding: &BindingUseFacts,
+    source_nullability: &SourceNullabilityMap,
+) -> Option<JavaType> {
+    if matches!(
+        crate::stdlib::java_collection_kind_for_type(binding.java_ty()),
+        Some(crate::stdlib::JavaCollectionKind::SortedMap)
+    ) {
+        return None;
+    }
+    let (key_ty, _) = crate::stdlib::java_map_type_args(binding.java_ty())?;
+    if crate::types::optional_element_type(key_ty).is_some()
+        || matches!(key_ty, JavaType::Primitive(_) | JavaType::Void)
+    {
+        return None;
+    }
+    let has_nullable_key = binding.uses().iter().any(|usage| {
+        let BindingUse::ReceiverForCall {
+            name,
+            argument_bindings,
+            ..
+        } = usage
+        else {
+            return false;
+        };
+        matches!(name.as_str(), "put" | "putIfAbsent" | "put_if_absent")
+            && argument_bindings.iter().any(|(index, argument_binding)| {
+                *index == 0
+                    && source_nullability
+                        .by_binding
+                        .get(argument_binding)
+                        .is_some_and(|state| {
+                            matches!(
+                                state,
+                                NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
+                            )
+                        })
+            })
+    });
+    has_nullable_key.then(|| crate::types::optional_java_type(key_ty.clone()))
+}
+
 fn local_java_type_with_signature_constraints(
     java_ty: &JavaType,
     constraints: &[SignatureConstraint],
 ) -> JavaType {
-    if !constraints.contains(&SignatureConstraint::NullableSequenceElement) {
+    let nullable_value = constraints.contains(&SignatureConstraint::NullableSequenceElement);
+    let nullable_key = constraints.contains(&SignatureConstraint::NullableMapKey);
+    if !nullable_value && !nullable_key {
         return java_ty.clone();
     }
     if let JavaType::Named { name, args } = java_ty
         && crate::stdlib::java_map_type_args(java_ty).is_some()
         && args.len() == 2
     {
-        if crate::types::optional_element_type(&args[1]).is_some()
-            || matches!(args[1], JavaType::Primitive(_) | JavaType::Void)
-        {
-            return java_ty.clone();
-        }
         return JavaType::Named {
             name: name.clone(),
             args: vec![
-                args[0].clone(),
-                crate::types::optional_java_type(args[1].clone()),
+                if nullable_key
+                    && crate::types::optional_element_type(&args[0]).is_none()
+                    && !matches!(args[0], JavaType::Primitive(_) | JavaType::Void)
+                {
+                    crate::types::optional_java_type(args[0].clone())
+                } else {
+                    args[0].clone()
+                },
+                if nullable_value
+                    && crate::types::optional_element_type(&args[1]).is_none()
+                    && !matches!(args[1], JavaType::Primitive(_) | JavaType::Void)
+                {
+                    crate::types::optional_java_type(args[1].clone())
+                } else {
+                    args[1].clone()
+                },
             ],
         };
+    }
+    if !nullable_value {
+        return java_ty.clone();
     }
     let Some(element_ty) = crate::types::sequence_element_type(java_ty) else {
         return java_ty.clone();
@@ -21154,7 +22047,19 @@ fn local_plan(
         representations,
         &mut constraints,
     );
-    let java_ty = local_java_type_with_signature_constraints(java_ty, &constraints);
+    let mut java_ty = local_java_type_with_signature_constraints(java_ty, &constraints);
+    if constraints_require_nullable_storage(&constraints)
+        && java_type_boxed_primitive_storage(&java_ty).is_some()
+        && !facts
+            .type_capability_overrides_for(&java_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource)
+        && crate::types::optional_element_type(&java_ty).is_none()
+    {
+        // A nullable boxed primitive must enter slot planning as a reference
+        // carrier. Otherwise the storage baseline unboxes it to `i32` first,
+        // after which the nullability constraint cannot add `Option`.
+        java_ty = crate::types::optional_java_type(java_ty);
+    }
     let shape = if declared_typed_initializer_should_anchor_local_type(&java_ty, initializer, facts)
     {
         RustSlotShape::for_storage(java_ty.clone())
@@ -21196,6 +22101,10 @@ fn normalize_declared_object_representation_local_constraints(
     representations: &RepresentationPlan,
     constraints: &mut Vec<SignatureConstraint>,
 ) {
+    if java_ty == &JavaType::String {
+        normalize_declared_string_param_constraints(constraints);
+        return;
+    }
     if constraints.contains(&SignatureConstraint::RequiredDispatch(
         DispatchShape::Concrete,
     )) && constraints.contains(&SignatureConstraint::RequiredView(ViewShape::Native))
@@ -23988,6 +24897,18 @@ fn method_return_shape_constraints_with_declared_source_types(
         push_unique_signature_constraints(
             &mut constraints,
             &internal_returned_object_alias_borrow_constraints(ty, method, usage, facts),
+        );
+    }
+    if crate::stdlib::source_type_directly_implements_jdk_map_entry(ty)
+        && matches!(method.name.as_str(), "getKey" | "getValue" | "setValue")
+        && !matches!(method.return_type, JavaType::Primitive(_) | JavaType::Void)
+    {
+        retain_only_storage_nullability(&mut constraints, NullabilityState::MaybeNull);
+        push_unique_signature_constraints(
+            &mut constraints,
+            &[SignatureConstraint::RequiredStorageNullability(
+                NullabilityState::MaybeNull,
+            )],
         );
     }
     constraints

@@ -1,15 +1,364 @@
-# 0056 — Nullable representation is partial; unknown erased display stays loud
+# 0056 — Nullable representation repaired for the audited surface
+
+Closed 2026-09-21. All named repros from this audit are permanent differential
+or generated-crate regressions, the differential known-gap inventory is empty,
+and nullable values now remain explicit until Java's actual dereference or
+unboxing boundary. Those boundaries raise catchable Java exceptions in
+propagating contexts. Unknown external runtime display without source,
+platform, or explicit external `toString` capability evidence remains a loud
+unsupported boundary; fabricating a value there would reintroduce the silent
+semantic corruption this audit was opened to remove.
+
+Codex follow-up 2026-09-21 interface-map parameter boundary:
+`InterfaceMapEntryParameterMutation.java` is promoted. A source helper taking
+`Map<String, Integer>` now receives a generic tracked-map handle, so HashMap,
+LinkedHashMap, and TreeMap callers retain live entry identity through the
+interface slot. The same oracle covers nullable hash/linked keys and values and
+a nullable TreeMap value; the helper's Java-facing `Map.Entry` contract remains
+unchanged.
+`InterfaceMapFieldEntryMutation.java` extends the same nullable carrier to
+instance `Map`/`SortedMap` fields and a process-wide static `Map` field. Null
+keys/values remain explicit while entry mutation, backing-map reads, and entry
+reads observe the same tracked node.
+`InterfaceMapLocalEntryMutation.java` covers nullable `Map` and `SortedMap`
+locals as well; interface declaration no longer prevents promotion to the
+tracked hash/sorted carrier.
+
+The representation trigger is now derived from the native entry operation
+itself: mutated/aliased entry locals, supported map parameters and fields, and
+direct `entrySet().iterator().next()` arguments request the live value carrier.
+The parameter and inline differential fixtures no longer contain unused
+source-defined `Map.Entry` classes merely to activate that representation.
+Mutable inline arguments are emitted as `&mut JavaMapEntryValue`, preserving
+Java `setValue` behavior through the source helper.
+Read-only native entry locals remain lightweight owned tuple snapshots. Their
+accessors now clone from the owned tuple shape before nullable-to-primitive
+conversion, so a null map value raises the catchable `NullPointerException`
+without generating a spurious dereference of the already-owned primitive.
+`NullableMapGetSwitchCatch.java` closes another non-argument coercion: both
+boxed-integer and String values returned by `Map.get` are unwrapped at a Java
+`switch` selector boundary. A missing key now raises a catchable
+`NullPointerException`; present values select the same arms as Java. General
+statement switches now share the selector-lowering path already used by switch
+expressions and return/assignment switches.
+`NullableMapGetPrimitiveContexts.java` extends the same copied-value unwrap to
+Boolean conditions, primitive returns, primitive source-method arguments,
+primitive local assignments, and array indices. The String receiver case is
+covered alongside them. Missing keys raise catchable Java NPEs in every
+context, while present values retain their normal primitive/string behavior;
+borrowed `&T` map values no longer leak into primitive Rust slots.
+The array-index case deliberately indexes an inline `new int[] {...}` value.
+Fallible primitive array reads now copy the checked element inside the block
+that owns or borrows the array source, rather than returning a borrow and
+dereferencing it after an inline array temporary has expired.
+`InlineArrayTemporaryAccess.java` extends this to reference arrays. Typed inline
+array initializers now use nullable `Option<T>` element storage even without an
+enclosing declaration slot, all-null initializers carry an explicit Rust type,
+and a checked read consumes a disposable inline array with `into_iter().nth()`.
+String, null-String/NPE, and source-object elements therefore survive the
+temporary-array boundary without an invalid borrow or a non-null carrier.
+The same oracle uses a side effect in an inline String-array initializer.
+One-argument `substring(begin)` now binds its receiver before deriving the
+implicit end index, so the Java receiver expression is evaluated exactly once.
+
+Codex follow-up 2026-09-21: `NullableMapEntryParameterMutation.java` is
+promoted to `tests/differential/`. Live native-map source parameters are now
+generic over the map's Rust key and value storage, so the same Java
+`HashMap<String, Integer>` helper accepts tracked maps storing nullable or
+present-only keys and values. Its Java-facing live entry remains
+`Map.Entry<String, Integer>` in both cases; Java and Rust print
+`null:7,null:8,null:9:t` after each `setValue` returns the prior null value.
+This closes the pinned nullable
+map-value parameter boundary for HashMap, LinkedHashMap, and TreeMap, not
+arbitrary unresolved/external map carriers.
+
+Codex follow-up 2026-09-21 live nullable map-field boundary: HashMap,
+LinkedHashMap, and TreeMap fields now retain live entry identity, and
+literal-null key/value evidence shapes the tracked field carrier's generic
+arguments as optional storage. `tests/differential/NullableMapFieldEntryMutation.java`
+is promoted; Java and Rust print `null:7,null:8,null:9:a` while the entry's
+Java-facing contract remains `Map.Entry<String, Integer>`.
+
+Codex follow-up 2026-09-21: `NullableHashMapValueConcat.java` is promoted to
+`tests/differential/` and checks nullable boxed-integer values read from
+`HashMap`, `LinkedHashMap`, and `TreeMap`. A `Map.get` over an optional value
+carrier now flattens the borrowed outer lookup result before Java display;
+null renders as `null`, and present integers render normally.
+
+Codex follow-up 2026-09-21: the promoted
+`MixedSourceAndTreeMapEntryAlias.java` oracle now also checks a nullable value
+in a live `TreeMap` entry. Assigning its `getValue()` to primitive `int`
+raises a catchable Java `NullPointerException`, matching the native hash-map
+and source-entry unboxing paths. This is a verified sorted-map entry slice,
+not general null-coercion closure.
+The adjacent `TreeMapEntryParameterMutation.java` helper returns
+`entry.setValue(7)` through a boxed `Integer` return. Return analysis now
+recognizes a top-level local's declared `Map.Entry` type and keeps the nullable
+previous value across that source-method boundary; Java and Rust both print
+`1:7:a` for the present value.
+
+Codex follow-up 2026-09-21: a nullable `Map.Entry<String, Integer>.getValue()`
+assigned to primitive `int` now unwraps through a catchable Java
+`NullPointerException`. `NullableHashMapEntryUnboxingCatch.java` is promoted to
+`tests/differential/` and matches Java (`caught:true`). This closes the direct
+local-unboxing slice for both the owned native-entry snapshot and live
+entry-value carrier; broader null
+coercions and unknown erased display remain open.
+
+The adjacent `NullableMapEntryPrimitiveReturnCatch.java` oracle now checks
+nullable source `Map.Entry` values crossing primitive return, argument,
+assignment, arithmetic, ordered-comparison, and numeric `switch` selector contexts. Each null case is
+caught as Java `NullPointerException`; present values still produce
+`four:4:4:4:5:true` on the present selector/value paths. This closes
+those explicit source-entry conversions, not the wider null-coercion surface.
+
+`NullableMapEntryStringSwitchCatch.java` checks the corresponding nullable
+`String` selector: null is catchable, while `"ok"` and an unmatched present
+string select their Java arms. Source-entry `getValue()` is unwrapped before
+borrowing it as `&str` for the generated Rust `match`.
+
+`NullableMapEntryBooleanConditionCatch.java` extends the same source-entry
+carrier to boxed `Boolean` in `if` conditions, logical negation, and
+short-circuit `&&`/`||`. Null unboxing is catchable only when that operand is
+evaluated; skipped short-circuit operands do not throw. The fixture also checks
+both present Boolean values.
 
 Recorded 2026-08-23.
-Status: **open, narrowed from silent null erasure to explicit nullable carriers,
-catchable null failures, and loud unknown-erased display gaps**.
+Status: **fixed/fenced for the audited surface: explicit nullable carriers,
+catchable null failures, and loud evidence-free external boundaries**.
 Severity: **medium-high, narrowed** — the original everyday null-bearing shapes
 are mostly fixture-backed as explicit nullable carriers, catchable
 `NullPointerException`s, or loud unsupported paths. The remaining live risk is
 unknown erased-object display without source/platform/external `toString`
 evidence, plus broader nullable representation work outside the already-pinned
 fixtures.
-Kind: semantics / lowering.
+Kind: semantics / lowering. **Closed.**
+
+Codex follow-up 2026-09-21: `SourceMapEntryNullComparison.java` is promoted to
+`tests/differential/` and matches Java at `true:true:true:true:true:true`. Direct
+`Map.Entry` carrier calls to `getKey`, `getValue`, and `setValue` now keep their
+single-layer optional result when compared to `null`, including source-defined
+entry implementations. The same rule covers live native ordered-map entries;
+tuple snapshots stay on their existing path. The mixed oracle additionally
+checks null comparisons and catchable empty `entrySet` iteration.
+
+The mixed oracle now sends a live native entry through a source helper that
+returns `entry.setValue(10)`. A null previous value crosses the helper as
+`Option<i32>`, not a bare `i32`; return-nullability planning recognizes the
+`Map.Entry` accessor on an interface-typed parameter. Both Java-oracle and
+signature-constraint tests pin this source-method boundary.
+
+Codex follow-up 2026-09-21: the promoted
+`tests/differential/MixedSourceAndNativeMapEntry.java` now exercises a native
+entry with both null key and null value while a source `Map.Entry`
+implementation is in the same program. The local ordered-map lowering path
+constructs the live entry carrier without nesting optional key/value layers;
+`getKey`, `getValue`, their direct comparisons to `null`, `setValue`,
+`toString`, and `entrySet().contains` match Java. Broader
+nullable receiver/escape shapes remain open.
+
+Codex follow-up 2026-09-21: the native ordered-map live-entry runtime adapter
+now implements `JavaMapEntry<K,V>` for bare or optional map keys and values.
+Generated-crate tests verify that a null key/value crosses `getKey`, `getValue`,
+and `setValue(null)` with one nullable layer, and that a detached entry keeps
+its last value. This was runtime groundwork for the bounded mixed-entry
+lowering path recorded above; native entry locals outside that path can still
+use tuple snapshots.
+
+Codex follow-up 2026-09-21: `NullableMapKeyConstructor.java` is promoted to
+`tests/differential/`. A nullable key passed into a source constructor now
+reaches its key parameter and the constructor's mutable `Map` parameter; the
+caller keeps the same optional-key ordered-map carrier after construction.
+`containsKey(null)`, `get(null)`, and key-set iteration agree with Java. This
+extends the bounded nullable-key path through constructor calls; broader
+unmodeled nullable expressions and unknown external erased display remain open.
+
+Codex follow-up 2026-09-21: `NullableMapKeyParameter.java` is promoted to the
+permanent differential suite. A nullable key local passed into a source method
+now makes its key parameter nullable; `Map.put` inside that method makes the
+map parameter's key carrier nullable, and the callee's requirement propagates
+back to caller map locals. The same method also accepts a present string key.
+The test covers variable-null, present, and literal-null keys through source
+methods, including `put`, lookup, and `keySet().iterator().next()`. This is a
+bounded source-method carrier path, not closure
+of all nullable argument expressions or external erased display.
+
+Codex follow-up 2026-09-21: `NullableMapKeyVariable.java` is promoted to
+`tests/differential/` and matches Java at `true:false:1:null`. The map-key
+constraint now follows the exact binding passed to `Map.put`, so a nullable
+variable key selects `Option<String>` just as a literal-null key does. The
+`keySet().iterator().next()` path preserves that optional key and converts
+iterator exhaustion through the existing Java exception projection. This is a
+bounded local-binding/map-view fix; nullable keys arriving through other
+unmodeled argument expressions remain part of the open representation work.
+
+Codex follow-up 2026-09-21: `NullableMapEntryValueCatch.java` is promoted to
+`tests/differential/` and matches Java at
+`npe:a:7:npe-key:2:1:true:2:9:1:2:0:true:true:true:true:0`. A map entry local
+whose backing map stores `Option<Integer>` now keeps that optional value until
+`getValue().intValue()` actually dereferences it, raising a catchable NPE.
+Literal-null map keys now get their own nullable-key signature constraint,
+independent of nullable map values; `getKey().length()` likewise raises a
+catchable NPE instead of observing a fabricated empty string. The present
+boxed-value control still reads `7`, and the nullable-key map continues to
+support present/null lookup, `getOrDefault`, `containsKey`, key-set and
+entry-set contains/remove, and direct removal. This closes these bounded
+map-entry paths, not general null representation.
+
+Codex follow-up 2026-09-21: source `Map.Entry` implementations now retain
+nullable key/value/old-value method slots and nullable boxed locals receiving
+`getKey`, `getValue`, or `setValue`. The generated-crate and Java-oracle pair
+`tests/differential/SourceMapEntryNullableValue.java` checks both null-to-value
+and value-to-null mutation through an interface reference, while the concrete
+alias sees the same stored value. This is a bounded entry carrier, not closure
+of broader null representation or unknown erased display.
+
+Codex follow-up 2026-09-20: a nullable boxed-primitive instance field
+returned by a source getter no longer becomes `Some(Option<i32>)`. The field
+and return slots were both already `Option<i32>`; shared-self-field recovery
+mistakenly treated the stored optional as a bare element and wrapped it again.
+That branch now applies only when the actual field value is non-optional.
+`NullableBoxedFieldGetter.java` checks Java/Rust `null:2` through null and
+present getter calls. The focused oracle, the full
+`null_representation_fixtures_match_java_output` group (319.49 s), 1,102
+library tests, `cargo check --tests`, `cargo fmt --check`, and `git diff --check`
+pass at this checkpoint.
+
+Codex follow-up 2026-09-20: the same boxed-field oracle now exercises a
+`replace(Integer)` method that returns the previous field value through a
+local binding, including `null -> 1` and `2 -> null` transitions. The return
+signature previously narrowed to `i32` and called `.expect("Java null
+receiver")` on the null old value. The binding-keyed return-nullability pass
+now seeds a local initialized or assigned from a typed source field using the
+field's nullability fact, preserving `Option<i32>` across the method return and
+its callers. Java and translated Rust both produce
+`null:2:null:1:2:null`; unit guard
+`signature::tests::source_return_nullability_tracks_field_value_through_returned_local`
+pins the binding-level fact. The 1,103 library tests, full null-representation
+Java/Rust group (319.02 s), nearby typed-map-entry and erased-source-argument
+oracles, `cargo check --tests`, `cargo fmt --check`, and `git diff --check` pass
+at this checkpoint.
+
+Codex follow-up 2026-09-20: a typed `SimpleEntry<String,String>` boxed as
+`Object` now retains literal-null key and value components as typed `None`
+values, rather than emitting untyped `Default::default()` tuple elements that
+fail to compile. The `ErasedMapEntryTypedDisplay` Java/Rust oracle checks
+`null=null` through a separate `show(Object)` call. This is a bounded
+constructor/erased-display case, not general nullable `Map.Entry` storage.
+Adjacent mixed-element and method-return `Object[]` failures are now fixed.
+An owned boxed String literal is no longer rewritten into a borrowed element;
+`ErasedObjectArrayElements` covers String, integer, and null display. An
+`Object[]` method return now uses an owned vector rather than an unsized slice,
+and borrowed erased elements clone through the runtime helper rather than
+`to_vec()`. `ErasedObjectArrayRoundTrip` checks the returned length, String
+element, and null element against Java. This does not establish array alias
+identity across the method boundary.
+
+Codex follow-up 2026-09-20: nullable enhanced-for iterables now raise
+catchable `NullPointerException` for null array and list receivers, while
+nullable array elements remain explicit loop values. The previous borrowed
+`&Option<String>` binding produced invalid `.cloned()` output on a loop-value
+return. A boxed element assigned to a primitive loop variable now unboxes
+lazily at each iteration and raises a catchable NPE before the body instead of
+silently rendering `null` in arithmetic/string expressions. The
+`NullableEnhancedForCatch.java` Java oracle covers null array/list receivers,
+null element dereference, null and present boxed integers, and reassignment of
+a nullable string element; it is included in the null-representation group.
+The same fixture now checks source-class array elements across member writes,
+read-only use, loop-variable rebinding, and an alias retained outside the
+array. Enhanced-for source elements contribute a storage alias fact, selecting
+shared handles where mutation requires them; cloning a loop handle therefore
+preserves the array's object identity while rebinding remains local to the
+loop variable.
+
+Codex follow-up 2026-09-20: `GenericObjectsToStringDefault.java` now checks
+generic present/null values through `Objects.toString(T, default)`, including a
+literal-null default, a nullable `String` default parameter, and a nullable
+result returned across a source-method boundary. The two-argument call no
+longer falls through to an unimplemented static stub in a generic method;
+nullable defaults preserve `Option<String>` rather than becoming the text
+`"null"`, and return signatures carry that nullability so callers can compare
+the result with Java `null`. A present `Object` holding a source-defined value
+also retains dynamic display through the two-argument route.
+
+Codex follow-up 2026-09-20: `GenericNullableFormatting.java` extends the
+generic nullable-field oracle through `Objects.toString(T)` and
+`String.format("%s", T)`. The latter previously emitted Rust `format!("{}",
+Option<T>)`, which does not compile. Format display arguments now use the same
+Java-null-aware generic helper as concat and `String.valueOf`; String, null,
+boxed integer, and source-defined `toString()` values match Java.
+
+Codex follow-up 2026-09-20: `tests/differential/NullableReceiverMatrix.java`
+confirms catchable NPEs for nullable source-class locals, nullable source-call
+results, `String.substring`, `StringBuilder.length`, and `List.size` receivers.
+The focused oracle passes; these paths are not the remaining null boundary.
+`tests/differential/GenericNullableFieldDisplay.java` pins a shared 0056/0059
+case: a generic `T` field must display both present values and Java `null`.
+It initially failed at `Option<T>::to_string()` and also exposed a constructor
+`Option<T>::clone()` without a `T: Clone` bound. Both failures are now fixed for
+the fixture's single-store constructor and generic display path.
+
+Codex follow-up 2026-09-20: the constructor transfer half is fixed for a
+single-use generic parameter stored once in a nullable field. The usage facts
+record both `StoredInField` and `ContentRead` for that one assignment; treating
+their length as two independent reads had inserted an invalid `Option<T>` clone.
+Generic Java-null-aware display now uses the erased-object runtime dispatcher
+for present `T` values and prints `null` for absent values. The fixture was
+promoted to the differential suite and matches Java at
+`Box(a),Box(null),Box(2),Box(payload)`.
+
+Codex follow-up 2026-09-20: `GenericNullableStringification.java` extends
+that generic field contract through `String.valueOf(Object)` and
+`StringBuilder.append(Object)`. Both now use the same nullable generic display
+helper as concatenation, so present String/integer/source values and absent
+values match Java (`x:x,null:null,2:2,payload:payload`).
+
+Codex follow-up 2026-09-20: `NullableReceiverMatrix` now also checks null
+`String.equals`, `List.get`, `Map.get`, and `Set.contains` receivers against
+Java. Instance `String.equals` first requires a present receiver and raises a
+catchable `NullPointerException`; static `Objects.equals` remains null-safe.
+The latter exposed a separate erased-boundary bug: a declared `String` local
+was solved as `Option<Box<dyn Any>>`. Local constraint normalization now pins
+concrete `String` dispatch as the existing parameter normalizer does, and
+`NullableObjectsEquals.java` is promoted with Java/Rust output `false`.
+
+Codex follow-up 2026-09-20: the expanded `NullableReceiverMatrix` now checks
+instance `Object.equals` separately from static `Objects.equals`. A null
+`Object` receiver throws a catchable `NullPointerException`, including when
+the argument is `null`; `equals(null)` on a present receiver returns `false`.
+For erased `Object` values holding modeled `String` or boxed scalar carriers,
+runtime equality dispatch preserves virtual String equality and boxed-type
+distinctions (`Integer(2)` equals `Integer(2)`, not `Long(2)`). Unknown erased
+runtime equality targets remain an explicit loud gap rather than a fabricated
+Rust `==` result.
+
+Codex follow-up 2026-09-20: `ErasedStringIdentityEquals.java` verifies that
+the erased equality dispatcher recognizes the `JavaString` identity carrier:
+`Object.equals` compares content while a separate `String ==` keeps reference
+identity. The reused String-to-Object local handoff clones the Arc handle so
+the source binding remains usable; `ErasedStringAliasDisplay.java` checks the
+same handoff with the ordinary owned String carrier.
+
+Codex follow-up 2026-09-20: a nullable erased `Object` receiver's direct
+`toString()` call now raises a catchable `NullPointerException` inside a
+propagating `try`, rather than panicking through `Option::expect`. The same
+rewrite reaches `"x" + value.toString()` without changing ordinary
+`"x" + value` null display (`xnull`).
+`tests/differential/NullableErasedToStringCatch.java` runs all three paths
+against Java and is registered in the null and exception fixture groups.
+
+Codex follow-up 2026-09-20: `tests/differential/GenericErasedDisplay.java`
+promotes a source generic display case shared with 0059. Java prints `xBox:Box`
+for a `Box<String>` held as `Object`; previously generated Rust panicked in
+`java_erased_any_to_string` because source downcast generation skipped types
+with parameters. Concrete generic instantiations visible in source `new`
+expressions or declared slots now gain runtime downcast arms, which call
+`toString()` on the live value rather than caching a string. The Java/Rust
+oracle covers explicit `Box<String>` construction and a `Box<Integer>` local
+initialized with diamond syntax; both pass.
+
+This is closed-world recovery for source-created values, not a dynamic display
+contract for unknown external erased values or unresolved generic arguments.
 
 Codex follow-up 2026-09-16 borrowed nullable return lifetime pass:
 representation-aware signature rewriting now only overwrites a parameter type

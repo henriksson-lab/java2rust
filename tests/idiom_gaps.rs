@@ -5602,9 +5602,8 @@ fn nullable_string_format_and_concat_use_java_null_display_policy() {
         translation
             .rust
             .contains("pub fn describe(&self, value: Option<&str>) -> String")
-            && translation.rust.contains(
-                "value.as_ref().map(|value| value.to_string()).unwrap_or_else(|| \"null\".to_string())"
-            )
+            && translation.rust.contains("value.as_ref().map(")
+            && translation.rust.contains(".unwrap_or(\"null\")")
             && !translation.rust.contains("format!(\"value={}\", value)")
             && !translation
                 .rust
@@ -17021,8 +17020,7 @@ class ContextGenericMethod {
 
 #[test]
 fn bounded_comparable_type_parameter_call_keeps_parameter_type() {
-    let translation =
-        translate_source(&fs::read_to_string("claude_audits/repro/GenericBox.java").unwrap());
+    let translation = translate_source(include_str!("fixtures/GenericBox.java"));
     let generic_box_section = translation
         .rust
         .split("pub struct GenericBox<T>")
@@ -34261,7 +34259,7 @@ class MapEntryEnhancedFor {
                 .contains("values: &std::collections::HashMap<String, Box<dyn std::any::Any>>")
             && !translation.rust.contains("values.iter().iter()")
             && !translation.rust.contains(".entry_set()")
-            && !translation.rust.contains(".get_key()"),
+            && !translation.rust.contains("builder.append(entry.get_key())"),
         "{}",
         translation.rust
     );
@@ -34322,6 +34320,223 @@ mod generated_tests {
     #[test]
     fn detached_map_entry_uses_key_and_value_contract() {
         assert_eq!(MapEntryDetachedContract::run().unwrap(), "false,false,2");
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn linked_hash_map_entry_ids_survive_updates_but_not_remove_reinsert() {
+    let translation =
+        translate_source(include_str!("differential/LinkedHashMapReinsertOrder.java"));
+    cargo_test_generated_modules(
+        "linked_hash_map_entry_ids",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn node_ids_track_the_same_entry_not_just_the_same_key() {
+        let mut map = JavaLinkedHashMap::new();
+        map.insert("a".to_string(), 1);
+        map.insert("b".to_string(), 2);
+        let a = map.entry_id("a").unwrap();
+        let b = map.entry_id("b").unwrap();
+        assert_eq!(map.replace_entry_value_by_id(a, 3), Some(1));
+        assert_eq!(map.entry_id("a"), Some(a));
+        assert_eq!(map.entry_by_id(a).map(|(_, value)| *value), Some(3));
+
+        map.retain(|key, _| key != "b");
+        assert!(map.entry_by_id(b).is_none());
+        assert_eq!(map.entry_id("a"), Some(a));
+
+        assert_eq!(map.remove("a"), Some(3));
+        map.insert("a".to_string(), 4);
+        assert_ne!(map.entry_id("a"), Some(a));
+        assert!(map.entry_by_id(a).is_none());
+        assert_eq!(map.replace_entry_value_by_id(a, 5), None);
+        assert_eq!(map.get("a"), Some(&4));
+    }
+
+    #[test]
+    fn native_entry_dispatch_stays_live_then_detaches() {
+        let map = std::rc::Rc::new(std::cell::RefCell::new(JavaLinkedHashMap::new()));
+        map.borrow_mut().insert("a".to_string(), 1);
+        let id = map.borrow().entry_id("a").unwrap();
+        let entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaLinkedHashMapLiveEntry::from_id(map.clone(), id).unwrap(),
+        );
+        assert_eq!(entry.get_key().unwrap(), Some("a".to_string()));
+        assert_eq!(entry.set_value(Some(3)).unwrap(), Some(1));
+        assert_eq!(map.borrow().get("a"), Some(&3));
+        map.borrow_mut().insert("a".to_string(), 5);
+        assert_eq!(entry.get_value().unwrap(), Some(5));
+        assert_eq!(entry.java_to_string().unwrap(), "a=5");
+
+        map.borrow_mut().insert("a".to_string(), 6);
+        assert_eq!(map.borrow_mut().remove("a"), Some(6));
+        map.borrow_mut().insert("a".to_string(), 7);
+        assert_eq!(entry.get_value().unwrap(), Some(6));
+        assert_eq!(entry.set_value(Some(9)).unwrap(), Some(6));
+        assert_eq!(entry.get_value().unwrap(), Some(9));
+        assert_eq!(map.borrow().get("a"), Some(&7));
+    }
+
+    #[test]
+    fn native_nullable_value_entry_does_not_double_wrap_null() {
+        let map = std::rc::Rc::new(std::cell::RefCell::new(JavaLinkedHashMap::new()));
+        map.borrow_mut().insert("a".to_string(), None::<i32>);
+        let id = map.borrow().entry_id("a").unwrap();
+        let entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaLinkedHashMapLiveEntry::from_id(map.clone(), id).unwrap(),
+        );
+        assert_eq!(entry.get_value().unwrap(), None);
+        assert_eq!(entry.java_to_string().unwrap(), "a=null");
+        assert_eq!(entry.set_value(Some(4)).unwrap(), None);
+        assert_eq!(map.borrow().get("a"), Some(&Some(4)));
+        assert_eq!(entry.set_value(None).unwrap(), Some(4));
+        assert_eq!(map.borrow().get("a"), Some(&None));
+        map.borrow_mut().insert("a".to_string(), Some(5));
+        assert_eq!(map.borrow_mut().remove("a"), Some(Some(5)));
+        map.borrow_mut().insert("a".to_string(), Some(7));
+        assert_eq!(entry.get_value().unwrap(), Some(5));
+        assert_eq!(entry.set_value(None).unwrap(), Some(5));
+        assert_eq!(entry.get_value().unwrap(), None);
+        assert_eq!(map.borrow().get("a"), Some(&Some(7)));
+    }
+
+    #[test]
+    fn native_nullable_key_and_value_use_single_null_layers() {
+        let keys = std::rc::Rc::new(std::cell::RefCell::new(JavaLinkedHashMap::new()));
+        keys.borrow_mut().insert(None::<String>, 1);
+        let id = keys.borrow().entry_id(&None::<String>).unwrap();
+        let key_entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaLinkedHashMapLiveEntry::from_id(keys.clone(), id).unwrap(),
+        );
+        assert_eq!(key_entry.get_key().unwrap(), None);
+        assert_eq!(key_entry.get_value().unwrap(), Some(1));
+        assert_eq!(key_entry.java_to_string().unwrap(), "null=1");
+
+        let both = std::rc::Rc::new(std::cell::RefCell::new(JavaLinkedHashMap::new()));
+        both.borrow_mut().insert(None::<String>, None::<i32>);
+        let id = both.borrow().entry_id(&None::<String>).unwrap();
+        let both_entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaLinkedHashMapLiveEntry::from_id(both.clone(), id).unwrap(),
+        );
+        assert_eq!(both_entry.get_key().unwrap(), None);
+        assert_eq!(both_entry.get_value().unwrap(), None);
+        assert_eq!(both_entry.java_to_string().unwrap(), "null=null");
+        assert_eq!(both_entry.set_value(Some(2)).unwrap(), None);
+        assert_eq!(both.borrow().get(&None::<String>), Some(&Some(2)));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn hash_map_live_entry_detaches_after_remove_reinsert() {
+    let translation = translate_source(include_str!(
+        "differential/MixedSourceAndHashMapEntryAlias.java"
+    ));
+    cargo_test_generated_modules(
+        "hash_map_live_entry_detachment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn updates_stay_live_but_new_nodes_do_not_reattach() {
+        let mut native = std::collections::HashMap::new();
+        native.insert("a".to_string(), 1);
+        native.insert("b".to_string(), 8);
+        let first_key = native.keys().next().unwrap().clone();
+        let map = std::rc::Rc::new(std::cell::RefCell::new(JavaTrackedHashMap::from(native)));
+        assert_eq!(map.borrow().keys().next(), Some(&first_key));
+        let id = map.borrow().entry_id("a").unwrap();
+        let entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaHashMapLiveEntry::from_id(map.clone(), id).unwrap(),
+        );
+        assert_eq!(entry.set_value(Some(2)).unwrap(), Some(1));
+        assert_eq!(map.borrow().get("a"), Some(&2));
+        map.borrow_mut().insert("a".to_string(), 3);
+        assert_eq!(entry.get_value().unwrap(), Some(3));
+        assert_eq!(map.borrow_mut().remove("a"), Some(3));
+        map.borrow_mut().insert("a".to_string(), 4);
+        assert_ne!(map.borrow().entry_id("a"), Some(id));
+        assert_eq!(entry.get_value().unwrap(), Some(3));
+        assert_eq!(entry.set_value(Some(5)).unwrap(), Some(3));
+        assert_eq!(map.borrow().get("a"), Some(&4));
+    }
+
+    #[test]
+    fn null_key_and_value_keep_one_option_layer() {
+        let mut map = JavaTrackedHashMap::new();
+        map.insert(None::<String>, None::<i32>);
+        let map = std::rc::Rc::new(std::cell::RefCell::new(map));
+        let id = map.borrow().first_entry_id().unwrap();
+        let entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaHashMapLiveEntry::from_id(map.clone(), id).unwrap(),
+        );
+        assert_eq!(entry.get_key().unwrap(), None);
+        assert_eq!(entry.get_value().unwrap(), None);
+        assert_eq!(entry.java_to_string().unwrap(), "null=null");
+        assert_eq!(entry.set_value(Some(6)).unwrap(), None);
+        assert_eq!(map.borrow().get(&None::<String>), Some(&Some(6)));
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn tree_map_live_entry_preserves_order_and_detaches_after_remove_reinsert() {
+    let translation = translate_source(include_str!(
+        "differential/MixedSourceAndTreeMapEntryAlias.java"
+    ));
+    cargo_test_generated_modules(
+        "tree_map_live_entry_detachment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn sorted_node_identity_tracks_updates_then_detaches() {
+        let mut native = std::collections::BTreeMap::new();
+        native.insert("b".to_string(), 2);
+        native.insert("a".to_string(), 1);
+        let map = std::rc::Rc::new(std::cell::RefCell::new(JavaTrackedTreeMap::from(native)));
+        assert_eq!(map.borrow().keys().next().map(String::as_str), Some("a"));
+        let id = map.borrow().first_entry_id().unwrap();
+        let entry: JavaMapEntryValue<String, i32> = JavaMapEntryValue::from_entry(
+            JavaTreeMapLiveEntry::from_id(map.clone(), id).unwrap(),
+        );
+        assert_eq!(entry.set_value(Some(3)).unwrap(), Some(1));
+        assert_eq!(map.borrow().get("a"), Some(&3));
+        map.borrow_mut().insert("a".to_string(), 5);
+        assert_eq!(entry.get_value().unwrap(), Some(5));
+        assert_eq!(map.borrow_mut().remove("a"), Some(5));
+        map.borrow_mut().insert("a".to_string(), 4);
+        assert_ne!(map.borrow().first_entry_id(), Some(id));
+        assert_eq!(entry.get_value().unwrap(), Some(5));
+        assert_eq!(entry.set_value(Some(6)).unwrap(), Some(5));
+        assert_eq!(map.borrow().get("a"), Some(&4));
     }
 }
 "#,
@@ -45655,5 +45870,160 @@ public class EnumValuesCollectionUser {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn map_entry_runtime_value_preserves_custom_dispatch_and_shared_state() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+class MapEntryCarrierSupportSmoke {
+    static File file() { return new File("x"); }
+}
+"#,
+    );
+    cargo_test_generated_modules_for_translation(
+        "map_entry_runtime_value",
+        translation.rust,
+        r#"
+#[derive(Clone)]
+struct CustomEntry {
+    value: std::rc::Rc<std::cell::RefCell<Option<i32>>>,
+}
+
+impl JavaMapEntry<String, i32> for CustomEntry {
+    fn get_key(&self) -> Result<Option<String>, JavaException> { Ok(Some("k".to_string())) }
+    fn get_value(&self) -> Result<Option<i32>, JavaException> { Ok(*self.value.borrow()) }
+    fn set_value(&self, value: Option<i32>) -> Result<Option<i32>, JavaException> {
+        Ok(self.value.replace(value))
+    }
+    fn java_to_string(&self) -> Result<String, JavaException> {
+        Ok(format!("custom(k={})", self.get_value()?.map_or("null".to_string(), |v| v.to_string())))
+    }
+}
+
+#[test]
+fn custom_entry_value_dispatches_through_shared_aliases() {
+    let state = std::rc::Rc::new(std::cell::RefCell::new(Some(1)));
+    let entry = JavaMapEntryValue::from_entry(CustomEntry { value: state.clone() });
+    let alias = entry.clone();
+    assert_eq!(entry.get_key().unwrap(), Some("k".to_string()));
+    assert_eq!(entry.java_to_string().unwrap(), "custom(k=1)");
+    assert_eq!(alias.set_value(Some(2)).unwrap(), Some(1));
+    assert_eq!(*state.borrow(), Some(2));
+    assert_eq!(entry.get_value().unwrap(), Some(2));
+    assert_eq!(entry.java_to_string().unwrap(), "custom(k=2)");
+}
+"#,
+    );
+}
+
+#[test]
+fn source_map_entry_implementation_emits_value_carrier_support() {
+    let translation = translate_source(include_str!("differential/SourceMapEntryValue.java"));
+    assert!(translation.rust.contains("pub trait JavaMapEntry<K, V>"));
+    assert!(
+        translation
+            .rust
+            .contains("pub struct JavaMapEntryValue<K, V>")
+    );
+    assert!(translation.rust.contains("pub struct JavaException"));
+    assert_eq!(
+        translation
+            .rust
+            .matches("pub trait JavaMapEntry<K, V>")
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn source_map_entry_adapter_dispatches_through_generated_shared_handle() {
+    let translation = translate_source(
+        r#"
+class SourceEntryAdapter {
+    static class Entry implements java.util.Map.Entry<String, Integer> {
+        String key;
+        Integer value;
+        Entry(String key, Integer value) { this.key = key; this.value = value; }
+        public String getKey() { return key; }
+        public Integer getValue() { return value; }
+        public Integer setValue(Integer value) {
+            Integer old = this.value;
+            this.value = value;
+            return old;
+        }
+        public String toString() { return "custom(" + key + "=" + value + ")"; }
+    }
+}
+"#,
+    );
+    cargo_test_generated_modules_for_translation(
+        "source_map_entry_adapter",
+        translation.rust,
+        r#"
+#[test]
+fn generated_source_entry_dispatches_and_mutates_shared_alias() {
+    let concrete = std::rc::Rc::new(std::cell::RefCell::new(
+        SourceEntryAdapter_Entry::new("k".to_string(), 1),
+    ));
+    let entry = JavaMapEntryValue::from_entry(concrete.clone());
+    assert_eq!(entry.get_key().unwrap(), Some("k".to_string()));
+    assert_eq!(entry.java_to_string().unwrap(), "custom(k=1)");
+    assert_eq!(entry.set_value(Some(2)).unwrap(), Some(1));
+    assert_eq!(entry.get_value().unwrap(), Some(2));
+    assert_eq!(concrete.borrow().get_value(), Some(2));
+    assert_eq!(entry.java_to_string().unwrap(), "custom(k=2)");
+}
+"#,
+    );
+}
+
+#[test]
+fn source_map_entry_value_preserves_override_and_concrete_alias() {
+    let translation = translate_source(include_str!("differential/SourceMapEntryValue.java"));
+    cargo_test_generated_modules_for_translation(
+        "source_map_entry_value",
+        translation.rust,
+        r#"
+#[test]
+fn source_map_entry_value_matches_java() {
+    assert_eq!(SourceMapEntryValue::run().unwrap(), "1:custom(k=2):k:2:2");
+}
+"#,
+    );
+}
+
+#[test]
+fn imported_source_map_entry_value_preserves_override_and_alias() {
+    let translation = translate_source(include_str!("differential/SourceMapEntryImported.java"));
+    cargo_test_generated_modules_for_translation(
+        "source_map_entry_imported",
+        translation.rust,
+        r#"
+#[test]
+fn imported_source_entry_matches_java() {
+    assert_eq!(SourceMapEntryImported::run(), "1:imported(k=3):3");
+}
+"#,
+    );
+}
+
+#[test]
+fn source_map_entry_nullable_value_preserves_old_and_new_null() {
+    let translation = translate_source(include_str!(
+        "differential/SourceMapEntryNullableValue.java"
+    ));
+    cargo_test_generated_modules_for_translation(
+        "source_map_entry_nullable_value",
+        translation.rust,
+        r#"
+#[test]
+fn source_entry_nullable_value_matches_java() {
+    assert_eq!(SourceMapEntryNullableValue::run(),
+        "null:nullable(n=4):4:nullable(n=null):null");
+}
+"#,
     );
 }

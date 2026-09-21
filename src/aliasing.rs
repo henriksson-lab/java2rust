@@ -24,12 +24,13 @@
 //! does not have, so until then the honest output is a diagnostic rather than a
 //! clone that compiles and lies.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use crate::diagnostics::{DiagnosticBag, Severity};
 use crate::facts::{FactSet, ReceiverMutabilityFact};
 use crate::java_ir::{Block, Expr, JavaType, Member, Program, Stmt, TypeDecl, UnaryOp};
 use crate::liveness::LivenessAnalysis;
+use crate::representation::RepresentationPlan;
 use crate::types::TypeEnv;
 use crate::usage::{MethodUsageFacts, UsageFacts};
 
@@ -48,6 +49,9 @@ pub(crate) struct ObservableAlias {
     observed_through: String,
     /// The Java type whose reference was copied.
     aliased_ty: JavaType,
+    /// The declared type of the original local, before an interface upcast.
+    original_ty: Option<JavaType>,
+    original_is_live_native_map_entry: bool,
     /// What the write was, for the message.
     mutation: MutationKind,
 }
@@ -60,6 +64,8 @@ impl ObservableAlias {
         mutated_through: String,
         observed_through: String,
         aliased_ty: JavaType,
+        original_ty: Option<JavaType>,
+        original_is_live_native_map_entry: bool,
         mutation: MutationKind,
     ) -> Self {
         Self {
@@ -69,6 +75,8 @@ impl ObservableAlias {
             mutated_through,
             observed_through,
             aliased_ty,
+            original_ty,
+            original_is_live_native_map_entry,
             mutation,
         }
     }
@@ -150,10 +158,13 @@ pub(crate) fn report_observable_aliases(
     program: &Program,
     usage: &UsageFacts,
     facts: &FactSet,
+    representations: &RepresentationPlan,
     into: &mut DiagnosticBag,
 ) {
     for alias in observable_aliases_with_facts(program, usage, facts) {
-        if direct_local_alias_mutation_is_represented(&alias, facts) {
+        if direct_local_alias_mutation_is_represented(&alias, facts)
+            || source_map_entry_alias_mutation_is_represented(&alias, program, representations)
+        {
             continue;
         }
         into.push(
@@ -172,6 +183,46 @@ pub(crate) fn report_observable_aliases(
             None,
         );
     }
+}
+
+fn source_map_entry_alias_mutation_is_represented(
+    alias: &ObservableAlias,
+    program: &Program,
+    representations: &RepresentationPlan,
+) -> bool {
+    if !representations.source_map_entry_uses_value_carrier()
+        || !matches!(alias.mutation(), MutationKind::MutatingCall { .. })
+        || !matches!(alias.aliased_ty(), JavaType::Named { name, args } if args.len() == 2 && matches!(crate::stdlib::canonical_external_receiver_type_key(name).as_str(), "Entry" | "Map.Entry" | "java.util.Map.Entry"))
+    {
+        return false;
+    }
+    if alias.original_is_live_native_map_entry {
+        return true;
+    }
+    let Some(JavaType::Named { name, .. }) = alias.original_ty.as_ref() else {
+        return false;
+    };
+    fn find_source_type<'a>(ty: &'a TypeDecl, name: &str) -> Option<&'a TypeDecl> {
+        if ty.name == name {
+            return Some(ty);
+        }
+        ty.members.iter().find_map(|member| match member {
+            Member::Type(nested) => find_source_type(nested, name),
+            _ => None,
+        })
+    }
+    let Some(source_type) = program
+        .types
+        .iter()
+        .find_map(|ty| find_source_type(ty, name))
+    else {
+        return false;
+    };
+    if !crate::stdlib::source_type_directly_implements_jdk_map_entry(source_type) {
+        return false;
+    }
+    let placement = representations.storage_placement_for(name);
+    placement.shared() && placement.interior_mutable() && !placement.sync()
 }
 
 fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &FactSet) -> bool {
@@ -328,6 +379,8 @@ fn collect_in_body(
             site.handle.clone(),
             other.display(),
             point.ty.clone(),
+            point.original_ty.clone(),
+            point.original_is_live_native_map_entry,
             site.kind.clone(),
         ));
     }
@@ -344,6 +397,8 @@ struct AliasPoint<'a> {
     original: String,
     alias: AliasHandle,
     ty: JavaType,
+    original_ty: Option<JavaType>,
+    original_is_live_native_map_entry: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -376,6 +431,7 @@ impl AliasHandle {
 fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec<AliasPoint<'a>> {
     let mut points = Vec::new();
     let mut local_types = HashMap::new();
+    let mut live_native_map_entries = HashSet::new();
     for stmt in statements {
         match stmt {
             Stmt::VarDecl {
@@ -394,7 +450,15 @@ fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec
                         original: source.clone(),
                         alias: AliasHandle::Local(name.clone()),
                         ty: ty.clone(),
+                        original_ty: local_types.get(source).cloned(),
+                        original_is_live_native_map_entry: live_native_map_entries.contains(source),
                     });
+                }
+                if initializer.as_ref().is_some_and(|initializer| {
+                    native_live_map_entry_initializer(initializer, &local_types)
+                        || matches!(initializer, Expr::Var(source) if live_native_map_entries.contains(source))
+                }) {
+                    live_native_map_entries.insert(name.clone());
                 }
                 local_types.insert(name.clone(), ty.clone());
             }
@@ -419,12 +483,70 @@ fn alias_points<'a>(statements: &[&'a Stmt], liveness: &LivenessAnalysis) -> Vec
                     original: source.clone(),
                     alias,
                     ty: source_ty.clone(),
+                    original_ty: Some(source_ty.clone()),
+                    original_is_live_native_map_entry: live_native_map_entries.contains(source),
                 });
+            }
+            Stmt::Assign {
+                target: Expr::Var(name),
+                value,
+            } => {
+                if !matches!(value, Expr::Var(source) if live_native_map_entries.contains(source)) {
+                    live_native_map_entries.remove(name);
+                }
             }
             _ => {}
         }
     }
     points
+}
+
+fn native_live_map_entry_initializer(
+    initializer: &Expr,
+    local_types: &HashMap<String, JavaType>,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(iterator),
+        name: next_name,
+        args: next_args,
+        ..
+    } = initializer
+    else {
+        return false;
+    };
+    let Expr::Call {
+        receiver: Some(entry_set),
+        name: iterator_name,
+        args: iterator_args,
+        ..
+    } = iterator.as_ref()
+    else {
+        return false;
+    };
+    let Expr::Call {
+        receiver: Some(map),
+        name: entry_set_name,
+        args: entry_set_args,
+        ..
+    } = entry_set.as_ref()
+    else {
+        return false;
+    };
+    let Expr::Var(map_name) = map.as_ref() else {
+        return false;
+    };
+    next_name == "next"
+        && next_args.is_empty()
+        && iterator_name == "iterator"
+        && iterator_args.is_empty()
+        && matches!(entry_set_name.as_str(), "entrySet" | "entry_set")
+        && entry_set_args.is_empty()
+        && local_types.get(map_name).is_some_and(|ty| {
+            crate::stdlib::java_collection_kind_for_type(ty)
+                == Some(crate::stdlib::JavaCollectionKind::InsertionOrderedMap)
+                || matches!(ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
+                    if matches!(name.as_str(), "HashMap" | "java.util.HashMap" | "TreeMap" | "java.util.TreeMap"))
+        })
 }
 
 fn alias_storage_receiver(target: &Expr) -> Option<AliasHandle> {
@@ -1269,6 +1391,7 @@ mod tests {
             &resolved.program,
             &usage,
             &FactSet::default(),
+            &RepresentationPlan::default(),
             &mut diagnostics,
         );
 
@@ -1277,6 +1400,55 @@ mod tests {
             .find(|diagnostic| diagnostic.code() == "observable_alias")
             .unwrap_or_else(|| panic!("expected observable_alias diagnostic: {diagnostics:?}"));
         assert_eq!(diagnostic.severity(), Severity::Error);
+    }
+
+    #[test]
+    fn live_native_map_entry_alias_exemption_requires_supported_map_origin() {
+        fn call(receiver: Expr, name: &str) -> Expr {
+            Expr::Call {
+                receiver: Some(Box::new(receiver)),
+                name: name.to_string(),
+                args: Vec::new(),
+                resolved: None,
+            }
+        }
+        let next = call(
+            call(call(Expr::Var("map".to_string()), "entrySet"), "iterator"),
+            "next",
+        );
+        let mut local_types = HashMap::new();
+        local_types.insert(
+            "map".to_string(),
+            JavaType::Named {
+                name: "java.util.LinkedHashMap".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert!(native_live_map_entry_initializer(&next, &local_types));
+        local_types.insert(
+            "map".to_string(),
+            JavaType::Named {
+                name: "java.util.TreeMap".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert!(native_live_map_entry_initializer(&next, &local_types));
+        local_types.insert(
+            "map".to_string(),
+            JavaType::Named {
+                name: "java.util.HashMap".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert!(native_live_map_entry_initializer(&next, &local_types));
+        local_types.insert(
+            "map".to_string(),
+            JavaType::Named {
+                name: "java.util.Map".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert!(!native_live_map_entry_initializer(&next, &local_types));
     }
 
     /// Symmetric: writing through the new handle is just as observable.
