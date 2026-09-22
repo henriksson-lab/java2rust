@@ -58547,8 +58547,17 @@ fn lower_emitted_source_super_boundary_call(
     else {
         return None;
     };
+    let emitted_declaring_method = find_emitted_context_type_for_super_call(ctx, declaring_type)
+        .is_some_and(|ty| {
+            source_type_has_implemented_instance_method(
+                ty,
+                java_name,
+                rust_name,
+                lowered_args.len(),
+            )
+        });
     if context_type_key_is_summary_only(ctx, declaring_type)
-        || context_type_key_is_in_source_summary(ctx, declaring_type)
+        || (context_type_key_is_in_source_summary(ctx, declaring_type) && !emitted_declaring_method)
     {
         return Some(
             if source_method_identity_returns_result_with_exception_plan(
@@ -58581,7 +58590,13 @@ fn lower_emitted_source_super_boundary_call(
     let super_ty_is_summary_context =
         type_decl_ref_is_from_program(super_ty, ctx.source_summary_type_program)
             || (!type_decl_ref_is_from_program(super_ty, ctx.program)
-                && context_type_key_is_in_source_summary(ctx, &super_ty.name));
+                && context_type_key_is_in_source_summary(ctx, &super_ty.name)
+                && !source_type_has_implemented_instance_method(
+                    super_ty,
+                    java_name,
+                    rust_name,
+                    lowered_args.len(),
+                ));
     if context_type_key_is_summary_only(ctx, &super_ty.name) || super_ty_is_summary_context {
         return Some(
             if source_method_identity_returns_result_with_exception_plan(
@@ -59243,8 +59258,8 @@ fn find_emitted_context_type_for_super_call<'a>(
     type_key: &str,
 ) -> Option<&'a TypeDecl> {
     let owner = SourceContextOwnerKey::new(type_key);
-    owner
-        .find_emitted_context_type(ctx)
+    find_primary_program_type_for_super_call(ctx.program, type_key)
+        .or_else(|| owner.find_emitted_context_type(ctx))
         .or_else(|| owner.find_context_type(ctx))
         .or_else(|| find_emitted_context_type_by_nested_path(ctx, type_key))
         .or_else(|| {
@@ -59376,6 +59391,27 @@ fn source_type_has_instance_method(
             return false;
         };
         !method.modifiers.contains(&Modifier::Static)
+            && method.params.len() == arg_count
+            && (method.name == java_name
+                || method
+                    .rust_name
+                    .as_deref()
+                    .is_some_and(|method_rust_name| method_rust_name == rust_name))
+    })
+}
+
+fn source_type_has_implemented_instance_method(
+    ty: &TypeDecl,
+    java_name: &str,
+    rust_name: &str,
+    arg_count: usize,
+) -> bool {
+    ty.members.iter().any(|member| {
+        let Member::Method(method) = member else {
+            return false;
+        };
+        method.body.is_some()
+            && !method.modifiers.contains(&Modifier::Static)
             && method.params.len() == arg_count
             && (method.name == java_name
                 || method
@@ -59877,9 +59913,32 @@ fn find_source_summary_context_type_by_key<'a>(
     ctx: LowerCtx<'a>,
     type_key: &str,
 ) -> Option<&'a TypeDecl> {
-    find_context_type_and_program_by_key_in_lower_ctx(ctx, type_key).and_then(|(ty, program)| {
-        std::ptr::eq(program, ctx.source_summary_type_program).then_some(ty)
-    })
+    let mut exact = Vec::new();
+    let mut alias = Vec::new();
+    let mut summary_simple = Vec::new();
+    for ty in &ctx.source_summary_type_program.types {
+        collect_context_type_key_program_matches(
+            ty,
+            ctx.source_summary_type_program,
+            type_key,
+            &mut exact,
+            &mut alias,
+            &mut summary_simple,
+        );
+    }
+
+    // Summary declarations are intentionally cloned into the combined support
+    // program. An exact source-summary owner must therefore be selected from
+    // the authoritative summary program instead of rejected as a duplicate
+    // cross-program match. Bare simple-name matches still go through the
+    // combined lookup so different package peers remain ambiguity-refusing.
+    unique_context_type_program_match(&exact)
+        .or_else(|| unique_context_type_program_match(&alias))
+        .or_else(|| {
+            find_context_type_and_program_by_key_in_lower_ctx(ctx, type_key)
+                .filter(|(_, program)| std::ptr::eq(*program, ctx.source_summary_type_program))
+        })
+        .map(|(ty, _)| ty)
 }
 
 fn collect_emitted_context_type_key_program_matches<'a>(

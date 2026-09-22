@@ -7329,10 +7329,9 @@ class Path {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
-            && translation.rust.contains("return path;")
+        translation.rust.contains(
+            "let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample.to_string());",
+        ) && translation.rust.contains("return path;")
             && !translation
                 .rust
                 .contains("let path: Option<Path> = Some(self.lookup.as_ref().unwrap().find"),
@@ -7356,20 +7355,26 @@ fn source_summary_nullable_return_into_concrete_local_unwraps_once() {
 class UsesNullableSourceSummaryConcreteLocal {
     Lookup lookup;
 
-    File run(String sample) {
-        Path path = lookup.find(sample);
+    SummaryFile run(String sample) {
+        SummaryPath path = lookup.find(sample);
         return path.toFile();
     }
 }
 "#;
     let summary = r#"
 class Lookup {
-    Path find(String sample) {
-        return sample == null ? null : new Path();
+    SummaryPath find(String sample) {
+        return sample == null ? null : new SummaryPath();
     }
 }
 
-class Path {
+class SummaryPath {
+    SummaryFile toFile() {
+        return new SummaryFile();
+    }
+}
+
+class SummaryFile {
 }
 "#;
     let translation = translate_source_with_context_summary_sources(
@@ -7381,10 +7386,15 @@ class Path {
     assert!(
         translation
             .rust
-            .contains("let path: Option<Path> = self.lookup.as_ref().unwrap().find(sample);")
+            .contains(
+                "let path: Option<SummaryPath> = self.lookup.as_ref().unwrap().find(sample.to_string());",
+            )
             && translation
                 .rust
                 .contains("return path.as_ref().unwrap().to_file();")
+            && translation
+                .rust
+                .contains("pub fn to_file(&self) -> SummaryFile")
             && !translation
                 .rust
                 .contains("Some(self.lookup.as_ref().unwrap().find"),
@@ -18531,8 +18541,14 @@ class Alignment {
     assert!(
         translation
             .rust
-            .contains("java_erased_object_to_string(alignment)")
-            && !translation.rust.contains("alignment.to_string()"),
+            .contains("eprintln!(\"{}\", alignment.to_string());")
+            && translation
+                .rust
+                .contains("impl std::fmt::Display for Alignment")
+            && translation.rust.contains("write!(f, \"Alignment@0\")")
+            && !translation
+                .rust
+                .contains("Alignment.toString is not modelled"),
         "{}",
         translation.rust
     );
@@ -18669,7 +18685,9 @@ class Dictionary {
                 .contains("pub fn iterator(&self) -> Option<CloseableIterator>")
             && translation
                 .rust
-                .contains("return self.reader.as_ref().unwrap().header().sam_header().unwrap();")
+                .contains(
+                    "return self.reader.as_ref().unwrap().header().sam_header().expect(\"Java null receiver\");",
+                )
             && !translation.rust.contains("pub fn dictionary(&self) -> ()"),
         "{}",
         translation.rust
@@ -25344,7 +25362,9 @@ class BaseSummaryFormat {
             && translation
                 .rust
                 .contains("let mut __java_self = ChildSummaryFormat { id: None }")
-            && translation.rust.contains("__java_self.set_id(\"CHILD\");")
+            && translation
+                .rust
+                .contains("__java_self.set_id(\"CHILD\".to_string());")
             && translation.rust.contains("return __java_self;"),
         "{}",
         translation.rust

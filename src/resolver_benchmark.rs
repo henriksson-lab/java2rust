@@ -1231,14 +1231,15 @@ pub fn benchmark_java_resolver_config(
     let source_type_modes = source_type_modes_by_name(&parsed_files);
     let source_type_fields = source_type_fields_by_name(&parsed_files);
     let mut representation_facts = external_facts.clone();
-    extend_representation_facts_for_source_summary_superclass_boundaries(
-        parsed_files
-            .iter()
-            .filter(|file| file.mode.emits_rust())
-            .map(|file| &file.parsed.program),
-        &source_type_modes,
-        &mut representation_facts,
-    );
+    let source_summary_boundary_policy =
+        extend_representation_facts_for_source_summary_superclass_boundaries(
+            parsed_files
+                .iter()
+                .filter(|file| file.mode.emits_rust())
+                .map(|file| &file.parsed.program),
+            &source_type_modes,
+            &mut representation_facts,
+        );
     if config.enable_builtin_external_packs() {
         extend_representation_facts_for_builtin_anonymous_targets(
             parsed_files
@@ -1274,7 +1275,11 @@ pub fn benchmark_java_resolver_config(
                 (
                     file.file_label.as_str(),
                     file.mode,
-                    source_index.source_program_for_file(&file.parsed.program, &source_programs),
+                    program_without_source_summary_boundary_types(
+                        source_index
+                            .source_program_for_file(&file.parsed.program, &source_programs),
+                        source_summary_boundary_policy.boundary_types(),
+                    ),
                     &file.parsed.program,
                 )
             }),
@@ -1675,6 +1680,42 @@ fn combined_source_programs_by_package(
             .extend(parsed_file.parsed.program.types.iter().cloned());
     }
     programs
+}
+
+fn program_without_source_summary_boundary_types(
+    mut program: Program,
+    boundary_types: &[String],
+) -> Program {
+    fn retain_non_boundary_members(ty: &mut TypeDecl, boundary_types: &[String]) {
+        ty.members.retain_mut(|member| {
+            let Member::Type(nested) = member else {
+                return true;
+            };
+            if boundary_types.iter().any(|boundary| {
+                boundary == &nested.name
+                    || boundary.rsplit('.').next() == Some(nested.name.as_str())
+                    || crate::parser::to_snake_case(boundary)
+                        == crate::parser::to_snake_case(&nested.name)
+            }) {
+                return false;
+            }
+            retain_non_boundary_members(nested, boundary_types);
+            true
+        });
+    }
+
+    program.types.retain_mut(|ty| {
+        if boundary_types.iter().any(|boundary| {
+            boundary == &ty.name
+                || boundary.rsplit('.').next() == Some(ty.name.as_str())
+                || crate::parser::to_snake_case(boundary) == crate::parser::to_snake_case(&ty.name)
+        }) {
+            return false;
+        }
+        retain_non_boundary_members(ty, boundary_types);
+        true
+    });
+    program
 }
 
 fn package_key(program: &Program) -> String {

@@ -14155,6 +14155,7 @@ struct ExternalApiFacadeSupport {
     erased_object_methods: BTreeMap<(String, usize), ExternalErasedObjectMethod>,
     erased_object_method_conflicts: BTreeSet<(String, usize)>,
     emitted_source_methods: BTreeSet<(String, String, usize)>,
+    source_summary_declared_methods: BTreeSet<(String, String, usize)>,
     erased_source_alias_owners: BTreeSet<String>,
     uses_java_string_runtime_helpers: bool,
     uses_java_string_buffer_runtime_surfaces: bool,
@@ -14739,6 +14740,11 @@ impl ExternalApiFacadeSupport {
                     continue;
                 }
                 let arity = method.params.len();
+                self.source_summary_declared_methods.insert((
+                    owner.clone(),
+                    rust_method.clone(),
+                    arity,
+                ));
                 let effect = prefer_typed_builtin_external_api_effect(
                     facts
                         .external_api_effect_for_receiver_with_arity(
@@ -16911,6 +16917,9 @@ impl ExternalApiFacadeSupport {
                     if source_type_params.contains(&canonical_external_receiver_type_key(owner)) {
                         continue;
                     }
+                    if self.source_declared_facade_shadows.contains(owner) {
+                        continue;
+                    }
                     if source_declared_types.contains(&canonical_external_receiver_type_key(owner))
                     {
                         continue;
@@ -18686,6 +18695,27 @@ impl ExternalApiFacadeSupport {
                     || self.source_declared_facade_shadows.contains(name))
         });
 
+        // A declaration-only summary class still inherits Object.toString.
+        // Generic external-surface synthesis may have installed an
+        // `unimplemented!` inherent method merely because the call was used;
+        // remove that synthetic method unless the summary actually declared
+        // the callable. The Display implementation below then supplies the
+        // deterministic Java Object fallback without recursive ToString calls.
+        for owner in self
+            .source_declared_facade_shadows
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if !self.source_summary_declared_methods.contains(&(
+                owner.clone(),
+                "to_string".to_string(),
+                0,
+            )) {
+                self.remove_instance_methods_named(&owner, "to_string");
+            }
+        }
+
         self.add_known_jdk_static_field_surfaces();
         if self.uses_java_string_runtime_helpers
             && (self.impls.contains_key("Appendable")
@@ -18781,11 +18811,18 @@ impl ExternalApiFacadeSupport {
             }
         }
         for ty in &display_and_eq_types {
+            let source_declared_shadow = self.source_declared_facade_shadows.contains(ty);
+            let source_summary_declares_to_string = self
+                .source_summary_declared_methods
+                .contains(&(ty.clone(), "to_string".to_string(), 0));
             lines.push(external_facade_eq_impl(ty));
             lines.push(external_facade_hash_impl(ty));
             lines.push(external_facade_display_impl(
                 ty,
-                external_type_has_display_to_string_capability(facts, ty),
+                source_summary_declares_to_string
+                    || (!source_declared_shadow
+                        && external_type_has_display_to_string_capability(facts, ty)),
+                source_declared_shadow,
             ));
         }
         if should_emit_level_constants_fallback {
@@ -23219,9 +23256,15 @@ fn external_display_receiver_name_matches(fact_receiver: &str, receiver_type: &s
         || receiver_type == rust_name_for_java_named_type(&canonical)
 }
 
-fn external_facade_display_impl(ty: &str, use_to_string_method: bool) -> String {
+fn external_facade_display_impl(
+    ty: &str,
+    use_to_string_method: bool,
+    source_declared_shadow: bool,
+) -> String {
     let (formatter_arg, body) = if use_to_string_method {
         ("f", "write!(f, \"{}\", self.to_string())".to_string())
+    } else if source_declared_shadow {
+        ("f", format!("write!(f, \"{ty}@0\")"))
     } else if let Some(display_name) = java_platform_object_display_name(ty) {
         ("f", format!("write!(f, \"{display_name}@0\")"))
     } else {
@@ -24298,6 +24341,7 @@ fn source_summary_method_is_used(
     used_calls: &BTreeMap<String, BTreeSet<usize>>,
 ) -> bool {
     [
+        method.name.clone(),
         crate::parser::to_snake_case(&method.name),
         rust_method.to_string(),
     ]
@@ -27177,6 +27221,7 @@ fn external_static_enum_constant_trait_impls(
         lines.push(external_facade_display_impl(
             owner,
             display_capable_external_facade_types(facts).contains(owner),
+            false,
         ));
         for trait_name in trait_impls {
             lines.push(format!("impl {trait_name} for {owner} {{}}"));
