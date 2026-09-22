@@ -4659,11 +4659,22 @@ fn propagated_callee_param_constraints_for_binding<'a>(
     propagated_callee_param_constraints(constraints)
         .into_iter()
         .filter(|constraint| {
-            !callee_erased_object_slot_constraint_should_stay_local(
+            // Array-parameter nullability describes values the callee accepts;
+            // it is not a storage fact about the caller's array binding.
+            // Propagating it backwards turns a freshly allocated `T[]` local
+            // into `Option<Vec<T>>` merely because the callee also accepts
+            // null. Other reference bindings still need this propagation: it
+            // is how nullable source-call initializers and reused nullable
+            // arguments retain their solved optional storage.
+            !(matches!(
                 constraint,
-                caller_binding_ty,
-                callee_slot_is_erased_object,
-            )
+                SignatureConstraint::RequiredStorageNullability(_)
+            ) && crate::types::sequence_element_type(caller_binding_ty).is_some())
+                && !callee_erased_object_slot_constraint_should_stay_local(
+                    constraint,
+                    caller_binding_ty,
+                    callee_slot_is_erased_object,
+                )
         })
         .collect()
 }
@@ -15754,6 +15765,67 @@ mod tests {
     }
 
     #[test]
+    fn nullable_callee_array_param_does_not_make_fresh_caller_local_nullable() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class NullableArrayBoundary {
+    static void copy(double[] input, double[] output) {
+        if (input != null) output[0] = input[0];
+    }
+
+    static void run() {
+        double[] values = new double[2];
+        double[] output = new double[2];
+        copy(values, output);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let semantic =
+            crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &facts);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let ty = &resolved.program.types[0];
+        let copy = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "copy" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let run = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "run" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+
+        let copy_input = &signatures.required_method_signature(ty, copy).params()[0];
+        assert!(copy_input.shape().optional_element_type().is_some());
+        let values = signatures
+            .required_method_signature(ty, run)
+            .locals()
+            .iter()
+            .find(|local| local.name() == "values")
+            .unwrap();
+        assert!(
+            values.shape().optional_element_type().is_none(),
+            "{values:?}"
+        );
+    }
+
+    #[test]
     fn field_assignment_scan_inspects_statement_assignment_target_expressions() {
         let block = Block {
             statements: vec![Stmt::Assign {
@@ -15808,6 +15880,8 @@ mod tests {
     fn external_receiver_constraints_keep_native_collection_mutable_borrow() {
         let parsed = crate::parser::parse_java_source(
             r#"
+package idiom.gaps;
+
 import java.util.List;
 
 class BulkAddAllBorrowed {
@@ -15859,6 +15933,20 @@ class BulkAddAllBorrowed {
             )),
             "addAll receiver should contribute a mutable-borrow signature constraint"
         );
+
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let params = signatures
+            .method_param_plans(ty, method)
+            .expect("merge signature should be solved");
+        assert_eq!(params[0].shape().ownership, OwnershipShape::MutableBorrow);
+        assert_eq!(params[1].shape().ownership, OwnershipShape::SharedBorrow);
     }
 
     #[test]

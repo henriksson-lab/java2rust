@@ -181,12 +181,16 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
     if let Some(element_ty) = shape.optional_element_type() {
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
-        // A Rust `Option` owns its payload.  Rendering an optional Java array
-        // with the array's borrowed slice view produces `Option<[T]>`, which
-        // is unsized and cannot hold assignments such as `bytes = input`.
-        // Keep the element as the native, owned `Vec<T>` carrier instead.
+        // An owned Rust `Option` must store the array payload as `Vec<T>`;
+        // storing the slice itself would produce the unsized `Option<[T]>`.
+        // Borrowed slots are different: their payload is the sized reference,
+        // so retain the view and render `Option<&[T]>`/`Option<&mut [T]>`.
         if matches!(element_shape.java_ty, JavaType::Array(_))
             && element_shape.view == ViewShape::Slice
+            && matches!(
+                element_shape.ownership,
+                OwnershipShape::Owned | OwnershipShape::CopyValue
+            )
         {
             element_shape.view = ViewShape::Native;
             element_shape.ownership = OwnershipShape::Owned;
@@ -2084,6 +2088,33 @@ fn builtin_or_conservative_erased_external_representation(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_array_rendering_preserves_borrowed_slice_ownership() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        let optional_array = crate::types::optional_java_type(JavaType::Array(Box::new(
+            JavaType::Primitive(PrimitiveType::Byte),
+        )));
+
+        for (ownership, expected) in [
+            (OwnershipShape::Owned, "Option<Vec<i8>>"),
+            (OwnershipShape::SharedBorrow, "Option<&[i8]>"),
+            (OwnershipShape::MutableBorrow, "Option<&mut [i8]>"),
+        ] {
+            let mut shape = RustSlotShape::conservative(optional_array.clone());
+            shape.ownership = ownership;
+            shape.view = ViewShape::Slice;
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
+    }
 
     #[test]
     fn no_default_message_policy_stays_inside_slot_render() {

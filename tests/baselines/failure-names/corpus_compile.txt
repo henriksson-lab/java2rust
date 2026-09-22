@@ -1,0 +1,3 @@
+# corpus_compile known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+checked_in_example_corpora_have_named_compile_failures

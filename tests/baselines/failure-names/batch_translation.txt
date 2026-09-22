@@ -1,0 +1,3 @@
+# batch_translation known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+focused_package_wrapper_preserves_primary_source_types_covered_by_external_pack

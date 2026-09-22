@@ -1,0 +1,7 @@
+# object_model known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+object_model_input_usage_contributes_dispatch_requirements
+object_model_keeps_source_interface_dyn_trait_for_resolved_receiver_call
+object_model_uses_erased_object_for_unknown_runtime_objects
+object_model_uses_erased_object_when_trait_objects_are_rejected
+resolved_constructor_interface_flow_keeps_dyn_trait_storage

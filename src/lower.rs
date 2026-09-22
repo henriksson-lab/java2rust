@@ -14716,11 +14716,27 @@ fn lower_optional_array2_receiver_for_rows(
     if crate::types::two_dimensional_array_element_type(&receiver_ty).is_none() {
         return None;
     }
-    let lowered_receiver = lower_expr_with_refinements(receiver, env, ctx, refinements);
+    let lowered_receiver = strip_ndarray_slice_view_projection(lower_expr_with_refinements(
+        receiver,
+        env,
+        ctx,
+        refinements,
+    ));
     Some(make_java_null_expect_catchable_in_propagating_ctx(
         unwrap_java_null_receiver_projection(lowered_receiver),
         ctx,
     ))
+}
+
+fn strip_ndarray_slice_view_projection(expr: RustExpr) -> RustExpr {
+    match expr.into_unshaped() {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "as_slice" && args.is_empty() => *receiver,
+        other => other,
+    }
 }
 
 fn hoist_borrowed_string_temporaries_in_initializer(
@@ -51544,12 +51560,12 @@ fn lower_optional_receiver_field_access_for_slot(
             }
             crate::member_access_plan::MemberAccessOp::Array2RowsAsI32 => {
                 array2_rows_i32_projection(make_java_null_expect_catchable_in_propagating_ctx(
-                    apply_optional_receiver_slot_projection(
+                    strip_ndarray_slice_view_projection(apply_optional_receiver_slot_projection(
                         lowered_receiver.clone(),
                         receiver_plan.projection(),
                         projection_plan.element_shape(),
                         projection_plan.conversion(),
-                    ),
+                    )),
                     ctx,
                 ))
             }

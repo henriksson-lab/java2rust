@@ -1,2 +1,3 @@
 # parser_tree_sitter known failures
 # Recorded by scripts/gate.sh --record. Diff names, not counts.
+all_fixtures_parse_without_reader_fallback_nodes

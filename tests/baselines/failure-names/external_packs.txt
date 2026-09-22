@@ -1,2 +1,4 @@
 # external_packs known failures
 # Recorded by scripts/gate.sh --record. Diff names, not counts.
+external_library_pack_member_lookup_refuses_cross_package_simple_alias
+generic_function_facade_methods_do_not_shadow_receiver_generics

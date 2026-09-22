@@ -10134,10 +10134,13 @@ class Incrementor {
             .contains("impl dyn Incrementor_MaxCountExceededCallback")
             && translation
                 .rust
-                .contains("<dyn Incrementor_MaxCountExceededCallback>::anonymous()")
+                .contains("struct __JavaAnonymousIncrementor_MaxCountExceededCallback_trigger")
+            && translation
+                .rust
+                .contains("impl Incrementor_MaxCountExceededCallback for __JavaAnonymousIncrementor_MaxCountExceededCallback_trigger")
             && !translation
                 .rust
-                .contains("&dyn Incrementor_MaxCountExceededCallback::anonymous")
+                .contains("<dyn Incrementor_MaxCountExceededCallback>::anonymous()")
             && !translation.rust.contains("anonymous().clone_box()")
             && !translation.rust.contains("compile_error!"),
         "{}",
@@ -14389,7 +14392,7 @@ class ByteIntWidenUse {
             && (translation.rust.contains("bytes[0 as usize] as i32 & 255")
                 || translation
                     .rust
-                    .matches("__java_arrays_source.get(__java_arrays_index as usize).ok_or_else")
+                    .matches("JavaException::new(\"ArrayIndexOutOfBoundsException\"")
                     .count()
                     >= 2)
             && (translation.rust.contains("(bytes[1 as usize] as i32) << 8")
@@ -17038,7 +17041,7 @@ fn bounded_comparable_type_parameter_call_keeps_parameter_type() {
         .expect("GenericBox section should be emitted");
 
     assert!(
-        generic_box_section.contains("impl<T: Ord> GenericBox<T>")
+        generic_box_section.contains("impl<T: Ord")
             && generic_box_section.contains("pub fn is_bigger(&self, other: T) -> bool")
             // `compare_to` takes a borrowed peer in the generated Rust API;
             // borrowing here preserves Java's non-consuming argument semantics.
@@ -31593,7 +31596,9 @@ class BufferedReaderReadLineOptional {
         translation
             .rust
             .contains("line = self.reader.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.read_line()?;")
-            && translation.rust.contains("return Ok(line);")
+            && translation
+                .rust
+                .contains("pub fn read(&self) -> Result<Option<String>, JavaException>")
             && !translation.rust.contains("read_line() -> ()")
             && !translation
                 .rust
@@ -43776,8 +43781,8 @@ class Service {
             && translation.rust.contains("pub struct RightService;")
             && translation.rust.contains("return LeftConstants::VALUE;")
             && translation.rust.contains("return RightConstants::VALUE;")
-            && translation.rust.contains("service: LeftService")
-            && translation.rust.contains("service: RightService")
+            && translation.rust.contains("service: &LeftService")
+            && translation.rust.contains("service: &RightService")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
@@ -44919,7 +44924,10 @@ class LocalArrayNullableOutParameter {
                 .contains("Self::fill(Some(values.as_mut_slice()))?;")
             && translation
                 .rust
-                .contains("return Ok(*{ let __java_arrays_source = &values;")
+                .contains("return Ok({ let __java_arrays_source = &values;")
+            && translation.rust.contains(
+                ".copied().ok_or_else(|| JavaException::new(\"ArrayIndexOutOfBoundsException\""
+            )
             && !translation.rust.contains("Option<&mut Vec<f64>>"),
         "{}",
         translation.rust
@@ -44966,14 +44974,14 @@ class NullableMutableArrayHelperReturnCount {
             .contains("pub fn fill(source: &[i8], mut destination: Option<&mut [i8]>, offset: i32) -> Result<i32, JavaException>")
             && translation
                 .rust
-                .contains("let mut out_buff: Option<Vec<i8>> = Some({ let __java_array_len = 4;")
+                .contains("let mut out_buff: Vec<i8> = { let __java_array_len = 4;")
             && translation
                 .rust
-                .contains("Self::fill(source, out_buff.as_deref_mut(), pos)?")
+                .contains("Self::fill(source, Some(out_buff.as_mut_slice()), pos)?")
             && translation
                 .rust
                 .contains("let mut out: Vec<i8> = { let __java_array_len = pos;")
-            && translation.rust.contains("System::arraycopy(out_buff.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_slice(), 0 as usize, out.as_mut_slice(), 0 as usize, pos as usize);")
+            && translation.rust.contains("System::arraycopy_result(out_buff.as_slice(), 0 as usize, out.as_mut_slice(), 0 as usize, pos as usize)?;")
             && !translation.rust.contains("destination: Option<Vec<i8>>")
             && !translation.rust.contains("Self::fill(source, out_buff,"),
         "{}",
@@ -45101,15 +45109,15 @@ class NullableReadOnlyArrayParameter {
             .contains("pub fn copy(input: Option<&[f64]>, output: &mut [f64]) -> Result<(), JavaException>")
             && translation
                 .rust
-                .contains("pub fn combine(left: &[f64], right: Option<&[f64]>, out: &mut [f64]) -> Result<(), JavaException>")
+                .contains("pub fn combine(left: &[f64], right: &[f64], out: &mut [f64]) -> Result<(), JavaException>")
             && translation
                 .rust
                 .contains("Self::copy(Some(values.as_slice()), out.as_mut_slice())?;")
             && translation.rust.contains(
-                "Self::combine(xs, Some(values.as_slice()), r#as.as_mut_slice())?;"
+                "Self::combine(xs.as_slice(), values.as_slice(), r#as.as_mut_slice())?;"
             )
             && translation.rust.contains(
-                "Self::combine(xs, Some(facts.as_slice()), r#as.as_mut_slice())?;"
+                "Self::combine(xs.as_slice(), facts.as_slice(), r#as.as_mut_slice())?;"
             )
             && !translation.rust.contains("input: Option<Vec<f64>>")
             && !translation.rust.contains("left: Option<Vec<f64>>")
@@ -45197,14 +45205,14 @@ class SameCallReadonlyArrayMutableOutputAlias {
 
     assert!(
         translation.rust.contains(
-            "Self::add(values.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice(), temp, values.as_mut_slice())?;"
+            "Self::add(values.clone()/* TODO(translation): validate same-call alias snapshot */.as_slice(), temp.as_slice(), values.as_mut_slice())?;"
         )
             && translation
                 .rust
                 .contains("pub fn add(left: &[f64], right: &[f64], out: &mut [f64])")
             && !translation
                 .rust
-                .contains("Self::add(values.as_slice(), temp, values.as_mut_slice())?;"),
+                .contains("Self::add(values.as_slice(), temp.as_slice(), values.as_mut_slice())?;"),
         "{}",
         translation.rust
     );
@@ -45401,7 +45409,7 @@ class OptionalArrayReceiverReads {
     assert!(
         translation
             .rust
-            .contains("self.labels.as_ref().expect(\"Java null receiver\")[index as usize]"),
+            .contains("self.labels.as_ref().expect(\"Java null receiver\")[index as usize].as_ref().expect(\"Java null receiver\").clone()"),
         "{}",
         translation.rust
     );

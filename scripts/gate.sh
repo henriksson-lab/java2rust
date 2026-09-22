@@ -138,7 +138,10 @@ for target in $targets; do
   fi
   output="$outputs_dir/$target.out"
   cargo test --release --test "$target" > "$output" 2>&1
-  line=$(grep '^test result' "$output" | head -1)
+  # Generated-crate checks can embed their own `test result` lines in a panic
+  # report. The outer harness result is terminal, so only the last result line
+  # describes this target's pass/fail census.
+  line=$(grep '^test result' "$output" | tail -1)
   passed=$(echo "$line" | sed -n 's/.*result: [a-zA-Z]*\. \([0-9]*\) passed.*/\1/p')
   failed=$(echo "$line" | sed -n 's/.*passed; \([0-9]*\) failed.*/\1/p')
   printf '%s\t%s\t%s\n' "$target" "${passed:-?}" "${failed:-?}" >> "$results"
@@ -149,7 +152,7 @@ done
 
 lib_output="$outputs_dir/__lib.out"
 cargo test --release --lib > "$lib_output" 2>&1
-lib_line=$(grep '^test result' "$lib_output" | head -1)
+lib_line=$(grep '^test result' "$lib_output" | tail -1)
 lib_passed=$(echo "$lib_line" | sed -n 's/.*result: [a-zA-Z]*\. \([0-9]*\) passed.*/\1/p')
 lib_failed=$(echo "$lib_line" | sed -n 's/.*passed; \([0-9]*\) failed.*/\1/p')
 printf '%s\t%s\t%s\n' "--lib" "${lib_passed:-?}" "${lib_failed:-?}" >> "$results"

@@ -1767,10 +1767,23 @@ fn analyze_type_usage(
                     .insert(rust_key, method_facts.clone());
                 let rust_key = UsageMethodKey::source_method(ty, method);
                 facts.methods.insert(rust_key, method_facts.clone());
-                facts.methods_by_java_key.insert(
-                    JavaCallableKey::source_method_in_program(program, ty, method),
-                    method_facts.clone(),
-                );
+                let canonical_java_key =
+                    JavaCallableKey::source_method_in_program(program, ty, method);
+                let declaration_java_key = JavaCallableKey::source_method_for_type(ty, method);
+                facts
+                    .methods_by_java_key
+                    .insert(canonical_java_key.clone(), method_facts.clone());
+                // Most declaration consumers hold `&TypeDecl`, whose name is
+                // simple for an ordinary packaged compilation unit because the
+                // package lives on `Program`. Keep that declaration-local key
+                // alongside the package-qualified identity. Batch programs
+                // qualify colliding peers in `TypeDecl::name`, so this does not
+                // collapse `a.Item` and `b.Item` back onto `Item`.
+                if declaration_java_key != canonical_java_key {
+                    facts
+                        .methods_by_java_key
+                        .insert(declaration_java_key, method_facts.clone());
+                }
                 facts.methods.insert(java_key, method_facts);
             }
             Member::Constructor(ctor) => {

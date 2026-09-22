@@ -1,2 +1,4 @@
 # dependency_mode known failures
 # Recorded by scripts/gate.sh --record. Diff names, not counts.
+external_fact_closed_enum_override_cleans_multilevel_hierarchy_shape
+external_fact_hierarchy_override_cleans_breakpoint_evidence_shape

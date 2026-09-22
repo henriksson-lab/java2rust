@@ -3,6 +3,17 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[test]
+fn gate_uses_the_terminal_outer_test_result_not_a_nested_result() {
+    let gate =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/gate.sh")).unwrap();
+
+    assert_eq!(gate.matches("grep '^test result'").count(), 2, "{gate}");
+    assert_eq!(gate.matches("| tail -1").count(), 2, "{gate}");
+    assert!(!gate.contains("grep '^test result' \"$output\" | head -1"));
+    assert!(!gate.contains("grep '^test result' \"$lib_output\" | head -1"));
+}
+
 fn unique_temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "new_java2rust_{name}_{}_{}",

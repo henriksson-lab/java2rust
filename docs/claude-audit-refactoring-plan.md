@@ -839,6 +839,12 @@ last row.
 | `0074` | done | Java UTF-16 `String.compareTo` semantics |
 | `0075` | done | Concrete interface-default overrides |
 | `0076` | done | Enum-values varargs, set carrier, and loop ownership |
+| `0077` | done | Reconciled `idiom_gaps` failure oracle and packaged usage-fact lookup |
+| `0078` | done | Migrated the audited brittle generated-output assertions |
+| `0079` | done | Gate census uses the terminal outer test result |
+| `0080` | done | Nullable array ABI shaping and caller-storage nullability boundary |
+| `0081` | done | Optional mutable-array reborrowing across writes and calls |
+| `0082` | done | Alias-safe readonly/mutable array arguments in one call |
 
 ## Parallel Work Split
 

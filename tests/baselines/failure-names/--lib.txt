@@ -1,2 +1,0 @@
-# --lib known failures
-# Recorded by scripts/gate.sh --record. Diff names, not counts.

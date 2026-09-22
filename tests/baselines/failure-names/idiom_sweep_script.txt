@@ -1,0 +1,4 @@
+# idiom_sweep_script known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+shared_support_merger_merges_erased_object_facade_trait_and_complex_impl
+shared_support_merger_uses_raw_input_for_erased_object_facade_impl

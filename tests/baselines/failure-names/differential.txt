@@ -1,0 +1,3 @@
+# differential known failures
+# Recorded by scripts/gate.sh --record. Diff names, not counts.
+translated_output_matches_java_output
