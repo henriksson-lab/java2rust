@@ -12717,10 +12717,16 @@ pub fn java_string_last_index_of_from<V: AsRef<str>, N: AsRef<str>>(
 }
 
 pub fn java_string_compare_to<L: AsRef<str>, R: AsRef<str>>(left: L, right: R) -> i32 {
-    match left.as_ref().cmp(right.as_ref()) {
-        std::cmp::Ordering::Less => -1,
-        std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater => 1,
+    let mut left = left.as_ref().encode_utf16();
+    let mut right = right.as_ref().encode_utf16();
+    loop {
+        match (left.next(), right.next()) {
+            (Some(left), Some(right)) if left != right => return left as i32 - right as i32,
+            (Some(_), Some(_)) => {}
+            (Some(_), None) => return 1 + left.count() as i32,
+            (None, Some(_)) => return -(1 + right.count() as i32),
+            (None, None) => return 0,
+        }
     }
 }
 

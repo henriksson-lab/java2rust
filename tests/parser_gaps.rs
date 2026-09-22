@@ -881,6 +881,91 @@ class YieldSwitchExpressionSupported {
 }
 
 #[test]
+fn record_pattern_instanceof_is_an_explicit_unsupported_expression() {
+    let parsed = parse_java_source(
+        r#"
+record Point(int x, int y) {}
+
+class RecordPatternUse {
+    boolean matches(Object value) {
+        return value instanceof Point(int x, int y);
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+    assert!(
+        fallbacks.iter().any(|fallback| {
+            fallback.contains("unsupported instanceof record or unnamed pattern")
+        }),
+        "{fallbacks:?}"
+    );
+}
+
+#[test]
+fn string_template_expression_is_an_explicit_unsupported_expression() {
+    let parsed = parse_java_source(
+        r#"
+class StringTemplateUse {
+    String render(String name) {
+        return STR."Hello \{name}";
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+    assert!(
+        fallbacks
+            .iter()
+            .any(|fallback| fallback.contains("template_expression")),
+        "{fallbacks:?}"
+    );
+}
+
+#[test]
+fn module_descriptor_is_reported_instead_of_silently_ignored() {
+    let parsed = parse_java_source(
+        r#"
+module sample.module {
+    requires java.base;
+    exports sample.api;
+}
+"#,
+    );
+
+    assert!(parsed.program.types.is_empty());
+    assert!(parsed.diagnostics.has_code("parse_no_class"));
+}
+
+#[test]
+fn receiver_parameter_is_metadata_not_a_runtime_parameter() {
+    let parsed = parse_java_source(
+        r#"
+class ReceiverParameterUse {
+    void run(ReceiverParameterUse this, int value) {}
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = parsed.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => Some(method),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(method.params.len(), 1);
+    assert_eq!(method.params[0].source_name, "value");
+    assert_eq!(method.params[0].ty, JavaType::Primitive(PrimitiveType::Int));
+}
+
+#[test]
 fn parses_arrow_switch_statement_rules_as_cases() {
     let parsed = parse_java_source(
         r#"

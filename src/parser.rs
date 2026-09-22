@@ -2805,6 +2805,13 @@ fn parse_annotated_type_node(node: tree_sitter::Node, source: &str) -> Option<Ja
 }
 
 fn parse_instanceof_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
+    let right = node.child_by_field_name("right");
+    let pattern = node.child_by_field_name("pattern");
+    if pattern.is_some_and(instanceof_pattern_requires_destructuring)
+        || right.is_some_and(instanceof_pattern_requires_destructuring)
+    {
+        return unsupported_expr_node(node, "unsupported instanceof record or unnamed pattern");
+    }
     Expr::InstanceOf {
         expr: Box::new(
             node.child_by_field_name("left")
@@ -2813,14 +2820,28 @@ fn parse_instanceof_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                     unsupported_expr_node(node, "instanceof_expression without left operand")
                 }),
         ),
-        ty: node
-            .child_by_field_name("right")
+        ty: right
             .map(|right| parse_type_node(right, source))
             .unwrap_or_else(|| JavaType::Unknown("instanceof".to_string())),
         binding: node
             .child_by_field_name("name")
             .map(|name| text(name, source).to_string()),
     }
+}
+
+fn instanceof_pattern_requires_destructuring(node: tree_sitter::Node) -> bool {
+    if matches!(
+        node.kind(),
+        "record_pattern"
+            | "record_pattern_body"
+            | "record_pattern_component"
+            | "underscore_pattern"
+    ) {
+        return true;
+    }
+    named_children(node)
+        .into_iter()
+        .any(instanceof_pattern_requires_destructuring)
 }
 
 fn parse_class_literal_type_node(node: tree_sitter::Node, source: &str) -> JavaType {

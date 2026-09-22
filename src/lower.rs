@@ -27990,6 +27990,16 @@ fn source_java_enum_values_call_owner(
     if name != "values" || !args.is_empty() {
         return None;
     }
+    if let Expr::Var(receiver_name) = receiver.as_ref()
+        && let Some(current_type) = ctx.current_type
+        && let Some(current) = SourceContextOwnerKey::new(current_type).find_context_type(ctx)
+    {
+        let mut nested = Vec::new();
+        collect_nested_enum_owner_candidates(current, receiver_name, &mut nested);
+        if let Some(owner) = nested.into_iter().next() {
+            return Some(owner);
+        }
+    }
     source_type_name_from_expr(receiver, env, ctx)
 }
 
@@ -28689,6 +28699,7 @@ fn nested_type_decl_by_receiver_alias<'a>(
 fn matches_source_java_enum_type(type_name: &str, ctx: LowerCtx) -> bool {
     SourceContextOwnerKey::new(type_name)
         .find_context_type(ctx)
+        .or_else(|| find_emitted_context_type_by_nested_path(ctx, type_name))
         .is_some_and(|ty| ty.kind == TypeKind::Enum)
 }
 

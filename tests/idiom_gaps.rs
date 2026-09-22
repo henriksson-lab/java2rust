@@ -46238,7 +46238,7 @@ public class EnumValuesCollectionUser {
         )
             && translation
                 .rust
-                .contains("mode != EnumValuesCollectionUser_Mode::value_of(")
+                .contains("mode != <EnumValuesCollectionUser_Mode>::value_of(")
             && !translation
                 .rust
                 .contains("vec![EnumValuesCollectionUser_Mode::values()]"),

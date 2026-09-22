@@ -48,9 +48,9 @@ struct MarkerFixture {
 const FIXTURES: &[MarkerFixture] = &[
     MarkerFixture {
         marker: "compile_error",
-        // String reference identity is intentionally loud until string identity
-        // representation exists.
-        java: "public class MarkerCompileError { public boolean m(String a, String b) { return a == b; } }",
+        // Record-pattern destructuring is parsed but intentionally fenced until
+        // the IR can represent its component bindings.
+        java: "record MarkerPoint(int x, int y) {} public class MarkerCompileError { public boolean m(Object value) { return value instanceof MarkerPoint(int x, int y); } }",
         counters: &["invalid_patterns", "compile_error_markers"],
     },
     MarkerFixture {
@@ -501,7 +501,7 @@ fn status_claims_completion(status: &str) -> bool {
 fn tracked_plan_rows() -> Vec<(String, String)> {
     let plan = std::fs::read_to_string(concat_repo_path("docs/claude-audit-refactoring-plan.md"))
         .expect("tracked plan");
-    let mut rows = Vec::new();
+    let mut rows = std::collections::BTreeMap::new();
     for line in plan.lines() {
         let line = line.trim();
         let Some(rest) = line.strip_prefix("| `") else {
@@ -516,14 +516,16 @@ fn tracked_plan_rows() -> Vec<(String, String)> {
         let Some(status) = rest.split('|').nth(1) else {
             continue;
         };
-        rows.push((id.to_string(), status.trim().to_string()));
+        // The plan retains its historical table. Later correction rows are the
+        // authoritative current status for an audit id.
+        rows.insert(id.to_string(), status.trim().to_string());
     }
     assert!(
         rows.len() > 20,
         "the tracked plan table stopped parsing: {} rows",
         rows.len()
     );
-    rows
+    rows.into_iter().collect()
 }
 
 #[test]
@@ -599,7 +601,7 @@ fn audit_readme_links_resolve() {
 #[test]
 fn exception_audit_does_not_reopen_promoted_catch_finally_loop_fixtures() {
     let audit = std::fs::read_to_string(concat_repo_path(
-        "claude_audits/0057-exceptions-are-panics-and-finally-is-a-closure.md",
+        "claude_audits/done/0057-exceptions-are-panics-and-finally-is-a-closure.md",
     ))
     .expect("0057 audit");
 

@@ -2080,11 +2080,27 @@ pub(crate) fn specialized_interface_abstract_contracts<'a>(
     program: &'a Program,
     interface: &'a TypeDecl,
 ) -> Vec<SpecializedInterfaceContract<'a>> {
+    specialized_interface_contracts(program, interface, false)
+}
+
+fn specialized_interface_instance_contracts<'a>(
+    program: &'a Program,
+    interface: &'a TypeDecl,
+) -> Vec<SpecializedInterfaceContract<'a>> {
+    specialized_interface_contracts(program, interface, true)
+}
+
+fn specialized_interface_contracts<'a>(
+    program: &'a Program,
+    interface: &'a TypeDecl,
+    include_defaults: bool,
+) -> Vec<SpecializedInterfaceContract<'a>> {
     fn visit<'a>(
         program: &'a Program,
         interface: &'a TypeDecl,
         substitutions: &HashMap<String, JavaType>,
         depth: usize,
+        include_defaults: bool,
         path: &mut HashSet<String>,
         out: &mut Vec<SpecializedInterfaceContract<'a>>,
     ) {
@@ -2118,13 +2134,23 @@ pub(crate) fn specialized_interface_abstract_contracts<'a>(
                     )
                 })
                 .collect::<HashMap<_, _>>();
-            visit(program, parent, &parent_substitutions, depth + 1, path, out);
+            visit(
+                program,
+                parent,
+                &parent_substitutions,
+                depth + 1,
+                include_defaults,
+                path,
+                out,
+            );
         }
         for member in &interface.members {
             let Member::Method(method) = member else {
                 continue;
             };
-            if method.body.is_some() || method.modifiers.contains(&Modifier::Static) {
+            if (!include_defaults && method.body.is_some())
+                || method.modifiers.contains(&Modifier::Static)
+            {
                 continue;
             }
             let visible_substitutions = substitutions
@@ -2201,6 +2227,7 @@ pub(crate) fn specialized_interface_abstract_contracts<'a>(
         interface,
         &HashMap::new(),
         0,
+        include_defaults,
         &mut HashSet::new(),
         &mut contracts,
     );
@@ -2263,7 +2290,7 @@ fn trait_impl_for_type(
 ) -> Option<String> {
     let trait_name = rust_name_for_java_named_type(trait_name);
     let impl_type_name = rust_name_for_java_named_type(&ty.name);
-    let methods = specialized_interface_abstract_contracts(program, interface)
+    let methods = specialized_interface_instance_contracts(program, interface)
         .into_iter()
         .filter_map(|contract| {
             let method_owner = contract.owner;

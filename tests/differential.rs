@@ -18,8 +18,16 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 440;
+const EXPECTED_DIFFERENTIAL_FIXTURES: usize = 441;
 const EXPECTED_KNOWN_GAP_FIXTURES: usize = 0;
+
+#[test]
+fn string_compare_to_uses_java_utf16_order_and_difference() {
+    let translator = translator_binary().expect("translator binary built");
+    let fixture =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/differential/StringCompareToUtf16.java");
+    compare_fixture(&translator, &fixture, "StringCompareToUtf16").unwrap();
+}
 
 #[test]
 fn generic_source_erased_display_matches_java_output() {

@@ -811,6 +811,35 @@ fall back to the idiom sweep when a stale analysis profile lacks the metric.
 | `0064` the Java-to-Rust name map is a pure non-injective function | open | **critical, live, partly silent.** The name map must be total, injective and single-valued; it is none of the three, because types and methods are named by pure `&str -> String` functions that see neither the package, nor the enclosing chain, nor which identifiers are taken — while fields and locals already use a proper occupancy-set allocator (`allocate_rust_ident`) and never collide. Several package-identity symptoms are patched, including package-qualified source references/class literals, same-package `Item.class.getName()`/fallback `get_class()` returning `a.Item`, context/emitted-context type lookup refusing ambiguous simple package peers instead of taking the first, source supertype conversion field flattening using combined inherited-field lookup instead of merging support and summary answers, and optional current-method display shape lookup resolving owner candidates before reading signature return shapes. The broader first-class type identity work remains. Seven verified repros: `K.AB`/`K.A.B` collapse to one `KAB` (17 rustc errors); `pub type` aliases collide across outers (`E0428` x3); packages are absent from source type identity so `a.Item`/`b.Item` are one `Item`; a file importing `a.Cfg` emits `BCfg::N` **regardless of the import**; `xY`/`x_Y` collide (`E0592`); `g(int[])`/`g(IntArray)` collide and one signature overwrites the other; and `P.Counter` written the legal short way becomes an unmodelled-import facade that panics where Java prints 20 |
 | `0065` the overload suffix is scoped to one file and one level of inheritance | done | Moved back to `claude_audits/done`. Method Rust names for primary sources count overloads through `ProgramSymbols::methods_for_hierarchy`, covering context files, transitive superclasses and implemented interfaces; single-file translation resolves emitted support context before inherited-member materialisation; lower-side source overload retargeting uses typed argument lookup before arity fallback; nested `extends`/`implements` string references are qualified. The 2026-09-06 recheck covers cross-file, interface-default, transitive-superclass, and subclass-added-overload cases with focused compile/runtime tests. |
 
+## Current status corrections
+
+This table is authoritative when an earlier historical row for the same audit
+id has stale status prose. Status tooling resolves duplicate ids by taking the
+last row.
+
+| Audit | Status | Current disposition |
+|---|---|---|
+| `0002` | done | Closure record is in `claude_audits/done` |
+| `0002b` | done | Closure record is in `claude_audits/done` |
+| `0007` | done | Closure record is in `claude_audits/done` |
+| `0023` | done | Closure record is in `claude_audits/done` |
+| `0056` | done | Audited nullability surface is fixed or explicitly fenced |
+| `0058` | done | Audited inheritance surface is fixed or explicitly fenced |
+| `0059` | done | Audited display and collection-contract surface is fixed or fenced |
+| `0061` | done | Audited binding-identity surface is closed |
+| `0064` | done | Audited naming and identity surface is closed |
+| `0066` | done | Inherited source-summary members |
+| `0067` | done | Source-summary overload identity |
+| `0068` | done | Package-qualified source-summary identity |
+| `0069` | done | Source-summary super calls |
+| `0070` | done | Source-summary nullable returns |
+| `0071` | done | Source-summary superclass representation boundary |
+| `0072` | done | Source-summary object stringification |
+| `0073` | done | Remaining Java grammar coverage reconciliation |
+| `0074` | done | Java UTF-16 `String.compareTo` semantics |
+| `0075` | done | Concrete interface-default overrides |
+| `0076` | done | Enum-values varargs, set carrier, and loop ownership |
+
 ## Parallel Work Split
 
 - Worker A: parse gate, coverage counters, unsupported diagnostic escaping, and
