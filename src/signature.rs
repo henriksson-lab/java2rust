@@ -6870,11 +6870,30 @@ fn normalize_borrowed_slice_param_constraints(constraints: &mut Vec<SignatureCon
 fn normalize_param_borrowed_slice_constraints(
     param: &Param,
     constraints: &mut Vec<SignatureConstraint>,
+    facts: &FactSet,
 ) {
     if param.is_varargs && java_varargs_erased_object_carrier_type(&param.ty) {
         return;
     }
     if param.ty == JavaType::String {
+        if facts.java_string_identity_representation {
+            constraints.retain(|constraint| {
+                !matches!(
+                    constraint,
+                    SignatureConstraint::RequiredOwnership(_)
+                        | SignatureConstraint::RequiredView(_)
+                )
+            });
+            push_unique_signature_constraints(
+                constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                    SignatureConstraint::RequiredView(ViewShape::Native),
+                    SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
+                ],
+            );
+            return;
+        }
         normalize_declared_string_param_constraints(constraints);
         return;
     }
@@ -9300,7 +9319,7 @@ fn method_param_shape_constraints_with_declared_source_types(
             )],
         );
     }
-    normalize_param_borrowed_slice_constraints(param, &mut constraints);
+    normalize_param_borrowed_slice_constraints(param, &mut constraints, facts);
     constraints
 }
 
@@ -10302,7 +10321,7 @@ fn constrained_param_plan(
     type_param_scope: TypeParamScope<'_>,
 ) -> ParamPlan {
     let mut constraints = constraints.to_vec();
-    normalize_param_borrowed_slice_constraints(param, &mut constraints);
+    normalize_param_borrowed_slice_constraints(param, &mut constraints, facts);
     normalize_source_hierarchy_param_dispatch_constraints(java_ty, facts, &mut constraints);
     // Call-site subtype observations used to force a closed carrier for every
     // parsed source target.  Interfaces have an authoritative DynTrait
@@ -20335,6 +20354,22 @@ fn local_shape_constraints_for_stmt_with_usage(
         .unwrap_or_else(|| binding_id.is_none() && mutated.contains(name));
     if binding_mutated {
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::MutableBinding]);
+        // A reassigned Java content reference cannot remain a Rust borrow of
+        // its initializer: a later assignment may produce a fresh temporary
+        // whose lifetime ends at the statement.  Parameters already use this
+        // rule; local storage needs the same invariant.
+        if borrowed_content_type_policy(java_ty, facts)
+            .policy()
+            .is_some()
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::Owned),
+                    SignatureConstraint::RequiredView(ViewShape::Native),
+                ],
+            );
+        }
     }
     constraints
 }
@@ -22137,6 +22172,10 @@ fn local_plan(
         representations,
         &mut constraints,
     );
+    let builtin_boxed_primitive = java_type_boxed_primitive_storage(java_ty).is_some()
+        && !facts
+            .type_capability_overrides_for(java_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource);
     let mut java_ty = local_java_type_with_signature_constraints(java_ty, &constraints);
     if constraints_require_nullable_storage(&constraints)
         && java_type_boxed_primitive_storage(&java_ty).is_some()
@@ -22150,7 +22189,14 @@ fn local_plan(
         // after which the nullability constraint cannot add `Option`.
         java_ty = crate::types::optional_java_type(java_ty);
     }
-    let shape = if declared_typed_initializer_should_anchor_local_type(
+    let shape = if builtin_boxed_primitive {
+        // JDK wrapper locals have a native scalar carrier.  Object-accepting
+        // uses (for example DecimalFormat.format(Object)) are conversions at
+        // that call boundary, not evidence that the local itself should be
+        // stored as `Box<dyn Any>`.  Nullability, when required, was encoded
+        // into `java_ty` immediately above and therefore renders as Option<T>.
+        RustSlotShape::for_storage(java_ty.clone())
+    } else if declared_typed_initializer_should_anchor_local_type(
         &java_ty,
         initializer,
         representations,

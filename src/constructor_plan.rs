@@ -48,6 +48,10 @@ pub enum DelegatedConstructorTrailingStmt<'a> {
         field_name: String,
         value: &'a Expr,
     },
+    ExternalSuperFieldAssignment {
+        field_name: String,
+        value: &'a Expr,
+    },
     Statement {
         stmt: &'a Stmt,
     },
@@ -235,11 +239,13 @@ pub(crate) fn delegated_constructor_trailing_stmts_for_lowering(
                         value,
                     })
                 }
-                Expr::Var(field) => Some(DelegatedConstructorTrailingStmt::FieldAssignment {
-                    field_name: crate::parser::to_snake_case_unescaped(field),
-                    value,
-                }),
-                _ => None,
+                // A bare Java name is not structurally a field access: a local or
+                // parameter with the same name shadows the field. Keep it as a
+                // normal statement so lowering can use the binding-aware shape
+                // environment to distinguish the cases. Explicit `this.field`
+                // assignments remain on the constructor-field fast path above.
+                Expr::Var(_) => Some(DelegatedConstructorTrailingStmt::Statement { stmt }),
+                _ => Some(DelegatedConstructorTrailingStmt::Statement { stmt }),
             },
             Stmt::Expr(Expr::Call {
                 receiver: None,
@@ -252,13 +258,14 @@ pub(crate) fn delegated_constructor_trailing_stmts_for_lowering(
             Stmt::Expr(expr) if constructor_trailing_expr_stmt_is_supported(expr) => {
                 Some(DelegatedConstructorTrailingStmt::ExprStatement { expr })
             }
-            Stmt::If { .. } if constructor_trailing_stmt_is_supported(stmt) => {
-                Some(DelegatedConstructorTrailingStmt::Statement { stmt })
-            }
-            Stmt::VarDecl { .. } | Stmt::Try { .. } | Stmt::Block(_) => {
-                Some(DelegatedConstructorTrailingStmt::Statement { stmt })
-            }
-            _ => None,
+            // Once construction has established `__java_self`, every
+            // remaining Java statement is an ordinary body statement. Keep
+            // the specialized cases above for field initialization and
+            // implicit-this calls, and route all other control flow through
+            // the shared statement lowerer instead of silently discarding an
+            // entire constructor when it contains a loop, switch, return, or
+            // other previously unlisted statement.
+            _ => Some(DelegatedConstructorTrailingStmt::Statement { stmt }),
         })
         .collect()
 }
@@ -271,10 +278,6 @@ fn delegated_constructor_trailing_stmts(
 
 fn constructor_trailing_expr_stmt_is_supported(expr: &Expr) -> bool {
     matches!(expr, Expr::Call { .. })
-}
-
-fn constructor_trailing_stmt_is_supported(stmt: &Stmt) -> bool {
-    matches!(stmt, Stmt::If { .. })
 }
 
 pub fn plan_constructor_field_values<'a>(

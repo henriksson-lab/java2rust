@@ -368,6 +368,7 @@ public class Item {
         return 1;
     }
 }
+
 "#
             .to_string(),
         ),
@@ -496,6 +497,337 @@ public class Main {
             ),
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn imported_unique_source_static_owner_uses_its_emitted_declaration_identity() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "jaligner/util/Commons.java".to_string(),
+            r#"
+package jaligner.util;
+
+public abstract class Commons {
+    private static String lineSeparator = "\n";
+    private static boolean jnlp = false;
+    public static String getLineSeparator() { return lineSeparator; }
+    public static void setJnlp(boolean value) { Commons.jnlp = value; }
+    static { setJnlp(jnlp); }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "jaligner/Alignment.java".to_string(),
+            r#"
+package jaligner;
+
+import jaligner.util.Commons;
+
+public class Alignment {
+    public String run() {
+        StringBuffer buffer = new StringBuffer();
+        buffer.append(Commons.getLineSeparator());
+        return buffer.toString();
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let alignment = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "jaligner/Alignment.java")
+        .expect("translated Alignment source");
+    let commons = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "jaligner/util/Commons.java")
+        .expect("translated Commons source");
+
+    assert!(
+        commons.rust().contains("pub struct Commons"),
+        "{}",
+        commons.rust()
+    );
+    assert!(
+        commons.rust().contains("Self::__set_static_jnlp(value);")
+            && commons
+                .rust()
+                .contains("Self::set_jnlp(Self::__static_jnlp());"),
+        "{}",
+        commons.rust()
+    );
+    assert!(
+        alignment.rust().contains("Commons::get_line_separator()")
+            && !alignment
+                .rust()
+                .contains("JalignerCommons::get_line_separator()"),
+        "{}",
+        alignment.rust()
+    );
+}
+
+#[test]
+fn duplicate_static_field_names_resolve_to_the_current_source_declaration() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "a/First.java".to_string(),
+            r#"
+package a;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+public class First {
+    private static final Logger logger = Logger.getLogger(First.class.getName());
+    public static void report(Exception error) {
+        logger.log(Level.WARNING, "first", error);
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "b/Second.java".to_string(),
+            r#"
+package b;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+
+public class Second {
+    private static final Logger logger = Logger.getLogger(Second.class.getName());
+    public static void report(Exception error) {
+        logger.log(Level.WARNING, "second", error);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    for (path, other) in [
+        ("a/First.java", "Second::logger"),
+        ("b/Second.java", "First::logger"),
+    ] {
+        let translation = report
+            .translations()
+            .iter()
+            .find(|translation| translation.path() == path)
+            .expect("translated source");
+        assert!(
+            translation.rust().contains("Self::logger.log_3("),
+            "{}",
+            translation.rust()
+        );
+        assert!(
+            !translation.rust().contains(other),
+            "{}",
+            translation.rust()
+        );
+    }
+}
+
+#[test]
+fn throwing_argument_does_not_make_infallible_cross_file_constructor_fallible() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "Value.java".to_string(),
+            "public class Value { public Value(String text) {} }".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Factory.java".to_string(),
+            r#"
+import java.io.IOException;
+public class Factory {
+    String load() throws IOException { throw new IOException(); }
+    Value make() throws IOException { return new Value(load()); }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let factory = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "Factory.java")
+        .expect("translated Factory source");
+    assert!(
+        factory.rust().contains("Value::new(self.load()?)")
+            && !factory.rust().contains("Value::new(self.load()?)?"),
+        "{}",
+        factory.rust()
+    );
+}
+
+#[test]
+fn concrete_source_comparator_uses_fallible_sort_bridge_when_compare_lowers_to_result() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "LetterComparator.java".to_string(),
+            r#"
+import java.util.Comparator;
+public class LetterComparator implements Comparator<String> {
+    public int compare(String left, String right) {
+        return left.charAt(0) - right.charAt(0);
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Sorter.java".to_string(),
+            r#"
+import java.util.ArrayList;
+import java.util.Collections;
+public class Sorter {
+    public ArrayList<String> sort(ArrayList<String> values) {
+        Collections.sort(values, new LetterComparator());
+        return values;
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let comparator = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "LetterComparator.java")
+        .expect("translated comparator source");
+    let sorter = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "Sorter.java")
+        .expect("translated sorter source");
+    assert!(
+        comparator.rust().contains(
+            "pub fn compare(&self, left: &str, right: &str) -> Result<i32, JavaException>"
+        ),
+        "{}",
+        comparator.rust()
+    );
+    assert!(
+        sorter.rust().contains("java_collection_sort_by_result")
+            && sorter
+                .rust()
+                .contains("__java_comparator.compare(a.clone(), b.clone())"),
+        "{}",
+        sorter.rust()
+    );
+}
+
+#[test]
+fn resolved_source_method_shape_wins_over_same_named_external_method_in_constructor_slot() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "jaligner/ui/filechooser/NamedInputStream.java".to_string(),
+            r#"
+package jaligner.ui.filechooser;
+import java.io.Serializable;
+import java.io.InputStream;
+public class NamedInputStream implements Serializable {
+    private String name = null;
+    private InputStream inputStream = null;
+    public NamedInputStream(String name, InputStream inputStream) {
+        this.name = name;
+        this.inputStream = inputStream;
+    }
+    public String getName() { return this.name; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "jaligner/matrix/Matrix.java".to_string(),
+            "package jaligner.matrix; import java.io.Serializable; public class Matrix implements Serializable { public Matrix(String value, float[][] scores) {} }"
+                .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "jaligner/matrix/MatrixLoader.java".to_string(),
+            r#"
+package jaligner.matrix;
+import jaligner.ui.filechooser.NamedInputStream;
+public class MatrixLoader {
+    public static Matrix make(NamedInputStream nis, float[][] scores) {
+        return new Matrix(nis.getName(), scores);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(3, None),
+        );
+    let holder = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "jaligner/ui/filechooser/NamedInputStream.java")
+        .expect("translated holder source");
+    let use_site = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "jaligner/matrix/MatrixLoader.java")
+        .expect("translated use source");
+    assert!(
+        holder
+            .rust()
+            .contains("pub fn get_name(&self) -> Option<String>"),
+        "{}",
+        holder.rust()
+    );
+    assert!(
+        use_site.rust().contains("nis.get_name().ok_or_else(")
+            || use_site
+                .rust()
+                .contains("nis.get_name().expect(\"Java null receiver\")"),
+        "{}",
+        use_site.rust()
     );
 }
 

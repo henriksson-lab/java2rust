@@ -376,6 +376,9 @@ fn apply_native_java_instance_method(
         }
         NativeJavaInstanceMethod::FileExists => file_exists_projection(receiver),
         NativeJavaInstanceMethod::ReaderReady => RustExpr::Literal("true".to_string()),
+        NativeJavaInstanceMethod::ReaderReadLine => {
+            receiver_method_call_projection(receiver, "read_line", args)
+        }
         NativeJavaInstanceMethod::BufferPut => {
             let Some(arg) = args.into_iter().next() else {
                 return unit_expr();
@@ -435,7 +438,7 @@ fn apply_native_java_instance_method(
             let Some(value) = args.into_iter().next() else {
                 return compile_error_call("Java DecimalFormat.format requires one argument");
             };
-            apply_java_display_plan(value, JavaDisplayPlan::FormatValue)
+            receiver_method_call_projection(receiver, "format", vec![value])
         }
         NativeJavaInstanceMethod::MessageFormatFormat => {
             let Some(value) = args.into_iter().next() else {

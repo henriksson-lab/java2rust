@@ -666,6 +666,7 @@ pub enum NativeJavaInstanceMethod {
     BitSetGet,
     FileExists,
     ReaderReady,
+    ReaderReadLine,
     BufferPut,
     StringReplace,
     StringReplaceFirst,
@@ -1061,6 +1062,12 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             ..
         } => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Boolean,
+        ))),
+        CallTargetPlan::NativeJavaInstance {
+            method: NativeJavaInstanceMethod::ReaderReadLine,
+            ..
+        } => Some(LoweredType::from_java(crate::types::optional_java_type(
+            JavaType::String,
         ))),
         CallTargetPlan::NativeJavaInstance {
             method:
@@ -2789,7 +2796,13 @@ fn plan_native_system_print_stream_statement<'a>(
     if !resolved_call_can_use_native_system_print_stream(resolved) {
         return None;
     }
-    if source_system_print_stream_field_shadows_native_receiver(receiver?, types) {
+    // A resolved `PrintStream` owner is authoritative even when the combined
+    // analysis environment also contains the runtime facade's `System.out` /
+    // `System.err` fields. Shadow checks are only needed for unresolved calls;
+    // otherwise the facade itself is mistaken for a user-defined `System`.
+    if resolved.is_none()
+        && source_system_print_stream_field_shadows_native_receiver(receiver?, types)
+    {
         return None;
     }
     let stream = system_print_stream_receiver(receiver?)?;
@@ -2827,12 +2840,20 @@ fn source_system_print_stream_field_shadows_native_receiver(
     if crate::stdlib::canonical_external_receiver_type_key(owner_name) != "System" {
         return false;
     }
-    matches!(field.as_str(), "out" | "err" | "OUT" | "ERR")
-        && (types.type_field_type(owner_name, field).is_some()
-            || types
-                .static_type_alias(owner_name)
-                .and_then(|alias| types.type_field_type(alias, field))
-                .is_some())
+    if !matches!(field.as_str(), "out" | "err" | "OUT" | "ERR") {
+        return false;
+    }
+    let field_ty = types.type_field_type(owner_name, field).or_else(|| {
+        types
+            .static_type_alias(owner_name)
+            .and_then(|alias| types.type_field_type(alias, field))
+    });
+    field_ty.is_some_and(|field_ty| {
+        let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = field_ty else {
+            return true;
+        };
+        crate::stdlib::canonical_external_receiver_type_key(name) != "PrintStream"
+    })
 }
 
 fn system_print_stream_receiver(receiver: &Expr) -> Option<NativeSystemStream> {
@@ -4366,6 +4387,11 @@ fn plan_native_java_receiver_call<'a>(
         }
         (JavaType::Named { name, .. }, "ready") if arg_count == 0 && is_reader_receiver(name) => {
             NativeJavaInstanceMethod::ReaderReady
+        }
+        (JavaType::Named { name, .. }, "readLine" | "read_line")
+            if arg_count == 0 && is_reader_receiver(name) =>
+        {
+            NativeJavaInstanceMethod::ReaderReadLine
         }
         (JavaType::Named { name, .. }, "put") if arg_count == 1 && is_buffer_receiver(name) => {
             NativeJavaInstanceMethod::BufferPut
@@ -7599,14 +7625,63 @@ mod tests {
             resolved: Some(resolved_instance_call("PrintStream", "println")),
         };
 
+        let mut types = TypeEnv::default();
+        types.insert_type_field(
+            "System",
+            "out",
+            JavaType::Named {
+                name: "PrintStream".to_string(),
+                args: Vec::new(),
+            },
+        );
+
         assert!(matches!(
-            plan_call_statement(&call, &FactSet::default(), &TypeEnv::default()),
+            plan_call_statement(&call, &FactSet::default(), &types),
             Some(CallStatementPlan::NativeSystemPrintStream {
                 stream: NativeSystemStream::Out,
                 method: NativePrintStreamMethod::Println,
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn unresolved_system_print_statement_uses_the_declared_stream_contract() {
+        let call = Expr::Call {
+            receiver: Some(Box::new(Expr::FieldAccess(
+                Box::new(Expr::Var("System".to_string())),
+                "err".to_string(),
+            ))),
+            name: "println".to_string(),
+            args: vec![Expr::Literal(Literal::String("x".to_string()))],
+            resolved: None,
+        };
+        let mut facade_types = TypeEnv::default();
+        facade_types.insert_type_field(
+            "System",
+            "err",
+            JavaType::Named {
+                name: "PrintStream".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert!(matches!(
+            plan_call_statement(&call, &FactSet::default(), &facade_types),
+            Some(CallStatementPlan::NativeSystemPrintStream { .. })
+        ));
+
+        facade_types.insert_type_field(
+            "System",
+            "err",
+            JavaType::Named {
+                name: "Sink".to_string(),
+                args: Vec::new(),
+            },
+        );
+        assert_eq!(
+            plan_call_statement(&call, &FactSet::default(), &facade_types),
+            None
+        );
     }
 
     #[test]

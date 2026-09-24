@@ -2859,7 +2859,12 @@ fn struct_fields_for_type(
                     representations,
                 ),
                 is_pub: false,
-                is_pub_crate: upcast_visible_fields,
+                // External-super storage is synthetic object-model state.
+                // Conversion impls are package support and may be hoisted to
+                // the crate root during multi-file assembly, so they need
+                // crate visibility even when there are no source subtypes in
+                // the current analysis unit.
+                is_pub_crate: true,
             }),
     );
     let mut seen = HashSet::new();

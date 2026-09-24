@@ -845,6 +845,9 @@ last row.
 | `0080` | done | Nullable array ABI shaping and caller-storage nullability boundary |
 | `0081` | done | Optional mutable-array reborrowing across writes and calls |
 | `0082` | done | Alias-safe readonly/mutable array arguments in one call |
+| `0083` | done | Ndarray borrow ownership is applied exactly once |
+| `0084` | done | Static slice constants cross ndarray carrier boundaries explicitly |
+| `0085` | done | Ragged object-array carrier oracle no longer matches `borrow_mut` |
 
 ## Parallel Work Split
 

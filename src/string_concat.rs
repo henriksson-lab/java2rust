@@ -83,8 +83,14 @@ pub(crate) fn binary_add_operands_make_string_concat(
     right: &Expr,
     env: &TypeEnv,
 ) -> bool {
-    matches!(infer_expr_type(left, env), JavaType::String)
-        || matches!(infer_expr_type(right, env), JavaType::String)
+    operand_has_java_string_type(left, env) || operand_has_java_string_type(right, env)
+}
+
+fn operand_has_java_string_type(expr: &Expr, env: &TypeEnv) -> bool {
+    let ty = infer_expr_type(expr, env);
+    matches!(ty, JavaType::String)
+        || crate::types::optional_element_type(&ty)
+            .is_some_and(|element| matches!(element, JavaType::String))
 }
 
 #[cfg(test)]
@@ -105,5 +111,13 @@ mod tests {
         assert!(is_string_concat(&expr, &env));
         assert_eq!(parts.parts().len(), 3);
         assert!(!is_string_concat(&parse_expr("count + 1"), &env));
+    }
+
+    #[test]
+    fn nullable_string_storage_still_selects_java_string_concat() {
+        let mut env = TypeEnv::new();
+        env.insert_local("value", crate::types::optional_java_type(JavaType::String));
+
+        assert!(is_string_concat(&parse_expr("value + value"), &env));
     }
 }

@@ -234,7 +234,18 @@ fn static_constant_owner(receiver: &Expr, member: &str, env: &TypeEnv) -> Option
     if env.local_type(owner).is_some() || (!upper_camel_owner && env.field_type(owner).is_some()) {
         return None;
     }
-    if let Some(alias) = env.static_type_alias(owner) {
+    let member_alias = crate::parser::to_snake_case(member);
+    if env.type_field_type(owner, member).is_some()
+        || env.type_field_type(owner, &member_alias).is_some()
+    {
+        // A source type's simple emitted identity takes precedence over an
+        // import alias carrying its package-qualified Java name.  Rendering
+        // that alias through the external-name mangler would duplicate package
+        // segments such as `jaligner.matrix.Matrix` ->
+        // `JalignerMatrixMatrix` even though the emitted declaration is
+        // `Matrix`.
+        Some(crate::java_naming::rust_name_for_java_named_type(owner))
+    } else if let Some(alias) = env.static_type_alias(owner) {
         Some(crate::java_naming::rust_name_for_java_named_type(alias))
     } else if source_type_static_field_exists(owner, member, env) {
         Some(crate::java_naming::rust_name_for_java_named_type(owner))

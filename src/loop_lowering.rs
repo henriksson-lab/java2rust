@@ -57,6 +57,7 @@ pub fn assignment_condition_loop(
     local_name: &str,
     assigned_value: RustExpr,
     null_test: NullTestKind,
+    bind_non_null_view: bool,
     mut body: Vec<RustStmt>,
     label: Option<String>,
 ) -> RustStmt {
@@ -80,7 +81,7 @@ pub fn assignment_condition_loop(
             else_body: Vec::new(),
         },
     ];
-    if null_test == NullTestKind::NotNull {
+    if null_test == NullTestKind::NotNull && bind_non_null_view {
         loop_body.push(RustStmt::Let {
             mutable: false,
             name: local_name.to_string(),

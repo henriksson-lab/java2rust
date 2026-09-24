@@ -41995,6 +41995,7 @@ fn loop_lowering_owns_classic_for_default_condition_label_and_continue_updates()
             "row",
             RustExpr::Raw("cursor.next()".to_string()),
             NullTestKind::NotNull,
+            true,
             vec![RustStmt::Expr(RustExpr::Raw(
                 "count += row.size()".to_string()
             ))],
@@ -46678,6 +46679,24 @@ fn stdlib_owns_known_jdk_content_method_facts() {
     assert_eq!(bitset_set_abi.return_slot, FacadeSlot::Owned);
     assert_eq!(bitset_set_abi.result, ResultAbi::ResultWrapped);
     assert_eq!(bitset_set_abi.rust_path, "BitSet::set_result");
+
+    let bitset_set_value_abi = stdlib_signature_facts
+        .facade_abi_for_external_method("java.util.BitSet", "set", 2)
+        .expect("BitSet.set(index, value) ABI should come from selected JDK facade facts");
+    assert_eq!(bitset_set_value_abi.receiver, ReceiverAbi::MutBorrowedSelf);
+    assert_eq!(
+        bitset_set_value_abi.args,
+        vec![FacadeSlot::Owned, FacadeSlot::Owned]
+    );
+    assert_eq!(bitset_set_value_abi.result, ResultAbi::ResultWrapped);
+    assert_eq!(bitset_set_value_abi.rust_path, "BitSet::set_2_result");
+
+    let bitset_size_abi = stdlib_signature_facts
+        .facade_abi_for_external_method("java.util.BitSet", "size", 0)
+        .expect("BitSet.size ABI should come from selected JDK facade facts");
+    assert_eq!(bitset_size_abi.receiver, ReceiverAbi::BorrowedSelf);
+    assert_eq!(bitset_size_abi.result, ResultAbi::Plain);
+    assert_eq!(bitset_size_abi.rust_path, "BitSet::size");
 
     let bitset_get_abi = stdlib_signature_facts
         .facade_abi_for_external_method("java.util.BitSet", "get", 1)

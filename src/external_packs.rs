@@ -477,6 +477,11 @@ pub fn modeled_external_super_constructor_state_field(
     {
         return Some("out");
     }
+    if external_type_name_matches(erased, "java.io.FileReader")
+        || external_type_name_matches(erased, "FileReader")
+    {
+        return Some("reader");
+    }
     None
 }
 
@@ -28874,6 +28879,18 @@ fn java_platform_field_fact_set() -> FactSet {
             "java.io.OutputStream",
             NullabilityState::MaybeNull,
         ),
+        (
+            "java.io.FileReader",
+            "reader",
+            "InputStreamReader",
+            NullabilityState::DefinitelyNonNull,
+        ),
+        (
+            "FileReader",
+            "reader",
+            "InputStreamReader",
+            NullabilityState::DefinitelyNonNull,
+        ),
     ] {
         facts.external_field_facts.push(ExternalFieldFact {
             field: FieldKey::named(type_name, field_name),
@@ -30064,6 +30081,8 @@ fn java_platform_api_effects_for_method_arity(
         "java.util.regex.Matcher",
         "Matcher",
         "JavaUtilRegexMatcher",
+        "java.util.logging.Logger",
+        "Logger",
         "java.lang.Class",
         "Class",
     ]
@@ -30091,6 +30110,23 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         return Some(effect);
     }
     let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    if simple_receiver == "Logger"
+        && method_name == "log"
+        && arg_count.is_some_and(|arity| matches!(arity, 2 | 3))
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count,
+            parameter_patterns: None,
+            role: ExternalApiRole::SideEffect,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Void),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if matches!(
         simple_receiver,
         "DecimalFormat" | "NumberFormat" | "DateFormat" | "MessageFormat" | "Format"
@@ -31599,6 +31635,18 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
             }),
     );
     adapters.extend([
+        ExternalConversionAdapterFact {
+            from_type: "java.io.FileReader".to_string(),
+            to_type: "InputStreamReader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "FileReader".to_string(),
+            to_type: "InputStreamReader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
         ExternalConversionAdapterFact {
             from_type: "InputStream".to_string(),
             to_type: "java.io.InputStream".to_string(),

@@ -29,6 +29,7 @@ pub struct ShapeEnv {
     static_field_names: HashMap<String, String>,
     static_field_access_names: HashMap<String, String>,
     static_field_owners: HashMap<String, String>,
+    ambiguous_static_field_owners: HashSet<String>,
     static_storage_field_names: HashMap<String, String>,
     static_storage_field_access_names: HashMap<String, String>,
     /// Declaring type of each static-storage field, so a reference from a
@@ -36,6 +37,10 @@ pub struct ShapeEnv {
     /// instead of assuming `Self`
     /// ([0037](../claude_audits/done/0037-nested-class-outer-static-read-is-capture.md)).
     static_storage_field_owners: HashMap<String, String>,
+    /// Bare static names shared by more than one source type have no global
+    /// owner.  Recording the last declaration made lowering depend on batch
+    /// order and could redirect `logger` (or any repeated field) to a peer.
+    ambiguous_static_storage_field_owners: HashSet<String>,
     /// The type whose members this environment was built for, when known.
     current_type: Option<String>,
     type_static_storage_field_names: HashMap<(String, String), String>,
@@ -915,10 +920,25 @@ impl ShapeEnv {
         let access_name = access_name.into();
         let alias = crate::parser::to_snake_case(&name);
         self.insert_static_field_shape_with_access_name(name.clone(), access_name.clone(), shape);
-        self.static_field_owners.insert(name.clone(), owner.clone());
-        self.static_field_owners
-            .insert(access_name.clone(), owner.clone());
-        self.static_field_owners.entry(alias).or_insert(owner);
+        self.record_static_field_owner(name, &owner);
+        self.record_static_field_owner(access_name, &owner);
+        self.record_static_field_owner(alias, &owner);
+    }
+
+    fn record_static_field_owner(&mut self, name: String, owner: &str) {
+        if self.ambiguous_static_field_owners.contains(&name) {
+            return;
+        }
+        match self.static_field_owners.get(&name) {
+            Some(existing) if existing != owner => {
+                self.static_field_owners.remove(&name);
+                self.ambiguous_static_field_owners.insert(name);
+            }
+            Some(_) => {}
+            None => {
+                self.static_field_owners.insert(name, owner.to_string());
+            }
+        }
     }
 
     fn insert_static_storage_field_shape_with_access_name(
@@ -964,13 +984,26 @@ impl ShapeEnv {
             access_name.clone(),
             shape,
         );
-        self.static_storage_field_owners
-            .insert(name.clone(), owner.to_string());
-        self.static_storage_field_owners
-            .insert(access_name, owner.to_string());
-        self.static_storage_field_owners
-            .entry(alias)
-            .or_insert_with(|| owner.to_string());
+        self.record_static_storage_field_owner(name, owner);
+        self.record_static_storage_field_owner(access_name, owner);
+        self.record_static_storage_field_owner(alias, owner);
+    }
+
+    fn record_static_storage_field_owner(&mut self, name: String, owner: &str) {
+        if self.ambiguous_static_storage_field_owners.contains(&name) {
+            return;
+        }
+        match self.static_storage_field_owners.get(&name) {
+            Some(existing) if existing != owner => {
+                self.static_storage_field_owners.remove(&name);
+                self.ambiguous_static_storage_field_owners.insert(name);
+            }
+            Some(_) => {}
+            None => {
+                self.static_storage_field_owners
+                    .insert(name, owner.to_string());
+            }
+        }
     }
 
     /// The type declaring the static-storage field `name`, if known.
@@ -1295,22 +1328,28 @@ pub fn infer_expr_shape_with_context(
             name,
             args,
             resolved: Some(call),
-        } => native_java_call_expr_shape(receiver.as_deref(), name, args, Some(call), env, ctx)
+        } => ctx
+            .signatures
+            .and_then(|signatures| {
+                // A resolved source declaration is authoritative.  Common
+                // names such as `getName` also exist on platform/external
+                // facades; consulting those models first can erase the
+                // source method's nullable carrier and make the emitted call
+                // type disagree with the slot planner.
+                resolved_call_return_shape_by_java_key(call, name, args.len(), signatures).or_else(
+                    || {
+                        signatures
+                            .method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
+                    },
+                )
+            })
+            .or_else(|| {
+                native_java_call_expr_shape(receiver.as_deref(), name, args, Some(call), env, ctx)
+            })
             .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
             .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
             .or_else(|| {
                 java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx)
-            })
-            .or_else(|| {
-                ctx.signatures.and_then(|signatures| {
-                    resolved_call_return_shape_by_java_key(call, name, args.len(), signatures)
-                        .or_else(|| {
-                            signatures.method_return_shape_by_rust_name(
-                                &call.declaring_type,
-                                &call.rust_name,
-                            )
-                        })
-                })
             })
             .unwrap_or_else(|| {
                 value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))

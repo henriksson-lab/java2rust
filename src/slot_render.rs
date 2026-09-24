@@ -219,7 +219,15 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
         (ViewShape::Slice, _)
             if crate::types::ndarray_array2_element_type(&shape.java_ty).is_some() =>
         {
-            rust_type_for_slot_with_facts(shape, facts)
+            // Render the ndarray value carrier here; the ownership match below
+            // is the single place that wraps it in `&`/`&mut`. Calling the
+            // slot renderer recursively would apply ownership twice and emit
+            // `&&Array2<T>` or `&mut &mut Array2<T>`.
+            rust_type_for_java_type_with_facts_and_representations(
+                &shape.java_ty,
+                facts,
+                representations,
+            )
         }
         (ViewShape::Slice, _) => {
             let content = slot_content_capability_policy_with_effective_facts(
@@ -2103,6 +2111,32 @@ mod tests {
             (OwnershipShape::MutableBorrow, "Option<&mut [i8]>"),
         ] {
             let mut shape = RustSlotShape::conservative(optional_array.clone());
+            shape.ownership = ownership;
+            shape.view = ViewShape::Slice;
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn ndarray_slice_slots_apply_borrow_ownership_once() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        let array2 = JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Double,
+        )))));
+
+        for (ownership, expected) in [
+            (OwnershipShape::SharedBorrow, "&ndarray::Array2<f64>"),
+            (OwnershipShape::MutableBorrow, "&mut ndarray::Array2<f64>"),
+        ] {
+            let mut shape = RustSlotShape::conservative(array2.clone());
             shape.ownership = ownership;
             shape.view = ViewShape::Slice;
             assert_eq!(

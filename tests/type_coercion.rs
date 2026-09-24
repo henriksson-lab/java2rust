@@ -908,6 +908,28 @@ fn member_access_plan_does_not_invent_unknown_uppercase_static_constant_owner() 
 }
 
 #[test]
+fn source_static_owner_keeps_emitted_simple_identity_over_qualified_import_alias() {
+    let mut env = TypeEnv::new();
+    env.insert_type_field("Matrix", "SIZE", JavaType::Primitive(PrimitiveType::Int));
+    env.insert_static_type_alias("Matrix", "jaligner.matrix.Matrix");
+
+    let plan = plan_member_access_with_facts(
+        &Expr::Var("Matrix".to_string()),
+        "SIZE",
+        &env,
+        &FactSet::default(),
+    )
+    .expect("source static constant should resolve through the source owner");
+
+    assert_eq!(
+        plan.op(),
+        &MemberAccessOp::StaticConstant {
+            owner: "Matrix".to_string(),
+        }
+    );
+}
+
+#[test]
 fn expr_shape_projects_known_external_static_string_constants() {
     let env = ShapeEnv::new();
 

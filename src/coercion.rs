@@ -834,6 +834,34 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
     {
         return record_view_coercion_target_shape(apply_one(expr, &Coercion::EraseObject), plan);
     }
+    if let (Some(actual_element), Some(target_element)) = (
+        plan.actual().optional_element_type(),
+        plan.target().optional_element_type(),
+    ) && crate::types::two_dimensional_array_element_type(&actual_element).is_some()
+        && crate::types::two_dimensional_array_element_type(&target_element).is_some()
+        && plan.target().view == ViewShape::Slice
+        && matches!(
+            plan.target().ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    {
+        // `Option<Array2<T>>` borrows its sized payload with `as_ref/as_mut`.
+        // Applying the generic sequence-view coercion to the option itself
+        // produced `option.as_ref().as_slice()`, which is a slice of option
+        // references rather than Java's rectangular matrix carrier.
+        let mut element_shape = plan.target().clone();
+        element_shape.java_ty = target_element;
+        let method = if plan.target().ownership == OwnershipShape::MutableBorrow {
+            "as_mut"
+        } else {
+            "as_ref"
+        };
+        return RustExpr::shaped_as(
+            RustExprShape::OptionalProjected,
+            Some(element_shape),
+            zero_arg_method_projection(expr, method),
+        );
+    }
     match plan.optional() {
         OptionalShapeCoercionPolicy::Wrap { element_plan, .. } => {
             let expr = apply_shape_coercion_plan(expr, element_plan);
@@ -1144,14 +1172,34 @@ fn optional_element_projection(
             );
         }
         OptionalMappedValueProjection::SliceView => {
+            let method =
+                if crate::types::two_dimensional_array_element_type(&target_element.java_ty)
+                    .is_some()
+                {
+                    // Rectangular Java arrays use the sized `Array2<T>` carrier,
+                    // not a dereference-to-slice carrier.  Borrow the option's
+                    // payload directly so `Option<Array2<T>>` becomes
+                    // `Option<&Array2<T>>`.
+                    "as_ref"
+                } else {
+                    "as_deref"
+                };
             return optional_projected_structured_expr(
-                zero_arg_method_projection(expr, "as_deref"),
+                zero_arg_method_projection(expr, method),
                 target_element,
             );
         }
         OptionalMappedValueProjection::MutableSliceView => {
+            let method =
+                if crate::types::two_dimensional_array_element_type(&target_element.java_ty)
+                    .is_some()
+                {
+                    "as_mut"
+                } else {
+                    "as_deref_mut"
+                };
             return optional_projected_structured_expr(
-                zero_arg_method_projection(expr, "as_deref_mut"),
+                zero_arg_method_projection(expr, method),
                 target_element,
             );
         }
@@ -1751,6 +1799,7 @@ pub(crate) fn force_mutable_borrow_projection(expr: RustExpr) -> RustExpr {
 pub(crate) fn propagate_result_projection(expr: RustExpr) -> RustExpr {
     if expr.recorded_shape() == Some(RustExprShape::Borrowed)
         || expr_is_result_propagated(&expr)
+        || rust_expr_is_result_panic_recovered(&expr)
         || matches!(expr.unshaped(), RustExpr::Try(_))
         || matches!(expr.unshaped(), RustExpr::MethodCall { method, .. } if method == "expect")
     {
@@ -1768,7 +1817,20 @@ pub(crate) fn propagate_result_projection(expr: RustExpr) -> RustExpr {
 /// try operator from punctuation inside a string literal. Producers that apply
 /// result propagation must record `ResultPropagated`.
 pub(crate) fn expr_is_result_propagated(expr: &RustExpr) -> bool {
-    expr.recorded_shape() == Some(RustExprShape::ResultPropagated)
+    if expr.recorded_shape() == Some(RustExprShape::ResultPropagated) {
+        return true;
+    }
+    match expr {
+        // These wrappers transform an already-unwrapped value; they do not
+        // restore a Result carrier.  Keeping the marker visible through them
+        // prevents `call()? as T` from becoming `(call()? as T)?`.
+        RustExpr::Cast { expr, .. }
+        | RustExpr::Grouped(expr)
+        | RustExpr::PostfixComment { expr, .. }
+        | RustExpr::MarkedBlock { expr, .. } => expr_is_result_propagated(expr),
+        RustExpr::Shaped { expr, .. } => expr_is_result_propagated(expr),
+        _ => false,
+    }
 }
 
 pub(crate) fn self_associated_path_projection(member: &str) -> RustExpr {
@@ -2816,7 +2878,18 @@ pub(crate) fn normalize_map_key_borrow_projection(
         RustExpr::Raw(rendered) => rendered_projection_or_raw_leaf(&rendered),
         other => other,
     };
-    let expr = if actual.is_some_and(|shape| shape.ownership == OwnershipShape::SharedBorrow) {
+    // Slot conversion may already have projected an optional collection
+    // element to `&K`.  Its recorded output shape is more authoritative than
+    // the source expression's pre-conversion shape; using the latter here
+    // adds a second `&` and asks HashMap for `Borrow<&K>`.
+    let projected_actual = expr
+        .recorded_slot_shape()
+        .cloned()
+        .or_else(|| actual.cloned());
+    let expr = if projected_actual
+        .as_ref()
+        .is_some_and(|shape| shape.ownership == OwnershipShape::SharedBorrow)
+    {
         if let Some(name) = local_name {
             collapse_redundant_shared_borrow_projection(expr, name)
         } else {
@@ -2825,7 +2898,7 @@ pub(crate) fn normalize_map_key_borrow_projection(
     } else {
         expr
     };
-    if let (Some(name), Some(shape)) = (local_name, actual)
+    if let (Some(name), Some(shape)) = (local_name, projected_actual.as_ref())
         && shape.java_ty == JavaType::String
         && shape.ownership == OwnershipShape::SharedBorrow
         && shape.view == ViewShape::Native
@@ -2833,17 +2906,17 @@ pub(crate) fn normalize_map_key_borrow_projection(
     {
         return string_view_expr(zero_arg_method_projection(expr, "as_str"));
     }
-    let actual_for_projection = if actual.is_some_and(|shape| {
+    let actual_for_projection = if projected_actual.as_ref().is_some_and(|shape| {
         matches!(
             shape.ownership,
             OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
         )
     }) {
-        actual
+        projected_actual.as_ref()
     } else {
         local_name
             .filter(|name| rust_expr_is_local_name(&expr, name))
-            .and(actual)
+            .and(projected_actual.as_ref())
     };
     ensure_borrow_projection(
         expr,
@@ -9903,6 +9976,20 @@ pub(crate) fn normalize_reused_clone_for_borrowed_argument(
         (JavaType::String, ViewShape::Str, OwnershipShape::SharedBorrow) => Some(string_view_expr(
             zero_arg_method_projection(RustExpr::Var(name.to_string()), "as_str"),
         )),
+        (JavaType::Array(_), ViewShape::Slice, _)
+            if crate::types::two_dimensional_array_element_type(&target_shape.java_ty)
+                .is_some() =>
+        {
+            // Primitive rectangular arrays use the sized `Array2<T>` carrier.
+            // The ordinary array view is spelled `&[T]`, but the corresponding
+            // rectangular view is `&Array2<T>`; an earlier optional/borrow
+            // adapter has already produced that view.  Reusing a local must not
+            // reinterpret it as a one-dimensional slice.
+            Some(RustExpr::shaped(
+                RustExprShape::Borrowed,
+                lowered.clone().into_unshaped(),
+            ))
+        }
         (JavaType::Array(_), ViewShape::Slice, OwnershipShape::MutableBorrow) => {
             Some(mutable_slice_view_expr(zero_arg_method_projection(
                 RustExpr::Var(name.to_string()),
@@ -11343,6 +11430,23 @@ fn borrow_projection_already_satisfied(
     if rust_expr_is_raw_borrow_leaf(expr) {
         return true;
     }
+    if rust_expr_is_optional_borrow_unwrap(expr) {
+        return true;
+    }
+    // A slot whose carrier is already borrowed renders nullable Java values as
+    // `Option<&T>` (or `Option<&mut T>`).  Unwrapping that carrier directly
+    // therefore produces a borrow even though there is no explicit `as_ref`
+    // node in the Rust expression.  The slot shape is the type-level proof;
+    // adding another `&` would change a map query from `Q = T` to `Q = &T`.
+    if actual.is_some_and(|shape| {
+        matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    }) && rust_expr_is_optional_unwrap(expr)
+    {
+        return true;
+    }
     match use_case {
         BorrowProjectionUse::MapKey => {
             rust_expr_is_already_borrowed_map_key(expr)
@@ -11374,6 +11478,47 @@ fn borrow_projection_already_satisfied(
             })
         }
     }
+}
+
+/// Java-null checks applied after `Option::as_ref`/`as_deref` have type `&T`.
+/// Treat both the propagating (`ok_or_else(..)?`) and infallible-boundary
+/// (`expect(..)`) forms as existing borrows so downstream normalization cannot
+/// form `&&T`.
+fn rust_expr_is_optional_borrow_unwrap(expr: &RustExpr) -> bool {
+    let unwrapped = match expr.unshaped() {
+        RustExpr::Try(inner) => inner.unshaped(),
+        other => other,
+    };
+    let RustExpr::MethodCall {
+        receiver,
+        method,
+        args,
+    } = unwrapped
+    else {
+        return false;
+    };
+    let is_null_check =
+        (method == "ok_or_else" && args.len() == 1) || (method == "expect" && args.len() == 1);
+    if !is_null_check {
+        return false;
+    }
+    matches!(
+        receiver.unshaped(),
+        RustExpr::MethodCall { method, args, .. }
+            if matches!(method.as_str(), "as_ref" | "as_deref") && args.is_empty()
+    )
+}
+
+fn rust_expr_is_optional_unwrap(expr: &RustExpr) -> bool {
+    let unwrapped = match expr.unshaped() {
+        RustExpr::Try(inner) => inner.unshaped(),
+        other => other,
+    };
+    matches!(
+        unwrapped,
+        RustExpr::MethodCall { method, args, .. }
+            if (method == "ok_or_else" || method == "expect") && args.len() == 1
+    )
 }
 
 fn rust_expr_is_raw_borrow_leaf(expr: &RustExpr) -> bool {
@@ -12658,12 +12803,28 @@ fn apply_optional_borrowed_element_target_view(
         (OwnershipShape::SharedBorrow, ViewShape::Slice)
             if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
         {
-            zero_arg_method_projection(expr.clone(), "as_deref")
+            let method =
+                if crate::types::two_dimensional_array_element_type(&target_element.java_ty)
+                    .is_some()
+                {
+                    "as_ref"
+                } else {
+                    "as_deref"
+                };
+            zero_arg_method_projection(expr.clone(), method)
         }
         (OwnershipShape::MutableBorrow, ViewShape::Slice)
             if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
         {
-            zero_arg_method_projection(expr.clone(), "as_deref_mut")
+            let method =
+                if crate::types::two_dimensional_array_element_type(&target_element.java_ty)
+                    .is_some()
+                {
+                    "as_mut"
+                } else {
+                    "as_deref_mut"
+                };
+            zero_arg_method_projection(expr.clone(), method)
         }
         (OwnershipShape::SharedBorrow, ViewShape::Str)
             if target_element.java_ty == crate::java_ir::JavaType::String =>
@@ -14228,6 +14389,11 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             }
         }
         Coercion::AsSlice => {
+            if expr.recorded_slot_shape().is_some_and(|shape| {
+                crate::types::two_dimensional_array_element_type(&shape.java_ty).is_some()
+            }) {
+                return expr;
+            }
             let expr = match expr {
                 RustExpr::Raw(rendered) => rendered_projection_or_raw_leaf(&rendered),
                 other => other,
@@ -14243,10 +14409,17 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 ))
             }
         }
-        Coercion::AsMutSlice => mutable_slice_view_expr(zero_arg_method_projection(
-            parenthesize_raw_method_receiver(expr),
-            "as_mut_slice",
-        )),
+        Coercion::AsMutSlice => {
+            if expr.recorded_slot_shape().is_some_and(|shape| {
+                crate::types::two_dimensional_array_element_type(&shape.java_ty).is_some()
+            }) {
+                return expr;
+            }
+            mutable_slice_view_expr(zero_arg_method_projection(
+                parenthesize_raw_method_receiver(expr),
+                "as_mut_slice",
+            ))
+        }
         Coercion::WrapClosedEnum {
             enum_name,
             variant_name,
@@ -15592,6 +15765,40 @@ mod tests {
     }
 
     #[test]
+    fn optional_borrowed_array2_uses_sized_payload_borrow() {
+        let array2_ty = JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Float,
+        )))));
+        let carrier_shape =
+            RustSlotShape::conservative(crate::types::optional_java_type(array2_ty.clone()));
+        let element_shape = RustSlotShape::conservative(array2_ty.clone());
+        let mut target = RustSlotShape::conservative(crate::types::optional_java_type(array2_ty));
+        target.ownership = OwnershipShape::SharedBorrow;
+        target.view = ViewShape::Slice;
+        let policy = BorrowedElementSlotAdapterPolicy::new(
+            target,
+            carrier_shape,
+            element_shape,
+            BorrowedElementCarrier::Option,
+            true,
+            None,
+        );
+
+        let projected = apply_optional_borrowed_element_target_view(
+            &RustExpr::Var("matrix".to_string()),
+            &policy,
+        )
+        .expect("Array2 optional payload borrow");
+
+        assert_eq!(emit::emit_expr(&projected), "matrix.as_ref()");
+        assert_eq!(
+            emit::emit_expr(&apply_one(projected, &Coercion::AsSlice)),
+            "matrix.as_ref()",
+            "Array2 is a sized matrix carrier, not a flat sequence view"
+        );
+    }
+
+    #[test]
     fn optional_borrowed_mut_slice_view_keeps_structured_method_tail() {
         let policy = optional_borrowed_array_policy(OwnershipShape::MutableBorrow);
         let expr = RustExpr::Var("values".to_string());
@@ -16141,6 +16348,66 @@ mod tests {
                 BorrowProjectionUse::MapKey
             )),
             "&custom_key_view(value)"
+        );
+    }
+
+    #[test]
+    fn borrow_projection_keeps_optional_expect_borrow_idempotent() {
+        let as_ref = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("key".to_string())),
+            method: "as_ref".to_string(),
+            args: Vec::new(),
+        };
+        let checked = RustExpr::MethodCall {
+            receiver: Box::new(as_ref),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        };
+        assert_eq!(
+            emit::emit_expr(&ensure_borrow_projection(
+                checked,
+                None,
+                None,
+                BorrowProjectionUse::MapKey,
+            )),
+            "key.as_ref().expect(\"Java null receiver\")"
+        );
+
+        let mut borrowed_optional = RustSlotShape::conservative(JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![JavaType::String],
+        });
+        borrowed_optional.ownership = OwnershipShape::SharedBorrow;
+        let direct_checked = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("key".to_string())),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        };
+        assert_eq!(
+            emit::emit_expr(&ensure_borrow_projection(
+                direct_checked,
+                Some(&borrowed_optional),
+                None,
+                BorrowProjectionUse::MapKey,
+            )),
+            "key.expect(\"Java null receiver\")"
+        );
+
+        let mut borrowed_java_value = RustSlotShape::conservative(JavaType::String);
+        borrowed_java_value.ownership = OwnershipShape::SharedBorrow;
+        let direct_checked = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("key".to_string())),
+            method: "expect".to_string(),
+            args: vec![RustExpr::Literal("\"Java null receiver\"".to_string())],
+        };
+        assert_eq!(
+            emit::emit_expr(&ensure_borrow_projection(
+                direct_checked,
+                Some(&borrowed_java_value),
+                None,
+                BorrowProjectionUse::MapKey,
+            )),
+            "key.expect(\"Java null receiver\")"
         );
     }
 
@@ -17995,6 +18262,53 @@ mod tests {
         assert_eq!(
             mutable_slice_view.recorded_shape(),
             Some(RustExprShape::MutableSliceView)
+        );
+
+        let matrix_ty = JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Float,
+        )))));
+        let mut matrix_target = RustSlotShape::conservative(matrix_ty);
+        matrix_target.ownership = OwnershipShape::SharedBorrow;
+        matrix_target.view = ViewShape::Slice;
+        let matrix_borrow = RustExpr::shaped(
+            RustExprShape::OwnedRecovery,
+            RustExpr::shaped_as(
+                RustExprShape::OptionalProjected,
+                Some(matrix_target.clone()),
+                RustExpr::Raw("matrix.as_ref()".to_string()),
+            ),
+        );
+        let normalized =
+            normalize_reused_clone_for_borrowed_argument(&matrix_borrow, "matrix", &matrix_target)
+                .expect("rectangular array borrow should remain a sized matrix view");
+        assert_eq!(emit::emit_expr(&normalized), "matrix.as_ref()");
+        assert_eq!(
+            emit::emit_expr(&apply_expr_to_slot_with_facts(
+                normalized,
+                matrix_target.clone(),
+                &Slot::Argument(matrix_target.clone()),
+                &FactSet::default(),
+            )),
+            "matrix.as_ref()",
+            "a later slot pass must not reinterpret Array2 as a slice"
+        );
+
+        let optional_matrix_ty = JavaType::Named {
+            name: "Optional".to_string(),
+            args: vec![matrix_target.java_ty.clone()],
+        };
+        let actual_optional = RustSlotShape::for_storage(optional_matrix_ty.clone());
+        let mut borrowed_optional = RustSlotShape::conservative(optional_matrix_ty);
+        borrowed_optional.ownership = OwnershipShape::SharedBorrow;
+        borrowed_optional.view = ViewShape::Slice;
+        assert_eq!(
+            emit::emit_expr(&apply_expr_to_slot_with_facts(
+                RustExpr::Var("matrix".to_string()),
+                actual_optional,
+                &Slot::Argument(borrowed_optional),
+                &FactSet::default(),
+            )),
+            "matrix.as_ref()"
         );
     }
 
@@ -27402,6 +27716,20 @@ mod tests {
         let twice = propagate_result_projection(once.clone());
         assert_eq!(emit::emit_expr(&twice), "call()?");
         assert_eq!(once, twice);
+        let cast = RustExpr::Cast {
+            expr: Box::new(once.clone()),
+            ty: "f32".to_string(),
+        };
+        assert_eq!(
+            emit::emit_expr(&propagate_result_projection(cast)),
+            "call()? as f32"
+        );
+        let recovered =
+            unwrap_result_or_panic_uncaught_java_exception(RustExpr::Raw("call()".to_string()));
+        assert_eq!(
+            emit::emit_expr(&propagate_result_projection(recovered)),
+            "call().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        );
         assert!(matches!(
             once,
             RustExpr::Shaped { shape, expr, .. }

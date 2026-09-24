@@ -2811,7 +2811,8 @@ class JdkFileConstructorIndexedArg {
             && translation.rust.contains("let __java_arrays_source = &args;")
             && translation
                 .rust
-                .contains(".clone().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?)")
+                .contains(".ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.clone())")
+            && !translation.rust.contains(".clone().ok_or_else(")
             && !translation.rust.contains("File::new(args[1 as usize]);")
             && !translation.rust.contains("File::new((args[1 as usize]));"),
         "{}",
@@ -2999,6 +3000,210 @@ mod generated_tests {
 }
 
 #[test]
+fn jdk_bitset_set_value_and_size_use_the_shared_facade_contract() {
+    let translation = translate_source(
+        r#"
+import java.util.BitSet;
+
+class JdkBitSetSetValueFacade {
+    static int run() {
+        BitSet bits = new BitSet();
+        bits.set(70, true);
+        bits.set(70, false);
+        bits.set(2, true);
+        return bits.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("set_2_result(70, true)")
+            && translation.rust.contains("set_2_result(70, false)")
+            && translation.rust.contains(".size()")
+            && !translation.rust.contains(".set_2(70")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "jdk_bitset_set_value_and_size",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn set_value_mutates_and_size_tracks_java_word_capacity() {
+        assert_eq!(JdkBitSetSetValueFacade::run(), Ok(128));
+        let mut bits = BitSet::new_0();
+        bits.set_2(2, true);
+        assert!(bits.get(2));
+        bits.set_2(2, false);
+        assert!(!bits.get(2));
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn boxed_double_parse_local_keeps_native_numeric_storage() {
+    let translation = translate_source(
+        r#"
+class BoxedDoubleParseLocal {
+    static double score(String text) {
+        Double value = Double.parseDouble(text);
+        java.text.DecimalFormat formatter = new java.text.DecimalFormat("0.00");
+        formatter.format(value);
+        if (value == 0) return 255;
+        return -10 * Math.log10(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let value: f64")
+            && (translation.rust.contains("value == (0 as f64)")
+                || translation.rust.contains("value == 0f64"))
+            && !translation
+                .rust
+                .contains("let value: Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("java_clone_erased_object_ref(&(value))")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "boxed_double_parse_local",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn decimal_format_preserves_pattern_and_formats_numeric_values() {
+    let translation = translate_source(
+        r#####"
+class DecimalFormatPatterns {
+    static String run() {
+        java.text.DecimalFormat scientific = new java.text.DecimalFormat("0.####E0");
+        java.text.DecimalFormat fixed = new java.text.DecimalFormat("#0.000");
+        java.text.DecimalFormat optional = new java.text.DecimalFormat("###.##");
+        return scientific.format(0.98) + ":" + scientific.format(1.0)
+            + ":" + fixed.format(1.2) + ":" + optional.format(1.20);
+    }
+}
+"#####,
+    );
+
+    assert!(
+        translation.rust.contains("scientific.format(0.98f64)")
+            && translation.rust.contains("fixed.format(1.2f64)")
+            && !translation
+                .rust
+                .contains("DecimalFormat.format is not modelled")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "decimal_format_preserves_pattern",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn formats_scientific_and_fixed_patterns() {
+        assert_eq!(
+            DecimalFormatPatterns::run(),
+            "9.8E-1:1E0:1.200:1.2".to_string()
+        );
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn numeric_parse_of_nullable_string_array_element_borrows_before_unwrap() {
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(
+        r#"
+class NullableArrayNumericParse {
+    static double run() {
+        String[] fields = "1.25".split(",");
+        return Double.parseDouble(fields[0]);
+    }
+}
+"#,
+        &facts,
+    );
+    assert!(
+        translation.rust.contains(".as_ref().expect(")
+            && !translation.rust.contains("}.ok_or_else(")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_array_numeric_parse",
+        translation.rust,
+        r#"
+#[test]
+fn parses_without_moving_the_optional_array_element() {
+    assert_eq!(NullableArrayNumericParse::run(), 1.25);
+}
+"#,
+    );
+}
+
+#[test]
+fn primitive_array_post_increment_uses_checked_mutable_slot() {
+    let translation = translate_source(
+        r#"
+class PrimitiveArrayPostIncrement {
+    static long run() throws Exception {
+        long[] counts = new long[2];
+        long old = counts[1]++;
+        return old * 10 + counts[1];
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("get_mut(")
+            && translation
+                .rust
+                .contains("let __java_old_value = *__java_arrays_slot")
+            && !translation.rust.contains("} += 1"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "primitive_array_post_increment",
+        translation.rust,
+        r#"
+#[test]
+fn post_increment_returns_old_value_and_updates_slot() {
+    assert_eq!(PrimitiveArrayPostIncrement::run().unwrap(), 1);
+}
+"#,
+    );
+}
+
+#[test]
 fn java_string_regex_helpers_use_runtime_surfaces() {
     let translation = translate_source(
         r#"
@@ -3065,6 +3270,157 @@ mod generated_tests {
 }
 "#,
         }],
+    );
+}
+
+#[test]
+fn nullable_identity_string_regex_argument_is_null_checked_before_runtime_call() {
+    let source = r#"
+class NullableIdentityRegexArgument {
+    static String run(String[] args) {
+        String pattern = args[0];
+        return "axa".replaceFirst(pattern, "");
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains("java_string_replace_first")
+            && translation.rust.contains("pattern.ok_or_else(")
+            && !translation.rust.contains(
+                "java_string_replace_first(&JavaString::intern(\"axa\"), pattern.as_ref()"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_regex_argument",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_regex_storage_is_projected_to_string_content() {
+    assert_eq!(
+        NullableIdentityRegexArgument::run(&[Some(JavaString::intern("x"))])
+            .unwrap()
+            .as_str(),
+        "aa"
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_replace_argument_uses_intrinsic_string_contract() {
+    let source = r#"
+class NullableIdentityStringReplaceArgument {
+    static String run(String[] args) {
+        String pattern = args[0];
+        return "axa".replace(pattern, "");
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains(".replace(")
+            && translation.rust.contains("pattern.ok_or_else(")
+            && !translation.rust.contains("replace(pattern.as_ref(),"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_string_replace_argument",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_replace_pattern_is_projected_to_string_content() {
+    assert_eq!(
+        NullableIdentityStringReplaceArgument::run(&[Some(JavaString::intern("x"))])
+            .unwrap()
+            .as_str(),
+        "aa"
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_operands_select_java_concat() {
+    let source = r#"
+class NullableIdentityStringConcat {
+    static String run(String[] args) {
+        String allele = args[0];
+        return allele + allele;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains("JavaString::fresh(format!")
+            && !translation.rust.contains("allele + allele"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_string_concat",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_string_storage_uses_java_concat_semantics() {
+    assert_eq!(
+        NullableIdentityStringConcat::run(&[Some(JavaString::intern("A"))])
+            .unwrap()
+            .as_str(),
+        "AA"
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_regex_array_iteration_uses_intrinsic_contract() {
+    let source = r#"
+class NullableIdentityRegexArrayIteration {
+    static String run() {
+        String[] patterns = "x".split(",");
+        for (String pattern : patterns) {
+            return "axa".replaceFirst(pattern, "");
+        }
+        return "";
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains("java_string_replace_first")
+            && !translation.rust.contains(
+                "java_string_replace_first(&JavaString::intern(\"axa\"), pattern.as_ref(),"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_regex_array_iteration",
+        translation.rust,
+        r#"
+#[test]
+fn array_iteration_pattern_is_projected_to_string_content() {
+    assert_eq!(
+        NullableIdentityRegexArrayIteration::run().as_str(),
+        "aa"
+    );
+}
+"#,
     );
 }
 
@@ -4659,6 +5015,188 @@ class CastedBorrowedMapArgument {
     );
     cargo_check_generated_modules(
         "casted_borrowed_map_argument_clones_for_owned_helper_slot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn map_get_argument_recovers_owned_value_for_owned_source_parameter() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class MapGetOwnedSourceArgument {
+    static int consume(String value) {
+        value = value.trim();
+        return value.length();
+    }
+
+    static int run(HashMap<String, String> values) {
+        return consume(values.get("key"));
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(".get(&\"key\".to_string()).cloned().ok_or_else(")
+            || translation
+                .rust
+                .contains(".get(&String::from(\"key\")).cloned().ok_or_else(")
+            || translation
+                .rust
+                .contains(".get(&JavaString::intern(\"key\")).cloned().ok_or_else("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "map_get_owned_source_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn reassigned_string_array_element_local_uses_owned_storage() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class ReassignedArrayElementString {
+    static HashMap<String, String> run(String[] parts) {
+        HashMap<String, String> result = new HashMap<String, String>();
+        String value = parts[0];
+        value = value + "x";
+        result.put("key", value);
+        return result;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("let mut value: Option<&String>")
+            && !translation.rust.contains("Some(&format!(")
+            && (translation.rust.contains("let mut value: Option<String>")
+                || translation.rust.contains("let mut value: String")),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "reassigned_array_element_string",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn optional_equality_normalizes_owned_and_borrowed_carriers_once() {
+    let translation = translate_source(
+        r#"
+class MixedOptionalStringEquality {
+    static boolean run(String[] parts) {
+        String left = parts[0];
+        String right = parts[1];
+        left = left + "";
+        return left.equals(right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Ok(left.as_ref() == right);")
+            && !translation.rust.contains("left.as_ref() == right.as_ref()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "mixed_optional_string_equality",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn identity_string_split_borrows_receiver_for_later_java_uses() {
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(
+        r#"
+class ReusedIdentitySplitReceiver {
+    static int run(String value) {
+        String[] fields = value.split(":");
+        return fields.length + value.length();
+    }
+}
+"#,
+        &facts,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("java_string_split_identity(&value, \":\", 0)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "reused_identity_split_receiver",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nested_try_assignment_preinitializes_outer_uninitialized_string() {
+    let translation = translate_source(
+        r#"
+class NestedTryDefiniteAssignment {
+    static int run(boolean enabled) {
+        String value;
+        if (enabled) {
+            try {
+                value = "ready";
+            } catch (Exception ignored) {
+                value = "fallback";
+            }
+            return value.length();
+        }
+        return 0;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut value: String = Default::default();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nested_try_definite_assignment",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -11433,13 +11971,13 @@ class Wrapper {
 "#,
     );
 
+    let rust_without_clone_notes = translation
+        .rust
+        .replace("/* TODO(translation): validate added clone */", "");
     assert!(
-        translation
-            .rust
-            .contains("Wrapper::new(self.open(path)?, path.clone())")
-            && !translation
-                .rust
-                .contains("Wrapper::new(self.open(path), path)"),
+        rust_without_clone_notes.contains("Wrapper::new(self.open(path.clone())?, path.clone())")
+            && !rust_without_clone_notes
+                .contains("Wrapper::new(self.open(path.clone())?, path.clone())?"),
         "{}",
         translation.rust
     );
@@ -11451,6 +11989,91 @@ class Wrapper {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn reused_string_arguments_to_external_constructors_preserve_java_reference_aliasing() {
+    let translation = translate_source(
+        r#"
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.util.StringTokenizer;
+
+class ReusedExternalConstructorArgument {
+    String open(String path) throws Exception {
+        int parts = new StringTokenizer(path, "/").countTokens();
+        InputStream input = new FileInputStream(path);
+        return path + parts;
+    }
+}
+"#,
+    );
+    let rust_without_clone_notes = translation
+        .rust
+        .replace("/* TODO(translation): validate added clone */", "");
+    assert!(
+        rust_without_clone_notes.contains("StringTokenizer::new_2(path.clone(),")
+            && rust_without_clone_notes.contains("FileInputStream::new(path.clone())"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "reused_string_arguments_to_external_constructors_preserve_java_reference_aliasing",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn translated_buffered_reader_reads_file_lines_through_java_stream_runtime() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.FileInputStream;
+import java.io.InputStreamReader;
+
+class FileLineReader {
+    static String firstLine(String path) throws Exception {
+        BufferedReader reader = null;
+        reader = new BufferedReader(
+            new InputStreamReader(new FileInputStream(path)));
+        String line = reader.readLine();
+        reader.close();
+        return line;
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("FileInputStream::new(path)?")
+            && translation.rust.contains(".read_line()?")
+            && translation.rust.contains(".close()?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "translated_buffered_reader_reads_file_lines_through_java_stream_runtime",
+        translation.rust,
+        r#"
+#[test]
+fn reads_first_line_and_strips_java_line_terminator() {
+    let path = std::env::temp_dir().join(format!(
+        "new_java2rust_buffered_reader_{}_{}.txt",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    std::fs::write(&path, b"alpha\r\nbeta\n").unwrap();
+    let actual = FileLineReader::first_line(path.to_string_lossy().into_owned()).unwrap();
+    let _ = std::fs::remove_file(&path);
+    assert_eq!(actual.as_deref(), Some("alpha"));
+}
+"#,
     );
 }
 
@@ -15076,6 +15699,44 @@ mod generated_tests {
 }
 "#,
         }],
+    );
+}
+
+#[test]
+fn boxed_primitive_array_arithmetic_and_update_auto_unbox() {
+    let translation = translate_source(
+        r#"
+class BoxedPrimitiveArrayArithmetic {
+    static float run() {
+        Float[] sums = new Float[1];
+        Integer[] counts = new Integer[1];
+        sums[0] = 1.0f;
+        counts[0] = 1;
+        sums[0] += 2.0f;
+        counts[0]++;
+        return sums[0] / counts[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("__java_old_value")
+            && translation.rust.contains("Some(__java_new_value)")
+            && !translation.rust.contains("} += 1")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "boxed_primitive_array_arithmetic",
+        translation.rust,
+        r#"
+#[test]
+fn boxed_array_operators_unbox_then_store_boxed_results() {
+    assert_eq!(BoxedPrimitiveArrayArithmetic::run().unwrap(), 1.5);
+}
+"#,
     );
 }
 
@@ -22582,6 +23243,140 @@ fn interned_literals_and_fresh_constructor_keep_java_reference_identity() {
 }
 
 #[test]
+fn identity_string_carrier_retains_string_and_path_interfaces() {
+    let source = r#"
+import java.io.File;
+
+class IdentityStringInterfaces {
+    static int run(String input) {
+        String same = input;
+        boolean identity = same == input;
+        File file = new File(input);
+        return input.length()
+            + (input.contains("a") ? 1 : 0)
+            + (input.startsWith("x") ? 1 : 0)
+            + input.replace("a", "b").length()
+            + (identity ? file.getPath().length() : 0);
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains("pub struct JavaString")
+            && translation
+                .rust
+                .contains("impl std::ops::Deref for JavaString")
+            && translation
+                .rust
+                .contains("impl JavaPathArg for &JavaString")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "identity_string_interfaces",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn identity_string_split_preserves_the_identity_carrier() {
+    let source = r#"
+class IdentityStringSplit {
+    static String first(String input) {
+        String same = input;
+        if (same == input) {
+            String[] parts = input.split("\\t", -1);
+            return parts[0];
+        }
+        return "";
+    }
+}
+
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains("pub struct JavaString")
+            && translation.rust.contains("java_string_split")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "identity_string_split",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn identity_string_reader_and_transformations_preserve_the_carrier() {
+    let source = r#"
+import java.io.BufferedReader;
+import java.io.File;
+import java.io.FileReader;
+import java.io.IOException;
+
+class IdentityStringReader {
+    static String read(File file, String marker) throws IOException {
+        String same = marker;
+        if (same == marker) {
+            BufferedReader reader = new BufferedReader(new IdentityFileReader(file));
+            String line = reader.readLine();
+            return line.trim().toUpperCase().replace("A", "Z");
+        }
+        return "";
+    }
+}
+
+class IdentityFileReader extends FileReader {
+    IdentityFileReader(File file) {
+        super(file);
+    }
+}
+"#;
+    let translation = translate_source(source);
+
+    assert!(
+        translation.rust.contains("read_line_identity")
+            && translation.rust.contains("JavaString::fresh")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "identity_string_reader_and_transformations",
+        translation.rust,
+        r#"
+#[test]
+fn reader_and_string_transforms_return_java_string() {
+    let path = std::env::temp_dir().join(format!(
+        "new_java2rust_identity_reader_{}.txt",
+        std::process::id()
+    ));
+    std::fs::write(&path, " alpha \n").unwrap();
+    let result = IdentityStringReader::read(
+        File::new(path.to_string_lossy().to_string()),
+        JavaString::intern("marker"),
+    )
+    .unwrap();
+    assert_eq!(result.as_str(), "ZLPHZ");
+    let _ = std::fs::remove_file(path);
+}
+"#,
+    );
+}
+
+#[test]
 fn context_translation_restarts_with_one_string_identity_carrier() {
     let translation = translate_source_with_context_sources(
         r#"
@@ -22637,6 +23432,233 @@ class StringIdentityCollection {
 #[test]
 fn collection_preserves_fresh_string_reference_identity() {
     assert!(!StringIdentityCollection::run());
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_map_lookup_uses_one_key_borrow() {
+    let source = r#"
+import java.util.HashMap;
+class NullableIdentityMapKey {
+    static int run(String input) {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("x", 7);
+        String key = input;
+        return values.get(key);
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains("Borrow<&JavaString>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_string_map_lookup",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_key_projection_looks_up_the_string_element() {
+    assert_eq!(NullableIdentityMapKey::run(JavaString::intern("x")), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_collection_element_map_lookup_uses_one_key_borrow() {
+    let source = r#"
+import java.util.ArrayList;
+import java.util.HashMap;
+class NullableIdentityCollectionMapKey {
+    static int run() {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("x", 7);
+        ArrayList<String> keys = new ArrayList<>();
+        keys.add("x");
+        for (String key : keys) {
+            return values.get(key);
+        }
+        return 0;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains("Borrow<&JavaString>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_collection_map_key_lookup",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_collection_key_projection_looks_up_the_string_element() {
+    assert_eq!(NullableIdentityCollectionMapKey::run(), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_borrowed_string_local_map_lookup_projects_the_key() {
+    let source = r#"
+import java.util.HashMap;
+class NullableBorrowedLocalMapKey {
+    static int run() {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("x", 7);
+        String[] parts = "x".split(",");
+        String key = parts[0];
+        return values.get(key);
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains(".get(key)") && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_borrowed_local_map_key",
+        translation.rust,
+        r#"
+#[test]
+fn borrowed_optional_local_is_projected_at_map_boundary() {
+    assert_eq!(NullableBorrowedLocalMapKey::run(), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn borrowed_nullable_string_key_stays_singly_borrowed_across_try_region() {
+    let source = r#"
+import java.util.HashMap;
+class BorrowedNullableTryMapKey {
+    static int run(String line) {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("x", 7);
+        String[] parts = line.split("\\t");
+        String key = parts[0];
+        try {
+            if (values.containsKey(key)) {
+                return values.get(key);
+            }
+        } catch (Exception ex) {
+            return -1;
+        }
+        return 0;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains(".get(&key.expect(")
+            && !translation.rust.contains("Borrow<&JavaString>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "borrowed_nullable_try_map_key",
+        translation.rust,
+        r#"
+#[test]
+fn try_region_map_lookup_uses_the_borrowed_string_key() {
+    assert_eq!(BorrowedNullableTryMapKey::run(JavaString::intern("x")), Ok(7));
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_map_key_array_element_uses_one_key_borrow() {
+    let source = r#"
+import java.util.HashMap;
+class NullableIdentityMapKeyArray {
+    static int run() {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("x", 7);
+        String[] keys = (String[]) values.keySet().toArray(new String[0]);
+        for (String key : keys) {
+            return values.get(key);
+        }
+        return 0;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains("Borrow<&JavaString>")
+            && !translation.rust.contains(".get(&key.as_ref()")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_map_key_array",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_array_key_projection_looks_up_the_string_element() {
+    assert_eq!(NullableIdentityMapKeyArray::run(), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_identity_string_map_key_with_owned_value_uses_element_borrow() {
+    let source = r#"
+import java.util.HashMap;
+class NullableIdentityMapStringValue {
+    static int run() {
+        HashMap<String, String> values = new HashMap<>();
+        values.put("x", "found");
+        String[] keys = (String[]) values.keySet().toArray(new String[0]);
+        for (String key : keys) {
+            String value = values.get(key);
+            if (value != null) return value.length();
+        }
+        return 0;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains(".get(&key.as_ref())")
+            && !translation.rust.contains("Borrow<Option<&JavaString>>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "nullable_identity_map_string_value",
+        translation.rust,
+        r#"
+#[test]
+fn nullable_array_key_fetches_owned_string_value() {
+    assert_eq!(NullableIdentityMapStringValue::run(), 5);
 }
 "#,
     );
@@ -23593,6 +24615,47 @@ class ParsedBase {
 
     cargo_check_generated_modules(
         "source_super_constructor_with_child_locals",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn constructor_bare_assignment_respects_local_shadowing_and_implicit_fields() {
+    let translation = translate_source(
+        r#"
+class ConstructorLocalCompound {
+    ConstructorLocalCompound() {
+        String header = "base";
+        header += "\nrow";
+    }
+}
+
+class ConstructorImplicitField {
+    private String value;
+
+    ConstructorImplicitField(String input) {
+        value = input;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("let mut header")
+            && translation.rust.contains("header =")
+            && !translation.rust.contains("__java_self.header")
+            && translation.rust.contains("__java_self.value =")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "constructor_bare_assignment_shadowing",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -24653,15 +25716,180 @@ class ExceptionContext {
 }
 
 #[test]
-fn jdk_file_reader_super_constructor_is_no_state_facade() {
+fn constructor_bare_return_completes_with_the_current_object() {
+    let translation = translate_source(
+        r#"
+class ConstructorBareReturn {
+    int value;
+
+    ConstructorBareReturn(int mode) throws Exception {
+        value = 1;
+        if (mode == 1) {
+            return;
+        }
+        try {
+            if (mode == 2) {
+                throw new Exception("stop");
+            }
+            if (mode == 3) {
+                try {
+                    return;
+                } catch (Exception nested) {
+                    value = 9;
+                }
+            }
+            if (mode == 4) {
+                try {
+                    throw new Exception("nested");
+                } catch (Exception nested) {
+                    return;
+                }
+            }
+        } catch (Exception error) {
+            return;
+        }
+        value = 2;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return __java_self;")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "constructor_bare_return_current_object",
+        translation.rust,
+        r#"
+#[test]
+fn early_constructor_returns_keep_initialized_state() {
+    assert_eq!(ConstructorBareReturn::new(1).value, 1);
+    assert_eq!(ConstructorBareReturn::new(2).value, 1);
+    assert_eq!(ConstructorBareReturn::new(3).value, 1);
+    assert_eq!(ConstructorBareReturn::new(4).value, 1);
+    assert_eq!(ConstructorBareReturn::new(0).value, 2);
+}
+"#,
+    );
+}
+
+#[test]
+fn fallible_fresh_constructor_result_enters_the_planned_shared_storage() {
+    let translation = translate_source(
+        r#"
+class FallibleSharedConstruction {
+    int value;
+
+    FallibleSharedConstruction(int value) throws Exception {
+        if (value < 0) {
+            throw new Exception("negative");
+        }
+        this.value = value;
+    }
+
+    static int run() throws Exception {
+        FallibleSharedConstruction item = new FallibleSharedConstruction(7);
+        FallibleSharedConstruction alias = item;
+        alias.value = 9;
+        return item.value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("FallibleSharedConstruction::new(7)?")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "fallible_fresh_constructor_shared_storage",
+        translation.rust,
+        r#"
+#[test]
+fn propagated_constructor_result_preserves_shared_aliasing() {
+    assert_eq!(FallibleSharedConstruction::run().unwrap(), 9);
+}
+"#,
+    );
+}
+
+#[test]
+fn caught_constructor_exceptions_do_not_add_try_to_shared_local_initialization() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+
+class CaughtConstructorSharedLocal {
+    int value;
+
+    CaughtConstructorSharedLocal(HashMap<String, String> params) {
+        try {
+            value = Integer.parseInt(params.get("value"));
+        } catch (Exception ignored) {
+            value = 7;
+        }
+    }
+
+    static int run(HashMap<String, String> params) throws Exception {
+        CaughtConstructorSharedLocal item = new CaughtConstructorSharedLocal(params);
+        CaughtConstructorSharedLocal alias = item;
+        alias.value = 9;
+        return item.value;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("CaughtConstructorSharedLocal::new(&params)?")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "caught_constructor_shared_local",
+        translation.rust,
+        r#"
+#[test]
+fn infallible_constructor_enters_shared_storage_without_result_propagation() {
+    let mut params = std::collections::HashMap::new();
+    params.insert("value".to_string(), "3".to_string());
+    assert_eq!(CaughtConstructorSharedLocal::run(params).unwrap(), 9);
+}
+"#,
+    );
+}
+
+#[test]
+fn jdk_file_reader_super_constructor_preserves_reader_state() {
     let translation = translate_source(
         r#"
 import java.io.File;
+import java.io.BufferedReader;
 import java.io.FileReader;
+import java.io.IOException;
 
 class MiniSmartFileReader extends FileReader {
     MiniSmartFileReader(File file) {
         super(file);
+    }
+
+    static BufferedReader buffered(File file) {
+        return new BufferedReader(new MiniSmartFileReader(file));
+    }
+
+    public boolean ready() throws IOException {
+        super.ready();
+        return true;
     }
 }
 "#,
@@ -24672,6 +25900,22 @@ class MiniSmartFileReader extends FileReader {
             && translation
                 .rust
                 .contains("pub fn new(file: File) -> MiniSmartFileReader")
+            && translation
+                .rust
+                .contains("pub(crate) reader: InputStreamReader")
+            && translation
+                .rust
+                .contains("__java_self.reader = InputStreamReader::from_path(file)")
+            && translation
+                .rust
+                .contains("impl From<MiniSmartFileReader> for InputStreamReader")
+            && translation
+                .rust
+                .contains("BufferedReader::new(MiniSmartFileReader::new(file))")
+            && translation.rust.contains("pub fn ready(&self)")
+            && !translation
+                .rust
+                .contains("unsupported standalone Java super expression")
             && translation.rust.contains("return __java_self;")
             && !translation
                 .rust
@@ -24681,13 +25925,23 @@ class MiniSmartFileReader extends FileReader {
         translation.rust
     );
 
-    cargo_check_generated_modules(
-        "jdk_file_reader_super_constructor_no_state_facade",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
+    cargo_test_generated_modules_for_translation(
+        "jdk_file_reader_super_constructor_state",
+        translation.rust,
+        r#"
+#[test]
+fn source_file_reader_subclass_reads_the_file() {
+    let path = std::env::temp_dir().join(format!(
+        "new_java2rust_reader_{}_{}.txt",
+        std::process::id(),
+        std::thread::current().name().unwrap_or("test")
+    ));
+    std::fs::write(&path, "alpha\nbeta\n").unwrap();
+    let reader = MiniSmartFileReader::buffered(File::new(path.to_string_lossy().to_string()));
+    assert_eq!(reader.read_line().unwrap().as_deref(), Some("alpha"));
+    let _ = std::fs::remove_file(path);
+}
+"#,
     );
 }
 
@@ -28965,10 +30219,10 @@ class SystemInAndThreadSleepUse {
             && translation
                 .rust
                 .contains("return Ok(InputStreamReader::new(System::r#in));")
-            && translation.rust.contains("pub struct InputStream;")
+            && translation.rust.contains("pub struct InputStream {")
             && translation
                 .rust
-                .contains("pub const r#in: InputStream = InputStream;")
+                .contains("pub const r#in: InputStream = InputStream::empty();")
             && !translation.rust.contains("Duration::from_millis(-1 as u64)")
             && !translation.rust.contains("\n        thread::sleep")
             && !translation.rust.contains("system.r#in"),
@@ -28982,6 +30236,51 @@ class SystemInAndThreadSleepUse {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn system_get_property_models_standard_java_platform_properties() {
+    let translation = translate_source(
+        r#"
+class PlatformProperties {
+    String directory() {
+        return System.getProperty("user.dir");
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("\"file.separator\"")
+            && translation.rust.contains("std::env::current_dir()")
+            && translation
+                .rust
+                .contains("Self::get_property(key).unwrap_or_else"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "system_get_property_models_standard_java_platform_properties",
+        translation.rust,
+        r#"
+#[test]
+fn standard_properties_do_not_depend_on_dotted_environment_variable_names() {
+    let current_directory = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        System::get_property("file.separator").as_deref(),
+        Some(std::path::MAIN_SEPARATOR_STR)
+    );
+    assert_eq!(
+        System::get_property("user.dir").as_deref(),
+        Some(current_directory.as_str())
+    );
+    assert!(System::get_property("line.separator").is_some());
+}
+"#,
     );
 }
 
@@ -29110,6 +30409,111 @@ class SystemPrintStreamStatements {
 }
 
 #[test]
+fn constructor_trailing_system_print_statements_use_shared_statement_plan() {
+    let translation = translate_source(
+        r#"
+class ConstructorTrailingSystemPrint {
+    ConstructorTrailingSystemPrint(String[] args) {
+        String first = args[0];
+        System.err.println("first=" + first);
+        System.out.println(first);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("eprintln!(")
+            && translation.rust.contains("println!(")
+            && !translation.rust.contains("Err::println")
+            && !translation.rust.contains("Out::println"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "constructor_trailing_system_print",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn constructor_loop_body_is_lowered_as_ordered_statement() {
+    let translation = translate_source(
+        r#"
+class ConstructorLoopBody {
+    int count;
+
+    ConstructorLoopBody() {
+        for (int i = 0; i < 3; i++) {
+            count++;
+        }
+    }
+
+    static int run() {
+        return new ConstructorLoopBody().count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("while i < 3")
+            && translation.rust.contains("__java_self.count")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "constructor_loop_body",
+        translation.rust,
+        r#"
+#[test]
+fn constructor_loop_side_effects_are_preserved() {
+    assert_eq!(ConstructorLoopBody::run(), 3);
+}
+"#,
+    );
+}
+
+#[test]
+fn constructor_statements_learn_prior_local_array_shapes() {
+    let translation = translate_source(
+        r#"
+class ConstructorLocalArrayShape {
+    float average;
+
+    ConstructorLocalArrayShape() {
+        Integer[] counts = new Integer[1];
+        counts[0] = 2;
+        average = 3.0f / (float) counts[0];
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("&Option<i32> as f32")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "constructor_local_array_shape",
+        translation.rust,
+        r#"
+#[test]
+fn later_constructor_statements_reuse_local_array_shape() {
+    assert_eq!(ConstructorLocalArrayShape::new().unwrap().average, 1.5);
+}
+"#,
+    );
+}
+
+#[test]
 fn source_defined_system_out_statement_does_not_lower_to_native_print_macro() {
     let translation = translate_source(
         r#"
@@ -29139,9 +30543,8 @@ class SourceSystemPrintShadow {
             .rust
             .contains("println!(\"{}\", \"x\".to_string())")
             && !translation.rust.contains("println!(\"{}\", \"x\")")
-            && translation
-                .rust
-                .contains("System::__static_out().println(\"x\");"),
+            && translation.rust.contains("System::__static_out()")
+            && translation.rust.contains(".println(\"x\");"),
         "{}",
         translation.rust
     );
@@ -31775,6 +33178,53 @@ class BufferedReaderReadLineAssignmentConditionAnd {
 
     cargo_check_generated_modules(
         "buffered_reader_read_line_assignment_condition_and",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn assignment_condition_loop_does_not_shadow_a_local_reassigned_in_its_body() {
+    let translation = translate_source(
+        r#"
+import java.io.BufferedReader;
+import java.io.IOException;
+
+class BufferedReaderNestedAssignmentCondition {
+    int count(BufferedReader reader, boolean ready) throws IOException {
+        String line;
+        int count = 0;
+        while ((line = reader.readLine()) != null) {
+            line.trim();
+            while (ready && ((line = reader.readLine()) != null)) {
+                count++;
+            }
+        }
+        return count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java null comparison")
+            && !translation
+                .rust
+                .contains("let line = line.as_ref().unwrap();")
+            && translation
+                .rust
+                .contains("line = reader.read_line()?; line.is_some()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "buffered_reader_nested_assignment_condition",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -38370,6 +39820,7 @@ class Array2IndexCatch {
         }
     }
 }
+
 "#,
     );
 
@@ -38406,6 +39857,43 @@ mod generated_tests {
     }
 }
 "#,
+            },
+        ],
+    );
+}
+
+#[test]
+fn array2_char_indices_share_signed_checked_index_carrier() {
+    let translation = translate_source(
+        r#"
+class Array2CharIndex {
+    static float read(float[][] values, char row, char col) {
+        return values[row][col];
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_arrays_row = row as i64;")
+            && translation
+                .rust
+                .contains("let __java_arrays_col = col as i64;")
+            && translation.rust.contains("__java_arrays_row < 0"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "array2_char_checked_index",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
             },
         ],
     );
@@ -45800,7 +47288,7 @@ class RaggedObjectGroups {
                 .rust
                 .contains("file_bases.get_mut(&base_name).expect(\"Java null receiver\").push(")
             && !translation.rust.contains("ndarray::Array2<File>")
-            && !translation.rust.contains("row_mut"),
+            && !translation.rust.contains(".row_mut("),
         "{}",
         translation.rust
     );

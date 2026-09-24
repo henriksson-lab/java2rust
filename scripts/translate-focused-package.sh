@@ -1056,6 +1056,7 @@ shared_types = {
 
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
+static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 derive_re = re.compile(r"^#\[derive")
 inherent_impl_re = re.compile(
     r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
@@ -1334,6 +1335,7 @@ inherent_impl_re = re.compile(
 )
 trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
+static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
 
 
 def source_owned_nested_type_name(name: str) -> bool:
@@ -1471,10 +1473,26 @@ source_owned_names = {
     if name == current_source or name not in shared_names
 }
 missing_names = source_owned_names - present
-if not missing_names:
+
+# Source static storage is emitted as top-level Rust state immediately before
+# the source declaration.  Shared-support stripping must restore every storage
+# item still referenced by the surviving source implementation; otherwise the
+# accessors compile while their backing state silently disappears.
+raw_static_items = {}
+for index, line in enumerate(raw_lines):
+    if match := static_re.match(line):
+        end = item_end(raw_lines, index)
+        raw_static_items[match.group(1)] = "".join(raw_lines[index:end])
+referenced_static_names = {
+    name
+    for name in raw_static_items
+    if re.search(rf"\b{re.escape(name)}\b", current)
+}
+
+if not missing_names and not referenced_static_names:
     raise SystemExit(0)
 
-chunks = []
+chunks = [raw_static_items[name] for name in sorted(referenced_static_names)]
 index = 0
 while index < len(raw_lines):
     line = raw_lines[index]
@@ -1519,8 +1537,96 @@ PY
 
 if grep -R -q '^pub struct JavaException' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct InputStream;
+#[derive(Clone, Default)]
+pub struct InputStream {
+    bytes: Option<std::rc::Rc<Vec<u8>>>,
+    position: Option<std::rc::Rc<std::cell::Cell<usize>>>,
+    closed: Option<std::rc::Rc<std::cell::Cell<bool>>>,
+}
+
+impl InputStream {
+    pub const fn empty() -> InputStream {
+        InputStream { bytes: None, position: None, closed: None }
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> InputStream {
+        InputStream {
+            bytes: Some(std::rc::Rc::new(bytes)),
+            position: Some(std::rc::Rc::new(std::cell::Cell::new(0))),
+            closed: Some(std::rc::Rc::new(std::cell::Cell::new(false))),
+        }
+    }
+
+    pub fn read_line(&self) -> Result<Option<String>, JavaException> {
+        let Some(bytes) = self.bytes.as_ref() else {
+            return Ok(None);
+        };
+        let position_cell = self.position.as_ref().expect("byte-backed stream position");
+        let closed = self.closed.as_ref().expect("byte-backed stream closed state");
+        if closed.get() {
+            return Err(JavaException::new("IOException", "Stream closed".to_string()));
+        }
+        let mut position = position_cell.get();
+        if position >= bytes.len() {
+            return Ok(None);
+        }
+        let start = position;
+        while position < bytes.len() && bytes[position] != b'\n' {
+            position += 1;
+        }
+        let mut end = position;
+        if position < bytes.len() {
+            position += 1;
+        }
+        position_cell.set(position);
+        if end > start && bytes[end - 1] == b'\r' {
+            end -= 1;
+        }
+        Ok(Some(String::from_utf8_lossy(&bytes[start..end]).into_owned()))
+    }
+}
+
+impl std::fmt::Debug for InputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InputStream").finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for InputStream {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.position, &other.position) {
+            (Some(left), Some(right)) => std::rc::Rc::ptr_eq(left, right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for InputStream {}
+
+impl std::hash::Hash for InputStream {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&self.position.as_ref().map(std::rc::Rc::as_ptr), state);
+    }
+}
+
+impl std::fmt::Display for InputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.InputStream@0")
+    }
+}
+
+impl JavaIntoInputStream for InputStream {
+    fn into_input_stream(self) -> InputStream {
+        self
+    }
+}
+
+impl JavaIntoInputStream for Option<InputStream> {
+    fn into_input_stream(self) -> InputStream {
+        self.expect("Java null InputStream")
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
@@ -1569,23 +1675,64 @@ impl JavaException {
 
 impl InputStream {
     pub fn read_0(&self) -> Result<i32, JavaException> {
-        Ok(0)
+        let Some(bytes) = self.bytes.as_ref() else {
+            return Ok(-1);
+        };
+        let position_cell = self.position.as_ref().expect("byte-backed stream position");
+        let closed = self.closed.as_ref().expect("byte-backed stream closed state");
+        if closed.get() {
+            return Err(JavaException::new("IOException", "Stream closed".to_string()));
+        }
+        let position = position_cell.get();
+        if position >= bytes.len() {
+            return Ok(-1);
+        }
+        let value = bytes[position];
+        position_cell.set(position + 1);
+        Ok(i32::from(value))
     }
 
-    pub fn read<T0: ?Sized>(&self, _arg0: &T0) -> Result<i32, JavaException> {
-        Ok(0)
+    pub fn read(&self, buffer: &mut [i8]) -> Result<i32, JavaException> {
+        self.read_3(buffer, 0, buffer.len() as i32)
     }
 
-    pub fn read_3<T0: ?Sized>(
+    pub fn read_3(
         &self,
-        _arg0: &T0,
-        _arg1: i32,
-        _arg2: i32,
+        buffer: &mut [i8],
+        offset: i32,
+        length: i32,
     ) -> Result<i32, JavaException> {
-        Ok(0)
+        let buffer_len = buffer.len() as i32;
+        if offset < 0 || length < 0 || offset > buffer_len || length > buffer_len - offset {
+            return Err(JavaException::new("IndexOutOfBoundsException", "InputStream read range out of bounds".to_string()));
+        }
+        let Some(bytes) = self.bytes.as_ref() else {
+            return Ok(if length == 0 { 0 } else { -1 });
+        };
+        let position_cell = self.position.as_ref().expect("byte-backed stream position");
+        let closed = self.closed.as_ref().expect("byte-backed stream closed state");
+        if closed.get() {
+            return Err(JavaException::new("IOException", "Stream closed".to_string()));
+        }
+        if length == 0 {
+            return Ok(0);
+        }
+        let position = position_cell.get();
+        if position >= bytes.len() {
+            return Ok(-1);
+        }
+        let count = usize::min(length as usize, bytes.len() - position);
+        for index in 0..count {
+            buffer[offset as usize + index] = bytes[position + index] as i8;
+        }
+        position_cell.set(position + count);
+        Ok(count as i32)
     }
 
     pub fn close(&self) -> Result<(), JavaException> {
+        if let Some(closed) = self.closed.as_ref() {
+            closed.set(true);
+        }
         Ok(())
     }
 }
@@ -1635,7 +1782,7 @@ impl<T> JavaClass<T> {
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
-        Some(InputStream)
+        Some(InputStream::default())
     }
 
     pub fn get_class_loader(&self) -> ClassLoader {
@@ -1670,7 +1817,7 @@ impl ClassLoader {
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
-        Some(InputStream)
+        Some(InputStream::default())
     }
 }
 
@@ -1892,8 +2039,8 @@ impl URL {
         self.value.clone()
     }
 
-    pub fn open_connection<T: Default>(&self) -> Result<T, JavaException> {
-        Ok(T::default())
+    pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
+        Ok(URLConnection)
     }
 }
 
@@ -1913,8 +2060,8 @@ impl JarURLConnection {
 pub struct JarFile;
 
 impl JarFile {
-    pub fn entries(&self) -> Result<Enumeration, JavaException> {
-        Ok(Enumeration)
+    pub fn entries(&self) -> Result<Enumeration<JarEntry>, JavaException> {
+        Ok(Enumeration::default())
     }
 
     pub fn get_manifest(&self) -> Result<Manifest, JavaException> {
@@ -1923,15 +2070,29 @@ impl JarFile {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct JarEntry;
+pub struct JarEntry {
+    name: String,
+}
 
 impl JarEntry {
-    pub fn is_directory(&self) -> bool {
-        false
+    pub fn new() -> JarEntry {
+        JarEntry::default()
     }
 
-    pub fn get_name(&self) -> String {
-        String::new()
+    pub fn new_0() -> JarEntry {
+        JarEntry::default()
+    }
+
+    pub fn new_1<S: Into<String>>(name: S) -> JarEntry {
+        JarEntry { name: name.into() }
+    }
+
+    pub fn is_directory(&self) -> Result<bool, JavaException> {
+        Ok(self.name.ends_with('/'))
+    }
+
+    pub fn get_name(&self) -> Result<String, JavaException> {
+        Ok(self.name.clone())
     }
 }
 
@@ -1964,15 +2125,21 @@ impl AttributesName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct Enumeration;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Enumeration<T = ZipEntry>(std::marker::PhantomData<T>);
 
-impl Enumeration {
+impl<T> Default for Enumeration<T> {
+    fn default() -> Self {
+        Enumeration(std::marker::PhantomData)
+    }
+}
+
+impl<T: Default> Enumeration<T> {
     pub fn has_more_elements(&self) -> Result<bool, JavaException> {
         Ok(false)
     }
 
-    pub fn next_element<T: Default>(&self) -> Result<T, JavaException> {
+    pub fn next_element(&self) -> Result<T, JavaException> {
         Ok(T::default())
     }
 }
@@ -2136,7 +2303,7 @@ impl File {
             .unwrap_or(0)
     }
 
-    pub fn list(&self) -> Vec<String> {
+    pub fn list(&self) -> Vec<Option<String>> {
         std::fs::read_dir(std::path::Path::new(&self.value))
             .map(|entries| {
                 entries
@@ -2145,6 +2312,7 @@ impl File {
                             .ok()
                             .and_then(|entry| entry.file_name().into_string().ok())
                     })
+                    .map(Some)
                     .collect()
             })
             .unwrap_or_default()
@@ -2646,26 +2814,6 @@ RUST
   printf "java_is_serializable\n" >> "$shared_support_types_path"
 fi
 
-if grep -R -q -E 'java_(clone_erased_object|erased_object_to_string)' "$generated_dir"; then
-  cat >> "$shared_support_path" <<'RUST'
-pub fn java_clone_erased_object_ref(_value: &Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {
-    Box::new(())
-}
-
-pub fn java_clone_erased_object_vec_ref(
-    _value: &Vec<Box<dyn std::any::Any>>,
-) -> Vec<Box<dyn std::any::Any>> {
-    Vec::new()
-}
-
-pub fn java_erased_object_to_string<T: ?Sized>(_value: &T) -> String {
-    Default::default()
-}
-
-RUST
-  printf "java_clone_erased_object_ref\njava_clone_erased_object_vec_ref\njava_erased_object_to_string\n" >> "$shared_support_types_path"
-fi
-
 if grep -R -q 'java_string_format' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
 pub fn java_string_format<S: AsRef<str>>(template: S, args: Vec<String>) -> String {
@@ -2761,7 +2909,8 @@ awk '
 # A blanket string helper has no nominal implementation target, so the
 # facade merger cannot associate it with a selected struct.  It is nevertheless
 # crate-global Rust coherence, and must be emitted once.
-if grep -q '^pub trait JavaStringComparisonHelper' "$shared_support_path"; then
+if grep -q '^pub trait JavaStringComparisonHelper' "$shared_support_path" &&
+   ! grep -q '^impl<T: AsRef<str> + ?Sized> JavaStringComparisonHelper for T {' "$shared_support_path"; then
   cat >> "$shared_support_path" <<'RUST'
 impl<T: AsRef<str> + ?Sized> JavaStringComparisonHelper for T {
     fn java_string_compare_to<R: AsRef<str>>(&self, other: R) -> i32 {

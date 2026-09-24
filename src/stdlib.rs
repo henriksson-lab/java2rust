@@ -1677,6 +1677,40 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
         abi.receiver = ReceiverAbi::MutBorrowedSelf;
         facts.facade_abi_facts.push(abi);
 
+        let mut effect = jdk_instance_api_fact(owner, "set", 2, JavaType::Void);
+        effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+        effect.thrown = vec![JavaType::Named {
+            name: "IndexOutOfBoundsException".to_string(),
+            args: Vec::new(),
+        }];
+        facts.external_api_effect_facts.push(effect);
+
+        let mut abi = jdk_result_method_abi(
+            owner,
+            "set",
+            2,
+            "BitSet::set_2_result",
+            vec![FacadeSlot::Owned, FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        );
+        abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        facts.facade_abi_facts.push(abi);
+
+        facts.external_api_effect_facts.push(jdk_instance_api_fact(
+            owner,
+            "size",
+            0,
+            JavaType::Primitive(PrimitiveType::Int),
+        ));
+        facts.facade_abi_facts.push(rust_stdlib_method_abi(
+            owner,
+            "size",
+            0,
+            "BitSet::size",
+            Vec::new(),
+            FacadeSlot::Owned,
+        ));
+
         for method in ["clear", "flip"] {
             let mut effect = jdk_instance_api_fact(owner, method, 1, JavaType::Void);
             effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
@@ -1877,6 +1911,11 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
 }
 
 fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
+    for owner in ["FileInputStream", "java.io.FileInputStream"] {
+        facts
+            .external_constructor_rust_result_facts
+            .push(jdk_constructor_result_fact(owner, 1));
+    }
     for owner in ["Class", "JavaClass", "java.lang.Class"] {
         for method in ["getResourceAsStream", "get_resource_as_stream"] {
             facts.facade_abi_facts.push(jdk_option_method_abi(
@@ -4161,7 +4200,7 @@ fn known_typed_constant_field_type(receiver: &str, field_name: &str) -> Option<J
         {
             "Option"
         }
-        ("Level", "DEBUG" | "INFO" | "ERROR") => "Level",
+        ("Level", "SEVERE" | "WARNING" | "INFO" | "DEBUG" | "ERROR") => "Level",
         ("Locale", "ENGLISH" | "US") => "Locale",
         ("ElementKind", "FIELD") => "ElementKind",
         ("StandardOpenOption", "CREATE_NEW" | "CREATE" | "WRITE" | "READ" | "APPEND") => {
@@ -6035,35 +6074,35 @@ pub struct URL {
     value: String,
 }
 
-	impl URL {
-	    pub fn new<S: Into<String>>(value: S) -> URL {
-	        URL { value: value.into() }
-	    }
+impl URL {
+    pub fn new<S: Into<String>>(value: S) -> URL {
+        URL { value: value.into() }
+    }
 
-	    pub fn new_result<S: Into<String>>(value: S) -> Result<URL, JavaException> {
-	        let value = value.into();
-	        let Some(separator) = value.find(':') else {
-	            return Err(JavaException::new("MalformedURLException", value));
-	        };
-	        if separator == 0 || value[..separator].contains(|ch: char| ch.is_whitespace()) {
-	            return Err(JavaException::new("MalformedURLException", value));
-	        }
-	        Ok(URL { value })
-	    }
+    pub fn new_result<S: Into<String>>(value: S) -> Result<URL, JavaException> {
+        let value = value.into();
+        let Some(separator) = value.find(':') else {
+            return Err(JavaException::new("MalformedURLException", value));
+        };
+        if separator == 0 || value[..separator].contains(|ch: char| ch.is_whitespace()) {
+            return Err(JavaException::new("MalformedURLException", value));
+        }
+        Ok(URL { value })
+    }
 
-	    pub fn get_file(&self) -> String {
-	        self.value.clone()
-	    }
-	}
+    pub fn get_file(&self) -> String {
+        self.value.clone()
+    }
+}
 
-	impl std::fmt::Display for URL {
-	    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	        write!(f, "{}", self.value)
-	    }
-	}
+impl std::fmt::Display for URL {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
 
-	#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-	pub struct ClassLoader;
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ClassLoader;
 
 impl ClassLoader {
     pub fn get_system_resource<S: Into<String>>(path: S) -> URL {
@@ -6075,7 +6114,7 @@ impl ClassLoader {
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
-        Some(InputStream)
+        Some(InputStream::default())
     }
 }"#
     } else {
@@ -6124,7 +6163,7 @@ impl<T> JavaClass<T> {
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
-        Some(InputStream)
+        Some(InputStream::default())
     }
 
     pub fn get_class_loader(&self) -> ClassLoader {
@@ -6258,38 +6297,186 @@ pub struct URL {
     value: String,
 }
 
-	impl URL {
-	    pub fn new<S: Into<String>>(value: S) -> URL {
-	        URL { value: value.into() }
-	    }
+impl URL {
+    pub fn new<S: Into<String>>(value: S) -> URL {
+        URL { value: value.into() }
+    }
 
-	    pub fn new_result<S: Into<String>>(value: S) -> Result<URL, JavaException> {
-	        let value = value.into();
-	        let Some(separator) = value.find(':') else {
-	            return Err(JavaException::new("MalformedURLException", value));
-	        };
-	        if separator == 0 || value[..separator].contains(|ch: char| ch.is_whitespace()) {
-	            return Err(JavaException::new("MalformedURLException", value));
-	        }
-	        Ok(URL { value })
-	    }
+    pub fn new_result<S: Into<String>>(value: S) -> Result<URL, JavaException> {
+        let value = value.into();
+        let Some(separator) = value.find(':') else {
+            return Err(JavaException::new("MalformedURLException", value));
+        };
+        if separator == 0 || value[..separator].contains(|ch: char| ch.is_whitespace()) {
+            return Err(JavaException::new("MalformedURLException", value));
+        }
+        Ok(URL { value })
+    }
 
-	    pub fn get_file(&self) -> String {
-	        self.value.clone()
-	    }
+    pub fn get_file(&self) -> String {
+        self.value.clone()
+    }
 
-	    pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
-	        Ok(URLConnection)
-	    }
-	}
+    pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
+        Ok(URLConnection)
+    }
+}
 
-	impl std::fmt::Display for URL {
-	    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-	        write!(f, "{}", self.value)
-	    }
-	}
+impl std::fmt::Display for URL {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.value)
+    }
+}
 
-	pub trait JavaAppendValue {
+/// The numeric part of `java.text.DecimalFormat` patterns.  Keeping the
+/// pattern on the formatter is essential: Java call sites commonly reuse a
+/// formatter and its output is not equivalent to `Number.toString()`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct DecimalFormat {
+    pattern: String,
+}
+
+pub trait JavaDecimalFormatValue {
+    fn java_decimal_format_value(self) -> f64;
+}
+
+impl JavaDecimalFormatValue for i8 {
+    fn java_decimal_format_value(self) -> f64 { self as f64 }
+}
+impl JavaDecimalFormatValue for i16 {
+    fn java_decimal_format_value(self) -> f64 { self as f64 }
+}
+impl JavaDecimalFormatValue for i32 {
+    fn java_decimal_format_value(self) -> f64 { self as f64 }
+}
+impl JavaDecimalFormatValue for i64 {
+    fn java_decimal_format_value(self) -> f64 { self as f64 }
+}
+impl JavaDecimalFormatValue for f32 {
+    fn java_decimal_format_value(self) -> f64 { self as f64 }
+}
+impl JavaDecimalFormatValue for f64 {
+    fn java_decimal_format_value(self) -> f64 { self }
+}
+
+impl JavaDecimalFormatValue for &i8 {
+    fn java_decimal_format_value(self) -> f64 { *self as f64 }
+}
+impl JavaDecimalFormatValue for &i16 {
+    fn java_decimal_format_value(self) -> f64 { *self as f64 }
+}
+impl JavaDecimalFormatValue for &i32 {
+    fn java_decimal_format_value(self) -> f64 { *self as f64 }
+}
+impl JavaDecimalFormatValue for &i64 {
+    fn java_decimal_format_value(self) -> f64 { *self as f64 }
+}
+impl JavaDecimalFormatValue for &f32 {
+    fn java_decimal_format_value(self) -> f64 { *self as f64 }
+}
+impl JavaDecimalFormatValue for &f64 {
+    fn java_decimal_format_value(self) -> f64 { *self }
+}
+
+impl DecimalFormat {
+    pub fn new<S: AsRef<str>>(pattern: S) -> Self {
+        Self { pattern: pattern.as_ref().to_string() }
+    }
+
+    pub fn format<T: JavaDecimalFormatValue>(&self, value: T) -> String {
+        java_decimal_format_number(&self.pattern, value.java_decimal_format_value())
+    }
+}
+
+fn java_decimal_format_number(pattern: &str, mut value: f64) -> String {
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    if value.is_infinite() {
+        return if value.is_sign_negative() { "-∞" } else { "∞" }.to_string();
+    }
+
+    // DecimalFormat's positive subpattern determines the numeric layout.  A
+    // negative subpattern can additionally customize affixes; the ordinary
+    // Java default is a leading minus sign.
+    let positive_pattern = pattern.split(';').next().unwrap_or(pattern);
+    let percent = positive_pattern.contains('%');
+    if percent {
+        value *= 100.0;
+    }
+    let negative = value.is_sign_negative();
+    value = value.abs();
+
+    let first_digit = positive_pattern
+        .find(|ch| ch == '#' || ch == '0')
+        .unwrap_or(0);
+    let last_digit = positive_pattern
+        .rfind(|ch| ch == '#' || ch == '0')
+        .unwrap_or_else(|| positive_pattern.len().saturating_sub(1));
+    let prefix = &positive_pattern[..first_digit];
+    let suffix = positive_pattern.get(last_digit + 1..).unwrap_or("");
+    let numeric_pattern = positive_pattern
+        .get(first_digit..=last_digit)
+        .unwrap_or(positive_pattern);
+
+    let mut rendered = if let Some(exponent_at) = numeric_pattern.find('E') {
+        let mantissa_pattern = &numeric_pattern[..exponent_at];
+        let fraction_pattern = mantissa_pattern.split_once('.').map(|(_, part)| part).unwrap_or("");
+        let min_fraction = fraction_pattern.chars().filter(|ch| *ch == '0').count();
+        let max_fraction = fraction_pattern.chars().filter(|ch| matches!(*ch, '0' | '#')).count();
+        let scientific = format!("{value:.max_fraction$e}");
+        let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+        let mut mantissa = mantissa.to_string();
+        if let Some(dot) = mantissa.find('.') {
+            while mantissa.len() > dot + 1 + min_fraction && mantissa.ends_with('0') {
+                mantissa.pop();
+            }
+            if mantissa.ends_with('.') {
+                mantissa.pop();
+            }
+        }
+        let exponent_value = exponent.parse::<i32>().unwrap_or(0);
+        format!("{mantissa}E{exponent_value}")
+    } else {
+        let (integer_pattern, fraction_pattern) = numeric_pattern
+            .split_once('.')
+            .unwrap_or((numeric_pattern, ""));
+        let min_fraction = fraction_pattern.chars().filter(|ch| *ch == '0').count();
+        let max_fraction = fraction_pattern.chars().filter(|ch| matches!(*ch, '0' | '#')).count();
+        let mut fixed = format!("{value:.max_fraction$}");
+        if let Some(dot) = fixed.find('.') {
+            while fixed.len() > dot + 1 + min_fraction && fixed.ends_with('0') {
+                fixed.pop();
+            }
+            if fixed.ends_with('.') {
+                fixed.pop();
+            }
+        }
+        if integer_pattern.contains(',') {
+            let (integer, fraction) = fixed.split_once('.').unwrap_or((&fixed, ""));
+            let mut grouped = String::with_capacity(fixed.len() + integer.len() / 3);
+            for (index, ch) in integer.chars().enumerate() {
+                if index > 0 && (integer.len() - index) % 3 == 0 {
+                    grouped.push(',');
+                }
+                grouped.push(ch);
+            }
+            if !fraction.is_empty() {
+                grouped.push('.');
+                grouped.push_str(fraction);
+            }
+            fixed = grouped;
+        }
+        fixed
+    };
+
+    if negative {
+        rendered.insert(0, '-');
+    }
+    format!("{prefix}{rendered}{suffix}")
+}
+
+pub trait JavaAppendValue {
     fn into_java_append_string(self) -> String;
 }
 
@@ -6381,6 +6568,15 @@ impl<T: JavaAppendValue + Clone> JavaAppendValue for &Option<T> {
 impl<T: JavaAppendValue + Clone> JavaAppendValue for &&T {
     fn into_java_append_string(self) -> String {
         (*self).clone().into_java_append_string()
+    }
+}
+
+// Translated Java objects use shared, interior-mutable handles. Java's
+// StringBuilder/StringBuffer append(Object) calls the object's virtual
+// toString; translated source types expose that through Display.
+impl<T: std::fmt::Display> JavaAppendValue for &std::rc::Rc<std::cell::RefCell<T>> {
+    fn into_java_append_string(self) -> String {
+        format!("{}", self.borrow())
     }
 }
 
@@ -7395,8 +7591,8 @@ impl JarURLConnection {
 pub struct JarFile;
 
 impl JarFile {
-    pub fn entries(&self) -> Result<Enumeration, JavaException> {
-        Ok(Enumeration)
+    pub fn entries(&self) -> Result<Enumeration<JarEntry>, JavaException> {
+        Ok(Enumeration::default())
     }
 
     pub fn get_manifest(&self) -> Result<Manifest, JavaException> {
@@ -7503,16 +7699,22 @@ impl AttributesName {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
-pub struct Enumeration;
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Enumeration<T = ZipEntry>(std::marker::PhantomData<T>);
 
-impl Enumeration {
+impl<T> Default for Enumeration<T> {
+    fn default() -> Self {
+        Enumeration(std::marker::PhantomData)
+    }
+}
+
+impl<T: Default> Enumeration<T> {
     pub fn has_more_elements(&self) -> Result<bool, JavaException> {
         Ok(false)
     }
 
-    pub fn next_element(&self) -> Result<ZipEntry, JavaException> {
-        Ok(ZipEntry::new())
+    pub fn next_element(&self) -> Result<T, JavaException> {
+        Ok(T::default())
     }
 }
 
@@ -8892,14 +9094,14 @@ impl std::fmt::Display for AtomicBoolean {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BitSet {
     bits: Vec<bool>,
 }
 
 impl BitSet {
     pub fn new_0() -> BitSet {
-        BitSet { bits: Vec::new() }
+        BitSet { bits: vec![false; 64] }
     }
 
     pub fn new_1(size: i32) -> BitSet {
@@ -8914,7 +9116,12 @@ impl BitSet {
                 "BitSet size is negative".to_string(),
             ));
         }
-        Ok(BitSet { bits: vec![false; size as usize] })
+        let capacity = if size == 0 {
+            0
+        } else {
+            (((size as usize) + 63) / 64) * 64
+        };
+        Ok(BitSet { bits: vec![false; capacity] })
     }
 
     pub fn get(&self, index: i32) -> bool {
@@ -8945,11 +9152,42 @@ impl BitSet {
             ));
         }
         let index = index as usize;
-        if index >= self.bits.len() {
-            self.bits.resize(index + 1, false);
-        }
+        self.ensure_word_capacity(index);
         self.bits[index] = true;
         Ok(())
+    }
+
+    pub fn set_2(&mut self, index: i32, value: bool) {
+        self.set_2_result(index, value)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn set_2_result(&mut self, index: i32, value: bool) -> Result<(), JavaException> {
+        if index < 0 {
+            return Err(JavaException::new(
+                "IndexOutOfBoundsException",
+                "BitSet index out of bounds".to_string(),
+            ));
+        }
+        let index = index as usize;
+        if value {
+            self.ensure_word_capacity(index);
+            self.bits[index] = true;
+        } else if let Some(bit) = self.bits.get_mut(index) {
+            *bit = false;
+        }
+        Ok(())
+    }
+
+    pub fn size(&self) -> i32 {
+        self.bits.len() as i32
+    }
+
+    fn ensure_word_capacity(&mut self, index: usize) {
+        if index >= self.bits.len() {
+            let capacity = ((index + 64) / 64) * 64;
+            self.bits.resize(capacity, false);
+        }
     }
 
     pub fn clear(&mut self, index: i32) {
@@ -8983,11 +9221,15 @@ impl BitSet {
             ));
         }
         let index = index as usize;
-        if index >= self.bits.len() {
-            self.bits.resize(index + 1, false);
-        }
+        self.ensure_word_capacity(index);
         self.bits[index] = !self.bits[index];
         Ok(())
+    }
+}
+
+impl Default for BitSet {
+    fn default() -> Self {
+        Self::new_0()
     }
 }
 
@@ -9107,7 +9349,7 @@ impl ClassLoader {
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
-        Some(InputStream)
+        Some(InputStream::default())
     }
 }
 
@@ -9545,6 +9787,125 @@ impl JavaPathArg for File {
 impl JavaPathArg for &File {
     fn into_path_value(self) -> String {
         self.value.clone()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct FileInputStream {
+    stream: InputStream,
+}
+
+impl FileInputStream {
+    pub fn new<P: JavaPathArg>(path: P) -> Result<FileInputStream, JavaException> {
+        let path = path.into_path_value();
+        let bytes = std::fs::read(std::path::Path::new(&path)).map_err(|error| {
+            JavaException::from_display("FileNotFoundException", error)
+        })?;
+        Ok(FileInputStream {
+            stream: InputStream::from_bytes(bytes),
+        })
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        self.stream.close()
+    }
+}
+
+impl std::fmt::Display for FileInputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.FileInputStream@0")
+    }
+}
+
+impl From<FileInputStream> for InputStream {
+    fn from(value: FileInputStream) -> InputStream {
+        value.stream
+    }
+}
+
+pub trait JavaIntoInputStream {
+    fn into_input_stream(self) -> InputStream;
+}
+
+impl JavaIntoInputStream for InputStream {
+    fn into_input_stream(self) -> InputStream {
+        self
+    }
+}
+
+impl JavaIntoInputStream for FileInputStream {
+    fn into_input_stream(self) -> InputStream {
+        self.into()
+    }
+}
+
+impl JavaIntoInputStream for Option<InputStream> {
+    fn into_input_stream(self) -> InputStream {
+        self.expect("Java null InputStream")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct InputStreamReader {
+    stream: InputStream,
+}
+
+impl InputStreamReader {
+    pub fn new<S: JavaIntoInputStream>(stream: S) -> InputStreamReader {
+        InputStreamReader {
+            stream: stream.into_input_stream(),
+        }
+    }
+
+    pub fn from_path<P: JavaPathArg>(path: P) -> InputStreamReader {
+        let path = path.into_path_value();
+        let stream = match std::fs::read(std::path::Path::new(&path)) {
+            Ok(bytes) => InputStream::from_bytes(bytes),
+            Err(error) => InputStream::from_file_error(error),
+        };
+        InputStreamReader { stream }
+    }
+}
+
+impl From<File> for InputStreamReader {
+    fn from(value: File) -> Self { InputStreamReader::from_path(value) }
+}
+
+impl From<String> for InputStreamReader {
+    fn from(value: String) -> Self { InputStreamReader::from_path(value) }
+}
+
+impl std::fmt::Display for InputStreamReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.InputStreamReader@0")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct BufferedReader {
+    stream: InputStream,
+}
+
+impl BufferedReader {
+    pub fn new<R: Into<InputStreamReader>>(reader: R) -> BufferedReader {
+        let reader = reader.into();
+        BufferedReader {
+            stream: reader.stream,
+        }
+    }
+
+    pub fn read_line(&self) -> Result<Option<String>, JavaException> {
+        self.stream.read_line()
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        self.stream.close()
+    }
+}
+
+impl std::fmt::Display for BufferedReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.BufferedReader@0")
     }
 }
 
@@ -12308,19 +12669,30 @@ where
     format!("{{{body}}}")
 }
 
-macro_rules! impl_java_arrays_deep_to_string_display {
-    ($($ty:ty),* $(,)?) => {
-        $(
-            impl JavaArraysDeepToStringElement for $ty {
-                fn java_arrays_deep_to_string(&self) -> String {
-                    self.to_string()
-                }
-            }
-        )*
-    };
+impl JavaArraysDeepToStringElement for bool {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
 }
-
-impl_java_arrays_deep_to_string_display!(bool, i8, i16, i32, i64, char, String, &str);
+impl JavaArraysDeepToStringElement for i8 {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
+}
+impl JavaArraysDeepToStringElement for i16 {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
+}
+impl JavaArraysDeepToStringElement for i32 {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
+}
+impl JavaArraysDeepToStringElement for i64 {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
+}
+impl JavaArraysDeepToStringElement for char {
+    fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
+}
+impl JavaArraysDeepToStringElement for String {
+    fn java_arrays_deep_to_string(&self) -> String { self.clone() }
+}
+impl JavaArraysDeepToStringElement for &str {
+    fn java_arrays_deep_to_string(&self) -> String { (*self).to_string() }
+}
 
 impl JavaArraysDeepToStringElement for f32 {
     fn java_arrays_deep_to_string(&self) -> String {
@@ -12948,7 +13320,7 @@ fn java_simple_regex_literal(regex: &str) -> &str {
 /// `new String(...)` allocation independently.
 pub(crate) fn java_string_identity_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
-        r#"#[derive(Clone, Debug)]
+        r#"#[derive(Clone, Debug, Default)]
 pub struct JavaString(std::sync::Arc<str>);
 
 impl JavaString {
@@ -12975,13 +13347,73 @@ impl JavaString {
 }
 
 impl AsRef<str> for JavaString { fn as_ref(&self) -> &str { self.as_str() } }
+impl std::ops::Deref for JavaString {
+    type Target = str;
+    fn deref(&self) -> &Self::Target { self.as_str() }
+}
+impl std::borrow::Borrow<str> for JavaString { fn borrow(&self) -> &str { self.as_str() } }
+impl From<String> for JavaString { fn from(value: String) -> Self { Self::fresh(value) } }
+impl From<&str> for JavaString { fn from(value: &str) -> Self { Self::fresh(value) } }
 impl std::fmt::Display for JavaString { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) } }
 impl PartialEq for JavaString { fn eq(&self, other: &Self) -> bool { self.java_equals(other) } }
 impl Eq for JavaString {}
 impl std::hash::Hash for JavaString { fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.0.hash(state) } }
 impl PartialOrd for JavaString { fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) } }
 impl Ord for JavaString { fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.cmp(&other.0) } }
+
+pub fn java_string_split_identity<V: AsRef<str>, R: AsRef<str>>(
+    value: V,
+    regex: R,
+    limit: i32,
+) -> Vec<Option<JavaString>> {
+    java_string_split(value.as_ref(), regex, limit)
+        .into_iter()
+        .map(JavaStringSplitIdentityPart::into_optional_java_string)
+        .collect()
+}
+
+pub trait JavaStringSplitIdentityPart {
+    fn into_optional_java_string(self) -> Option<JavaString>;
+}
+
+impl JavaStringSplitIdentityPart for String {
+    fn into_optional_java_string(self) -> Option<JavaString> { Some(JavaString::fresh(self)) }
+}
+
+impl JavaStringSplitIdentityPart for Option<String> {
+    fn into_optional_java_string(self) -> Option<JavaString> { self.map(JavaString::fresh) }
+}
 "#.to_string(),
+    )
+}
+
+/// Connects the identity-preserving String carrier to path-taking platform
+/// facades when both support families are present in a generated crate.
+pub(crate) fn java_string_path_arg_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"impl JavaPathArg for JavaString {
+    fn into_path_value(self) -> String { self.as_str().to_string() }
+}
+
+impl JavaPathArg for &JavaString {
+    fn into_path_value(self) -> String { self.as_str().to_string() }
+}
+
+impl From<JavaString> for InputStreamReader {
+    fn from(value: JavaString) -> Self { InputStreamReader::from_path(value) }
+}
+
+impl JavaArraysDeepToStringElement for JavaString {
+    fn java_arrays_deep_to_string(&self) -> String { self.as_str().to_string() }
+}
+
+impl BufferedReader {
+    pub fn read_line_identity(&self) -> Result<Option<JavaString>, JavaException> {
+        self.read_line().map(|line| line.map(JavaString::fresh))
+    }
+}
+"#
+        .to_string(),
     )
 }
 
@@ -13168,6 +13600,22 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
         ),
         ..ExternalApiFacadeSupport::default()
     };
+    if program
+        .imports
+        .iter()
+        .chain(local_type_program.imports.iter())
+        .any(|import| {
+            !import.is_static
+                && !import.is_wildcard
+                && canonical_external_receiver_type_key(&import.path) == "Level"
+        })
+    {
+        // Imported JDK value-object types are normally discovered from method
+        // and field signatures. `Level.WARNING` can occur only as a call
+        // argument (not a declaration), so retain its canonical facade from
+        // the import itself.
+        support.add_opaque_type("Level".to_string());
+    }
     support.add_erased_source_alias_owners(representations, &declared_external_type_exclusions);
     // Context sources are normally summaries for declarations which are not
     // rendered in this translation unit.  They need facade method bodies.
@@ -14813,9 +15261,9 @@ impl ExternalApiFacadeSupport {
                     self.add_java_type(&param.ty);
                 }
                 changed |= self.opaque_types.len() != opaque_count_before;
-                let method_body = if crate::java_signature::method_staticness(method)
-                    == crate::java_signature::JavaCallableStaticness::Static
-                {
+                let is_static = crate::java_signature::method_staticness(method)
+                    == crate::java_signature::JavaCallableStaticness::Static;
+                let method_body = if is_static {
                     source_summary_facade_static_method(
                         facts,
                         type_key,
@@ -14835,7 +15283,7 @@ impl ExternalApiFacadeSupport {
                     )
                 };
                 self.add_external_facade_return_opaque_type(&return_type);
-                if !weak_external_facade_return_type(&return_type) {
+                if !is_static && !weak_external_facade_return_type(&return_type) {
                     self.add_erased_object_method(
                         facts,
                         Some(type_key),
@@ -17168,11 +17616,25 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type("System".to_string());
             self.add_method(
                 "System".to_string(),
-                "    pub fn get_property<K: AsRef<str>>(key: K) -> Option<String> { std::env::var(key.as_ref()).ok() }".to_string(),
+                r#"    pub fn get_property<K: AsRef<str>>(key: K) -> Option<String> {
+        let key = key.as_ref();
+        match key {
+            "file.separator" => Some(std::path::MAIN_SEPARATOR.to_string()),
+            "line.separator" => Some(if cfg!(windows) { "\r\n" } else { "\n" }.to_string()),
+            "path.separator" => Some(if cfg!(windows) { ";" } else { ":" }.to_string()),
+            "user.dir" => std::env::current_dir()
+                .ok()
+                .map(|path| path.to_string_lossy().into_owned()),
+            "user.home" => std::env::var(if cfg!(windows) { "USERPROFILE" } else { "HOME" }).ok(),
+            "java.io.tmpdir" => Some(std::env::temp_dir().to_string_lossy().into_owned()),
+            _ => std::env::var(key).ok(),
+        }
+    }"#
+                .to_string(),
             );
             self.add_method(
                 "System".to_string(),
-                "    pub fn get_property_2<K: AsRef<str>, D: Into<String>>(key: K, default_value: D) -> String { std::env::var(key.as_ref()).unwrap_or_else(|_| default_value.into()) }".to_string(),
+                "    pub fn get_property_2<K: AsRef<str>, D: Into<String>>(key: K, default_value: D) -> String { Self::get_property(key).unwrap_or_else(|| default_value.into()) }".to_string(),
             );
         }
         if used_calls
@@ -18698,6 +19160,7 @@ impl ExternalApiFacadeSupport {
             !alias_names.contains(name)
                 && !self.trait_type_names.contains(name)
                 && (!is_builtin_external_facade_type(name)
+                    || name == "Level"
                     || self.source_declared_facade_shadows.contains(name))
         });
 
@@ -18754,8 +19217,7 @@ impl ExternalApiFacadeSupport {
                 .or_default()
                 .insert(executor_submit_facade_method_for_owner(owner));
         }
-        let should_emit_level_constants_fallback = emitted_support_type_names.contains("Level")
-            && !self.has_const_named("Level", "WARNING");
+        let should_emit_level_constants_fallback = self.has_surface_type("Level");
         let display_and_eq_types = self.opaque_types.iter().cloned().collect::<Vec<_>>();
         for ty in &display_and_eq_types {
             if crate::javalibs::needs_conversion_constructor_for_facade(ty)
@@ -18866,6 +19328,7 @@ impl ExternalApiFacadeSupport {
                     && !emitted_support_type_names.contains(&from))
                 || (is_builtin_external_facade_type(&from)
                     && !is_allowed_builtin_external_from_impl(&from, &to))
+                || builtin_external_from_impl_is_runtime_modeled(&from, &to)
                 || (builtin_external_from_impl_requires_surface(&from, &to)
                     && !self.uses_java_string_buffer_runtime_surfaces
                     && !builtin_from_impl_surface_names.contains(&from))
@@ -18960,7 +19423,7 @@ impl ExternalApiFacadeSupport {
             for (field, rust_type, value) in [
                 ("out", "PrintStream", "PrintStream"),
                 ("err", "PrintStream", "PrintStream"),
-                ("r#in", "InputStream", "InputStream"),
+                ("r#in", "InputStream", "InputStream::empty()"),
             ] {
                 if !self.has_method_named("System", field) {
                     self.add_method(
@@ -19301,6 +19764,16 @@ fn collect_type_imported_static_owner_calls(
             }
             Member::Unsupported { .. } => {}
         }
+    }
+    for initializer in &ty.static_init_blocks {
+        let mut shadows = type_shadows.clone();
+        collect_block_imported_static_owner_calls(
+            &initializer.block,
+            aliases,
+            static_members,
+            &mut shadows,
+            calls,
+        );
     }
 }
 
@@ -21551,6 +22024,9 @@ fn collect_type_call_arities(
             Member::Unsupported { .. } => {}
         }
     }
+    for initializer in &ty.static_init_blocks {
+        collect_block_call_arities(&initializer.block, calls);
+    }
 }
 
 fn collect_type_constructor_arities(
@@ -21577,6 +22053,9 @@ fn collect_type_constructor_arities(
             Member::Type(nested) => collect_type_constructor_arities(nested, constructors),
             Member::Unsupported { .. } => {}
         }
+    }
+    for initializer in &ty.static_init_blocks {
+        collect_block_constructor_arities(&initializer.block, constructors);
     }
 }
 
@@ -22953,6 +23432,13 @@ fn external_facade_unmodelled_method_with_facts(
         return format!(
             "    pub fn {escaped_rust_method}{args} -> {return_type} {{ Err(JavaException::new(\"IOException\", \"{receiver}.{java_method} is not modelled\".to_string())) }}"
         );
+    }
+    if !is_static && receiver_simple == "Logger" && java_method == "log" && return_type == "()" {
+        // Logging is an observational side effect, not part of the translated
+        // program's value semantics. A deterministic no-op preserves normal
+        // control flow (including exception handlers) instead of turning a
+        // diagnostic call into an artificial Rust panic.
+        return format!("    pub fn {escaped_rust_method}{args} -> () {{}}");
     }
     if !is_static
         && arg_count == 0
@@ -24495,6 +24981,9 @@ fn is_known_java_platform_stream_type_name(name: &str) -> bool {
             | "ZipOutputStream"
             | "PushbackInputStream"
             | "SequenceInputStream"
+            | "Reader"
+            | "InputStreamReader"
+            | "BufferedReader"
     ) || matches!(
         simple,
         "InputStream"
@@ -24517,6 +25006,9 @@ fn is_known_java_platform_stream_type_name(name: &str) -> bool {
             | "ZipOutputStream"
             | "PushbackInputStream"
             | "SequenceInputStream"
+            | "Reader"
+            | "InputStreamReader"
+            | "BufferedReader"
     )
 }
 
@@ -25929,11 +26421,15 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "BitSet"
             | "ClassLoader"
             | "Locale"
+            | "DecimalFormat"
             | "BufferedImage"
             | "Graphics"
             | "Graphics2D"
             | "Shape"
             | "InputStream"
+            | "FileInputStream"
+            | "InputStreamReader"
+            | "BufferedReader"
             | "logger"
             | "bool"
             | "i8"
@@ -26007,6 +26503,10 @@ fn builtin_external_from_impl_requires_surface(from: &str, to: &str) -> bool {
         (from, to),
         ("StringBuilder", "Appendable") | ("StringBuffer", "Appendable")
     )
+}
+
+fn builtin_external_from_impl_is_runtime_modeled(from: &str, to: &str) -> bool {
+    matches!((from, to), ("FileInputStream", "InputStream"))
 }
 
 fn valid_external_facade_type_ident(name: &str) -> bool {
@@ -27243,9 +27743,6 @@ fn static_constant_impl_lines(
     declared_owners: &BTreeSet<String>,
     used_constructors: &BTreeMap<String, BTreeSet<usize>>,
 ) -> Vec<String> {
-    if canonical_external_receiver_type_key(owner) == "Level" {
-        return Vec::new();
-    }
     let mut lines = fields
         .iter()
         .filter(|(field, _)| valid_rust_const_ident(field))
@@ -27461,7 +27958,7 @@ fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static 
         ("Locale" | "JavaUtilLocale", "ENGLISH") => Some("Locale::new(\"en\")"),
         ("Locale" | "JavaUtilLocale", "US") => Some("Locale::new(\"en_US\")"),
         ("System", "OUT" | "ERR") => Some("PrintStream"),
-        ("System", "IN") => Some("InputStream"),
+        ("System", "IN") => Some("InputStream::empty()"),
         ("GZIPInputStream" | "JavaUtilZipGZIPInputStream", "GZIP_MAGIC") => Some("0x8b1f"),
         ("AbstractAsyncWriter" | "HtsjdkSamtoolsUtilAbstractAsyncWriter", "DEFAULT_QUEUE_SIZE") => {
             Some("2000")
@@ -31808,6 +32305,52 @@ mod qualified_new_support_detection_tests {
                 .and_then(|arities| arities.iter().copied().next()),
             Some(1)
         );
+    }
+
+    #[test]
+    fn call_arity_scan_includes_static_initializer_blocks() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class Settings {
+                static { System.getProperty("line.separator"); }
+            }
+            "#,
+        );
+
+        let calls = collect_program_call_arities(&parsed.program);
+
+        assert_eq!(
+            calls.get("get_property"),
+            Some(&BTreeSet::from([1])),
+            "static initializers are executable call sites too"
+        );
+    }
+
+    #[test]
+    fn java_logger_overloads_and_level_constants_cover_static_initializers() {
+        let translated = crate::translate_source(
+            r#"
+            import java.util.logging.Level;
+            import java.util.logging.Logger;
+            class LoggingInit {
+                static Logger logger = Logger.getLogger("test");
+                static {
+                    logger.log(Level.WARNING, "message");
+                    logger.log(Level.WARNING, "message", new RuntimeException());
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translated.contains("pub const WARNING: Level = Level;"),
+            "{translated}"
+        );
+        assert!(translated.contains("pub fn log_2"), "{translated}");
+        assert!(translated.contains("pub fn log_3"), "{translated}");
+        assert!(translated.contains(".log_2("), "{translated}");
+        assert!(translated.contains(".log_3("), "{translated}");
     }
 
     #[test]
