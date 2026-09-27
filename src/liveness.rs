@@ -205,6 +205,33 @@ impl LivenessAnalysis {
         counts
     }
 
+    /// Names read by an expression that is evaluated again on a loop back edge.
+    ///
+    /// A single textual read in a loop condition is dynamically repeated.  It
+    /// therefore has the same move-safety consequence as two reads in an
+    /// ordinary statement: consuming an owned value requires recovery even
+    /// when no read is live after the loop statement itself.
+    pub(crate) fn repeated_use_counts_in(&self, stmt: &Stmt) -> HashMap<String, usize> {
+        let mut counts = HashMap::new();
+        match stmt {
+            Stmt::While { condition, .. } | Stmt::DoWhile { condition, .. } => {
+                crate::lower::collect_expr_read_counts_for_liveness(condition, &mut counts);
+            }
+            Stmt::For {
+                condition, update, ..
+            } => {
+                if let Some(condition) = condition {
+                    crate::lower::collect_expr_read_counts_for_liveness(condition, &mut counts);
+                }
+                for expression in update {
+                    crate::lower::collect_expr_read_counts_for_liveness(expression, &mut counts);
+                }
+            }
+            _ => {}
+        }
+        counts
+    }
+
     /// Whether the binding `name` refers to at `stmt` may be read afterwards.
     ///
     /// Resolves the name to the binding in scope at that point and compares

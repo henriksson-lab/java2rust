@@ -2813,6 +2813,21 @@ fn struct_fields_for_type(
         });
     }
     let upcast_visible_fields = source_type_has_context_subtypes(ty, support_program);
+    let carrier_visible_fields = representations.is_some_and(|representations| {
+        let emitted_name = rust_name_for_java_named_type(&ty.name);
+        representations.type_representations().any(|entry| {
+            matches!(
+                entry.representation(),
+                crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+                    variants,
+                    ..
+                } if variants.iter().any(|variant| {
+                    variant == &ty.name
+                        || rust_name_for_java_named_type(variant) == emitted_name
+                })
+            )
+        })
+    });
     let source_field_rust_names = crate::java_naming::source_instance_field_rust_names(ty);
     fields.extend(ty.members.iter().filter_map(|member| {
         match member {
@@ -2829,7 +2844,8 @@ fn struct_fields_for_type(
                     representations,
                 ),
                 is_pub: source_field_is_public(field),
-                is_pub_crate: !source_field_is_public(field) && upcast_visible_fields,
+                is_pub_crate: !source_field_is_public(field)
+                    && (upcast_visible_fields || carrier_visible_fields),
             }),
             _ => None,
         }
@@ -2845,7 +2861,7 @@ fn struct_fields_for_type(
                     representations,
                 ),
                 is_pub: false,
-                is_pub_crate: upcast_visible_fields,
+                is_pub_crate: upcast_visible_fields || carrier_visible_fields,
             }),
     );
     fields.extend(
@@ -2853,11 +2869,26 @@ fn struct_fields_for_type(
             .into_iter()
             .map(|inherited| RustField {
                 name: inherited.rust_name().to_string(),
-                ty: rust_type_for_slot_maybe_with_representations(
-                    &signatures.required_field_shape(&ty.name, inherited.rust_name()),
-                    facts,
-                    representations,
-                ),
+                ty: {
+                    let shape = signatures.required_field_shape(&ty.name, inherited.rust_name());
+                    if inherited.rust_name() == "__java_super" {
+                        // The carrier is an exact base-class subobject.  Do
+                        // not re-project it through the open-hierarchy
+                        // representation chosen for ordinary Java references.
+                        match inherited.field_type() {
+                            JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                                RustType::Named(rust_name_for_java_named_type(name))
+                            }
+                            _ => rust_type_for_slot_with_facts(&shape, facts),
+                        }
+                    } else {
+                        rust_type_for_slot_maybe_with_representations(
+                            &shape,
+                            facts,
+                            representations,
+                        )
+                    }
+                },
                 is_pub: false,
                 // External-super storage is synthetic object-model state.
                 // Conversion impls are package support and may be hoisted to
@@ -2883,11 +2914,67 @@ fn struct_fields_for_type(
 }
 
 pub(crate) fn type_declares_synchronized_instance_method(ty: &TypeDecl) -> bool {
-    ty.members.iter().any(|member| {
-        matches!(member, Member::Method(method)
-            if method.modifiers.contains(&Modifier::Synchronized)
-                && !method.modifiers.contains(&Modifier::Static))
+    ty.members.iter().any(|member| match member {
+        Member::Method(method) => {
+            (!method.modifiers.contains(&Modifier::Static)
+                && method.modifiers.contains(&Modifier::Synchronized))
+                || method
+                    .body
+                    .as_ref()
+                    .is_some_and(block_contains_synchronized_this)
+        }
+        Member::Constructor(constructor) => constructor
+            .body
+            .as_ref()
+            .is_some_and(block_contains_synchronized_this),
+        _ => false,
     })
+}
+
+pub(crate) fn block_contains_synchronized_this(block: &Block) -> bool {
+    block.statements.iter().any(stmt_contains_synchronized_this)
+}
+
+fn stmt_contains_synchronized_this(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::LabeledBlock { label, .. } if label == "__java_synchronized_this" => true,
+        Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
+            block_contains_synchronized_this(block)
+        }
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_contains_synchronized_this(then_block)
+                || else_block
+                    .as_ref()
+                    .is_some_and(block_contains_synchronized_this)
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::EnhancedFor { body, .. } => block_contains_synchronized_this(body),
+        Stmt::Switch { cases, .. } => cases
+            .iter()
+            .any(|case| case.statements.iter().any(stmt_contains_synchronized_this)),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources.iter().any(stmt_contains_synchronized_this)
+                || block_contains_synchronized_this(body)
+                || catches
+                    .iter()
+                    .any(|catch| block_contains_synchronized_this(&catch.body))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(block_contains_synchronized_this)
+        }
+        _ => false,
+    }
 }
 
 pub(crate) fn type_declares_synchronized_static_method(ty: &TypeDecl) -> bool {

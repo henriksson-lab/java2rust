@@ -63,6 +63,7 @@ const SAMTOOLS_UTIL_PACK: &str = "htsjdk.samtools.util";
 const HDF5_PACK: &str = "hdf5";
 const SQLITE_PACK: &str = "sqlite";
 const JAVA_SQL_PACK: &str = "java.sql";
+const ITADAKI_BZIP2_PACK: &str = "org.itadaki.bzip2";
 const APACHE_COMMONS_MATH_PACK: &str = "org.apache.commons.math3";
 const APACHE_COMMONS_MATH_OPTIM_PACK: &str = "org.apache.commons.math3.optim.univariate";
 const APACHE_COMMONS_MATH_STATS_PACK: &str = "org.apache.commons.math3.stat.descriptive.rank";
@@ -398,6 +399,9 @@ impl ExternalPackManifest {
                     .push(constructor.as_external_crate_constructor_mapping_fact(self.pack_name));
             }
         }
+        if self.pack_name == ITADAKI_BZIP2_PACK {
+            push_itadaki_bzip2_constructor_facts(facts);
+        }
         for field in self.modeled_fields {
             if field.coverage == ExternalApiCoverage::Unsupported {
                 facts
@@ -457,6 +461,16 @@ pub fn modeled_no_state_external_super_constructor(type_name: &str, arg_count: u
         || (external_type_name_matches(erased, "java.io.FilterOutputStream")
             || external_type_name_matches(erased, "FilterOutputStream"))
             && arg_count == 1
+        || (external_type_name_matches(erased, "java.util.zip.GZIPOutputStream")
+            || external_type_name_matches(erased, "GZIPOutputStream"))
+            && arg_count == 1
+        || external_superclass_uses_embedded_carrier(erased) && arg_count == 1
+}
+
+pub fn external_superclass_uses_embedded_carrier(type_name: &str) -> bool {
+    let erased = erased_external_type_name(type_name);
+    external_type_name_matches(erased, "org.itadaki.bzip2.BitOutputStream")
+        || external_type_name_matches(erased, "BitOutputStream")
 }
 
 pub fn modeled_external_super_constructor_state_field(
@@ -474,6 +488,8 @@ pub fn modeled_external_super_constructor_state_field(
     }
     if external_type_name_matches(erased, "java.io.FilterOutputStream")
         || external_type_name_matches(erased, "FilterOutputStream")
+        || external_type_name_matches(erased, "java.util.zip.GZIPOutputStream")
+        || external_type_name_matches(erased, "GZIPOutputStream")
     {
         return Some("out");
     }
@@ -482,7 +498,111 @@ pub fn modeled_external_super_constructor_state_field(
     {
         return Some("reader");
     }
+    if external_superclass_uses_embedded_carrier(erased) {
+        return Some("__java_super");
+    }
     None
+}
+
+fn push_itadaki_bzip2_constructor_facts(facts: &mut FactSet) {
+    // Manifest constructor rows establish coverage, while this pack hook owns
+    // the precise Java slot types.  Replace the manifest's arity-only `_`
+    // facts so constructor selection has one authoritative signature.
+    facts.external_constructor_facts.retain(|fact| {
+        !((["org.itadaki.bzip2.BZip2InputStream", "BZip2InputStream"]
+            .contains(&fact.type_name.as_str())
+            && fact.arg_types.len() == 2)
+            || (["org.itadaki.bzip2.BZip2OutputStream", "BZip2OutputStream"]
+                .contains(&fact.type_name.as_str())
+                && matches!(fact.arg_types.len(), 1 | 2))
+            || (["org.itadaki.bzip2.BitOutputStream", "BitOutputStream"]
+                .contains(&fact.type_name.as_str())
+                && fact.arg_types.len() == 1)
+            || ([
+                "org.itadaki.bzip2.BZip2BlockCompressor",
+                "BZip2BlockCompressor",
+            ]
+            .contains(&fact.type_name.as_str())
+                && fact.arg_types.len() == 2))
+    });
+    for type_name in ["org.itadaki.bzip2.BZip2InputStream", "BZip2InputStream"] {
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: type_name.to_string(),
+                arg_types: vec![
+                    JavaType::Named {
+                        name: "java.io.InputStream".to_string(),
+                        args: Vec::new(),
+                    },
+                    JavaType::Primitive(PrimitiveType::Boolean),
+                ],
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+    for type_name in ["org.itadaki.bzip2.BZip2OutputStream", "BZip2OutputStream"] {
+        for arg_types in [
+            vec![JavaType::Named {
+                name: "java.io.OutputStream".to_string(),
+                args: Vec::new(),
+            }],
+            vec![
+                JavaType::Named {
+                    name: "java.io.OutputStream".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Primitive(PrimitiveType::Int),
+            ],
+        ] {
+            facts
+                .external_constructor_facts
+                .push(ExternalConstructorFact {
+                    type_name: type_name.to_string(),
+                    arg_types,
+                    provenance: FactProvenance::ExternalLibraryPack,
+                });
+        }
+    }
+    for type_name in ["org.itadaki.bzip2.BitOutputStream", "BitOutputStream"] {
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: type_name.to_string(),
+                arg_types: vec![JavaType::Named {
+                    name: "java.io.OutputStream".to_string(),
+                    args: Vec::new(),
+                }],
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+    for type_name in [
+        "org.itadaki.bzip2.BZip2BlockCompressor",
+        "BZip2BlockCompressor",
+    ] {
+        // Keep the constructor ABI in the same alias family as its owner.
+        // The qualified and imported-simple spellings denote one Java class,
+        // but support generation currently emits one façade per spelling.
+        // Mixing those spellings here creates an artificial Rust conversion
+        // requirement at an otherwise ordinary Java superclass upcast.
+        let bit_output_stream_type = if type_name.contains('.') {
+            "org.itadaki.bzip2.BitOutputStream"
+        } else {
+            "BitOutputStream"
+        };
+        facts
+            .external_constructor_facts
+            .push(ExternalConstructorFact {
+                type_name: type_name.to_string(),
+                arg_types: vec![
+                    JavaType::Named {
+                        name: bit_output_stream_type.to_string(),
+                        args: Vec::new(),
+                    },
+                    JavaType::Primitive(PrimitiveType::Int),
+                ],
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
 }
 
 pub fn external_template_method_hook_for_super_method(
@@ -4681,6 +4801,227 @@ const APACHE_COMMONS_COMPRESS_OWNED_TYPES: &[&str] = &[
     "TarArchiveOutputStream",
     "org.apache.commons.compress.archivers.tar.TarArchiveEntry",
     "TarArchiveEntry",
+];
+const ITADAKI_BZIP2_OWNED_TYPES: &[&str] = &[
+    "org.itadaki.bzip2.BZip2InputStream",
+    "BZip2InputStream",
+    "org.itadaki.bzip2.BZip2OutputStream",
+    "BZip2OutputStream",
+    "org.itadaki.bzip2.BitOutputStream",
+    "BitOutputStream",
+    "org.itadaki.bzip2.BZip2BlockCompressor",
+    "BZip2BlockCompressor",
+];
+
+const ITADAKI_BZIP2_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
+    concrete_object_strategy("org.itadaki.bzip2.BZip2InputStream"),
+    concrete_object_strategy("BZip2InputStream"),
+    concrete_object_strategy("org.itadaki.bzip2.BZip2OutputStream"),
+    concrete_object_strategy("BZip2OutputStream"),
+    concrete_object_strategy("org.itadaki.bzip2.BitOutputStream"),
+    concrete_object_strategy("BitOutputStream"),
+    concrete_object_strategy("org.itadaki.bzip2.BZip2BlockCompressor"),
+    concrete_object_strategy("BZip2BlockCompressor"),
+];
+
+const ITADAKI_BZIP2_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BitOutputStream",
+        method_name: "flush",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BitOutputStream",
+        method_name: "flush",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BitOutputStream",
+        method_name: "writeBits",
+        arg_count: Some(2),
+        params: &["int", "int"],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BitOutputStream",
+        method_name: "writeBits",
+        arg_count: Some(2),
+        params: &["int", "int"],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BitOutputStream",
+        method_name: "writeBoolean",
+        arg_count: Some(1),
+        params: &["boolean"],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BitOutputStream",
+        method_name: "writeBoolean",
+        arg_count: Some(1),
+        params: &["boolean"],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BZip2BlockCompressor",
+        method_name: "write",
+        arg_count: Some(3),
+        params: &["byte[]", "int", "int"],
+        rust_name: None,
+        role: ExternalApiRole::Mutator,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("int"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BZip2BlockCompressor",
+        method_name: "write",
+        arg_count: Some(3),
+        params: &["byte[]", "int", "int"],
+        rust_name: None,
+        role: ExternalApiRole::Mutator,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("int"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BZip2BlockCompressor",
+        method_name: "isEmpty",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::BooleanGetter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some("boolean"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &[],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BZip2BlockCompressor",
+        method_name: "isEmpty",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::BooleanGetter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some("boolean"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &[],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BZip2BlockCompressor",
+        method_name: "close",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BZip2BlockCompressor",
+        method_name: "close",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::SideEffect,
+        receiver_mutability: ReceiverMutabilityFact::MutatesReceiver,
+        return_type: Some("void"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &["IOException"],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "org.itadaki.bzip2.BZip2BlockCompressor",
+        method_name: "getCRC",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some("int"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &[],
+    },
+    ExternalPackApiEffect {
+        receiver_type: "BZip2BlockCompressor",
+        method_name: "getCRC",
+        arg_count: Some(0),
+        params: &[],
+        rust_name: None,
+        role: ExternalApiRole::Getter,
+        receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+        return_type: Some("int"),
+        return_nullability: NullabilityState::DefinitelyNonNull,
+        thrown: &[],
+    },
+];
+
+const ITADAKI_BZIP2_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("org.itadaki.bzip2.BitOutputStream", "flush"),
+    modeled_semantic("BitOutputStream", "flush"),
+    modeled_semantic("org.itadaki.bzip2.BitOutputStream", "writeBits"),
+    modeled_semantic("BitOutputStream", "writeBits"),
+    modeled_semantic("org.itadaki.bzip2.BitOutputStream", "writeBoolean"),
+    modeled_semantic("BitOutputStream", "writeBoolean"),
+    modeled_semantic("org.itadaki.bzip2.BZip2BlockCompressor", "write"),
+    modeled_semantic("BZip2BlockCompressor", "write"),
+    modeled_semantic("org.itadaki.bzip2.BZip2BlockCompressor", "isEmpty"),
+    modeled_semantic("BZip2BlockCompressor", "isEmpty"),
+    modeled_semantic("org.itadaki.bzip2.BZip2BlockCompressor", "close"),
+    modeled_semantic("BZip2BlockCompressor", "close"),
+    modeled_semantic("org.itadaki.bzip2.BZip2BlockCompressor", "getCRC"),
+    modeled_semantic("BZip2BlockCompressor", "getCRC"),
+];
+const ITADAKI_BZIP2_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
+    modeled_semantic_constructor("org.itadaki.bzip2.BZip2InputStream", 2),
+    modeled_semantic_constructor("BZip2InputStream", 2),
+    modeled_semantic_constructor("org.itadaki.bzip2.BZip2OutputStream", 1),
+    modeled_semantic_constructor("BZip2OutputStream", 1),
+    modeled_semantic_constructor("org.itadaki.bzip2.BZip2OutputStream", 2),
+    modeled_semantic_constructor("BZip2OutputStream", 2),
+    modeled_semantic_constructor("org.itadaki.bzip2.BitOutputStream", 1),
+    modeled_semantic_constructor("BitOutputStream", 1),
+    modeled_semantic_constructor("org.itadaki.bzip2.BZip2BlockCompressor", 2),
+    modeled_semantic_constructor("BZip2BlockCompressor", 2),
 ];
 const APACHE_COMMONS_LANG_OWNED_TYPES: &[&str] = &[
     "org.apache.commons.lang3.builder.HashCodeBuilder",
@@ -28793,6 +29134,24 @@ fn build_builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             unsupported_apis: &[],
         },
         ExternalPackManifest {
+            pack_name: ITADAKI_BZIP2_PACK,
+            owned_type_patterns: ITADAKI_BZIP2_OWNED_TYPES,
+            mode: ExternalLibraryMode::ExternalFactModel,
+            default_coverage: ExternalApiCoverage::Semantic,
+            rust_target: Some("crate::external::itadaki::bzip2"),
+            object_strategies: ITADAKI_BZIP2_OBJECT_STRATEGIES,
+            closed_hierarchy: NO_CLOSED_HIERARCHY,
+            type_capabilities: NO_TYPE_CAPABILITIES,
+            field_nullability: NO_FIELD_NULLABILITY,
+            argument_effects: NO_ARGUMENT_EFFECTS,
+            exceptions: NO_EXCEPTIONS,
+            api_effects: ITADAKI_BZIP2_API_EFFECTS,
+            modeled_apis: ITADAKI_BZIP2_MODELED_APIS,
+            modeled_constructors: ITADAKI_BZIP2_MODELED_CONSTRUCTORS,
+            modeled_fields: NO_MODELED_FIELDS,
+            unsupported_apis: &[],
+        },
+        ExternalPackManifest {
             pack_name: SQLITE_PACK,
             owned_type_patterns: SQLITE_OWNED_TYPES,
             mode: ExternalLibraryMode::RustCrateMapping,
@@ -28880,6 +29239,30 @@ fn java_platform_field_fact_set() -> FactSet {
             NullabilityState::MaybeNull,
         ),
         (
+            "java.util.zip.GZIPOutputStream",
+            "out",
+            "java.io.OutputStream",
+            NullabilityState::DefinitelyNonNull,
+        ),
+        (
+            "GZIPOutputStream",
+            "out",
+            "java.io.OutputStream",
+            NullabilityState::DefinitelyNonNull,
+        ),
+        (
+            "java.util.zip.GZIPOutputStream",
+            "def",
+            "java.util.zip.Deflater",
+            NullabilityState::DefinitelyNonNull,
+        ),
+        (
+            "GZIPOutputStream",
+            "def",
+            "java.util.zip.Deflater",
+            NullabilityState::DefinitelyNonNull,
+        ),
+        (
             "java.io.FileReader",
             "reader",
             "InputStreamReader",
@@ -28906,6 +29289,36 @@ fn java_platform_field_fact_set() -> FactSet {
             state: nullability,
             provenance: FieldNullabilityProvenance::ExternalLibraryPack,
         });
+    }
+    for type_name in ["java.util.zip.Deflater", "Deflater", "JavaUtilZipDeflater"] {
+        for (field_name, rust_value) in [
+            ("DEFLATED", "8"),
+            ("NO_COMPRESSION", "0"),
+            ("BEST_SPEED", "1"),
+            ("BEST_COMPRESSION", "9"),
+            ("DEFAULT_COMPRESSION", "-1"),
+            ("FILTERED", "1"),
+            ("HUFFMAN_ONLY", "2"),
+            ("DEFAULT_STRATEGY", "0"),
+            ("NO_FLUSH", "0"),
+            ("SYNC_FLUSH", "2"),
+            ("FULL_FLUSH", "3"),
+        ] {
+            let field = FieldKey::named(type_name, field_name);
+            facts.external_field_facts.push(ExternalFieldFact {
+                field: field.clone(),
+                field_type: Some(JavaType::Primitive(PrimitiveType::Int)),
+                field_kind: ExternalFieldKind::StaticFinal,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+            facts
+                .external_field_value_facts
+                .push(ExternalFieldValueFact {
+                    field,
+                    rust_value: rust_value.to_string(),
+                    provenance: FactProvenance::BuiltinExternalModel,
+                });
+        }
     }
     facts
 }
@@ -28994,6 +29407,19 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             provenance: FactProvenance::BuiltinExternalModel,
         })
         .collect::<Vec<_>>();
+    for receiver_type in ["Pattern", "JavaUtilRegexPattern", "java.util.regex.Pattern"] {
+        facts.push(ExternalApiArgumentEffectFact {
+            method_name: "matcher".to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            parameter_index: 0,
+            parameter_type: Some(JavaType::String),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     for receiver_type in ["ObjectOutputStream", "java.io.ObjectOutputStream"] {
         for method_name in ["writeObject", "write_object"] {
             facts.push(ExternalApiArgumentEffectFact {
@@ -29161,6 +29587,74 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
                     alias_policy: ExternalArgumentAliasPolicy::NoAlias,
                     provenance: FactProvenance::BuiltinExternalModel,
                 });
+            }
+        }
+    }
+    for (receiver_types, value_type, supports_addition) in [
+        (
+            &[
+                "AtomicBoolean",
+                "JavaUtilConcurrentAtomicAtomicBoolean",
+                "java.util.concurrent.atomic.AtomicBoolean",
+            ][..],
+            JavaType::Primitive(PrimitiveType::Boolean),
+            false,
+        ),
+        (
+            &[
+                "AtomicInteger",
+                "JavaUtilConcurrentAtomicAtomicInteger",
+                "java.util.concurrent.atomic.AtomicInteger",
+            ][..],
+            JavaType::Primitive(PrimitiveType::Int),
+            true,
+        ),
+        (
+            &[
+                "AtomicLong",
+                "JavaUtilConcurrentAtomicAtomicLong",
+                "java.util.concurrent.atomic.AtomicLong",
+            ][..],
+            JavaType::Primitive(PrimitiveType::Long),
+            true,
+        ),
+    ] {
+        for receiver_type in receiver_types {
+            for (method_name, arg_count) in [
+                ("set", 1),
+                ("getAndSet", 1),
+                ("get_and_set", 1),
+                ("compareAndSet", 2),
+                ("compare_and_set", 2),
+            ] {
+                for parameter_index in 0..arg_count {
+                    facts.push(ExternalApiArgumentEffectFact {
+                        method_name: method_name.to_string(),
+                        receiver_type: Some((*receiver_type).to_string()),
+                        arg_count: Some(arg_count),
+                        parameter_index,
+                        parameter_type: Some(value_type.clone()),
+                        parameter_nullability: NullabilityState::DefinitelyNonNull,
+                        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                        provenance: FactProvenance::BuiltinExternalModel,
+                    });
+                }
+            }
+            if supports_addition {
+                for method_name in ["addAndGet", "add_and_get"] {
+                    facts.push(ExternalApiArgumentEffectFact {
+                        method_name: method_name.to_string(),
+                        receiver_type: Some((*receiver_type).to_string()),
+                        arg_count: Some(1),
+                        parameter_index: 0,
+                        parameter_type: Some(value_type.clone()),
+                        parameter_nullability: NullabilityState::DefinitelyNonNull,
+                        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+                        provenance: FactProvenance::BuiltinExternalModel,
+                    });
+                }
             }
         }
     }
@@ -29344,6 +29838,7 @@ fn builtin_external_pack_fact_sets() -> &'static [(String, FactSet)] {
                 jackson_databind_pack_facts(),
             ),
             (HDF5_PACK.to_string(), hdf5_pack_facts()),
+            (ITADAKI_BZIP2_PACK.to_string(), itadaki_bzip2_pack_facts()),
             (SQLITE_PACK.to_string(), sqlite_pack_facts()),
             (JAVA_SQL_PACK.to_string(), java_sql_pack_facts()),
         ]
@@ -29674,6 +30169,13 @@ fn external_field_name_lookup_aliases(field_name: &str) -> Vec<String> {
 fn external_method_name_lookup_aliases(method_name: &str) -> Vec<String> {
     let canonical = crate::parser::to_snake_case(method_name);
     let mut aliases = vec![method_name.to_string(), canonical];
+    if let Some((base, suffix)) = method_name.rsplit_once('_')
+        && !base.is_empty()
+        && !suffix.is_empty()
+        && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    {
+        aliases.push(base.to_string());
+    }
     match method_name {
         "read_3" => aliases.push("read".to_string()),
         "write_3" => aliases.push("write".to_string()),
@@ -30039,6 +30541,9 @@ fn java_platform_api_effects_for_method_arity(
         "JarEntry",
         "java.util.zip.ZipEntry",
         "ZipEntry",
+        "java.util.zip.Deflater",
+        "Deflater",
+        "JavaUtilZipDeflater",
         "javax.xml.stream.XMLOutputFactory",
         "XMLOutputFactory",
         "JavaxXmlStreamXMLOutputFactory",
@@ -30110,6 +30615,77 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         return Some(effect);
     }
     let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    if matches!(simple_receiver, "Deflater" | "JavaUtilZipDeflater") {
+        let (expected_args, role, return_type, receiver_mutability) = match method_name {
+            "needsInput" | "needs_input" if matches_arg_count(0) => (
+                0,
+                ExternalApiRole::BooleanGetter,
+                JavaType::Primitive(PrimitiveType::Boolean),
+                ReceiverMutabilityFact::ReadOnly,
+            ),
+            "deflate" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                JavaType::Primitive(PrimitiveType::Int),
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "deflate" if matches_arg_count(3) => (
+                3,
+                ExternalApiRole::Mutator,
+                JavaType::Primitive(PrimitiveType::Int),
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "deflate" if matches_arg_count(4) => (
+                4,
+                ExternalApiRole::Mutator,
+                JavaType::Primitive(PrimitiveType::Int),
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "finish" if matches_arg_count(0) => (
+                0,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "setLevel" | "set_level" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "setInput" | "set_input" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "setInput" | "set_input" if matches_arg_count(3) => (
+                3,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "setDictionary" | "set_dictionary" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            parameter_patterns: None,
+            role,
+            receiver_mutability,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if simple_receiver == "Logger"
         && method_name == "log"
         && arg_count.is_some_and(|arity| matches!(arity, 2 | 3))
@@ -30414,8 +30990,11 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         "Matcher" | "JavaUtilRegexMatcher" | "java.util.regex.Matcher"
     ) {
         let (expected_args, return_type) = match method_name {
-            "matches" if matches_arg_count(0) => (0, JavaType::Primitive(PrimitiveType::Boolean)),
+            "matches" | "find" if matches_arg_count(0) => {
+                (0, JavaType::Primitive(PrimitiveType::Boolean))
+            }
             "group" if matches_arg_count(1) => (1, JavaType::String),
+            "replaceAll" | "replace_all" if matches_arg_count(1) => (1, JavaType::String),
             _ => return None,
         };
         return Some(ExternalApiEffectFact {
@@ -31113,6 +31692,34 @@ pub fn java_platform_constructor_argument_effect_for(
     arg_count: usize,
     parameter_index: usize,
 ) -> Option<ExternalConstructorArgumentEffectFact> {
+    if crate::facts::external_type_name_matches(type_name, "java.io.BufferedReader")
+        && arg_count == 2
+    {
+        let (parameter_type, alias_policy) = match parameter_index {
+            0 => (
+                JavaType::Named {
+                    name: "java.io.InputStreamReader".to_string(),
+                    args: Vec::new(),
+                },
+                ExternalArgumentAliasPolicy::Escapes,
+            ),
+            1 => (
+                JavaType::Primitive(PrimitiveType::Int),
+                ExternalArgumentAliasPolicy::NoAlias,
+            ),
+            _ => return None,
+        };
+        return Some(ExternalConstructorArgumentEffectFact {
+            type_name: type_name.to_string(),
+            arg_count,
+            parameter_index,
+            parameter_type: Some(parameter_type),
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::ReadOnly,
+            alias_policy,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if crate::facts::external_type_name_matches(type_name, "java.util.StringTokenizer") {
         match (arg_count, parameter_index) {
             (1..=3, 0) | (2..=3, 1) => {
@@ -31196,24 +31803,30 @@ pub fn java_platform_constructor_argument_effect_for(
             provenance: FactProvenance::BuiltinExternalModel,
         });
     }
-    if arg_count == 1
-        && parameter_index == 0
-        && [
-            "java.io.BufferedInputStream",
-            "JavaIoBufferedInputStream",
-            "java.io.DataInputStream",
-            "JavaIoDataInputStream",
-            "java.io.ObjectInputStream",
-            "JavaIoObjectInputStream",
-            "java.io.FilterInputStream",
-            "JavaIoFilterInputStream",
-            "java.io.PushbackInputStream",
-            "JavaIoPushbackInputStream",
-            "java.util.zip.GZIPInputStream",
-            "JavaUtilZipGZIPInputStream",
-        ]
-        .iter()
-        .any(|expected| crate::facts::external_type_name_matches(type_name, expected))
+    if parameter_index == 0
+        && ((arg_count == 1
+            && [
+                "java.io.BufferedInputStream",
+                "JavaIoBufferedInputStream",
+                "java.io.DataInputStream",
+                "JavaIoDataInputStream",
+                "java.io.ObjectInputStream",
+                "JavaIoObjectInputStream",
+                "java.io.FilterInputStream",
+                "JavaIoFilterInputStream",
+                "java.io.PushbackInputStream",
+                "JavaIoPushbackInputStream",
+                "java.util.zip.GZIPInputStream",
+                "JavaUtilZipGZIPInputStream",
+                "java.util.zip.ZipInputStream",
+                "ZipInputStream",
+            ]
+            .iter()
+            .any(|expected| crate::facts::external_type_name_matches(type_name, expected)))
+            || (arg_count == 2
+                && ["java.io.PushbackInputStream", "PushbackInputStream"]
+                    .iter()
+                    .any(|expected| crate::facts::external_type_name_matches(type_name, expected))))
     {
         return Some(ExternalConstructorArgumentEffectFact {
             type_name: type_name.to_string(),
@@ -31356,6 +31969,81 @@ fn java_platform_concurrent_api_effect(
     matches_arg_count: impl Fn(usize) -> bool,
 ) -> Option<ExternalApiEffectFact> {
     let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    let atomic_value_type = match simple_receiver {
+        "AtomicBoolean" | "JavaUtilConcurrentAtomicAtomicBoolean" => {
+            Some(JavaType::Primitive(PrimitiveType::Boolean))
+        }
+        "AtomicInteger" | "JavaUtilConcurrentAtomicAtomicInteger" => {
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        }
+        "AtomicLong" | "JavaUtilConcurrentAtomicAtomicLong" => {
+            Some(JavaType::Primitive(PrimitiveType::Long))
+        }
+        _ => None,
+    };
+    if let Some(value_type) = atomic_value_type {
+        let (expected_args, role, return_type, receiver_mutability) = match method_name {
+            "get" if matches_arg_count(0) => (
+                0,
+                ExternalApiRole::Getter,
+                value_type.clone(),
+                ReceiverMutabilityFact::ReadOnly,
+            ),
+            "set" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "getAndSet" | "get_and_set" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                value_type.clone(),
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "compareAndSet" | "compare_and_set" if matches_arg_count(2) => (
+                2,
+                ExternalApiRole::Mutator,
+                JavaType::Primitive(PrimitiveType::Boolean),
+                ReceiverMutabilityFact::MutatesReceiver,
+            ),
+            "incrementAndGet" | "increment_and_get" | "getAndIncrement" | "get_and_increment"
+                if !matches!(value_type, JavaType::Primitive(PrimitiveType::Boolean))
+                    && matches_arg_count(0) =>
+            {
+                (
+                    0,
+                    ExternalApiRole::Mutator,
+                    value_type.clone(),
+                    ReceiverMutabilityFact::MutatesReceiver,
+                )
+            }
+            "addAndGet" | "add_and_get"
+                if !matches!(value_type, JavaType::Primitive(PrimitiveType::Boolean))
+                    && matches_arg_count(1) =>
+            {
+                (
+                    1,
+                    ExternalApiRole::Mutator,
+                    value_type.clone(),
+                    ReceiverMutabilityFact::MutatesReceiver,
+                )
+            }
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            parameter_patterns: None,
+            role,
+            receiver_mutability,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     let (expected_args, role, return_type) = match (simple_receiver, method_name) {
         (
             "Executors" | "JavaUtilConcurrentExecutors" | "java.util.concurrent.Executors",
@@ -31702,6 +32390,8 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
             "DataInputStream",
             "java.util.zip.GZIPInputStream",
             "GZIPInputStream",
+            "java.util.zip.ZipInputStream",
+            "ZipInputStream",
             "java.io.ObjectInputStream",
             "ObjectInputStream",
             "java.io.FilterInputStream",
@@ -32045,6 +32735,34 @@ fn manifest_pack_fact(manifest: &ExternalPackManifest) -> ExternalLibraryPackFac
 pub fn hdf5_pack_facts() -> FactSet {
     let mut facts = FactSet::default();
     manifest_by_name(HDF5_PACK).apply_boundary_facts(&mut facts);
+
+    facts
+}
+
+pub fn itadaki_bzip2_pack_facts() -> FactSet {
+    let mut facts = FactSet::default();
+    manifest_by_name(ITADAKI_BZIP2_PACK).apply_boundary_facts(&mut facts);
+
+    for from_type in ["org.itadaki.bzip2.BZip2InputStream", "BZip2InputStream"] {
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: from_type.to_string(),
+                to_type: "InputStream".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
+    for from_type in ["org.itadaki.bzip2.BZip2OutputStream", "BZip2OutputStream"] {
+        facts
+            .external_conversion_adapter_facts
+            .push(ExternalConversionAdapterFact {
+                from_type: from_type.to_string(),
+                to_type: "OutputStream".to_string(),
+                kind: ExternalConversionAdapterKind::Into,
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+    }
 
     facts
 }

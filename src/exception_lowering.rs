@@ -73,19 +73,21 @@ pub(crate) fn java_exception_support_item_with_facts(facts: &FactSet) -> RustIte
 pub struct InputStream {
     bytes: Option<std::rc::Rc<Vec<u8>>>,
     position: Option<std::rc::Rc<std::cell::Cell<usize>>>,
+    marked_position: Option<std::rc::Rc<std::cell::Cell<usize>>>,
     closed: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     error_message: Option<std::rc::Rc<String>>,
 }
 
 impl InputStream {
     pub const fn empty() -> InputStream {
-        InputStream { bytes: None, position: None, closed: None, error_message: None }
+        InputStream { bytes: None, position: None, marked_position: None, closed: None, error_message: None }
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> InputStream {
         InputStream {
             bytes: Some(std::rc::Rc::new(bytes)),
             position: Some(std::rc::Rc::new(std::cell::Cell::new(0))),
+            marked_position: Some(std::rc::Rc::new(std::cell::Cell::new(0))),
             closed: Some(std::rc::Rc::new(std::cell::Cell::new(false))),
             error_message: None,
         }
@@ -95,6 +97,7 @@ impl InputStream {
         InputStream {
             bytes: None,
             position: None,
+            marked_position: None,
             closed: None,
             error_message: Some(std::rc::Rc::new(error.to_string())),
         }
@@ -289,6 +292,48 @@ fn java_exception_is_subtype(actual: &str, target: &str) -> bool {
 }
 
 impl InputStream {
+    pub fn available(&self) -> i32 {
+        match (&self.bytes, &self.position) {
+            (Some(bytes), Some(position)) => {
+                i32::try_from(bytes.len().saturating_sub(position.get())).unwrap_or(i32::MAX)
+            }
+            _ => 0,
+        }
+    }
+
+    pub fn mark(&self, _read_limit: i32) {
+        if let (Some(position), Some(marked_position)) =
+            (&self.position, &self.marked_position)
+        {
+            marked_position.set(position.get());
+        }
+    }
+
+    pub fn mark_supported(&self) -> bool {
+        self.position.is_some() && self.marked_position.is_some()
+    }
+
+    pub fn reset(&self) {
+        if let (Some(position), Some(marked_position)) =
+            (&self.position, &self.marked_position)
+        {
+            position.set(marked_position.get());
+        }
+    }
+
+    pub fn skip(&self, count: i64) -> i64 {
+        if count <= 0 {
+            return 0;
+        }
+        let (Some(bytes), Some(position)) = (&self.bytes, &self.position) else {
+            return 0;
+        };
+        let remaining = bytes.len().saturating_sub(position.get());
+        let skipped = remaining.min(usize::try_from(count).unwrap_or(usize::MAX));
+        position.set(position.get() + skipped);
+        i64::try_from(skipped).unwrap_or(i64::MAX)
+    }
+
     pub fn read_0(&self) -> Result<i32, JavaException> {
         if let Some(message) = self.error_message.as_ref() {
             return Err(JavaException::new("FileNotFoundException", message.as_ref().clone()));

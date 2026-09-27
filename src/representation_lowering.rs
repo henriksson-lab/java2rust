@@ -12,7 +12,10 @@ use crate::java_naming::rust_name_for_java_named_type;
 use crate::representation::{ObjectRepresentation, RepresentationPlan};
 use crate::rust_ir::RustType;
 use crate::signature::{ReceiverPlan, SignaturePlan};
-use crate::slot_render::{rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts};
+use crate::slot_render::{
+    rust_type_for_java_type_with_facts, rust_type_for_java_type_with_facts_and_representations,
+    rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
+};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -199,6 +202,15 @@ pub(crate) fn source_hierarchy_virtual_dispatch_trait_item_for_type(
         return None;
     }
     let trait_name = source_hierarchy_virtual_dispatch_trait_name(&ty.name);
+    let carrier_variants = representations
+        .type_representation(&ty.name)
+        .and_then(|representation| match representation.representation() {
+            ObjectRepresentation::SourceHierarchyCarrier { variants, .. } => {
+                Some(variants.as_slice())
+            }
+            _ => None,
+        })
+        .unwrap_or(&[]);
     let methods = ty
         .members
         .iter()
@@ -209,8 +221,11 @@ pub(crate) fn source_hierarchy_virtual_dispatch_trait_item_for_type(
             source_hierarchy_virtual_dispatch_method_signature(
                 ty,
                 method,
+                carrier_variants,
+                support_program,
                 signatures,
                 facts,
+                representations,
                 exceptions.method_plan(ty, method),
             )
         })
@@ -221,8 +236,11 @@ pub(crate) fn source_hierarchy_virtual_dispatch_trait_item_for_type(
                     source_hierarchy_virtual_dispatch_method_signature(
                         ty,
                         inherited.method(),
+                        carrier_variants,
+                        support_program,
                         signatures,
                         facts,
+                        representations,
                         exceptions.method_plan(inherited.declaring_ty(), inherited.method()),
                     )
                 }),
@@ -265,8 +283,11 @@ pub(crate) fn source_hierarchy_virtual_dispatch_field_getter_name(field_name: &s
 fn source_hierarchy_virtual_dispatch_method_signature(
     owner: &TypeDecl,
     method: &MethodDecl,
+    variants: &[String],
+    support_program: &Program,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    representations: &RepresentationPlan,
     exceptions: MethodExceptionPlan,
 ) -> Option<String> {
     if method.modifiers.contains(&Modifier::Static) || !method.type_params.is_empty() {
@@ -279,11 +300,27 @@ fn source_hierarchy_virtual_dispatch_method_signature(
         .enumerate()
         .map(|(index, param)| {
             let name = rust_identifier_token(&crate::parser::to_snake_case(&param.name));
-            let ty = source_hierarchy_virtual_param_type(owner, method, index, signatures, facts);
+            let ty = source_hierarchy_virtual_param_type(
+                owner,
+                method,
+                index,
+                variants,
+                support_program,
+                signatures,
+                facts,
+                representations,
+            );
             format!(", {name}: {ty}")
         })
         .collect::<String>();
-    let return_ty = source_hierarchy_virtual_return_type(method, facts, exceptions);
+    let return_ty = source_hierarchy_virtual_return_type(
+        owner,
+        method,
+        signatures,
+        facts,
+        representations,
+        exceptions,
+    );
     Some(format!("    fn {rust_name}(&self{params}) -> {return_ty};"))
 }
 
@@ -294,34 +331,188 @@ pub(crate) fn source_hierarchy_virtual_param_type(
     owner: &TypeDecl,
     method: &MethodDecl,
     index: usize,
+    variants: &[String],
+    support_program: &Program,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    representations: &RepresentationPlan,
 ) -> String {
-    let ty = &method.params[index].ty;
-    if matches!(ty, JavaType::String)
-        || matches!(ty, JavaType::Array(element) if matches!(element.as_ref(), JavaType::Primitive(_)))
-    {
-        if let Some(plan) = signatures.method_param_plans(owner, method)
-            && let Some(param) = plan.get(index)
+    // The carrier is the virtual-call boundary for every concrete payload.
+    // Prefer the payload ABI when all implementations agree. This is more
+    // authoritative than a separately solved declaration ABI (which can be
+    // more nullable or borrowed for an abstract/inherited declaration), and
+    // avoids impossible conversions such as `Option<&T>` -> `Rc<T>` in a
+    // dispatch arm. If implementations disagree, retain the declaration ABI.
+    // A package summary can contain a qualified copy of the current source
+    // declaration. The carrier may be discovered through that copy, while
+    // its payload is the declaration actually emitted in this module. Derive
+    // the boundary from that payload contract first so both sides consult the
+    // same signature-plan entry.
+    if let Some((payload_owner, payload_method)) = variants.first().and_then(|variant| {
+        emitted_carrier_payload_type(support_program, variant).and_then(|payload_owner| {
+            implementing_method_candidates_in_hierarchy(payload_owner, method, support_program)
+                .into_iter()
+                .find(|(_, candidate)| {
+                    candidate.name == method.name
+                        && crate::java_signature::erased_param_types(&candidate.params)
+                            == crate::java_signature::erased_param_types(&method.params)
+                })
+        })
+    }) {
+        let forwarding_owner = trait_impl_forwarding_owner_for_inherited_source_method(
+            emitted_carrier_payload_type(support_program, &variants[0])
+                .expect("carrier payload resolved above"),
+            payload_owner,
+            payload_method,
+        );
+        if let Some(param) = signatures
+            .method_signature(forwarding_owner, payload_method)
+            .unwrap_or_else(|| signatures.required_method_signature(payload_owner, payload_method))
+            .params()
+            .get(index)
         {
-            return emit_type(&rust_type_for_slot_with_facts(&param.shape(), facts));
-        }
-        if let JavaType::Array(element) = ty {
-            return format!(
-                "&[{}]",
-                emit_type(&rust_type_for_java_type_with_facts(element, facts))
+            let shape = crate::lower::emitted_source_method_param_shape(
+                payload_method,
+                &payload_method.params[index],
+                &forwarding_owner.name,
+                param.shape(),
+                representations,
+            );
+            return emit_type(
+                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    facts,
+                    representations,
+                ),
             );
         }
+    }
+
+    let implementation_shapes = variants
+        .iter()
+        .filter_map(|variant| {
+            let variant_ty =
+                find_type_decl_for_owner_context(support_program, &owner.name, variant)?;
+            let (implementation_owner, implementation_method) =
+                implementing_method_candidates_in_hierarchy(variant_ty, method, support_program)
+                    .into_iter()
+                    .find(|(_, candidate)| {
+                        trait_impl_method_compatibility_error(method, candidate).is_none()
+                    })?;
+            // Inherited concrete methods are emitted on the payload type, so
+            // query the same forwarding owner used by trait emission. Looking
+            // only at the declaring owner can select its independently solved
+            // ABI rather than the ABI the match arm actually invokes.
+            let forwarding_owner = trait_impl_forwarding_owner_for_inherited_source_method(
+                variant_ty,
+                implementation_owner,
+                implementation_method,
+            );
+            signatures
+                .method_signature(forwarding_owner, implementation_method)
+                .unwrap_or_else(|| {
+                    signatures
+                        .required_method_signature(implementation_owner, implementation_method)
+                })
+                .params()
+                .get(index)
+                .map(|param| {
+                    crate::lower::emitted_source_method_param_shape(
+                        implementation_method,
+                        &implementation_method.params[index],
+                        &forwarding_owner.name,
+                        param.shape(),
+                        representations,
+                    )
+                })
+        })
+        .collect::<Vec<_>>();
+    if let Some(first) = implementation_shapes.first()
+        && implementation_shapes.iter().all(|shape| shape == first)
+    {
+        return emit_type(
+            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                first,
+                facts,
+                representations,
+            ),
+        );
+    }
+    let ty = &method.params[index].ty;
+    if let Some(plan) = signatures.method_param_plans(owner, method)
+        && let Some(param) = plan.get(index)
+    {
+        return emit_type(
+            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &param.shape(),
+                facts,
+                representations,
+            ),
+        );
+    }
+    if let JavaType::Array(element) = ty
+        && matches!(element.as_ref(), JavaType::Primitive(_))
+    {
+        return format!(
+            "&[{}]",
+            emit_type(&rust_type_for_java_type_with_facts(element, facts))
+        );
     }
     emit_type(&rust_type_for_java_type_with_facts(ty, facts))
 }
 
+/// Locate the declaration whose Rust name is the carrier payload name.
+///
+/// When both the active compilation unit and a package-qualified summary copy
+/// are present they intentionally erase to the same Rust identifier. The
+/// active declaration has the shortest source identity (`Outer.Inner` rather
+/// than `pkg.Outer.Inner`), which is also the identity used by ordinary item
+/// emission in the focused-package pipeline.
+fn emitted_carrier_payload_type<'a>(program: &'a Program, variant: &str) -> Option<&'a TypeDecl> {
+    fn collect<'a>(ty: &'a TypeDecl, variant: &str, matches: &mut Vec<&'a TypeDecl>) {
+        if crate::item_assembly::rust_use_name_for_source_type(ty) == variant {
+            matches.push(ty);
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect(nested, variant, matches);
+            }
+        }
+    }
+
+    let mut matches = Vec::new();
+    for ty in &program.types {
+        collect(ty, variant, &mut matches);
+    }
+    matches.into_iter().min_by_key(|ty| {
+        (
+            ty.name.matches('.').count(),
+            ty.name.len(),
+            ty.name.as_str(),
+        )
+    })
+}
+
 pub(crate) fn source_hierarchy_virtual_return_type(
+    owner: &TypeDecl,
     method: &MethodDecl,
+    signatures: &SignaturePlan,
     facts: &FactSet,
+    representations: &RepresentationPlan,
     exceptions: MethodExceptionPlan,
 ) -> String {
-    let ty = rust_type_for_java_type_with_facts(&method.return_type, facts);
+    let ty = signatures
+        .method_return_shape(owner, method)
+        .map(|shape| {
+            rust_type_for_slot_with_facts_and_representations(&shape, facts, representations)
+        })
+        .unwrap_or_else(|| {
+            rust_type_for_java_type_with_facts_and_representations(
+                &method.return_type,
+                facts,
+                representations,
+            )
+        });
     emit_type(&if exceptions.wrap_returns_in_result() {
         exception_result_type(ty)
     } else {
@@ -331,6 +522,30 @@ pub(crate) fn source_hierarchy_virtual_return_type(
 
 fn closed_enum_carrier_item(enum_name: &str, variants: &[String], facts: &FactSet) -> String {
     carrier_enum_item("#[derive(Clone, PartialEq)]", enum_name, variants, facts)
+}
+
+fn closed_enum_carrier_item_for_program(
+    enum_name: &str,
+    variants: &[String],
+    facts: &FactSet,
+    program: &Program,
+    owner: &TypeDecl,
+) -> String {
+    let variants = variants
+        .iter()
+        .map(|variant| {
+            let emitted_name = emitted_carrier_variant_payload_name(program, &owner.name, variant);
+            let placement = facts.storage_placement_for(variant);
+            let payload = if placement.shared() && placement.is_implemented() {
+                placement.wrap(emitted_name)
+            } else {
+                emitted_name
+            };
+            format!("    {variant}({payload}),")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    format!("#[derive(Clone, PartialEq)]\npub enum {enum_name} {{\n{variants}\n}}")
 }
 
 fn source_hierarchy_carrier_item(
@@ -350,21 +565,26 @@ fn source_hierarchy_carrier_item(
         enum_name,
         variants,
         representations,
+        ty,
+        support_program,
         virtual_dispatch_trait,
         anonymous_sync,
     );
     let mut impl_members = Vec::new();
     impl_members.extend(source_hierarchy_carrier_field_accessors(
         variants,
+        representations,
         facts,
         signatures,
         ty,
+        support_program,
         virtual_dispatch_trait.is_some(),
         anonymous_sync,
     ));
     impl_members.extend(source_hierarchy_carrier_forwarding_methods(
         enum_name,
         variants,
+        representations,
         facts,
         signatures,
         exceptions,
@@ -432,15 +652,23 @@ fn source_hierarchy_carrier_enum_item(
     enum_name: &str,
     variants: &[String],
     representations: &RepresentationPlan,
+    owner: &TypeDecl,
+    support_program: &Program,
     virtual_dispatch_trait: Option<&str>,
     anonymous_sync: bool,
 ) -> String {
     let mut variants = variants
         .iter()
         .map(|variant| {
+            let payload_type =
+                emitted_carrier_variant_payload_name(support_program, &owner.name, variant);
             format!(
                 "    {variant}({}),",
-                source_hierarchy_carrier_variant_payload_type(variant, representations)
+                source_hierarchy_carrier_variant_payload_type(
+                    variant,
+                    &payload_type,
+                    representations,
+                )
             )
         })
         .collect::<Vec<_>>();
@@ -478,6 +706,7 @@ fn carrier_enum_item(
 fn source_hierarchy_carrier_forwarding_methods(
     enum_name: &str,
     variants: &[String],
+    representations: &RepresentationPlan,
     facts: &FactSet,
     signatures: &SignaturePlan,
     exceptions: &ProgramExceptionPlan,
@@ -495,11 +724,13 @@ fn source_hierarchy_carrier_forwarding_methods(
             source_hierarchy_carrier_forwarding_method(
                 enum_name,
                 variants,
+                representations,
                 facts,
                 signatures,
                 exceptions.method_plan(ty, method),
                 ty,
                 method,
+                support_program,
                 virtual_dispatch_trait,
                 anonymous_sync,
             )
@@ -511,11 +742,13 @@ fn source_hierarchy_carrier_forwarding_methods(
                     source_hierarchy_carrier_forwarding_method(
                         enum_name,
                         variants,
+                        representations,
                         facts,
                         signatures,
                         exceptions.method_plan(inherited.declaring_ty(), inherited.method()),
                         ty,
                         inherited.method(),
+                        support_program,
                         virtual_dispatch_trait,
                         anonymous_sync,
                     )
@@ -527,26 +760,45 @@ fn source_hierarchy_carrier_forwarding_methods(
 fn source_hierarchy_carrier_forwarding_method(
     _enum_name: &str,
     variants: &[String],
+    representations: &RepresentationPlan,
     facts: &FactSet,
     signatures: &SignaturePlan,
     exceptions: MethodExceptionPlan,
     owner: &TypeDecl,
     method: &MethodDecl,
+    support_program: &Program,
     virtual_dispatch_trait: Option<&str>,
     anonymous_sync: bool,
 ) -> Option<String> {
-    if method.modifiers.contains(&Modifier::Static) {
+    if method.modifiers.contains(&Modifier::Static) || method.modifiers.contains(&Modifier::Private)
+    {
         return None;
     }
     let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(method));
-    let return_ty = source_hierarchy_virtual_return_type(method, facts, exceptions);
+    let return_ty = source_hierarchy_virtual_return_type(
+        owner,
+        method,
+        signatures,
+        facts,
+        representations,
+        exceptions,
+    );
     let params = method
         .params
         .iter()
         .enumerate()
         .map(|(index, param)| {
             let name = rust_identifier_token(&crate::parser::to_snake_case(&param.name));
-            let ty = source_hierarchy_virtual_param_type(owner, method, index, signatures, facts);
+            let ty = source_hierarchy_virtual_param_type(
+                owner,
+                method,
+                index,
+                variants,
+                support_program,
+                signatures,
+                facts,
+                representations,
+            );
             (name, ty)
         })
         .collect::<Vec<_>>();
@@ -568,11 +820,24 @@ fn source_hierarchy_carrier_forwarding_method(
         suffix += 1;
         carrier_binding = format!("__java_carrier_payload_{suffix}");
     }
+    let receiver_plan = source_hierarchy_carrier_receiver_plan(
+        variants,
+        owner,
+        method,
+        support_program,
+        signatures,
+    );
     let mut arms = variants
         .iter()
         .map(|variant| {
+            let receiver = source_hierarchy_carrier_payload_receiver(
+                &carrier_binding,
+                variant,
+                representations,
+                receiver_plan == ReceiverPlan::Mutable,
+            );
             format!(
-                "            Self::{variant}({carrier_binding}) => {carrier_binding}.{rust_name}({arguments}),"
+                "            Self::{variant}({carrier_binding}) => {receiver}.{rust_name}({arguments}),"
             )
         })
         .collect::<Vec<_>>();
@@ -587,16 +852,62 @@ fn source_hierarchy_carrier_forwarding_method(
         ));
     }
     let arms = arms.join("\n");
+    let self_receiver = if receiver_plan == ReceiverPlan::Mutable {
+        "&mut self"
+    } else {
+        "&self"
+    };
     Some(format!(
-        "    pub fn {rust_name}(&self{parameter_declarations}) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+        "    pub fn {rust_name}({self_receiver}{parameter_declarations}) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
     ))
+}
+
+fn source_hierarchy_carrier_receiver_plan(
+    variants: &[String],
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    support_program: &Program,
+    signatures: &SignaturePlan,
+) -> ReceiverPlan {
+    let mut receiver = signatures
+        .method_receiver(owner, method)
+        .unwrap_or(ReceiverPlan::Shared);
+    for variant in variants {
+        let Some(variant_ty) =
+            find_type_decl_for_owner_context(support_program, &owner.name, variant)
+        else {
+            continue;
+        };
+        let implementation =
+            implementing_method_candidates_in_hierarchy(variant_ty, method, support_program)
+                .into_iter()
+                .find(|(_, candidate)| {
+                    trait_impl_method_compatibility_error(method, candidate).is_none()
+                });
+        let Some((implementation_owner, implementation_method)) = implementation else {
+            continue;
+        };
+        let implementation_receiver = signatures
+            .method_signature(implementation_owner, implementation_method)
+            .unwrap_or_else(|| {
+                signatures.required_method_signature(implementation_owner, implementation_method)
+            })
+            .receiver();
+        if implementation_receiver == ReceiverPlan::Mutable {
+            receiver = ReceiverPlan::Mutable;
+            break;
+        }
+    }
+    receiver
 }
 
 fn source_hierarchy_carrier_field_accessors(
     variants: &[String],
+    representations: &RepresentationPlan,
     facts: &FactSet,
     signatures: &SignaturePlan,
     ty: &TypeDecl,
+    support_program: &Program,
     has_anonymous_variant: bool,
     anonymous_sync: bool,
 ) -> Vec<String> {
@@ -608,10 +919,12 @@ fn source_hierarchy_carrier_field_accessors(
             };
             source_hierarchy_carrier_field_accessor(
                 variants,
+                representations,
                 facts,
                 signatures,
                 ty,
                 field,
+                support_program,
                 has_anonymous_variant,
                 anonymous_sync,
             )
@@ -621,10 +934,12 @@ fn source_hierarchy_carrier_field_accessors(
 
 fn source_hierarchy_carrier_field_accessor(
     variants: &[String],
+    representations: &RepresentationPlan,
     facts: &FactSet,
     signatures: &SignaturePlan,
     ty: &TypeDecl,
     field: &FieldDecl,
+    support_program: &Program,
     has_anonymous_variant: bool,
     anonymous_sync: bool,
 ) -> Option<String> {
@@ -634,14 +949,24 @@ fn source_hierarchy_carrier_field_accessor(
     let rust_name = rust_identifier_token(&crate::parser::to_snake_case(&field.name));
     let field_shape = signatures.required_declared_field_shape(ty, field);
     let return_ty = emit_type(&rust_type_for_slot_with_facts(&field_shape, facts));
-    let projection = if source_hierarchy_carrier_field_accessor_returns_copy(&field.ty) {
-        format!("value.{rust_name}")
-    } else {
-        format!("value.{rust_name}.clone()")
-    };
     let mut arms = variants
         .iter()
-        .map(|variant| format!("            Self::{variant}(value) => {projection},"))
+        .map(|variant| {
+            let receiver =
+                source_hierarchy_carrier_payload_receiver("value", variant, representations, false);
+            let storage_name = source_hierarchy_carrier_variant_field_storage_name(
+                variant,
+                ty,
+                field,
+                support_program,
+            );
+            let projection = if source_hierarchy_carrier_field_accessor_returns_copy(&field.ty) {
+                format!("{receiver}.{storage_name}")
+            } else {
+                format!("{receiver}.{storage_name}.clone()")
+            };
+            format!("            Self::{variant}(value) => {projection},")
+        })
         .collect::<Vec<_>>();
     if has_anonymous_variant {
         let getter = source_hierarchy_virtual_dispatch_field_getter_name(&field.name);
@@ -664,6 +989,56 @@ fn source_hierarchy_carrier_field_accessor_returns_copy(java_ty: &JavaType) -> b
     matches!(java_ty, JavaType::Primitive(_))
 }
 
+fn source_hierarchy_carrier_payload_receiver(
+    binding: &str,
+    variant: &str,
+    representations: &RepresentationPlan,
+    mutable: bool,
+) -> String {
+    let placement = storage_placement_for_emitted_type_name(representations, variant);
+    if !placement.shared() || !placement.interior_mutable() {
+        return binding.to_string();
+    }
+    if placement.sync() {
+        format!("{binding}.lock().unwrap()")
+    } else if mutable {
+        format!("{binding}.borrow_mut()")
+    } else {
+        format!("{binding}.borrow()")
+    }
+}
+
+fn source_hierarchy_carrier_variant_field_storage_name(
+    variant: &str,
+    declaring_ty: &TypeDecl,
+    field: &FieldDecl,
+    support_program: &Program,
+) -> String {
+    let Some(variant_ty) =
+        find_type_decl_for_owner_context(support_program, &declaring_ty.name, variant)
+    else {
+        return rust_identifier_token(&crate::parser::to_snake_case(&field.name));
+    };
+    if variant_ty.name == declaring_ty.name {
+        return crate::java_naming::source_instance_field_rust_name(variant_ty, &field.name);
+    }
+    let inherited_fields = crate::inherited_members::inherited_instance_field_refs_for_type(
+        variant_ty,
+        support_program,
+    );
+    let Some(inherited) = inherited_fields.iter().find(|inherited| {
+        crate::facts::external_type_name_matches(inherited.declaring_type(), &declaring_ty.name)
+            && inherited.field().name == field.name
+    }) else {
+        return rust_identifier_token(&crate::parser::to_snake_case(&field.name));
+    };
+    crate::inherited_members::inherited_instance_field_rust_name_for_type_in_programs(
+        variant_ty,
+        inherited,
+        &[support_program],
+    )
+}
+
 /// The payload a carrier variant stores.
 ///
 /// A variant payload is a *slot* of its type like any other, so a shared type
@@ -683,15 +1058,30 @@ fn carrier_variant_payload_type(variant: &str, facts: &FactSet) -> String {
 }
 
 fn source_hierarchy_carrier_variant_payload_type(
-    variant: &str,
+    representation_name: &str,
+    emitted_name: &str,
     representations: &RepresentationPlan,
 ) -> String {
-    let placement = storage_placement_for_emitted_type_name(representations, variant);
+    // Nested source types can reach this boundary under their flattened Rust
+    // representation name.  Use the same emitted-name-aware lookup as the
+    // carrier's forwarding and identity methods so the declared payload and
+    // every operation on it agree about whether it is handle-backed.
+    let placement = storage_placement_for_emitted_type_name(representations, representation_name);
     if placement.shared() && placement.is_implemented() {
-        placement.wrap(variant.to_string())
+        placement.wrap(emitted_name.to_string())
     } else {
-        variant.to_string()
+        emitted_name.to_string()
     }
+}
+
+fn emitted_carrier_variant_payload_name(
+    program: &Program,
+    owner_name: &str,
+    representation_name: &str,
+) -> String {
+    find_type_decl_for_owner_context(program, owner_name, representation_name)
+        .map(crate::item_assembly::rust_use_name_for_source_type)
+        .unwrap_or_else(|| representation_name.to_string())
 }
 
 fn storage_placement_for_emitted_type_name(
@@ -712,8 +1102,8 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
     }) else {
         return String::new();
     };
-    let field_arg_indices = java_enum_constructor_field_arg_indices(constructor);
-    if field_arg_indices.is_empty() {
+    let field_initializers = java_enum_constructor_field_initializers(constructor);
+    if field_initializers.is_empty() {
         return String::new();
     }
     let field_types = ty
@@ -727,9 +1117,9 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
         })
         .collect::<HashMap<_, _>>();
     let constants = java_enum_constant_args(ty);
-    field_arg_indices
+    field_initializers
         .into_iter()
-        .filter_map(|(field_name, arg_index)| {
+        .filter_map(|(field_name, initializer)| {
             let field_ty = field_types.get(&field_name)?;
             let rust_return_ty = java_enum_payload_accessor_return_type(field_ty)?;
             let accessor_name = rust_identifier_token(&crate::parser::to_snake_case(&field_name));
@@ -738,8 +1128,11 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
                 .map(|variant| {
                     let value = constants
                         .get(variant)
-                        .and_then(|args| args.get(arg_index))
-                        .and_then(|arg| java_enum_payload_arg_value(arg, field_ty))
+                        .and_then(|args| java_enum_payload_initializer_value(
+                            &initializer,
+                            args,
+                            field_ty,
+                        ))
                         .unwrap_or_else(|| java_enum_payload_default_value(field_ty));
                     format!("            Self::{variant} => {value},")
                 })
@@ -753,7 +1146,40 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
         .join("")
 }
 
-fn java_enum_constructor_field_arg_indices(constructor: &ConstructorDecl) -> Vec<(String, usize)> {
+pub(crate) fn source_java_enum_payload_field_emits_accessor(
+    ty: &TypeDecl,
+    field_name: &str,
+) -> bool {
+    if ty.kind != TypeKind::Enum {
+        return false;
+    }
+    let Some(constructor) = ty.members.iter().find_map(|member| match member {
+        Member::Constructor(constructor) => Some(constructor),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let has_initializer = java_enum_constructor_field_initializers(constructor)
+        .iter()
+        .any(|(name, _)| name == field_name);
+    has_initializer
+        && ty.members.iter().any(|member| {
+            matches!(member, Member::Field(field)
+                if !field.modifiers.contains(&Modifier::Static)
+                    && crate::parser::to_snake_case(&field.name) == field_name
+                    && java_enum_payload_accessor_return_type(&field.ty).is_some())
+        })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum JavaEnumPayloadInitializer {
+    DirectParam(usize),
+    PatternCompileParam(usize),
+}
+
+fn java_enum_constructor_field_initializers(
+    constructor: &ConstructorDecl,
+) -> Vec<(String, JavaEnumPayloadInitializer)> {
     let Some(body) = constructor.body.as_ref() else {
         return Vec::new();
     };
@@ -776,15 +1202,46 @@ fn java_enum_constructor_field_arg_indices(constructor: &ConstructorDecl) -> Vec
                 Expr::Var(name) => crate::parser::to_snake_case(name.strip_prefix("this.")?),
                 _ => return None,
             };
-            let Expr::Var(param_name) = value else {
-                return None;
-            };
-            param_indices
-                .get(param_name)
-                .copied()
-                .map(|arg_index| (field_name, arg_index))
+            java_enum_payload_initializer(value, &param_indices)
+                .map(|initializer| (field_name, initializer))
         })
         .collect()
+}
+
+fn java_enum_payload_initializer(
+    value: &Expr,
+    param_indices: &HashMap<String, usize>,
+) -> Option<JavaEnumPayloadInitializer> {
+    if let Expr::Var(param_name) = value {
+        return param_indices
+            .get(param_name)
+            .copied()
+            .map(JavaEnumPayloadInitializer::DirectParam);
+    }
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = value
+    else {
+        return None;
+    };
+    let Expr::Var(owner) = receiver.as_ref() else {
+        return None;
+    };
+    let [Expr::Var(param_name)] = args.as_slice() else {
+        return None;
+    };
+    (crate::stdlib::canonical_external_receiver_type_key(owner) == "Pattern"
+        && matches!(name.as_str(), "compile"))
+    .then(|| {
+        param_indices
+            .get(param_name)
+            .copied()
+            .map(JavaEnumPayloadInitializer::PatternCompileParam)
+    })
+    .flatten()
 }
 
 pub(crate) fn rust_identifier_token(name: &str) -> String {
@@ -823,7 +1280,31 @@ fn java_enum_payload_accessor_return_type(field_ty: &JavaType) -> Option<String>
     match field_ty {
         JavaType::String => Some("String".to_string()),
         JavaType::Primitive(primitive) => Some(emit_type(&rust_type_for_primitive(*primitive))),
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && crate::stdlib::canonical_external_receiver_type_key(name) == "Pattern" =>
+        {
+            Some("Pattern".to_string())
+        }
         _ => None,
+    }
+}
+
+fn java_enum_payload_initializer_value(
+    initializer: &JavaEnumPayloadInitializer,
+    args: &[Expr],
+    field_ty: &JavaType,
+) -> Option<String> {
+    match initializer {
+        JavaEnumPayloadInitializer::DirectParam(index) => {
+            java_enum_payload_arg_value(args.get(*index)?, field_ty)
+        }
+        JavaEnumPayloadInitializer::PatternCompileParam(index) => {
+            let Expr::Literal(Literal::String(pattern)) = args.get(*index)? else {
+                return None;
+            };
+            Some(format!("Pattern::compile_static({pattern:?})"))
+        }
     }
 }
 
@@ -866,6 +1347,12 @@ fn java_enum_payload_default_value(field_ty: &JavaType) -> String {
         JavaType::Primitive(crate::java_ir::PrimitiveType::Float) => "0.0f32".to_string(),
         JavaType::Primitive(crate::java_ir::PrimitiveType::Double) => "0.0f64".to_string(),
         JavaType::Primitive(crate::java_ir::PrimitiveType::Char) => "'\\0'".to_string(),
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && crate::stdlib::canonical_external_receiver_type_key(name) == "Pattern" =>
+        {
+            "Pattern::default()".to_string()
+        }
         _ => "Default::default()".to_string(),
     }
 }
@@ -882,6 +1369,12 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
         return RepresentationTypeEmission::LowerAsConcreteStruct;
     };
     match representation.representation() {
+        ObjectRepresentation::ClosedEnum {
+            enum_name,
+            variants,
+        } => RepresentationTypeEmission::RawRustItem(closed_enum_carrier_item_for_program(
+            enum_name, variants, facts, program, ty,
+        )),
         ObjectRepresentation::DynTrait { trait_name } => {
             RepresentationTypeEmission::RawRustItem(trait_item_for_type_with_program(
                 ty,
@@ -1061,6 +1554,7 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
                 signatures,
                 facts,
                 exceptions,
+                representations,
             )
         })
         .collect::<Vec<_>>();
@@ -1083,6 +1577,7 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
                     signatures,
                     facts,
                     exceptions,
+                    representations,
                 )
             }),
     );
@@ -1328,7 +1823,7 @@ fn source_class_bound_trait_method_signature_with_return_shape(
         let shape = param_shapes.get(index).unwrap_or(&param.shape());
         format!(
             "{}: {}",
-            param.name(),
+            rust_identifier_token(param.name()),
             emit_type(&rust_type_for_slot_with_facts(shape, facts))
         )
     }));
@@ -1860,6 +2355,7 @@ fn boxed_interface_upcast_impls(
                             return_shape,
                             program,
                             Some(&param_types),
+                            Some(representations),
                         );
                         let covariant_erased_return = derived_contracts.iter().any(|contract| {
                             contract.method.name == method.name
@@ -1966,6 +2462,7 @@ fn trait_item_for_type_with_program(
                 return_shape,
                 program,
                 Some(&contract.param_types),
+                Some(representations),
             )
         })
         .collect::<Vec<_>>();
@@ -2287,9 +2784,13 @@ fn trait_impl_for_type(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
 ) -> Option<String> {
     let trait_name = rust_name_for_java_named_type(trait_name);
     let impl_type_name = rust_name_for_java_named_type(&ty.name);
+    let placement = representations.storage_placement_for(&ty.name);
+    let shared_adapter =
+        (placement.shared() && placement.interior_mutable()).then_some(placement.sync());
     let methods = specialized_interface_instance_contracts(program, interface)
         .into_iter()
         .filter_map(|contract| {
@@ -2309,10 +2810,39 @@ fn trait_impl_for_type(
                 signatures,
                 facts,
                 trait_method_exception_plan(method_owner, &effective_method, program, exceptions),
+                representations,
+                shared_adapter,
             )
         })
         .collect::<Vec<_>>();
     let mut methods = methods;
+    if let Some(sync) = shared_adapter {
+        methods.extend(shared_trait_object_support_impl_methods(&trait_name));
+        let trait_base = trait_name.split('<').next().unwrap_or(&trait_name);
+        let adapter_name = format!("__JavaShared{impl_type_name}As{trait_base}");
+        let generic_params = ty
+            .type_params
+            .iter()
+            .map(|name| format!("{name}: 'static"))
+            .collect::<Vec<_>>();
+        let impl_generics = (!generic_params.is_empty())
+            .then(|| format!("<{}>", generic_params.join(", ")))
+            .unwrap_or_default();
+        let type_args = (!ty.type_params.is_empty())
+            .then(|| format!("<{}>", ty.type_params.join(", ")))
+            .unwrap_or_default();
+        let impl_type = format!("{impl_type_name}{type_args}");
+        let adapter_type = format!("{adapter_name}{type_args}");
+        let handle = if sync {
+            format!("std::sync::Arc<std::sync::Mutex<{impl_type}>>")
+        } else {
+            format!("std::rc::Rc<std::cell::RefCell<{impl_type}>>")
+        };
+        return Some(format!(
+            "#[derive(Clone)]\npub struct {adapter_name}{impl_generics}(pub {handle});\n\nimpl{impl_generics} {trait_name} for {adapter_type} {{\n{}\n}}\n\nimpl{impl_generics} From<{handle}> for std::boxed::Box<dyn {trait_name}> {{\n    fn from(value: {handle}) -> Self {{ std::boxed::Box::new({adapter_name}(value)) }}\n}}",
+            methods.join("\n")
+        ));
+    }
     methods.extend(trait_object_support_impl_methods(&trait_name));
     Some(format!(
         "impl {trait_name} for {impl_type_name} {{\n{}\n}}",
@@ -2332,6 +2862,15 @@ fn trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
         "    fn as_any(&self) -> &dyn std::any::Any { self }".to_string(),
         format!(
             "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ panic!(\"java2rust: clone_box for {trait_name} requires a cloneable Java object carrier\") }}"
+        ),
+    ]
+}
+
+fn shared_trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
+    vec![
+        "    fn as_any(&self) -> &dyn std::any::Any { self }".to_string(),
+        format!(
+            "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}"
         ),
     ]
 }
@@ -2694,6 +3233,8 @@ fn trait_impl_method(
     signatures: &SignaturePlan,
     facts: &FactSet,
     interface_exceptions: MethodExceptionPlan,
+    representations: &RepresentationPlan,
+    shared_adapter: Option<bool>,
 ) -> Option<String> {
     let mut trait_return_shape =
         trait_method_return_shape_plan(interface, declared_interface_method, program, signatures);
@@ -2721,6 +3262,7 @@ fn trait_impl_method(
         trait_return_shape,
         program,
         Some(&specialized_param_types),
+        Some(representations),
     );
     let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
@@ -2739,21 +3281,17 @@ fn trait_impl_method(
             .compile_error_body(&signature),
         );
     };
-    let covariant_object_return = |candidate: &MethodDecl| {
-        !interface_exceptions.wrap_returns_in_result()
-            && matches!(&interface_method.return_type, JavaType::Named { name, .. } | JavaType::Unknown(name)
-            if matches!(name.as_str(), "Object" | "java.lang.Object"))
-            && interface_contract_return_refines(
-                program,
-                &candidate.return_type,
-                &interface_method.return_type,
-            )
-            && trait_impl_method_compatibility_error(interface_method, candidate)
-                == Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch)
+    let covariant_return = |candidate: &MethodDecl| {
+        interface_contract_return_refines(
+            program,
+            &candidate.return_type,
+            &interface_method.return_type,
+        ) && trait_impl_method_compatibility_error(interface_method, candidate)
+            == Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch)
     };
     let compatible = candidates.iter().copied().find(|(_, candidate)| {
         trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-            || covariant_object_return(candidate)
+            || covariant_return(candidate)
     });
     // A `default` method that nothing overrides keeps the interface's body --
     // that is what `default` means. Candidates are gathered by *name*, so an
@@ -2771,7 +3309,7 @@ fn trait_impl_method(
     let (implementing_owner, implementing_method) = compatible.unwrap_or(candidates[0]);
     if let Some(message) =
         trait_impl_method_compatibility_error(interface_method, implementing_method)
-            .filter(|_| !covariant_object_return(implementing_method))
+            .filter(|_| !covariant_return(implementing_method))
     {
         return Some(
             trait_impl_method_message_policy(
@@ -2806,7 +3344,7 @@ fn trait_impl_method(
     for (index, param) in interface_method.params.iter().enumerate() {
         if trait_param_shapes
             .get(index)
-            .is_some_and(|shape| shape.java_ty != param.ty)
+            .is_some_and(|shape| !trait_shape_has_declared_java_type(shape, &param.ty))
         {
             trait_param_shapes[index] = RustSlotShape::for_storage(param.ty.clone());
         }
@@ -2836,20 +3374,60 @@ fn trait_impl_method(
         )
     };
     let implementing_owner_name = rust_name_for_java_named_type(&forwarding_owner.name);
-    let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
-    let call = if covariant_object_return(implementing_method) {
-        format!("std::boxed::Box::new({call}) as std::boxed::Box<dyn std::any::Any>")
+    let call = if let Some(sync) = shared_adapter {
+        if forwarding_owner.name == ty.name {
+            let comma_args = (!args.is_empty())
+                .then(|| format!(", {args}"))
+                .unwrap_or_default();
+            format!("{implementing_owner_name}::{rust_name}_with_outer(self.0.clone(){comma_args})")
+        } else {
+            let borrowed = if sync {
+                "self.0.lock().unwrap()"
+            } else if matches!(trait_receiver, Some(ReceiverPlan::Mutable)) {
+                "self.0.borrow_mut()"
+            } else {
+                "self.0.borrow()"
+            };
+            let borrow = if matches!(trait_receiver, Some(ReceiverPlan::Mutable)) {
+                "&mut *"
+            } else {
+                "&*"
+            };
+            let receiver = format!("{borrow}{borrowed}");
+            let receiver_arg = if args.is_empty() {
+                receiver
+            } else {
+                format!("{receiver}, {args}")
+            };
+            format!("{implementing_owner_name}::{rust_name}({receiver_arg})")
+        }
+    } else {
+        format!("{implementing_owner_name}::{rust_name}({receiver_arg})")
+    };
+    let call = if covariant_return(implementing_method) {
+        adapt_covariant_trait_impl_return(
+            call,
+            trait_return_shape_for_body
+                .as_ref()
+                .or(interface_signature.return_shape()),
+            &implementation_signature.return_shape_cloned(),
+            interface_exceptions,
+        )
     } else {
         call
     };
-    let call = adapt_trait_impl_forwarded_return(
-        call,
-        trait_return_shape_for_body
-            .as_ref()
-            .or(interface_signature.return_shape()),
-        &implementation_signature.return_shape_cloned(),
-        interface_exceptions,
-    );
+    let call = if covariant_return(implementing_method) {
+        call
+    } else {
+        adapt_trait_impl_forwarded_return(
+            call,
+            trait_return_shape_for_body
+                .as_ref()
+                .or(interface_signature.return_shape()),
+            &implementation_signature.return_shape_cloned(),
+            interface_exceptions,
+        )
+    };
     let body = if interface_exceptions.wrap_returns_in_result()
         || signatures
             .required_method_signature(interface, declared_interface_method)
@@ -2875,7 +3453,13 @@ fn adapt_trait_impl_forwarded_return(
     let Some(trait_shape) = trait_return_shape else {
         return call;
     };
-    if trait_shape.optional_element_type().is_some() {
+    if let Some(trait_element_ty) = trait_shape.optional_element_type() {
+        if let Some(implementation_shape) = implementation_return_shape
+            && implementation_shape.optional_element_type().is_none()
+            && implementation_shape.java_ty == trait_element_ty
+        {
+            return format!("Some({call})");
+        }
         return call;
     }
     if let Some(implementation_shape) = implementation_return_shape
@@ -2886,6 +3470,47 @@ fn adapt_trait_impl_forwarded_return(
         return format!("{call}.expect(\"Java null receiver\")");
     }
     call
+}
+
+fn adapt_covariant_trait_impl_return(
+    call: String,
+    trait_return_shape: Option<&RustSlotShape>,
+    implementation_return_shape: &Option<RustSlotShape>,
+    interface_exceptions: MethodExceptionPlan,
+) -> String {
+    let Some(trait_shape) = trait_return_shape else {
+        return call;
+    };
+    let conversion = |value: &str| match &trait_shape.dispatch {
+        DispatchShape::BoxedDynTrait { trait_name } | DispatchShape::DynTrait { trait_name } => {
+            format!(
+                "std::boxed::Box::new({value}) as std::boxed::Box<dyn {}>",
+                rust_name_for_java_named_type(trait_name)
+            )
+        }
+        DispatchShape::ErasedObject => {
+            format!("std::boxed::Box::new({value}) as std::boxed::Box<dyn std::any::Any>")
+        }
+        _ => value.to_string(),
+    };
+    let implementation_is_optional = implementation_return_shape
+        .as_ref()
+        .is_some_and(|shape| shape.optional_element_type().is_some());
+    let trait_is_optional = trait_shape.optional_element_type().is_some();
+    let adapt_value = |value: &str| match (implementation_is_optional, trait_is_optional) {
+        (true, true) => format!(
+            "{value}.map(|__java_covariant| {})",
+            conversion("__java_covariant")
+        ),
+        (false, true) => format!("Some({})", conversion(value)),
+        (true, false) => conversion(&format!("{value}.expect(\"Java null receiver\")")),
+        (false, false) => conversion(value),
+    };
+    if interface_exceptions.wrap_returns_in_result() {
+        format!("{call}.map(|__java_value| {})", adapt_value("__java_value"))
+    } else {
+        adapt_value(&call)
+    }
 }
 
 fn trait_impl_forwarding_owner_for_inherited_source_method<'a>(
@@ -2926,6 +3551,17 @@ fn trait_impl_forwarded_arg(
     trait_shape: &RustSlotShape,
     implementation_shape: Option<&RustSlotShape>,
 ) -> String {
+    let arg_name = rust_identifier_token(arg_name);
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.optional_element_type().is_some()
+            && trait_shape.java_ty == shape.java_ty
+            && trait_shape.ownership == OwnershipShape::Owned
+            && trait_shape.view == ViewShape::Native
+            && shape.ownership == OwnershipShape::SharedBorrow
+            && matches!(shape.view, ViewShape::Slice | ViewShape::Str)
+    }) {
+        return format!("{arg_name}.as_deref()");
+    }
     if implementation_shape.is_some_and(|shape| {
         trait_shape.ownership == OwnershipShape::Owned
             && trait_shape.view == ViewShape::Native
@@ -2962,7 +3598,7 @@ fn trait_impl_forwarded_arg(
     }) {
         return format!("{arg_name}.to_string()");
     }
-    arg_name.to_string()
+    arg_name
 }
 
 #[cfg(test)]
@@ -3033,7 +3669,7 @@ fn external_template_method_trait_impl_body(
     let args = interface_method
         .params
         .iter()
-        .map(|param| param.name.as_str())
+        .map(|param| rust_identifier_token(&param.name))
         .collect::<Vec<_>>()
         .join(", ");
     let call_args = if args.is_empty() {
@@ -3159,10 +3795,11 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
         return_shape_override,
         program,
         None,
+        None,
     )
 }
 
-fn trait_method_signature_with_receiver_and_return_shape_and_params(
+pub(crate) fn trait_method_signature_with_receiver_and_return_shape_and_params(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
@@ -3172,6 +3809,7 @@ fn trait_method_signature_with_receiver_and_return_shape_and_params(
     return_shape_override: Option<RustSlotShape>,
     program: &Program,
     specialized_param_types: Option<&[JavaType]>,
+    representations: Option<&RepresentationPlan>,
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
@@ -3185,7 +3823,7 @@ fn trait_method_signature_with_receiver_and_return_shape_and_params(
     params.extend(signature.params().iter().enumerate().map(|(index, param)| {
         let specialized = specialized_param_types
             .and_then(|types| types.get(index))
-            .filter(|ty| param.shape().java_ty != **ty)
+            .filter(|ty| !trait_shape_has_declared_java_type(param.shape(), ty))
             .map(|ty| RustSlotShape::for_storage(ty.clone()));
         let shape = specialized
             .as_ref()
@@ -3193,8 +3831,16 @@ fn trait_method_signature_with_receiver_and_return_shape_and_params(
             .unwrap_or(&param.shape());
         format!(
             "{}: {}",
-            param.name(),
-            emit_type(&rust_type_for_slot_with_facts(shape, facts))
+            rust_identifier_token(param.name()),
+            emit_type(&if let Some(representations) = representations {
+                crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                    shape,
+                    facts,
+                    representations,
+                )
+            } else {
+                rust_type_for_slot_with_facts(shape, facts)
+            })
         )
     }));
     let return_type = trait_method_return_type_with_exception_plan(
@@ -3204,6 +3850,7 @@ fn trait_method_signature_with_receiver_and_return_shape_and_params(
         facts,
         exceptions,
         return_shape_override,
+        representations,
     )
     .map(|ty| format!(" -> {}", emit_type(&ty)))
     .unwrap_or_default();
@@ -3355,16 +4002,23 @@ pub(crate) fn trait_method_param_shape_plan(
     param_shapes
 }
 
+fn trait_shape_has_declared_java_type(shape: &RustSlotShape, declared: &JavaType) -> bool {
+    shape.java_ty == *declared || shape.optional_element_type().as_ref() == Some(declared)
+}
+
 fn trait_param_shape_should_widen_to_implementation(
     interface_shape: &RustSlotShape,
     implementation_shape: &RustSlotShape,
 ) -> bool {
+    if implementation_shape
+        .optional_element_type()
+        .is_some_and(|element_ty| element_ty == interface_shape.java_ty)
+    {
+        return true;
+    }
     if interface_shape.ownership != OwnershipShape::SharedBorrow
         || interface_shape.java_ty != implementation_shape.java_ty
     {
-        return false;
-    }
-    if matches!(interface_shape.java_ty, JavaType::Array(_)) {
         return false;
     }
     if implementation_shape.ownership == OwnershipShape::Owned {
@@ -3503,6 +4157,7 @@ fn trait_method_return_type_with_exception_plan(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     return_shape_override: Option<RustSlotShape>,
+    representations: Option<&RepresentationPlan>,
 ) -> Option<RustType> {
     let return_shape = return_shape_override.or_else(|| {
         signatures
@@ -3510,9 +4165,17 @@ fn trait_method_return_type_with_exception_plan(
             .return_shape()
             .cloned()
     });
-    let rust_return = return_shape
-        .as_ref()
-        .map(|shape| rust_type_for_slot_with_facts(shape, facts));
+    let rust_return = return_shape.as_ref().map(|shape| {
+        if let Some(representations) = representations {
+            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                shape,
+                facts,
+                representations,
+            )
+        } else {
+            rust_type_for_slot_with_facts(shape, facts)
+        }
+    });
     if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(rust_return.unwrap_or(RustType::Unit)))
     } else {
@@ -3697,9 +4360,11 @@ fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> b
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
     let mut matches = TypeDeclMatches::default();
     for ty in &program.types {
-        collect_type_decl_matches(ty, type_name, &mut matches);
+        collect_type_decl_matches(ty, type_name, program.package.as_deref(), &mut matches);
     }
     unique_type_decl(matches.exact)
+        .or_else(|| unique_type_decl(matches.package_qualified_emitted_alias))
+        .or_else(|| unique_type_decl(matches.source_qualified_alias))
         .or_else(|| unique_type_decl(matches.emitted_alias))
         .or_else(|| unique_type_decl(matches.simple))
 }
@@ -3711,9 +4376,11 @@ fn find_type_decl_for_owner_context<'a>(
 ) -> Option<&'a TypeDecl> {
     let mut matches = TypeDeclMatches::default();
     for ty in &program.types {
-        collect_type_decl_matches(ty, type_name, &mut matches);
+        collect_type_decl_matches(ty, type_name, program.package.as_deref(), &mut matches);
     }
     unique_type_decl(matches.exact)
+        .or_else(|| unique_type_decl(matches.package_qualified_emitted_alias))
+        .or_else(|| unique_type_decl(matches.source_qualified_alias))
         .or_else(|| unique_same_package_type_decl(matches.simple.as_slice(), owner_name))
         .or_else(|| unique_type_decl(matches.emitted_alias))
         .or_else(|| unique_type_decl(matches.simple))
@@ -3722,6 +4389,8 @@ fn find_type_decl_for_owner_context<'a>(
 #[derive(Default)]
 struct TypeDeclMatches<'a> {
     exact: Vec<&'a TypeDecl>,
+    package_qualified_emitted_alias: Vec<&'a TypeDecl>,
+    source_qualified_alias: Vec<&'a TypeDecl>,
     emitted_alias: Vec<&'a TypeDecl>,
     simple: Vec<&'a TypeDecl>,
 }
@@ -3754,11 +4423,21 @@ fn java_owner_package_prefix(name: &str) -> Option<&str> {
 fn collect_type_decl_matches<'a>(
     ty: &'a TypeDecl,
     type_name: &str,
+    package: Option<&str>,
     matches: &mut TypeDeclMatches<'a>,
 ) {
     let simple_name = ty.name.rsplit('.').next().unwrap_or(&ty.name);
     if ty.name == type_name {
         matches.exact.push(ty);
+    } else if package.is_some_and(|package| {
+        rust_name_for_java_named_type(&format!("{package}.{}", ty.name)) == type_name
+    }) {
+        matches.package_qualified_emitted_alias.push(ty);
+    } else if type_name
+        .strip_suffix(&ty.name)
+        .is_some_and(|prefix| prefix.ends_with('.'))
+    {
+        matches.source_qualified_alias.push(ty);
     } else if rust_name_for_java_named_type(&ty.name) == type_name {
         matches.emitted_alias.push(ty);
     } else if simple_name == type_name || rust_name_for_java_named_type(simple_name) == type_name {
@@ -3766,7 +4445,7 @@ fn collect_type_decl_matches<'a>(
     }
     for member in &ty.members {
         if let Member::Type(nested) = member {
-            collect_type_decl_matches(nested, type_name, matches);
+            collect_type_decl_matches(nested, type_name, package, matches);
         }
     }
 }
@@ -3981,11 +4660,13 @@ interface SpecificFirst extends Specific, General {}
         let rendered = source_hierarchy_carrier_forwarding_method(
             "BaseValue",
             &["Base".to_string()],
+            &crate::representation::RepresentationPlan::default(),
             &FactSet::default(),
             &SignaturePlan::default(),
             MethodExceptionPlan::new(false),
             &parsed.program.types[0],
             method,
+            &parsed.program,
             None,
             false,
         )
@@ -4000,6 +4681,124 @@ interface SpecificFirst extends Specific, General {}
                 "Self::Base(__java_carrier_payload) => __java_carrier_payload.value(input)"
             ),
             "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_hierarchy_carrier_uses_the_payloads_post_solver_shared_param_abi() {
+        let parsed = parse_java_source(
+            r#"
+class Record {
+    int value;
+}
+abstract class Base {
+    abstract int compare(Record record);
+    int score(Record record) { return record.value; }
+}
+class Left extends Base {
+    int compare(Record record) { record.value = 1; return score(record); }
+}
+class Right extends Base {
+    int compare(Record record) { return score(record); }
+}
+class Use {
+    int run(Base base, Record record) {
+        Record alias = record;
+        alias.value = 2;
+        return base.compare(record);
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let mut facts = resolved.facts.clone();
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "Base".to_string(),
+            strategy: HierarchyStrategy::ClosedEnum {
+                enum_name: "BaseValue".to_string(),
+                variants: vec!["Left".to_string(), "Right".to_string()],
+            },
+            provenance: FactProvenance::UserOverride,
+        });
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let base = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+        let compare = base
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "compare" => Some(method),
+                _ => None,
+            })
+            .expect("compare method");
+
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Left".to_string(), "Right".to_string()],
+            &representations,
+            &semantic.facts,
+            &signatures,
+            MethodExceptionPlan::new(false),
+            base,
+            compare,
+            &resolved.program,
+            None,
+            false,
+        )
+        .expect("carrier method");
+
+        assert!(
+            rendered.contains(
+                "pub fn compare(&self, record: std::rc::Rc<std::cell::RefCell<Record>>) -> i32"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("__java_carrier_payload.compare(record)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_hierarchy_carrier_does_not_forward_private_methods() {
+        let parsed =
+            parse_java_source("class Base { private int helper(int input) { return input; } }");
+        let method = parsed.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("private method");
+
+        assert!(
+            source_hierarchy_carrier_forwarding_method(
+                "BaseValue",
+                &["Base".to_string()],
+                &crate::representation::RepresentationPlan::default(),
+                &FactSet::default(),
+                &SignaturePlan::default(),
+                MethodExceptionPlan::new(false),
+                &parsed.program.types[0],
+                method,
+                &parsed.program,
+                None,
+                false,
+            )
+            .is_none()
         );
     }
 
@@ -4450,6 +5249,60 @@ class NullName implements Named {
         );
         assert!(
             !impls[0].contains("NullName::name(self).expect(\"Java null receiver\")"),
+            "{}",
+            impls[0]
+        );
+    }
+
+    #[test]
+    fn trait_impl_forwarding_wraps_nonnull_return_for_nullable_trait_contract() {
+        let parsed = parse_java_source(
+            r#"
+interface Bytes {
+    byte[] data();
+}
+
+class MaybeBytes implements Bytes {
+    byte[] value;
+    public byte[] data() { return value; }
+}
+
+class PresentBytes implements Bytes {
+    byte[] value;
+    PresentBytes() { value = new byte[1]; }
+    public byte[] data() { return value; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let present = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "PresentBytes")
+            .unwrap();
+
+        let impls = trait_impl_emissions_for_type_with_facts(
+            &representations,
+            &resolved.program,
+            present,
+            &signatures,
+            &semantic.facts,
+        );
+
+        assert_eq!(impls.len(), 1);
+        assert!(
+            impls[0]
+                .contains("fn data(&self) -> Option<Vec<i8>> { Some(PresentBytes::data(self)) }"),
             "{}",
             impls[0]
         );
@@ -4934,6 +5787,24 @@ mod type_lookup_tests {
     }
 
     #[test]
+    fn find_type_decl_maps_package_qualified_nested_summary_identity_to_emitted_decl() {
+        let parsed = crate::parser::parse_java_source(
+            "package example.identity; class Outer { class Nested {} }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+
+        assert_eq!(
+            find_type_decl_for_owner_context(
+                &resolved.program,
+                "Outer",
+                "example.identity.Outer.Nested",
+            )
+            .map(crate::item_assembly::rust_use_name_for_source_type),
+            Some("Outer_Nested".to_string())
+        );
+    }
+
+    #[test]
     fn source_type_extends_uses_same_package_before_ambiguous_simple_peer() {
         let mut child = empty_type("b.Child");
         child.extends = Some("Base".to_string());
@@ -5122,6 +5993,28 @@ mod shared_handle_forwarding_tests {
             rendered.contains("fn grow(&mut self) { Shape::grow(&mut *self.lock().unwrap()) }")
         );
         assert!(!rendered.contains("Shape for std::rc::Rc<__JavaShared>"));
+    }
+
+    #[test]
+    fn forwards_fallible_interface_surface_with_trait_arguments_and_returns() {
+        let rendered = shared_handle_forwarding_impl(
+            "ParallelCompressor",
+            &[
+                "    fn wrap_and_write_header(&self, stream: OutputStream) -> Result<BlockOutputStreamValue, JavaException>;".to_string(),
+                "    fn update_checksum_pre_compression(&mut self, current: Option<UncompressedBlockData>) -> Result<(), JavaException>;".to_string(),
+                "    fn compress(&self, previous: Option<UncompressedBlockData>, current: Option<UncompressedBlockData>) -> Result<Option<Box<dyn BlockData>>, JavaException>;".to_string(),
+                "    fn update_checksum_post_compression(&mut self, current: &dyn BlockData);".to_string(),
+                "    fn write_trailer(&self, stream: BlockOutputStreamValue) -> Result<(), JavaException>;".to_string(),
+                "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
+                "    fn clone_box(&self) -> std::boxed::Box<dyn ParallelCompressor>;".to_string(),
+            ],
+        )
+        .expect("the complete owned-return surface forwards through cell handles");
+        assert!(
+            rendered
+                .contains("ParallelCompressor for std::rc::Rc<std::cell::RefCell<__JavaShared>>"),
+            "{rendered}"
+        );
     }
 
     #[test]

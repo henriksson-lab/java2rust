@@ -317,6 +317,66 @@ class LocalArrayDimensionSyntax {
 }
 
 #[test]
+fn declarator_array_dimensions_do_not_leak_between_local_declarators() {
+    let parsed = parse_java_source(
+        r#"
+class LocalArrayDeclarators {
+    void read() {
+        File inputs[], outputs[];
+        String[] names, aliases[];
+    }
+}
+"#,
+    );
+    let body = method_body(&parsed.program.types[0], "read");
+    let types = body
+        .statements
+        .iter()
+        .map(|statement| match statement {
+            Stmt::VarDecl { ty, .. } => ty,
+            other => panic!("expected local declaration, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+
+    let file = JavaType::Named {
+        name: "File".to_string(),
+        args: Vec::new(),
+    };
+    assert_eq!(types[0], &JavaType::Array(Box::new(file.clone())));
+    assert_eq!(types[1], &JavaType::Array(Box::new(file)));
+    assert_eq!(types[2], &JavaType::Array(Box::new(JavaType::String)));
+    assert_eq!(
+        types[3],
+        &JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::String))))
+    );
+}
+
+#[test]
+fn declarator_array_dimensions_do_not_leak_between_field_declarators() {
+    let parsed = parse_java_source(
+        r#"
+class FieldArrayDeclarators {
+    File first[], second[];
+}
+"#,
+    );
+    let fields = parsed.program.types[0]
+        .members
+        .iter()
+        .map(|member| match member {
+            Member::Field(field) => field,
+            other => panic!("expected field declaration, got {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    let expected = JavaType::Array(Box::new(JavaType::Named {
+        name: "File".to_string(),
+        args: Vec::new(),
+    }));
+    assert_eq!(fields[0].ty, expected);
+    assert_eq!(fields[1].ty, expected);
+}
+
+#[test]
 fn local_array_dimensions_ignore_generic_argument_arrays() {
     let parsed = parse_java_source(
         r#"
@@ -779,6 +839,38 @@ class StaticInitializerUnsupportedMember {
             .statements
             .len(),
         1
+    );
+}
+
+#[test]
+fn enum_static_initializer_block_is_parsed_in_member_order() {
+    let parsed = parse_java_source(
+        r#"
+enum EnumStaticInitializer {
+    A, B;
+    static java.util.Set<EnumStaticInitializer> active;
+
+    static {
+        active = new java.util.HashSet<EnumStaticInitializer>();
+        active.add(A);
+    }
+}
+"#,
+    );
+    let fallbacks = collect_program_fallbacks(&parsed.program);
+
+    assert!(fallbacks.is_empty(), "{fallbacks:?}");
+    assert_eq!(parsed.program.types[0].static_init_blocks.len(), 1);
+    assert_eq!(
+        parsed.program.types[0].static_init_blocks[0].member_index,
+        3
+    );
+    assert_eq!(
+        parsed.program.types[0].static_init_blocks[0]
+            .block
+            .statements
+            .len(),
+        2
     );
 }
 

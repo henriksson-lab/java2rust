@@ -65,7 +65,10 @@ use crate::rust_ir::{
     RustClosureBody, RustClosureParam, RustExpr, RustExprShape, RustStmt, RustType,
 };
 use crate::shape_projection::shape_is_erased_object_boundary;
-use crate::slot_render::{rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts};
+use crate::slot_render::{
+    rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
+    rust_type_for_slot_with_facts_and_representations,
+};
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
 
 pub fn apply_call_target(
@@ -730,6 +733,28 @@ fn apply_native_java_static_method(
             };
             math_floor_mod_projection(left, right, primitive, return_primitive)
         }
+        NativeJavaStaticMethod::BooleanParseBoolean => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Boolean.parseBoolean requires one argument");
+            };
+            receiver_method_call_projection_exact(
+                arg,
+                "is_some_and",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    params: vec![RustClosureParam {
+                        pattern: "value".to_string(),
+                        ty: None,
+                    }],
+                    return_type: None,
+                    body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                        RustExpr::Var("value".to_string()),
+                        "eq_ignore_ascii_case",
+                        vec![rust_string_literal_projection("true")],
+                    ))),
+                }],
+            )
+        }
         NativeJavaStaticMethod::IntegerParseInt => {
             let mut args = args.into_iter();
             let Some(arg) = args.next() else {
@@ -747,6 +772,19 @@ fn apply_native_java_static_method(
             };
             let arg = java_integral_parse_null_argument_as_number_format(arg);
             primitive_parse_projection(arg, PrimitiveType::Int)
+        }
+        NativeJavaStaticMethod::IntegralBitCount => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Integer.bitCount/Long.bitCount requires one argument");
+            };
+            RustExpr::Cast {
+                expr: Box::new(receiver_method_call_projection_exact(
+                    RustExpr::Grouped(Box::new(arg)),
+                    "count_ones",
+                    Vec::new(),
+                )),
+                ty: "i32".to_string(),
+            }
         }
         NativeJavaStaticMethod::ByteParseByte => {
             let mut args = args.into_iter();
@@ -1187,8 +1225,20 @@ fn apply_native_collection_method(
         NativeCollectionMethod::ArrayBlockingQueueOffer => {
             return apply_array_blocking_queue_offer(receiver, args);
         }
+        NativeCollectionMethod::ArrayBlockingQueueTimedOffer => {
+            return apply_array_blocking_queue_timed_offer(receiver, args);
+        }
         NativeCollectionMethod::ArrayBlockingQueuePut => {
             return apply_array_blocking_queue_put(receiver, args);
+        }
+        NativeCollectionMethod::ArrayBlockingQueueTake => {
+            return apply_array_blocking_queue_take(receiver, args);
+        }
+        NativeCollectionMethod::ArrayBlockingQueueTimedPoll => {
+            return apply_array_blocking_queue_timed_poll(receiver, args);
+        }
+        NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity => {
+            return array_blocking_queue_remaining_capacity_projection(receiver);
         }
         NativeCollectionMethod::ListInsert => {
             return apply_list_insert(receiver, args);
@@ -1504,6 +1554,28 @@ fn apply_array_blocking_queue_offer(receiver: RustExpr, args: Vec<RustExpr>) -> 
     ))
 }
 
+fn apply_array_blocking_queue_timed_offer(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 3 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.offer(value, timeout, unit) requires three arguments",
+        );
+    }
+    unwrap_result_or_panic_uncaught_java_exception(
+        array_blocking_queue_timed_offer_result_projection(receiver, args),
+    )
+}
+
+fn apply_array_blocking_queue_timed_poll(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    if args.len() != 2 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.poll(timeout, unit) requires two arguments",
+        );
+    }
+    unwrap_result_or_panic_uncaught_java_exception(
+        array_blocking_queue_timed_poll_result_projection(receiver, args),
+    )
+}
+
 fn apply_array_blocking_queue_put(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
     if args.len() != 1 {
         return compile_error_call(
@@ -1512,6 +1584,15 @@ fn apply_array_blocking_queue_put(receiver: RustExpr, args: Vec<RustExpr>) -> Ru
     }
     unwrap_result_or_panic_uncaught_java_exception(array_blocking_queue_put_result_projection(
         receiver, args,
+    ))
+}
+
+fn apply_array_blocking_queue_take(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
+    if !args.is_empty() {
+        return compile_error_call("Java ArrayBlockingQueue.take() requires no arguments");
+    }
+    unwrap_result_or_panic_uncaught_java_exception(array_blocking_queue_take_result_projection(
+        receiver,
     ))
 }
 
@@ -1598,6 +1679,133 @@ pub(crate) fn array_blocking_queue_offer_result_projection(
             )),
         },
     )
+}
+
+pub(crate) fn array_blocking_queue_timed_offer_result_projection(
+    receiver: RustExpr,
+    mut args: Vec<RustExpr>,
+) -> RustExpr {
+    if args.len() != 3 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.offer(value, timeout, unit) requires three arguments",
+        );
+    }
+    let unit = args.pop().expect("len checked");
+    let timeout = args.pop().expect("len checked");
+    let value = args.pop().expect("len checked");
+    let value_name = "__java_array_blocking_queue_timed_offer_value";
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: value_name.to_string(),
+                ty: None,
+                value: Some(value),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_array_blocking_queue_timed_offer_timeout".to_string(),
+                ty: None,
+                value: Some(timeout),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_array_blocking_queue_timed_offer_unit".to_string(),
+                ty: None,
+                value: Some(unit),
+            },
+        ],
+        tail: Some(Box::new(array_blocking_queue_offer_result_projection(
+            receiver,
+            vec![RustExpr::Var(value_name.to_string())],
+        ))),
+    }
+}
+
+pub(crate) fn array_blocking_queue_timed_poll_result_projection(
+    receiver: RustExpr,
+    mut args: Vec<RustExpr>,
+) -> RustExpr {
+    if args.len() != 2 {
+        return compile_error_call(
+            "Java ArrayBlockingQueue.poll(timeout, unit) requires two arguments",
+        );
+    }
+    let unit = args.pop().expect("len checked");
+    let timeout = args.pop().expect("len checked");
+    RustExpr::Block {
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_array_blocking_queue_timed_poll_timeout".to_string(),
+                ty: None,
+                value: Some(timeout),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_array_blocking_queue_timed_poll_unit".to_string(),
+                ty: None,
+                value: Some(unit),
+            },
+        ],
+        tail: Some(Box::new(function_call_projection(
+            RustExpr::generic_path(
+                ["Ok"],
+                vec![
+                    RustType::Named("_".to_string()),
+                    RustType::Named("JavaException".to_string()),
+                ],
+                Option::<&str>::None,
+            ),
+            vec![queue_poll_projection(receiver)],
+        ))),
+    }
+}
+
+pub(crate) fn array_blocking_queue_take_result_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::If {
+        condition: Box::new(receiver_method_call_projection_exact(
+            receiver.clone(),
+            "is_empty",
+            Vec::new(),
+        )),
+        then_expr: Box::new(function_call_projection(
+            RustExpr::Var("Err".to_string()),
+            vec![crate::exception_lowering::new_exception_expr(
+                "InterruptedException",
+                rust_string_literal_projection(
+                    "Java ArrayBlockingQueue.take would block on empty queue",
+                ),
+            )],
+        )),
+        else_expr: Box::new(function_call_projection(
+            RustExpr::Var("Ok".to_string()),
+            vec![receiver_method_call_projection_exact(
+                receiver,
+                "remove",
+                vec![RustExpr::Literal("0".to_string())],
+            )],
+        )),
+    }
+}
+
+fn array_blocking_queue_remaining_capacity_projection(receiver: RustExpr) -> RustExpr {
+    RustExpr::Cast {
+        expr: Box::new(RustExpr::Binary {
+            op: "-".to_string(),
+            left: Box::new(receiver_method_call_projection_exact(
+                receiver.clone(),
+                "capacity",
+                Vec::new(),
+            )),
+            right: Box::new(receiver_method_call_projection_exact(
+                receiver,
+                "len",
+                Vec::new(),
+            )),
+        }),
+        ty: "i32".to_string(),
+    }
 }
 
 pub(crate) fn array_blocking_queue_put_result_projection(
@@ -2846,7 +3054,8 @@ fn apply_new_target_with_optional_representations(
     }
     if target.rust_name() == "new"
         && args.is_empty()
-        && let Some(sequence_like) = sequence_like_empty_native_collection_projection(target, facts)
+        && let Some(sequence_like) =
+            sequence_like_empty_native_collection_projection(target, facts, representations)
     {
         return sequence_like;
     }
@@ -2877,6 +3086,14 @@ fn wrap_source_hierarchy_carrier_constructor_value(
             return constructed;
         }
     };
+    wrap_source_hierarchy_carrier_value(constructed, owner_name, representations)
+}
+
+pub(crate) fn wrap_source_hierarchy_carrier_value(
+    constructed: RustExpr,
+    owner_name: &str,
+    representations: &RepresentationPlan,
+) -> RustExpr {
     if owner_name.is_empty() {
         return constructed;
     }
@@ -3041,7 +3258,7 @@ fn apply_native_collection_new_target(
         }
         NativeCollectionNewTarget::Empty { kind } => {
             if matches!(kind, crate::stdlib::JavaCollectionKind::List) {
-                sequence_like_empty_native_collection_projection(target, facts)
+                sequence_like_empty_native_collection_projection(target, facts, representations)
                     .unwrap_or_else(|| native_collection_empty_new_projection(kind))
             } else {
                 native_collection_empty_new_projection(kind)
@@ -3291,12 +3508,25 @@ fn priority_queue_comparator_constructor_unsupported_projection() -> RustExpr {
 fn sequence_like_empty_native_collection_projection(
     target: &NewTargetPlan,
     facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
 ) -> Option<RustExpr> {
-    let element_ty = facts.sequence_element_type_for(&target.owner_shape().java_ty)?;
+    let element_ty = if let Some(representations) = representations {
+        match rust_type_for_slot_with_facts_and_representations(
+            target.owner_shape(),
+            facts,
+            representations,
+        ) {
+            RustType::Vec(element_ty) => *element_ty,
+            _ => return None,
+        }
+    } else {
+        let element_ty = facts.sequence_element_type_for(&target.owner_shape().java_ty)?;
+        rust_type_for_java_type_with_facts(&element_ty, facts)
+    };
     Some(function_call_projection(
         RustExpr::GenericPath {
             base: vec!["Vec".to_string()],
-            args: vec![rust_type_for_java_type_with_facts(&element_ty, facts)],
+            args: vec![element_ty],
             member: Some("new".to_string()),
         },
         Vec::new(),

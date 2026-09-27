@@ -1809,6 +1809,14 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         element_shape.java_ty = projected.java_ty;
         element_shape.dispatch = projected.dispatch;
         element_shape.view = projected.view;
+    } else if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&element_ty) {
+        // Optionality is a carrier property, not evidence that an executable
+        // generic facade payload has become a dynamically erased object.  A
+        // nullable `Future<T>` (and analogous facade carriers) must unwrap to
+        // the same concrete/native `Future<T>` ABI as a non-null declaration.
+        element_shape.java_ty = element_ty;
+        element_shape.dispatch = DispatchShape::Concrete;
+        element_shape.view = ViewShape::Native;
     } else if let JavaType::Named { name, args } = &element_ty
         && args.is_empty()
         && facts.object_safe_trait_fact_for_name(name) == Some(true)
@@ -2244,12 +2252,17 @@ pub fn dispatch_coercion_policy_with_facts(
     {
         return DispatchCoercionPolicy::NoDispatchChange;
     }
+    // An explicit external adapter describes the concrete facade ABI, while
+    // hierarchy dispatch is a representation choice.  Source-summary
+    // inheritance can project a platform superclass slot as a dyn carrier;
+    // do not let that incidental projection replace a modeled conversion
+    // such as FileInputStream -> InputStream with an invalid trait cast.
+    if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts) {
+        return adapter;
+    }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::Concrete, DispatchShape::Concrete) => {
             if let Some(adapter) = java_collection_conversion_policy(actual, target) {
-                adapter
-            } else if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts)
-            {
                 adapter
             } else if actual.java_ty != target.java_ty
                 && target.ownership == OwnershipShape::SharedBorrow

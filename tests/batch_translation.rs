@@ -8,6 +8,95 @@ use std::process::Command;
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
+#[test]
+fn batch_nested_subclass_return_and_cast_select_source_hierarchy_carrier() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "BaseStream.java".to_string(),
+            r#"
+package example.streams;
+
+public class BaseStream {
+    int baseValue;
+    BaseStream(int value) { baseValue = value; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "StreamFactory.java".to_string(),
+            r#"
+package example.streams;
+
+public class StreamFactory implements StreamService {
+    public BaseStream make() {
+        ChildStream child = new ChildStream(7);
+        return child;
+    }
+    public int read(BaseStream stream) { return ((ChildStream) stream).childValue; }
+
+    private static class ChildStream extends BaseStream {
+        int childValue;
+        ChildStream(int value) { super(value); childValue = value + 1; }
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "DirectStreamFactory.java".to_string(),
+            r#"
+package example.streams;
+
+public class DirectStreamFactory implements StreamService {
+    public BaseStream make() {
+        BaseStream base = new BaseStream(3);
+        return base;
+    }
+    public int read(BaseStream stream) { return stream.baseValue; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "StreamService.java".to_string(),
+            r#"
+package example.streams;
+
+public interface StreamService {
+    BaseStream make();
+    int read(BaseStream stream);
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rendered = translations
+        .iter()
+        .map(|translation| translation.rust())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("pub enum BaseStreamValue")
+            && rendered.contains("impl From<StreamFactory_ChildStream> for BaseStreamValue")
+            && rendered.contains(
+                "let base: BaseStreamValue = BaseStreamValue::BaseStream(BaseStream::new(3))"
+            )
+            && !rendered
+                .contains("match BaseStream::new(3) { BaseStreamValue::BaseStream(value) => value"),
+        "{rendered}"
+    );
+}
+
 fn unique_temp_dir(name: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "new_java2rust_{name}_{}_{}",
@@ -53,6 +142,266 @@ public class B {
 "#,
     )
     .unwrap();
+}
+
+#[test]
+fn batch_timed_queue_offer_uses_declared_generic_field_element() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "FutureSink.java".to_string(),
+            r#"
+import java.util.concurrent.Future;
+
+abstract class FutureSink {
+    abstract void put(Future<BatchBlock> future) throws Exception;
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "ThreadedFutureSink.java".to_string(),
+            r#"
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+
+class ThreadedFutureSink extends FutureSink {
+    private ArrayBlockingQueue<Future<BatchBlock>> queue;
+
+    void put(Future<BatchBlock> future) throws Exception {
+        while (!queue.offer(future, 100, TimeUnit.MILLISECONDS)) {}
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "BatchBlock.java".to_string(),
+            r#"
+import java.util.concurrent.Future;
+
+class BatchBlock implements Future<BatchBlock> {
+    public BatchBlock get() { return this; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "NullableFutureUse.java".to_string(),
+            r#"
+class NullableFutureUse {
+    void sendNull(FutureSink sink) throws Exception { sink.put(null); }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let threaded = translations
+        .iter()
+        .find(|translation| translation.path() == "ThreadedFutureSink.java")
+        .expect("threaded sink translation");
+    assert!(
+        threaded.rust().contains(
+            "let __java_array_blocking_queue_timed_offer_value = future.clone().ok_or_else"
+        ),
+        "{}",
+        threaded.rust()
+    );
+    assert!(
+        !threaded
+            .rust()
+            .contains("let __java_array_blocking_queue_timed_offer_value = Box::new"),
+        "{}",
+        threaded.rust()
+    );
+}
+
+#[test]
+fn batch_fallible_nullable_source_call_is_not_wrapped_twice() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "NullableFuturePipeline.java".to_string(),
+            r#"
+import java.util.concurrent.Future;
+
+abstract class NullableFuturePipeline {
+    static NullableFuturePipeline make(boolean first) {
+        return first ? new NullableFuturePipelineImpl() : new NullableFuturePipelineImpl2();
+    }
+    abstract Future<NullableFutureValue> submit(NullableFutureWork work) throws Exception;
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "NullableFuturePipelineImpl2.java".to_string(),
+            r#"
+import java.util.concurrent.Future;
+
+class NullableFuturePipelineImpl2 extends NullableFuturePipeline {
+    Future<NullableFutureValue> submit(NullableFutureWork work) throws Exception {
+        return null;
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "NullableFuturePipelineImpl.java".to_string(),
+            r#"
+import java.util.concurrent.Future;
+
+class NullableFuturePipelineImpl extends NullableFuturePipeline {
+    Future<NullableFutureValue> submit(NullableFutureWork work) throws Exception {
+        NullableFutureValue value = work.process();
+        return value;
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "NullableFutureCallUse.java".to_string(),
+            r#"
+import java.util.concurrent.Future;
+
+class NullableFutureCallUse {
+    void run(NullableFutureWork work) throws Exception {
+        NullableFuturePipeline pipeline = NullableFuturePipeline.make(true);
+        Future<NullableFutureValue> future = pipeline.submit(work);
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "NullableFutureTypes.java".to_string(),
+            r#"
+class NullableFutureWork {
+    NullableFutureValue process() { return null; }
+}
+class NullableFutureValue implements java.util.concurrent.Future<NullableFutureValue> {
+    int value;
+    void setValue(int value) { this.value = value; }
+    public NullableFutureValue get() { return this; }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let caller = translations
+        .iter()
+        .find(|translation| translation.path() == "NullableFutureCallUse.java")
+        .expect("nullable future caller translation");
+    assert!(
+        caller.rust().contains("let future: Option<Future<")
+            && caller.rust().contains(" = pipeline.submit(")
+            && !caller.rust().contains("Some(pipeline.submit("),
+        "{}",
+        caller.rust()
+    );
+}
+
+#[test]
+fn batch_null_compared_shared_source_parameter_keeps_optional_carrier() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "BatchNullableRecord.java".to_string(),
+            r#"
+class BatchNullableRecord {
+    int value;
+    int take() { return value++; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "BatchNullableRecordQueue.java".to_string(),
+            r#"
+import java.util.ArrayDeque;
+class BatchNullableRecordQueue {
+    ArrayDeque<BatchNullableRecord> records = new ArrayDeque<BatchNullableRecord>();
+    BatchNullableRecord poll() { return records.poll(); }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "BatchNullableValidator.java".to_string(),
+            r#"
+class BatchNullableValidator {
+    BatchNullableRecord current;
+
+    public int read(BatchNullableRecord record) {
+        if (record != null) return record.take();
+        return 0;
+    }
+
+    public BatchNullableRecord touch(BatchNullableRecord record) {
+        if (record != null) record.take();
+        return record;
+    }
+
+    public void touchCurrent() {
+        if (current != null) current.take();
+    }
+
+    public int readNext(boolean present, BatchNullableRecord record) {
+        BatchNullableRecord next = present ? record : null;
+        return read(next);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let validator = translations
+        .iter()
+        .find(|translation| translation.path() == "BatchNullableValidator.java")
+        .expect("translated validator");
+
+    assert!(
+        validator.rust().contains("record: Option<")
+            && validator.rust().contains("if record.is_some()")
+            && validator.rust().contains("self.read(next)")
+            && !validator.rust().contains("self.read(next.ok_or_else")
+            && validator.rust().contains("record.as_ref().ok_or_else")
+            && !validator.rust().contains("record.unwrap().clone()")
+            && !validator
+                .rust()
+                .contains("__java_outer_receiver = self.current.clone();")
+            && !validator
+                .rust()
+                .contains("unsupported Java null comparison"),
+        "{}",
+        validator.rust()
+    );
 }
 
 fn generated_source_items_from_marker(rust: &str, marker: &str) -> String {
@@ -663,6 +1012,7 @@ public class Factory {
     String load() throws IOException { throw new IOException(); }
     Value make() throws IOException { return new Value(load()); }
 }
+
 "#
             .to_string(),
         ),
@@ -686,6 +1036,716 @@ public class Factory {
             && !factory.rust().contains("Value::new(self.load()?)?"),
         "{}",
         factory.rust()
+    );
+}
+
+#[test]
+fn emitted_constructor_fallibility_wins_over_duplicate_source_summary() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "FallibleSummaryValue.java".to_string(),
+            r#"
+public class FallibleSummaryValue {
+    int value;
+    String name;
+    String sequence;
+    String comment;
+    String quality;
+    public FallibleSummaryValue(String name, String sequence, String comment, String quality, int offset) {
+        this.name = name;
+        this.sequence = sequence;
+        this.comment = comment;
+        this.quality = quality;
+        if (sequence.length() != quality.length()) throw new RuntimeException("mismatch");
+        value = offset;
+    }
+    public FallibleSummaryValue(int value) { this.value = value; }
+    public void setValue(int value) { this.value = value; }
+    public static FallibleSummaryValue create(String text) {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) builder.append('I');
+        return new FallibleSummaryValue(text, text, text, builder.toString(), 33);
+    }
+    public static int run(String text) {
+        FallibleSummaryValue first = create(text);
+        FallibleSummaryValue alias = first;
+        alias.setValue(9);
+        return first.value;
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "FallibleSummaryOwner.java".to_string(),
+            r#"
+public class FallibleSummaryOwner {
+    FallibleSummaryValue current;
+    public void make(String text) {
+        current = new FallibleSummaryValue(text);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let summary_sources = vec![
+        r#"
+public class FallibleSummaryValue {
+    int value;
+    String name;
+    String sequence;
+    String comment;
+    String quality;
+    public FallibleSummaryValue(String name, String sequence, String comment, String quality, int offset) {
+        this.name = name;
+        this.sequence = sequence;
+        this.comment = comment;
+        this.quality = quality;
+        if (sequence.length() != quality.length()) throw new RuntimeException("mismatch");
+        value = offset;
+    }
+    public FallibleSummaryValue(int value) { this.value = value; }
+    public void setValue(int value) { this.value = value; }
+    public static FallibleSummaryValue create(String text) {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < text.length(); i++) builder.append('I');
+        return new FallibleSummaryValue(text, text, text, builder.toString(), 33);
+    }
+    public static int run(String text) {
+        FallibleSummaryValue first = create(text);
+        FallibleSummaryValue alias = first;
+        alias.setValue(9);
+        return first.value;
+    }
+}
+"#
+        .to_string(),
+        r#"
+public class FallibleSummaryOwner {
+    FallibleSummaryValue current;
+    public void make(String text) {
+        current = new FallibleSummaryValue(text);
+    }
+}
+"#
+        .to_string(),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let owner = translations
+        .iter()
+        .find(|translation| translation.path() == "FallibleSummaryOwner.java")
+        .expect("translated owner");
+    let value = translations
+        .iter()
+        .find(|translation| translation.path() == "FallibleSummaryValue.java")
+        .expect("translated value");
+
+    assert!(
+        owner.rust().contains("FallibleSummaryValue::new_") && owner.rust().contains(")?"),
+        "{}",
+        owner.rust()
+    );
+    assert!(
+        !owner
+            .rust()
+            .contains("FallibleSummaryValue::new(Some(&text)))"),
+        "{}",
+        owner.rust()
+    );
+    assert!(
+        value.rust().contains(
+            "std::rc::Rc::new(std::cell::RefCell::new(FallibleSummaryValue::new_string_string_string_string_int(text.clone()"
+        ) && value.rust().contains(", 33)?))"),
+        "{}",
+        value.rust()
+    );
+}
+
+#[test]
+fn packaged_emitted_constructor_fallibility_wins_over_duplicate_summary() {
+    let source = r#"
+package org.usadellab.trimmomatic.fastq;
+
+public class FastqRecord {
+    String name;
+    String sequence;
+    String comment;
+    String quality;
+    int value;
+
+    public FastqRecord(String name, String sequence, String comment, String quality, int offset) {
+        this.name = name;
+        this.sequence = sequence;
+        this.comment = comment;
+        this.quality = quality;
+        if (sequence.length() != quality.length()) throw new RuntimeException("mismatch");
+        value = offset;
+    }
+
+    public void setValue(int value) { this.value = value; }
+
+    public static FastqRecord make(String name, String sequence, int quality) {
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < sequence.length(); i++) builder.append('I');
+        return new FastqRecord(name, sequence, name, builder.toString(), 33);
+    }
+
+    public static int run(String name, String sequence) {
+        FastqRecord first = make(name, sequence, 40);
+        FastqRecord alias = first;
+        alias.setValue(9);
+        return first.value;
+    }
+}
+"#;
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "org/usadellab/trimmomatic/fastq/FastqRecord.java".to_string(),
+        source.to_string(),
+    )];
+    let summary_sources = vec![source.to_string()];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let record = translations
+        .iter()
+        .find(|translation| {
+            translation.path() == "org/usadellab/trimmomatic/fastq/FastqRecord.java"
+        })
+        .expect("translated record");
+
+    assert!(
+        record
+            .rust()
+            .contains("std::rc::Rc::new(std::cell::RefCell::new(FastqRecord::new(")
+            && record.rust().contains(", 33)?))"),
+        "{}",
+        record.rust()
+    );
+}
+
+#[test]
+fn duplicate_source_summary_atomic_field_get_keeps_infallible_facade_abi() {
+    let atomic_source = r#"
+import java.util.concurrent.atomic.AtomicBoolean;
+public class SummaryAtomicOwner {
+    AtomicBoolean flag;
+    public SummaryAtomicOwner(boolean present) {
+        flag = present ? new AtomicBoolean(false) : null;
+    }
+    public boolean value() { return flag.get(); }
+}
+"#;
+    let fallible_get_source = r#"
+public class SummaryFallibleGet {
+    public Object get() throws Exception { throw new Exception("failed"); }
+}
+"#;
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "SummaryAtomicOwner.java".to_string(),
+            atomic_source.to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "SummaryFallibleGet.java".to_string(),
+            fallible_get_source.to_string(),
+        ),
+    ];
+    let summary_sources = vec![atomic_source.to_string(), fallible_get_source.to_string()];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let owner = translations
+        .iter()
+        .find(|translation| translation.path() == "SummaryAtomicOwner.java")
+        .expect("translated atomic owner");
+
+    assert!(owner.rust().contains(".get();"), "{}", owner.rust());
+    assert!(
+        !owner.rust().contains(".get().unwrap_or_else"),
+        "{}",
+        owner.rust()
+    );
+}
+
+#[test]
+fn duplicate_source_summary_nullable_string_adapts_at_pattern_matcher_boundary() {
+    let pattern_source = r#"
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
+
+public enum SummaryNamePattern {
+    ALPHA("alpha", "A"), BETA("beta", "B");
+
+    private Pattern pattern;
+    private String replacement;
+
+    SummaryNamePattern(String expression, String replacement) {
+        this.pattern = Pattern.compile(expression);
+        this.replacement = replacement;
+    }
+
+    public String canonicalizeOne(String value) {
+        String candidate = value.length() > 0 ? value : null;
+        Matcher matcher = pattern.matcher(candidate);
+        if (!matcher.find()) return null;
+        return matcher.replaceAll(replacement);
+    }
+
+    public static String canonicalize(String value) {
+        for (SummaryNamePattern candidate : SummaryNamePattern.values()) {
+            String canonical = candidate.canonicalizeOne(value);
+            if (canonical != null) return canonical;
+        }
+        return null;
+    }
+}
+"#;
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "SummaryNamePattern.java".to_string(),
+        pattern_source.to_string(),
+    )];
+    let summary_sources = vec![pattern_source.to_string()];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let pattern = translations
+        .iter()
+        .find(|translation| translation.path() == "SummaryNamePattern.java")
+        .expect("translated pattern enum");
+
+    assert!(
+        pattern.rust().contains("candidate: Option")
+            && pattern.rust().contains(".matcher(candidate.as_ref()"),
+        "{}",
+        pattern.rust()
+    );
+}
+
+#[test]
+fn summary_source_constructor_slot_uses_external_stream_conversion_adapter() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "example/use/StreamHolderUse.java".to_string(),
+        r#"
+package example.use;
+import java.io.FileInputStream;
+import example.util.StreamHolder;
+
+public class StreamHolderUse {
+    public static StreamHolder open(String path) throws Exception {
+        return new StreamHolder(new FileInputStream(path), 1L);
+    }
+}
+"#
+        .to_string(),
+    )];
+    let summary_sources = vec![
+        r#"
+package example.util;
+import java.io.InputStream;
+import java.io.IOException;
+
+public class StreamHolder extends InputStream {
+    public StreamHolder(InputStream stream, long length) {}
+    public int read() throws IOException { return -1; }
+}
+"#
+        .to_string(),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let use_site = translations
+        .iter()
+        .find(|translation| translation.path() == "example/use/StreamHolderUse.java")
+        .expect("translated stream holder use");
+
+    assert!(
+        use_site.rust().contains("FileInputStream::new(path)?")
+            && !use_site.rust().contains("as InputStream"),
+        "{}",
+        use_site.rust()
+    );
+}
+
+#[test]
+fn imported_summary_static_owner_uses_emitted_declaration_identity() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "org/usadellab/trimmomatic/fastq/Parser.java".to_string(),
+        r#"
+package org.usadellab.trimmomatic.fastq;
+import java.io.InputStream;
+import org.usadellab.trimmomatic.util.compression.CompressionFormat;
+
+public class Parser {
+    public static InputStream open(InputStream stream, String name) throws Exception {
+        return CompressionFormat.wrapStreamForParsing(stream, name);
+    }
+    public static InputStream save(InputStream stream, String name) throws Exception {
+        return CompressionFormat.wrapStreamForSerializing(stream, name, null);
+    }
+}
+
+"#
+        .to_string(),
+    )];
+    let summary_sources = vec![
+        r#"
+package org.usadellab.trimmomatic.util.compression;
+import java.io.InputStream;
+
+public enum CompressionFormat {
+    NONE("");
+    private String ext;
+    CompressionFormat(String ext) { this.ext = ext; }
+    public static InputStream wrapStreamForParsing(InputStream stream, String name) {
+        return stream;
+    }
+    public static InputStream wrapStreamForSerializing(InputStream stream, String name, Integer level) {
+        return stream;
+    }
+}
+"#
+        .to_string(),
+        r#"
+package org.usadellab.trimmomatic.fastq;
+import java.io.InputStream;
+import org.usadellab.trimmomatic.util.compression.CompressionFormat;
+
+public class Parser {
+    public static InputStream open(InputStream stream, String name) throws Exception {
+        return CompressionFormat.wrapStreamForParsing(stream, name);
+    }
+    public static InputStream save(InputStream stream, String name) throws Exception {
+        return CompressionFormat.wrapStreamForSerializing(stream, name, null);
+    }
+}
+"#
+        .to_string(),
+        r#"
+package unrelated.context;
+
+public class Noise {
+    int compressionFormat;
+}
+"#
+        .to_string(),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let parser = translations
+        .iter()
+        .find(|translation| translation.path() == "org/usadellab/trimmomatic/fastq/Parser.java")
+        .expect("translated parser");
+
+    assert!(
+        parser
+            .rust()
+            .contains("CompressionFormat::wrap_stream_for_parsing(")
+            && !parser.rust().contains(
+                "OrgUsadellabTrimmomaticFastqCompressionFormat::wrap_stream_for_parsing("
+            )
+            && !parser.rust().contains(
+                "OrgUsadellabTrimmomaticUtilCompressionCompressionFormat::wrap_stream_for_parsing("
+            )
+            && parser
+                .rust()
+                .contains("wrap_stream_for_serializing(stream, name, None)")
+            && parser.rust().contains("_arg2: Option<i32>"),
+        "{}",
+        parser.rust()
+    );
+}
+
+#[test]
+fn nullable_shared_summary_subclass_adapts_to_external_super_method_slot() {
+    let parser_source = r#"
+package example.fastq;
+import java.io.InputStream;
+import example.util.PositionTrackingInputStream;
+import example.util.CompressionFormat;
+
+public class Parser {
+    PositionTrackingInputStream tracked;
+
+    public InputStream open(InputStream stream, String name) throws Exception {
+        tracked = new PositionTrackingInputStream(stream, 1L);
+        return CompressionFormat.wrap(tracked, name);
+    }
+}
+"#;
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "example/fastq/Parser.java".to_string(),
+        parser_source.to_string(),
+    )];
+    let summary_sources = vec![
+        parser_source.to_string(),
+        r#"
+package example.util;
+import java.io.InputStream;
+
+public class PositionTrackingInputStream extends InputStream {
+    public PositionTrackingInputStream(InputStream stream, long length) {}
+    public int read() { return -1; }
+}
+"#
+        .to_string(),
+        r#"
+package example.util;
+import java.io.InputStream;
+
+public class CompressionFormat {
+    public static InputStream wrap(InputStream stream, String name) throws Exception {
+        return stream;
+    }
+}
+"#
+        .to_string(),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let parser = translations
+        .iter()
+        .find(|translation| translation.path() == "example/fastq/Parser.java")
+        .expect("translated parser");
+    let wrap_args = parser
+        .rust()
+        .split("ExampleUtilCompressionFormat::wrap(")
+        .nth(1)
+        .and_then(|tail| tail.split_once(", name)"))
+        .map(|(args, _)| args)
+        .expect("generated CompressionFormat.wrap arguments");
+    let constructor_signatures = parser
+        .rust()
+        .lines()
+        .filter(|line| line.contains("pub fn new"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        wrap_args.contains(".into()")
+            && parser
+                .rust()
+                .contains("impl From<std::rc::Rc<PositionTrackingInputStream>> for InputStream")
+            && parser
+                .rust()
+                .contains("pub fn new(_arg0: InputStream, _arg1: i64) -> Self"),
+        "wrap args: {wrap_args}\nconstructors:\n{constructor_signatures}"
+    );
+}
+
+#[test]
+fn emitted_same_package_static_owner_beats_qualified_summary_copy() {
+    let pattern = r#"
+package org.usadellab.trimmomatic.fastq;
+
+public class RecordNamePattern {
+    public static String canonicalize(String value) { return value; }
+}
+"#;
+    let validator = r#"
+package org.usadellab.trimmomatic.fastq;
+
+public class PairingValidator {
+    public static String validate(String value) {
+        return RecordNamePattern.canonicalize(value);
+    }
+}
+"#;
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "org/usadellab/trimmomatic/fastq/RecordNamePattern.java".to_string(),
+            pattern.to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "org/usadellab/trimmomatic/fastq/PairingValidator.java".to_string(),
+            validator.to_string(),
+        ),
+    ];
+    let summary_sources = vec![pattern.to_string(), validator.to_string()];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let validator = translations
+        .iter()
+        .find(|translation| {
+            translation.path() == "org/usadellab/trimmomatic/fastq/PairingValidator.java"
+        })
+        .expect("translated validator");
+
+    assert!(
+        validator
+            .rust()
+            .contains("RecordNamePattern::canonicalize(")
+            && !validator
+                .rust()
+                .contains("OrgUsadellabTrimmomaticFastqRecordNamePattern::canonicalize("),
+        "{}",
+        validator.rust()
+    );
+}
+
+#[test]
+fn batch_emitted_getter_return_shape_drives_required_argument_lowering() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "ContextNullableSource.java".to_string(),
+            r#"
+public class ContextNullableSource {
+    String value;
+    String getValue() { return value; }
+    void setValue(String value) { this.value = value; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "ContextGetterConsumer.java".to_string(),
+            r#"
+public class ContextGetterConsumer {
+    static int[] pack(String value) {
+        int[] out = null;
+        out = new int[value.length()];
+        out[0] = value.charAt(0);
+        return out;
+    }
+    class Inner {
+        int run(ContextNullableSource source) {
+            ContextNullableSource alias = source;
+            alias.setValue(source.getValue());
+            return pack(source.getValue())[0];
+        }
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let consumer = translations
+        .iter()
+        .find(|translation| translation.path() == "ContextGetterConsumer.java")
+        .expect("translated consumer");
+
+    assert!(
+        consumer.rust().contains("::pack(source")
+            && consumer.rust().contains("get_value().as_ref().ok_or_else")
+            && !consumer
+                .rust()
+                .contains("&source.borrow().get_value().as_ref()"),
+        "{}",
+        consumer.rust()
+    );
+}
+
+#[test]
+fn batch_outer_handle_call_materializes_shared_field_receiver_before_owner_arguments() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "CallOwner.java".to_string(),
+            r#"
+public class CallOwner {
+    Sink sink;
+    int count = 3;
+    class Inner {}
+
+    CallOwner(Sink sink) { this.sink = sink; }
+
+    void run() {
+        new Inner();
+        sink.report(count);
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Sink.java".to_string(),
+            r#"
+public class Sink {
+    void report(int value) {}
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let owner = translations
+        .iter()
+        .find(|translation| translation.path() == "CallOwner.java")
+        .expect("translated owner");
+
+    assert!(
+        owner
+            .rust()
+            .contains("let __java_call_receiver = __java_self.borrow().sink.clone()")
+            || owner
+                .rust()
+                .contains("let __java_call_receiver = __java_self.borrow().sink.as_ref().cloned()"),
+        "{}",
+        owner.rust()
+    );
+    assert!(
+        owner.rust().contains("__java_call_receiver") && owner.rust().contains(".report("),
+        "{}",
+        owner.rust()
     );
 }
 

@@ -3504,6 +3504,39 @@ class Known {}
 }
 
 #[test]
+fn representation_plan_preserves_typed_generic_facade_carriers() {
+    let parsed = parse_java_source(
+        r#"
+class Known {}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let representations = plan_representations(&resolved.program, &resolved.facts);
+    let future = JavaType::Named {
+        name: "Future".to_string(),
+        args: vec![JavaType::Named {
+            name: "Known".to_string(),
+            args: Vec::new(),
+        }],
+    };
+
+    assert_eq!(
+        value_shape_for_java_type(&representations, future.clone()).dispatch,
+        DispatchShape::Concrete
+    );
+    assert_eq!(
+        storage_shape_for_java_type(&representations, future.clone()).dispatch,
+        DispatchShape::Concrete
+    );
+    assert_eq!(
+        return_shape_for_java_type(&representations, &future)
+            .expect("non-void generic facade return")
+            .dispatch,
+        DispatchShape::Concrete
+    );
+}
+
+#[test]
 fn shape_projection_projects_unknown_java_types_as_erased_without_plan() {
     let shape = project_java_value_shape(None, JavaType::Unknown("Object".to_string()));
 
@@ -4637,6 +4670,76 @@ class PlatformBoundaryUse {
 
     cargo_check_generated_modules(
         "java_platform_facade_support_covers_path_uri_and_file_bounda",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_platform_facade_models_class_location_and_file_contracts() {
+    let translation = translate_source(
+        r#"
+import java.io.File;
+import java.io.IOException;
+import java.net.URI;
+
+class PlatformContractUse {
+    boolean absolute(File file) {
+        return file.isAbsolute();
+    }
+
+    File parent(File file) {
+        return file.getParentFile();
+    }
+
+    String canonical(File file) throws IOException {
+        return file.getCanonicalPath();
+    }
+
+    URI classLocation() throws Exception {
+        return PlatformContractUse.class
+                .getProtectionDomain()
+                .getCodeSource()
+                .getLocation()
+                .toURI();
+    }
+}
+"#,
+    );
+
+    assert!(translation.rust.contains("pub struct ProtectionDomain"));
+    assert!(translation.rust.contains("pub struct CodeSource"));
+    assert!(
+        translation
+            .rust
+            .contains("pub fn is_absolute(&self) -> bool")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_parent_file(&self) -> Option<File>")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_canonical_path(&self) -> Result<String, JavaException>")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn to_u_r_i(&self) -> Result<URI, JavaException>")
+    );
+    assert!(
+        translation.rust.contains("get_code_source()")
+            && translation.rust.contains("NullPointerException")
+            && translation.rust.contains("to_u_r_i()?")
+    );
+
+    cargo_check_generated_modules(
+        "java_platform_facade_models_class_location_and_file_contracts",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),
@@ -19932,6 +20035,60 @@ public class OuterStatics {
 
     cargo_check_generated_modules(
         "nested_class_reads_enclosing_static_through_its_owner",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn empty_list_constructor_uses_the_planned_element_storage_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class StoredItem {
+    int value;
+}
+
+class CollectionCarrier {
+    List<StoredItem> items;
+
+    void fill() {
+        List<StoredItem> local = null;
+        local = new ArrayList<StoredItem>();
+        StoredItem item = new StoredItem();
+        local.add(item);
+        items = local;
+        item.value = 1;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Vec::<std::rc::Rc<std::cell::RefCell<StoredItem>>>::new()"),
+        "the constructor must use the same representation-aware element carrier as the list slot:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Vec::<StoredItem>::new()"),
+        "the nominal Java element must not bypass its storage placement:\n{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "empty_list_constructor_uses_the_planned_element_storage_carrier",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),
@@ -45781,6 +45938,151 @@ public class Ragged {
 
     cargo_check_generated_modules(
         "ragged_two_dimensional_assignment_hoists_both_indices",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn rectangular_object_array_initializer_keeps_nested_vec_carrier() {
+    let translation = translate_source(
+        r#"
+public class ObjectMatrixInitializer {
+    static String[][] patterns() {
+        String[][] values = {
+            { "_R1_", "_R2_" },
+            { ".1", ".2" }
+        };
+        return values;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Vec<Vec<Option<String>>> = vec![vec![Some("),
+        "the initializer must use the same nested object-array carrier as its slot:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("ndarray::arr2"),
+        "rectangular object syntax must not select the primitive ndarray carrier:\n{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "rectangular_object_array_initializer_keeps_nested_vec_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_reference_array_element_adapts_to_optional_borrow_argument() {
+    let translation = translate_source(
+        r#"
+class OptionalArrayItem {
+    int value;
+}
+
+class OptionalArrayElementCall {
+    int read(OptionalArrayItem item) {
+        if (item == null) return 0;
+        return item.value;
+    }
+
+    int first(OptionalArrayItem[] items) {
+        return read(items[0]);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn read(&self, item: Option<&OptionalArrayItem>)")
+            && translation.rust.contains(".as_ref())"),
+        "a borrowed array slot `&Option<T>` must project to `Option<&T>` for a nullable borrowed argument:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_reference_array_element_adapts_to_optional_borrow_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn non_list_collection_field_seed_uses_its_own_default_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.concurrent.ArrayBlockingQueue;
+
+class QueueFieldSeed {
+    ArrayBlockingQueue<String> queue;
+
+    QueueFieldSeed(int size) {
+        queue = new ArrayBlockingQueue<String>(size);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("queue: Default::default()")
+            && !translation.rust.contains("queue: Vec::new()"),
+        "constructor seed values must use the collection's planned carrier:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "non_list_collection_field_seed_uses_its_own_default_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust.clone(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn borrowed_collection_element_handle_is_cloned_without_rewrapping() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class SharedCollectionItem {
+    SharedCollectionItem alias;
+}
+
+class SharedCollectionConsumer {
+    void consume(SharedCollectionItem item) {}
+
+    void consumeAll(List<SharedCollectionItem> items) {
+        for (SharedCollectionItem item : items) consume(item);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("Rc::new(item.clone()"),
+        "a borrowed handle must be cloned, not nested behind a second handle:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "borrowed_collection_element_handle_is_cloned_without_rewrapping",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),

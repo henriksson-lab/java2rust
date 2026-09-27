@@ -6,6 +6,7 @@ use crate::java_ir::{
     SwitchCase, SwitchLabel, TypeDecl,
 };
 use crate::java_signature::{JavaCallableSlotKey, source_method_rust_name};
+use crate::types::TypeEnv;
 use crate::usage::{CallGraph, CallableKey};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -479,6 +480,124 @@ fn expr_has_integer_div_rem_expr(expr: &Expr) -> bool {
     }
 }
 
+fn expr_has_throwing_integer_div_rem_expr(expr: &Expr, env: &TypeEnv) -> bool {
+    match expr {
+        Expr::Binary { op, left, right } => {
+            let operation_can_throw = matches!(op, BinaryOp::Div | BinaryOp::Rem)
+                && !matches!(
+                    crate::types::infer_expr_type(expr, env),
+                    JavaType::Primitive(
+                        crate::java_ir::PrimitiveType::Float
+                            | crate::java_ir::PrimitiveType::Double
+                    )
+                );
+            operation_can_throw
+                || expr_has_throwing_integer_div_rem_expr(left, env)
+                || expr_has_throwing_integer_div_rem_expr(right, env)
+        }
+        Expr::Unary { expr, .. } | Expr::Cast { expr, .. } | Expr::FieldAccess(expr, _) => {
+            expr_has_throwing_integer_div_rem_expr(expr, env)
+        }
+        Expr::ArrayAccess(array, index) => {
+            expr_has_throwing_integer_div_rem_expr(array, env)
+                || expr_has_throwing_integer_div_rem_expr(index, env)
+        }
+        Expr::Call { receiver, args, .. } => {
+            receiver
+                .as_ref()
+                .is_some_and(|receiver| expr_has_throwing_integer_div_rem_expr(receiver, env))
+                || args
+                    .iter()
+                    .any(|arg| expr_has_throwing_integer_div_rem_expr(arg, env))
+        }
+        Expr::New {
+            qualifier,
+            args,
+            body,
+            ..
+        } => {
+            qualifier
+                .as_ref()
+                .is_some_and(|qualifier| expr_has_throwing_integer_div_rem_expr(qualifier, env))
+                || args
+                    .iter()
+                    .any(|arg| expr_has_throwing_integer_div_rem_expr(arg, env))
+                // Anonymous members have their own parameter/local environments.
+                // Keep the older conservative scan for those nested callables.
+                || body.as_ref().is_some_and(|members| {
+                    members.iter().any(|member| match member {
+                        Member::Method(method) => method
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_integer_div_rem_expr),
+                        Member::Constructor(constructor) => constructor
+                            .body
+                            .as_ref()
+                            .is_some_and(block_has_integer_div_rem_expr),
+                        Member::Field(field) => field
+                            .initializer
+                            .as_ref()
+                            .is_some_and(expr_has_integer_div_rem_expr),
+                        Member::Type(nested) => type_has_integer_div_rem_expr(nested),
+                        Member::Unsupported { .. } => false,
+                    })
+                })
+        }
+        Expr::ArrayCreation {
+            dimensions,
+            initializer,
+            ..
+        } => {
+            dimensions
+                .iter()
+                .any(|dimension| expr_has_throwing_integer_div_rem_expr(dimension, env))
+                || initializer.as_ref().is_some_and(|elements| {
+                    elements
+                        .iter()
+                        .any(|element| expr_has_throwing_integer_div_rem_expr(element, env))
+                })
+        }
+        Expr::ArrayInitializer(elements) => elements
+            .iter()
+            .any(|element| expr_has_throwing_integer_div_rem_expr(element, env)),
+        Expr::Ternary {
+            condition,
+            then_expr,
+            else_expr,
+        } => {
+            expr_has_throwing_integer_div_rem_expr(condition, env)
+                || expr_has_throwing_integer_div_rem_expr(then_expr, env)
+                || expr_has_throwing_integer_div_rem_expr(else_expr, env)
+        }
+        Expr::Switch { selector, cases } => {
+            expr_has_throwing_integer_div_rem_expr(selector, env)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => {
+                            expr_has_throwing_integer_div_rem_expr(expr, env)
+                        }
+                        SwitchLabel::Default => false,
+                    }) || expr_has_throwing_integer_div_rem_expr(&case.value, env)
+                })
+        }
+        Expr::InstanceOf { expr, .. } => expr_has_throwing_integer_div_rem_expr(expr, env),
+        Expr::Lambda { body, .. } => match body {
+            crate::java_ir::LambdaBody::Expr(expr) => {
+                expr_has_throwing_integer_div_rem_expr(expr, env)
+            }
+            crate::java_ir::LambdaBody::Block(block) => block_has_integer_div_rem_expr(block),
+        },
+        Expr::MethodReference { .. }
+        | Expr::Literal(_)
+        | Expr::Var(_)
+        | Expr::This
+        | Expr::Super
+        | Expr::ClassLiteral(_)
+        | Expr::Raw(_)
+        | Expr::Unsupported { .. } => false,
+    }
+}
+
 fn switch_label_has_integer_div_rem_expr(label: &crate::java_ir::SwitchLabel) -> bool {
     match label {
         crate::java_ir::SwitchLabel::Expr(expr) => expr_has_integer_div_rem_expr(expr),
@@ -835,6 +954,131 @@ fn stmt_has_unhandled_integer_div_rem(stmt: &Stmt) -> bool {
     }
 }
 
+fn block_has_unhandled_integer_div_rem_with_env(block: &Block, env: &TypeEnv) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+}
+
+fn stmt_has_unhandled_integer_div_rem_with_env(stmt: &Stmt, env: &TypeEnv) -> bool {
+    match stmt {
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let guarded_counts = !catches_arithmetic_exception(catches);
+            (guarded_counts
+                && (resources
+                    .iter()
+                    .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+                    || block_has_unhandled_integer_div_rem_with_env(body, env)))
+                || catches
+                    .iter()
+                    .any(|catch| block_has_unhandled_integer_div_rem_with_env(&catch.body, env))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_has_unhandled_integer_div_rem_with_env(block, env))
+        }
+        Stmt::VarDecl { initializer, .. } => initializer
+            .as_ref()
+            .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, env)),
+        Stmt::Assign { target, value } => {
+            expr_has_throwing_integer_div_rem_expr(target, env)
+                || expr_has_throwing_integer_div_rem_expr(value, env)
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_has_throwing_integer_div_rem_expr(expr, env),
+        Stmt::Return(expr) => expr
+            .as_ref()
+            .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, env)),
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            expr_has_throwing_integer_div_rem_expr(condition, env)
+                || block_has_unhandled_integer_div_rem_with_env(then_block, env)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_has_unhandled_integer_div_rem_with_env(block, env))
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            expr_has_throwing_integer_div_rem_expr(condition, env)
+                || block_has_unhandled_integer_div_rem_with_env(body, env)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            init.iter()
+                .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+                || condition
+                    .as_ref()
+                    .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, env))
+                || update
+                    .iter()
+                    .any(|expr| expr_has_throwing_integer_div_rem_expr(expr, env))
+                || block_has_unhandled_integer_div_rem_with_env(body, env)
+        }
+        Stmt::EnhancedFor { iterable, body, .. } => {
+            expr_has_throwing_integer_div_rem_expr(iterable, env)
+                || block_has_unhandled_integer_div_rem_with_env(body, env)
+        }
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            block_has_unhandled_integer_div_rem_with_env(body, env)
+        }
+        Stmt::Switch { selector, cases } => {
+            expr_has_throwing_integer_div_rem_expr(selector, env)
+                || cases.iter().any(|case| {
+                    case.labels.iter().any(|label| match label {
+                        SwitchLabel::Expr(expr) => {
+                            expr_has_throwing_integer_div_rem_expr(expr, env)
+                        }
+                        SwitchLabel::Default => false,
+                    }) || case
+                        .statements
+                        .iter()
+                        .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+                })
+        }
+        Stmt::ConstructorInvocation { args, .. } => args
+            .iter()
+            .any(|expr| expr_has_throwing_integer_div_rem_expr(expr, env)),
+        // A local/anonymous type owns a separate type environment. The call
+        // graph seeds its callable independently, so it must not contaminate
+        // the enclosing callable here.
+        Stmt::LocalType(_) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => false,
+    }
+}
+
+fn callable_integer_div_rem_type_env(ty: &TypeDecl, params: &[crate::java_ir::Param]) -> TypeEnv {
+    let mut env = TypeEnv::new();
+    for member in &ty.members {
+        if let Member::Field(field) = member {
+            env.insert_field(field.name.clone(), field.ty.clone());
+            env.insert_field(crate::parser::to_snake_case(&field.name), field.ty.clone());
+            env.insert_type_field(ty.name.clone(), field.name.clone(), field.ty.clone());
+        }
+    }
+    for param in params {
+        env.insert_param(param.name.clone(), param.ty.clone());
+        if param.source_name != param.name {
+            env.insert_param(param.source_name.clone(), param.ty.clone());
+        }
+    }
+    env
+}
+
 fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
     let mut types = Vec::new();
     for ty in &program.types {
@@ -845,20 +1089,18 @@ fn integer_div_rem_callables(program: &Program) -> Vec<CallableKey> {
         for member in &ty.members {
             match member {
                 Member::Method(method) => {
-                    if method
-                        .body
-                        .as_ref()
-                        .is_some_and(block_has_unhandled_integer_div_rem)
-                    {
+                    let env = callable_integer_div_rem_type_env(ty, &method.params);
+                    if method.body.as_ref().is_some_and(|body| {
+                        block_has_unhandled_integer_div_rem_with_env(body, &env)
+                    }) {
                         keys.push(CallableKey::source_method_for_type(ty, method));
                     }
                 }
                 Member::Constructor(constructor) => {
-                    if constructor
-                        .body
-                        .as_ref()
-                        .is_some_and(block_has_unhandled_integer_div_rem)
-                    {
+                    let env = callable_integer_div_rem_type_env(ty, &constructor.params);
+                    if constructor.body.as_ref().is_some_and(|body| {
+                        block_has_unhandled_integer_div_rem_with_env(body, &env)
+                    }) {
                         keys.push(CallableKey::source_constructor_for_type(ty, constructor));
                     }
                 }
@@ -1695,7 +1937,7 @@ fn expr_is_nullable_param_ref(expr: &Expr, names: &HashSet<String>) -> bool {
 
 /// Groups each declared method with the supertype method it overrides or
 /// implements, so fallibility can be equalized across the group.
-fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
+pub(crate) fn override_groups_for_program(program: &Program) -> Vec<Vec<CallableKey>> {
     let mut types = Vec::new();
     for ty in &program.types {
         collect_type_decls(ty, &mut types);
@@ -2490,6 +2732,41 @@ class FixedMetric implements Metric {
         }
 
         let _semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    }
+
+    #[test]
+    fn floating_point_division_does_not_make_constructor_fallible() {
+        let parsed = parse_java_source(
+            r#"
+class FloatingRatio {
+    static final double SCALE = 0.5;
+    double ratio;
+
+    FloatingRatio(int value) {
+        ratio = value / SCALE;
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        let ty = &resolved.program.types[0];
+        let constructor = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(constructor) => Some(constructor),
+                _ => None,
+            })
+            .expect("constructor is present");
+        let key = CallableKey::source_constructor_for_type(ty, constructor);
+        assert!(
+            !fallibility.returns_result(&key),
+            "floating-point division cannot throw ArithmeticException: {:?}",
+            fallibility.callable(&key).map(CallableFallibility::reasons)
+        );
     }
 
     #[test]

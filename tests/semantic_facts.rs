@@ -8906,6 +8906,7 @@ class ReadOnlyExternalReceiverParam {
         &vec![
             BindingUse::ReceiverForCall {
                 name: "getName".to_string(),
+                arg_count: 0,
                 boundary: CallArgumentBoundary::KnownContentRead,
                 has_literal_null_arg: false,
                 literal_null_arg_indices: Vec::new(),

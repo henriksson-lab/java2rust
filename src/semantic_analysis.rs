@@ -6887,7 +6887,7 @@ fn walk_stmt_exprs(stmt: &Stmt, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
-fn walk_block_exprs(block: &Block, visit: &mut impl FnMut(&Expr)) {
+pub(crate) fn walk_block_exprs(block: &Block, visit: &mut impl FnMut(&Expr)) {
     for stmt in &block.statements {
         walk_stmt_exprs(stmt, visit);
     }

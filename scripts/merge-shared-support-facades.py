@@ -20,7 +20,7 @@ FROM_TRAIT_RE = re.compile(
     r"^From<([A-Za-z_][A-Za-z0-9_]*)(?:<.*>)?>$"
 )
 FN_RE = re.compile(
-    r"^\s*(?:pub\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+    r"^\s*(?:pub(?:\(crate\))?\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 # A `const fn` is a method, not an associated constant.  Keeping `fn` out of
 # this match matters because constants are copied as a single line while
@@ -194,7 +194,33 @@ def prelude_source_owned_nested_types(path: Path) -> set[str]:
     # Sequence.  Generated nested classes have both a prelude facade and the
     # concrete declaration before their enclosing primary type, which gives us
     # a structural signal instead of relying on a name prefix alone.
-    return set(duplicate_source_owned_nested_last_decl_starts(path))
+    nested = set(duplicate_source_owned_nested_last_decl_starts(path))
+    source_type = source_type_for(path)
+    lines = path.read_text().splitlines(keepends=True)
+    declared = set()
+    aliases = []
+    depth = 0
+    for line in lines:
+        if depth == 0:
+            type_match = TYPE_RE.match(line)
+            if type_match:
+                name = type_match.group(2)
+                if name == source_type:
+                    break
+                declared.add(name)
+            if alias_match := ALIAS_RE.match(line):
+                aliases.append((alias_match.group(1), alias_match.group(2)))
+        depth += brace_delta(line)
+    # A flattened declaration plus its simple-name alias is the emitted form
+    # of a Java nested source type. The prefix alone is insufficient evidence
+    # (`SequenceInputStream` is not nested in `Sequence`), while this pair is
+    # produced deliberately by nested-type lowering.
+    nested.update(
+        target
+        for _alias, target in aliases
+        if target in declared and target.startswith(f"{source_type}_")
+    )
+    return nested
 
 
 def prelude_from_impls(path: Path) -> list[tuple[str, str]]:
@@ -317,9 +343,17 @@ def duplicate_source_owned_nested_last_decl_starts(path: Path) -> dict[str, int]
     }
 
 
-def parse_items(path: Path, selected: set[str]) -> list[dict]:
+def parse_items(
+    path: Path,
+    selected: set[str],
+    known_source_owned_nested_types: set[str] | None = None,
+) -> list[dict]:
     source_type = source_type_for(path)
-    source_owned_nested_types = prelude_source_owned_nested_types(path)
+    source_owned_nested_types = (
+        prelude_source_owned_nested_types(path)
+        if known_source_owned_nested_types is None
+        else known_source_owned_nested_types
+    )
     lines = path.read_text().splitlines(keepends=True)
     items = []
     depth = 0
@@ -369,15 +403,18 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
             if alias_match and (
                 alias_match.group(1) in selected or alias_match.group(2) in selected
             ):
+                alias_target = alias_match.group(2)
                 items.append(
                     {
                         "kind": "alias",
                         "name": alias_match.group(1),
-                        "target": alias_match.group(2),
+                        "target": alias_target,
                         "start": index,
                         "end": index + 1,
                         "text": line,
                         "prelude": not after_primary,
+                        "source_owned_nested": alias_target
+                        in source_owned_nested_types,
                     }
                 )
                 index += 1
@@ -396,6 +433,15 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
                 raw_target = trait_match.group(2).strip()
                 target_name = impl_target_name(raw_target)
                 from_match = FROM_TRAIT_RE.match(raw_trait)
+                source_owned_nested = (
+                    target_name in source_owned_nested_types
+                    or trait_impl_name(raw_trait) in source_owned_nested_types
+                    or (
+                        from_match is not None
+                        and impl_target_name(from_match.group(1))
+                        in source_owned_nested_types
+                    )
+                )
                 if from_match and (
                     impl_target_name(from_match.group(1)) in source_owned_nested_types
                     or target_name in source_owned_nested_types
@@ -415,6 +461,7 @@ def parse_items(path: Path, selected: set[str]) -> list[dict]:
                         "end": end,
                         "text": "".join(lines[index:end]),
                         "prelude": not after_primary,
+                        "source_owned_nested": source_owned_nested,
                     }
                 )
                 index = end
@@ -618,6 +665,15 @@ def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
     return referenced
 
 
+def referenced_nominal_names(texts: list[str], candidate_names: set[str]) -> set[str]:
+    referenced = set()
+    combined = "\n".join(texts)
+    for name in candidate_names:
+        if re.search(rf"\b{re.escape(name)}\b", combined):
+            referenced.add(name)
+    return referenced
+
+
 def top_level_function_dependency_closure(
     seed_texts: list[str], functions_by_name: dict[str, list[dict]]
 ) -> set[str]:
@@ -632,6 +688,51 @@ def top_level_function_dependency_closure(
             selected.add(name)
             pending_texts.extend(item["text"] for item in functions_by_name[name])
     return selected
+
+
+def crate_visible_top_level_function(text: str) -> str:
+    """Expose a moved private helper to sibling generated modules.
+
+    Facade helpers start life in each generated module's prelude. Once the
+    facade merger moves one to crate-root shared support, callers reside in a
+    different Rust module, so preserving private visibility changes its
+    meaning. `pub(crate)` is the narrow visibility that preserves the
+    original package-wide generated-code contract.
+    """
+    if re.match(r"^\s*pub(?:\(crate\))?\s+", text):
+        return text
+    return re.sub(
+        r"^(\s*)((?:const\s+)?fn\b)",
+        r"\1pub(crate) \2",
+        text,
+        count=1,
+    )
+
+
+def promote_existing_top_level_functions(path: Path, names: set[str]) -> None:
+    if not names or not path.exists():
+        return
+    text = path.read_text()
+    lines = text.splitlines(keepends=True)
+    replacements = {
+        item["start"]: (item["end"], crate_visible_top_level_function(item["text"]))
+        for item in parse_top_level_functions_from_text(text)
+        if item["name"] in names
+    }
+    if not replacements:
+        return
+    output = []
+    index = 0
+    while index < len(lines):
+        replacement = replacements.get(index)
+        if replacement is None:
+            output.append(lines[index])
+            index += 1
+            continue
+        end, replacement_text = replacement
+        output.append(replacement_text)
+        index = end
+    path.write_text("".join(output))
 
 
 def remove_shared_items(path: Path, items: list[dict]) -> None:
@@ -917,6 +1018,58 @@ def method_signature_text(method_text: str) -> str:
     return " ".join(line.strip() for line in before_body.splitlines())
 
 
+def comma_separated_arity(text: str) -> int:
+    if not text.strip():
+        return 0
+    depth = 0
+    count = 1
+    state = "code"
+    index = 0
+    while index < len(text):
+        ch = text[index]
+        next_ch = text[index + 1] if index + 1 < len(text) else ""
+        if state == "string":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == '"':
+                state = "code"
+        elif state == "char":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == "'":
+                state = "code"
+        elif ch == '"':
+            state = "string"
+        elif ch == "'":
+            state = "char"
+        elif ch in "([{<":
+            depth += 1
+        elif ch in ")]}>":
+            depth = max(0, depth - 1)
+        elif ch == "," and depth == 0:
+            count += 1
+        index += 1
+    return count
+
+
+def method_parameter_count(method_text: str) -> int | None:
+    signature = method_signature_text(method_text)
+    open_paren = signature.find("(")
+    if open_paren < 0:
+        return None
+    depth = 0
+    for index in range(open_paren, len(signature)):
+        if signature[index] == "(":
+            depth += 1
+        elif signature[index] == ")":
+            depth -= 1
+            if depth == 0:
+                return comma_separated_arity(signature[open_paren + 1 : index])
+    return None
+
+
 def method_receiver_kind(method_text: str) -> str:
     signature = method_signature_text(method_text)
     open_paren = signature.find("(")
@@ -931,6 +1084,13 @@ def method_receiver_kind(method_text: str) -> str:
     if first_arg == "self":
         return "owned_self"
     return "static"
+
+
+def method_call_arity(method_text: str) -> int | None:
+    count = method_parameter_count(method_text)
+    if count is None:
+        return None
+    return count - 1 if method_receiver_kind(method_text) != "static" else count
 
 
 def weak_method_variant(method_text: str) -> bool:
@@ -965,11 +1125,18 @@ def default_receiver_rank(method_name: str, method_text: str) -> int:
 
 
 def best_method_variant(
-    method_name: str, variants: list[str], preferred_receiver_kinds: set[str]
+    method_name: str,
+    variants: list[str],
+    preferred_receiver_kinds: set[str],
+    preferred_arities: set[int] | None = None,
 ) -> str:
+    preferred_arities = preferred_arities or set()
     return sorted(
         variants,
         key=lambda text: (
+            method_call_arity(text) not in preferred_arities
+            if preferred_arities
+            else False,
             method_receiver_preference_rank(text, preferred_receiver_kinds),
             default_receiver_rank(method_name, text),
             weak_method_variant(text),
@@ -977,6 +1144,70 @@ def best_method_variant(
             text,
         ),
     )[0]
+
+
+def call_argument_count(text: str, open_paren: int) -> int | None:
+    depth = 0
+    state = "code"
+    index = open_paren
+    while index < len(text):
+        ch = text[index]
+        if state == "string":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == '"':
+                state = "code"
+        elif state == "char":
+            if ch == "\\":
+                index += 2
+                continue
+            if ch == "'":
+                state = "code"
+        elif ch == '"':
+            state = "string"
+        elif ch == "'":
+            state = "char"
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+            if depth == 0:
+                return comma_separated_arity(text[open_paren + 1 : index])
+        index += 1
+    return None
+
+
+def method_call_arity_preferences(
+    rust_paths: list[Path], selected: set[str], alias_targets: dict[str, str]
+) -> dict[tuple[str, str], set[int]]:
+    preferences = defaultdict(set)
+    names_by_target = defaultdict(set)
+    for name in selected:
+        names_by_target[name].add(name)
+    for alias, target in alias_targets.items():
+        names_by_target[target].add(alias)
+    path_texts = [path.read_text() for path in rust_paths]
+    parsed_items = []
+    for path in rust_paths:
+        parsed_items.extend(parse_items(path, selected))
+    method_names_by_target = defaultdict(set)
+    for item in parsed_items:
+        if item["kind"] == "inherent_impl":
+            for method_name, _ in extract_methods(item["text"]):
+                method_names_by_target[item["name"]].add(method_name)
+    for target, names in names_by_target.items():
+        for type_name in names:
+            for method_name in method_names_by_target.get(type_name, set()):
+                call_re = re.compile(
+                    rf"\b{re.escape(type_name)}\s*::\s*{re.escape(method_name)}\s*\("
+                )
+                for text in path_texts:
+                    for match in call_re.finditer(text):
+                        arity = call_argument_count(text, match.end() - 1)
+                        if arity is not None:
+                            preferences[(target, method_name)].add(arity)
+    return preferences
 
 
 def method_call_receiver_preferences(
@@ -1356,6 +1587,7 @@ def main() -> int:
     primary_output_types = {source_type_for(path) for path in rust_paths}
     source_shadowing_aliases = set(existing_shared_alias_names) & primary_output_types
     candidates_by_type = defaultdict(list)
+    top_level_functions_by_name = defaultdict(list)
     for path in merge_input_paths:
         for name in prelude_support_types(path):
             candidates_by_type[name].append(path)
@@ -1364,6 +1596,16 @@ def main() -> int:
             for alias, _ in prelude_aliases(path)
             if alias in primary_output_types
         )
+        for item in parse_top_level_functions(path):
+            item_with_path = dict(item)
+            item_with_path["path"] = path
+            top_level_functions_by_name[item["name"]].append(item_with_path)
+
+    initially_selected_functions = top_level_function_dependency_closure(
+        [existing_shared_text]
+        + [text_without_top_level_functions(path) for path in rust_paths],
+        top_level_functions_by_name,
+    )
 
     selected = {
         name
@@ -1383,6 +1625,18 @@ def main() -> int:
         if len(candidates_by_type.get(name, ())) > 1
         and name not in primary_output_types
     )
+    # The assembler can seed a shared-type manifest before it has copied the
+    # corresponding declaration into shared support. Those names are stripped
+    # from per-file modules before this merger runs, so treating only repeated
+    # or already-declared names as promotable silently discards their impls.
+    # A manifest entry is an explicit cross-module ownership decision: restore
+    # its complete declaration/impl surface from any raw merge input, even in a
+    # one-file focused package.
+    selected.update(
+        name
+        for name in existing_shared_types
+        if candidates_by_type.get(name) and name not in primary_output_types
+    )
     keep_last_prelude_names = set()
     protected_source_owned_nested_names = set()
     for path in merge_input_paths:
@@ -1391,7 +1645,7 @@ def main() -> int:
         protected_source_owned_nested_names.update(
             name
             for name in prelude_source_owned_nested_types(path)
-            if name in existing_shared_types and name not in primary_output_types
+            if name not in primary_output_types
         )
     removal_only_names.update(keep_last_prelude_names)
     removal_only_names.update(protected_source_owned_nested_names)
@@ -1411,18 +1665,53 @@ def main() -> int:
     }
     for path in merge_input_paths:
         for alias, target in prelude_aliases(path):
+            if target in protected_source_owned_nested_names:
+                continue
             if (
                 alias in existing_shared_types
                 or alias in candidates_by_type
             ) and alias not in primary_output_types:
                 protected_shared_aliases.add(alias)
                 continue
-            if target in selected and alias not in primary_output_types:
+            if (
+                target in selected
+                and target not in protected_source_owned_nested_names
+                and alias not in primary_output_types
+            ):
                 promoted_aliases.add(alias)
     selected.update(promoted_aliases)
     removal_only_names.update(promoted_aliases)
     selected.update(protected_shared_aliases)
     removal_only_names.update(protected_shared_aliases)
+
+    # Shared seed code and a promoted declaration form one Rust coherence
+    # unit. Close nominal dependencies before extracting items: otherwise a
+    # root helper can retain `T: SupportTrait` while the trait declaration is
+    # left in a child module and its impls are stripped as duplicate prelude.
+    # Repeating over selected item bodies also captures transitive field and
+    # trait dependencies without any corpus-specific allowlist.
+    changed = True
+    while changed:
+        selected_item_texts = [existing_shared_text]
+        selected_item_texts.extend(
+            item["text"]
+            for name in initially_selected_functions
+            for item in top_level_functions_by_name[name]
+        )
+        for path in merge_input_paths:
+            selected_item_texts.extend(
+                item["text"] for item in parse_items(path, selected)
+            )
+        dependencies = {
+            name
+            for name in referenced_nominal_names(
+                selected_item_texts, set(candidates_by_type)
+            )
+            if name not in primary_output_types and promotable_shared_name(name)
+        }
+        new_dependencies = dependencies - selected
+        changed = bool(new_dependencies)
+        selected.update(new_dependencies)
 
     from_impls = []
     for path in merge_input_paths:
@@ -1459,6 +1748,17 @@ def main() -> int:
                 selected.add(trait_name)
                 changed = True
 
+    # Structural source ownership is authoritative even when an earlier
+    # assembly stage seeded a facade declaration but did not record the name
+    # in the shared-type manifest. Remove those stale crate-wide identities
+    # before the empty-selection fast path as well as before normal merging.
+    remove_protected_names_from_shared_support(
+        shared_support_path, protected_source_owned_nested_names
+    )
+    remove_protected_names_from_shared_types(
+        Path(args.shared_types), protected_source_owned_nested_names
+    )
+
     conflict_lines = ["type\tkind\tdetail\n"]
     if not selected:
         append_missing_builtin_from_impls(
@@ -1479,7 +1779,10 @@ def main() -> int:
     trait_impls = defaultdict(list)
     inherent_methods = defaultdict(list)
     inherent_consts = defaultdict(list)
-    top_level_functions_by_name = defaultdict(list)
+    source_owned_nested_types_by_filename = {
+        path.name: prelude_source_owned_nested_types(path)
+        for path in merge_input_paths
+    }
 
     for path in merge_input_paths:
         items = [
@@ -1491,10 +1794,7 @@ def main() -> int:
             )
         ]
         for item in items:
-            if (
-                item.get("source_owned_nested")
-                and item["name"] in protected_source_owned_nested_names
-            ):
+            if item.get("source_owned_nested"):
                 continue
             if item["kind"] == "decl":
                 declarations[item["name"]].append((path, item["text"]))
@@ -1512,14 +1812,14 @@ def main() -> int:
                     )
                 for const_name, const_text in extract_consts(item["text"]):
                     inherent_consts[(item["name"], const_name)].append((path, const_text))
-        for item in parse_top_level_functions(path):
-            item_with_path = dict(item)
-            item_with_path["path"] = path
-            top_level_functions_by_name[item["name"]].append(item_with_path)
     for path in rust_paths:
         items_by_path[path] = [
             item
-            for item in parse_items(path, selected)
+            for item in parse_items(
+                path,
+                selected,
+                source_owned_nested_types_by_filename.get(path.name),
+            )
             if not (
                 item["name"] in source_shadowing_aliases
                 and item["kind"] != "alias"
@@ -1614,6 +1914,9 @@ def main() -> int:
         Path(args.shared_types), source_shadowing_aliases
     )
     receiver_preferences = method_call_receiver_preferences(
+        merge_input_paths, selected, alias_targets
+    )
+    arity_preferences = method_call_arity_preferences(
         merge_input_paths, selected, alias_targets
     )
     for name in sorted(selected):
@@ -1715,7 +2018,12 @@ def main() -> int:
                 )
             preferred_receiver_kinds = receiver_preferences.get((name, method_name), set())
             methods_by_header[impl_header].append(
-                best_method_variant(method_name, unique_variants, preferred_receiver_kinds)
+                best_method_variant(
+                    method_name,
+                    unique_variants,
+                    preferred_receiver_kinds,
+                    arity_preferences.get((name, method_name), set()),
+                )
             )
         if consts_for_type:
             impl_header = inherent_impl_header_for_decl(
@@ -1826,6 +2134,7 @@ def main() -> int:
         + [text_without_top_level_functions(path) for path in rust_paths],
         top_level_functions_by_name,
     )
+    promote_existing_top_level_functions(shared_support_path, selected_functions)
     for function_name in sorted(selected_functions):
         if function_name in existing_shared_function_names:
             continue
@@ -1843,7 +2152,9 @@ def main() -> int:
             conflict_lines.append(
                 f"{function_name}\tfunction\tkept first of {len(variants)} variants\n"
             )
-        shared_chunks.append("\n" + variants[0].rstrip() + "\n")
+        shared_chunks.append(
+            "\n" + crate_visible_top_level_function(variants[0]).rstrip() + "\n"
+        )
 
     for alias_name, variants in sorted(aliases.items()):
         if alias_name in protected_shared_aliases or alias_name in source_shadowing_aliases:
@@ -1870,6 +2181,8 @@ def main() -> int:
 
     with Path(args.shared_types).open("a") as shared_types:
         for name in sorted((selected - removal_only_names) | shared_aliases):
+            shared_types.write(f"{name}\n")
+        for name in sorted(selected_functions):
             shared_types.write(f"{name}\n")
 
     for path, items in items_by_path.items():

@@ -925,6 +925,24 @@ impl ShapeEnv {
         self.record_static_field_owner(alias, &owner);
     }
 
+    pub(crate) fn insert_preferred_static_field_shape_for_owner_with_access_name(
+        &mut self,
+        owner: impl Into<String>,
+        name: impl Into<String>,
+        access_name: impl Into<String>,
+        shape: RustSlotShape,
+    ) {
+        let owner = owner.into();
+        let name = name.into();
+        let access_name = access_name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        self.insert_static_field_shape_with_access_name(name.clone(), access_name.clone(), shape);
+        for key in [name, access_name, alias] {
+            self.ambiguous_static_field_owners.remove(&key);
+            self.static_field_owners.insert(key, owner.clone());
+        }
+    }
+
     fn record_static_field_owner(&mut self, name: String, owner: &str) {
         if self.ambiguous_static_field_owners.contains(&name) {
             return;
@@ -987,6 +1005,28 @@ impl ShapeEnv {
         self.record_static_storage_field_owner(name, owner);
         self.record_static_storage_field_owner(access_name, owner);
         self.record_static_storage_field_owner(alias, owner);
+    }
+
+    pub(crate) fn insert_preferred_static_storage_field_shape_owned_by_with_access_name(
+        &mut self,
+        owner: &str,
+        name: impl Into<String>,
+        access_name: impl Into<String>,
+        shape: RustSlotShape,
+    ) {
+        let name = name.into();
+        let access_name = access_name.into();
+        let alias = crate::parser::to_snake_case(&name);
+        self.insert_static_storage_field_shape_with_access_name(
+            name.clone(),
+            access_name.clone(),
+            shape,
+        );
+        for key in [name, access_name, alias] {
+            self.ambiguous_static_storage_field_owners.remove(&key);
+            self.static_storage_field_owners
+                .insert(key, owner.to_string());
+        }
     }
 
     fn record_static_storage_field_owner(&mut self, name: String, owner: &str) {
@@ -1095,6 +1135,17 @@ impl ShapeEnv {
 
     pub fn local_shape(&self, name: &str) -> Option<&RustSlotShape> {
         self.local_shapes.get(name)
+    }
+
+    /// Replace only the Rust storage shape of an existing local/parameter.
+    ///
+    /// Emission may refine a solved source parameter ABI to a retained shared
+    /// handle.  Body lowering must see that same shape without disturbing the
+    /// Java declared type, binding identity, or collision-safe access name.
+    pub(crate) fn replace_local_shape_if_present(&mut self, name: &str, shape: RustSlotShape) {
+        if let Some(existing) = self.local_shapes.get_mut(name) {
+            *existing = shape;
+        }
     }
 
     /// Local bindings available at the current lowering site. Anonymous-object
@@ -1328,32 +1379,47 @@ pub fn infer_expr_shape_with_context(
             name,
             args,
             resolved: Some(call),
-        } => ctx
-            .signatures
-            .and_then(|signatures| {
-                // A resolved source declaration is authoritative.  Common
-                // names such as `getName` also exist on platform/external
-                // facades; consulting those models first can erase the
-                // source method's nullable carrier and make the emitted call
-                // type disagree with the slot planner.
-                resolved_call_return_shape_by_java_key(call, name, args.len(), signatures).or_else(
-                    || {
-                        signatures
-                            .method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
-                    },
-                )
-            })
-            .or_else(|| {
-                native_java_call_expr_shape(receiver.as_deref(), name, args, Some(call), env, ctx)
-            })
-            .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
-            .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
-            .or_else(|| {
-                java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx)
-            })
-            .unwrap_or_else(|| {
-                value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
-            }),
+        } => {
+            resolved_external_call_expr_shape(receiver.as_deref(), name, args.len(), call, env, ctx)
+                .or_else(|| {
+                    ctx.signatures.and_then(|signatures| {
+                        // A resolved source declaration is authoritative.  Common
+                        // names such as `getName` also exist on platform/external
+                        // facades; consulting those models first can erase the
+                        // source method's nullable carrier and make the emitted call
+                        // type disagree with the slot planner. Conversely, a
+                        // positively modelled external declaration owns its ABI even
+                        // if the resolver attached a compatibility signature to it.
+                        resolved_call_return_shape_by_java_key(call, name, args.len(), signatures)
+                            .or_else(|| {
+                                signatures.method_return_shape_by_rust_name(
+                                    &call.declaring_type,
+                                    &call.rust_name,
+                                )
+                            })
+                    })
+                })
+                .or_else(|| {
+                    native_java_call_expr_shape(
+                        receiver.as_deref(),
+                        name,
+                        args,
+                        Some(call),
+                        env,
+                        ctx,
+                    )
+                })
+                .or_else(|| {
+                    external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx)
+                })
+                .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
+                .or_else(|| {
+                    java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx)
+                })
+                .unwrap_or_else(|| {
+                    value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
+                })
+        }
         Expr::Call {
             receiver,
             name,
@@ -1386,6 +1452,30 @@ pub fn infer_expr_shape_with_context(
         Expr::Cast { ty, .. } => value_shape_or_conservative(ctx, ty.clone()),
         _ => value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env())),
     }
+}
+
+fn resolved_external_call_expr_shape(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    call: &crate::java_ir::ResolvedCall,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let facts = ctx.facts?;
+    let effect = facts.external_api_effect_for_receiver_with_arity(
+        Some(&call.declaring_type),
+        name,
+        Some(arg_count),
+    )?;
+    if matches!(
+        effect.provenance,
+        crate::facts::FactProvenance::ParsedSource
+            | crate::facts::FactProvenance::ConservativeFallback
+    ) {
+        return None;
+    }
+    external_call_expr_shape(receiver, name, arg_count, env, ctx)
 }
 
 fn resolved_call_return_shape_by_java_key(

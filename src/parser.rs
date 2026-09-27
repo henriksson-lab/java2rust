@@ -606,7 +606,7 @@ fn parse_interface_decl(
                     members.extend(parse_field_decl(child, source));
                 }
                 "method_declaration" => {
-                    members.push(Member::Method(parse_method_decl(
+                    members.push(Member::Method(parse_interface_method_decl(
                         child,
                         source,
                         diagnostics,
@@ -681,14 +681,22 @@ fn parse_enum_decl(
 ) -> TypeDecl {
     let name = field_text(node, "name", source).unwrap_or_else(|| "Unknown".to_string());
     let mut members = Vec::new();
+    let mut static_init_blocks = Vec::new();
     if let Some(body) = node.child_by_field_name("body") {
         for child in named_children(body) {
-            parse_enum_member_node(child, &name, source, diagnostics, &mut members);
+            parse_enum_member_node(
+                child,
+                &name,
+                source,
+                diagnostics,
+                &mut members,
+                &mut static_init_blocks,
+            );
         }
     }
 
     TypeDecl {
-        static_init_blocks: Vec::new(),
+        static_init_blocks,
         kind: TypeKind::Enum,
         name,
         type_params: Vec::new(),
@@ -894,6 +902,7 @@ fn parse_enum_member_node(
     source: &str,
     diagnostics: &mut DiagnosticBag,
     members: &mut Vec<Member>,
+    static_init_blocks: &mut Vec<crate::java_ir::StaticInitBlock>,
 ) {
     match node.kind() {
         "enum_constant" => {
@@ -935,9 +944,22 @@ fn parse_enum_member_node(
                 diagnostics,
             )));
         }
+        "static_initializer" => {
+            static_init_blocks.push(crate::java_ir::StaticInitBlock {
+                member_index: members.len(),
+                block: parse_static_initializer_block(node, source, diagnostics),
+            });
+        }
         "enum_body_declarations" => {
             for child in named_children(node) {
-                parse_enum_member_node(child, enum_name, source, diagnostics, members);
+                parse_enum_member_node(
+                    child,
+                    enum_name,
+                    source,
+                    diagnostics,
+                    members,
+                    static_init_blocks,
+                );
             }
         }
         _ => {
@@ -1003,7 +1025,7 @@ fn parse_annotation_type_decl(
                     members.extend(parse_field_decl(child, source));
                 }
                 "method_declaration" | "annotation_type_element_declaration" => {
-                    members.push(Member::Method(parse_method_decl(
+                    members.push(Member::Method(parse_interface_method_decl(
                         child,
                         source,
                         diagnostics,
@@ -1110,6 +1132,26 @@ fn parse_constructor_decl(
             .map(|body| parse_block_like(body, source, diagnostics)),
         span: span(node),
     }
+}
+
+fn parse_interface_method_decl(
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
+) -> MethodDecl {
+    let mut method = parse_method_decl(node, source, diagnostics);
+    if !method.modifiers.iter().any(|modifier| {
+        matches!(
+            modifier,
+            Modifier::Public | Modifier::Protected | Modifier::Private
+        )
+    }) {
+        method.modifiers.push(Modifier::Public);
+    }
+    if method.body.is_none() && !method.modifiers.contains(&Modifier::Abstract) {
+        method.modifiers.push(Modifier::Abstract);
+    }
+    method
 }
 
 fn parse_method_decl(
@@ -1511,11 +1553,30 @@ fn attach_label_to_stmt(label: String, stmt: Stmt) -> Stmt {
 }
 
 fn parse_synchronized_node(
-    _node: tree_sitter::Node,
-    _source: &str,
-    _diagnostics: &mut DiagnosticBag,
+    node: tree_sitter::Node,
+    source: &str,
+    diagnostics: &mut DiagnosticBag,
 ) -> Stmt {
-    Stmt::Unsupported("synchronized monitor semantics".to_string())
+    let monitor = named_children(node)
+        .into_iter()
+        .find(|child| child.kind() != "block")
+        .map(|object| parse_expr_node(object, source));
+    let body = node
+        .child_by_field_name("body")
+        .map(|body| parse_block_like(body, source, diagnostics))
+        .unwrap_or_default();
+    if matches!(monitor, Some(Expr::This)) {
+        // Synchronized-this blocks use the same object-owned monitor as
+        // synchronized instance methods.  Preserve the lexical boundary in
+        // the existing block IR with an internal, unrepresentable Java label;
+        // lowering consumes it before ordinary label handling.
+        Stmt::LabeledBlock {
+            label: "__java_synchronized_this".to_string(),
+            body,
+        }
+    } else {
+        Stmt::Unsupported("synchronized monitor semantics for non-this receiver".to_string())
+    }
 }
 
 fn parse_try_node(node: tree_sitter::Node, source: &str, diagnostics: &mut DiagnosticBag) -> Stmt {
@@ -1801,22 +1862,21 @@ fn type_with_declarator_array_dimensions(
     declaration_text: &str,
     name: &str,
 ) -> JavaType {
-    let declared_depth = local_declarator_array_depth(declaration_text, name);
-    let parsed_depth = java_array_depth(base_ty);
-    if declared_depth <= parsed_depth {
-        return base_ty.clone();
-    }
-    (0..(declared_depth - parsed_depth))
-        .fold(base_ty.clone(), |ty, _| JavaType::Array(Box::new(ty)))
+    let declarator_depth = local_declarator_array_depth(declaration_text, name);
+    (0..declarator_depth).fold(base_ty.clone(), |ty, _| JavaType::Array(Box::new(ty)))
 }
 
 fn local_declarator_array_depth(declaration_text: &str, name: &str) -> usize {
     let Some(name_start) = find_identifier_occurrence(declaration_text, name) else {
         return 0;
     };
-    let prefix = &declaration_text[..name_start];
     let suffix = &declaration_text[name_start + name.len()..];
-    count_empty_array_suffixes(prefix) + count_immediate_empty_array_suffixes(suffix)
+    // The parser's `type` field already contains dimensions written with the
+    // base type (`File[] a`).  Only dimensions attached to this particular
+    // declarator belong here (`File a[]`).  Counting every `[]` before `name`
+    // also counts earlier declarators in declarations such as
+    // `File inputs[], outputs[]`, incorrectly making `outputs` two-dimensional.
+    count_immediate_empty_array_suffixes(suffix)
 }
 
 fn find_identifier_occurrence(haystack: &str, ident: &str) -> Option<usize> {
@@ -1827,24 +1887,6 @@ fn find_identifier_occurrence(haystack: &str, ident: &str) -> Option<usize> {
         let after_boundary = after.is_none_or(|ch| !(ch == '_' || ch.is_ascii_alphanumeric()));
         (before_boundary && after_boundary).then_some(index)
     })
-}
-
-fn count_empty_array_suffixes(text: &str) -> usize {
-    let mut depth = 0usize;
-    let mut count = 0usize;
-    let mut chars = text.chars().peekable();
-    while let Some(ch) = chars.next() {
-        match ch {
-            '<' => depth += 1,
-            '>' => depth = depth.saturating_sub(1),
-            '[' if depth == 0 && chars.peek() == Some(&']') => {
-                chars.next();
-                count += 1;
-            }
-            _ => {}
-        }
-    }
-    count
 }
 
 fn count_immediate_empty_array_suffixes(mut text: &str) -> usize {

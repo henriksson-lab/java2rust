@@ -1899,6 +1899,30 @@ pub struct MethodEffectFact {
     pub provenance: FactProvenance,
 }
 
+fn join_method_receiver_mutability<'a>(
+    effects: impl IntoIterator<Item = &'a MethodEffectFact>,
+) -> Option<ReceiverMutabilityFact> {
+    let mut inferred = None;
+    let mut user_override = None;
+    for effect in effects {
+        if effect.provenance == FactProvenance::UserOverride {
+            user_override = Some(effect.receiver_mutability);
+            continue;
+        }
+        inferred = Some(match (inferred, effect.receiver_mutability) {
+            (Some(ReceiverMutabilityFact::MutatesReceiver), _)
+            | (_, ReceiverMutabilityFact::MutatesReceiver) => {
+                ReceiverMutabilityFact::MutatesReceiver
+            }
+            (Some(ReceiverMutabilityFact::ReadOnly), _) | (_, ReceiverMutabilityFact::ReadOnly) => {
+                ReceiverMutabilityFact::ReadOnly
+            }
+            _ => ReceiverMutabilityFact::Unknown,
+        });
+    }
+    user_override.or(inferred)
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceEqualsOverrideFact {
     pub type_name: String,
@@ -2265,6 +2289,12 @@ impl FactSet {
     /// [`crate::storage_strategy::SharedHandle`].
     pub fn shared_handle_for(&self, type_name: &str) -> crate::storage_strategy::SharedHandle {
         self.storage_strategies.handle(type_name)
+    }
+
+    pub fn constructor_self_escapes_for(&self, type_name: &str) -> bool {
+        self.storage_strategies
+            .facts(type_name)
+            .is_some_and(|facts| facts.constructor_self_escapes())
     }
 
     pub fn extend_from(&mut self, other: FactSet) {
@@ -3281,6 +3311,37 @@ impl FactSet {
                     .rev()
                     .find(|fact| method_key_matches(&fact.method, type_name, method_name))
             })
+    }
+
+    /// Joins receiver-mutability evidence independently of the other method
+    /// effect dimensions. Summary and primary-source analysis can contribute
+    /// separate facts for one method; a later `Unknown` summary must not hide
+    /// a concrete mutating body.
+    pub fn method_receiver_mutability_for(
+        &self,
+        type_name: &str,
+        method_name: &str,
+    ) -> Option<ReceiverMutabilityFact> {
+        let direct = self
+            .method_effect_facts
+            .iter()
+            .filter(|fact| method_key_directly_matches(&fact.method, type_name, method_name))
+            .collect::<Vec<_>>();
+        if !direct.is_empty() {
+            return join_method_receiver_mutability(direct);
+        }
+        if method_key_simple_owner_alias_is_ambiguous(
+            self.method_effect_facts.iter().map(|fact| &fact.method),
+            type_name,
+            method_name,
+        ) {
+            return None;
+        }
+        join_method_receiver_mutability(
+            self.method_effect_facts
+                .iter()
+                .filter(|fact| method_key_matches(&fact.method, type_name, method_name)),
+        )
     }
 
     pub fn source_equals_override_for(&self, type_name: &str) -> Option<&SourceEqualsOverrideFact> {
@@ -5202,6 +5263,28 @@ fn push_java_type_conflict(
 mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
+
+    #[test]
+    fn receiver_mutability_join_does_not_let_unknown_summary_hide_mutating_body() {
+        let mut facts = FactSet::default();
+        for receiver_mutability in [
+            ReceiverMutabilityFact::MutatesReceiver,
+            ReceiverMutabilityFact::Unknown,
+        ] {
+            facts.method_effect_facts.push(MethodEffectFact {
+                method: MethodKey::named("Worker", "run"),
+                receiver_mutability,
+                return_nullability: NullabilityState::Unknown,
+                thrown: Vec::new(),
+                provenance: FactProvenance::ParsedSource,
+            });
+        }
+
+        assert_eq!(
+            facts.method_receiver_mutability_for("Worker", "run"),
+            Some(ReceiverMutabilityFact::MutatesReceiver)
+        );
+    }
 
     #[test]
     fn external_api_effect_rust_name_fallback_refuses_ambiguous_simple_owner_alias() {

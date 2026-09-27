@@ -452,9 +452,13 @@ fn constructor_field_assignments(body: Option<&Block>) -> Vec<(String, &Expr)> {
                     {
                         Some((crate::parser::to_snake_case_unescaped(field), value))
                     }
-                    Expr::Var(field) => {
-                        Some((crate::parser::to_snake_case_unescaped(field), value))
-                    }
+                    // A bare name can be a parameter or local that shadows a
+                    // field. It is deliberately retained as an ordered
+                    // statement by `delegated_constructor_trailing_stmts_for_lowering`,
+                    // where the binding-aware environment can distinguish the
+                    // cases. Claiming it here as a field assignment lowers the
+                    // same RHS twice (and can move `this` on the first copy).
+                    Expr::Var(_) => None,
                     _ => None,
                 },
                 _ => None,

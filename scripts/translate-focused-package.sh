@@ -730,7 +730,23 @@ for i in "${!java_files[@]}"; do
   stem="$(basename "${java_files[$i]%.java}")"
   stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
   printf "%s\n" "$stem" >> "$source_types_path"
+  rust_stem="$(printf '%05d_%s' "$((i + 1))" "$stem")"
+  rust_path="$generated_dir/$rust_stem.rs"
+  if [[ -f "$rust_path" ]]; then
+    awk -v outer="$stem" '
+      /^pub[[:space:]]+(struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
+        name = $3
+        sub(/[=;{(<:].*/, "", name)
+        prefix = outer "_"
+        if (index(name, prefix) == 1) {
+          suffix = substr(name, length(prefix) + 1)
+          if (suffix ~ /^[A-Z]/) print name
+        }
+      }
+    ' "$rust_path" >> "$source_types_path"
+  fi
 done
+sort -u -o "$source_types_path" "$source_types_path"
 
 strip_shared_support_items() {
   local rust_path="$1"
@@ -810,7 +826,7 @@ strip_shared_support_items() {
         sub(/(<.*>)?[[:space:]]*\{.*/, "", impl_target)
         target_is_shared = shared[impl_target] && impl_target != source_type
         keep_module_from_impl_to_shared = target_is_shared && from_trait_source != "" && !shared[from_trait_source]
-        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (target_is_shared && !keep_module_from_impl_to_shared) || shared[impl_trait]) {
+        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (target_is_shared && !keep_module_from_impl_to_shared) || (shared[impl_trait] && impl_trait != source_type)) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")
@@ -880,7 +896,12 @@ source_types = {
     for line in source_types_path.read_text().splitlines()
     if line.strip()
 }
-source_types.discard(current_source)
+source_types = {
+    name
+    for name in source_types
+    if name != current_source
+    and not re.match(rf"^{re.escape(current_source)}[_$][A-Z]", name)
+}
 
 lines = rust_path.read_text().splitlines(keepends=True)
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
@@ -1069,7 +1090,11 @@ def source_owned_nested_type_name(name: str) -> bool:
     if name == current_source or not name.startswith(current_source):
         return False
     suffix = name[len(current_source):]
-    return bool(suffix) and suffix[0].isupper()
+    # Nested source declarations use the collision-free flattened spelling
+    # `Outer_Child` (and legacy inputs may use `Outer$Child`). A concatenated
+    # top-level name such as `SequenceInputStream` is not evidence of nesting.
+    nested_suffix = suffix[1:] if suffix.startswith(("_", "$")) else ""
+    return bool(nested_suffix) and nested_suffix[0].isupper()
 
 
 def is_char_literal_start(line: str, index: int) -> bool:
@@ -1195,6 +1220,44 @@ def top_level_function_items(lines: list[str]) -> dict[str, list[tuple[int, int,
     return functions
 
 
+def imported_top_level_names(lines: list[str]) -> set[str]:
+    """Names made available by flat `use crate::{...}` module imports.
+
+    Focused-package assembly writes this import surface before reconciliation.
+    A helper imported from the merged shared facade already satisfies a
+    restored source method and must not also be copied back as a local item.
+    """
+    names = set()
+    depth = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if depth == 0 and re.match(r"^\s*use\s+crate(?:::\{?|\s)", line):
+            statement = line
+            while ";" not in statement and index + 1 < len(lines):
+                index += 1
+                statement += lines[index]
+            body = re.sub(r"^\s*use\s+crate::?", "", statement.strip())
+            body = body.rstrip(";").strip()
+            if body.startswith("{") and body.endswith("}"):
+                body = body[1:-1]
+            for item in body.split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if " as " in item:
+                    leaf = item.rsplit(" as ", 1)[1].strip()
+                else:
+                    leaf = item.rsplit("::", 1)[-1].strip()
+                if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", leaf):
+                    names.add(leaf)
+            index += 1
+            continue
+        depth += brace_delta(line)
+        index += 1
+    return names
+
+
 def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
     referenced = set()
     for name in candidate_names:
@@ -1227,7 +1290,13 @@ def restorable_support_name(name: str) -> bool:
 
 current = rust_path.read_text()
 present = declared_names(current)
-present_functions = set(top_level_function_items(current.splitlines(keepends=True)))
+current_lines = current.splitlines(keepends=True)
+present_functions = set(top_level_function_items(current_lines))
+present_functions.update(imported_top_level_names(current_lines))
+# Shared facade names are imported only after reconciliation, but they are
+# already satisfied at crate scope.  Treat them as present now so dependency
+# closure restores only helpers absent from both the module and the facade.
+present_functions.update(shared_types)
 raw_lines = raw_path.read_text().splitlines(keepends=True)
 candidate_names = set()
 depth = 0
@@ -1293,7 +1362,6 @@ for name in sorted(selected_functions):
 if not chunks:
     raise SystemExit(0)
 
-current_lines = current.splitlines(keepends=True)
 insert_at = None
 for line_index, line in enumerate(current_lines):
     if (match := decl_re.match(line)) and match.group(2) == current_source:
@@ -1336,13 +1404,17 @@ inherent_impl_re = re.compile(
 trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
 static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+method_re = re.compile(
+    r"^\s*(?:pub(?:\(crate\))?\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
+)
 
 
 def source_owned_nested_type_name(name: str) -> bool:
     if name == current_source or not name.startswith(current_source):
         return False
     suffix = name[len(current_source):]
-    return bool(suffix) and suffix[0].isupper()
+    nested_suffix = suffix[1:] if suffix.startswith(("_", "$")) else ""
+    return bool(nested_suffix) and nested_suffix[0].isupper()
 
 
 def declared_names(text: str) -> set[str]:
@@ -1454,11 +1526,30 @@ def remove_names_from_crate_import(text: str, names: set[str]) -> str:
 current = rust_path.read_text()
 present = declared_names(current)
 raw_lines = raw_path.read_text().splitlines(keepends=True)
+# The primary declaration is an ownership boundary in translator output.
+# Nominal declarations emitted after it are representation companions of that
+# source type (for example, the enum carrier selected for a source hierarchy),
+# not reusable prelude support.  Preserve them together with the primary and
+# structurally identified nested source declarations.
+post_primary_names = set()
+after_primary = False
+for line in raw_lines:
+    if match := decl_re.match(line):
+        name = match.group(2)
+        if name == current_source:
+            after_primary = True
+        if after_primary:
+            post_primary_names.add(name)
+
 source_owned_names = {
     match.group(2)
     for line in raw_lines
     if (match := decl_re.match(line))
-    and (match.group(2) == current_source or source_owned_nested_type_name(match.group(2)))
+    and (
+        match.group(2) == current_source
+        or source_owned_nested_type_name(match.group(2))
+        or match.group(2) in post_primary_names
+    )
 }
 shared_names = set()
 if shared_types_path and shared_types_path.exists():
@@ -1473,6 +1564,124 @@ source_owned_names = {
     if name == current_source or name not in shared_names
 }
 missing_names = source_owned_names - present
+# A wholly missing source declaration is restored below together with all of
+# its attached impls. Surface-level reconciliation is only for declarations
+# that survived assembly; otherwise the same raw impl would be restored once
+# as a missing method and again as part of the missing nominal type.
+surface_owned_names = source_owned_names - missing_names
+
+
+def inherent_method_names(lines: list[str], owned_names: set[str]) -> dict[str, set[str]]:
+    names = {name: set() for name in owned_names}
+    index = 0
+    while index < len(lines):
+        match = inherent_impl_re.match(lines[index])
+        if not match or match.group(1) not in owned_names:
+            index += 1
+            continue
+        target = match.group(1)
+        end = item_end(lines, index)
+        inner = index + 1
+        while inner < max(index + 1, end - 1):
+            if method := method_re.match(lines[inner]):
+                names[target].add(method.group(1))
+                inner = item_end(lines, inner)
+            else:
+                inner += 1
+        index = end
+    return names
+
+
+def trait_impl_keys(lines: list[str], owned_names: set[str]) -> set[tuple[str, str]]:
+    keys = set()
+    for line in lines:
+        if match := trait_impl_re.match(line):
+            target = match.group(2).strip()
+            if target in owned_names:
+                keys.add((match.group(1).strip(), target))
+    return keys
+
+
+# Shared-support stripping may move or remove the structural alias that proves
+# a flattened nested class belongs to this source module. Reconcile the source
+# surface from the raw translator output at the end: support assembly may
+# deduplicate facades, but it must never discard methods or trait impls emitted
+# for a real source type. Only post-primary fallback impls are considered here;
+# pre-primary inherent impls include deliberately weak facade variants.
+current_lines_for_surface = current.splitlines(keepends=True)
+existing_methods = inherent_method_names(current_lines_for_surface, surface_owned_names)
+existing_traits = trait_impl_keys(current_lines_for_surface, surface_owned_names)
+existing_all_traits = trait_impl_keys(
+    current_lines_for_surface,
+    declared_names("".join(raw_lines)) | source_owned_names,
+)
+source_surface_chunks = []
+raw_after_primary = False
+index = 0
+while index < len(raw_lines):
+    line = raw_lines[index]
+    if match := decl_re.match(line):
+        if match.group(2) == current_source:
+            raw_after_primary = True
+    if raw_after_primary and (match := inherent_impl_re.match(line)):
+        target = match.group(1)
+        end = item_end(raw_lines, index)
+        if target in surface_owned_names:
+            missing_methods = []
+            inner = index + 1
+            while inner < max(index + 1, end - 1):
+                method = method_re.match(raw_lines[inner])
+                if not method:
+                    inner += 1
+                    continue
+                method_end = item_end(raw_lines, inner)
+                if method.group(1) not in existing_methods[target]:
+                    missing_methods.append("".join(raw_lines[inner:method_end]))
+                    existing_methods[target].add(method.group(1))
+                inner = method_end
+            if missing_methods:
+                header = line.split("{", 1)[0].rstrip()
+                source_surface_chunks.append(
+                    header + " {\n" + "".join(missing_methods) + "}\n"
+                )
+        index = end
+        continue
+    if raw_after_primary and (match := trait_impl_re.match(line)):
+        target = match.group(2).strip()
+        key = (match.group(1).strip(), target)
+        end = item_end(raw_lines, index)
+        if target in surface_owned_names and key not in existing_traits:
+            source_surface_chunks.append("".join(raw_lines[index:end]))
+            existing_traits.add(key)
+        index = end
+        continue
+    index += 1
+
+# A conversion whose input is a source-owned type is part of that source
+# representation even when its target carrier lives in a sibling module.
+# Facade reconciliation may remove such an impl while merging generic support;
+# restore it once in the module that owns the input type.
+from_source_re = re.compile(r"^From<([A-Za-z_][A-Za-z0-9_]*)>$")
+index = 0
+while index < len(raw_lines):
+    match = trait_impl_re.match(raw_lines[index])
+    if not match:
+        index += 1
+        continue
+    trait = match.group(1).strip()
+    target = match.group(2).strip()
+    source_match = from_source_re.match(trait)
+    end = item_end(raw_lines, index)
+    key = (trait, target)
+    if (
+        source_match
+        and source_match.group(1) in source_owned_names
+        and target not in shared_names
+        and key not in existing_all_traits
+    ):
+        source_surface_chunks.append("".join(raw_lines[index:end]))
+        existing_all_traits.add(key)
+    index = end
 
 # Source static storage is emitted as top-level Rust state immediately before
 # the source declaration.  Shared-support stripping must restore every storage
@@ -1483,16 +1692,18 @@ for index, line in enumerate(raw_lines):
     if match := static_re.match(line):
         end = item_end(raw_lines, index)
         raw_static_items[match.group(1)] = "".join(raw_lines[index:end])
+static_reference_text = current + "".join(source_surface_chunks)
 referenced_static_names = {
     name
     for name in raw_static_items
-    if re.search(rf"\b{re.escape(name)}\b", current)
+    if re.search(rf"\b{re.escape(name)}\b", static_reference_text)
 }
 
-if not missing_names and not referenced_static_names:
+if not missing_names and not referenced_static_names and not source_surface_chunks:
     raise SystemExit(0)
 
 chunks = [raw_static_items[name] for name in sorted(referenced_static_names)]
+chunks.extend(source_surface_chunks)
 index = 0
 while index < len(raw_lines):
     line = raw_lines[index]
@@ -1532,6 +1743,36 @@ if chunks:
     else:
         current_lines[insert_at:insert_at] = [restored]
         rust_path.write_text("".join(current_lines))
+
+# Close static dependencies against the final reconciled surface.  A method
+# restored above can be the first surviving reference to its backing storage,
+# so deciding from the pre-reconciliation module alone is insufficient.
+final_text = rust_path.read_text()
+final_static_names = {
+    match.group(1)
+    for line in final_text.splitlines()
+    if (match := static_re.match(line))
+}
+missing_static_chunks = [
+    raw_static_items[name].rstrip()
+    for name in sorted(raw_static_items)
+    if name not in final_static_names
+    and re.search(rf"\b{re.escape(name)}\b", final_text)
+]
+if missing_static_chunks:
+    final_lines = final_text.splitlines(keepends=True)
+    insert_at = None
+    for line_index, line in enumerate(final_lines):
+        if (match := decl_re.match(line)) and match.group(2) == current_source:
+            insert_at = attached_start(final_lines, line_index)
+            break
+    restored_statics = "\n".join(missing_static_chunks) + "\n"
+    if insert_at is None:
+        separator = "" if final_text.endswith("\n") or not final_text else "\n"
+        rust_path.write_text(final_text + separator + restored_statics)
+    else:
+        final_lines[insert_at:insert_at] = [restored_statics]
+        rust_path.write_text("".join(final_lines))
 PY
 }
 
@@ -1789,13 +2030,50 @@ impl<T> JavaClass<T> {
         ClassLoader
     }
 
+    pub fn get_protection_domain(&self) -> ProtectionDomain {
+        ProtectionDomain::for_runtime_class(&self.name)
+    }
+
     pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
         self.name == other.name
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ProtectionDomain {
+    code_source: Option<CodeSource>,
+}
+
+impl ProtectionDomain {
+    fn for_runtime_class(_class_name: &str) -> ProtectionDomain {
+        let location = std::env::current_exe()
+            .ok()
+            .and_then(|path| path.parent().map(std::path::Path::to_path_buf))
+            .map(|path| format!("file:{}", path.to_string_lossy()))
+            .unwrap_or_else(|| "file:.".to_string());
+        ProtectionDomain {
+            code_source: Some(CodeSource { location: URL::new(location) }),
+        }
+    }
+
+    pub fn get_code_source(&self) -> Option<CodeSource> {
+        self.code_source.clone()
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct CodeSource {
+    location: URL,
+}
+
+impl CodeSource {
+    pub fn get_location(&self) -> URL {
+        self.location.clone()
+    }
+}
+
 RUST
-  printf "JavaClass\n" >> "$shared_support_types_path"
+  printf "JavaClass\nProtectionDomain\nCodeSource\n" >> "$shared_support_types_path"
 fi
 
 # These declarations are used by the root JavaClass facade and by the erased
@@ -2039,6 +2317,10 @@ impl URL {
         self.value.clone()
     }
 
+    pub fn to_u_r_i(&self) -> Result<URI, JavaException> {
+        URI::parse(self.value.clone())
+    }
+
     pub fn open_connection(&self) -> Result<URLConnection, JavaException> {
         Ok(URLConnection)
     }
@@ -2160,9 +2442,19 @@ impl<T: Clone> JavaIterator<T> {
     }
 
     pub fn next(&mut self) -> T {
-        let value = self.items.get(self.index).expect("Java iterator exhausted").clone();
+        self.next_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn next_result(&mut self) -> Result<T, JavaException> {
+        let value = self.items.get(self.index).cloned().ok_or_else(|| {
+            JavaException::new(
+                "NoSuchElementException",
+                "Java iterator has no more elements".to_string(),
+            )
+        })?;
         self.index += 1;
-        value
+        Ok(value)
     }
 
     pub fn for_each_remaining<F>(&mut self, mut f: F)
@@ -2172,6 +2464,18 @@ impl<T: Clone> JavaIterator<T> {
         while self.has_next() {
             f(self.next());
         }
+    }
+
+    pub fn remove(&mut self) {
+        self.remove_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn remove_result(&mut self) -> Result<(), JavaException> {
+        Err(JavaException::new(
+            "UnsupportedOperationException",
+            "Java snapshot iterator mutation is not supported".to_string(),
+        ))
     }
 }
 
@@ -2264,6 +2568,10 @@ impl File {
         self.value.clone()
     }
 
+    pub fn is_absolute(&self) -> bool {
+        std::path::Path::new(&self.value).is_absolute()
+    }
+
     pub fn get_name(&self) -> String {
         self.value
             .rsplit('/')
@@ -2277,6 +2585,19 @@ impl File {
             .rsplit_once('/')
             .map(|(parent, _)| parent.to_string())
             .unwrap_or_default()
+    }
+
+    pub fn get_parent_file(&self) -> Option<File> {
+        std::path::Path::new(&self.value)
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .map(|parent| File::new(parent.to_string_lossy().into_owned()))
+    }
+
+    pub fn get_canonical_path(&self) -> Result<String, JavaException> {
+        std::fs::canonicalize(std::path::Path::new(&self.value))
+            .map(|path| path.to_string_lossy().into_owned())
+            .map_err(|error| JavaException::new("IOException", error.to_string()))
     }
 
     pub fn get_absolute_file(&self) -> File {
@@ -2426,6 +2747,18 @@ impl JavaPathArg for File {
 impl JavaPathArg for &File {
     fn into_path_value(self) -> String {
         self.value.clone()
+    }
+}
+
+impl JavaPathArg for Option<File> {
+    fn into_path_value(self) -> String {
+        self.map(|file| file.value).unwrap_or_default()
+    }
+}
+
+impl JavaPathArg for &Option<File> {
+    fn into_path_value(self) -> String {
+        self.as_ref().map(|file| file.value.clone()).unwrap_or_default()
     }
 }
 
@@ -2722,7 +3055,7 @@ pub fn java_string_from_bytes(bytes: &[i8]) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<String> {
+pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Vec<Option<String>> {
     let regex = regex.as_ref();
     let split_whitespace = regex == "\\s+";
     let delimiter = match regex {
@@ -2733,18 +3066,32 @@ pub fn java_string_split<R: AsRef<str>>(value: &str, regex: R, limit: i32) -> Ve
         other => other,
     };
     let mut parts = if split_whitespace {
-        value.split_whitespace().map(|part| part.to_string()).collect::<Vec<_>>()
+        value
+            .split_whitespace()
+            .map(|part| Some(part.to_string()))
+            .collect::<Vec<_>>()
     } else {
-        value.split(delimiter).map(|part| part.to_string()).collect::<Vec<_>>()
+        value
+            .split(delimiter)
+            .map(|part| Some(part.to_string()))
+            .collect::<Vec<_>>()
     };
     if limit == 0 {
-        while parts.last().is_some_and(|part| part.is_empty()) {
+        while parts
+            .last()
+            .is_some_and(|part| part.as_ref().is_some_and(|part| part.is_empty()))
+        {
             parts.pop();
         }
     } else if limit > 0 && parts.len() > limit as usize {
         let keep = limit as usize - 1;
-        let tail = parts.split_off(keep).join(delimiter);
-        parts.push(tail);
+        let tail = parts
+            .split_off(keep)
+            .into_iter()
+            .map(|part| part.unwrap_or_else(|| "null".to_string()))
+            .collect::<Vec<_>>()
+            .join(delimiter);
+        parts.push(Some(tail));
     }
     parts
 }
@@ -2882,7 +3229,6 @@ if [[ -s "$shared_support_path" ]]; then
     strip_shared_support_items "$rust_path" "$shared_support_types_path"
     strip_source_type_facade_stubs "$rust_path" "$source_types_path"
     restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
-    restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
   done
 else
   touch "$shared_support_path" "$shared_support_types_path"
@@ -2975,16 +3321,22 @@ for path in Path(sys.argv[1]).glob("*.rs"):
     path.write_text("".join(kept))
 PY
 
-for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path"
-done
-
 if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then
   if ! grep -q '^ndarray[[:space:]]*=' "$crate_dir/Cargo.toml"; then
     write_ndarray_shim "$crate_dir/ndarray-shim"
     printf 'ndarray = { path = "ndarray-shim" }\n' >> "$crate_dir/Cargo.toml"
   fi
 fi
+
+# Run dependency restoration after every assembler rewrite. In particular,
+# source-owned `static` storage is not a nominal facade item and a late source
+# surface reconciliation may remove it while leaving its accessors intact.
+# The restoration helper only copies raw statics still referenced by the final
+# module, so support-prelude state remains excluded.
+for rust_path in "$generated_dir"/*.rs; do
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path"
+  restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
+done
 
 for i in "${!java_files[@]}"; do
   index="$((i + 1))"

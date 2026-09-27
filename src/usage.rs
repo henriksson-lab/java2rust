@@ -441,7 +441,15 @@ pub struct MethodUsageFacts {
     constructor_call_sites: Vec<ConstructorCallSiteUse>,
     returned_call_results: Vec<ReturnedCallResultUse>,
     field_uses: Vec<FieldUse>,
+    self_argument_uses: Vec<SelfArgumentUse>,
     mutates_self: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SelfArgumentUse {
+    name: String,
+    arg_count: usize,
+    boundary: CallArgumentBoundary,
 }
 
 impl UsageFacts {
@@ -643,6 +651,12 @@ impl MethodUsageFacts {
 
     pub fn mutates_self(&self) -> bool {
         self.mutates_self
+    }
+
+    pub(crate) fn self_passes_unknown_boundary(&self) -> bool {
+        self.self_argument_uses
+            .iter()
+            .any(|use_site| use_site.boundary == CallArgumentBoundary::Unknown)
     }
 
     pub fn type_params_in_scope(&self) -> &[String] {
@@ -1004,6 +1018,7 @@ pub enum BindingUse {
     },
     ReceiverForCall {
         name: String,
+        arg_count: usize,
         boundary: CallArgumentBoundary,
         has_literal_null_arg: bool,
         literal_null_arg_indices: Vec<usize>,
@@ -1459,6 +1474,13 @@ fn refine_usage_call_boundaries(
             && is_strict_assertion(name, *arg_count)
         {
             *boundary = CallArgumentBoundary::KnownContentRead;
+        }
+    }
+    for use_site in &mut usage.self_argument_uses {
+        if use_site.boundary == CallArgumentBoundary::Unknown
+            && is_strict_assertion(&use_site.name, use_site.arg_count)
+        {
+            use_site.boundary = CallArgumentBoundary::KnownContentRead;
         }
     }
 }
@@ -4021,6 +4043,7 @@ fn analyze_expr_with_context(
                     binding,
                     BindingUse::ReceiverForCall {
                         name: name.clone(),
+                        arg_count: args.len(),
                         boundary: call_boundary,
                         has_literal_null_arg: args.iter().any(expr_is_null_literal),
                         literal_null_arg_indices: null_argument_indices(args),
@@ -4672,9 +4695,19 @@ fn record_returned_subtype_use(
     let target_type = crate::types::optional_element_type(declared_return_type)
         .unwrap_or_else(|| declared_return_type.clone());
     let value_expr = optional_of_present_argument(expr).unwrap_or(expr);
-    let Some(actual_type) =
-        assigned_subtype_local_actual_type(value_expr, &target_type, type_env, semantic_facts)
-    else {
+    // `TypeEnv` intentionally carries type parameters, not the method's full
+    // lexical binding table. For `Sub value = ...; return value;`, use the
+    // authoritative live binding fact so the declared supertype return slot is
+    // marked as polymorphic just as it is for `return new Sub(...)`.
+    let actual_type = match value_expr {
+        Expr::Var(name) => facts
+            .visible_binding_java_type_for_name(name)
+            .and_then(|actual| {
+                assigned_subtype_actual_type(actual, &target_type, type_env, semantic_facts)
+            }),
+        _ => assigned_subtype_local_actual_type(value_expr, &target_type, type_env, semantic_facts),
+    };
+    let Some(actual_type) = actual_type else {
         return;
     };
     facts.field_uses.push(FieldUse::AssignedSubtypeToReturn {
@@ -4749,6 +4782,13 @@ fn record_call_arg_use(
         return;
     }
     match arg {
+        Expr::This => {
+            facts.self_argument_uses.push(SelfArgumentUse {
+                name: call_name.to_string(),
+                arg_count,
+                boundary,
+            });
+        }
         Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
             if mutates_argument {
                 facts.mutates_self = true;

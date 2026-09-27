@@ -35,6 +35,9 @@ pub(crate) fn generic_facade_interface_erases_to_named_rust_type(java_ty: &JavaT
     if args.is_empty() {
         return false;
     }
+    if crate::stdlib::external_facade_generic_carrier_arity(name) == Some(args.len()) {
+        return true;
+    }
     matches!(
         crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
         "Comparator" | "java.util.Comparator" | "Comparable" | "java.lang.Comparable"

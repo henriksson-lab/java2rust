@@ -226,6 +226,13 @@ fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
 }
 
 fn java_type_is_known_platform_facade(java_ty: &JavaType) -> bool {
+    // Some Java interfaces are deliberately represented by concrete generic
+    // Rust carriers (for example `Future<T>`).  Their representation-plan
+    // entry may still describe the Java interface hierarchy as erased, but
+    // that must not erase the selected facade ABI at value boundaries.
+    if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(java_ty) {
+        return true;
+    }
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             crate::stdlib::is_java_platform_facade_type_name(name)
@@ -249,6 +256,11 @@ pub fn storage_arg_shape_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> RustSlotShape {
     let mut shape = RustSlotShape::for_storage(java_ty.clone());
+    if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(&java_ty) {
+        apply_required_dispatch(&mut shape, DispatchShape::Concrete);
+        apply_required_view(&mut shape, ViewShape::Native);
+        return shape;
+    }
     if let Some(HierarchyStrategy::DynTrait { trait_name }) =
         facts.object_representation_override_strategy_for(&java_ty)
     {
@@ -522,6 +534,8 @@ fn dispatch_for_java_type_or_optional_element(
         } else {
             representations.dispatch_for(&element_ty)
         }
+    } else if java_type_is_known_platform_facade(java_ty) {
+        DispatchShape::Concrete
     } else {
         representations.dispatch_for(java_ty)
     }

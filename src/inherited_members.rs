@@ -4,7 +4,9 @@ use crate::facts::{
     ExternalApiEffectFact, ExternalFieldFact, ExternalFieldKind, FactSet, NullabilityState,
 };
 use crate::java_ir::{FieldDecl, JavaType, Member, MethodDecl, Modifier, Program, TypeDecl};
-use crate::java_signature::{JavaCallableSlotKey, source_method_overload_rust_name};
+use crate::java_signature::{
+    JavaCallableSlotKey, source_method_overload_rust_name, source_method_rust_name,
+};
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct ExternalInheritedInstanceField {
@@ -304,6 +306,58 @@ pub(crate) fn inherited_instance_method_refs_for_type<'a>(
     methods
 }
 
+/// Private methods are not inherited Java members, but a concrete inherited
+/// method body may call private implementation helpers declared by its owner.
+/// Because source inheritance is flattened by copying that body into the
+/// emitted child impl, copy those implementation dependencies under an
+/// owner-qualified Rust name.  They deliberately stay out of the ordinary
+/// inherited-member set (and therefore out of traits and external dispatch).
+pub(crate) fn inherited_private_implementation_method_refs_for_type<'a>(
+    ty: &TypeDecl,
+    support_program: &'a Program,
+) -> Vec<InheritedInstanceMethodRef<'a>> {
+    let inherited = inherited_instance_method_refs_for_type(ty, support_program);
+    let mut declaring_types = HashSet::new();
+    let mut helpers = Vec::new();
+
+    for inherited_method in inherited {
+        let declaring_ty = inherited_method.declaring_ty();
+        if !declaring_types.insert(declaring_ty.name.clone()) {
+            continue;
+        }
+        for member in &declaring_ty.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if is_static_method(method)
+                || !method.modifiers.contains(&Modifier::Private)
+                || method.modifiers.contains(&Modifier::Abstract)
+                || method.body.is_none()
+            {
+                continue;
+            }
+            helpers.push(InheritedInstanceMethodRef::new(
+                &declaring_ty.name,
+                declaring_ty,
+                method,
+                inherited_private_implementation_method_rust_name(&declaring_ty.name, method),
+            ));
+        }
+    }
+
+    helpers
+}
+
+pub(crate) fn inherited_private_implementation_method_rust_name(
+    declaring_type: &str,
+    method: &MethodDecl,
+) -> String {
+    let owner = crate::java_naming::rust_name_for_java_named_type(declaring_type);
+    let owner = crate::parser::to_snake_case_unescaped(&owner);
+    let method_name = source_method_rust_name(method);
+    format!("__java_private_{owner}_{method_name}")
+}
+
 /// Every inherited instance contract of an interface, including abstract
 /// contracts.  This is intentionally narrower than the class default-method
 /// walk: a class's abstract interface methods are an implementation obligation,
@@ -492,6 +546,21 @@ pub(crate) fn external_inherited_instance_fields_for_type(
             }
         }
     }
+    if let Some(super_name) = ty.extends.as_deref()
+        && crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+        && seen_fields.insert("__java_super".to_string())
+    {
+        fields.push(ExternalInheritedInstanceField::new(
+            super_name.to_string(),
+            "__java_super".to_string(),
+            "__java_super".to_string(),
+            JavaType::Named {
+                name: super_name.to_string(),
+                args: Vec::new(),
+            },
+            Some(NullabilityState::DefinitelyNonNull),
+        ));
+    }
     fields
 }
 
@@ -608,12 +677,18 @@ pub(crate) fn external_inherited_instance_methods_for_type(
     let mut methods = HashMap::<(String, usize), ExternalInheritedInstanceMethod>::new();
     for super_name in super_names {
         for fact in &facts.external_api_effect_facts {
-            record_external_inherited_instance_method_from_fact(&mut methods, fact, &super_name);
+            record_external_inherited_instance_method_from_fact(
+                &mut methods,
+                facts,
+                fact,
+                &super_name,
+            );
         }
         if !facts.disable_builtin_external_packs {
             for fact in crate::external_packs::builtin_external_api_effect_facts() {
                 record_external_inherited_instance_method_from_fact(
                     &mut methods,
+                    facts,
                     fact,
                     &super_name,
                 );
@@ -631,6 +706,7 @@ pub(crate) fn external_inherited_instance_methods_for_type(
 
 fn record_external_inherited_instance_method_from_fact(
     methods: &mut HashMap<(String, usize), ExternalInheritedInstanceMethod>,
+    facts: &FactSet,
     fact: &ExternalApiEffectFact,
     super_name: &str,
 ) {
@@ -643,7 +719,12 @@ fn record_external_inherited_instance_method_from_fact(
     let Some(arg_count) = fact.arg_count else {
         return;
     };
-    let rust_name = crate::parser::to_snake_case(&fact.method_name);
+    let rust_name = crate::call_plan::external_method_rust_name(
+        receiver_type,
+        &fact.method_name,
+        arg_count,
+        facts,
+    );
     let method = ExternalInheritedInstanceMethod::new(
         receiver_type.to_string(),
         fact.method_name.clone(),

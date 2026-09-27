@@ -2869,8 +2869,38 @@ fn external_upcast_coercion_uses_adapter_into_projection_at_use_site() {
         }],
     );
 
-    assert_eq!(emit_expr(&rendered), "zip.into()");
+    assert_eq!(
+        emit_expr(&rendered),
+        "std::convert::Into::<OutputStream>::into(zip)"
+    );
     assert!(!matches!(rendered.into_unshaped(), RustExpr::Raw(_)));
+}
+
+#[test]
+fn external_into_clones_source_before_consuming_conversion() {
+    let rendered = apply_coercions(
+        RustExpr::Var("stream".to_string()),
+        &[
+            Coercion::ExternalInto {
+                from_type: JavaType::Named {
+                    name: "ByteArrayOutputStream".to_string(),
+                    args: Vec::new(),
+                },
+                to_type: JavaType::Named {
+                    name: "OutputStream".to_string(),
+                    args: Vec::new(),
+                },
+            },
+            Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::AuditRequired,
+            },
+        ],
+    );
+
+    assert_eq!(
+        emit_expr(&rendered),
+        "std::convert::Into::<OutputStream>::into(stream.clone()/* TODO(translation): validate added clone */)"
+    );
 }
 
 #[test]

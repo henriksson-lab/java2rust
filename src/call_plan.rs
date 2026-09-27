@@ -513,7 +513,11 @@ pub enum NativeCollectionMethod {
     PriorityQueueAdd,
     ArrayBlockingQueueAdd,
     ArrayBlockingQueueOffer,
+    ArrayBlockingQueueTimedOffer,
     ArrayBlockingQueuePut,
+    ArrayBlockingQueueTake,
+    ArrayBlockingQueueTimedPoll,
+    ArrayBlockingQueueRemainingCapacity,
     ListInsert,
     ListGet,
     ListSubList,
@@ -565,7 +569,10 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::PriorityQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueOffer
+            | NativeCollectionMethod::ArrayBlockingQueueTimedOffer
             | NativeCollectionMethod::ArrayBlockingQueuePut
+            | NativeCollectionMethod::ArrayBlockingQueueTake
+            | NativeCollectionMethod::ArrayBlockingQueueTimedPoll
             | NativeCollectionMethod::ListInsert
             | NativeCollectionMethod::ListSet
             | NativeCollectionMethod::ListRemoveIndex
@@ -591,6 +598,7 @@ impl NativeCollectionMethod {
             | NativeCollectionMethod::QueueElement
             | NativeCollectionMethod::QueueLastElement
             | NativeCollectionMethod::QueuePeek
+            | NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity
             | NativeCollectionMethod::Contains
             | NativeCollectionMethod::ContainsAll
             | NativeCollectionMethod::SetHashCode
@@ -741,9 +749,11 @@ pub enum NativeJavaStaticMethod {
     },
     ByteParseByte,
     ShortParseShort,
+    BooleanParseBoolean,
     IntegerParseInt,
     IntegerDecode,
     IntegerValueOfString,
+    IntegralBitCount,
     LongParseLong,
     FloatParseFloat,
     DoubleParseDouble,
@@ -799,7 +809,8 @@ pub fn native_collection_lowered_type(
         NativeCollectionMethod::ListAdd
         | NativeCollectionMethod::PriorityQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueAdd
-        | NativeCollectionMethod::ArrayBlockingQueueOffer => Some(LoweredType::from_java(
+        | NativeCollectionMethod::ArrayBlockingQueueOffer
+        | NativeCollectionMethod::ArrayBlockingQueueTimedOffer => Some(LoweredType::from_java(
             JavaType::Primitive(PrimitiveType::Boolean),
         )),
         NativeCollectionMethod::ArrayBlockingQueuePut => {
@@ -847,6 +858,19 @@ pub fn native_collection_lowered_type(
                 borrowed_sequence_element_shape(element_ty.clone()),
             ))
         }
+        NativeCollectionMethod::ArrayBlockingQueueTake => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::from_java(element_ty.clone()))
+        }
+        NativeCollectionMethod::ArrayBlockingQueueTimedPoll => {
+            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
+            Some(LoweredType::from_java(crate::types::optional_java_type(
+                element_ty.clone(),
+            )))
+        }
+        NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity => Some(
+            LoweredType::from_java(JavaType::Primitive(PrimitiveType::Int)),
+        ),
         NativeCollectionMethod::ListRemoveObject => Some(LoweredType::from_java(
             JavaType::Primitive(PrimitiveType::Boolean),
         )),
@@ -940,6 +964,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         CallTargetPlan::NativeJavaStatic {
             method:
                 NativeJavaStaticMethod::IntegerParseInt
+                | NativeJavaStaticMethod::IntegralBitCount
                 | NativeJavaStaticMethod::MathRound {
                     source: PrimitiveType::Float,
                 }
@@ -1040,7 +1065,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
         ))),
         CallTargetPlan::NativeJavaStatic {
             method:
-                NativeJavaStaticMethod::FloatingIsNaN
+                NativeJavaStaticMethod::BooleanParseBoolean
+                | NativeJavaStaticMethod::FloatingIsNaN
                 | NativeJavaStaticMethod::CharacterPredicate { .. }
                 | NativeJavaStaticMethod::ObjectsEquals
                 | NativeJavaStaticMethod::ObjectsNonNull
@@ -1913,29 +1939,74 @@ pub(crate) fn external_call_returns_rust_result_with_external_index(
     ) else {
         return false;
     };
-    if let Some(receiver_key) = receiver_key.as_deref() {
-        if let Some(abi) = facts.facade_abi_for_external_method(receiver_key, name, arg_count) {
-            return matches!(abi.result, ResultAbi::ResultWrapped);
-        }
-    }
-    if let Some(fallibility) =
-        facts.external_rust_result_for_receiver(receiver_key.as_deref(), name, Some(arg_count))
-    {
-        return fallibility.returns_result;
-    }
-    external_index
-        .external_api_effect_for_receiver_with_arity(receiver_key.as_deref(), name, Some(arg_count))
-        .cloned()
-        .or_else(|| {
-            (!facts.disable_builtin_external_packs).then(|| {
-                crate::external_packs::external_api_effect_for_receiver_with_arity(
+    external_receiver_hierarchy_keys(facts, receiver_key.as_deref())
+        .into_iter()
+        .any(|receiver_key| {
+            if let Some(receiver_key) = receiver_key.as_deref()
+                && let Some(abi) =
+                    facts.facade_abi_for_external_method(receiver_key, name, arg_count)
+            {
+                return matches!(abi.result, ResultAbi::ResultWrapped);
+            }
+            if let Some(fallibility) = facts.external_rust_result_for_receiver(
+                receiver_key.as_deref(),
+                name,
+                Some(arg_count),
+            ) {
+                return fallibility.returns_result;
+            }
+            external_index
+                .external_api_effect_for_receiver_with_arity(
                     receiver_key.as_deref(),
                     name,
                     Some(arg_count),
                 )
-            })?
+                .cloned()
+                .or_else(|| {
+                    (!facts.disable_builtin_external_packs).then(|| {
+                        crate::external_packs::external_api_effect_for_receiver_with_arity(
+                            receiver_key.as_deref(),
+                            name,
+                            Some(arg_count),
+                        )
+                    })?
+                })
+                .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
         })
-        .is_some_and(|effect| facts.thrown_types_include_checked_exception(&effect.thrown))
+}
+
+/// The receiver's declared source type and every modeled supertype are valid
+/// owners for an inherited external method contract. A source subclass does
+/// not redeclare the JDK/external ABI merely because the Java resolver records
+/// the subclass as the call's declaring type.
+fn external_receiver_hierarchy_keys(
+    facts: &FactSet,
+    receiver_key: Option<&str>,
+) -> Vec<Option<String>> {
+    let mut keys = vec![receiver_key.map(str::to_string)];
+    let Some(receiver_key) = receiver_key else {
+        return keys;
+    };
+    keys.extend(
+        facts
+            .reachable_hierarchy_edges_for_type(&JavaType::Named {
+                name: receiver_key.to_string(),
+                args: Vec::new(),
+            })
+            .into_iter()
+            .map(|edge| Some(edge.super_name)),
+    );
+    keys.sort();
+    keys.dedup();
+    // Keep the exact declared receiver first; user overrides on the subclass
+    // must dominate inherited defaults.
+    if let Some(index) = keys
+        .iter()
+        .position(|key| key.as_deref() == Some(receiver_key))
+    {
+        keys.swap(0, index);
+    }
+    keys
 }
 
 pub(crate) fn external_call_returns_rust_result_for_receiver(
@@ -3299,7 +3370,7 @@ fn plan_call_target_with_external_index_impl<'a>(
     }
 }
 
-fn resolved_external_instance_call_rust_name(
+pub(crate) fn resolved_external_instance_call_rust_name(
     call: &ResolvedCall,
     java_name: &str,
     arg_count: usize,
@@ -3308,49 +3379,52 @@ fn resolved_external_instance_call_rust_name(
     if call.kind != CallKind::Instance {
         return None;
     }
-    let external_name =
-        external_method_rust_name(&call.declaring_type, java_name, arg_count, facts);
-    if external_name != call.rust_name
-        && crate::stdlib::canonical_external_receiver_type_key(&call.declaring_type)
-            == "PrintStream"
-        && matches!(
-            external_method_base_rust_name(java_name).as_str(),
-            "print" | "println"
-        )
+    for owner in external_receiver_hierarchy_keys(facts, Some(&call.declaring_type))
+        .into_iter()
+        .flatten()
     {
-        return Some(external_name);
-    }
-    let effect = facts
-        .external_lookup_index()
-        .external_api_effect_for_receiver_with_arity(
-            Some(&call.declaring_type),
-            java_name,
-            Some(arg_count),
-        )
-        .cloned()
-        .or_else(|| {
-            crate::external_packs::external_api_effect_for_receiver_with_arity(
-                Some(&call.declaring_type),
-                java_name,
-                Some(arg_count),
+        let external_name = external_method_rust_name(&owner, java_name, arg_count, facts);
+        if external_name != call.rust_name
+            && crate::stdlib::canonical_external_receiver_type_key(&owner) == "PrintStream"
+            && matches!(
+                external_method_base_rust_name(java_name).as_str(),
+                "print" | "println"
             )
-        })
-        .or_else(|| {
-            crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
-                &call.declaring_type,
-                java_name,
-                Some(arg_count),
-            )
-        })?;
-    if !matches!(
-        effect.provenance,
-        FactProvenance::BuiltinExternalModel
-            | FactProvenance::ExternalLibraryPack
-            | FactProvenance::UserOverride
-    ) {
-        return None;
+        {
+            return Some(external_name);
+        }
+        let effect = facts
+            .external_lookup_index()
+            .external_api_effect_for_receiver_with_arity(Some(&owner), java_name, Some(arg_count))
+            .cloned()
+            .or_else(|| {
+                crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(&owner),
+                    java_name,
+                    Some(arg_count),
+                )
+            })
+            .or_else(|| {
+                crate::external_packs::java_platform_api_effect_for_receiver_with_arity(
+                    &owner,
+                    java_name,
+                    Some(arg_count),
+                )
+            });
+        let Some(effect) = effect else {
+            continue;
+        };
+        if matches!(
+            effect.provenance,
+            FactProvenance::BuiltinExternalModel
+                | FactProvenance::ExternalLibraryPack
+                | FactProvenance::UserOverride
+        ) && external_name != call.rust_name
+        {
+            return Some(external_name);
+        }
     }
-    (external_name != call.rust_name).then_some(external_name)
+    None
 }
 
 fn plan_java_object_to_string_fallback<'a>(
@@ -4177,6 +4251,14 @@ fn plan_native_collection_receiver_call<'a>(
         (crate::stdlib::JavaCollectionKind::List, "offer")
             if matches!(
                 native_queue_receiver_kind(&receiver_ty),
+                Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+            ) && args.is_some_and(|args| args.len() == 3) =>
+        {
+            NativeCollectionMethod::ArrayBlockingQueueTimedOffer
+        }
+        (crate::stdlib::JavaCollectionKind::List, "offer")
+            if matches!(
+                native_queue_receiver_kind(&receiver_ty),
                 Some(NativeQueueReceiverKind::PriorityQueue)
             ) =>
         {
@@ -4209,6 +4291,30 @@ fn plan_native_collection_receiver_call<'a>(
                 && args.is_some_and(|args| args.is_empty()) =>
         {
             NativeCollectionMethod::QueuePoll
+        }
+        (crate::stdlib::JavaCollectionKind::List, "poll")
+            if matches!(
+                native_queue_receiver_kind(&receiver_ty),
+                Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+            ) && args.is_some_and(|args| args.len() == 2) =>
+        {
+            NativeCollectionMethod::ArrayBlockingQueueTimedPoll
+        }
+        (crate::stdlib::JavaCollectionKind::List, "take")
+            if matches!(
+                native_queue_receiver_kind(&receiver_ty),
+                Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+            ) && args.is_some_and(|args| args.is_empty()) =>
+        {
+            NativeCollectionMethod::ArrayBlockingQueueTake
+        }
+        (crate::stdlib::JavaCollectionKind::List, "remainingCapacity")
+            if matches!(
+                native_queue_receiver_kind(&receiver_ty),
+                Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+            ) && args.is_some_and(|args| args.is_empty()) =>
+        {
+            NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity
         }
         (crate::stdlib::JavaCollectionKind::List, name)
             if native_queue_receiver_kind(&receiver_ty).is_some()
@@ -4942,8 +5048,12 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         ("Math", "floorMod" | "floor_mod") => math_floor_mod_method(args, types),
         ("Byte", "parseByte" | "parse_byte") => NativeJavaStaticMethod::ByteParseByte,
         ("Short", "parseShort" | "parse_short") => NativeJavaStaticMethod::ShortParseShort,
+        ("Boolean", "parseBoolean" | "parse_boolean") => {
+            NativeJavaStaticMethod::BooleanParseBoolean
+        }
         ("Integer", "parseInt" | "parse_int") => NativeJavaStaticMethod::IntegerParseInt,
         ("Integer", "decode") => NativeJavaStaticMethod::IntegerDecode,
+        ("Integer" | "Long", "bitCount" | "bit_count") => NativeJavaStaticMethod::IntegralBitCount,
         ("Integer", "valueOf" | "value_of")
             if args
                 .and_then(|args| args.first())
@@ -5322,13 +5432,37 @@ fn constructor_rust_name(
     arg_count: usize,
 ) -> String {
     if let Some(resolved) = resolved {
-        return constructor_member_rust_name(&resolved.rust_name).to_string();
+        let resolved_name = constructor_member_rust_name(&resolved.rust_name);
+        // Source/context summaries can resolve an external constructor before
+        // overload-aware Rust naming has been applied. A bare `new` is not an
+        // authoritative overload identity when the external contract exposes
+        // multiple constructor arities (for example `File(path)` and
+        // `File(parent, child)`). Recover that identity from the same facts
+        // used by the unresolved path.
+        if resolved_name == "new"
+            && (builtin_facade_constructor_uses_arity_name(&resolved.declaring_type)
+                || external_constructor_needs_arity_name(&resolved.declaring_type, facts))
+        {
+            return format!("new_{arg_count}");
+        }
+        if resolved_name == "new"
+            && java_buffered_reader_capacity_constructor(&resolved.declaring_type, arg_count)
+        {
+            return "new_2".to_string();
+        }
+        return resolved_name.to_string();
     }
     let Some(type_name) = java_type_name(owner_ty) else {
         return "new".to_string();
     };
-    if java_mutable_string_buffer_constructor_uses_arity_name(type_name) {
+    if builtin_facade_constructor_uses_arity_name(type_name) {
         return format!("new_{arg_count}");
+    }
+    if java_buffered_reader_capacity_constructor(type_name, arg_count) {
+        return "new_2".to_string();
+    }
+    if java_atomic_constructor_uses_zero_arg_name(type_name, arg_count) {
+        return "new_0".to_string();
     }
     if external_constructor_needs_arity_name(type_name, facts) {
         format!("new_{arg_count}")
@@ -5337,15 +5471,34 @@ fn constructor_rust_name(
     }
 }
 
+fn java_buffered_reader_capacity_constructor(type_name: &str, arg_count: usize) -> bool {
+    arg_count == 2
+        && crate::stdlib::canonical_external_receiver_type_key(type_name) == "BufferedReader"
+}
+
+fn java_atomic_constructor_uses_zero_arg_name(type_name: &str, arg_count: usize) -> bool {
+    arg_count == 0
+        && matches!(
+            crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
+            "AtomicBoolean" | "AtomicInteger" | "AtomicLong"
+        )
+}
+
 fn constructor_member_rust_name(rust_name: &str) -> &str {
     rust_name.rsplit("::").next().unwrap_or(rust_name)
 }
 
-fn java_mutable_string_buffer_constructor_uses_arity_name(type_name: &str) -> bool {
-    matches!(
-        crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
-        "StringBuilder" | "StringBuffer" | "StringTokenizer" | "BitSet" | "JarEntry" | "ZipEntry"
-    )
+fn builtin_facade_constructor_uses_arity_name(type_name: &str) -> bool {
+    crate::facts::external_type_name_matches(type_name, "java.io.File")
+        || matches!(
+            crate::stdlib::canonical_external_receiver_type_key(type_name).as_str(),
+            "StringBuilder"
+                | "StringBuffer"
+                | "StringTokenizer"
+                | "BitSet"
+                | "JarEntry"
+                | "ZipEntry"
+        )
 }
 
 fn plan_native_string_constructor(
@@ -6172,6 +6325,34 @@ pub fn native_collection_arg_shapes_with_facts(
     {
         NativeCollectionMethod::QueueLastRemove
     } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "offer"
+        && arg_count == 3
+    {
+        NativeCollectionMethod::ArrayBlockingQueueTimedOffer
+    } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "poll"
+        && arg_count == 2
+    {
+        NativeCollectionMethod::ArrayBlockingQueueTimedPoll
+    } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "take"
+        && arg_count == 0
+    {
+        NativeCollectionMethod::ArrayBlockingQueueTake
+    } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "remainingCapacity"
+        && arg_count == 0
+    {
+        NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity
+    } else if matches!(
         crate::stdlib::native_collection_receiver_kind_for_type(&receiver_ty),
         Some(crate::stdlib::JavaCollectionKind::List)
     ) && name == "add"
@@ -6214,6 +6395,27 @@ pub(crate) fn native_collection_method_arg_shapes(
                 RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
                 collection_element_arg_shape_with_effective_facts(&receiver_ty, &effective_facts)?,
             ]
+        }
+        NativeCollectionMethod::ArrayBlockingQueueTimedOffer if arg_count == 3 => vec![
+            collection_element_arg_shape_with_effective_facts(&receiver_ty, &effective_facts)?,
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Long)),
+            RustSlotShape::for_storage(JavaType::Named {
+                name: "TimeUnit".to_string(),
+                args: Vec::new(),
+            }),
+        ],
+        NativeCollectionMethod::ArrayBlockingQueueTimedPoll if arg_count == 2 => vec![
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Long)),
+            RustSlotShape::for_storage(JavaType::Named {
+                name: "TimeUnit".to_string(),
+                args: Vec::new(),
+            }),
+        ],
+        NativeCollectionMethod::ArrayBlockingQueueTake
+        | NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity
+            if arg_count == 0 =>
+        {
+            Vec::new()
         }
         NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
@@ -6401,7 +6603,7 @@ pub(crate) fn external_call_arg_shapes(
     external_call_arg_shapes_core(receiver, name, arg_count, None, facts, types)
 }
 
-fn external_call_arg_shapes_with_args(
+pub(crate) fn external_call_arg_shapes_with_args(
     receiver: Option<&Expr>,
     name: &str,
     args: &[Expr],
@@ -6730,6 +6932,34 @@ fn facade_abi_native_collection_arg_java_types(
     {
         NativeCollectionMethod::QueueLastRemove
     } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "offer"
+        && arg_count == 3
+    {
+        NativeCollectionMethod::ArrayBlockingQueueTimedOffer
+    } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "poll"
+        && arg_count == 2
+    {
+        NativeCollectionMethod::ArrayBlockingQueueTimedPoll
+    } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "take"
+        && arg_count == 0
+    {
+        NativeCollectionMethod::ArrayBlockingQueueTake
+    } else if matches!(
+        native_queue_receiver_kind(&receiver_ty),
+        Some(NativeQueueReceiverKind::ArrayBlockingQueue)
+    ) && name == "remainingCapacity"
+        && arg_count == 0
+    {
+        NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity
+    } else if matches!(
         crate::stdlib::native_collection_receiver_kind_for_type(&receiver_ty),
         Some(crate::stdlib::JavaCollectionKind::List)
     ) && name == "add"
@@ -6757,6 +6987,31 @@ fn facade_abi_native_collection_arg_java_types(
         NativeCollectionMethod::ListInsert if arg_count == 2 => {
             crate::types::sequence_mutation_element_type(&receiver_ty)
                 .map(|element_ty| vec![JavaType::Primitive(PrimitiveType::Int), element_ty])
+        }
+        NativeCollectionMethod::ArrayBlockingQueueTimedOffer if arg_count == 3 => {
+            crate::types::sequence_mutation_element_type(&receiver_ty).map(|element_ty| {
+                vec![
+                    element_ty,
+                    JavaType::Primitive(PrimitiveType::Long),
+                    JavaType::Named {
+                        name: "TimeUnit".to_string(),
+                        args: Vec::new(),
+                    },
+                ]
+            })
+        }
+        NativeCollectionMethod::ArrayBlockingQueueTimedPoll if arg_count == 2 => Some(vec![
+            JavaType::Primitive(PrimitiveType::Long),
+            JavaType::Named {
+                name: "TimeUnit".to_string(),
+                args: Vec::new(),
+            },
+        ]),
+        NativeCollectionMethod::ArrayBlockingQueueTake
+        | NativeCollectionMethod::ArrayBlockingQueueRemainingCapacity
+            if arg_count == 0 =>
+        {
+            Some(Vec::new())
         }
         NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
@@ -6990,12 +7245,29 @@ pub fn external_constructor_arg_shapes_with_args(
     let arg_count = args.len();
     let receiver_name = java_type_name(ty)?;
     let effective_facts = EffectiveFacts::new(facts);
+    let actual_arg_types = args
+        .iter()
+        .map(|arg| infer_arg_storage_java_type(arg, signatures, types))
+        .collect::<Vec<_>>();
+    let modeled_constructor = facts
+        .external_constructor_for(receiver_name, &actual_arg_types)
+        .cloned()
+        .or_else(|| {
+            (!facts.disable_builtin_external_packs)
+                .then(|| {
+                    crate::external_packs::external_constructor_for(
+                        receiver_name,
+                        &actual_arg_types,
+                    )
+                })
+                .flatten()
+        });
     let mut saw_fact = false;
     let shapes = args
         .iter()
         .enumerate()
-        .map(|(index, arg)| {
-            let actual_arg_type = infer_arg_storage_java_type(arg, signatures, types);
+        .map(|(index, _arg)| {
+            let actual_arg_type = actual_arg_types[index].clone();
             if receiver_name == "String" && args.len() == 1 && actual_arg_type == JavaType::String {
                 saw_fact = true;
                 RustSlotShape::for_storage(JavaType::String)
@@ -7041,6 +7313,12 @@ pub fn external_constructor_arg_shapes_with_args(
             {
                 saw_fact = true;
                 argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
+            } else if let Some(parameter_type) = modeled_constructor
+                .as_ref()
+                .and_then(|constructor| constructor.arg_types.get(index))
+            {
+                saw_fact = true;
+                RustSlotShape::for_storage(parameter_type.clone())
             } else {
                 RustSlotShape::conservative(JavaType::Unknown(format!("{rust_name}:arg{index}")))
             }
@@ -8178,6 +8456,30 @@ mod tests {
         assert_eq!(
             constructor_member_rust_name("std::rc::Rc::<Wrapper>::new"),
             "new"
+        );
+    }
+
+    #[test]
+    fn resolved_external_constructor_recovers_overload_arity_from_contract() {
+        let resolved = ResolvedConstructor {
+            declaring_type: "java.io.File".to_string(),
+            rust_name: "new".to_string(),
+            constructed_type: JavaType::Named {
+                name: "java.io.File".to_string(),
+                args: Vec::new(),
+            },
+            params: Vec::new(),
+            arg_coercions: Vec::new(),
+        };
+
+        assert_eq!(
+            constructor_rust_name(
+                &resolved.constructed_type,
+                Some(&resolved),
+                &FactSet::default(),
+                2,
+            ),
+            "new_2"
         );
     }
 

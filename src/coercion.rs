@@ -811,6 +811,19 @@ pub fn apply_coercions(mut expr: RustExpr, coercions: &[Coercion]) -> RustExpr {
     let mut index = 0;
     while index < coercions.len() {
         let coercion = &coercions[index];
+        if matches!(coercion, Coercion::ExternalInto { .. })
+            && let Some(Coercion::CloneRecovery { policy }) = coercions.get(index + 1)
+        {
+            // Ownership recovery belongs to the Java source value. Cloning
+            // the converted facade can either move the source too early or
+            // duplicate a semantically different adapter carrier. This also
+            // keeps target-typed `Into::<T>::into(...)` unambiguous without
+            // changing the established `.clone().into()` order.
+            expr = apply_clone_recovery(expr, policy);
+            expr = apply_one(expr, coercion);
+            index += 2;
+            continue;
+        }
         if let Coercion::BorrowConcreteFacade { target_type } = coercion
             && matches!(coercions.get(index + 1), Some(Coercion::BorrowMut))
             && !is_structural_borrow_facade_target(target_type)
@@ -1800,6 +1813,14 @@ pub(crate) fn propagate_result_projection(expr: RustExpr) -> RustExpr {
     if expr.recorded_shape() == Some(RustExprShape::Borrowed)
         || expr_is_result_propagated(&expr)
         || rust_expr_is_result_panic_recovered(&expr)
+        || matches!(
+            expr.unshaped(),
+            RustExpr::MacroCall { macro_name, .. }
+                if matches!(
+                    macro_name.as_str(),
+                    "compile_error" | "panic" | "unreachable" | "todo" | "unimplemented"
+                )
+        )
         || matches!(expr.unshaped(), RustExpr::Try(_))
         || matches!(expr.unshaped(), RustExpr::MethodCall { method, .. } if method == "expect")
     {
@@ -2786,14 +2807,7 @@ fn raw_comment_end_at(raw: &str, idx: usize) -> Option<usize> {
     None
 }
 
-pub(crate) fn constructor_self_field_projection(field_name: &str) -> RustExpr {
-    field_projection(
-        RustExpr::Var("__java_self".to_string()),
-        &rust_field_projection_ident(field_name),
-    )
-}
-
-fn rust_field_projection_ident(name: &str) -> String {
+pub(crate) fn rust_field_projection_ident(name: &str) -> String {
     if name.starts_with("r#") || name.contains("::") || name.is_empty() {
         return name.to_string();
     }
@@ -12801,30 +12815,43 @@ fn apply_optional_borrowed_element_target_view(
     }
     let adapted = match (target_element.ownership, &target_element.view) {
         (OwnershipShape::SharedBorrow, ViewShape::Slice)
-            if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
+            if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_))
+                || crate::types::sequence_element_type(&target_element.java_ty).is_some() =>
         {
-            let method =
-                if crate::types::two_dimensional_array_element_type(&target_element.java_ty)
-                    .is_some()
-                {
-                    "as_ref"
-                } else {
-                    "as_deref"
-                };
-            zero_arg_method_projection(expr.clone(), method)
+            if crate::types::two_dimensional_array_element_type(&target_element.java_ty).is_some() {
+                zero_arg_method_projection(expr.clone(), "as_ref")
+            } else {
+                zero_arg_method_projection(
+                    strip_terminal_as_ref_projection(expr.clone()),
+                    "as_deref",
+                )
+            }
         }
         (OwnershipShape::MutableBorrow, ViewShape::Slice)
-            if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_)) =>
+            if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_))
+                || crate::types::sequence_element_type(&target_element.java_ty).is_some() =>
         {
-            let method =
-                if crate::types::two_dimensional_array_element_type(&target_element.java_ty)
-                    .is_some()
-                {
-                    "as_mut"
-                } else {
-                    "as_deref_mut"
-                };
-            zero_arg_method_projection(expr.clone(), method)
+            if crate::types::two_dimensional_array_element_type(&target_element.java_ty).is_some() {
+                zero_arg_method_projection(expr.clone(), "as_mut")
+            } else {
+                zero_arg_method_projection(
+                    strip_terminal_optional_mut_borrow_projection(expr.clone()),
+                    "as_deref_mut",
+                )
+            }
+        }
+        (OwnershipShape::SharedBorrow, _)
+            if crate::types::sequence_element_type(&target_element.java_ty).is_some() =>
+        {
+            zero_arg_method_projection(strip_terminal_as_ref_projection(expr.clone()), "as_deref")
+        }
+        (OwnershipShape::MutableBorrow, _)
+            if crate::types::sequence_element_type(&target_element.java_ty).is_some() =>
+        {
+            zero_arg_method_projection(
+                strip_terminal_optional_mut_borrow_projection(expr.clone()),
+                "as_deref_mut",
+            )
         }
         (OwnershipShape::SharedBorrow, ViewShape::Str)
             if target_element.java_ty == crate::java_ir::JavaType::String =>
@@ -12846,6 +12873,19 @@ fn apply_optional_borrowed_element_target_view(
         Some(target_element),
         adapted,
     ))
+}
+
+fn strip_terminal_optional_mut_borrow_projection(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if method == "as_mut" && args.is_empty() => *receiver,
+        RustExpr::Shaped { expr, .. } => strip_terminal_optional_mut_borrow_projection(*expr),
+        RustExpr::Grouped(expr) => strip_terminal_optional_mut_borrow_projection(*expr),
+        other => other,
+    }
 }
 
 fn slot_shapes_match_ignoring_identity(actual: &RustSlotShape, target: &RustSlotShape) -> bool {
@@ -14445,7 +14485,26 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 )
             }
         }
-        Coercion::ExternalInto { .. } => into_projection(expr),
+        Coercion::ExternalInto { to_type, .. } => {
+            // `.into()` is ambiguous as soon as an external value has more
+            // than one modeled facade conversion (for example a byte-array
+            // stream can become either the public `OutputStream` carrier or
+            // its internal Java-IO facade). The Java destination slot already
+            // chose the conversion, so preserve that information in Rust
+            // instead of asking inference to rediscover it.
+            let target =
+                crate::emit::emit_type(&crate::slot_render::rust_type_for_java_type(to_type));
+            let result_propagated = expr_is_result_propagated(&expr);
+            let converted = function_call_projection(
+                RustExpr::raw_leaf(format!("std::convert::Into::<{target}>::into")),
+                vec![expr],
+            );
+            if result_propagated {
+                RustExpr::shaped(RustExprShape::ResultPropagated, converted)
+            } else {
+                converted
+            }
+        }
         Coercion::BoxDynTrait { trait_name } => boxed_dyn_trait_projection(expr, trait_name),
         Coercion::CloneBoxDynTrait { trait_name: _ } => {
             if expr.recorded_shape() == Some(RustExprShape::AnonymousDynTrait) {
@@ -15190,6 +15249,18 @@ fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExp
     }
     let expr = recover_parseable_raw_operand_projection(expr);
     let expr = match expr {
+        RustExpr::Call { function, mut args }
+            if args.len() == 1 && rust_expr_is_target_typed_into_function(&function) =>
+        {
+            let source = args.pop().expect("one Into source argument");
+            return RustExpr::shaped(
+                RustExprShape::OwnedRecovery,
+                RustExpr::Call {
+                    function,
+                    args: vec![apply_clone_recovery(source, policy)],
+                },
+            );
+        }
         RustExpr::MethodCall {
             receiver,
             method,
@@ -15253,6 +15324,14 @@ fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExp
             zero_arg_method_projection(clone_method_receiver(expr, false), "clone"),
             policy,
         ),
+    )
+}
+
+fn rust_expr_is_target_typed_into_function(function: &RustExpr) -> bool {
+    matches!(
+        function.unshaped(),
+        RustExpr::Raw(path)
+            if path.starts_with("std::convert::Into::<") && path.ends_with(">::into")
     )
 }
 
@@ -18453,7 +18532,13 @@ mod tests {
 
     #[test]
     fn constructor_self_temporary_raw_fallback_requires_identifier_token() {
-        let keyword_field = constructor_self_field_projection("type");
+        let constructor_field = |name| {
+            field_projection(
+                RustExpr::Var("__java_self".to_string()),
+                &rust_field_projection_ident(name),
+            )
+        };
+        let keyword_field = constructor_field("type");
         assert_eq!(emit::emit_expr(&keyword_field), "__java_self.r#type");
         assert_eq!(
             keyword_field,
@@ -18462,9 +18547,9 @@ mod tests {
                 "r#type".to_string(),
             )
         );
-        let self_field = constructor_self_field_projection("self");
+        let self_field = constructor_field("self");
         assert_eq!(emit::emit_expr(&self_field), "__java_self.self__");
-        let crate_field = constructor_self_field_projection("crate");
+        let crate_field = constructor_field("crate");
         assert_eq!(emit::emit_expr(&crate_field), "__java_self.crate__");
         assert!(rust_expr_mentions_constructor_self_temporary(
             &RustExpr::Field(
@@ -27729,6 +27814,14 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&propagate_result_projection(recovered)),
             "call().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
+        );
+        let diverging = RustExpr::MacroCall {
+            macro_name: "compile_error".to_string(),
+            args: vec![RustExpr::Literal("unsupported".to_string())],
+        };
+        assert_eq!(
+            emit::emit_expr(&propagate_result_projection(diverging)),
+            "compile_error!(unsupported)"
         );
         assert!(matches!(
             once,

@@ -26,8 +26,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::FactSet;
 use crate::java_ir::{
-    Block, Expr, JavaType, LambdaBody, Member, Modifier, Program, Stmt, SwitchLabel, TypeDecl,
-    TypeKind, WildcardBound,
+    Block, CallKind, ConstructorDecl, Expr, JavaType, LambdaBody, Member, MethodDecl, Modifier,
+    Program, Stmt, SwitchLabel, TypeDecl, TypeKind, WildcardBound,
 };
 use crate::usage::{BindingUse, CallArgumentBoundary, MethodUsageFacts, UsageFacts};
 
@@ -118,6 +118,9 @@ pub struct TypeStorageFacts {
     /// must be `Send + Sync` **in a single-threaded program with no `Thread`
     /// anywhere**. `Rc` is neither; `Arc` is both.
     static_reachable: bool,
+    /// A constructor passes `this` across a boundary which may retain it.
+    /// Wrapping the completed value at its caller is too late for this case.
+    constructor_self_escapes: bool,
 }
 
 impl Default for TypeStorageFacts {
@@ -131,6 +134,7 @@ impl Default for TypeStorageFacts {
             // field write it cannot attribute to a type.
             mutation_provably_absent: true,
             static_reachable: false,
+            constructor_self_escapes: false,
             // Assumed forwardable until the surface is examined; the plan sets
             // this for every declared type before any placement is read.
             surface_forwardable: true,
@@ -165,6 +169,10 @@ impl TypeStorageFacts {
 
     pub fn static_reachable(&self) -> bool {
         self.static_reachable
+    }
+
+    pub fn constructor_self_escapes(&self) -> bool {
+        self.constructor_self_escapes
     }
 
     pub fn with_escape(mut self, escape: Escape) -> Self {
@@ -210,6 +218,7 @@ impl TypeStorageFacts {
         self.threaded |= other.threaded;
         self.mutation_provably_absent &= other.mutation_provably_absent;
         self.static_reachable |= other.static_reachable;
+        self.constructor_self_escapes |= other.constructor_self_escapes;
         // Conservative in the same direction as the others: one non-forwardable
         // observation is enough.
         self.surface_forwardable &= other.surface_forwardable;
@@ -553,8 +562,10 @@ fn plan_storage_strategies_with_facts(
     for ty in &program.types {
         collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
     }
+    propagate_inherited_receiver_mutation(program, usage, &declared, &mut types);
     if let Some(facts) = facts {
         collect_inner_outer_capture_storage_requirements(program, facts, &declared, &mut types);
+        collect_constructor_inner_identity_requirements(program, facts, &mut types);
     }
     for (name, facts) in types.iter_mut() {
         facts.static_reachable = static_reachable.contains(name);
@@ -570,6 +581,175 @@ fn plan_storage_strategies_with_facts(
             type_interface_surface_is_handle_forwardable(name, program, usage);
     }
     StoragePlan { types }
+}
+
+/// A constructor that directly or transitively constructs a non-static inner
+/// class exposes `this` as that inner object's enclosing identity. The final
+/// shared handle must therefore exist before the constructor body runs, just
+/// as when `this` is passed to an unknown retaining boundary.
+fn collect_constructor_inner_identity_requirements(
+    program: &Program,
+    semantic_facts: &FactSet,
+    types: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    fn visit(
+        ty: &TypeDecl,
+        semantic_facts: &FactSet,
+        types: &mut BTreeMap<String, TypeStorageFacts>,
+    ) {
+        let constructor_needs_identity = ty.members.iter().any(|member| {
+            let Member::Constructor(ctor) = member else {
+                return false;
+            };
+            constructor_reaches_inner_construction(ty, ctor, semantic_facts)
+        });
+        if constructor_needs_identity && let Some(storage) = types.get_mut(&ty.name) {
+            storage.constructor_self_escapes = true;
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, semantic_facts, types);
+            }
+        }
+    }
+
+    for ty in &program.types {
+        visit(ty, semantic_facts, types);
+    }
+}
+
+fn constructor_reaches_inner_construction(
+    ty: &TypeDecl,
+    ctor: &ConstructorDecl,
+    facts: &FactSet,
+) -> bool {
+    let Some(body) = ctor.body.as_ref() else {
+        return false;
+    };
+    if crate::inner_class_capture::block_constructs_inner_for_outer(body, &ty.name, facts) {
+        return true;
+    }
+    block_calls_inner_constructing_self_method(ty, body, facts, &mut BTreeSet::new())
+}
+
+fn method_reaches_inner_construction(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    facts: &FactSet,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    let key = crate::java_signature::source_method_rust_name(method);
+    if !visiting.insert(key.clone()) {
+        return false;
+    }
+    let result = method.body.as_ref().is_some_and(|body| {
+        crate::inner_class_capture::block_constructs_inner_for_outer(body, &ty.name, facts)
+            || block_calls_inner_constructing_self_method(ty, body, facts, visiting)
+    });
+    visiting.remove(&key);
+    result
+}
+
+fn block_calls_inner_constructing_self_method(
+    ty: &TypeDecl,
+    block: &Block,
+    facts: &FactSet,
+    visiting: &mut BTreeSet<String>,
+) -> bool {
+    let mut found = false;
+    crate::semantic_analysis::walk_block_exprs(block, &mut |expr| {
+        if found {
+            return;
+        }
+        let Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved,
+        } = expr
+        else {
+            return;
+        };
+        if !matches!(receiver.as_deref(), None | Some(Expr::This))
+            || resolved
+                .as_ref()
+                .is_some_and(|resolved| resolved.kind != CallKind::Instance)
+        {
+            return;
+        }
+        let resolved_rust_name = resolved
+            .as_ref()
+            .map(|resolved| resolved.rust_name.as_str());
+        let resolved_owner_matches = resolved.as_ref().is_none_or(|resolved| {
+            crate::stdlib::canonical_external_receiver_type_key(&resolved.declaring_type)
+                == crate::stdlib::canonical_external_receiver_type_key(&ty.name)
+        });
+        if !resolved_owner_matches {
+            return;
+        }
+        let mut candidates = ty.members.iter().filter_map(|member| {
+            let Member::Method(method) = member else {
+                return None;
+            };
+            if method.modifiers.contains(&Modifier::Static) || method.params.len() != args.len() {
+                return None;
+            }
+            let rust_name = crate::java_signature::source_method_rust_name(method);
+            (method.name == *name
+                || resolved_rust_name.is_some_and(|resolved| resolved == rust_name))
+            .then_some(method)
+        });
+        let Some(callee) = candidates.next() else {
+            return;
+        };
+        if candidates.next().is_some() && resolved.is_none() {
+            return;
+        }
+        found = method_reaches_inner_construction(ty, callee, facts, visiting);
+    });
+    found
+}
+
+fn propagate_inherited_receiver_mutation(
+    program: &Program,
+    usage: &UsageFacts,
+    declared: &BTreeSet<String>,
+    types: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    for subtype in declared {
+        let mut owner = subtype.clone();
+        let mut current = source_type_decl(program, subtype).and_then(|ty| ty.extends.clone());
+        let mut inherits_mutation = false;
+        for _ in 0..64 {
+            let Some(super_name) = current else {
+                break;
+            };
+            let Some(super_ty) = source_type_decl_for_owner_context(program, &owner, &super_name)
+            else {
+                break;
+            };
+            if super_ty.members.iter().any(|member| {
+                let Member::Method(method) = member else {
+                    return false;
+                };
+                !method.modifiers.contains(&Modifier::Static)
+                    && usage
+                        .source_method_usage(super_ty, method)
+                        .is_some_and(|method_usage| method_usage.mutates_self())
+            }) {
+                inherits_mutation = true;
+                break;
+            }
+            owner = super_ty.name.clone();
+            current = super_ty.extends.clone();
+        }
+        if inherits_mutation && let Some(facts) = types.get_mut(subtype) {
+            // Flattened subclass storage contains the superclass subobject.
+            // An inherited method therefore mutates the subclass allocation,
+            // even when the subclass declares no mutating method of its own.
+            facts.mutated = true;
+        }
+    }
 }
 
 /// Report every type the plan says should be shared while lowering holds it by
@@ -953,6 +1133,14 @@ fn collect_type_facts(
                 }
             }
             Member::Constructor(constructor) => {
+                if let Some(constructor_usage) = usage.source_constructor_usage(ty, constructor) {
+                    if constructor_usage.self_passes_unknown_boundary()
+                        && let Some(facts) = into.get_mut(&ty.name)
+                    {
+                        facts.constructor_self_escapes = true;
+                    }
+                    collect_unknown_boundary_escapes(constructor_usage, ty, declared, into);
+                }
                 if let Some(body) = &constructor.body {
                     let mut locals = local_types_from_params(&constructor.params);
                     collect_block_facts(body, ty, program, declared, true, &mut locals, into);
@@ -989,6 +1177,11 @@ fn collect_unknown_boundary_escapes(
     declared: &BTreeSet<String>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
+    if method_usage.self_passes_unknown_boundary()
+        && let Some(facts) = into.get_mut(&owner.name)
+    {
+        facts.escape = facts.escape.max(Escape::UnknownBoundary);
+    }
     for binding in method_usage.all_binding_facts() {
         let crosses_unknown_boundary = binding.uses().iter().any(|use_site| {
             matches!(
@@ -2891,6 +3084,32 @@ public class Outer {
     }
 
     #[test]
+    fn constructor_calling_inner_factory_requires_stable_self_handle() {
+        let parsed = parse_java_source(
+            r#"
+class Outer {
+    class Inner {}
+
+    Outer() {
+        initialize();
+    }
+
+    void initialize() {
+        new Inner();
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let plan = plan_storage_strategies_from_facts(&resolved.program, &usage, &resolved.facts);
+        let facts = plan.facts("Outer").expect("Outer storage facts");
+
+        assert!(facts.constructor_self_escapes());
+        assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+    }
+
+    #[test]
     fn anonymous_object_capture_marks_mutated_factory_argument_shared_local() {
         let facts = facts_of(
             r#"
@@ -3065,6 +3284,56 @@ class ExternalName {}
             "ExternalName",
         );
         assert_eq!(facts.escape, Escape::UnknownBoundary);
+    }
+
+    #[test]
+    fn constructor_passing_this_to_unknown_boundary_plans_shared_sync_storage() {
+        let facts = facts_of(
+            r#"
+class Worker implements Runnable {
+    Thread thread;
+    int value;
+    Worker() { thread = new Thread(this); }
+    public void run() { value++; }
+}
+"#,
+            "Worker",
+        );
+
+        assert_eq!(facts.escape, Escape::UnknownBoundary);
+        assert!(facts.threaded);
+        assert!(facts.mutated);
+        assert!(facts.constructor_self_escapes());
+        assert_eq!(facts.strategy(), StorageStrategy::SharedSync);
+        assert_eq!(facts.placement(), StoragePlacement::new(true, true, true));
+    }
+
+    #[test]
+    fn inherited_constructor_passing_this_after_super_preserves_escape_fact() {
+        let facts = facts_of(
+            r#"
+class Parser {
+    Parser(Object parser) {}
+}
+class Worker extends Parser implements Runnable {
+    Thread thread;
+    int value;
+    Worker(Object parser) {
+        super(parser);
+        thread = new Thread(this);
+        thread.start();
+    }
+    public void run() { value++; }
+}
+"#,
+            "Worker",
+        );
+
+        assert_eq!(facts.escape, Escape::UnknownBoundary);
+        assert!(facts.threaded);
+        assert!(facts.mutated);
+        assert!(facts.constructor_self_escapes());
+        assert_eq!(facts.strategy(), StorageStrategy::SharedSync);
     }
 
     #[test]

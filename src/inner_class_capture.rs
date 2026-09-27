@@ -80,6 +80,59 @@ pub(crate) fn constructed_outer_this_inner_classes(
     found
 }
 
+/// Whether evaluating `block` constructs a non-static inner class whose
+/// enclosing instance is `outer_type`.
+///
+/// This is an identity requirement, not merely a lowering detail: when a
+/// constructor reaches such an allocation (possibly through a same-receiver
+/// method), the outer object must already live behind its final shared handle.
+/// Keep the predicate with capture analysis so storage planning and lowering
+/// cannot invent different definitions of "needs the outer identity".
+pub(crate) fn block_constructs_inner_for_outer(
+    block: &Block,
+    outer_type: &str,
+    facts: &FactSet,
+) -> bool {
+    let mut found = false;
+    crate::semantic_analysis::walk_block_exprs(block, &mut |expr| {
+        if found {
+            return;
+        }
+        let Expr::New { ty, resolved, .. } = expr else {
+            return;
+        };
+        let constructed = resolved
+            .as_ref()
+            .map(|resolved| resolved.declaring_type.as_str())
+            .or_else(|| java_type_name(ty));
+        let Some(constructed) = constructed else {
+            return;
+        };
+        found = constructed_inner_outer_matches(constructed, outer_type, facts)
+            || (!constructed.contains('.')
+                && constructed_inner_outer_matches(
+                    &format!("{outer_type}.{constructed}"),
+                    outer_type,
+                    facts,
+                ));
+    });
+    found
+}
+
+fn constructed_inner_outer_matches(
+    constructed_type: &str,
+    outer_type: &str,
+    facts: &FactSet,
+) -> bool {
+    facts
+        .captures
+        .outer_this_type_for_type(constructed_type)
+        .is_some_and(|constructed_outer| {
+            crate::stdlib::canonical_external_receiver_type_key(constructed_outer)
+                == crate::stdlib::canonical_external_receiver_type_key(outer_type)
+        })
+}
+
 /// Reports each as `inner_class_construction_panics`.
 ///
 /// A warning accompanies the generated unsupported-feature handoff so corpus

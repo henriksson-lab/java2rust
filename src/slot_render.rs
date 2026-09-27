@@ -5,7 +5,7 @@ use crate::facts::{
 use crate::java_ir::{JavaType, PrimitiveType, WildcardBound};
 use crate::java_naming::rust_name_for_java_named_type;
 use crate::representation::{RepresentationPlan, RepresentationProvenance};
-use crate::rust_ir::{RustExpr, RustType, rust_type_arg_projection_or_raw};
+use crate::rust_ir::{RustExpr, RustExprShape, RustType, rust_type_arg_projection_or_raw};
 use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::storage_strategy::StoragePlacement;
 use crate::types::optional_element_type;
@@ -179,6 +179,15 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
 ) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
     if let Some(element_ty) = shape.optional_element_type() {
+        if let JavaType::Named { name, args } = &element_ty
+            && args.is_empty()
+            && let Some(primitive) = boxed_primitive_storage_java_type(name, &effective_facts)
+        {
+            return RustType::Option(Box::new(rust_type_for_java_type_with_effective_facts(
+                &JavaType::Primitive(primitive),
+                &effective_facts,
+            )));
+        }
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
         // An owned Rust `Option` must store the array payload as `Vec<T>`;
@@ -251,11 +260,43 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 rust_type_for_slot_with_facts(shape, facts)
             }
         }
+        (_, _)
+            if matches!(
+                &shape.java_ty,
+                JavaType::Named { name, args }
+                    if crate::stdlib::external_facade_generic_carrier_arity(name)
+                        == Some(args.len())
+            ) =>
+        {
+            // A generated generic facade is itself the executable carrier.
+            // Conservative hierarchy dispatch may classify the external Java
+            // type as erased, but erasing here would discard the facade's
+            // payload parameter (for example `Future<T>`) and make its methods
+            // disagree with collection storage using the same Java type.
+            rust_type_for_java_type_with_facts_and_representations(
+                &shape.java_ty,
+                facts,
+                representations,
+            )
+        }
         (_, DispatchShape::Concrete) => {
             if external_final_facade_should_keep_named_type(&shape.java_ty, &effective_facts)
                 && let JavaType::Named { name, .. } = &shape.java_ty
             {
                 RustType::Named(rust_name_for_java_named_type(name))
+            } else if matches!(
+                &shape.java_ty,
+                JavaType::Named { name, .. } | JavaType::Unknown(name)
+                    if crate::stdlib::is_java_platform_facade_type_name(name)
+            ) {
+                // A concrete platform-facade constraint is authoritative: it
+                // was added only after source-name analysis established that
+                // the declaration refers to the modeled Java carrier (or a
+                // same-named source declaration, which must remain nominal as
+                // well). Re-projecting it through the corpus-wide hierarchy
+                // plan can erase an InputStream/OutputStream slot to Any even
+                // though its generated body calls the facade's methods.
+                rust_type_for_java_type_with_effective_facts(&shape.java_ty, &effective_facts)
             } else if crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some()
                 || matches!(shape.java_ty, JavaType::Array(_))
             {
@@ -321,6 +362,15 @@ pub fn rust_type_for_slot_with_effective_facts(
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
     if let Some(element_ty) = shape.optional_element_type() {
+        if let JavaType::Named { name, args } = &element_ty
+            && args.is_empty()
+            && let Some(primitive) = boxed_primitive_storage_java_type(name, facts)
+        {
+            return RustType::Option(Box::new(rust_type_for_java_type_with_effective_facts(
+                &JavaType::Primitive(primitive),
+                facts,
+            )));
+        }
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
         return RustType::Option(Box::new(rust_type_for_slot_with_effective_facts(
@@ -368,7 +418,10 @@ fn shared_handle_slot_rust_type_with_representations(
         shape.ownership,
         OwnershipShape::Owned | OwnershipShape::CopyValue
     ) || shape.optional_element_type().is_some()
-        || matches!(shape.dispatch, DispatchShape::ErasedObject)
+        || matches!(
+            shape.dispatch,
+            DispatchShape::ErasedObject | DispatchShape::ClosedEnum { .. }
+        )
     {
         return rendered;
     }
@@ -690,17 +743,107 @@ pub(crate) fn storage_placement_construction_expr(
     rendered: RustExpr,
 ) -> RustExpr {
     let rendered = recover_storage_placement_construction_expr(placement, rendered);
+    let rendered = relocate_result_projection_inside_storage(placement, rendered);
     if storage_placement_construction_expr_is_wrapped(placement, &rendered) {
         return rendered;
     }
+    let payload_was_result_propagated = rendered.recorded_shape()
+        == Some(RustExprShape::ResultPropagated)
+        || matches!(rendered.unshaped(), RustExpr::Try(_));
     let celled = placement
         .cell_path()
         .map(|cell| storage_wrapper_new_call_expr(cell, rendered.clone()))
         .unwrap_or(rendered);
-    placement
+    let constructed = placement
         .handle_path()
         .map(|handle| storage_wrapper_new_call_expr(handle, celled.clone()))
-        .unwrap_or(celled)
+        .unwrap_or(celled);
+    if payload_was_result_propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, constructed)
+    } else {
+        constructed
+    }
+}
+
+/// Shared-storage constructors are infallible adapters around their payload.
+/// If a later slot boundary has put `?` around an already constructed handle,
+/// move that projection back to the payload which can actually be a `Result`.
+/// This also makes storage construction idempotent across expression and slot
+/// lowering: `Handle(Cell(value?))?` must not become a nested handle.
+fn relocate_result_projection_inside_storage(
+    placement: StoragePlacement,
+    expr: RustExpr,
+) -> RustExpr {
+    match expr {
+        RustExpr::Shaped {
+            shape: RustExprShape::ResultPropagated,
+            actual,
+            expr,
+        } => {
+            let RustExpr::Try(wrapped) = *expr else {
+                return RustExpr::Shaped {
+                    shape: RustExprShape::ResultPropagated,
+                    actual,
+                    expr,
+                };
+            };
+            let Some(payload) = storage_placement_wrapped_payload(placement, (*wrapped).clone())
+            else {
+                return RustExpr::Shaped {
+                    shape: RustExprShape::ResultPropagated,
+                    actual,
+                    expr: Box::new(RustExpr::Try(wrapped)),
+                };
+            };
+            let payload = if matches!(payload.unshaped(), RustExpr::Try(_)) {
+                payload
+            } else {
+                RustExpr::Try(Box::new(payload))
+            };
+            RustExpr::Shaped {
+                shape: RustExprShape::ResultPropagated,
+                actual,
+                expr: Box::new(storage_placement_construction_expr(placement, payload)),
+            }
+        }
+        RustExpr::Try(wrapped) => {
+            let Some(payload) = storage_placement_wrapped_payload(placement, (*wrapped).clone())
+            else {
+                return RustExpr::Try(wrapped);
+            };
+            let payload = if matches!(payload.unshaped(), RustExpr::Try(_)) {
+                payload
+            } else {
+                RustExpr::Try(Box::new(payload))
+            };
+            storage_placement_construction_expr(placement, payload)
+        }
+        other => other,
+    }
+}
+
+fn storage_placement_wrapped_payload(
+    placement: StoragePlacement,
+    expr: RustExpr,
+) -> Option<RustExpr> {
+    let without_handle = match placement.handle_path() {
+        Some(handle) => storage_wrapper_new_call_inner(expr, handle)?,
+        None => expr,
+    };
+    match placement.cell_path() {
+        Some(cell) => storage_wrapper_new_call_inner(without_handle, cell),
+        None => Some(without_handle),
+    }
+}
+
+fn storage_wrapper_new_call_inner(expr: RustExpr, wrapper: &str) -> Option<RustExpr> {
+    let RustExpr::Call { function, mut args } = expr.into_unshaped() else {
+        return None;
+    };
+    if !rust_path_expr_matches(&function, wrapper, "new") || args.len() != 1 {
+        return None;
+    }
+    args.pop()
 }
 
 fn recover_storage_placement_construction_expr(
@@ -834,6 +977,21 @@ pub fn slot_default_value_policy_with_effective_facts(
         (OwnershipShape::Owned, ViewShape::Native, JavaType::Unknown(name))
             if external_crate_mapped_named_rust_type(name, &[], facts).is_some() =>
         {
+            SlotDefaultValuePolicy::DefaultTrait
+        }
+        (OwnershipShape::Owned, ViewShape::Native, ty)
+            if crate::stdlib::java_type_is_array_blocking_queue(ty)
+                || crate::stdlib::java_type_is_priority_queue(ty) =>
+        {
+            SlotDefaultValuePolicy::DefaultTrait
+        }
+        (OwnershipShape::Owned, ViewShape::Native, ty)
+            if crate::stdlib::java_collection_kind_for_type(ty)
+                .is_some_and(|kind| !matches!(kind, crate::stdlib::JavaCollectionKind::List)) =>
+        {
+            // Sequence capability does not imply a Vec carrier. Queues, sets,
+            // and maps have distinct native/facade carriers; `Default` creates
+            // their empty value without guessing the representation.
             SlotDefaultValuePolicy::DefaultTrait
         }
         (OwnershipShape::Owned, ViewShape::Native, _) if content.sequence_element().is_some() => {
@@ -1015,6 +1173,14 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
             kind if kind.is_map_like() => {}
             _ => {}
         }
+    }
+
+    if let Some(ty) = rust_type_for_external_generic_facade_with_representations(
+        ty,
+        &effective_facts,
+        representations,
+    ) {
+        return ty;
     }
 
     if let JavaType::Named { name, args } = ty
@@ -1704,6 +1870,15 @@ fn boxed_primitive_storage_java_type(
     {
         return None;
     }
+    if !name.contains('.') && !name.contains('$') {
+        // Unqualified wrapper names are the implicitly imported java.lang
+        // types unless resolution recorded a parsed source declaration above.
+        // Requiring a separate built-in capability fact here made nullable
+        // method/constructor parameters such as Integer render as
+        // Option<Box<dyn Any>>, even though direct and collection slots already
+        // use the scalar carrier.
+        return Some(primitive);
+    }
     facts
         .type_capability_overrides_for(&java_ty)
         .any(|fact| fact.provenance == FactProvenance::BuiltinExternalModel)
@@ -1745,6 +1920,11 @@ fn rust_type_for_java_generic_arg_with_representations(
             ),
         ));
     }
+    if let Some(ty) =
+        rust_type_for_external_generic_facade_with_representations(ty, facts, representations)
+    {
+        return ty;
+    }
     if builtin_or_conservative_erased_external_representation(ty, representations)
         && let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty
     {
@@ -1761,6 +1941,28 @@ fn rust_type_for_java_generic_arg_with_representations(
         return storage_ty;
     }
     rust_type_for_java_generic_arg_with_effective_facts(ty, facts)
+}
+
+fn rust_type_for_external_generic_facade_with_representations(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> Option<RustType> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    let arity = crate::stdlib::external_facade_generic_carrier_arity(name)?;
+    if args.len() != arity {
+        return None;
+    }
+    Some(rust_generic_type(
+        rust_name_for_java_named_type(name),
+        args.iter()
+            .map(|arg| {
+                rust_type_for_java_generic_arg_with_representations(arg, facts, representations)
+            })
+            .collect(),
+    ))
 }
 
 fn source_map_entry_value_carrier_type(
@@ -2276,6 +2478,42 @@ mod tests {
     }
 
     #[test]
+    fn storage_placement_moves_result_projection_to_the_fallible_payload() {
+        let placement = StoragePlacement::new(true, true, false);
+        let wrapped = storage_placement_construction_expr(
+            placement,
+            RustExpr::Var("make_value()".to_string()),
+        );
+        let projected_after_storage = RustExpr::shaped(
+            RustExprShape::ResultPropagated,
+            RustExpr::Try(Box::new(wrapped)),
+        );
+
+        let normalized = storage_placement_construction_expr(placement, projected_after_storage);
+
+        assert_eq!(
+            crate::emit::emit_expr(&normalized),
+            "std::rc::Rc::new(std::cell::RefCell::new(make_value()?))"
+        );
+
+        let payload_already_projected = storage_placement_construction_expr(
+            placement,
+            RustExpr::Try(Box::new(RustExpr::Var("make_value()".to_string()))),
+        );
+        let redundantly_projected = RustExpr::shaped(
+            RustExprShape::ResultPropagated,
+            RustExpr::Try(Box::new(payload_already_projected)),
+        );
+        assert_eq!(
+            crate::emit::emit_expr(&storage_placement_construction_expr(
+                placement,
+                redundantly_projected,
+            )),
+            "std::rc::Rc::new(std::cell::RefCell::new(make_value()?))"
+        );
+    }
+
+    #[test]
     fn storage_placement_type_builds_nested_generics_structurally() {
         let ty = storage_placement_type(
             StoragePlacement::new(true, true, false),
@@ -2387,6 +2625,29 @@ mod tests {
                 "optional {java_name}"
             );
         }
+    }
+
+    #[test]
+    fn nullable_unqualified_boxed_primitive_slot_renders_as_optional_scalar() {
+        let shape = RustSlotShape {
+            java_ty: crate::types::optional_java_type(JavaType::Named {
+                name: "Integer".to_string(),
+                args: Vec::new(),
+            }),
+            ownership: OwnershipShape::Owned,
+            view: ViewShape::Native,
+            dispatch: DispatchShape::ErasedObject,
+            mutability: crate::slot_shape::MutabilityShape::Immutable,
+        };
+
+        assert_eq!(
+            rust_type_for_slot_with_facts_and_representations(
+                &shape,
+                &FactSet::default(),
+                &RepresentationPlan::default(),
+            ),
+            RustType::Option(Box::new(RustType::I32))
+        );
     }
 
     #[test]

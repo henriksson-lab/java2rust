@@ -161,6 +161,79 @@ fn focused_package_source_type_stub_stripping_is_separate_from_shared_support() 
 }
 
 #[test]
+fn focused_package_reconciles_source_surfaces_once_after_shared_merge() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+    let invocation = "restore_missing_source_type_items \"$rust_path\" \"$raw_generated_backup_dir/$(basename \"$rust_path\")\"";
+
+    assert_eq!(script.matches(invocation).count(), 1, "{script}");
+    let merge = script
+        .find("python3 \"$repo_root/scripts/merge-shared-support-facades.py\"")
+        .expect("shared facade merge invocation");
+    let reconcile = script
+        .find(invocation)
+        .expect("source reconciliation invocation");
+    assert!(reconcile > merge, "source reconciliation must follow merge");
+}
+
+#[test]
+fn focused_package_does_not_restore_methods_twice_with_missing_nominal_type() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("surface_owned_names = source_owned_names - missing_names"),
+        "{script}"
+    );
+    assert!(
+        script.contains("inherent_method_names(current_lines_for_surface, surface_owned_names)"),
+        "{script}"
+    );
+    assert!(
+        script.contains("if target in surface_owned_names and key not in existing_traits:"),
+        "{script}"
+    );
+}
+
+#[test]
+fn focused_package_preserves_source_hierarchy_carriers_and_conversions() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(script.contains("post_primary_names.add(name)"), "{script}");
+    assert!(
+        script.contains("or match.group(2) in post_primary_names"),
+        "{script}"
+    );
+    assert!(
+        script.contains("source_match.group(1) in source_owned_names"),
+        "{script}"
+    );
+    assert!(
+        script.contains("and target not in shared_names"),
+        "{script}"
+    );
+    assert!(
+        script.contains("source_surface_chunks.append(\"\".join(raw_lines[index:end]))"),
+        "{script}"
+    );
+}
+
+#[test]
+fn focused_package_shared_iterator_matches_fallible_runtime_abi() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(script.contains("pub fn next_result(&mut self) -> Result<T, JavaException>"));
+    assert!(script.contains("pub fn remove_result(&mut self) -> Result<(), JavaException>"));
+    assert!(script.contains("Java iterator has no more elements"));
+}
+
+#[test]
 fn focused_package_prelude_restore_keeps_top_level_helper_dependencies() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
@@ -176,12 +249,37 @@ fn focused_package_prelude_restore_keeps_top_level_helper_dependencies() {
 }
 
 #[test]
+fn focused_package_prelude_restore_treats_shared_imports_as_satisfied() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(script.contains("def imported_top_level_names"), "{script}");
+    assert!(
+        script.contains("present_functions.update(imported_top_level_names(current_lines))"),
+        "{script}"
+    );
+    assert!(
+        script.contains("present_functions.update(shared_types)"),
+        "{script}"
+    );
+}
+
+#[test]
 fn focused_package_source_restore_keeps_referenced_static_storage() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
     let script = fs::read_to_string(script_path).unwrap();
 
     assert!(script.contains("static_re = re.compile"), "{script}");
+    assert!(
+        script.contains("static_reference_text = current + \"\".join(source_surface_chunks)"),
+        "{script}"
+    );
+    assert!(
+        script.contains("final_static_names = {") && script.contains("missing_static_chunks = ["),
+        "{script}"
+    );
     assert!(script.contains("referenced_static_names = {"), "{script}");
     assert!(
         script.contains(
@@ -579,6 +677,70 @@ pub struct UseColorTarget;
             .unwrap()
             .contains("impl VCFConstants"),
         "merged support impl should be removed from source module"
+    );
+}
+
+#[test]
+fn shared_support_merger_selects_constructor_arity_used_by_generated_calls() {
+    let dir = unique_temp_dir("shared_support_constructor_arity");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    let facade = r#"
+#[derive(Clone, Debug, Default)]
+pub struct SummaryValue;
+
+impl SummaryValue {
+    pub fn new() -> Self { Self }
+}
+
+impl SummaryValue {
+    pub fn new<T0, T1>(_arg0: T0, _arg1: T1) -> Self {
+        unimplemented!("source-summary constructor")
+    }
+}
+"#;
+    fs::write(
+        generated_dir.join("00001_UseSummary.rs"),
+        format!(
+            "{facade}\npub struct UseSummary;\nimpl UseSummary {{ pub fn make() -> SummaryValue {{ SummaryValue::new(1, nested(2, 3)) }} }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_OtherUse.rs"),
+        format!("{facade}\npub struct OtherUse;\n"),
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(
+        shared.contains("pub fn new<T0, T1>(_arg0: T0, _arg1: T1)")
+            && !shared.contains("pub fn new() -> Self"),
+        "{shared}"
     );
 }
 
@@ -1324,15 +1486,15 @@ fn java_already_shared_helper() -> i32 {
     assert!(shared.contains("pub struct StringBuffer"), "{shared}");
     assert!(shared.contains("pub struct Pattern"), "{shared}");
     assert!(
-        shared.contains("fn java_string_buffer_set_length"),
+        shared.contains("pub(crate) fn java_string_buffer_set_length"),
         "{shared}"
     );
     assert!(
-        shared.contains("fn java_string_buffer_byte_index"),
+        shared.contains("pub(crate) fn java_string_buffer_byte_index"),
         "{shared}"
     );
     assert!(
-        shared.contains("fn java_string_buffer_multiline_helper"),
+        shared.contains("pub(crate) fn java_string_buffer_multiline_helper"),
         "{shared}"
     );
     assert!(
@@ -1340,7 +1502,7 @@ fn java_already_shared_helper() -> i32 {
         "{shared}"
     );
     assert!(
-        shared.contains("fn java_existing_shared_helper"),
+        shared.contains("pub(crate) fn java_existing_shared_helper"),
         "{shared}"
     );
     assert_eq!(
@@ -1348,11 +1510,29 @@ fn java_already_shared_helper() -> i32 {
         1,
         "{shared}"
     );
-    assert!(shared.contains("fn java_pattern_matches"), "{shared}");
     assert!(
-        shared.contains("fn java_pattern_simple_regex_literal"),
+        shared.contains("pub(crate) fn java_pattern_matches"),
         "{shared}"
     );
+    assert!(
+        shared.contains("pub(crate) fn java_pattern_simple_regex_literal"),
+        "{shared}"
+    );
+    let shared_type_names = fs::read_to_string(shared_types).unwrap();
+    for helper in [
+        "java_string_buffer_set_length",
+        "java_string_buffer_byte_index",
+        "java_string_buffer_multiline_helper",
+        "java_existing_shared_helper",
+        "java_already_shared_helper",
+        "java_pattern_matches",
+        "java_pattern_simple_regex_literal",
+    ] {
+        assert!(
+            shared_type_names.lines().any(|name| name == helper),
+            "missing {helper} from shared import manifest:\n{shared_type_names}"
+        );
+    }
 
     for file in ["00001_UseA.rs", "00002_UseB.rs"] {
         let source = fs::read_to_string(generated_dir.join(file)).unwrap();
@@ -1364,6 +1544,323 @@ fn java_already_shared_helper() -> i32 {
         );
         assert!(!source.contains("fn java_pattern_matches"), "{source}");
     }
+}
+
+#[test]
+fn shared_support_manifest_restores_single_module_trait_and_impls() {
+    let dir = unique_temp_dir("shared_support_manifest_single_module");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseValue.rs"),
+        r#"
+pub trait SharedValue {
+    fn value(&self) -> i32;
+}
+
+impl SharedValue for i32 {
+    fn value(&self) -> i32 { *self }
+}
+
+pub struct UseValue;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(&shared_support, "").unwrap();
+    fs::write(&shared_types, "SharedValue\n").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(shared.contains("pub trait SharedValue"), "{shared}");
+    assert!(shared.contains("impl SharedValue for i32"), "{shared}");
+    let module = fs::read_to_string(generated_dir.join("00001_UseValue.rs")).unwrap();
+    assert!(!module.contains("pub trait SharedValue"), "{module}");
+    assert!(!module.contains("impl SharedValue for i32"), "{module}");
+}
+
+#[test]
+fn shared_support_seed_closes_nominal_trait_dependencies() {
+    let dir = unique_temp_dir("shared_support_seed_nominal_closure");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseValue.rs"),
+        r#"
+pub trait SharedValue {
+    fn value(&self) -> i32;
+}
+
+impl SharedValue for i32 {
+    fn value(&self) -> i32 { *self }
+}
+
+pub struct UseValue;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        "pub fn read_shared<T: SharedValue>(value: &T) -> i32 { value.value() }\n",
+    )
+    .unwrap();
+    fs::write(&shared_types, "").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(shared.contains("pub trait SharedValue"), "{shared}");
+    assert!(shared.contains("impl SharedValue for i32"), "{shared}");
+    let shared_names = fs::read_to_string(shared_types).unwrap();
+    assert!(
+        shared_names.lines().any(|name| name == "SharedValue"),
+        "{shared_names}"
+    );
+}
+
+#[test]
+fn promoted_helper_closes_its_nominal_trait_dependencies() {
+    let dir = unique_temp_dir("promoted_helper_nominal_closure");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseValue.rs"),
+        r#"
+pub trait SharedValue {
+    fn value(&self) -> i32;
+}
+
+impl SharedValue for i32 {
+    fn value(&self) -> i32 { *self }
+}
+
+pub fn read_shared<T: SharedValue>(value: &T) -> i32 { value.value() }
+
+pub struct UseValue;
+
+impl UseValue {
+    pub fn read() -> i32 { read_shared(&7) }
+}
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(&shared_support, "").unwrap();
+    fs::write(&shared_types, "").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(shared.contains("pub fn read_shared"), "{shared}");
+    assert!(shared.contains("pub trait SharedValue"), "{shared}");
+    assert!(shared.contains("impl SharedValue for i32"), "{shared}");
+    let shared_names = fs::read_to_string(shared_types).unwrap();
+    for name in ["read_shared", "SharedValue"] {
+        assert!(
+            shared_names.lines().any(|candidate| candidate == name),
+            "missing {name}:\n{shared_names}"
+        );
+    }
+}
+
+#[test]
+fn nominal_closure_keeps_aliased_nested_source_type_in_its_module() {
+    let dir = unique_temp_dir("nominal_closure_nested_source_owner");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_Outer.rs"),
+        r#"
+pub struct Outer_Child;
+pub type Child = Outer_Child;
+
+impl std::fmt::Display for Outer_Child {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("child")
+    }
+}
+
+pub fn nested_value() -> Outer_Child { Outer_Child }
+
+pub struct Outer;
+
+impl Outer {
+    pub fn child() -> Outer_Child { nested_value() }
+}
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    // Model an earlier assembly phase that seeded a summary facade but failed
+    // to add it to the shared-type manifest. Structural source ownership must
+    // still override both the stale declaration and all associated impls.
+    fs::write(
+        &shared_support,
+        r#"
+pub struct Outer_Child;
+impl Outer_Child {
+    pub fn summary_only(&self) -> i32 { 0 }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(output.status.success(), "{:?}", output);
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(!shared.contains("pub struct Outer_Child"), "{shared}");
+    assert!(!shared.contains("summary_only"), "{shared}");
+    let module = fs::read_to_string(generated_dir.join("00001_Outer.rs")).unwrap();
+    assert!(module.contains("pub struct Outer_Child"), "{module}");
+    assert!(module.contains("pub type Child = Outer_Child"), "{module}");
+    assert!(
+        module.contains("impl std::fmt::Display for Outer_Child"),
+        "{module}"
+    );
+}
+
+#[test]
+fn raw_source_ownership_preserves_nested_impls_after_structural_alias_is_stripped() {
+    let dir = unique_temp_dir("raw_nested_source_ownership");
+    let generated_dir = dir.join("generated");
+    let raw_dir = dir.join("raw");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::create_dir_all(&raw_dir).unwrap();
+
+    let raw = r#"
+pub struct Outer_Child;
+pub type Child = Outer_Child;
+
+impl std::fmt::Display for Outer_Child {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("child")
+    }
+}
+
+pub struct Outer;
+"#;
+    fs::write(raw_dir.join("00001_Outer.rs"), raw).unwrap();
+    // Earlier assembly passes are allowed to remove compatibility aliases.
+    // The raw translator output remains the authoritative ownership record.
+    fs::write(
+        generated_dir.join("00001_Outer.rs"),
+        raw.replace("pub type Child = Outer_Child;\n", ""),
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(&shared_support, "").unwrap();
+    fs::write(&shared_types, "Outer_Child\n").unwrap();
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--merge-input-dir")
+        .arg(&raw_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(output.status.success(), "{:?}", output);
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(!shared.contains("Outer_Child"), "{shared}");
+    let module = fs::read_to_string(generated_dir.join("00001_Outer.rs")).unwrap();
+    assert!(module.contains("pub struct Outer_Child"), "{module}");
+    assert!(
+        module.contains("impl std::fmt::Display for Outer_Child"),
+        "{module}"
+    );
 }
 
 #[test]
@@ -3326,4 +3823,89 @@ pub struct SOURCE;
     let shared = fs::read_to_string(shared_support).unwrap();
     assert!(shared.contains("impl DeepElement for bool"), "{shared}");
     assert!(shared.contains("impl DeepElement for i32"), "{shared}");
+}
+
+#[test]
+fn shared_support_merger_preserves_monitor_state_and_qualified_sync_types() {
+    let dir = unique_temp_dir("shared_support_monitor_dependencies");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    let support = r#"
+#[derive(Default)]
+pub struct JavaMonitorState {
+    owner: Option<std::thread::ThreadId>,
+    depth: usize,
+}
+
+pub struct JavaMonitor {
+    state: std::sync::Mutex<JavaMonitorState>,
+    changed: std::sync::Condvar,
+}
+
+impl JavaMonitor {
+    pub const fn new() -> Self {
+        Self {
+            state: std::sync::Mutex::new(JavaMonitorState { owner: None, depth: 0 }),
+            changed: std::sync::Condvar::new(),
+        }
+    }
+}
+
+pub struct SOURCE;
+"#;
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        support.replace("SOURCE", "UseA"),
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        support.replace("SOURCE", "UseB"),
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert!(shared.contains("pub struct JavaMonitorState"), "{shared}");
+    assert!(
+        shared.contains("state: std::sync::Mutex<JavaMonitorState>"),
+        "{shared}"
+    );
+    assert!(shared.contains("changed: std::sync::Condvar"), "{shared}");
+
+    let compiled = Command::new("rustc")
+        .args(["--edition=2024", "--crate-type=lib"])
+        .arg(&shared_support)
+        .arg("-o")
+        .arg(dir.join("shared.rlib"))
+        .output()
+        .expect("compile merged monitor support");
+    assert!(
+        compiled.status.success(),
+        "merged monitor support did not compile: {}\n{shared}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
 }

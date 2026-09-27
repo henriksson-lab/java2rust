@@ -29,8 +29,8 @@ use new_java2rust::external_packs::{
     htsjdk_sam_writer_pack_facts, htsjdk_samtools_util_pack_facts,
     htsjdk_tribble_feature_pack_facts, htsjdk_tribble_index_pack_facts,
     htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts, iharder_base64_pack_facts,
-    intel_gkl_pack_facts, jackson_databind_pack_facts, jama_pack_facts, java_sql_pack_facts,
-    jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
+    intel_gkl_pack_facts, itadaki_bzip2_pack_facts, jackson_databind_pack_facts, jama_pack_facts,
+    java_sql_pack_facts, jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
     modeled_no_state_external_super_constructor, opencsv_pack_facts, org_json_pack_facts,
     parse_external_pack_manifest, picard_markduplicates_pack_facts, picard_metrics_pack_facts,
     picard_programgroups_pack_facts, picard_vcf_pack_facts, reflections_pack_facts,
@@ -20085,4 +20085,105 @@ fn analyze(source: &str) -> semantic_analysis::SemanticFacts {
     let parsed = parser::parse_java_source(source);
     let resolved = resolve::resolve_program(&parsed.program, parsed.diagnostics);
     semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &FactSet::default())
+}
+
+#[test]
+fn java_deflater_constants_have_primitive_values() {
+    for (field_name, expected) in [
+        ("DEFLATED", "8"),
+        ("DEFAULT_COMPRESSION", "-1"),
+        ("NO_FLUSH", "0"),
+        ("SYNC_FLUSH", "2"),
+    ] {
+        let field =
+            new_java2rust::external_packs::external_field_for("java.util.zip.Deflater", field_name)
+                .expect("modeled Deflater constant");
+        assert_eq!(
+            field.field_type,
+            Some(JavaType::Primitive(PrimitiveType::Int))
+        );
+        assert_eq!(
+            new_java2rust::external_packs::external_field_value_for("Deflater", field_name)
+                .expect("Deflater constant value")
+                .rust_value,
+            expected
+        );
+    }
+}
+
+#[test]
+fn java_deflater_state_methods_have_typed_effects() {
+    let needs_input = new_java2rust::external_packs::external_api_effect_for_receiver_with_arity(
+        Some("java.util.zip.Deflater"),
+        "needsInput",
+        Some(0),
+    )
+    .expect("Deflater.needsInput effect");
+    assert_eq!(
+        needs_input.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Boolean))
+    );
+
+    let deflate = new_java2rust::external_packs::external_api_effect_for_receiver_with_arity(
+        Some("JavaUtilZipDeflater"),
+        "deflate",
+        Some(4),
+    )
+    .expect("Deflater.deflate effect");
+    assert_eq!(
+        deflate.return_type,
+        Some(JavaType::Primitive(PrimitiveType::Int))
+    );
+}
+
+#[test]
+fn stream_wrapper_packs_expose_constructor_and_input_stream_upcast_contracts() {
+    let bzip_facts = itadaki_bzip2_pack_facts();
+    let bzip_constructor = bzip_facts
+        .external_constructor_for(
+            "BZip2InputStream",
+            &[
+                JavaType::Named {
+                    name: "java.io.InputStream".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Primitive(PrimitiveType::Boolean),
+            ],
+        )
+        .expect("Itadaki BZip2InputStream constructor contract");
+    assert_eq!(
+        bzip_constructor.arg_types,
+        vec![
+            JavaType::Named {
+                name: "java.io.InputStream".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ]
+    );
+    assert!(
+        external_conversion_adapter_for("BZip2InputStream", "InputStream").is_some(),
+        "Itadaki input streams must expose their Java InputStream carrier"
+    );
+    let bzip_output_constructor = bzip_facts
+        .external_constructor_for(
+            "BZip2OutputStream",
+            &[
+                JavaType::Named {
+                    name: "java.io.OutputStream".to_string(),
+                    args: Vec::new(),
+                },
+                JavaType::Primitive(PrimitiveType::Int),
+            ],
+        )
+        .expect("Itadaki BZip2OutputStream level constructor contract");
+    assert_eq!(bzip_output_constructor.arg_types.len(), 2);
+    assert!(
+        external_conversion_adapter_for("BZip2OutputStream", "OutputStream").is_some(),
+        "Itadaki output streams must expose their Java OutputStream carrier"
+    );
+    assert!(
+        external_conversion_adapter_for("ZipInputStream", "InputStream").is_some(),
+        "JDK zip input streams must expose their Java InputStream carrier"
+    );
 }
