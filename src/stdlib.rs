@@ -1658,6 +1658,15 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
             args: Vec::new(),
         }];
         facts.external_api_effect_facts.push(effect);
+        facts
+            .external_api_argument_effect_facts
+            .push(jdk_owned_argument_effect(
+                owner,
+                "get",
+                1,
+                0,
+                JavaType::Primitive(PrimitiveType::Int),
+            ));
 
         facts.facade_abi_facts.push(jdk_result_method_abi(
             owner,
@@ -1675,6 +1684,15 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
             args: Vec::new(),
         }];
         facts.external_api_effect_facts.push(effect);
+        facts
+            .external_api_argument_effect_facts
+            .push(jdk_owned_argument_effect(
+                owner,
+                "set",
+                1,
+                0,
+                JavaType::Primitive(PrimitiveType::Int),
+            ));
 
         let mut abi = jdk_result_method_abi(
             owner,
@@ -1694,6 +1712,24 @@ fn add_jdk_collection_abi_facts(facts: &mut FactSet) {
             args: Vec::new(),
         }];
         facts.external_api_effect_facts.push(effect);
+        facts
+            .external_api_argument_effect_facts
+            .push(jdk_owned_argument_effect(
+                owner,
+                "set",
+                2,
+                0,
+                JavaType::Primitive(PrimitiveType::Int),
+            ));
+        facts
+            .external_api_argument_effect_facts
+            .push(jdk_owned_argument_effect(
+                owner,
+                "set",
+                2,
+                1,
+                JavaType::Primitive(PrimitiveType::Boolean),
+            ));
 
         let mut abi = jdk_result_method_abi(
             owner,
@@ -1973,6 +2009,16 @@ fn add_jdk_platform_io_abi_facts(facts: &mut FactSet) {
         }
     }
     for owner in ["ClassLoader", "java.lang.ClassLoader"] {
+        for method in ["getSystemResourceAsStream", "get_system_resource_as_stream"] {
+            facts.facade_abi_facts.push(rust_stdlib_static_abi(
+                owner,
+                method,
+                1,
+                "ClassLoader::get_system_resource_as_stream",
+                vec![FacadeSlot::Owned],
+                FacadeSlot::Owned,
+            ));
+        }
         for method in ["getResource", "get_resource"] {
             facts.facade_abi_facts.push(jdk_option_method_abi(
                 owner,
@@ -2909,6 +2955,26 @@ fn jdk_instance_field_fact(
     }
 }
 
+fn jdk_owned_argument_effect(
+    owner: &str,
+    method_name: &str,
+    arg_count: usize,
+    parameter_index: usize,
+    parameter_type: JavaType,
+) -> ExternalApiArgumentEffectFact {
+    ExternalApiArgumentEffectFact {
+        method_name: method_name.to_string(),
+        receiver_type: Some(owner.to_string()),
+        arg_count: Some(arg_count),
+        parameter_index,
+        parameter_type: Some(parameter_type),
+        parameter_nullability: NullabilityState::DefinitelyNonNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+        provenance: FactProvenance::BuiltinExternalModel,
+    }
+}
+
 fn jdk_instance_api_fact(
     owner: &str,
     method_name: &str,
@@ -3209,6 +3275,7 @@ fn is_known_reader_type(name: &str) -> bool {
             | "LineNumberReader"
             | "FileReader"
             | "BufferedReader"
+            | "PrintStream"
             | "StringReader"
             | "InputStreamReader"
             | "CharArrayReader"
@@ -3787,6 +3854,19 @@ pub fn known_external_method_return_type(
                 name: "InputStream".to_string(),
                 args: Vec::new(),
             })
+        }
+        (Some("ClassLoader"), "getSystemResourceAsStream" | "get_system_resource_as_stream", 1) => {
+            Some(JavaType::Named {
+                name: "InputStream".to_string(),
+                args: Vec::new(),
+            })
+        }
+        (Some("Runtime"), "getRuntime" | "get_runtime", 0) => Some(JavaType::Named {
+            name: "Runtime".to_string(),
+            args: Vec::new(),
+        }),
+        (Some("Runtime"), "availableProcessors" | "available_processors", 0) => {
+            Some(JavaType::Primitive(PrimitiveType::Int))
         }
         (Some("URL"), "getFile" | "get_file", 0) => Some(JavaType::String),
         (Some("URL"), "toURI" | "to_u_r_i", 0) => Some(JavaType::Named {
@@ -6242,6 +6322,10 @@ impl ClassLoader {
         URL::new(path)
     }
 
+    pub fn get_system_resource_as_stream<S: Into<String>>(_path: S) -> InputStream {
+        InputStream::default()
+    }
+
     pub fn get_resource<S: Into<String>>(&self, path: S) -> Option<URL> {
         Some(URL::new(path))
     }
@@ -8381,6 +8465,33 @@ impl<T: PartialEq> std::iter::FromIterator<T> for JavaLinkedHashSet<T> {
     }
 }
 
+impl<T> IntoIterator for JavaLinkedHashSet<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.into_iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a JavaLinkedHashSet<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut JavaLinkedHashSet<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.entries.iter_mut()
+    }
+}
+
 impl<T: PartialEq + JavaArraysDeepToStringElement> std::fmt::Display for JavaLinkedHashSet<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&java_collection_to_string(&self.entries))
@@ -9875,12 +9986,193 @@ impl ClassLoader {
         URL::new(path)
     }
 
+    pub fn get_system_resource_as_stream<S: Into<String>>(_path: S) -> InputStream {
+        InputStream::default()
+    }
+
     pub fn get_resource<S: Into<String>>(&self, path: S) -> Option<URL> {
         Some(URL::new(path))
     }
 
     pub fn get_resource_as_stream<S: Into<String>>(&self, _path: S) -> Option<InputStream> {
         Some(InputStream::default())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct Runtime;
+
+impl Runtime {
+    pub fn get_runtime() -> Runtime {
+        Runtime
+    }
+
+    pub fn available_processors(&self) -> i32 {
+        std::thread::available_parallelism()
+            .map(|count| count.get() as i32)
+            .unwrap_or(1)
+    }
+}
+
+/// Value-backed model of `java.nio.charset.Charset`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Charset {
+    canonical_name: &'static str,
+}
+
+impl Charset {
+    pub const fn new(canonical_name: &'static str) -> Charset {
+        Charset { canonical_name }
+    }
+
+    pub fn name(&self) -> String { self.canonical_name.to_string() }
+    pub fn to_string(&self) -> String { self.name() }
+}
+
+impl Default for Charset {
+    fn default() -> Self { StandardCharsets::UTF_8 }
+}
+
+impl std::fmt::Display for Charset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.canonical_name)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct JavaNioCharsetStandardCharsets;
+
+pub type StandardCharsets = JavaNioCharsetStandardCharsets;
+
+impl JavaNioCharsetStandardCharsets {
+    pub const US_ASCII: Charset = Charset::new("US-ASCII");
+    pub const ISO_8859_1: Charset = Charset::new("ISO-8859-1");
+    pub const UTF_8: Charset = Charset::new("UTF-8");
+    pub const UTF_16BE: Charset = Charset::new("UTF-16BE");
+    pub const UTF_16LE: Charset = Charset::new("UTF-16LE");
+    pub const UTF_16: Charset = Charset::new("UTF-16");
+}
+
+#[derive(Clone)]
+pub struct CountDownLatch {
+    state: std::sync::Arc<(std::sync::Mutex<i64>, std::sync::Condvar)>,
+}
+
+impl CountDownLatch {
+    pub fn new<C: Into<i64>>(count: C) -> CountDownLatch {
+        let count = count.into();
+        assert!(count >= 0, "negative CountDownLatch count");
+        CountDownLatch {
+            state: std::sync::Arc::new((
+                std::sync::Mutex::new(count),
+                std::sync::Condvar::new(),
+            )),
+        }
+    }
+
+    pub fn count_down(&self) {
+        let (count, ready) = self.state.as_ref();
+        let mut count = count.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if *count == 0 {
+            return;
+        }
+        *count -= 1;
+        if *count == 0 {
+            ready.notify_all();
+        }
+    }
+
+    pub fn r#await(&self) -> Result<(), JavaException> {
+        let (count, ready) = self.state.as_ref();
+        let mut count = count.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        while *count != 0 {
+            count = ready
+                .wait(count)
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+        }
+        Ok(())
+    }
+
+    pub fn await_0(&self) -> Result<(), JavaException> { self.r#await() }
+
+    pub fn await_2<T0, T1>(&self, _timeout: T0, _unit: T1) -> Result<bool, JavaException> {
+        self.r#await()?;
+        Ok(true)
+    }
+
+    pub fn get_count(&self) -> i64 {
+        let (count, _) = self.state.as_ref();
+        *count.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Default for CountDownLatch {
+    fn default() -> Self { Self::new(0_i64) }
+}
+
+impl std::fmt::Debug for CountDownLatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CountDownLatch")
+            .field("count", &self.get_count())
+            .finish()
+    }
+}
+
+impl PartialEq for CountDownLatch {
+    fn eq(&self, other: &Self) -> bool { std::sync::Arc::ptr_eq(&self.state, &other.state) }
+}
+
+impl Eq for CountDownLatch {}
+
+impl std::hash::Hash for CountDownLatch {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(std::sync::Arc::as_ptr(&self.state), state);
+    }
+}
+
+impl std::fmt::Display for CountDownLatch {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.util.concurrent.CountDownLatch[Count = {}]", self.get_count())
+    }
+}
+
+pub type Properties = std::collections::HashMap<String, String>;
+
+pub trait JavaPropertiesExt {
+    fn load(&mut self, stream: InputStream) -> Result<(), JavaException>;
+    fn get_property<S: AsRef<str>>(&self, key: S) -> Option<String>;
+}
+
+impl JavaPropertiesExt for Properties {
+    fn load(&mut self, stream: InputStream) -> Result<(), JavaException> {
+        let mut bytes = Vec::new();
+        loop {
+            let byte = stream.read_0()?;
+            if byte < 0 {
+                break;
+            }
+            bytes.push(byte as u8);
+        }
+        let contents = String::from_utf8_lossy(&bytes);
+        for raw_line in contents.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                continue;
+            }
+            let separator = line.find(['=', ':']).unwrap_or(line.len());
+            let key = line[..separator].trim().to_string();
+            let value = if separator < line.len() {
+                line[separator + 1..].trim().to_string()
+            } else {
+                String::new()
+            };
+            self.insert(key, value);
+        }
+        Ok(())
+    }
+
+    fn get_property<S: AsRef<str>>(&self, key: S) -> Option<String> {
+        self.get(key.as_ref()).cloned()
     }
 }
 
@@ -10489,6 +10781,10 @@ impl BufferedReader {
         }
     }
 
+    pub fn new_1<R: Into<InputStreamReader>>(reader: R) -> BufferedReader {
+        Self::new(reader)
+    }
+
     pub fn new_2<R: Into<InputStreamReader>>(reader: R, _capacity: i32) -> BufferedReader {
         Self::new(reader)
     }
@@ -10506,6 +10802,578 @@ impl std::fmt::Display for BufferedReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "java.io.BufferedReader@0")
     }
+}
+
+enum JavaOutputTarget {
+    Memory(Vec<u8>),
+    File(std::fs::File),
+    Failed(String),
+}
+
+struct JavaOutputState {
+    target: JavaOutputTarget,
+    closed: bool,
+}
+
+/// Shared carrier for the stateful `java.io.OutputStream` family.
+///
+/// Java stream wrappers retain and delegate to the same sink. `Rc<RefCell<_>>`
+/// models that identity directly, so converting a concrete file or byte-array
+/// stream to its base type cannot silently replace the destination.
+#[derive(Clone)]
+pub struct OutputStream {
+    state: std::rc::Rc<std::cell::RefCell<JavaOutputState>>,
+}
+
+impl OutputStream {
+    fn memory() -> OutputStream {
+        OutputStream {
+            state: std::rc::Rc::new(std::cell::RefCell::new(JavaOutputState {
+                target: JavaOutputTarget::Memory(Vec::new()),
+                closed: false,
+            })),
+        }
+    }
+
+    fn from_path(path: String) -> OutputStream {
+        let target = match std::fs::File::create(std::path::Path::new(&path)) {
+            Ok(file) => JavaOutputTarget::File(file),
+            Err(error) => JavaOutputTarget::Failed(error.to_string()),
+        };
+        OutputStream {
+            state: std::rc::Rc::new(std::cell::RefCell::new(JavaOutputState {
+                target,
+                closed: false,
+            })),
+        }
+    }
+
+    fn write_bytes(&self, bytes: &[u8]) -> Result<(), JavaException> {
+        use std::io::Write as _;
+        let mut state = self.state.borrow_mut();
+        if state.closed {
+            return Err(JavaException::new("IOException", "stream closed".to_string()));
+        }
+        match &mut state.target {
+            JavaOutputTarget::Memory(output) => {
+                output.extend_from_slice(bytes);
+                Ok(())
+            }
+            JavaOutputTarget::File(output) => output
+                .write_all(bytes)
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Failed(message) => {
+                Err(JavaException::new("IOException", message.clone()))
+            }
+        }
+    }
+
+    pub fn write(&self, value: i32) -> Result<(), JavaException> { self.write_int(value) }
+
+    pub fn write_int(&self, value: i32) -> Result<(), JavaException> {
+        self.write_bytes(&[(value & 0xff) as u8])
+    }
+
+    pub fn write_1(&self, bytes: &[i8]) -> Result<(), JavaException> {
+        let bytes = bytes.iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+        self.write_bytes(&bytes)
+    }
+
+    pub fn write_3(
+        &self,
+        bytes: &[i8],
+        offset: i32,
+        length: i32,
+    ) -> Result<(), JavaException> {
+        if offset < 0 || length < 0 {
+            return Err(JavaException::new(
+                "IndexOutOfBoundsException",
+                "negative output buffer range".to_string(),
+            ));
+        }
+        let start = offset as usize;
+        let end = start.checked_add(length as usize).ok_or_else(|| {
+            JavaException::new(
+                "IndexOutOfBoundsException",
+                "output buffer range overflow".to_string(),
+            )
+        })?;
+        let bytes = bytes.get(start..end).ok_or_else(|| {
+            JavaException::new(
+                "IndexOutOfBoundsException",
+                "output buffer range out of bounds".to_string(),
+            )
+        })?;
+        self.write_1(bytes)
+    }
+
+    pub fn flush(&self) -> Result<(), JavaException> {
+        use std::io::Write as _;
+        let mut state = self.state.borrow_mut();
+        if state.closed {
+            return Err(JavaException::new("IOException", "stream closed".to_string()));
+        }
+        match &mut state.target {
+            JavaOutputTarget::Memory(_) => Ok(()),
+            JavaOutputTarget::File(output) => output
+                .flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Failed(message) => {
+                Err(JavaException::new("IOException", message.clone()))
+            }
+        }
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        use std::io::Write as _;
+        let mut state = self.state.borrow_mut();
+        if state.closed {
+            return Ok(());
+        }
+        let result = match &mut state.target {
+            // Closing a ByteArrayOutputStream has no effect in Java.
+            JavaOutputTarget::Memory(_) => Ok(()),
+            JavaOutputTarget::File(output) => output
+                .flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Failed(message) => {
+                Err(JavaException::new("IOException", message.clone()))
+            }
+        };
+        if !matches!(state.target, JavaOutputTarget::Memory(_)) {
+            state.closed = true;
+        }
+        result
+    }
+
+    fn memory_bytes(&self) -> Vec<i8> {
+        let state = self.state.borrow();
+        match &state.target {
+            JavaOutputTarget::Memory(bytes) => bytes.iter().map(|byte| *byte as i8).collect(),
+            _ => panic!("toByteArray called on a non-memory output stream"),
+        }
+    }
+}
+
+impl Default for OutputStream {
+    fn default() -> Self { Self::memory() }
+}
+
+impl std::fmt::Debug for OutputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OutputStream").finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for OutputStream {
+    fn eq(&self, other: &Self) -> bool { std::rc::Rc::ptr_eq(&self.state, &other.state) }
+}
+
+impl Eq for OutputStream {}
+
+impl std::hash::Hash for OutputStream {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(std::rc::Rc::as_ptr(&self.state), state);
+    }
+}
+
+impl std::fmt::Display for OutputStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.OutputStream@{:p}", std::rc::Rc::as_ptr(&self.state))
+    }
+}
+
+pub trait JavaIntoOutputStream {
+    fn into_output_stream(self) -> OutputStream;
+}
+
+impl JavaIntoOutputStream for OutputStream {
+    fn into_output_stream(self) -> OutputStream { self }
+}
+
+/// Exact-name carrier used when source code spells `java.io.OutputStream`.
+/// It remains a wrapper (rather than a type alias) so Rust's blanket
+/// `From<T> for T` does not collide with the Java upcast adapters.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct JavaIoOutputStream {
+    stream: OutputStream,
+}
+
+impl From<OutputStream> for JavaIoOutputStream {
+    fn from(stream: OutputStream) -> JavaIoOutputStream { JavaIoOutputStream { stream } }
+}
+
+impl From<JavaIoOutputStream> for OutputStream {
+    fn from(value: JavaIoOutputStream) -> OutputStream { value.stream }
+}
+
+impl JavaIntoOutputStream for JavaIoOutputStream {
+    fn into_output_stream(self) -> OutputStream { self.into() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FileOutputStream {
+    stream: OutputStream,
+}
+
+impl FileOutputStream {
+    pub fn new<P: JavaPathArg>(path: P) -> FileOutputStream {
+        FileOutputStream { stream: OutputStream::from_path(path.into_path_value()) }
+    }
+
+    pub fn write(&self, value: i32) -> Result<(), JavaException> { self.stream.write(value) }
+    pub fn write_int(&self, value: i32) -> Result<(), JavaException> { self.stream.write_int(value) }
+    pub fn write_1(&self, bytes: &[i8]) -> Result<(), JavaException> { self.stream.write_1(bytes) }
+    pub fn write_3(&self, bytes: &[i8], offset: i32, length: i32) -> Result<(), JavaException> {
+        self.stream.write_3(bytes, offset, length)
+    }
+    pub fn flush(&self) -> Result<(), JavaException> { self.stream.flush() }
+    pub fn close(&self) -> Result<(), JavaException> { self.stream.close() }
+}
+
+impl Default for FileOutputStream {
+    fn default() -> Self { Self { stream: OutputStream::default() } }
+}
+
+impl From<FileOutputStream> for OutputStream {
+    fn from(value: FileOutputStream) -> OutputStream { value.stream }
+}
+
+impl From<FileOutputStream> for JavaIoOutputStream {
+    fn from(value: FileOutputStream) -> JavaIoOutputStream { value.stream.into() }
+}
+
+impl JavaIntoOutputStream for FileOutputStream {
+    fn into_output_stream(self) -> OutputStream { self.into() }
+}
+
+/// Stateful model of `java.io.PrintStream`.
+///
+/// Java's print methods deliberately suppress I/O exceptions; callers inspect
+/// them through `checkError`. The existing `OutputStream` carrier preserves
+/// the identity of wrapped file and memory sinks, so PrintStream delegates to
+/// it rather than inventing a second output implementation.
+#[derive(Clone, Debug)]
+pub enum PrintStream {
+    Stdout,
+    Stderr,
+    Stream(OutputStream),
+}
+
+impl Default for PrintStream {
+    fn default() -> Self { Self::Stdout }
+}
+
+impl PartialEq for PrintStream {
+    fn eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Stdout, Self::Stdout) | (Self::Stderr, Self::Stderr) => true,
+            (Self::Stream(left), Self::Stream(right)) => left == right,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for PrintStream {}
+
+impl std::hash::Hash for PrintStream {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        if let Self::Stream(stream) = self { stream.hash(state); }
+    }
+}
+
+pub trait JavaIntoPrintStream {
+    fn into_print_stream(self) -> PrintStream;
+}
+
+/// Java print conversion at nullable reference boundaries. A null Java value
+/// is rendered as the literal `null`, unlike Rust's lack of `Display` for
+/// `Option<T>`.
+pub trait JavaPrintValue {
+    fn java_print_value(&self) -> String;
+}
+
+impl JavaPrintValue for bool {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for i8 {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for i16 {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for i32 {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for i64 {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for f32 {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for f64 {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for char {
+    fn java_print_value(&self) -> String { self.to_string() }
+}
+impl JavaPrintValue for String {
+    fn java_print_value(&self) -> String { self.clone() }
+}
+impl JavaPrintValue for &str {
+    fn java_print_value(&self) -> String { (*self).to_string() }
+}
+
+impl<T: JavaPrintValue> JavaPrintValue for Option<T> {
+    fn java_print_value(&self) -> String {
+        self.as_ref()
+            .map(JavaPrintValue::java_print_value)
+            .unwrap_or_else(|| "null".to_string())
+    }
+}
+
+impl JavaIntoPrintStream for PrintStream {
+    fn into_print_stream(self) -> PrintStream { self }
+}
+
+impl JavaIntoPrintStream for OutputStream {
+    fn into_print_stream(self) -> PrintStream { PrintStream::Stream(self) }
+}
+
+impl JavaIntoPrintStream for JavaIoOutputStream {
+    fn into_print_stream(self) -> PrintStream { PrintStream::Stream(self.into()) }
+}
+
+impl JavaIntoPrintStream for FileOutputStream {
+    fn into_print_stream(self) -> PrintStream { PrintStream::Stream(self.into()) }
+}
+
+impl JavaIntoPrintStream for File {
+    fn into_print_stream(self) -> PrintStream {
+        PrintStream::Stream(OutputStream::from_path(self.get_path()))
+    }
+}
+
+impl JavaIntoPrintStream for String {
+    fn into_print_stream(self) -> PrintStream {
+        PrintStream::Stream(OutputStream::from_path(self))
+    }
+}
+
+impl JavaIntoPrintStream for &str {
+    fn into_print_stream(self) -> PrintStream {
+        PrintStream::Stream(OutputStream::from_path(self.to_string()))
+    }
+}
+
+impl PrintStream {
+    pub fn new<T: JavaIntoPrintStream>(target: T) -> PrintStream {
+        target.into_print_stream()
+    }
+
+    fn write_text(&self, text: &str) -> Result<(), JavaException> {
+        use std::io::Write as _;
+        match self {
+            Self::Stdout => std::io::stdout()
+                .write_all(text.as_bytes())
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            Self::Stderr => std::io::stderr()
+                .write_all(text.as_bytes())
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            Self::Stream(stream) => stream.write_bytes(text.as_bytes()),
+        }
+    }
+
+    pub fn print<T: JavaPrintValue>(&self, value: T) { let _ = self.write_text(&value.java_print_value()); }
+    pub fn print_1<T: JavaPrintValue>(&self, value: T) { self.print(value); }
+    pub fn println<T: JavaPrintValue>(&self, value: T) { self.println_1(value); }
+    pub fn println_0(&self) { let _ = self.write_text("\n"); }
+    pub fn println_1<T: JavaPrintValue>(&self, value: T) {
+        let _ = self.write_text(&format!("{}\n", value.java_print_value()));
+    }
+
+    pub fn write<T: JavaPrintValue>(&self, value: T) { self.print(value); }
+    pub fn write_3(&self, bytes: &[i8], offset: i32, length: i32) {
+        if offset < 0 || length < 0 { return; }
+        let start = offset as usize;
+        let Some(end) = start.checked_add(length as usize) else { return; };
+        let Some(bytes) = bytes.get(start..end) else { return; };
+        let bytes = bytes.iter().map(|byte| *byte as u8).collect::<Vec<_>>();
+        let _ = match self {
+            Self::Stream(stream) => stream.write_bytes(&bytes),
+            Self::Stdout => {
+                use std::io::Write as _;
+                std::io::stdout().write_all(&bytes)
+                    .map_err(|error| JavaException::from_display("IOException", error))
+            }
+            Self::Stderr => {
+                use std::io::Write as _;
+                std::io::stderr().write_all(&bytes)
+                    .map_err(|error| JavaException::from_display("IOException", error))
+            }
+        };
+    }
+
+    pub fn printf<T1, T2, T3, T4, T5>(
+        &self,
+        format: String,
+        arg1: T1,
+        arg2: T2,
+        arg3: T3,
+        arg4: T4,
+        arg5: T5,
+    ) where
+        T1: JavaPrintValue,
+        T2: JavaPrintValue,
+        T3: JavaPrintValue,
+        T4: JavaPrintValue,
+        T5: JavaPrintValue,
+    {
+        let mut rendered = format;
+        for value in [
+            arg1.java_print_value(), arg2.java_print_value(), arg3.java_print_value(),
+            arg4.java_print_value(), arg5.java_print_value(),
+        ] {
+            if let Some(index) = rendered.find(|ch| ch == 's' || ch == 'd') {
+                if index > 0 && rendered.as_bytes()[index - 1] == b'%' {
+                    rendered.replace_range(index - 1..=index, &value);
+                }
+            }
+        }
+        self.print(rendered);
+    }
+
+    pub fn flush(&self) {
+        use std::io::Write as _;
+        let _ = match self {
+            Self::Stdout => std::io::stdout().flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            Self::Stderr => std::io::stderr().flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            Self::Stream(stream) => stream.flush(),
+        };
+    }
+
+    pub fn close(&self) {
+        if let Self::Stream(stream) = self { let _ = stream.close(); }
+    }
+
+    pub fn check_error(&self) -> bool {
+        match self {
+            Self::Stream(stream) => stream.flush().is_err(),
+            Self::Stdout => {
+                use std::io::Write as _;
+                std::io::stdout().flush().is_err()
+            }
+            Self::Stderr => {
+                use std::io::Write as _;
+                std::io::stderr().flush().is_err()
+            }
+        }
+    }
+
+    pub fn checkError(&self) -> bool { self.check_error() }
+}
+
+impl std::fmt::Display for PrintStream {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.PrintStream@0")
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct ByteArrayOutputStream {
+    stream: OutputStream,
+}
+
+impl ByteArrayOutputStream {
+    pub fn new() -> ByteArrayOutputStream { Self::default() }
+    pub fn write(&self, value: i32) -> Result<(), JavaException> { self.stream.write(value) }
+    pub fn write_int(&self, value: i32) -> Result<(), JavaException> { self.stream.write_int(value) }
+    pub fn write_1(&self, bytes: &[i8]) -> Result<(), JavaException> { self.stream.write_1(bytes) }
+    pub fn write_3(&self, bytes: &[i8], offset: i32, length: i32) -> Result<(), JavaException> {
+        self.stream.write_3(bytes, offset, length)
+    }
+    pub fn flush(&self) -> Result<(), JavaException> { self.stream.flush() }
+    pub fn close(&self) -> Result<(), JavaException> { Ok(()) }
+    pub fn to_byte_array(&self) -> Vec<i8> { self.stream.memory_bytes() }
+    pub fn to_string(&self) -> String {
+        String::from_utf8_lossy(
+            &self.to_byte_array().iter().map(|byte| *byte as u8).collect::<Vec<_>>()
+        ).into_owned()
+    }
+    pub fn to_string_0(&self) -> String { self.to_string() }
+    pub fn to_string_1<S: AsRef<str>>(&self, charset_name: S) -> Result<String, JavaException> {
+        let bytes = self
+            .to_byte_array()
+            .into_iter()
+            .map(|byte| byte as u8)
+            .collect::<Vec<_>>();
+        let charset = charset_name.as_ref().replace('_', "-").to_ascii_uppercase();
+        match charset.as_str() {
+            "UTF-8" | "UTF8" => Ok(String::from_utf8_lossy(&bytes).into_owned()),
+            "ISO-8859-1" | "ISO8859-1" => Ok(bytes.into_iter().map(char::from).collect()),
+            "US-ASCII" | "ASCII" => Ok(bytes
+                .into_iter()
+                .map(|byte| if byte.is_ascii() { char::from(byte) } else { '\u{fffd}' })
+                .collect()),
+            _ => Err(JavaException::new(
+                "UnsupportedEncodingException",
+                charset_name.as_ref().to_string(),
+            )),
+        }
+    }
+}
+
+impl From<ByteArrayOutputStream> for OutputStream {
+    fn from(value: ByteArrayOutputStream) -> OutputStream { value.stream }
+}
+
+impl From<ByteArrayOutputStream> for JavaIoOutputStream {
+    fn from(value: ByteArrayOutputStream) -> JavaIoOutputStream { value.stream.into() }
+}
+
+impl JavaIntoOutputStream for ByteArrayOutputStream {
+    fn into_output_stream(self) -> OutputStream { self.into() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct OutputStreamWriter {
+    stream: OutputStream,
+}
+
+impl OutputStreamWriter {
+    pub fn new<S: JavaIntoOutputStream>(stream: S) -> OutputStreamWriter {
+        OutputStreamWriter { stream: stream.into_output_stream() }
+    }
+
+    pub fn write<S: AsRef<str>>(&self, value: S) -> Result<(), JavaException> {
+        self.stream.write_bytes(value.as_ref().as_bytes())
+    }
+
+    pub fn flush(&self) -> Result<(), JavaException> { self.stream.flush() }
+    pub fn close(&self) -> Result<(), JavaException> { self.stream.close() }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct BufferedWriter {
+    writer: OutputStreamWriter,
+}
+
+impl BufferedWriter {
+    pub fn new(writer: OutputStreamWriter, _capacity: i32) -> BufferedWriter {
+        BufferedWriter { writer }
+    }
+
+    pub fn new_1(writer: OutputStreamWriter) -> BufferedWriter { BufferedWriter { writer } }
+
+    pub fn write<S: AsRef<str>>(&self, value: S) -> Result<(), JavaException> {
+        self.writer.write(value)
+    }
+
+    pub fn flush(&self) -> Result<(), JavaException> { self.writer.flush() }
+    pub fn close(&self) -> Result<(), JavaException> { self.writer.close() }
 }
 
 pub fn java_math_floor_div_i32_result(left: i32, right: i32) -> Result<i32, JavaException> {
@@ -10725,6 +11593,39 @@ pub mod logger {
     pub fn error<M: std::fmt::Display>(_message: M) {}
     pub fn trace<M: std::fmt::Display>(_message: M) {}
 }"#
+        .to_string(),
+    )
+}
+
+pub(crate) fn java_stream_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"/// An escaping Java stream. Java streams are single-use even when aliases of
+/// the stream object exist, so clones share the same optional backing store.
+/// Inline terminal pipelines remain ordinary Rust iterators; this carrier is
+/// only the representation at a Java `Stream<T>` value boundary.
+#[derive(Debug, Clone, Default)]
+pub struct JavaStream<T> {
+    items: std::rc::Rc<std::cell::RefCell<Option<Vec<T>>>>,
+}
+
+impl<T> JavaStream<T> {
+    pub fn from_iter<I: IntoIterator<Item = T>>(items: I) -> JavaStream<T> {
+        JavaStream {
+            items: std::rc::Rc::new(std::cell::RefCell::new(Some(
+                items.into_iter().collect(),
+            ))),
+        }
+    }
+
+    pub fn into_iter_once(&self) -> std::vec::IntoIter<T> {
+        self.items
+            .borrow_mut()
+            .take()
+            .unwrap_or_default()
+            .into_iter()
+    }
+}
+"#
         .to_string(),
     )
 }
@@ -13634,21 +14535,59 @@ pub fn java_value_hash_code<T: std::hash::Hash + ?Sized>(value: &T) -> i32 {
     hasher.finish() as i32
 }
 
-pub fn java_string_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+pub trait JavaStringSearchNeedle {
+    fn java_string_search_needle(&self) -> Option<String>;
+}
+
+impl JavaStringSearchNeedle for String {
+    fn java_string_search_needle(&self) -> Option<String> { Some(self.clone()) }
+}
+
+impl JavaStringSearchNeedle for &String {
+    fn java_string_search_needle(&self) -> Option<String> { Some((*self).clone()) }
+}
+
+impl JavaStringSearchNeedle for &str {
+    fn java_string_search_needle(&self) -> Option<String> { Some((*self).to_string()) }
+}
+
+impl JavaStringSearchNeedle for char {
+    fn java_string_search_needle(&self) -> Option<String> { Some(self.to_string()) }
+}
+
+impl JavaStringSearchNeedle for &char {
+    fn java_string_search_needle(&self) -> Option<String> { Some(self.to_string()) }
+}
+
+impl JavaStringSearchNeedle for i32 {
+    fn java_string_search_needle(&self) -> Option<String> {
+        u32::try_from(*self).ok().and_then(char::from_u32).map(|value| value.to_string())
+    }
+}
+
+impl JavaStringSearchNeedle for &i32 {
+    fn java_string_search_needle(&self) -> Option<String> {
+        (*self).java_string_search_needle()
+    }
+}
+
+pub fn java_string_index_of<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> i32 {
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
     value
         .as_ref()
-        .find(needle.as_ref())
+        .find(needle.as_str())
         .map(|index| index as i32)
         .unwrap_or(-1)
 }
 
-pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+pub fn java_string_index_of_from<V: AsRef<str>, N: JavaStringSearchNeedle>(
     value: V,
     needle: N,
     from_index: i32,
 ) -> i32 {
     let value = value.as_ref();
-    let needle = needle.as_ref();
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
+    let needle = needle.as_str();
     let from_index = from_index.max(0) as usize;
     if from_index >= value.len() {
         return if needle.is_empty() { value.len() as i32 } else { -1 };
@@ -13659,21 +14598,23 @@ pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
         .unwrap_or(-1)
 }
 
-pub fn java_string_last_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+pub fn java_string_last_index_of<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> i32 {
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
     value
         .as_ref()
-        .rfind(needle.as_ref())
+        .rfind(needle.as_str())
         .map(|index| index as i32)
         .unwrap_or(-1)
 }
 
-pub fn java_string_last_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+pub fn java_string_last_index_of_from<V: AsRef<str>, N: JavaStringSearchNeedle>(
     value: V,
     needle: N,
     from_index: i32,
 ) -> i32 {
     let value = value.as_ref();
-    let needle = needle.as_ref();
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
+    let needle = needle.as_str();
     if from_index < 0 {
         return -1;
     }
@@ -17687,6 +18628,14 @@ impl ExternalApiFacadeSupport {
                 method_owners.push(simple_owner_rust.clone());
             }
             for arg_count in &arities {
+                if imported_static_method_is_mockito_do_answer(&owner_key, method, *arg_count) {
+                    self.add_opaque_type("OrgMockitoInvocationInvocationOnMock".to_string());
+                    self.add_opaque_type("OrgMockitoStubbingStubber".to_string());
+                    self.add_method(
+                        "OrgMockitoStubbingStubber".to_string(),
+                        "    pub fn when<T0>(&self, _arg0: T0) -> T0 { unimplemented!(\"org.mockito.stubbing.Stubber.when is not modelled\") }".to_string(),
+                    );
+                }
                 if let Some(effect) = facts.external_api_effect_for_receiver_with_arity(
                     Some(&owner_key),
                     method,
@@ -19850,6 +20799,21 @@ impl ExternalApiFacadeSupport {
         facts: &FactSet,
         local_types: &BTreeSet<String>,
     ) {
+        // OutputStream is a stateful platform runtime, unlike the opaque
+        // external endpoints synthesized here.  Keep its adapter surface
+        // demand-driven: a global library-pack conversion must not introduce
+        // output wrappers (and references to the absent runtime carrier) into
+        // programs that never mention the source type.
+        let preexisting_surface_types = self
+            .opaque_types
+            .iter()
+            .chain(self.impls.keys())
+            .chain(self.fields.keys())
+            .chain(self.trait_type_names.iter())
+            .chain(self.aliases.keys())
+            .chain(self.aliases.values())
+            .cloned()
+            .collect::<BTreeSet<_>>();
         for adapter in facts
             .external_conversion_adapter_facts
             .iter()
@@ -19859,21 +20823,28 @@ impl ExternalApiFacadeSupport {
             let ExternalConversionAdapterKind::Into = adapter.kind;
             let from_key = canonical_external_receiver_type_key(&adapter.from_type);
             let to_key = canonical_external_receiver_type_key(&adapter.to_type);
-            if local_types.contains(&from_key)
-                || (local_types.contains(&to_key) && !is_builtin_external_facade_type(&to_key))
+            if local_type_set_matches_external_name(local_types, &adapter.from_type)
+                || local_type_set_matches_external_name(local_types, &from_key)
+                || (local_type_set_matches_external_name(local_types, &adapter.to_type)
+                    && !is_builtin_external_facade_type(&to_key))
             {
                 continue;
             }
             let from =
                 external_conversion_adapter_endpoint_rust_name(&adapter.from_type, &from_key);
             let to = external_conversion_adapter_endpoint_rust_name(&adapter.to_type, &to_key);
-            if local_types.contains(&from)
-                || (local_types.contains(&to) && !is_builtin_external_facade_type(&to_key))
+            if to == "OutputStream" && !preexisting_surface_types.contains(&from) {
+                continue;
+            }
+            if local_type_set_matches_external_name(local_types, &from)
+                || (local_type_set_matches_external_name(local_types, &to)
+                    && !is_builtin_external_facade_type(&to_key))
             {
                 continue;
             }
             if !valid_external_facade_type_ident(&from)
-                || (!valid_external_facade_type_ident(&to) && to != "InputStream")
+                || (!valid_external_facade_type_ident(&to)
+                    && !matches!(to.as_str(), "InputStream" | "OutputStream"))
                 || is_builtin_external_facade_type(&from)
                 || from == to
             {
@@ -19951,6 +20922,11 @@ impl ExternalApiFacadeSupport {
             }
             let from = rust_name_for_exact_jdk_stream_adapter_endpoint(from);
             let to = rust_name_for_exact_jdk_stream_adapter_endpoint(to);
+            if matches!(to.as_str(), "OutputStream" | "JavaIoOutputStream")
+                && !self.has_surface_type(&from)
+            {
+                continue;
+            }
             if (!valid_external_facade_type_ident(&to) && to != "InputStream") || from == to {
                 continue;
             }
@@ -20119,6 +21095,15 @@ impl ExternalApiFacadeSupport {
         }
 
         self.add_known_jdk_static_field_surfaces();
+        // The exact `java.io.OutputStream` ABI uses a distinct Rust carrier.
+        // A simple-name BufferedOutputStream is still a Java subtype of that
+        // exact type, so retain the bridge whenever the facade is present.
+        if self.has_surface_type("BufferedOutputStream") {
+            self.from_impls.insert((
+                "BufferedOutputStream".to_string(),
+                "JavaIoOutputStream".to_string(),
+            ));
+        }
         if self.uses_java_string_runtime_helpers
             && (self.impls.contains_key("Appendable")
                 || self.fields.contains_key("Appendable")
@@ -20363,8 +21348,8 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type("InputStream".to_string());
             self.add_opaque_type("PrintStream".to_string());
             for (field, rust_type, value) in [
-                ("out", "PrintStream", "PrintStream"),
-                ("err", "PrintStream", "PrintStream"),
+                ("out", "PrintStream", "PrintStream::Stdout"),
+                ("err", "PrintStream", "PrintStream::Stderr"),
                 ("r#in", "InputStream", "InputStream::empty()"),
             ] {
                 if !self.has_method_named("System", field) {
@@ -22219,6 +23204,10 @@ mod stdlib_support_item_tests {
         assert!(support.contains("impl From<&File> for std::path::PathBuf"));
         assert!(support.contains("impl AsRef<std::path::Path> for Path"));
         assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
+        assert!(support.contains("pub enum PrintStream"));
+        assert!(support.contains("pub trait JavaPrintValue"));
+        assert!(support.contains("impl<T: JavaPrintValue> JavaPrintValue for Option<T>"));
+        assert!(support.contains("pub fn println_1<T: JavaPrintValue>"));
     }
 
     #[test]
@@ -22839,8 +23828,16 @@ class ErasedAliasCaller {
         );
 
         assert!(
-            rendered.contains("impl From<FileInputStream> for InputStream"),
-            "{rendered}"
+            !rendered.contains("impl From<FileInputStream> for InputStream"),
+            "the external facade layer must not duplicate the runtime-modelled conversion:\n{rendered}"
+        );
+        let platform_runtime = crate::emit::emit_file(&crate::rust_ir::RustFile {
+            items: vec![java_platform_facade_support_item()],
+        });
+        assert!(
+            platform_runtime.contains("impl From<FileInputStream> for InputStream")
+                && platform_runtime.contains("value.stream"),
+            "the runtime platform surface must provide the state-preserving conversion:\n{platform_runtime}"
         );
         assert!(
             rendered.contains("impl From<InputStream> for JavaIoInputStream"),
@@ -22859,11 +23856,12 @@ class ErasedAliasCaller {
             "{rendered}"
         );
         assert!(
-            rendered.contains("impl From<OutputStream> for JavaIoOutputStream"),
-            "{rendered}"
+            !rendered.contains("impl From<OutputStream> for JavaIoOutputStream")
+                && platform_runtime.contains("impl From<OutputStream> for JavaIoOutputStream"),
+            "the stateful platform runtime, not the opaque facade, must own the exact-name output conversion:\n{rendered}\n{platform_runtime}"
         );
         assert!(
-            rendered.contains("impl From<JavaIoByteArrayOutputStream> for JavaIoOutputStream"),
+            !rendered.contains("impl From<JavaIoByteArrayOutputStream> for JavaIoOutputStream"),
             "{rendered}"
         );
 
@@ -22886,8 +23884,12 @@ class Base64 {
             &RepresentationPlan::default(),
         );
         assert!(
-            local_rendered.contains("impl From<JavaIoInputStream> for InputStream"),
-            "{local_rendered}"
+            !local_rendered.contains("impl From<JavaIoInputStream> for InputStream"),
+            "an unrelated nested source InputStream must not receive the java.io.InputStream conversion:\n{local_rendered}"
+        );
+        assert!(
+            local_rendered.contains("pub struct JavaIoInputStream"),
+            "the exact java.io.InputStream facade must remain available:\n{local_rendered}"
         );
 
         let exact_byte_array_program = crate::parser::parse_java_source(
@@ -25150,6 +26152,12 @@ fn external_facade_imported_static_method_with_facts(
     name: &str,
     arg_count: usize,
 ) -> String {
+    if imported_static_method_is_mockito_do_answer(owner_key, name, arg_count) {
+        let rust_name = rust_raw_ident_if_needed(name);
+        return format!(
+            "    pub fn {rust_name}<F>(_arg0: F) -> OrgMockitoStubbingStubber where F: FnOnce(OrgMockitoInvocationInvocationOnMock) -> Option<JavaPlainObject> {{ unimplemented!(\"org.mockito.Mockito.doAnswer is not modelled\") }}"
+        );
+    }
     if imported_static_method_returns_first_arg(owner_key, name, arg_count) {
         return external_facade_imported_static_first_arg_method(name, arg_count);
     }
@@ -25231,6 +26239,16 @@ fn external_facade_imported_static_method_with_facts(
         );
     }
     external_facade_imported_static_method(name, arg_count)
+}
+
+fn imported_static_method_is_mockito_do_answer(
+    owner_key: &str,
+    name: &str,
+    arg_count: usize,
+) -> bool {
+    crate::facts::external_type_name_matches(owner_key, "org.mockito.Mockito")
+        && matches!(name, "doAnswer" | "do_answer")
+        && arg_count == 1
 }
 
 fn imported_static_method_has_mutating_argument_effect(
@@ -25665,7 +26683,7 @@ fn source_summary_method_returns_param_index(method: &MethodDecl) -> Option<usiz
         .find_map(|(index, param)| (param.ty == method.return_type).then_some(index))
 }
 
-fn source_summary_method_body_calls_fallible_external(
+pub(crate) fn source_summary_method_body_calls_fallible_external(
     facts: &FactSet,
     method: &MethodDecl,
 ) -> bool {
@@ -26168,6 +27186,7 @@ fn is_known_java_platform_stream_type_name(name: &str) -> bool {
             | "Reader"
             | "InputStreamReader"
             | "BufferedReader"
+            | "PrintStream"
     ) || matches!(
         simple,
         "InputStream"
@@ -26721,11 +27740,13 @@ fn external_facade_new_builder_result_type(receiver_rust: &str) -> String {
 fn external_erased_object_trait_method(method: &ExternalErasedObjectMethod) -> String {
     let name = rust_method_ident_for_arity(&method.name, method.arg_count);
     let return_type = external_erased_object_method_return_type(method);
+    let sized_bound = external_erased_object_self_sized_bound(return_type);
     format!(
-        "    fn {}{} -> {};",
+        "    fn {}{} -> {}{};",
         name,
         external_facade_self_args_with_return_generics(method.arg_count, return_type),
-        return_type
+        return_type,
+        sized_bound,
     )
 }
 
@@ -26738,11 +27759,13 @@ fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> St
         } else {
             external_erased_object_default_expr(method, return_type)
         };
+    let sized_bound = external_erased_object_self_sized_bound(return_type);
     format!(
-        "    fn {}{} -> {} {{ {} }}",
+        "    fn {}{} -> {}{} {{ {} }}",
         name,
         external_facade_self_args_with_return_generics(method.arg_count, return_type),
         return_type,
+        sized_bound,
         body
     )
 }
@@ -26750,13 +27773,57 @@ fn external_erased_object_impl_method(method: &ExternalErasedObjectMethod) -> St
 fn external_erased_object_slice_impl_method(method: &ExternalErasedObjectMethod) -> String {
     let name = rust_method_ident_for_arity(&method.name, method.arg_count);
     let return_type = external_erased_object_method_return_type(method);
+    let sized_bound = external_erased_object_self_sized_bound(return_type);
     format!(
-        "    fn {}{} -> {} {{ {} }}",
+        "    fn {}{} -> {}{} {{ {} }}",
         name,
         external_facade_self_args_with_return_generics(method.arg_count, return_type),
         return_type,
+        sized_bound,
         external_erased_object_default_expr(method, return_type)
     )
+}
+
+fn external_erased_object_self_sized_bound(return_type: &str) -> &'static str {
+    // Java builder-style methods can be discovered first on an erased receiver
+    // and therefore retain `Self` as their facade return.  The facade is also
+    // implemented for slices so array receivers can share erased dispatch.
+    // Rust permits that combination only when methods returning `Self` are
+    // explicitly unavailable for unsized implementors.
+    if return_type == "Self" {
+        " where Self: Sized"
+    } else {
+        ""
+    }
+}
+
+#[cfg(test)]
+mod erased_object_unsized_facade_tests {
+    use super::*;
+
+    #[test]
+    fn methods_returning_self_are_sized_for_slice_facades() {
+        let method = ExternalErasedObjectMethod {
+            name: "setLevel".to_string(),
+            arg_count: 1,
+            return_type: "Self".to_string(),
+        };
+
+        assert!(external_erased_object_trait_method(&method).contains("where Self: Sized;"));
+        assert!(external_erased_object_slice_impl_method(&method).contains("where Self: Sized {"));
+    }
+
+    #[test]
+    fn ordinary_erased_methods_remain_callable_on_slices() {
+        let method = ExternalErasedObjectMethod {
+            name: "length".to_string(),
+            arg_count: 0,
+            return_type: "i32".to_string(),
+        };
+
+        assert!(!external_erased_object_trait_method(&method).contains("Self: Sized"));
+        assert!(!external_erased_object_slice_impl_method(&method).contains("Self: Sized"));
+    }
 }
 
 fn external_erased_object_method_return_type(method: &ExternalErasedObjectMethod) -> &str {
@@ -27629,6 +28696,12 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "AtomicLong"
             | "BitSet"
             | "ClassLoader"
+            | "Runtime"
+            | "Properties"
+            | "Charset"
+            | "StandardCharsets"
+            | "JavaNioCharsetStandardCharsets"
+            | "CountDownLatch"
             | "Locale"
             | "TimeUnit"
             | "DecimalFormat"
@@ -27641,6 +28714,13 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "BufferedInputStream"
             | "InputStreamReader"
             | "BufferedReader"
+            | "OutputStream"
+            | "JavaIoOutputStream"
+            | "FileOutputStream"
+            | "ByteArrayOutputStream"
+            | "OutputStreamWriter"
+            | "BufferedWriter"
+            | "PrintStream"
             | "logger"
             | "bool"
             | "i8"
@@ -27692,6 +28772,7 @@ fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
         ("InputStream", "JavaIoInputStream")
             | ("JavaIoInputStream", "InputStream")
             | ("OutputStream", "JavaIoOutputStream")
+            | ("BufferedOutputStream", "JavaIoOutputStream")
             | ("StringBuilder", "Appendable")
             | ("StringBuffer", "Appendable")
     ) || (to == "InputStream"
@@ -27707,6 +28788,16 @@ fn is_allowed_builtin_external_from_impl(from: &str, to: &str) -> bool {
                 | "PushbackInputStream"
                 | "SequenceInputStream"
         ))
+        || (to == "OutputStream"
+            && matches!(
+                from,
+                "BufferedOutputStream"
+                    | "FilterOutputStream"
+                    | "ObjectOutputStream"
+                    | "GZIPOutputStream"
+                    | "ZipOutputStream"
+                    | "PrintStream"
+            ))
 }
 
 fn builtin_external_from_impl_requires_surface(from: &str, to: &str) -> bool {
@@ -27719,7 +28810,14 @@ fn builtin_external_from_impl_requires_surface(from: &str, to: &str) -> bool {
 fn builtin_external_from_impl_is_runtime_modeled(from: &str, to: &str) -> bool {
     matches!(
         (from, to),
-        ("FileInputStream", "InputStream") | ("BufferedInputStream", "InputStream")
+        ("FileInputStream", "InputStream")
+            | ("BufferedInputStream", "InputStream")
+            | ("OutputStream", "JavaIoOutputStream")
+            | ("JavaIoOutputStream", "OutputStream")
+            | ("FileOutputStream", "OutputStream")
+            | ("ByteArrayOutputStream", "OutputStream")
+            | ("FileOutputStream", "JavaIoOutputStream")
+            | ("ByteArrayOutputStream", "JavaIoOutputStream")
     )
 }
 
@@ -28976,6 +30074,9 @@ fn static_constant_impl_lines(
             if constant.field_kind == ExternalFieldKind::NestedType {
                 return None;
             }
+            if runtime_modelled_static_constant(owner, field) {
+                return None;
+            }
             if declared_owners.contains(owner)
                 && !is_known_value_object_static_constant(owner, field)
                 && constant.provenance != FactProvenance::BuiltinExternalModel
@@ -29022,6 +30123,18 @@ fn static_constant_impl_lines(
         lines.push("    pub fn new() -> Self { Default::default() }".to_string());
     }
     lines
+}
+
+fn runtime_modelled_static_constant(owner: &str, field: &str) -> bool {
+    owner
+        .rsplit('.')
+        .next()
+        .unwrap_or(owner)
+        .ends_with("StandardCharsets")
+        && matches!(
+            canonical_external_field_name(field).as_str(),
+            "US_ASCII" | "ISO_8859_1" | "UTF_8" | "UTF_16BE" | "UTF_16LE" | "UTF_16"
+        )
 }
 
 fn static_constant_surface_already_emits_self_typed_value(
@@ -29183,7 +30296,8 @@ fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static 
         ("Math", "E") => Some("std::f64::consts::E"),
         ("Locale" | "JavaUtilLocale", "ENGLISH") => Some("Locale::new(\"en\")"),
         ("Locale" | "JavaUtilLocale", "US") => Some("Locale::new(\"en_US\")"),
-        ("System", "OUT" | "ERR") => Some("PrintStream"),
+        ("System", "OUT") => Some("PrintStream::Stdout"),
+        ("System", "ERR") => Some("PrintStream::Stderr"),
         ("System", "IN") => Some("InputStream::empty()"),
         ("GZIPInputStream" | "JavaUtilZipGZIPInputStream", "GZIP_MAGIC") => Some("0x8b1f"),
         ("TimeUnit" | "JavaUtilConcurrentTimeUnit", "NANOSECONDS") => {
@@ -29429,6 +30543,11 @@ pub(crate) fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.util.concurrent.atomic.AtomicLong"
                 | "java.util.BitSet"
                 | "java.lang.ClassLoader"
+                | "java.lang.Runtime"
+                | "java.util.Properties"
+                | "java.nio.charset.Charset"
+                | "java.nio.charset.StandardCharsets"
+                | "java.util.concurrent.CountDownLatch"
                 | "java.security.ProtectionDomain"
                 | "java.security.CodeSource"
                 | "java.awt.image.BufferedImage"
@@ -29495,6 +30614,11 @@ fn program_declares_java_platform_facade_support_type(program: &Program) -> bool
                 | "AtomicLong"
                 | "BitSet"
                 | "ClassLoader"
+                | "Runtime"
+                | "Properties"
+                | "Charset"
+                | "StandardCharsets"
+                | "CountDownLatch"
                 | "BufferedImage"
                 | "Graphics"
                 | "Graphics2D"
@@ -29689,7 +30813,12 @@ fn expr_uses_java_platform_facades(expr: &Expr) -> bool {
                     .is_some_and(expr_uses_java_platform_facades)
                 || args.iter().any(expr_uses_java_platform_facades)
         }
-        Expr::FieldAccess(receiver, _) => expr_uses_java_platform_facades(receiver),
+        Expr::FieldAccess(receiver, field) => {
+            matches!(receiver.as_ref(), Expr::Var(owner)
+                if canonical_external_receiver_type_key(owner) == "System"
+                    && matches!(field.as_str(), "out" | "err" | "OUT" | "ERR"))
+                || expr_uses_java_platform_facades(receiver)
+        }
         Expr::ArrayAccess(array, index) => {
             expr_uses_java_platform_facades(array) || expr_uses_java_platform_facades(index)
         }
@@ -29772,9 +30901,13 @@ fn expr_is_java_platform_static_call(receiver: &Expr, name: &str, args: &[Expr])
         (receiver_key, name, args.len()),
         (
             "ClassLoader",
-            "getSystemResource" | "get_system_resource",
+            "getSystemResource"
+                | "get_system_resource"
+                | "getSystemResourceAsStream"
+                | "get_system_resource_as_stream",
             1
-        ) | ("Arrays", "toString" | "to_string", 1)
+        ) | ("Runtime", "getRuntime" | "get_runtime", 0)
+            | ("Arrays", "toString" | "to_string", 1)
             | (
                 "Math",
                 "max"
@@ -29869,6 +31002,11 @@ pub(crate) fn is_java_platform_facade_type_name(name: &str) -> bool {
             | "AtomicLong"
             | "BitSet"
             | "ClassLoader"
+            | "Runtime"
+            | "Properties"
+            | "Charset"
+            | "StandardCharsets"
+            | "CountDownLatch"
             | "Serializable"
             | "BufferedImage"
             | "Component"

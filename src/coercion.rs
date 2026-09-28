@@ -842,6 +842,22 @@ pub fn apply_coercions(mut expr: RustExpr, coercions: &[Coercion]) -> RustExpr {
 }
 
 pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> RustExpr {
+    if expr.recorded_slot_shape().is_some_and(|produced| {
+        slot_shapes_match_ignoring_identity(produced, plan.target())
+            || (expr.recorded_shape() == Some(RustExprShape::OptionalProjected)
+                && plan
+                    .target()
+                    .optional_element_type()
+                    .is_some_and(|element_ty| {
+                        let target_element = crate::conversion_plan::optional_element_slot_shape(
+                            plan.target(),
+                            element_ty,
+                        );
+                        slot_shapes_match_ignoring_identity(produced, &target_element)
+                    }))
+    }) {
+        return expr;
+    }
     if expr.recorded_shape() == Some(RustExprShape::OptionalConstructed)
         && matches!(plan.dispatch(), DispatchCoercionPolicy::EraseObject)
     {
@@ -918,7 +934,7 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
     if let Some(projected) = apply_borrowed_set_slice_view(expr.clone(), plan) {
         return projected;
     }
-    if let Some(projected) = apply_map_carrier_conversion(expr.clone(), plan) {
+    if let Some(projected) = apply_collection_carrier_conversion(expr.clone(), plan) {
         return projected;
     }
     let coerced = apply_coercions(expr, &plan.coercions());
@@ -1070,7 +1086,30 @@ fn record_view_coercion_target_shape(expr: RustExpr, plan: &ShapeCoercionPlan) -
             Some(plan.target().clone()),
             expr,
         ),
-        ViewCoercionPolicy::NoViewChange => expr,
+        // Even when the view is unchanged, ownership, dispatch, or optional
+        // element adaptation may have changed the Rust carrier.  Retain the
+        // target shape so a second lowering boundary does not apply that
+        // conversion again (notably in batch/global source signatures).
+        ViewCoercionPolicy::NoViewChange => {
+            if let Some(shape) = expr.recorded_shape() {
+                RustExpr::shaped_as(shape, Some(plan.target().clone()), expr)
+            } else if matches!(
+                plan.target().java_ty,
+                JavaType::Primitive(PrimitiveType::Char)
+            ) {
+                // Native string search needs to distinguish a converted Java
+                // char from an arbitrary Rust scalar so it can materialize the
+                // one-character string ABI. Keep metadata only for that
+                // otherwise-structurally-invisible conversion.
+                RustExpr::shaped_as(
+                    RustExprShape::SlotAdapted,
+                    Some(plan.target().clone()),
+                    expr,
+                )
+            } else {
+                expr
+            }
+        }
     }
 }
 
@@ -1103,7 +1142,10 @@ fn borrowed_set_slice_temporary_vec_view_projection(expr: RustExpr) -> RustExpr 
     ))
 }
 
-fn apply_map_carrier_conversion(expr: RustExpr, plan: &ShapeCoercionPlan) -> Option<RustExpr> {
+fn apply_collection_carrier_conversion(
+    expr: RustExpr,
+    plan: &ShapeCoercionPlan,
+) -> Option<RustExpr> {
     if !matches!(plan.target().ownership, OwnershipShape::Owned)
         || plan.actual().optional_element_type().is_some()
         || plan.target().optional_element_type().is_some()
@@ -1112,14 +1154,26 @@ fn apply_map_carrier_conversion(expr: RustExpr, plan: &ShapeCoercionPlan) -> Opt
     }
     let actual_kind = crate::stdlib::java_collection_kind_for_type(&plan.actual().java_ty)?;
     let target_kind = crate::stdlib::java_collection_kind_for_type(&plan.target().java_ty)?;
-    if actual_kind == target_kind || !actual_kind.is_map_like() || !target_kind.is_map_like() {
+    if actual_kind == target_kind {
         return None;
     }
-    let (actual_key, actual_value) = crate::stdlib::java_map_type_args(&plan.actual().java_ty)?;
-    let (target_key, target_value) = crate::stdlib::java_map_type_args(&plan.target().java_ty)?;
-    if actual_key != target_key || actual_value != target_value {
+    let collect_type = if actual_kind.is_map_like() && target_kind.is_map_like() {
+        let (actual_key, actual_value) = crate::stdlib::java_map_type_args(&plan.actual().java_ty)?;
+        let (target_key, target_value) = crate::stdlib::java_map_type_args(&plan.target().java_ty)?;
+        if actual_key != target_key || actual_value != target_value {
+            return None;
+        }
+        map_collect_type_for_kind(target_kind)?
+    } else if actual_kind.is_set_like() && target_kind.is_set_like() {
+        if crate::types::sequence_element_type(&plan.actual().java_ty)
+            != crate::types::sequence_element_type(&plan.target().java_ty)
+        {
+            return None;
+        }
+        set_collect_type_for_kind(target_kind)?
+    } else {
         return None;
-    }
+    };
     let iterator = match plan.actual().ownership {
         OwnershipShape::Owned => {
             zero_arg_method_projection(RustExpr::Grouped(Box::new(expr)), "into_iter")
@@ -1132,8 +1186,17 @@ fn apply_map_carrier_conversion(expr: RustExpr, plan: &ShapeCoercionPlan) -> Opt
     Some(RustExpr::shaped_as(
         RustExprShape::OwnedRecovery,
         Some(plan.target().clone()),
-        typed_collect_projection(iterator, map_collect_type_for_kind(target_kind)?),
+        typed_collect_projection(iterator, collect_type),
     ))
+}
+
+fn set_collect_type_for_kind(kind: crate::stdlib::JavaCollectionKind) -> Option<&'static str> {
+    match kind {
+        crate::stdlib::JavaCollectionKind::Set => Some("std::collections::HashSet<_>"),
+        crate::stdlib::JavaCollectionKind::SortedSet => Some("std::collections::BTreeSet<_>"),
+        crate::stdlib::JavaCollectionKind::InsertionOrderedSet => Some("JavaLinkedHashSet<_>"),
+        _ => None,
+    }
 }
 
 fn borrowed_map_cloned_iter(expr: RustExpr) -> RustExpr {
@@ -1235,14 +1298,13 @@ fn optional_element_projection(
     }
     match mapped_value.recorded_shape() {
         Some(RustExprShape::Borrowed)
-            if target_element.ownership == OwnershipShape::SharedBorrow
-                && target_element.view == ViewShape::Native =>
+            if target_element.ownership == OwnershipShape::SharedBorrow =>
         {
             return optional_projected_structured_expr(
                 optional_map_projection_expr(
                     expr,
                     OptionalMapReceiverProjection::AsRef,
-                    mapped_value,
+                    strip_optional_map_value_borrow(mapped_value),
                 ),
                 target_element,
             );
@@ -1295,6 +1357,24 @@ fn optional_element_projection(
         optional_map_projection_expr(expr, OptionalMapReceiverProjection::Direct, mapped_value),
         target_element,
     )
+}
+
+fn strip_optional_map_value_borrow(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Shaped { expr, .. } => strip_optional_map_value_borrow(*expr),
+        RustExpr::Cast { expr, ty } => match *expr {
+            RustExpr::Unary { op, expr }
+                if op == "&" && matches!(expr.as_ref(), RustExpr::Var(name) if name == "value") =>
+            {
+                RustExpr::Cast { expr, ty }
+            }
+            other => RustExpr::Cast {
+                expr: Box::new(other),
+                ty,
+            },
+        },
+        other => other,
+    }
 }
 
 fn optional_mapped_value_boxes_cloned_erased_object(mapped_value: &RustExpr) -> bool {
@@ -1427,7 +1507,9 @@ fn mapped_optional_value_projection(expr: &RustExpr) -> OptionalMappedValueProje
             method,
             args,
         } if args.is_empty()
-            && matches!(receiver.unshaped(), RustExpr::Var(name) if name == "value") =>
+            && (matches!(receiver.unshaped(), RustExpr::Var(name) if name == "value")
+                || matches!(receiver.unshaped(), RustExpr::Unary { op, expr }
+                    if op == "&" && matches!(expr.unshaped(), RustExpr::Var(name) if name == "value"))) =>
         {
             match method.as_str() {
                 "as_str" => OptionalMappedValueProjection::StringView,
@@ -4794,6 +4876,11 @@ pub(crate) fn string_last_index_of_projection(
 fn string_search_needle_projection(needle: RustExpr) -> RustExpr {
     if let Some(literal) = string_literal_from_rust_char_literal_expr(&needle) {
         RustExpr::Literal(literal)
+    } else if needle
+        .recorded_slot_shape()
+        .is_some_and(|shape| matches!(shape.java_ty, JavaType::Primitive(PrimitiveType::Char)))
+    {
+        zero_arg_method_projection(needle, "to_string")
     } else {
         needle
     }
@@ -11195,10 +11282,19 @@ fn clone_method_receiver(expr: RustExpr, string_literals_as_literals: bool) -> R
 }
 
 pub(crate) fn into_projection(expr: RustExpr) -> RustExpr {
-    RustExpr::MethodCall {
+    let result_propagated = expr_is_result_propagated(&expr);
+    let converted = RustExpr::MethodCall {
         receiver: Box::new(expr),
         method: "into".to_string(),
         args: Vec::new(),
+    };
+    // `Into` converts the already-produced value; it does not recreate the
+    // Result that a nested `?` consumed. Preserve the propagation marker so a
+    // surrounding return/assignment boundary cannot emit `value.into()?`.
+    if result_propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, converted)
+    } else {
+        converted
     }
 }
 
@@ -12813,6 +12909,31 @@ fn apply_optional_borrowed_element_target_view(
     if already_applied {
         return Some(expr.clone());
     }
+    if let DispatchShape::DynTrait { trait_name } = &target_element.dispatch {
+        let trait_name = normalize_emitted_java_type_name(trait_name);
+        let value = RustExpr::Var("value".to_string());
+        let value = if matches!(
+            policy.element_shape().dispatch,
+            DispatchShape::BoxedDynTrait { .. }
+        ) {
+            zero_arg_method_projection(value, "as_ref")
+        } else {
+            value
+        };
+        let mapped = optional_map_projection_expr(
+            expr.clone(),
+            OptionalMapReceiverProjection::Direct,
+            RustExpr::Cast {
+                expr: Box::new(value),
+                ty: format!("&dyn {trait_name}"),
+            },
+        );
+        return Some(RustExpr::shaped_as(
+            RustExprShape::OptionalProjected,
+            Some(target_element),
+            mapped,
+        ));
+    }
     let adapted = match (target_element.ownership, &target_element.view) {
         (OwnershipShape::SharedBorrow, ViewShape::Slice)
             if matches!(target_element.java_ty, crate::java_ir::JavaType::Array(_))
@@ -12894,6 +13015,50 @@ fn slot_shapes_match_ignoring_identity(actual: &RustSlotShape, target: &RustSlot
         && actual.view == target.view
         && actual.dispatch == target.dispatch
         && actual.mutability == target.mutability
+}
+
+/// Remove a stale required-value borrow applied after an optional payload was
+/// already projected to `Option<&dyn Trait>`.
+pub(crate) fn strip_redundant_optional_projected_dyn_borrow(expr: RustExpr) -> RustExpr {
+    match expr {
+        RustExpr::Shaped {
+            shape,
+            actual,
+            expr,
+        } => {
+            let normalized = strip_redundant_optional_projected_dyn_borrow(*expr);
+            if normalized.recorded_shape() == Some(RustExprShape::OptionalProjected) {
+                normalized
+            } else {
+                RustExpr::Shaped {
+                    shape,
+                    actual,
+                    expr: Box::new(normalized),
+                }
+            }
+        }
+        RustExpr::Cast { expr, ty } if ty.trim_start().starts_with("&dyn ") => match *expr {
+            RustExpr::MethodCall {
+                receiver,
+                method,
+                args,
+            } if method == "as_ref"
+                && args.is_empty()
+                && (receiver.recorded_shape() == Some(RustExprShape::OptionalProjected)
+                    || receiver.recorded_slot_shape().is_some_and(|shape| {
+                        shape.optional_element_type().is_some()
+                            && matches!(shape.dispatch, DispatchShape::DynTrait { .. })
+                    })) =>
+            {
+                *receiver
+            }
+            inner => RustExpr::Cast {
+                expr: Box::new(inner),
+                ty,
+            },
+        },
+        other => other,
+    }
 }
 
 fn apply_required_borrowed_element_target_view(
@@ -17191,6 +17356,30 @@ mod tests {
         );
         assert_eq!(
             builtin_slice_projected.recorded_slot_shape(),
+            Some(&slice_target)
+        );
+
+        // A required-element borrow can be planned before the slice view,
+        // yielding `(&value).as_slice()`.  It is still the built-in projection
+        // of the optional payload: mapping it by value would both consume the
+        // option and return a reference to the closure-local value.
+        let borrowed_builtin_slice_projected = optional_element_projection(
+            RustExpr::Var("values".to_string()),
+            slice_view_expr(zero_arg_method_projection(
+                RustExpr::Unary {
+                    op: "&".to_string(),
+                    expr: Box::new(RustExpr::Var("value".to_string())),
+                },
+                "as_slice",
+            )),
+            &slice_target,
+        );
+        assert_eq!(
+            emit::emit_expr(&borrowed_builtin_slice_projected),
+            "values.as_deref()"
+        );
+        assert_eq!(
+            borrowed_builtin_slice_projected.recorded_slot_shape(),
             Some(&slice_target)
         );
 
@@ -26184,6 +26373,72 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&expr),
             "source.expect(\"Java null receiver\")"
+        );
+    }
+
+    #[test]
+    fn optional_boxed_dyn_trait_adapter_casts_each_payload() {
+        let block_data = JavaType::Named {
+            name: "BlockData".to_string(),
+            args: Vec::new(),
+        };
+        let optional = crate::types::optional_java_type(block_data.clone());
+        let mut carrier_shape = RustSlotShape::conservative(optional.clone());
+        carrier_shape.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "BlockData".to_string(),
+        };
+        carrier_shape.view = ViewShape::DynTraitView;
+        let mut element_shape = RustSlotShape::conservative(block_data);
+        element_shape.ownership = OwnershipShape::SharedBorrow;
+        element_shape.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "BlockData".to_string(),
+        };
+        element_shape.view = ViewShape::DynTraitView;
+        let mut target = RustSlotShape::conservative(optional);
+        target.ownership = OwnershipShape::SharedBorrow;
+        target.dispatch = DispatchShape::DynTrait {
+            trait_name: "BlockData".to_string(),
+        };
+        target.view = ViewShape::DynTraitView;
+        let policy = crate::conversion_plan::borrowed_element_slot_adapter_policy(
+            BorrowedElementCarrier::Option,
+            &target,
+            &carrier_shape,
+            &element_shape,
+            &FactSet::default(),
+        );
+        let projected = RustExpr::shaped_as(
+            RustExprShape::OptionalProjected,
+            Some(element_shape),
+            zero_arg_method_projection(RustExpr::Var("block_data".to_string()), "as_ref"),
+        );
+
+        assert_eq!(
+            emit::emit_expr(&apply_borrowed_element_slot_adapter(projected, &policy)),
+            "block_data.as_ref().map(|value| value.as_ref() as &dyn BlockData)"
+        );
+
+        let mut concrete_element = policy.element_shape().clone();
+        concrete_element.dispatch = DispatchShape::Concrete;
+        concrete_element.view = ViewShape::Native;
+        let concrete_policy = crate::conversion_plan::borrowed_element_slot_adapter_policy(
+            BorrowedElementCarrier::Option,
+            &target,
+            &carrier_shape,
+            &concrete_element,
+            &FactSet::default(),
+        );
+        let projected_concrete = RustExpr::shaped_as(
+            RustExprShape::OptionalProjected,
+            Some(concrete_element),
+            RustExpr::Raw("uc_data.as_ref().map(|value| &**value)".to_string()),
+        );
+        assert_eq!(
+            emit::emit_expr(&apply_borrowed_element_slot_adapter(
+                projected_concrete,
+                &concrete_policy,
+            )),
+            "uc_data.as_ref().map(|value| &**value).map(|value| value as &dyn BlockData)"
         );
     }
 

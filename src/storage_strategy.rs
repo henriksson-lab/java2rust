@@ -51,6 +51,91 @@ pub enum StorageStrategy {
     SharedSync,
 }
 
+#[cfg(test)]
+mod interface_identity_storage_tests {
+    use super::*;
+    use crate::parser::parse_java_source;
+
+    fn strategy_of(source: &str, type_name: &str) -> StorageStrategy {
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        plan_storage_strategies(&resolved.program, &usage).strategy(type_name)
+    }
+
+    #[test]
+    fn source_interface_implementor_gets_identity_preserving_handle() {
+        assert_eq!(
+            strategy_of(
+                r#"
+interface Item { int value(); }
+class Concrete implements Item {
+    public int value() { return 1; }
+}
+class Factory { static Item make() { return new Concrete(); } }
+"#,
+                "Concrete",
+            ),
+            StorageStrategy::SharedImmutable,
+        );
+    }
+
+    #[test]
+    fn unused_interface_declaration_does_not_force_shared_storage() {
+        assert_eq!(
+            strategy_of(
+                r#"
+interface Item { int value(); }
+class Concrete implements Item {
+    public int value() { return 1; }
+}
+"#,
+                "Concrete",
+            ),
+            StorageStrategy::Value,
+        );
+    }
+
+    #[test]
+    fn inherited_interface_implementor_gets_mutable_shared_handle() {
+        assert_eq!(
+            strategy_of(
+                r#"
+interface Counter { int get(); void set(int value); }
+abstract class Base implements Counter {}
+class Concrete extends Base {
+    int value;
+    public int get() { return value; }
+    public void set(int value) { this.value = value; }
+}
+class Factory { static Counter make() { return new Concrete(); } }
+"#,
+                "Concrete",
+            ),
+            StorageStrategy::SharedLocal,
+        );
+    }
+
+    #[test]
+    fn thread_reachable_interface_implementor_gets_sync_shared_handle() {
+        assert_eq!(
+            strategy_of(
+                r#"
+interface Item { int value(); }
+class Worker implements Item, Runnable {
+    int value;
+    public int value() { return value; }
+    public void run() { value++; }
+}
+class Factory { static Item make() { return new Worker(); } }
+"#,
+                "Worker",
+            ),
+            StorageStrategy::SharedSync,
+        );
+    }
+}
+
 impl StorageStrategy {
     /// Join is max, because the order is "how much sharing must be supported".
     pub fn join(self, other: Self) -> Self {
@@ -559,9 +644,12 @@ fn plan_storage_strategies_with_facts(
     for ty in &program.types {
         collect_interface_type_names(ty, &mut interfaces);
     }
+    let interface_value_types = source_interfaces_used_as_value_types(program, &interfaces);
     for ty in &program.types {
         collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
     }
+    mark_source_interface_implementors_as_aliasable(program, &interface_value_types, &mut types);
+    mark_external_input_stream_subclasses_as_aliasable(program, &mut types);
     propagate_inherited_receiver_mutation(program, usage, &declared, &mut types);
     if let Some(facts) = facts {
         collect_inner_outer_capture_storage_requirements(program, facts, &declared, &mut types);
@@ -581,6 +669,260 @@ fn plan_storage_strategies_with_facts(
             type_interface_surface_is_handle_forwardable(name, program, usage);
     }
     StoragePlan { types }
+}
+
+/// A source subclass converted to the platform `InputStream` facade must keep
+/// the original Java object behind that facade.  Treating it as a value would
+/// detach later source-typed aliases from virtual reads performed through the
+/// base-class reference.
+fn mark_external_input_stream_subclasses_as_aliasable(
+    program: &Program,
+    types: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    fn extends_input_stream(ty: &TypeDecl, program: &Program, seen: &mut BTreeSet<String>) -> bool {
+        let Some(super_name) = ty.extends.as_deref() else {
+            return false;
+        };
+        let canonical = crate::stdlib::canonical_external_receiver_type_key(super_name);
+        if super_name.rsplit('.').next() == Some("InputStream") {
+            return true;
+        }
+        if !seen.insert(canonical.clone()) {
+            return false;
+        }
+        source_type_decl_for_owner_context(program, &ty.name, super_name)
+            .is_some_and(|super_ty| extends_input_stream(super_ty, program, seen))
+    }
+
+    fn visit(ty: &TypeDecl, program: &Program, types: &mut BTreeMap<String, TypeStorageFacts>) {
+        if extends_input_stream(ty, program, &mut BTreeSet::new())
+            && let Some(storage) = types.get_mut(&ty.name)
+        {
+            storage.locally_aliased = true;
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, program, types);
+            }
+        }
+    }
+
+    for ty in &program.types {
+        visit(ty, program, types);
+    }
+}
+
+/// A Java interface value is a reference to its implementing object, not an
+/// owned copy of that object.  The same interface reference can be copied by a
+/// local assignment, an array/list operation, or a return boundary without a
+/// second syntactic use of the concrete class ever appearing in the source.
+///
+/// Rust trait objects are currently carried in `Box<dyn Trait>`.  Making the
+/// concrete implementor shared ensures that the boxed payload is an `Rc`/`Arc`
+/// (and a cell when mutation requires one).  The generated forwarding impl's
+/// `clone_box` then clones that handle, preserving Java identity.  Leaving an
+/// implementor at `Value` would force either a deep clone or a runtime panic.
+fn mark_source_interface_implementors_as_aliasable(
+    program: &Program,
+    interfaces: &BTreeSet<String>,
+    types: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    fn reaches_source_interface(
+        ty: &TypeDecl,
+        program: &Program,
+        interfaces: &BTreeSet<String>,
+        seen: &mut BTreeSet<String>,
+    ) -> bool {
+        if !seen.insert(ty.name.clone()) {
+            return false;
+        }
+        if ty.implements.iter().any(|implemented| {
+            interfaces.iter().any(|interface| {
+                implemented == interface || simple_name(implemented) == simple_name(interface)
+            })
+        }) {
+            return true;
+        }
+        ty.extends.as_deref().is_some_and(|super_name| {
+            source_type_decl_for_owner_context(program, &ty.name, super_name).is_some_and(
+                |super_ty| reaches_source_interface(super_ty, program, interfaces, seen),
+            )
+        })
+    }
+
+    fn visit(
+        ty: &TypeDecl,
+        program: &Program,
+        interfaces: &BTreeSet<String>,
+        types: &mut BTreeMap<String, TypeStorageFacts>,
+    ) {
+        if ty.kind == TypeKind::Class
+            && reaches_source_interface(ty, program, interfaces, &mut BTreeSet::new())
+            && let Some(facts) = types.get_mut(&ty.name)
+        {
+            facts.locally_aliased = true;
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, program, interfaces, types);
+            }
+        }
+    }
+
+    for ty in &program.types {
+        visit(ty, program, interfaces, types);
+    }
+}
+
+fn source_interfaces_used_as_value_types(
+    program: &Program,
+    interfaces: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    fn mentions(ty: &JavaType, interface: &str) -> bool {
+        match ty {
+            JavaType::Named { name, args } => {
+                simple_name(name) == simple_name(interface)
+                    || args.iter().any(|arg| mentions(arg, interface))
+            }
+            JavaType::Array(element) => mentions(element, interface),
+            JavaType::Wildcard(Some(
+                WildcardBound::Extends(bound) | WildcardBound::Super(bound),
+            )) => mentions(bound, interface),
+            _ => false,
+        }
+    }
+
+    fn block_mentions(block: &Block, interface: &str) -> bool {
+        block
+            .statements
+            .iter()
+            .any(|stmt| stmt_mentions(stmt, interface))
+    }
+
+    fn stmt_mentions(stmt: &Stmt, interface: &str) -> bool {
+        match stmt {
+            Stmt::VarDecl { ty, .. } => mentions(ty, interface),
+            Stmt::EnhancedFor { var_type, body, .. } => {
+                mentions(var_type, interface) || block_mentions(body, interface)
+            }
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                block_mentions(then_block, interface)
+                    || else_block
+                        .as_ref()
+                        .is_some_and(|block| block_mentions(block, interface))
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => block_mentions(body, interface),
+            Stmt::For { init, body, .. } => {
+                init.iter().any(|stmt| stmt_mentions(stmt, interface))
+                    || block_mentions(body, interface)
+            }
+            Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+                case.statements
+                    .iter()
+                    .any(|stmt| stmt_mentions(stmt, interface))
+            }),
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                resources.iter().any(|stmt| stmt_mentions(stmt, interface))
+                    || block_mentions(body, interface)
+                    || catches.iter().any(|catch| {
+                        catch.types.iter().any(|ty| mentions(ty, interface))
+                            || block_mentions(&catch.body, interface)
+                    })
+                    || finally_block
+                        .as_ref()
+                        .is_some_and(|block| block_mentions(block, interface))
+            }
+            Stmt::LocalType(local) => local.members.iter().any(|member| match member {
+                Member::Field(field) => mentions(&field.ty, interface),
+                Member::Method(method) => {
+                    mentions(&method.return_type, interface)
+                        || method
+                            .params
+                            .iter()
+                            .any(|param| mentions(&param.ty, interface))
+                        || method
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| block_mentions(body, interface))
+                }
+                Member::Constructor(constructor) => {
+                    constructor
+                        .params
+                        .iter()
+                        .any(|param| mentions(&param.ty, interface))
+                        || constructor
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| block_mentions(body, interface))
+                }
+                Member::Type(_) | Member::Unsupported { .. } => false,
+            }),
+            Stmt::Assign { .. }
+            | Stmt::Expr(_)
+            | Stmt::Return(_)
+            | Stmt::Throw(_)
+            | Stmt::ConstructorInvocation { .. }
+            | Stmt::Break(_)
+            | Stmt::Continue(_)
+            | Stmt::Unsupported(_) => false,
+        }
+    }
+
+    fn visit(ty: &TypeDecl, interfaces: &BTreeSet<String>, used: &mut BTreeSet<String>) {
+        for interface in interfaces {
+            let referenced = ty.members.iter().any(|member| match member {
+                Member::Field(field) => mentions(&field.ty, interface),
+                Member::Method(method) => {
+                    mentions(&method.return_type, interface)
+                        || method
+                            .params
+                            .iter()
+                            .any(|param| mentions(&param.ty, interface))
+                        || method
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| block_mentions(body, interface))
+                }
+                Member::Constructor(constructor) => {
+                    constructor
+                        .params
+                        .iter()
+                        .any(|param| mentions(&param.ty, interface))
+                        || constructor
+                            .body
+                            .as_ref()
+                            .is_some_and(|body| block_mentions(body, interface))
+                }
+                Member::Type(_) | Member::Unsupported { .. } => false,
+            });
+            if referenced {
+                used.insert(interface.clone());
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, interfaces, used);
+            }
+        }
+    }
+
+    let mut used = BTreeSet::new();
+    for ty in &program.types {
+        visit(ty, interfaces, &mut used);
+    }
+    used
 }
 
 /// A constructor that directly or transitively constructs a non-static inner

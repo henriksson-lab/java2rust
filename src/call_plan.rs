@@ -6237,6 +6237,9 @@ pub fn plan_call_arguments_with_facts_and_args(
     types: &TypeEnv,
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
+    if let Some(shapes) = native_string_search_arg_shapes(receiver, name, args, types) {
+        return ArgumentLoweringPlan::Shaped(shapes);
+    }
     if let Some(call) = resolved {
         if let Some(shapes) =
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
@@ -6282,6 +6285,43 @@ pub fn plan_call_arguments_with_facts_and_args(
                 .map(ArgumentLoweringPlan::Shaped)
         })
         .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
+}
+
+fn native_string_search_arg_shapes(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    if !matches!(
+        name,
+        "indexOf" | "index_of" | "lastIndexOf" | "last_index_of"
+    ) || !matches!(args.len(), 1 | 2)
+        || receiver
+            .map(|receiver| infer_expr_type(receiver, types))
+            .and_then(|ty| crate::types::optional_element_type(&ty).or(Some(ty)))
+            != Some(JavaType::String)
+    {
+        return None;
+    }
+    let needle_ty = infer_expr_type(&args[0], types);
+    let needle_element =
+        crate::types::optional_element_type(&needle_ty).unwrap_or_else(|| needle_ty.clone());
+    let is_character = matches!(needle_element, JavaType::Primitive(PrimitiveType::Char))
+        || matches!(&needle_element, JavaType::Named { name, .. }
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Character");
+    if !is_character {
+        return None;
+    }
+    let mut shapes = vec![RustSlotShape::for_storage(JavaType::Primitive(
+        PrimitiveType::Char,
+    ))];
+    if args.len() == 2 {
+        shapes.push(RustSlotShape::for_storage(JavaType::Primitive(
+            PrimitiveType::Int,
+        )));
+    }
+    Some(shapes)
 }
 
 pub fn native_collection_arg_shapes_with_facts(

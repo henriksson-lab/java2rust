@@ -483,6 +483,8 @@ pub fn modeled_external_super_constructor_state_field(
     let erased = erased_external_type_name(type_name);
     if external_type_name_matches(erased, "java.io.FilterInputStream")
         || external_type_name_matches(erased, "FilterInputStream")
+        || external_type_name_matches(erased, "java.util.zip.GZIPInputStream")
+        || external_type_name_matches(erased, "GZIPInputStream")
     {
         return Some("in");
     }
@@ -30615,6 +30617,95 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
         return Some(effect);
     }
     let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
+    if simple_receiver == "Properties" {
+        let (expected_args, role, return_type, receiver_mutability, nullability) = match method_name
+        {
+            "load" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Mutator,
+                JavaType::Void,
+                ReceiverMutabilityFact::MutatesReceiver,
+                NullabilityState::DefinitelyNonNull,
+            ),
+            "getProperty" | "get_property" if matches_arg_count(1) => (
+                1,
+                ExternalApiRole::Getter,
+                JavaType::String,
+                ReceiverMutabilityFact::ReadOnly,
+                NullabilityState::MaybeNull,
+            ),
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            parameter_patterns: None,
+            role,
+            receiver_mutability,
+            return_type: Some(return_type),
+            return_nullability: nullability,
+            thrown: if method_name == "load" {
+                vec![JavaType::Named {
+                    name: "IOException".to_string(),
+                    args: Vec::new(),
+                }]
+            } else {
+                Vec::new()
+            },
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "ClassLoader" | "JavaLangClassLoader")
+        && matches!(
+            method_name,
+            "getSystemResourceAsStream" | "get_system_resource_as_stream"
+        )
+        && matches_arg_count(1)
+    {
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::Named {
+                name: "InputStream".to_string(),
+                args: Vec::new(),
+            }),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    if matches!(simple_receiver, "Runtime" | "JavaLangRuntime") {
+        let (expected_args, return_type) = match method_name {
+            "getRuntime" | "get_runtime" if matches_arg_count(0) => (
+                0,
+                JavaType::Named {
+                    name: "Runtime".to_string(),
+                    args: Vec::new(),
+                },
+            ),
+            "availableProcessors" | "available_processors" if matches_arg_count(0) => {
+                (0, JavaType::Primitive(PrimitiveType::Int))
+            }
+            _ => return None,
+        };
+        return Some(ExternalApiEffectFact {
+            method_name: method_name.to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(expected_args),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(return_type),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
     if matches!(simple_receiver, "Deflater" | "JavaUtilZipDeflater") {
         let (expected_args, role, return_type, receiver_mutability) = match method_name {
             "needsInput" | "needs_input" if matches_arg_count(0) => (
@@ -32084,6 +32175,32 @@ fn java_platform_concurrent_api_effect(
             | "java.util.concurrent.CountDownLatch",
             "await" | "r#await",
         ) if matches_arg_count(0) => (0, ExternalApiRole::SideEffect, JavaType::Void),
+        (
+            "CountDownLatch"
+            | "JavaUtilConcurrentCountDownLatch"
+            | "java.util.concurrent.CountDownLatch",
+            "await" | "r#await",
+        ) if matches_arg_count(2) => (
+            2,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
+            "CountDownLatch"
+            | "JavaUtilConcurrentCountDownLatch"
+            | "java.util.concurrent.CountDownLatch",
+            "countDown" | "count_down",
+        ) if matches_arg_count(0) => (0, ExternalApiRole::SideEffect, JavaType::Void),
+        (
+            "CountDownLatch"
+            | "JavaUtilConcurrentCountDownLatch"
+            | "java.util.concurrent.CountDownLatch",
+            "getCount" | "get_count",
+        ) if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Long),
+        ),
         _ => return None,
     };
     let thrown = if matches!(

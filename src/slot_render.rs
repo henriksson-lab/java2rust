@@ -1083,6 +1083,49 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
         return carrier;
     }
     if let JavaType::Named { name, args } = ty
+        && matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "Iterator" | "java.util.Iterator" | "ListIterator" | "java.util.ListIterator"
+        )
+    {
+        let element_ty = args
+            .first()
+            .cloned()
+            .unwrap_or_else(erased_object_java_type);
+        let carrier = if matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "ListIterator" | "java.util.ListIterator"
+        ) {
+            "JavaListIterator"
+        } else {
+            "JavaIterator"
+        };
+        return rust_generic_type(
+            carrier,
+            vec![rust_type_for_java_generic_arg_with_representations(
+                &element_ty,
+                &effective_facts,
+                representations,
+            )],
+        );
+    }
+    if let JavaType::Named { name, args } = ty
+        && crate::stdlib::canonical_external_receiver_type_key(name) == "Stream"
+    {
+        let element_ty = args
+            .first()
+            .cloned()
+            .unwrap_or_else(erased_object_java_type);
+        return rust_generic_type(
+            "JavaStream",
+            vec![rust_type_for_java_generic_arg_with_representations(
+                &element_ty,
+                &effective_facts,
+                representations,
+            )],
+        );
+    }
+    if let JavaType::Named { name, args } = ty
         && (!args.is_empty() || crate::stdlib::java_collection_kind_for_name(name).is_some())
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
     {
@@ -1495,6 +1538,23 @@ pub fn native_java_rust_type_policy_with_effective_facts(
                 ),
             }
         }
+        JavaType::Named { name, args }
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Stream" =>
+        {
+            let element_ty = args
+                .first()
+                .cloned()
+                .unwrap_or_else(erased_object_java_type);
+            NativeJavaRustTypePolicy::Direct {
+                ty: rust_generic_type(
+                    "JavaStream",
+                    vec![rust_type_for_java_generic_arg_with_effective_facts(
+                        &element_ty,
+                        facts,
+                    )],
+                ),
+            }
+        }
         JavaType::Named { .. } if crate::stdlib::java_map_type_args(ty).is_some() => {
             let (key, value) = crate::stdlib::java_map_type_args(ty).unwrap();
             let kind = crate::stdlib::java_collection_kind_for_type(ty)
@@ -1816,7 +1876,13 @@ fn rust_type_for_optional_element_arg(ty: &JavaType, facts: &EffectiveFacts<'_>)
     {
         return RustType::Named(rust_name_for_java_named_type(name));
     }
-    rust_type_for_java_generic_arg_unwrapped(ty, facts)
+    // `Option` is the null carrier for the Java reference, not a replacement
+    // for the payload's storage carrier.  In particular a nullable element of
+    // `Iterator<T>`/`List<T>` must remain `Option<Rc<RefCell<T>>>` when `T`
+    // has shared storage.  Calling the unwrapped renderer here used to silently
+    // discard that handle and made iterator locals disagree with the collection
+    // they were created from.
+    rust_type_for_java_generic_arg_with_effective_facts(ty, facts)
 }
 
 fn rust_storage_sequence_element_java_type(

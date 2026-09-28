@@ -779,6 +779,82 @@ fn translates_nullable_clear_assignment_as_option_take() {
 }
 
 #[test]
+fn nullable_shared_reference_projections_compile_across_iterators_calls_and_receivers() {
+    let translation = translate_source(
+        r#"
+import java.util.Iterator;
+import java.util.List;
+
+class NullableSharedReferenceProjection {
+    static class Record {
+        String name;
+        String getName() { return name; }
+        void rename(String replacement) { name = replacement; }
+    }
+
+    static class Payload {
+        int size;
+        Payload(List<Record> records) { size = records.size(); }
+        void bump() { size++; }
+    }
+
+    static class Slot {
+        Payload payload;
+        void set(Payload value) { payload = value; }
+        void setMaybe(Payload value) { payload = value; }
+    }
+
+    boolean iterate(List<Record> records) {
+        Iterator<Record> iter = records.iterator();
+        Record record = iter.hasNext() ? iter.next() : null;
+        return record == null || record.getName() == null;
+    }
+
+    String arrayName(Record[] records) {
+        return records[0].getName();
+    }
+
+    void install(Slot slot, List<Record> records) {
+        slot.setMaybe(new Payload(records));
+    }
+
+    void clear(Slot slot) { slot.setMaybe(null); }
+
+    int forward(Record record) { return accept(record); }
+    int accept(Record record) { return record == null ? 0 : 1; }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaIterator<std::rc::Rc<std::cell::RefCell<NullableSharedReferenceProjection_Record>>>")
+            && translation
+                .rust
+                .contains("let record: Option<std::rc::Rc<std::cell::RefCell<NullableSharedReferenceProjection_Record>>>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(".borrow().get_name()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "slot.set_maybe(Some(std::rc::Rc::new(std::cell::RefCell::new(NullableSharedReferenceProjection_Payload::new(&records)?))))"
+        ) && translation.rust.contains("return self.accept(record);")
+            && !translation
+                .rust
+                .contains("self.accept(record.clone().ok_or_else"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("nullable_shared_reference_projections", &translation.rust);
+}
+
+#[test]
 fn translates_simple_class_shape() {
     let translation = translate_source(&fixture("04-objects/SimpleClass.java"));
     assert!(
@@ -1706,6 +1782,38 @@ fn checked_propagation_string_length_after_fallible_optional_read_compiles() {
         translation.rust
     );
     cargo_check_translation("checked_propagation", &translation.rust);
+}
+
+#[test]
+fn constructor_local_called_through_mutable_receiver_is_declared_mutable() {
+    let translation = translate_source(
+        r#"
+class ConstructorLocalSink {
+    int value;
+    void open(int value) { this.value = value; }
+}
+class ConstructorLocalMutableReceiver {
+    ConstructorLocalMutableReceiver() {
+        ConstructorLocalSink sink = new ConstructorLocalSink();
+        sink.open(7);
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}\n{}",
+        translation.diagnostics,
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("let mut sink: ConstructorLocalSink = ConstructorLocalSink::new();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("constructor_local_mutable_receiver", &translation.rust);
 }
 
 #[test]

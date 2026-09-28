@@ -3220,16 +3220,7 @@ fn struct_derives_for_type(
 ) -> Vec<String> {
     let mut derives = Vec::new();
     let type_params: HashSet<String> = ty.type_params.iter().cloned().collect();
-    if fields.iter().all(|field| {
-        rust_type_supports_struct_derive_clone(
-            &field.ty,
-            &type_params,
-            signatures,
-            facts,
-            support_program,
-            &mut HashSet::new(),
-        )
-    }) {
+    if source_struct_fields_support_derive_clone(ty, fields, signatures, facts, support_program) {
         derives.push("Clone".to_string());
     }
     if fields
@@ -3274,7 +3265,50 @@ fn struct_derives_for_type(
     derives
 }
 
-fn program_needs_constructor_placeholder_default_for_type(
+/// Whether the concrete Rust struct emitted for a source declaration derives
+/// `Clone`.
+///
+/// Consumers that synthesize code containing `self.clone()` must use the same
+/// structural proof as the derive itself. Keeping that decision here prevents
+/// trait-object adapters and the concrete item from drifting apart.
+pub(crate) fn source_type_supports_struct_derive_clone(
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    support_program: &Program,
+) -> bool {
+    let fields = struct_fields_for_type(
+        ty,
+        signatures,
+        facts,
+        Some(representations),
+        support_program,
+    );
+    source_struct_fields_support_derive_clone(ty, &fields, signatures, facts, support_program)
+}
+
+fn source_struct_fields_support_derive_clone(
+    ty: &TypeDecl,
+    fields: &[RustField],
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    support_program: &Program,
+) -> bool {
+    let type_params: HashSet<String> = ty.type_params.iter().cloned().collect();
+    fields.iter().all(|field| {
+        rust_type_supports_struct_derive_clone(
+            &field.ty,
+            &type_params,
+            signatures,
+            facts,
+            support_program,
+            &mut HashSet::new(),
+        )
+    })
+}
+
+pub(crate) fn program_needs_constructor_placeholder_default_for_type(
     support_program: &Program,
     target: &TypeDecl,
 ) -> bool {
@@ -3293,20 +3327,23 @@ fn program_needs_constructor_placeholder_default_for_type(
             };
             ctor.body.as_ref().is_some_and(|body| {
                 body.statements.iter().any(|stmt| {
-                    constructor_stmt_assigns_self_dependent_field_of_type(stmt, &fields, target)
+                    constructor_stmt_assigns_placeholder_field_of_type(stmt, &fields, target)
                 })
             })
         })
     })
 }
 
-fn constructor_stmt_assigns_self_dependent_field_of_type(
+fn constructor_stmt_assigns_placeholder_field_of_type(
     stmt: &Stmt,
     fields: &[&FieldDecl],
     target: &TypeDecl,
 ) -> bool {
     match stmt {
-        Stmt::Assign { target: lhs, value } => {
+        Stmt::Assign {
+            target: lhs,
+            value: _,
+        } => {
             let Some(field_name) = assigned_instance_field_name(lhs) else {
                 return false;
             };
@@ -3319,7 +3356,7 @@ fn constructor_stmt_assigns_self_dependent_field_of_type(
                             args: Vec::new(),
                         },
                     )
-            }) && constructor_expr_reads_self(value)
+            })
         }
         Stmt::If {
             then_block,
@@ -3327,10 +3364,10 @@ fn constructor_stmt_assigns_self_dependent_field_of_type(
             ..
         } => {
             then_block.statements.iter().any(|stmt| {
-                constructor_stmt_assigns_self_dependent_field_of_type(stmt, fields, target)
+                constructor_stmt_assigns_placeholder_field_of_type(stmt, fields, target)
             }) || else_block.as_ref().is_some_and(|block| {
                 block.statements.iter().any(|stmt| {
-                    constructor_stmt_assigns_self_dependent_field_of_type(stmt, fields, target)
+                    constructor_stmt_assigns_placeholder_field_of_type(stmt, fields, target)
                 })
             })
         }
@@ -3348,6 +3385,7 @@ fn assigned_instance_field_name(expr: &Expr) -> Option<&str> {
     }
 }
 
+#[cfg(test)]
 fn constructor_expr_reads_self(expr: &Expr) -> bool {
     match expr {
         Expr::This | Expr::Super => true,

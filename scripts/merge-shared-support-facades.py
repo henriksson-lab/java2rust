@@ -5,9 +5,18 @@ from collections import defaultdict
 from pathlib import Path
 
 
-TYPE_RE = re.compile(r"^\s*pub\s+(struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)")
+# Private helper types can be representation dependencies of a public support
+# carrier (for example an enum/state pair behind an Rc<RefCell<_>>).  They are
+# top-level support items just like public facades and must participate in the
+# same nominal dependency closure.  Visibility is widened to `pub(crate)` only
+# when such an item is actually promoted to crate-root shared support.
+TYPE_RE = re.compile(
+    r"^\s*(?:(?:pub(?:\(crate\))?)\s+)?(struct|enum)\s+([A-Za-z_][A-Za-z0-9_]*)"
+)
 TRAIT_DECL_RE = re.compile(r"^\s*pub\s+trait\s+([A-Za-z_][A-Za-z0-9_]*)\b")
-ALIAS_RE = re.compile(r"^\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
+ALIAS_RE = re.compile(
+    r"^\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*;\s*$"
+)
 DERIVE_RE = re.compile(r"^\s*#\[derive")
 INHERENT_IMPL_RE = re.compile(
     r"^\s*impl(?:\s*<.*>)?\s+(?:dyn\s+)?"
@@ -44,6 +53,26 @@ def impl_target_name(raw_target: str) -> str:
     target = target.removeprefix("dyn ")
     outer_type = target.split("<", 1)[0].strip()
     return outer_type.rsplit("::", 1)[-1]
+
+
+def impl_target_wraps_type(raw_target: str, type_name: str) -> bool:
+    """Whether an Rc/Arc impl target is owned by the wrapped source type.
+
+    The outer target name is useful for shared-facade coherence, but it loses
+    ownership information for generated polymorphic adapters such as
+    `impl Trait for Rc<ConcreteSource>`.  Those impls belong beside the
+    concrete source declaration just as `impl Trait for ConcreteSource` does.
+    """
+    target = raw_target.strip()
+    target = target.removeprefix("&mut ").removeprefix("&")
+    target = target.removeprefix("dyn ")
+    if "<" not in target or not target.endswith(">"):
+        return False
+    outer, inner = target.split("<", 1)
+    if outer.strip().rsplit("::", 1)[-1] not in {"Rc", "Arc"}:
+        return False
+    inner = inner[:-1].strip()
+    return impl_target_name(inner) == type_name and "<" not in inner
 
 
 def trait_impl_name(raw_trait: str) -> str:
@@ -433,6 +462,9 @@ def parse_items(
                 raw_target = trait_match.group(2).strip()
                 target_name = impl_target_name(raw_target)
                 from_match = FROM_TRAIT_RE.match(raw_trait)
+                source_owned_wrapper = impl_target_wraps_type(
+                    raw_target, source_type
+                )
                 source_owned_nested = (
                     target_name in source_owned_nested_types
                     or trait_impl_name(raw_trait) in source_owned_nested_types
@@ -462,6 +494,7 @@ def parse_items(
                         "text": "".join(lines[index:end]),
                         "prelude": not after_primary,
                         "source_owned_nested": source_owned_nested,
+                        "source_owned_wrapper": source_owned_wrapper,
                     }
                 )
                 index = end
@@ -703,6 +736,18 @@ def crate_visible_top_level_function(text: str) -> str:
         return text
     return re.sub(
         r"^(\s*)((?:const\s+)?fn\b)",
+        r"\1pub(crate) \2",
+        text,
+        count=1,
+    )
+
+
+def crate_visible_top_level_type(text: str) -> str:
+    """Expose a promoted private nominal helper to generated child modules."""
+    if re.search(r"(?m)^\s*pub(?:\(crate\))?\s+(?:struct|enum)\b", text):
+        return text
+    return re.sub(
+        r"(?m)^(\s*)((?:struct|enum)\b)",
         r"\1pub(crate) \2",
         text,
         count=1,
@@ -1129,8 +1174,10 @@ def best_method_variant(
     variants: list[str],
     preferred_receiver_kinds: set[str],
     preferred_arities: set[int] | None = None,
+    representation_family_variants: set[str] | None = None,
 ) -> str:
     preferred_arities = preferred_arities or set()
+    representation_family_variants = representation_family_variants or set()
     return sorted(
         variants,
         key=lambda text: (
@@ -1139,6 +1186,9 @@ def best_method_variant(
             else False,
             method_receiver_preference_rank(text, preferred_receiver_kinds),
             default_receiver_rank(method_name, text),
+            text not in representation_family_variants
+            if representation_family_variants
+            else False,
             weak_method_variant(text),
             method_return_type(text) == "",
             text,
@@ -1264,6 +1314,8 @@ def remove_items(
         if item["name"] in keep_last_prelude_names and item.get("prelude", False)
     }
     for item in items:
+        if item.get("source_owned_wrapper"):
+            continue
         if item.get("source_owned_nested") and item["name"] not in shared_identity_names:
             continue
         if item["name"] in removal_only_names and not item.get("prelude", False):
@@ -1587,10 +1639,13 @@ def main() -> int:
     primary_output_types = {source_type_for(path) for path in rust_paths}
     source_shadowing_aliases = set(existing_shared_alias_names) & primary_output_types
     candidates_by_type = defaultdict(list)
+    alias_candidates_by_name = defaultdict(list)
     top_level_functions_by_name = defaultdict(list)
     for path in merge_input_paths:
         for name in prelude_support_types(path):
             candidates_by_type[name].append(path)
+        for alias, target in prelude_aliases(path):
+            alias_candidates_by_name[alias].append((path, target))
         source_shadowing_aliases.update(
             alias
             for alias, _ in prelude_aliases(path)
@@ -1641,11 +1696,34 @@ def main() -> int:
     protected_source_owned_nested_names = set()
     for path in merge_input_paths:
         removal_only_names.update(prelude_types_redeclared_after_primary(path))
-        keep_last_prelude_names.update(duplicate_prelude_types_before_primary(path))
+        # Duplicate declarations within one prelude are a local restoration
+        # artifact only when that identity occurs in no sibling module. If the
+        # same support type is present across modules, crate-wide coherence
+        # wins: merge one declaration/impl surface and remove every local copy.
+        keep_last_prelude_names.update(
+            name
+            for name in duplicate_prelude_types_before_primary(path)
+            if len(candidates_by_type.get(name, ())) <= 1
+        )
+        path_support_types = prelude_support_types(path)
         protected_source_owned_nested_names.update(
             name
             for name in prelude_source_owned_nested_types(path)
             if name not in primary_output_types
+        )
+        # A module-local compatibility alias must not let an already shared
+        # identity absorb the alias target's richer source-owned declaration.
+        # For example, `type OutputStream = Base64OutputStream` is a fallback
+        # view of the local payload when `OutputStream` is already crate-wide;
+        # it is not evidence that `Base64OutputStream` itself is shared facade
+        # state. Keep the target in its source module and discard only the
+        # colliding alias.
+        protected_source_owned_nested_names.update(
+            target
+            for alias, target in prelude_aliases(path)
+            if alias in existing_shared_types
+            and target in path_support_types
+            and target not in primary_output_types
         )
     removal_only_names.update(keep_last_prelude_names)
     removal_only_names.update(protected_source_owned_nested_names)
@@ -1665,13 +1743,26 @@ def main() -> int:
     }
     for path in merge_input_paths:
         for alias, target in prelude_aliases(path):
-            if target in protected_source_owned_nested_names:
-                continue
             if (
                 alias in existing_shared_types
                 or alias in candidates_by_type
             ) and alias not in primary_output_types:
                 protected_shared_aliases.add(alias)
+                continue
+            if target in protected_source_owned_nested_names:
+                continue
+            alias_variants = alias_candidates_by_name[alias]
+            if (
+                len({path for path, _target in alias_variants}) > 1
+                and len({candidate_target for _path, candidate_target in alias_variants}) == 1
+                and alias not in primary_output_types
+            ):
+                # Repeated generic aliases (for example Properties =
+                # HashMap<String, String>) are shared facade identities too.
+                # They have no struct/enum declaration, so nominal candidate
+                # discovery cannot otherwise make their extension-trait impls
+                # coherent at crate root.
+                promoted_aliases.add(alias)
                 continue
             if (
                 target in selected
@@ -1781,6 +1872,13 @@ def main() -> int:
     inherent_consts = defaultdict(list)
     source_owned_nested_types_by_filename = {
         path.name: prelude_source_owned_nested_types(path)
+        | {
+            target
+            for alias, target in prelude_aliases(path)
+            if alias in existing_shared_types
+            and target in prelude_support_types(path)
+            and target not in primary_output_types
+        }
         for path in merge_input_paths
     }
 
@@ -1794,7 +1892,7 @@ def main() -> int:
             )
         ]
         for item in items:
-            if item.get("source_owned_nested"):
+            if item.get("source_owned_nested") or item.get("source_owned_wrapper"):
                 continue
             if item["kind"] == "decl":
                 declarations[item["name"]].append((path, item["text"]))
@@ -1825,6 +1923,12 @@ def main() -> int:
                 and item["kind"] != "alias"
             )
         ]
+        for item in items_by_path[path]:
+            if item["kind"] == "alias" and (
+                item["name"] in protected_shared_aliases
+                or item["name"] in source_shadowing_aliases
+            ):
+                item["source_owned_nested"] = False
 
     existing_shared_items = parse_shared_items_from_text(existing_shared_text, selected)
     generated_trait_decls = {
@@ -1864,6 +1968,29 @@ def main() -> int:
                 (item.get("target", item["name"]), item.get("trait_raw", item["trait"]))
             ].append((shared_support_path, item["text"]))
             existing_shared_items_to_replace.append(item)
+
+    # A package seed owns the nominal identity, but the raw generated prelude
+    # can still carry a wider inherent surface. Reconcile that surface instead
+    # of treating an existing declaration as a reason to discard every raw
+    # method. When a seed already has an impl, include its methods in variant
+    # selection and replace that impl atomically; this preserves seed-only
+    # methods while allowing raw-only methods to reach the assembled crate.
+    generated_inherent_names = {
+        type_name for type_name, _impl_header, _method_name in inherent_methods
+    } | {type_name for type_name, _const_name in inherent_consts}
+    for item in existing_shared_items:
+        if item["kind"] != "inherent_impl" or item["name"] not in generated_inherent_names:
+            continue
+        impl_header = item["text"].split("{", 1)[0].rstrip()
+        for method_name, method_text in extract_methods(item["text"]):
+            inherent_methods[(item["name"], impl_header, method_name)].append(
+                (shared_support_path, method_text)
+            )
+        for const_name, const_text in extract_consts(item["text"]):
+            inherent_consts[(item["name"], const_name)].append(
+                (shared_support_path, const_text)
+            )
+        existing_shared_items_to_replace.append(item)
 
     # A declaration and its inherent implementation form one representation
     # contract.  If a generated declaration carries more state than the
@@ -1938,6 +2065,9 @@ def main() -> int:
         if not unique_decls:
             continue
         selected_decl, selected_decl_reason = preferred_decl_variant(unique_decls)
+        selected_decl_paths = {
+            path for path, text in decls if text == selected_decl
+        }
         selected_decl_is_trait = bool(re.match(r"^\s*pub\s+trait\b", selected_decl))
         declaration_is_already_shared = (
             name in existing_shared_declared_type_names
@@ -1951,7 +2081,7 @@ def main() -> int:
         selected_decl = (
             merge_trait_declarations(name, unique_decls)
             if selected_decl_is_trait
-            else selected_decl
+            else crate_visible_top_level_type(selected_decl)
         )
         derived_traits = derived_traits_for_decl(selected_decl)
         if not declaration_is_already_shared:
@@ -1960,7 +2090,7 @@ def main() -> int:
         method_variants_by_header_and_name = defaultdict(list)
         consts_for_type = []
         emitted_const_names = set()
-        if not selected_decl_is_trait and not declaration_is_already_shared:
+        if not selected_decl_is_trait:
             for (type_name, const_name), variants in sorted(inherent_consts.items()):
                 if not item_targets_name(type_name, name, alias_targets):
                     continue
@@ -1984,45 +2114,54 @@ def main() -> int:
                 if const_name not in emitted_const_names:
                     consts_for_type.append(const_text)
                     emitted_const_names.add(const_name)
-        if not declaration_is_already_shared:
-            for (type_name, impl_header, method_name), variants in sorted(
-                inherent_methods.items()
-            ):
-                if not item_targets_name(type_name, name, alias_targets):
-                    continue
-                for _, text in variants:
-                    emitted_header = (
-                        impl_header
-                        if type_name == name
-                        else inherent_impl_header_for_decl(
-                            name, selected_decl, selected_decl_is_trait
-                        )
+        for (type_name, impl_header, method_name), variants in sorted(
+            inherent_methods.items()
+        ):
+            if not item_targets_name(type_name, name, alias_targets):
+                continue
+            for path, text in variants:
+                emitted_header = (
+                    impl_header
+                    if type_name == name
+                    else inherent_impl_header_for_decl(
+                        name, selected_decl, selected_decl_is_trait
                     )
-                    method_variants_by_header_and_name[(
-                        emitted_header,
-                        method_name,
-                    )].append(text)
+                )
+                method_variants_by_header_and_name[(
+                    emitted_header,
+                    method_name,
+                )].append((path, text))
         methods_by_header = defaultdict(list)
         for (impl_header, method_name), variants in sorted(
             method_variants_by_header_and_name.items()
         ):
             unique_variants = []
             seen_methods = set()
-            for text in variants:
+            for path, text in variants:
                 if text not in seen_methods:
-                    unique_variants.append(text)
+                    unique_variants.append((path, text))
                     seen_methods.add(text)
             if len(unique_variants) > 1:
                 conflict_lines.append(
                     f"{name}\tmethod\t{method_name}: kept preferred of {len(unique_variants)} variants\n"
                 )
             preferred_receiver_kinds = receiver_preferences.get((name, method_name), set())
+            # Struct literals in constructors and factories must describe the
+            # declaration that survives the merge. Prefer methods emitted
+            # beside that declaration after honoring observed call shape, so
+            # a richer facade cannot inherit a narrower initializer.
+            representation_family_variants = {
+                text
+                for path, text in unique_variants
+                if path in selected_decl_paths
+            }
             methods_by_header[impl_header].append(
                 best_method_variant(
                     method_name,
-                    unique_variants,
+                    [text for _, text in unique_variants],
                     preferred_receiver_kinds,
                     arity_preferences.get((name, method_name), set()),
+                    representation_family_variants,
                 )
             )
         if consts_for_type:
@@ -2082,8 +2221,12 @@ def main() -> int:
                 trait_impl_key = (type_name, trait_raw)
                 if trait_impl_key in emitted_trait_impl_keys:
                     continue
-                if not trait_impl_target_can_be_emitted_without_decl(
-                    type_name, variants[0][1]
+                if not (
+                    trait_impl_target_can_be_emitted_without_decl(
+                        type_name, variants[0][1]
+                    )
+                    or type_name in promoted_aliases
+                    or type_name in existing_shared_types
                 ):
                     continue
                 methods_by_name = defaultdict(list)
@@ -2159,7 +2302,9 @@ def main() -> int:
     for alias_name, variants in sorted(aliases.items()):
         if alias_name in protected_shared_aliases or alias_name in source_shadowing_aliases:
             continue
-        if not any(target in selected for _, target, _ in variants):
+        if alias_name not in promoted_aliases and not any(
+            target in selected for _, target, _ in variants
+        ):
             continue
         unique_variants = []
         seen_aliases = set()

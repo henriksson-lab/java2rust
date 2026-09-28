@@ -19,10 +19,11 @@ use crate::coercion::{
     collections_n_copies_projection, collections_singleton_list_projection,
     collections_singleton_map_projection, collections_singleton_projection,
     collections_unmodifiable_projection, discard_value_projection, erased_object_box_projection,
-    erased_object_constructor_projection, external_crate_associated_path_projection,
-    external_crate_path_projection, external_facade_rust_path_projection, facade_method_name,
-    field_projection, file_exists_projection, free_function_path_projection,
-    function_call_projection, index_to_usize_projection, java_class_literal_path_projection,
+    erased_object_constructor_projection, expr_is_result_propagated,
+    external_crate_associated_path_projection, external_crate_path_projection,
+    external_facade_rust_path_projection, facade_method_name, field_projection,
+    file_exists_projection, free_function_path_projection, function_call_projection,
+    index_to_usize_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_integral_parse_null_argument_as_number_format,
     java_iterator_from_collection_projection, java_list_hash_code_projection,
     java_list_iterator_from_collection_at_projection,
@@ -3102,10 +3103,33 @@ pub(crate) fn wrap_source_hierarchy_carrier_value(
     else {
         return constructed;
     };
-    function_call_projection(
+    // The carrier declaration treats each variant payload as a storage slot:
+    // if the represented source type is shared, the variant stores its
+    // planned handle (`Rc<T>`, `Rc<RefCell<T>>`, ...), not a bare `T`.
+    // Construct the payload from that same placement decision.  Keeping this
+    // at the carrier boundary makes declaration and construction agree for
+    // every source hierarchy instead of teaching individual constructor call
+    // sites about the enum's representation.
+    let placement = representations.storage_placement_for(owner_name);
+    let result_propagated = expr_is_result_propagated(&constructed);
+    let payload = if placement.shared() && placement.is_implemented() {
+        crate::slot_render::storage_placement_construction_expr(placement, constructed)
+    } else {
+        constructed
+    };
+    let wrapped = function_call_projection(
         RustExpr::path([carrier_name, owner_variant.as_str()]),
-        vec![constructed],
-    )
+        vec![payload],
+    );
+    // The enum constructor changes only the representation of the already
+    // produced payload. If the source constructor was unwrapped with `?`, keep
+    // that fact visible through the carrier boundary so return lowering does
+    // not append a second `?` to the infallible enum variant expression.
+    if result_propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, wrapped)
+    } else {
+        wrapped
+    }
 }
 
 fn constructor_owner_associated_path_projection(

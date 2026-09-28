@@ -1039,6 +1039,11 @@ pub enum BindingUse {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldUse {
+    AssignedToLocal {
+        field_name: String,
+        local_name: String,
+        local_binding: Option<BindingId>,
+    },
     AssignedSubtypeToField {
         field_name: String,
         field_type: JavaType,
@@ -1070,6 +1075,13 @@ pub enum FieldUse {
         arg_count: usize,
         arg_index: usize,
         boundary: CallArgumentBoundary,
+    },
+    ReceiverForCall {
+        field_name: String,
+        receiver_type: Option<JavaType>,
+        name: String,
+        arg_count: usize,
+        argument_bindings: Vec<(usize, BindingId)>,
     },
     Returned {
         field_name: String,
@@ -2811,7 +2823,17 @@ fn analyze_stmt(
             binding,
             ..
         } => {
+            let initialized_from_field = initializer.as_ref().and_then(|initializer| {
+                self_field_name(initializer, facts, field_names).map(str::to_string)
+            });
             insert_binding_use_facts(facts, source_name.clone(), binding.clone(), ty.clone());
+            if let Some(field_name) = initialized_from_field {
+                facts.field_uses.push(FieldUse::AssignedToLocal {
+                    field_name,
+                    local_name: name.clone(),
+                    local_binding: binding.clone(),
+                });
+            }
             if let Some(initializer) = initializer {
                 if let Some(actual_type) =
                     assigned_subtype_local_actual_type(initializer, ty, type_env, semantic_facts)
@@ -2911,6 +2933,13 @@ fn analyze_stmt(
                 } else {
                     record_use(facts, name, BindingUse::Mutated);
                     let local_binding = facts.visible_binding_id_for_name(name);
+                    if let Some(field_name) = self_field_name(value, facts, field_names) {
+                        facts.field_uses.push(FieldUse::AssignedToLocal {
+                            field_name: field_name.to_string(),
+                            local_name: name.clone(),
+                            local_binding: local_binding.clone(),
+                        });
+                    }
                     if let Some(target_binding) = facts.current_visible_binding_facts_for_name(name)
                         && let Some(actual_type) = assigned_subtype_local_actual_type(
                             value,
@@ -4035,6 +4064,18 @@ fn analyze_expr_with_context(
             {
                 record_use(facts, binding, BindingUse::ContentRead);
             }
+            if let Some(field_name) = receiver
+                .as_deref()
+                .and_then(|receiver| self_field_name(receiver, facts, field_names))
+            {
+                facts.field_uses.push(FieldUse::ReceiverForCall {
+                    field_name: field_name.to_string(),
+                    receiver_type: receiver_type.clone(),
+                    name: name.clone(),
+                    arg_count: args.len(),
+                    argument_bindings: argument_bindings.clone(),
+                });
+            }
             if let Some(receiver) = receiver
                 && let Expr::Var(binding) = receiver.as_ref()
             {
@@ -5112,6 +5153,20 @@ fn expr_targets_self_field(
         Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This),
         Expr::ArrayAccess(array, _) => expr_targets_self_field(array, facts, field_names),
         _ => false,
+    }
+}
+
+fn self_field_name<'a>(
+    expr: &'a Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+) -> Option<&'a str> {
+    match expr {
+        Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => Some(name),
+        Expr::FieldAccess(receiver, field_name) if matches!(receiver.as_ref(), Expr::This) => {
+            Some(field_name)
+        }
+        _ => None,
     }
 }
 

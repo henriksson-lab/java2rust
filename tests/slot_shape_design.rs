@@ -5184,6 +5184,57 @@ fn generic_source_supertype_collection_field_dispatches() {
 }
 
 #[test]
+fn escaping_collection_stream_uses_one_shot_owned_element_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+import java.util.stream.Stream;
+
+class StreamRow {
+    int value;
+    StreamRow(int value) { this.value = value; }
+}
+
+class EscapingStreams {
+    static Stream<StreamRow> rows(List<StreamRow> testCases) {
+        return testCases.stream();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn rows(test_cases: &[StreamRow]) -> Result<JavaStream<StreamRow>, JavaException>"
+        ) && translation
+            .rust
+            .contains("return Ok(JavaStream::from_iter(test_cases.iter().cloned()));"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "escaping_collection_stream_uses_one_shot_owned_element_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn escaping_stream_owns_elements_and_is_consumed_once_across_aliases() {
+    let rows = vec![StreamRow::new(7)];
+    let stream = EscapingStreams::rows(&rows).unwrap();
+    let alias = stream.clone();
+    let values = stream.into_iter_once().collect::<Vec<_>>();
+    assert_eq!(values.len(), 1);
+    assert_eq!(values[0].value, 7);
+    assert_eq!(alias.into_iter_once().count(), 0);
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn hierarchy_override_validation_policy_owns_conflict_diagnostics() {
     let parsed = parse_java_source(
         r#"
@@ -28488,6 +28539,63 @@ class UseImportedStaticMissingReturnFact {
         !translation.rust.contains("R: Default"),
         "{}",
         translation.rust
+    );
+}
+
+#[test]
+fn unsupported_mockito_do_answer_lambda_has_deterministic_callback_and_stubber_types() {
+    let source = r#"
+import static org.mockito.Mockito.doAnswer;
+
+class Signal {
+    void countDown() {}
+}
+
+class Worker {
+    void pollCompressible() {}
+}
+
+class UseMockitoAnswer {
+    void install(Signal latch, Worker serializer) {
+        doAnswer(invocation -> {
+            latch.countDown();
+            return null;
+        }).when(serializer).pollCompressible();
+    }
+}
+"#;
+
+    let translation = translate_source_with_facts(source, &FactSet::default());
+
+    assert!(
+        translation
+            .rust
+            .contains("FnOnce(OrgMockitoInvocationInvocationOnMock) -> Option<JavaPlainObject>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn when<T0>(&self, _arg0: T0) -> T0"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("org.mockito.Mockito.doAnswer is not modelled"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "unsupported_mockito_do_answer_lambda_has_deterministic_callback_",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 

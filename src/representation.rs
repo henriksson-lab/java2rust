@@ -5416,6 +5416,75 @@ class PlainFieldMap {
         );
     }
 
+    #[test]
+    fn hierarchy_carrier_construction_uses_its_variant_payload_storage_placement() {
+        let mut plan = RepresentationPlan::default();
+        plan.types.insert(
+            "Base".to_string(),
+            TypeRepresentation::new(
+                "Base",
+                ObjectRepresentation::SourceHierarchyCarrier {
+                    carrier_name: "BaseValue".to_string(),
+                    variants: vec!["Base".to_string()],
+                },
+                RepresentationProvenance::ParsedSource,
+                Vec::new(),
+            ),
+        );
+        plan.storage.insert(
+            "Base".to_string(),
+            crate::storage_strategy::TypeStorageFacts::default()
+                .with_escape(crate::storage_strategy::Escape::Stored)
+                .with_mutated(true),
+        );
+
+        let constructed = crate::call_lowering::wrap_source_hierarchy_carrier_value(
+            crate::rust_ir::RustExpr::Call {
+                function: Box::new(crate::rust_ir::RustExpr::path(["Base", "new"])),
+                args: Vec::new(),
+            },
+            "Base",
+            &plan,
+        );
+
+        assert_eq!(
+            crate::emit::emit_expr(&constructed),
+            "BaseValue::Base(std::rc::Rc::new(std::cell::RefCell::new(Base::new())))"
+        );
+    }
+
+    #[test]
+    fn hierarchy_carrier_construction_preserves_result_propagation() {
+        let mut plan = RepresentationPlan::default();
+        plan.types.insert(
+            "Child".to_string(),
+            TypeRepresentation::new(
+                "Child",
+                ObjectRepresentation::SourceHierarchyCarrier {
+                    carrier_name: "BaseValue".to_string(),
+                    variants: vec!["Child".to_string()],
+                },
+                RepresentationProvenance::ParsedSource,
+                Vec::new(),
+            ),
+        );
+        let constructor = crate::coercion::propagate_result_projection(
+            crate::coercion::function_call_projection(
+                crate::rust_ir::RustExpr::path(["Child", "new"]),
+                Vec::new(),
+            ),
+        );
+
+        let wrapped =
+            crate::call_lowering::wrap_source_hierarchy_carrier_value(constructor, "Child", &plan);
+
+        assert_eq!(
+            crate::emit::emit_expr(&wrapped),
+            "BaseValue::Child(Child::new()?)"
+        );
+        assert!(crate::coercion::expr_is_result_propagated(&wrapped));
+    }
+
     fn interface_type(name: &str, method: &str) -> TypeDecl {
         TypeDecl {
             kind: TypeKind::Interface,

@@ -1,7 +1,7 @@
 name	kind	local_path	java_source_path	java_files	recommended_gate_tier	notes
 old-golden-snippets	snippet	/home/mahogny/github/claude/java2rust/tests/corpus	/home/mahogny/github/claude/java2rust/tests/corpus	42	0	Old transpiler self-contained golden corpus with expected Rust outputs.
 current-fixtures	synthetic	/data/henriksson/github/claude/new_java2rust/examples/java	/data/henriksson/github/claude/new_java2rust/examples/java	38	0	Current minimized design fixtures; not a real code corpus.
-trimmomatic	real	/home/mahogny/github/claude/java2rust/testdata/trimmomatic	/home/mahogny/github/claude/java2rust/testdata/trimmomatic/src/main/java	68	1	Small real bioinformatics corpus; old repo tracks it in docs/CORPORA.tsv.
+trimmomatic	real	/home/mahogny/github/claude/java2rust/testdata/trimmomatic	/home/mahogny/github/claude/java2rust/testdata/trimmomatic/src/main/java	65	1	Production gate has 65 files under src/main/java; the project also has 3 JUnit/Mockito files under src/test/java for a separate discovery gate.
 jaligner	real	/home/mahogny/github/claude/java2rust/testdata/jaligner	/home/mahogny/github/claude/java2rust/testdata/jaligner/src/jaligner	29	1	Small alignment corpus from old SUM10 gate.
 jahmm	real	/home/mahogny/github/claude/java2rust/testdata/jahmm	/home/mahogny/github/claude/java2rust/testdata/jahmm/src	102	1	Small HMM corpus from old SUM10 gate.
 varscan	real	/home/mahogny/github/claude/java2rust/testdata/varscan	/home/mahogny/github/claude/java2rust/testdata/varscan	18	1	Small variant-calling corpus from old SUM10 gate.

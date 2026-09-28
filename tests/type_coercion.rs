@@ -6007,6 +6007,69 @@ fn optional_borrowed_concrete_element_unwraps_to_dyn_trait_target() {
 }
 
 #[test]
+fn optional_boxed_dyn_trait_maps_borrow_over_payload() {
+    let block_data = JavaType::Named {
+        name: "BlockData".to_string(),
+        args: Vec::new(),
+    };
+    let optional_block_data = optional_java_type(block_data.clone());
+    let mut actual = RustSlotShape::conservative(optional_block_data.clone());
+    actual.dispatch = DispatchShape::BoxedDynTrait {
+        trait_name: "BlockData".to_string(),
+    };
+    actual.view = ViewShape::DynTraitView;
+    let mut target = RustSlotShape::conservative(optional_block_data);
+    target.ownership = OwnershipShape::SharedBorrow;
+    target.dispatch = DispatchShape::DynTrait {
+        trait_name: "BlockData".to_string(),
+    };
+    target.view = ViewShape::DynTraitView;
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "BlockData".to_string(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: Vec::new(),
+            extends: None,
+            final_type: None,
+            object_safe_trait: Some(true),
+            provenance: FactProvenance::UserOverride,
+        });
+
+    let plan = shape_coercion_plan_with_facts(&actual, &target, &facts);
+    let OptionalShapeCoercionPolicy::MapElement { element_plan, .. } = plan.optional() else {
+        panic!("nullable boxed-to-borrowed trait conversion must map its payload");
+    };
+    assert_eq!(
+        element_plan.dispatch(),
+        &DispatchCoercionPolicy::BorrowBoxedDynTrait {
+            trait_name: "BlockData".to_string(),
+        }
+    );
+    assert_eq!(
+        emit_expr(&apply_shape_coercion_plan(
+            RustExpr::Var("block_data".to_string()),
+            &plan,
+        )),
+        "block_data.as_ref().map(|value| value.as_ref() as &dyn BlockData)"
+    );
+
+    let borrowed_plan = shape_coercion_plan_with_facts(&target, &target, &facts);
+    assert_eq!(
+        emit_expr(&apply_shape_coercion_plan(
+            RustExpr::Var("block_data".to_string()),
+            &borrowed_plan,
+        )),
+        "block_data",
+        "an Option<&dyn Trait> argument must not be reinterpreted as Option<Box<dyn Trait>>"
+    );
+}
+
+#[test]
 fn optional_borrowed_concrete_element_unwraps_to_concrete_facade_target() {
     let simple_interval = JavaType::Named {
         name: "SimpleInterval".to_string(),

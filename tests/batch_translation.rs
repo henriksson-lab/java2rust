@@ -9,6 +9,212 @@ use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn batch_nullable_collection_constructor_parameter_and_stored_field_share_shape() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "CarrierRecord.java".to_string(),
+            r#"
+package example.carrier;
+
+public class CarrierRecord {
+    int value;
+    void setValue(int value) { this.value = value; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "CarrierBlock.java".to_string(),
+            r#"
+package example.carrier;
+
+import java.util.List;
+
+public class CarrierBlock {
+    private List<CarrierRecord> originalRecords;
+
+    public CarrierBlock(List<CarrierRecord> originalRecords) {
+        this.originalRecords = originalRecords;
+    }
+
+    public List<CarrierRecord> takeRecords() {
+        List<CarrierRecord> result = originalRecords;
+        originalRecords = null;
+        return result;
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "CarrierProducer.java".to_string(),
+            r#"
+package example.carrier;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class CarrierProducer {
+    public CarrierBlock make() {
+        List<CarrierRecord> records = new ArrayList<CarrierRecord>();
+        CarrierRecord record = null;
+        records.add(record);
+        return new CarrierBlock(records);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let block = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "CarrierBlock.java")
+        .expect("carrier block translation");
+    assert!(
+        block.rust().contains(
+            "original_records: Option<Vec<Option<std::rc::Rc<std::cell::RefCell<CarrierRecord>>>>>"
+        ),
+        "{}",
+        block.rust()
+    );
+    assert!(
+        block.rust().contains(
+            "original_records: Vec<Option<std::rc::Rc<std::cell::RefCell<CarrierRecord>>>>)"
+        ),
+        "{}",
+        block.rust()
+    );
+    cargo_check_generated_modules(
+        "batch_nullable_collection_constructor_field_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: block.rust().to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn batch_global_shapes_do_not_project_nullable_arguments_twice() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "ProjectionBatch.java".to_string(),
+            r#"
+interface ProjectionBlockData { int size(); }
+
+interface ProjectionBlockSink {
+    void accept(ProjectionBlockData value);
+}
+
+class ProjectionUncompressedBlockData implements ProjectionBlockData {
+    ProjectionUncompressedBlockData peer;
+    public int size() { return 1; }
+}
+
+class ProjectionBlock {
+    ProjectionBlockData data;
+    ProjectionUncompressedBlockData raw;
+    ProjectionBlockData get() { return data; }
+    ProjectionUncompressedBlockData getRaw() {
+        if (raw == null) return null;
+        return raw;
+    }
+    int useData(ProjectionBlockData value) { return value == null ? 0 : value.size(); }
+}
+
+class ProjectionRecord {
+    String name;
+    String getName() { return name; }
+}
+
+public class ProjectionBatch {
+    ProjectionBlockSink sink;
+
+    int forward(ProjectionBlock target, ProjectionBlock source) {
+        ProjectionBlockData data = source.get();
+        return target.useData(data) + target.useData(source.getRaw());
+    }
+
+    void forwardOptional(ProjectionBlockData data) {
+        if (data != null)
+            sink.accept(data);
+    }
+
+    int delimiterIndex(String name, Character delimiter) {
+        return name.indexOf(delimiter);
+    }
+
+    String firstName(ProjectionRecord[] records) {
+        return records[0].getName();
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "ProjectionBatchPeer.java".to_string(),
+            "class ProjectionBatchPeer { int value() { return 1; } }".to_string(),
+        ),
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let projection = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "ProjectionBatch.java")
+        .expect("projection batch translation");
+    assert!(
+        !projection
+            .rust()
+            .contains("Option<&&dyn ProjectionBlockData>")
+            && !projection
+                .rust()
+                .contains(").as_ref() as &dyn ProjectionBlockData")
+            && !projection.rust().contains("?.as_ref().cloned()")
+            && !projection.rust().contains("?.get_name()")
+            && !projection
+                .rust()
+                .contains("data.as_ref() as &dyn ProjectionBlockData"),
+        "{}",
+        projection.rust()
+    );
+    assert!(
+        projection.rust().contains(
+            ".get_raw().as_ref().map(|value| &**value).map(|value| value as &dyn ProjectionBlockData)"
+        ),
+        "nullable shared implementors must project the handle payload before the trait upcast: {}",
+        projection.rust()
+    );
+    cargo_check_generated_modules(
+        "batch_global_shapes_do_not_project_twice",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: projection.rust().to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn batch_nested_subclass_return_and_cast_select_source_hierarchy_carrier() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new(
@@ -3367,4 +3573,218 @@ fn translate_batch_keeps_parse_diagnostics_with_the_file_that_caused_them() {
         }
     }
     assert_eq!(seen, 3, "{status}");
+}
+
+#[test]
+fn batch_cross_file_overloaded_constructor_uses_the_emitted_fallibility_abi() {
+    let record = r#"
+package example.model;
+public class Record {
+    String value;
+    public Record(String value) {
+        this.value = value;
+        if (value.length() == 0) throw new RuntimeException("empty");
+    }
+    public Record(Record base, int start, int length) {
+        if (start < 0) throw new RuntimeException("negative");
+        this.value = base.value.substring(start, start + length);
+    }
+    public Record(Record base, String value, String quality, int offset) {
+        this.value = value;
+    }
+    public void rename(String value) { this.value = value; }
+}
+"#;
+    let consumer = r#"
+package example.consumer;
+import example.model.Record;
+public class Consumer {
+    public Record convert(Record input, String value) {
+        return new Record(input, value, value, 33);
+    }
+}
+"#;
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &[
+                new_java2rust::BatchSource::new(
+                    "example/model/Record.java".to_string(),
+                    record.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/consumer/Consumer.java".to_string(),
+                    consumer.to_string(),
+                ),
+            ],
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let consumer = translations
+        .iter()
+        .find(|translation| translation.path() == "example/consumer/Consumer.java")
+        .expect("translated consumer");
+    assert!(
+        consumer
+            .rust()
+            .contains("Record::new_record_string_string_int(input, value.clone()"),
+        "{}",
+        consumer.rust()
+    );
+    assert!(!consumer.rust().contains(", 33)?"), "{}", consumer.rust());
+}
+
+#[test]
+fn batch_nullable_constructor_receiver_uses_one_fallibility_abi_at_definition_and_call() {
+    let record = r#"
+package example.model;
+public class Record {
+    String name;
+    String sequence;
+    String quality;
+    int offset;
+    public Record(String name, String sequence, String quality, int offset) {
+        this.name = name;
+        this.sequence = sequence;
+        this.quality = quality;
+        if (sequence.length() != quality.length()) throw new RuntimeException("mismatch");
+    }
+    public Record(Record base, int start, int length) {
+        if (start < 0) throw new RuntimeException("negative");
+        this.sequence = base.sequence.substring(start, start + length);
+    }
+    public Record(Record base, String sequence, String quality, int offset) {
+        this.name = base.name;
+        this.sequence = sequence;
+        this.quality = quality;
+        this.offset = offset;
+    }
+    public String getSequence() { return sequence; }
+    public String getQuality() { return quality; }
+    public int getOffset() { return offset; }
+}
+"#;
+    let base = r#"
+package example.convert;
+import example.model.Record;
+public abstract class Base {
+    public abstract Record convert(Record input);
+}
+"#;
+    let consumer = r#"
+package example.convert;
+import example.model.Record;
+public class Consumer extends Base {
+    public Record convert(Record input) {
+        if (input.getOffset() == 33) return input;
+        String sequence = input.getSequence();
+        String quality = input.getQuality();
+        StringBuilder converted = new StringBuilder();
+        for (int i = 0; i < quality.length(); i++) converted.append(quality.charAt(i));
+        return new Record(input, sequence, converted.toString(), 33);
+    }
+}
+"#;
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &[
+                new_java2rust::BatchSource::new(
+                    "example/model/Record.java".to_string(),
+                    record.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/convert/Base.java".to_string(),
+                    base.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/convert/Consumer.java".to_string(),
+                    consumer.to_string(),
+                ),
+            ],
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let consumer = translations
+        .iter()
+        .find(|translation| translation.path() == "example/convert/Consumer.java")
+        .expect("translated consumer");
+    let record_translation = translations
+        .iter()
+        .find(|translation| translation.path() == "example/model/Record.java")
+        .expect("translated record");
+    assert!(
+        consumer
+            .rust()
+            .contains("Record::new_record_string_string_int(input, sequence"),
+        "{}",
+        consumer.rust()
+    );
+    assert!(consumer.rust().contains(", 33)?"), "{}", consumer.rust());
+    assert!(
+        record_translation
+            .rust()
+            .contains("pub fn new_record_string_string_int(")
+            && record_translation
+                .rust()
+                .contains(") -> Result<Record, JavaException>")
+            && record_translation.rust().contains("return Ok(Record"),
+        "the solved constructor fallibility must control both its signature and body:\n{}",
+        record_translation.rust()
+    );
+}
+
+#[test]
+fn batch_indexed_shared_reference_receiver_borrows_the_payload() {
+    let record = r#"
+package example.model;
+public class Record {
+    String name;
+    public Record(String name) { this.name = name; }
+    public String getName() { return name; }
+    public void rename(String name) { this.name = name; }
+    public static String aliasMutation(Record record) {
+        Record alias = record;
+        alias.rename("changed");
+        return record.name;
+    }
+}
+"#;
+    let consumer = r#"
+package example.consumer;
+import example.model.Record;
+public class Consumer {
+    public String firstName(Record[] records) {
+        return records[0].getName();
+    }
+}
+"#;
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &[
+                new_java2rust::BatchSource::new(
+                    "example/model/Record.java".to_string(),
+                    record.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/consumer/Consumer.java".to_string(),
+                    consumer.to_string(),
+                ),
+            ],
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let consumer = translations
+        .iter()
+        .find(|translation| translation.path() == "example/consumer/Consumer.java")
+        .expect("translated consumer");
+    assert!(
+        consumer.rust().contains(".borrow().get_name()"),
+        "{}",
+        consumer.rust()
+    );
 }

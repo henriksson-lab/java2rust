@@ -50,7 +50,80 @@ use new_java2rust::facts::{
     UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
-use new_java2rust::{parser, resolve, semantic_analysis};
+use new_java2rust::{parser, resolve, semantic_analysis, translate_source};
+
+#[test]
+fn java_platform_properties_runtime_and_resource_stream_facades_compile() {
+    let source = r#"
+import java.io.BufferedReader;
+import java.io.InputStream;
+import java.io.InputStreamReader;
+import java.util.Properties;
+
+class PlatformFacadeUse {
+    static int run() throws Exception {
+        InputStream stream = ClassLoader.getSystemResourceAsStream("version.properties");
+        Properties properties = new Properties();
+        properties.load(stream);
+        String version = properties.getProperty("version");
+        BufferedReader reader = new BufferedReader(new InputStreamReader(
+            ClassLoader.getSystemResourceAsStream("lines.txt")));
+        reader.close();
+        return Runtime.getRuntime().availableProcessors() + (version == null ? 0 : 1);
+    }
+}
+"#;
+    let translation = translate_source(source);
+    assert!(
+        translation.diagnostics.is_empty(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("ClassLoader::get_system_resource_as_stream")
+    );
+    assert!(translation.rust.contains("properties.load(stream)?"));
+    assert!(translation.rust.contains("properties.get_property"));
+    assert!(
+        translation
+            .rust
+            .contains("Runtime::get_runtime().available_processors()")
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn new_1<R: Into<InputStreamReader>>")
+    );
+    cargo_check_generated_modules(
+        "java_platform_config_facades",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn java_properties_load_is_a_mutating_checked_api() {
+    let effect =
+        external_api_effect_for_receiver_with_arity(Some("java.util.Properties"), "load", Some(1))
+            .expect("Properties.load should be modelled");
+    assert_eq!(effect.return_type, Some(JavaType::Void));
+    assert_eq!(
+        effect.receiver_mutability,
+        ReceiverMutabilityFact::MutatesReceiver
+    );
+    assert_eq!(
+        effect.thrown,
+        vec![JavaType::Named {
+            name: "IOException".to_string(),
+            args: Vec::new(),
+        }]
+    );
+}
 
 #[test]
 fn files_new_buffered_reader_returns_buffered_reader_fact() {
@@ -7753,6 +7826,22 @@ fn java_platform_concurrent_static_factory_declares_precise_return_type() {
             ),
             "{receiver}.await/0 should declare its checked InterruptedException"
         );
+
+        let timed = external_api_effect_for_receiver_with_arity(Some(receiver), "await", Some(2))
+            .unwrap_or_else(|| panic!("{receiver}.await/2 should be platform-modeled"));
+        assert_eq!(timed.provenance, FactProvenance::BuiltinExternalModel);
+        assert_eq!(timed.arg_count, Some(2));
+        assert_eq!(timed.role, ExternalApiRole::Getter);
+        assert_eq!(
+            timed.return_type,
+            Some(JavaType::Primitive(PrimitiveType::Boolean))
+        );
+        assert!(
+            timed.thrown.iter().any(
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "InterruptedException")
+            ),
+            "{receiver}.await/2 should declare its checked InterruptedException"
+        );
     }
 
     for receiver in ["Thread", "java.lang.Thread", "JavaLangThread"] {
@@ -10029,7 +10118,7 @@ class BroadHttpBucketUtilsUse {
 }
 
 #[test]
-fn generic_function_facade_methods_do_not_shadow_receiver_generics() {
+fn generic_function_parameters_lower_to_typed_rust_closures() {
     let translation = new_java2rust::translate_source(
         r#"
 import java.util.function.Function;
@@ -10048,23 +10137,18 @@ class GenericFunctionFacadeUse {
     );
 
     assert!(
-        translation.rust.contains("impl<T0, T1> Function<T0, T1>"),
-        "{}",
-        translation.rust
-    );
-    assert!(
         translation
             .rust
-            .contains("pub fn apply<T2>(&self, _arg0: T2)")
+            .contains("mut function: impl FnMut(String) -> String")
             && translation
                 .rust
-                .contains("pub fn apply_as_int<T2>(&self, _arg0: T2)"),
+                .contains("mut function: impl FnMut(String) -> i32"),
         "{}",
         translation.rust
     );
     assert!(
-        !translation.rust.contains("pub fn apply<T0>(&self")
-            && !translation.rust.contains("pub fn apply_as_int<T0>(&self"),
+        translation.rust.contains("function(\"x\".to_string())")
+            && translation.rust.contains("function(\"abcd\".to_string())"),
         "{}",
         translation.rust
     );

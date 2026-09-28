@@ -66,7 +66,7 @@ Tier 4 is the stress corpus:
 |---|---:|---:|---|
 | `old-golden-snippets` | 42 | 0 | `/home/mahogny/github/claude/java2rust/tests/corpus` |
 | `current-fixtures` | 38 | 0 | `examples/java` |
-| `trimmomatic` | 68 | 1 | `/home/mahogny/github/claude/java2rust/testdata/trimmomatic` |
+| `trimmomatic` | 65 production + 3 test | 1 | `/home/mahogny/github/claude/java2rust/testdata/trimmomatic` |
 | `jaligner` | 29 | 1 | `/home/mahogny/github/claude/java2rust/testdata/jaligner` |
 | `jahmm` | 102 | 1 | `/home/mahogny/github/claude/java2rust/testdata/jahmm` |
 | `varscan` | 18 | 1 | `/home/mahogny/github/claude/java2rust/testdata/varscan` |

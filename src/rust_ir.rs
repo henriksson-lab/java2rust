@@ -334,6 +334,12 @@ pub struct RustMatchArm {
 /// the answer; recording it here is what stops the consumer from guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustExprShape {
+    /// A slot conversion completed without producing a more specific view.
+    ///
+    /// This carries the resulting `RustSlotShape` so a later (for example,
+    /// batch-global) consumer can recognize that ownership/dispatch/nullability
+    /// adaptation has already happened.
+    SlotAdapted,
     /// A `&str`: `.as_str()`, a borrowed `String`, a string literal.
     StringView,
     /// A shared borrow of the underlying value.

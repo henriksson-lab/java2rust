@@ -379,11 +379,15 @@ find "$generated_dir" -type f -name '*.rs' -delete
 printf "phase\tstatus\telapsed_ms\tdetail\n" > "$phase_events_path"
 printf "event\tpid\tindex\tsource\telapsed_ms\tstatus\trust_path\n" > "$worker_events_path"
 
-if [[ ! -x "$binary" ]]; then
-  if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
+if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
+  if [[ ! -x "$binary" ]]; then
     echo "NEW_JAVA2RUST_BIN is not executable: $binary" >&2
     exit 1
   fi
+else
+  # The focused package gate is an end-to-end translator test.  An existing
+  # release executable may predate the source changes under test, so let Cargo
+  # perform its incremental freshness check on every default invocation.
   cargo build --quiet "${build_profile_args[@]}" --bin new-java2rust
 fi
 
@@ -809,7 +813,7 @@ strip_shared_support_items() {
         copy_depth -= gsub(/\}/, "}")
         next
       }
-      if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+&?([[:space:]]*)?[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
+      if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+.*[[:space:]]+for[[:space:]]+&?([[:space:]]*)?([A-Za-z_][A-Za-z0-9_]*::)*[A-Za-z_][A-Za-z0-9_]*(<.*>)?[[:space:]]*\{/) {
         impl_trait_raw = $0
         sub(/^impl([[:space:]]*<[^{}]+>)?[[:space:]]+/, "", impl_trait_raw)
         sub(/[[:space:]]+for[[:space:]].*/, "", impl_trait_raw)
@@ -823,10 +827,14 @@ strip_shared_support_items() {
         }
         impl_target = $0
         sub(/^.*[[:space:]]for[[:space:]]+/, "", impl_target)
+        impl_target_raw = impl_target
+        sub(/[[:space:]]*\{.*/, "", impl_target_raw)
         sub(/(<.*>)?[[:space:]]*\{.*/, "", impl_target)
         target_is_shared = shared[impl_target] && impl_target != source_type
         keep_module_from_impl_to_shared = target_is_shared && from_trait_source != "" && !shared[from_trait_source]
-        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (target_is_shared && !keep_module_from_impl_to_shared) || (shared[impl_trait] && impl_trait != source_type)) {
+        source_owned_shared_adapter = index(impl_target, "__JavaShared" source_type "As") == 1
+        source_owned_wrapper = impl_target_raw ~ ("(^|::)(Rc|Arc)[[:space:]]*<[[:space:]]*" source_type "[[:space:]]*>$")
+        if (impl_target == "JavaException" || impl_target == "JavaClass" || impl_target == "FileSystem" || impl_target == "Path" || impl_target == "URI" || impl_target == "File" || impl_target == "URL" || impl_target == "URLConnection" || impl_target == "JarURLConnection" || impl_target == "JarFile" || impl_target == "JarEntry" || impl_target == "Manifest" || impl_target == "Attributes" || impl_target == "AttributesName" || impl_target == "Enumeration" || impl_target == "JavaIterator" || impl_target == "IOUtils" || (target_is_shared && !keep_module_from_impl_to_shared) || (shared[impl_trait] && impl_trait != source_type && !source_owned_shared_adapter && !source_owned_wrapper)) {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")
@@ -1377,11 +1385,125 @@ else:
 PY
 }
 
+deduplicate_generated_coherence_items() {
+  local rust_path="$1"
+  python3 - "$rust_path" <<'PY'
+import re
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+lines = path.read_text().splitlines(keepends=True)
+static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+trait_impl_re = re.compile(
+    r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)"
+)
+
+
+def is_char_literal_start(line: str, index: int) -> bool:
+    next_index = index + 1
+    if next_index >= len(line):
+        return False
+    if line[next_index] == "\\":
+        return index + 3 < len(line) and line[index + 3] == "'"
+    return index + 2 < len(line) and line[index + 2] == "'"
+
+
+def brace_delta(line: str) -> int:
+    delta = 0
+    index = 0
+    state = "code"
+    while index < len(line):
+        ch = line[index]
+        nxt = line[index + 1] if index + 1 < len(line) else ""
+        if state == "code":
+            if ch == "/" and nxt == "/":
+                break
+            if ch == "/" and nxt == "*":
+                state = "block_comment"
+                index += 2
+                continue
+            if ch == '"':
+                state = "string"
+                index += 1
+                continue
+            if ch == "'" and is_char_literal_start(line, index):
+                state = "char"
+                index += 1
+                continue
+            if ch == "{":
+                delta += 1
+            elif ch == "}":
+                delta -= 1
+            index += 1
+            continue
+        if state in {"string", "char"}:
+            if ch == "\\":
+                index += 2
+                continue
+            if (state == "string" and ch == '"') or (state == "char" and ch == "'"):
+                state = "code"
+            index += 1
+            continue
+        if ch == "*" and nxt == "/":
+            state = "code"
+            index += 2
+            continue
+        index += 1
+    return delta
+
+
+def item_end(start: int) -> int:
+    if "{" not in lines[start]:
+        return start + 1
+    depth = 0
+    for index in range(start, len(lines)):
+        depth += brace_delta(lines[index])
+        if depth <= 0:
+            return index + 1
+    return len(lines)
+
+
+# Source-surface restoration is intentionally repeatable at multiple assembly
+# boundaries.  Keep the first top-level storage item and the first exact Rust
+# coherence key in a module; later identical keys cannot coexist in Rust even
+# when their bodies happen to differ.  Inherent impls and unique companion
+# impls (notably Clone for Box<dyn SourceTrait>) are outside this filter.
+seen = set()
+remove = set()
+depth = 0
+index = 0
+while index < len(lines):
+    line = lines[index]
+    key = None
+    if depth == 0:
+        if match := static_re.match(line):
+            key = ("static", match.group(1))
+        elif match := trait_impl_re.match(line):
+            key = ("trait_impl", match.group(1).strip(), match.group(2).strip())
+    if key is not None:
+        end = item_end(index)
+        if key in seen:
+            remove.update(range(index, end))
+        else:
+            seen.add(key)
+        index = end
+        depth = 0
+        continue
+    depth += brace_delta(line)
+    index += 1
+
+if remove:
+    path.write_text("".join(line for index, line in enumerate(lines) if index not in remove))
+PY
+}
+
 restore_missing_source_type_items() {
   local rust_path="$1"
   local raw_path="$2"
   local shared_types_path="${3:-}"
-  python3 - "$rust_path" "$raw_path" "$shared_types_path" <<'PY'
+  local shared_support_path="${4:-}"
+  python3 - "$rust_path" "$raw_path" "$shared_types_path" "$shared_support_path" <<'PY'
 import re
 import sys
 from pathlib import Path
@@ -1389,6 +1511,7 @@ from pathlib import Path
 rust_path = Path(sys.argv[1])
 raw_path = Path(sys.argv[2])
 shared_types_path = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+shared_support_path = Path(sys.argv[4]) if len(sys.argv) > 4 and sys.argv[4] else None
 
 if not raw_path.exists():
     raise SystemExit(0)
@@ -1592,14 +1715,75 @@ def inherent_method_names(lines: list[str], owned_names: set[str]) -> dict[str, 
     return names
 
 
+def boxed_dyn_trait_target_name(target: str):
+    """Return `Trait` for the owned carrier `Box<dyn Trait<...>>`.
+
+    Trait-object support is emitted immediately after a source interface, but
+    its impl target is the carrier rather than the source declaration itself.
+    Treating ownership as a bare target-name comparison therefore lets facade
+    reconciliation silently discard `Clone for Box<dyn Trait>`.
+    """
+    match = re.fullmatch(
+        r"(?:(?:std|alloc)::boxed::)?Box\s*<\s*dyn\s+"
+        r"([A-Za-z_][A-Za-z0-9_]*)(?:\s*<.*>)?\s*>",
+        target,
+    )
+    return match.group(1) if match else None
+
+
+def source_carrier_target_name(target: str):
+    """Return the source nominal wrapped by a transparent shared carrier.
+
+    Generated dispatch impls commonly target `Rc<Source>` or `Arc<Source>`;
+    synchronization/interior-mutability carriers can add another transparent
+    layer.  Peel only wrappers that preserve object identity so unrelated
+    generic support impls do not become source-owned accidentally.
+    """
+    target = target.strip()
+    target = target.removeprefix("&mut ").removeprefix("&").strip()
+    plain = re.fullmatch(
+        r"(?:(?:[A-Za-z_][A-Za-z0-9_]*)::)*([A-Za-z_][A-Za-z0-9_]*)",
+        target,
+    )
+    if plain:
+        return plain.group(1)
+    wrapped = re.fullmatch(r"(.+?)\s*<\s*(.+)\s*>", target)
+    if not wrapped:
+        return None
+    wrapper = wrapped.group(1).strip().rsplit("::", 1)[-1]
+    if wrapper not in {"Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock"}:
+        return None
+    return source_carrier_target_name(wrapped.group(2))
+
+
+def source_owned_trait_impl(
+    trait: str, target: str, owned_names: set[str]
+) -> bool:
+    if source_carrier_target_name(target) in owned_names:
+        return True
+    return (
+        trait == "Clone"
+        and boxed_dyn_trait_target_name(target) in owned_names
+    )
+
+
 def trait_impl_keys(lines: list[str], owned_names: set[str]) -> set[tuple[str, str]]:
     keys = set()
     for line in lines:
         if match := trait_impl_re.match(line):
+            trait = match.group(1).strip()
             target = match.group(2).strip()
-            if target in owned_names:
-                keys.add((match.group(1).strip(), target))
+            if source_owned_trait_impl(trait, target, owned_names):
+                keys.add((trait, target))
     return keys
+
+
+def all_trait_impl_keys(lines: list[str]) -> set[tuple[str, str]]:
+    return {
+        (match.group(1).strip(), match.group(2).strip())
+        for line in lines
+        if (match := trait_impl_re.match(line))
+    }
 
 
 # Shared-support stripping may move or remove the structural alias that proves
@@ -1611,10 +1795,18 @@ def trait_impl_keys(lines: list[str], owned_names: set[str]) -> set[tuple[str, s
 current_lines_for_surface = current.splitlines(keepends=True)
 existing_methods = inherent_method_names(current_lines_for_surface, surface_owned_names)
 existing_traits = trait_impl_keys(current_lines_for_surface, surface_owned_names)
-existing_all_traits = trait_impl_keys(
-    current_lines_for_surface,
-    declared_names("".join(raw_lines)) | source_owned_names,
-)
+existing_all_traits = all_trait_impl_keys(current_lines_for_surface)
+# The facade merge runs before this reconciliation pass and can already own a
+# conversion at crate scope.  Rust coherence is global, so restoring the same
+# `(trait, target)` pair in its source file would produce E0119 even though the
+# implementations live in different assembly inputs.  Compare exact keys: a
+# shared target by itself must not suppress a genuinely missing source
+# conversion.
+shared_trait_keys = set()
+if shared_support_path and shared_support_path.exists():
+    for line in shared_support_path.read_text().splitlines():
+        if match := trait_impl_re.match(line):
+            shared_trait_keys.add((match.group(1).strip(), match.group(2).strip()))
 source_surface_chunks = []
 raw_after_primary = False
 index = 0
@@ -1650,7 +1842,11 @@ while index < len(raw_lines):
         target = match.group(2).strip()
         key = (match.group(1).strip(), target)
         end = item_end(raw_lines, index)
-        if target in surface_owned_names and key not in existing_traits:
+        if (
+            source_owned_trait_impl(key[0], target, surface_owned_names)
+            and key not in existing_traits
+            and key not in shared_trait_keys
+        ):
             source_surface_chunks.append("".join(raw_lines[index:end]))
             existing_traits.add(key)
         index = end
@@ -1661,7 +1857,7 @@ while index < len(raw_lines):
 # representation even when its target carrier lives in a sibling module.
 # Facade reconciliation may remove such an impl while merging generic support;
 # restore it once in the module that owns the input type.
-from_source_re = re.compile(r"^From<([A-Za-z_][A-Za-z0-9_]*)>$")
+from_source_re = re.compile(r"^From<(.+)>$")
 index = 0
 while index < len(raw_lines):
     match = trait_impl_re.match(raw_lines[index])
@@ -1671,13 +1867,18 @@ while index < len(raw_lines):
     trait = match.group(1).strip()
     target = match.group(2).strip()
     source_match = from_source_re.match(trait)
+    from_source_names = (
+        set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", source_match.group(1)))
+        if source_match
+        else set()
+    )
     end = item_end(raw_lines, index)
     key = (trait, target)
     if (
         source_match
-        and source_match.group(1) in source_owned_names
-        and target not in shared_names
+        and bool(from_source_names & source_owned_names)
         and key not in existing_all_traits
+        and key not in shared_trait_keys
     ):
         source_surface_chunks.append("".join(raw_lines[index:end]))
         existing_all_traits.add(key)
@@ -1693,10 +1894,16 @@ for index, line in enumerate(raw_lines):
         end = item_end(raw_lines, index)
         raw_static_items[match.group(1)] = "".join(raw_lines[index:end])
 static_reference_text = current + "".join(source_surface_chunks)
+existing_static_names = {
+    match.group(1)
+    for line in current.splitlines()
+    if (match := static_re.match(line))
+}
 referenced_static_names = {
     name
     for name in raw_static_items
-    if re.search(rf"\b{re.escape(name)}\b", static_reference_text)
+    if name not in existing_static_names
+    and re.search(rf"\b{re.escape(name)}\b", static_reference_text)
 }
 
 if not missing_names and not referenced_static_names and not source_surface_chunks:
@@ -3334,7 +3541,7 @@ fi
 # The restoration helper only copies raw statics still referenced by the final
 # module, so support-prelude state remains excluded.
 for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path"
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path"
   restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
 done
 
@@ -3410,6 +3617,16 @@ for i in "${!java_files[@]}"; do
     } > "$tmp_import_path"
     mv "$tmp_import_path" "$rust_path"
   fi
+done
+
+# Import materialization above is the last rewrite of each generated source
+# module.  Re-run the idempotent source-surface closure at that actual module
+# boundary.  The earlier pass must remain before type indexing because it can
+# restore nominal declarations; this final pass protects non-nominal companion
+# items such as trait-object carrier impls from every assembly ordering.
+for rust_path in "$generated_dir"/*.rs; do
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path"
+  deduplicate_generated_coherence_items "$rust_path"
 done
 
 {
@@ -3517,14 +3734,14 @@ printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_pa
   printf "elapsed_ms\tphase\tstatus\tdetail\n"
   awk -F '\t' 'NR > 1 { gsub(/\t/, " ", $4); printf "%s\t%s\t%s\t%s\n", $3, $1, $2, $4 }' "$phase_events_path" \
     | sort -nr \
-    | head -20
+    | awk 'NR <= 20'
 } > "$slowest_phases_path"
 
 {
   printf "elapsed_ms\tevent\tstatus\tindex\tsource\trust_path\n"
   awk -F '\t' 'NR > 1 && $5 > 0 { gsub(/\t/, " ", $4); gsub(/\t/, " ", $7); printf "%s\t%s\t%s\t%s\t%s\t%s\n", $5, $1, $6, $3, $4, $7 }' "$worker_events_path" \
     | sort -nr \
-    | head -20
+    | awk 'NR <= 20'
 } > "$slowest_workers_path"
 
 {

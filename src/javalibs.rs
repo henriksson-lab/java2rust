@@ -254,9 +254,15 @@ pub(crate) fn preferred_static_owner_alias(
     match (owner.as_str(), method, arg_count) {
         (
             "class_loader" | "ClassLoader" | "java.lang.ClassLoader",
-            "get_system_resource" | "getSystemResource",
+            "get_system_resource"
+            | "getSystemResource"
+            | "get_system_resource_as_stream"
+            | "getSystemResourceAsStream",
             1,
         ) => Some("ClassLoader"),
+        ("runtime" | "Runtime" | "java.lang.Runtime", "get_runtime" | "getRuntime", 0) => {
+            Some("Runtime")
+        }
         (
             "org.disq_bio.disq.TabixIndexWriteOption" | "OrgDisqBioDisqTabixIndexWriteOption",
             "from_boolean" | "fromBoolean",

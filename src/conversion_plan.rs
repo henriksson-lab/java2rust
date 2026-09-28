@@ -528,6 +528,12 @@ fn optional_element_handle_placement(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> Option<crate::storage_strategy::StoragePlacement> {
+    // A closed-enum carrier owns its runtime payload representation.  The
+    // hierarchy's storage-placement fact describes the enum variant payload,
+    // not an additional handle around the carrier itself.
+    if matches!(target.dispatch, DispatchShape::ClosedEnum { .. }) {
+        return None;
+    }
     let JavaType::Named { name, .. } = target.optional_element_type()? else {
         return None;
     };
@@ -540,6 +546,9 @@ fn optional_element_handle_placement_with_representations(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> Option<crate::storage_strategy::StoragePlacement> {
+    if matches!(target.dispatch, DispatchShape::ClosedEnum { .. }) {
+        return None;
+    }
     let JavaType::Named { name, .. } = target.optional_element_type()? else {
         return None;
     };
@@ -685,6 +694,28 @@ pub fn optional_present_construction_plan_for_actual(
         Slot::Assignment(construction.element_shape().clone())
     };
     OptionalPresentConstructionPlan::new(construction, element_lowering_slot)
+}
+
+pub fn optional_present_construction_plan_for_actual_with_representations(
+    actual_element_shape: &RustSlotShape,
+    target: &RustSlotShape,
+    element_ty: JavaType,
+    source: OptionalPresentConstructionSource,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> OptionalPresentConstructionPlan {
+    let mut plan = optional_present_construction_plan_for_actual(
+        actual_element_shape,
+        target,
+        element_ty,
+        source,
+        facts,
+    );
+    if plan.construction.element_handle.is_none() {
+        plan.construction.element_handle =
+            optional_element_handle_placement_with_representations(target, facts, representations);
+    }
+    plan
 }
 
 pub fn preconverted_optional_slot_construction_plan(
@@ -1817,6 +1848,17 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         element_shape.java_ty = element_ty;
         element_shape.dispatch = DispatchShape::Concrete;
         element_shape.view = ViewShape::Native;
+    } else if matches!(
+        element_shape.dispatch,
+        DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
+    ) {
+        // A facade slot can already describe how the optional payload crosses
+        // the boundary.  In particular, `Optional(Borrowed)` for an
+        // object-safe interface is `Option<&dyn Trait>`, while storage is
+        // `Option<Box<dyn Trait>>`.  Re-inferring both payloads as boxed here
+        // erases that distinction and leaves the outer `Option` to be cast as
+        // though it were itself a trait object.
+        element_shape.java_ty = element_ty;
     } else if let JavaType::Named { name, args } = &element_ty
         && args.is_empty()
         && facts.object_safe_trait_fact_for_name(name) == Some(true)
@@ -2353,6 +2395,12 @@ pub fn dispatch_coercion_policy_with_facts(
         (DispatchShape::Concrete, DispatchShape::ErasedObject) => {
             DispatchCoercionPolicy::EraseObject
         }
+        (DispatchShape::ClosedEnum { .. }, DispatchShape::ErasedObject) => {
+            // A closed hierarchy enum is already the concrete runtime carrier
+            // for the Java value.  Crossing an Object boundary erases that
+            // carrier in exactly the same way as a concrete struct.
+            DispatchCoercionPolicy::EraseObject
+        }
         (DispatchShape::ClosedEnum { enum_name }, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
@@ -2387,7 +2435,7 @@ pub fn dispatch_coercion_policy_with_facts(
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
                     DispatchCoercionPolicy::DowncastDynTrait {
-                        target_type,
+                        target_type: erased_runtime_target_type(target, target_type, facts),
                         invalid_cast: InvalidCastPolicy::Panic,
                     }
                 }
@@ -2404,7 +2452,7 @@ pub fn dispatch_coercion_policy_with_facts(
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
                     DispatchCoercionPolicy::DowncastBoxedDynTrait {
-                        target_type,
+                        target_type: erased_runtime_target_type(target, target_type, facts),
                         invalid_cast: InvalidCastPolicy::Panic,
                     }
                 }
@@ -2596,26 +2644,20 @@ fn java_collection_conversion_policy(
 ) -> Option<DispatchCoercionPolicy> {
     let actual_kind = crate::stdlib::java_collection_kind_for_type(&actual.java_ty)?;
     let target_kind = crate::stdlib::java_collection_kind_for_type(&target.java_ty)?;
-    if !matches!(
-        (actual_kind, target_kind),
-        (
-            crate::stdlib::JavaCollectionKind::InsertionOrderedMap,
-            crate::stdlib::JavaCollectionKind::Map
-        )
-    ) {
-        return None;
-    }
-
-    let (actual_key, actual_value) = crate::stdlib::java_map_type_args(&actual.java_ty)?;
-    let (target_key, target_value) = crate::stdlib::java_map_type_args(&target.java_ty)?;
-    if actual_key == target_key && actual_value == target_value {
-        Some(DispatchCoercionPolicy::ExternalInto {
-            from_type: actual.java_ty.clone(),
-            to_type: target.java_ty.clone(),
-        })
+    let compatible = if actual_kind.is_map_like() && target_kind.is_map_like() {
+        let (actual_key, actual_value) = crate::stdlib::java_map_type_args(&actual.java_ty)?;
+        let (target_key, target_value) = crate::stdlib::java_map_type_args(&target.java_ty)?;
+        actual_key == target_key && actual_value == target_value
+    } else if actual_kind.is_set_like() && target_kind.is_set_like() {
+        crate::types::sequence_element_type(&actual.java_ty)
+            == crate::types::sequence_element_type(&target.java_ty)
     } else {
-        None
-    }
+        false
+    };
+    (actual_kind != target_kind && compatible).then(|| DispatchCoercionPolicy::ExternalInto {
+        from_type: actual.java_ty.clone(),
+        to_type: target.java_ty.clone(),
+    })
 }
 
 fn unsupported_dispatch_coercion_policy_with_fallback(
@@ -3160,7 +3202,9 @@ pub fn plan_instanceof_check_with_facts(
         (DispatchShape::DynTrait { .. }, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
-                    return InstanceOfCheck::DynTraitType { target_type };
+                    return InstanceOfCheck::DynTraitType {
+                        target_type: erased_runtime_target_type(target, target_type, facts),
+                    };
                 }
                 RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
                     return unsupported_instanceof_check(
@@ -3174,7 +3218,9 @@ pub fn plan_instanceof_check_with_facts(
         (DispatchShape::BoxedDynTrait { .. }, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
-                    return InstanceOfCheck::BoxedDynTraitType { target_type };
+                    return InstanceOfCheck::BoxedDynTraitType {
+                        target_type: erased_runtime_target_type(target, target_type, facts),
+                    };
                 }
                 RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
                     return unsupported_instanceof_check(
@@ -4489,6 +4535,27 @@ mod tests {
                 OwnershipCoercionPolicy::RecoverOwnedWithClone { .. }
             ),
             "shared borrowed Array2 recovered with {policy:?}"
+        );
+    }
+
+    #[test]
+    fn closed_enum_erases_at_object_boundary() {
+        let mut actual = RustSlotShape::conservative(JavaType::Named {
+            name: "BlockOutputStream".to_string(),
+            args: Vec::new(),
+        });
+        actual.dispatch = DispatchShape::ClosedEnum {
+            enum_name: "BlockOutputStreamValue".to_string(),
+        };
+        let mut target = RustSlotShape::conservative(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        });
+        target.dispatch = DispatchShape::ErasedObject;
+
+        assert_eq!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &FactSet::default()),
+            DispatchCoercionPolicy::EraseObject
         );
     }
 }

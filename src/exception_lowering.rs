@@ -69,18 +69,58 @@ impl ExternalExceptionConversion {
 pub(crate) fn java_exception_support_item_with_facts(facts: &FactSet) -> RustItem {
     let conversions = external_exception_conversions(facts);
     let source_parent_arms = source_exception_parent_match_arms(facts);
-    let mut item = r#"#[derive(Clone, Default)]
+    let mut item = r#"pub trait JavaInputStreamDispatch {
+    fn identity(&self) -> *const ();
+    fn available(&self) -> i32 { 0 }
+    fn mark(&self, _read_limit: i32) {}
+    fn mark_supported(&self) -> bool { false }
+    fn reset(&self) {}
+    fn skip(&self, count: i64) -> i64 {
+        if count <= 0 { return 0; }
+        let mut skipped = 0_i64;
+        while skipped < count {
+            match self.read_0() {
+                Ok(-1) | Err(_) => break,
+                Ok(_) => skipped += 1,
+            }
+        }
+        skipped
+    }
+    fn read_0(&self) -> Result<i32, JavaException> { Ok(-1) }
+    fn read(&self, buffer: &mut [i8]) -> Result<i32, JavaException> {
+        self.read_3(buffer, 0, buffer.len() as i32)
+    }
+    fn read_3(&self, buffer: &mut [i8], offset: i32, length: i32) -> Result<i32, JavaException> {
+        let buffer_len = buffer.len() as i32;
+        if offset < 0 || length < 0 || offset > buffer_len || length > buffer_len - offset {
+            return Err(JavaException::new("IndexOutOfBoundsException", "InputStream read range out of bounds".to_string()));
+        }
+        if length == 0 { return Ok(0); }
+        let mut count = 0_i32;
+        while count < length {
+            let value = self.read_0()?;
+            if value < 0 { return Ok(if count == 0 { -1 } else { count }); }
+            buffer[(offset + count) as usize] = value as i8;
+            count += 1;
+        }
+        Ok(count)
+    }
+    fn close(&self) -> Result<(), JavaException> { Ok(()) }
+}
+
+#[derive(Clone, Default)]
 pub struct InputStream {
     bytes: Option<std::rc::Rc<Vec<u8>>>,
     position: Option<std::rc::Rc<std::cell::Cell<usize>>>,
     marked_position: Option<std::rc::Rc<std::cell::Cell<usize>>>,
     closed: Option<std::rc::Rc<std::cell::Cell<bool>>>,
     error_message: Option<std::rc::Rc<String>>,
+    source: Option<std::rc::Rc<dyn JavaInputStreamDispatch>>,
 }
 
 impl InputStream {
     pub const fn empty() -> InputStream {
-        InputStream { bytes: None, position: None, marked_position: None, closed: None, error_message: None }
+        InputStream { bytes: None, position: None, marked_position: None, closed: None, error_message: None, source: None }
     }
 
     pub fn from_bytes(bytes: Vec<u8>) -> InputStream {
@@ -90,6 +130,7 @@ impl InputStream {
             marked_position: Some(std::rc::Rc::new(std::cell::Cell::new(0))),
             closed: Some(std::rc::Rc::new(std::cell::Cell::new(false))),
             error_message: None,
+            source: None,
         }
     }
 
@@ -100,10 +141,34 @@ impl InputStream {
             marked_position: None,
             closed: None,
             error_message: Some(std::rc::Rc::new(error.to_string())),
+            source: None,
+        }
+    }
+
+    pub fn from_source<T: JavaInputStreamDispatch + 'static>(source: T) -> InputStream {
+        InputStream {
+            bytes: None,
+            position: None,
+            marked_position: None,
+            closed: None,
+            error_message: None,
+            source: Some(std::rc::Rc::new(source)),
         }
     }
 
     pub fn read_line(&self) -> Result<Option<String>, JavaException> {
+        if let Some(source) = self.source.as_ref() {
+            let mut bytes = Vec::new();
+            let mut saw_input = false;
+            loop {
+                let value = source.read_0()?;
+                if value < 0 { break; }
+                saw_input = true;
+                if value == i32::from(b'\n') { break; }
+                if value != i32::from(b'\r') { bytes.push(value as u8); }
+            }
+            return Ok(saw_input.then(|| String::from_utf8_lossy(&bytes).into_owned()));
+        }
         if let Some(message) = self.error_message.as_ref() {
             return Err(JavaException::new("FileNotFoundException", message.as_ref().clone()));
         }
@@ -146,6 +211,11 @@ impl std::fmt::Debug for InputStream {
 
 impl PartialEq for InputStream {
     fn eq(&self, other: &Self) -> bool {
+        match (&self.source, &other.source) {
+            (Some(left), Some(right)) => return left.identity() == right.identity(),
+            (Some(_), None) | (None, Some(_)) => return false,
+            (None, None) => {}
+        }
         match (&self.position, &other.position) {
             (Some(left), Some(right)) => std::rc::Rc::ptr_eq(left, right),
             (None, None) => true,
@@ -158,6 +228,10 @@ impl Eq for InputStream {}
 
 impl std::hash::Hash for InputStream {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        if let Some(source) = self.source.as_ref() {
+            std::hash::Hash::hash(&source.identity(), state);
+            return;
+        }
         std::hash::Hash::hash(&self.position.as_ref().map(std::rc::Rc::as_ptr), state);
     }
 }
@@ -293,6 +367,7 @@ fn java_exception_is_subtype(actual: &str, target: &str) -> bool {
 
 impl InputStream {
     pub fn available(&self) -> i32 {
+        if let Some(source) = self.source.as_ref() { return source.available(); }
         match (&self.bytes, &self.position) {
             (Some(bytes), Some(position)) => {
                 i32::try_from(bytes.len().saturating_sub(position.get())).unwrap_or(i32::MAX)
@@ -302,6 +377,7 @@ impl InputStream {
     }
 
     pub fn mark(&self, _read_limit: i32) {
+        if let Some(source) = self.source.as_ref() { source.mark(_read_limit); return; }
         if let (Some(position), Some(marked_position)) =
             (&self.position, &self.marked_position)
         {
@@ -310,10 +386,12 @@ impl InputStream {
     }
 
     pub fn mark_supported(&self) -> bool {
+        if let Some(source) = self.source.as_ref() { return source.mark_supported(); }
         self.position.is_some() && self.marked_position.is_some()
     }
 
     pub fn reset(&self) {
+        if let Some(source) = self.source.as_ref() { source.reset(); return; }
         if let (Some(position), Some(marked_position)) =
             (&self.position, &self.marked_position)
         {
@@ -322,6 +400,7 @@ impl InputStream {
     }
 
     pub fn skip(&self, count: i64) -> i64 {
+        if let Some(source) = self.source.as_ref() { return source.skip(count); }
         if count <= 0 {
             return 0;
         }
@@ -335,6 +414,7 @@ impl InputStream {
     }
 
     pub fn read_0(&self) -> Result<i32, JavaException> {
+        if let Some(source) = self.source.as_ref() { return source.read_0(); }
         if let Some(message) = self.error_message.as_ref() {
             return Err(JavaException::new("FileNotFoundException", message.as_ref().clone()));
         }
@@ -356,10 +436,12 @@ impl InputStream {
     }
 
     pub fn read(&self, buffer: &mut [i8]) -> Result<i32, JavaException> {
+        if let Some(source) = self.source.as_ref() { return source.read(buffer); }
         self.read_3(buffer, 0, buffer.len() as i32)
     }
 
     pub fn read_3(&self, buffer: &mut [i8], offset: i32, length: i32) -> Result<i32, JavaException> {
+        if let Some(source) = self.source.as_ref() { return source.read_3(buffer, offset, length); }
         if let Some(message) = self.error_message.as_ref() {
             return Err(JavaException::new("FileNotFoundException", message.as_ref().clone()));
         }
@@ -392,6 +474,7 @@ impl InputStream {
     }
 
     pub fn close(&self) -> Result<(), JavaException> {
+        if let Some(source) = self.source.as_ref() { return source.close(); }
         if let Some(closed) = self.closed.as_ref() {
             closed.set(true);
         }

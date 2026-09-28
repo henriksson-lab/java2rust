@@ -28,6 +28,161 @@ fn idiom_gap(path: &str) -> String {
     fs::read_to_string(Path::new("examples/idiom-gaps").join(path)).unwrap()
 }
 
+#[test]
+fn interface_factory_array_copies_preserve_implementor_identity() {
+    let translation = translate_source(
+        r#"
+interface CounterView {
+    int get();
+    void set(int value);
+}
+
+class MutableCounter implements CounterView {
+    int value;
+
+    MutableCounter(int value) {
+        this.value = value;
+    }
+
+    public int get() {
+        return value;
+    }
+
+    public void set(int value) {
+        this.value = value;
+    }
+}
+
+class InterfaceAliasUse {
+    static CounterView make() {
+        return new MutableCounter(7);
+    }
+
+    static int copyAndMutate() {
+        CounterView first = make();
+        CounterView second = first;
+        java.util.List<CounterView> list = new java.util.ArrayList<CounterView>();
+        list.add(first);
+        list.add(second);
+        CounterView[] values = list.toArray(new CounterView[0]);
+        values[0].set(41);
+        return values[1].get();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("std::rc::Rc::new(std::cell::RefCell::new(MutableCounter::new(7)))"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "interface_factory_array_copies_preserve_identity",
+        translation.rust,
+        r#"
+#[test]
+fn copied_interface_references_observe_the_same_object() {
+    assert_eq!(InterfaceAliasUse::copy_and_mutate(), 41);
+}
+"#,
+    );
+}
+
+#[test]
+fn direct_shared_concrete_call_keeps_override_return_abi() {
+    let translation = translate_source(
+        r#"
+interface DataView {
+    byte[] data();
+}
+
+class MissingData implements DataView {
+    public byte[] data() { return null; }
+}
+
+class PresentData implements DataView {
+    final byte[] bytes;
+
+    PresentData(byte[] bytes) { this.bytes = bytes; }
+
+    public byte[] data() { return bytes; }
+}
+
+class ConcreteDataUse {
+    static DataView make() { return new PresentData(new byte[3]); }
+    static PresentData solid() { return new PresentData(new byte[3]); }
+
+    static int concreteLength(PresentData value) {
+        byte[] bytes = value.data();
+        return bytes.length;
+    }
+
+    static int run() {
+        return concreteLength(solid());
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("PresentData::data("),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "direct_shared_concrete_override_abi",
+        translation.rust,
+        r#"
+#[test]
+fn concrete_override_keeps_its_nonnull_return() {
+    assert_eq!(ConcreteDataUse::run().unwrap(), 3);
+}
+"#,
+    );
+}
+
+#[test]
+fn source_hierarchy_value_receiver_keeps_virtual_dispatch_carrier() {
+    let translation = translate_source(
+        r#"
+class DispatchBase {
+    int value() { return 1; }
+}
+
+class DispatchChild extends DispatchBase {
+    int value() { return 2; }
+}
+
+class HierarchyDispatchUse {
+    static DispatchBase make() { return new DispatchChild(); }
+    static int run() {
+        DispatchBase value = make();
+        return value.value();
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("DispatchBase::value(&*"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "source_hierarchy_value_receiver_dispatch",
+        translation.rust,
+        r#"
+#[test]
+fn derived_override_dispatches_through_base_value() {
+    assert_eq!(HierarchyDispatchUse::run(), 2);
+}
+"#,
+    );
+}
+
 fn cargo_test_generated_modules_for_translation(
     crate_name: &str,
     rust: String,
@@ -39,6 +194,84 @@ fn cargo_test_generated_modules_for_translation(
             name: "fixture",
             rust,
             tests,
+        }],
+    );
+}
+
+#[test]
+fn cloneable_direct_interface_implementor_clones_through_trait_object() {
+    let translation = translate_source(
+        r#"
+interface ValueView {
+    int value();
+}
+
+class ConstantValue implements ValueView {
+    public int value() { return 7; }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("#[derive(Clone")
+            && translation.rust.contains(
+                "fn clone_box(&self) -> std::boxed::Box<dyn ValueView> { std::boxed::Box::new(self.clone()) }"
+            )
+            && !translation.rust.contains(
+                "clone_box for ValueView requires a cloneable Java object carrier"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "cloneable_direct_interface_implementor_clone_box",
+        translation.rust,
+        r#"
+#[test]
+fn cloned_trait_object_retains_the_concrete_value() {
+    let original: Box<dyn ValueView> = Box::new(ConstantValue {});
+    let cloned = original.clone();
+    assert_eq!(cloned.value(), 7);
+}
+"#,
+    );
+}
+
+#[test]
+fn noncloneable_direct_interface_implementor_keeps_explicit_clone_failure() {
+    let translation = translate_source(
+        r#"
+interface OpaqueView {
+    int value();
+}
+
+class OpaqueValue implements OpaqueView {
+    Object payload;
+
+    public int value() { return 9; }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("#[derive(Clone)]\npub struct OpaqueValue")
+            && translation
+                .rust
+                .contains("impl OpaqueView for OpaqueValue {")
+            && translation
+                .rust
+                .contains("clone_box for OpaqueView requires a cloneable Java object carrier"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "noncloneable_direct_interface_implementor_clone_box",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
         }],
     );
 }
@@ -962,6 +1195,7 @@ fn external_facade_keyword_method_names_render_as_raw_identifiers() {
     let translation = translate_source(
         r#"
 import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 class ExternalFacadeKeywordMethodNames {
     void waitFor(CountDownLatch latch) throws InterruptedException {
@@ -976,6 +1210,10 @@ class ExternalFacadeKeywordMethodNames {
             return "interrupted";
         }
     }
+
+    boolean waitForTimed(CountDownLatch latch) throws InterruptedException {
+        return latch.await(5, TimeUnit.SECONDS);
+    }
 }
 "#,
     );
@@ -983,11 +1221,14 @@ class ExternalFacadeKeywordMethodNames {
     assert!(
         translation
             .rust
-            .contains("pub fn r#await(&self) -> Result<(), JavaException>")
-            && translation.rust.contains("latch.r#await()?")
+            .contains("pub fn await_0(&self) -> Result<(), JavaException>")
+            && translation.rust.contains("latch.await_0()?")
             && translation
                 .rust
                 .contains("Err(ex) if ex.is_instance(&[\"InterruptedException\"])")
+            && translation
+                .rust
+                .contains("latch.await_2(5, TimeUnit::SECONDS)?")
             && !translation.rust.contains("pub fn await(")
             && !translation.rust.contains("latch.await()"),
         "{}",
@@ -1217,6 +1458,7 @@ fn java_list_iterator_cursor_uses_platform_facade() {
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.List;
+import java.util.ArrayList;
 
 class JavaIteratorCursorOverList {
     static List<String> copy(List<String> input) {
@@ -1489,6 +1731,151 @@ class LoopMove {
     );
     cargo_check_generated_modules(
         "loop_body_reuses_owned_value_with_back_edge_clone",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn loop_carried_nullable_collection_constructor_argument_is_cloned() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class LoopNullableCollectionMove {
+    static class Batch {
+        Batch(List<String> values) {}
+    }
+
+    void run(List<String> values, int n) {
+        while (n > 0) {
+            new Batch(values);
+            n--;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Batch::new(values.clone()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "loop_carried_nullable_collection_constructor_argument_is_cloned",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_collection_borrow_uses_option_payload_lifetime() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class NullableCollectionRecord {
+    int value;
+}
+
+class NullableCollectionBorrow {
+    boolean validate(List<NullableCollectionRecord> values) {
+        return values.size() > 0;
+    }
+
+    void run() {
+        List<NullableCollectionRecord> values = null;
+        values = new ArrayList<NullableCollectionRecord>();
+        if (values != null) {
+            validate(values);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.validate(values.as_deref())"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("map(|value| (&value).as_slice())")
+    );
+    cargo_check_generated_modules(
+        "nullable_collection_borrow_uses_option_payload_lifetime",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn enhanced_for_mutating_owned_hierarchy_element_uses_mutable_iterator() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+abstract class MutableLoopWorker {
+    int baseCount;
+    static MutableLoopWorker make(boolean first) {
+        if (first) return new MutableLoopWorkerA();
+        return new MutableLoopWorkerB();
+    }
+    void poll() { baseCount++; }
+}
+
+class MutableLoopWorkerA extends MutableLoopWorker {
+    int count;
+    void poll() { count++; }
+}
+
+class MutableLoopWorkerB extends MutableLoopWorker {
+    int count;
+    void poll() { count += 2; }
+}
+
+class MutableLoopWorkers {
+    List<MutableLoopWorker> workers = new ArrayList<MutableLoopWorker>();
+    int runs;
+
+    MutableLoopWorkers() {
+        workers.add(MutableLoopWorker.make(true));
+    }
+
+    void run() {
+        runs++;
+        for (MutableLoopWorker worker : workers) {
+            worker.poll();
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.workers.as_mut().expect(\"Java null receiver\").iter_mut()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "enhanced_for_mutating_owned_hierarchy_element_uses_mutable_iterator",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -3050,6 +3437,40 @@ mod generated_tests {
 }
 
 #[test]
+fn jdk_bitset_index_arguments_apply_java_char_to_int_widening() {
+    let translation = translate_source(
+        r#"
+import java.util.BitSet;
+
+class JdkBitSetCharIndex {
+    static boolean run(String text) {
+        BitSet bits = new BitSet();
+        char value = text.charAt(0);
+        bits.set(value);
+        return bits.get(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.matches("(value as u32) as i32").count() >= 2
+            && translation.rust.contains("set_result(")
+            && translation.rust.contains("get_result("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "jdk_bitset_char_index",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn boxed_double_parse_local_keeps_native_numeric_storage() {
     let translation = translate_source(
         r#"
@@ -3129,6 +3550,48 @@ mod generated_tests {
             DecimalFormatPatterns::run(),
             "9.8E-1:1E0:1.200:1.2".to_string()
         );
+    }
+}
+"#,
+    );
+}
+
+#[test]
+fn static_decimal_format_initializer_preserves_constructor_arguments() {
+    let translation = translate_source(
+        r#"
+class StaticDecimalFormatPattern {
+    private static java.text.DecimalFormat formatter =
+        new java.text.DecimalFormat("0.00");
+
+    static String run() {
+        return formatter.format(50.0);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("DecimalFormat::new(\"0.00\".to_string())")
+            && !translation
+                .rust
+                .contains("get_or_insert_with(|| Default::default())"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "static_decimal_format_initializer",
+        translation.rust,
+        r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn static_pattern_is_applied() {
+        assert_eq!(StaticDecimalFormatPattern::run(), "50.00".to_string());
     }
 }
 "#,
@@ -10889,15 +11352,15 @@ class HasContext implements ContextProvider {
     assert!(
         translation
             .rust
-            .contains("fn get_context(&self) -> Option<&Context>;")
+            .contains("fn get_context(&self) -> Option<std::rc::Rc<Context>>;")
             && translation
                 .rust
-                .contains("pub fn get_context(&self) -> Option<&Context>")
+                .contains("pub fn get_context(&self) -> Option<std::rc::Rc<Context>>")
             && translation
                 .rust
-                .contains("return self.context.as_ref().map(|value| &**value);")
+                .contains("return self.context.as_ref().cloned()")
             && translation.rust.contains(
-                "fn get_context(&self) -> Option<&Context> { HasContext::get_context(self) }"
+                "fn get_context(&self) -> Option<std::rc::Rc<Context>> { HasContext::get_context(self) }"
             )
             && !translation.rust.contains("return self.context.clone();"),
         "{}",
@@ -12612,6 +13075,79 @@ class SourceGzipOutput extends GZIPOutputStream {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_input_stream_subclass_dispatch_preserves_overrides_and_alias_state() {
+    let translation = translate_source(
+        r#"
+import java.io.InputStream;
+
+class DispatchingInputStream extends InputStream {
+    int position;
+
+    public int read() {
+        position++;
+        return 7;
+    }
+
+    public int available() { return 100 - position; }
+    public void close() { position += 100; }
+    public synchronized void mark(int limit) { position = limit; }
+    public boolean markSupported() { return true; }
+    public synchronized void reset() { position = 3; }
+    public long skip(long count) { position = position + (int) count; return count; }
+}
+
+class InputStreamDispatchProbe {
+    static int exercise() throws Exception {
+        DispatchingInputStream source = new DispatchingInputStream();
+        InputStream base = source;
+        InputStream alias = base;
+        int read = alias.read();
+        int available = base.available();
+        base.mark(5);
+        long skipped = alias.skip(2);
+        base.reset();
+        base.close();
+        return base.available() * 1000 + available + read + (int) skipped
+            + (base.markSupported() ? 1 : 0);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl JavaInputStreamDispatch for std::rc::Rc<std::cell::RefCell<DispatchingInputStream>>")
+            && translation.rust.contains(
+                "impl From<std::rc::Rc<std::cell::RefCell<DispatchingInputStream>>> for InputStream"
+            )
+            && !translation.rust.contains(
+                "unsupported Java external upcast: std::rc::Rc<std::cell::RefCell<DispatchingInputStream>> -> InputStream"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "source_input_stream_virtual_dispatch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn base_stream_calls_reach_source_overrides_and_one_shared_object() {
+        assert_eq!(InputStreamDispatchProbe::exercise().unwrap(), -2891);
+    }
+}
+"#,
         }],
     );
 }
@@ -14362,6 +14898,66 @@ class Kmer {
             rust: translation.rust.clone(),
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn nullable_boxed_trait_field_uses_mutable_projection_for_mutating_trait_method() {
+    let translation = translate_source(
+        r#"
+interface Counter {
+    void update(Item item);
+}
+class CounterImpl implements Counter {
+    int count;
+    public void update(Item item) { count++; }
+}
+class CounterHolder {
+    Counter counter;
+    void run(Item item) {
+        if (counter != null) counter.update(item);
+    }
+}
+class Item {}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("self.counter.as_mut().unwrap().update("),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn optional_shared_infallible_constructor_return_does_not_retain_try_operator() {
+    let translation = translate_source(
+        r#"
+class ConstructedRecord {
+    int count;
+    ConstructedRecord(int value) { count = value; }
+    void bump() { count++; }
+}
+class OptionalConstructorResult {
+    ConstructedRecord retained;
+    void retain(ConstructedRecord record) { retained = record; }
+    ConstructedRecord copy(ConstructedRecord record) {
+        if (record == null) return null;
+        return new ConstructedRecord(1);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Some(std::rc::Rc::new(std::cell::RefCell::new(ConstructedRecord::new(")
+            && !translation.rust.contains("ConstructedRecord::new(1)?"),
+        "{}",
+        translation.rust
     );
 }
 
@@ -25938,6 +26534,63 @@ fn carrier_uses_same_shared_and_nullable_abi_as_payloads() {
 }
 
 #[test]
+fn nullable_source_hierarchy_field_assignments_keep_the_carrier_slot_shape() {
+    let translation = translate_source(
+        r#"
+class NullableCarrierFieldAssignment {
+    NullableCarrierBase value;
+
+    NullableCarrierFieldAssignment(boolean throughFactory) {
+        if (throughFactory)
+            this.value = NullableCarrierFactory.make();
+        else
+            this.value = new NullableCarrierChild();
+    }
+
+    int read() { return value.read(); }
+}
+
+abstract class NullableCarrierBase {
+    abstract int read();
+}
+
+class NullableCarrierChild extends NullableCarrierBase {
+    int read() { return 7; }
+}
+
+class NullableCarrierFactory {
+    static NullableCarrierBase make() { return new NullableCarrierChild(); }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("value: Option<NullableCarrierBaseValue>")
+            && !translation
+                .rust
+                .contains("__java_self.value = Some(Box::new(")
+            && !translation
+                .rust
+                .contains("__java_self.value = Some(match NullableCarrierFactory::make()")
+            && translation
+                .rust
+                .contains("NullableCarrierBase(std::rc::Rc::new(Default::default()))"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_source_hierarchy_field_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_hierarchy_carrier_preserves_external_generic_return_payload() {
     let translation = translate_source(
         r#"
@@ -26875,7 +27528,9 @@ class ParsedBase {
         parsed_pos < self_pos
             && translation.rust.contains("key: Some(\"KEY\".to_string())")
             && translation.rust.contains("value: Some(\"\".to_string())")
-            && translation.rust.contains("name: Some(parsed.clone()")
+            && translation
+                .rust
+                .contains("__java_self.name = Some(parsed.clone()")
             && translation
                 .rust
                 .contains("__java_self.source = Some(parsed.clone()")
@@ -27286,6 +27941,212 @@ class HeaderChild extends HeaderBase {
 }
 
 #[test]
+fn source_super_constructor_definite_if_else_assignment_initializes_inherited_field() {
+    let superclass = r#"
+class ConditionalBase {
+    private int selected;
+
+    ConditionalBase(boolean useFirst, int first, int second) {
+        int candidate = first + 1;
+        if (useFirst) {
+            this.selected = candidate;
+        } else {
+            this.selected = second;
+        }
+    }
+}
+"#;
+    let subclass = r#"
+class ConditionalChild extends ConditionalBase {
+    ConditionalChild(boolean useFirst, int first, int second) {
+        super(useFirst, first, second);
+    }
+
+    int selected() {
+        return selected;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("selected: if use_first")
+            && translation.rust.contains("candidate")
+            && !translation.rust.contains("selected: Default::default()")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "source_super_constructor_definite_if_else_assignment",
+        translation.rust,
+        r#"
+#[test]
+fn source_super_constructor_definite_if_else_assignment_preserves_java_state() {
+    let first = ConditionalChild::new(true, 4, 20);
+    let second = ConditionalChild::new(false, 4, 20);
+    assert_eq!(first.selected(), 5);
+    assert_eq!(second.selected(), 20);
+}
+"#,
+    );
+}
+
+#[test]
+fn throwing_source_super_constructor_conditional_reference_assignment_compiles() {
+    let superclass = r#"
+class ConditionalSink {
+    int value;
+    ConditionalSink(int value) { this.value = value; }
+}
+
+class ConditionalReferenceBase {
+    protected ConditionalSink sink;
+
+    ConditionalReferenceBase(boolean useWrapped, int divisor) {
+        if (useWrapped) {
+            this.sink = new ConditionalSink(10 / divisor);
+        } else {
+            this.sink = new ConditionalSink(9);
+        }
+    }
+}
+"#;
+    let subclass = r#"
+class ConditionalReferenceChild extends ConditionalReferenceBase {
+    ConditionalReferenceChild(boolean useWrapped, int divisor) {
+        super(useWrapped, divisor);
+    }
+
+    int value() { return sink.value; }
+}
+"#;
+
+    let source = format!("{superclass}\n{subclass}");
+    let translation = translate_source(&source);
+
+    assert!(
+        translation.rust.contains("sink: if")
+            && translation
+                .rust
+                .contains("-> Result<ConditionalReferenceChild, JavaException>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "throwing_source_super_constructor_conditional_reference_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn fallible_source_super_constructor_propagates_through_shared_child_and_factory() {
+    let translation = translate_source(
+        r#"
+class FallibleSharedBase {
+    int value;
+
+    FallibleSharedBase(int divisor) {
+        value = 10 / divisor;
+    }
+}
+
+class FallibleSharedChild extends FallibleSharedBase implements Runnable {
+    Thread thread;
+
+    FallibleSharedChild(int divisor) throws java.io.IOException {
+        super(divisor);
+        thread = new Thread(this);
+    }
+
+    void replaceThread(Thread replacement) {
+        thread = replacement;
+    }
+
+    public void run() {}
+}
+
+class FallibleSharedFactory {
+    FallibleSharedChild make(int divisor) throws java.io.IOException {
+        return new FallibleSharedChild(divisor);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "-> Result<std::sync::Arc<std::sync::Mutex<FallibleSharedChild>>, JavaException>"
+        ) && translation
+            .rust
+            .contains("FallibleSharedChild::new(divisor)?"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "fallible_source_super_shared_child_factory",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn fallible_source_constructor_keeps_try_inside_hierarchy_carrier() {
+    let translation = translate_source(
+        r#"
+abstract class CarrierBase {
+    static CarrierBase make(int divisor) {
+        return new FallibleCarrierChild(divisor);
+    }
+}
+
+class FallibleCarrierChild extends CarrierBase {
+    int value;
+
+    FallibleCarrierChild(int divisor) {
+        value = 10 / divisor;
+    }
+}
+
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("FallibleCarrierChild::new(divisor)?.into()")
+            && !translation
+                .rust
+                .contains("FallibleCarrierChild::new(divisor)?.into()?"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "fallible_constructor_inside_hierarchy_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn source_super_constructor_uses_resolved_overload_not_first_same_arity() {
     let superclass = r#"
 enum CountKind {
@@ -27617,7 +28478,7 @@ class ExceptionContext {
                 .rust
                 .contains("let mut __java_self = NumberProblem")
             && translation.rust.contains(
-                "argument: Some((*java_clone_erased_object_ref(&(wrong)).downcast::<Number>()"
+                "__java_self.argument = Some((*java_clone_erased_object_ref(&(wrong)).downcast::<Number>()"
             )
             && !translation
                 .rust
@@ -31160,6 +32021,7 @@ class NullableCollectionElementCallBoundary {
         return contains(values, value);
     }
 }
+
 "#,
     );
 
@@ -31175,6 +32037,139 @@ class NullableCollectionElementCallBoundary {
     );
     cargo_check_generated_modules(
         "nullable_collection_element_call_boundary",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn linked_hash_set_nullable_elements_iterators_and_boxed_char_search_stay_coherent() {
+    let translation = translate_source(
+        r#"
+import java.util.Iterator;
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+class PairomaticCarrierFixture {
+    String readName() { return null; }
+
+    private Set<String> names(Character delimiter) {
+        Set<String> names = new LinkedHashSet<String>();
+        String name = readName();
+        if (delimiter != null) {
+            int index = name.lastIndexOf(delimiter);
+            if (index == -1) throw new RuntimeException("missing " + delimiter + " in " + name);
+            name = name.substring(0, index);
+        }
+        names.add(name);
+        return names;
+    }
+
+    private boolean equalOrdering(Set<String> left, Set<String> right) {
+        Iterator<String> leftIter = left.iterator();
+        Iterator<String> rightIter = right.iterator();
+        while (leftIter.hasNext() && rightIter.hasNext()) {
+            String leftValue = leftIter.next();
+            String rightValue = rightIter.next();
+            if (!leftValue.equals(rightValue)) return false;
+        }
+        return !leftIter.hasNext() && !rightIter.hasNext();
+    }
+
+    boolean run(Character delimiter) {
+        Set<String> left = names(delimiter);
+        Set<String> right = names(delimiter);
+        return equalOrdering(left, right);
+    }
+}
+
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation.rust.contains("JavaIterator<Option<String>>")
+            && translation.rust.contains("let left_value: Option<String>")
+            && translation.rust.contains("JavaStringSearchNeedle")
+            && translation
+                .rust
+                .contains("&delimiter.as_ref().copied().ok_or_else(")
+            && !translation.rust.contains(
+                "delimiter.as_ref().copied().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.as_ref()"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "pairomatic_carrier_coherence",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn string_search_helpers_cover_java_overloads() {
+        let boxed_char = 'b';
+        assert_eq!(java_string_index_of("abc", "bc"), 1);
+        assert_eq!(java_string_index_of("abc", &boxed_char), 1);
+        assert_eq!(java_string_last_index_of("abca", 'a'), 3);
+        assert_eq!(java_string_index_of("abc", i32::from(b'c')), 2);
+        assert_eq!(java_string_index_of("abc", -1_i32), -1);
+        assert_eq!(java_string_index_of("abc", 0x11_0000_i32), -1);
+    }
+}
+
+"#,
+        }],
+    );
+}
+
+#[test]
+fn source_logger_local_inside_enhanced_for_remains_an_instance_receiver() {
+    let translation = translate_source(
+        r#"
+class Logger {
+    void info(String message) {}
+}
+
+class SourceLoggerLoop {
+    static void run(String[] args) {
+        Logger logger = new Logger();
+        for (String arg : args) {
+            logger.info(" " + arg);
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics.iter().collect::<Vec<_>>()
+    );
+    assert!(
+        translation.rust.contains("logger.info(format!"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("Logger::info("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "source_logger_loop_instance_receiver",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -31225,6 +32220,84 @@ class NullableReturnedCollection {
     );
     cargo_check_generated_modules(
         "nullable_returned_collection_element",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_shared_elements_keep_one_carrier_through_iterators_fields_and_nested_queues() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+
+class ContainerCarrierRecord {
+    int count;
+    void touch() { count++; }
+}
+
+class ContainerCarrierFixture {
+    List<ContainerCarrierRecord> records;
+    ArrayBlockingQueue<List<ContainerCarrierRecord>> queue;
+
+    ContainerCarrierFixture(List<ContainerCarrierRecord> records) {
+        ContainerCarrierRecord record = null;
+        records.add(record);
+        this.records = records;
+        queue = new ArrayBlockingQueue<List<ContainerCarrierRecord>>(2);
+    }
+
+    ContainerCarrierRecord next(List<ContainerCarrierRecord> input) throws Exception {
+        ContainerCarrierRecord record = null;
+        input.add(record);
+        Iterator<ContainerCarrierRecord> iterator = input.iterator();
+        return iterator.hasNext() ? iterator.next() : null;
+    }
+
+    void enqueue() throws Exception {
+        List<ContainerCarrierRecord> batch = new ArrayList<ContainerCarrierRecord>();
+        ContainerCarrierRecord record = null;
+        batch.add(record);
+        queue.put(batch);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains(
+            "JavaIterator<Option<std::rc::Rc<std::cell::RefCell<ContainerCarrierRecord>>>>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "records: Option<Vec<Option<std::rc::Rc<std::cell::RefCell<ContainerCarrierRecord>>>>>"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "JavaArrayBlockingQueue<Vec<Option<std::rc::Rc<std::cell::RefCell<ContainerCarrierRecord>>>>>"
+        ),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_shared_container_carrier_coherence",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -32630,17 +33703,15 @@ class PrintStreamOutputStreamConstructorUse {
     );
 
     assert!(
-        translation.rust.contains("pub struct OutputStream;")
+        translation.rust.contains("pub struct OutputStream {")
             && translation
                 .rust
-                .contains("pub fn new(_arg0: OutputStream) -> Self")
+                .contains("pub fn new<T: JavaIntoPrintStream>(target: T) -> PrintStream")
             && translation.rust.contains("return PrintStream::new(out);")
             && !translation
                 .rust
                 .contains("return PrintStream::new(out.into())")
-            && !translation
-                .rust
-                .contains("pub fn new(_arg0: JavaIoOutputStream) -> Self"),
+            && !translation.rust.contains("PrintStream::new(out.into())"),
         "{}",
         translation.rust
     );
@@ -32685,10 +33756,10 @@ class OptionalPrintStreamFieldPrintln {
             .contains("self.output_stream.as_ref().unwrap().println_1(value);")
             && translation
                 .rust
-                .contains("pub fn println_1<T0>(&self, _arg0: T0) -> ()")
+                .contains("pub fn println_1<T: JavaPrintValue>(&self, value: T)")
             && translation
                 .rust
-                .contains("pub fn println<T0>(&self, _arg0: T0) -> ()")
+                .contains("pub fn println<T: JavaPrintValue>(&self, value: T)")
             && !translation
                 .rust
                 .contains("self.output_stream.as_ref().unwrap().println(value);"),
@@ -32785,7 +33856,7 @@ class Encoder {
                 .contains("self.output_stream.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.println_1(")
             && translation
                 .rust
-                .contains("self.encoder.as_mut().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.encode(value.to_string())?")
+                .contains("self.encoder.as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\", \"Java null receiver\".to_string()))?.borrow_mut().encode(value.to_string())?")
             && !translation.rust.contains("pub fn emit(&self"),
         "{}",
         translation.rust
@@ -33606,10 +34677,10 @@ class SystemErrStaticConstantUse {
     assert!(
         translation
             .rust
-            .contains("pub const ERR: PrintStream = PrintStream;")
+            .contains("pub const ERR: PrintStream = PrintStream::Stderr;")
             && translation
                 .rust
-                .contains("pub const err: PrintStream = PrintStream;")
+                .contains("pub const err: PrintStream = PrintStream::Stderr;")
             && translation.rust.contains("return System::err;")
             && !translation
                 .rust
@@ -34814,7 +35885,7 @@ class Config {
             .contains("pub fn get_instance() -> std::sync::Arc<Config>")
             && translation
                 .rust
-                .contains("return std::sync::Arc::new(Config::new());")
+                .contains("get_or_insert_with(|| std::sync::Arc::new(Config::new()))")
             && translation
                 .rust
                 .contains("return Config::get_instance().svg_output;")
@@ -39414,7 +40485,7 @@ class ReassignedStringEnhancedFor {
         translation
             .rust
             .contains("for mut allele in alleles.iter().cloned()")
-            && translation.rust.contains("allele = Self::shorten(")
+            && translation.rust.contains("allele = Some(Self::shorten(")
             && !translation.rust.contains("allele = &Self::shorten")
             && !translation.rust.contains("for allele in alleles.iter()"),
         "{}",
@@ -40408,9 +41479,9 @@ class FileInputStreamOptionalInputSlot {
         translation
             .rust
             .contains("let mut r#in: Option<InputStream> = None;")
-            && translation
-                .rust
-                .contains("r#in = Some(FileInputStream::new(path).into());")
+            && translation.rust.contains(
+                "r#in = Some(std::convert::Into::<InputStream>::into(FileInputStream::new(path)?));"
+            )
             && translation
                 .rust
                 .contains("impl From<FileInputStream> for InputStream"),
@@ -40508,10 +41579,8 @@ class ResourceInputStreamReadClose {
             && translation.rust.contains("pub fn read_3")
             && translation
                 .rust
-                .contains("let __java_buffer_len = _arg0.len() as i32;")
-            && translation
-                .rust
-                .contains("_arg2 > __java_buffer_len - _arg1")
+                .contains("let buffer_len = buffer.len() as i32;")
+            && translation.rust.contains("length > buffer_len - offset")
             && translation
                 .rust
                 .contains("JavaException::new(\"IndexOutOfBoundsException\"")
@@ -51909,6 +52978,74 @@ class ContextNullableSource {
 }
 
 #[test]
+fn nested_inherited_call_uses_emitted_nullable_shared_handle_parameter_abi() {
+    let translation = translate_source(
+        r#"
+class NestedInheritedCallRecord {
+    int value;
+
+    NestedInheritedCallRecord(int value) {
+        this.value = value;
+    }
+
+    int value() {
+        return value;
+    }
+
+    void setValue(int replacement) {
+        value = replacement;
+    }
+}
+
+class NestedInheritedCallOwner {
+    NestedInheritedCallRecord retained;
+
+    void retain(NestedInheritedCallRecord record) {
+        retained = record;
+    }
+
+    abstract class Base {
+        int consume(NestedInheritedCallRecord record) {
+            if (record == null) {
+                return 0;
+            }
+            return record.value();
+        }
+    }
+
+    class Child extends Base {
+        int run(NestedInheritedCallRecord record) {
+            if (record != null) {
+                return consume(record);
+            }
+            return -1;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("record: Option<std::rc::Rc<std::cell::RefCell<NestedInheritedCallRecord>>>")
+            && !translation
+                .rust
+                .contains("consume(record.clone().ok_or_else"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nested_inherited_nullable_shared_handle_parameter_abi",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn shared_interface_factory_preserves_boxed_primitive_and_covariant_return() {
     let translation = translate_source(
         r#"
@@ -51977,5 +53114,246 @@ fn factory_preserves_boxed_primitive_carrier_and_dispatch() {
     let _payload = SharedInterfaceFactory::make(1).payload();
 }
 "#,
+    );
+}
+
+#[test]
+fn owned_source_implementor_constructor_boxes_directly_for_interface_return() {
+    let translation = translate_source(
+        r#"
+interface DirectProduct {
+    int value();
+}
+
+class ConcreteDirectProduct implements DirectProduct {
+    private final int stored;
+
+    ConcreteDirectProduct(int stored) {
+        this.stored = stored;
+    }
+
+    public int value() {
+        return stored;
+    }
+}
+
+class DirectProductFactory {
+    DirectProduct make(int value) {
+        return new ConcreteDirectProduct(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("Box::new(ConcreteDirectProduct::new(value)) as Box<dyn DirectProduct>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("Into::<Box<dyn DirectProduct>>::into(ConcreteDirectProduct::new(value))"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "owned_source_implementor_interface_return",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn fallible_call_assignment_to_nullable_field_propagates_inside_some() {
+    let translation = translate_source(
+        r#"
+class FallibleNullableFieldAssignment {
+    long[] values;
+
+    static long[] make(int length) {
+        return new long[length];
+    }
+
+    FallibleNullableFieldAssignment(int length) {
+        values = make(length);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("Some(Some(")
+            && !translation
+                .rust
+                .contains("Some(FallibleNullableFieldAssignment::make(length))?"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "fallible_nullable_field_assignment",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn shared_field_constructor_assignment_and_companion_call_use_handles() {
+    let translation = translate_source(
+        r#"
+class SharedFieldStats {
+    long count;
+
+    void merge(SharedFieldStats other) {
+        count += other.count;
+    }
+}
+
+class SharedFieldCollector {
+    SharedFieldStats stats;
+
+    SharedFieldCollector() {
+        stats = new SharedFieldStats();
+    }
+
+    void put(SharedFieldStats other) {
+        stats.merge(other);
+    }
+
+    SharedFieldStats getStats() {
+        return stats;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("#[derive(Clone, PartialEq, Default)]\npub struct SharedFieldStats")
+            && translation.rust.contains(
+                "__java_self.stats = std::rc::Rc::new(std::cell::RefCell::new(SharedFieldStats::new()));"
+            )
+            && translation.rust.contains("let __java_outer_receiver = self.stats.clone();")
+            && !translation
+                .rust
+                .contains("let __java_outer_receiver = self.stats;"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "shared_field_constructor_assignment_and_companion_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn mutable_source_receiver_call_marks_fresh_local_mutable() {
+    let translation = translate_source(
+        r#"
+class MutableLocalSerializer {
+    String output;
+
+    void open(String value) {
+        output = value;
+    }
+}
+
+class MutableLocalSerializerUse {
+    void write(String value) {
+        MutableLocalSerializer ser = new MutableLocalSerializer();
+        ser.open(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let mut ser: MutableLocalSerializer = MutableLocalSerializer::new();")
+            && translation.rust.contains("ser.open(value.to_string());")
+            && !translation
+                .rust
+                .contains("let ser: MutableLocalSerializer = MutableLocalSerializer::new();"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "mutable_source_receiver_call_marks_fresh_local_mutable",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn repeatedly_used_guarded_nullable_receiver_is_borrowed() {
+    let translation = translate_source(
+        r#"
+class GuardedFastqRecord {
+    String sequence;
+    int headPos;
+
+    String getSequence() {
+        return sequence;
+    }
+
+    int getHeadPos() {
+        return headPos + 0;
+    }
+
+    void setHeadPos(int value) {
+        headPos = value;
+    }
+
+    GuardedFastqRecord alias() {
+        return this;
+    }
+}
+
+class GuardedFastqUse {
+    int[] positions(GuardedFastqRecord rec) {
+        GuardedFastqRecord alias = rec;
+        int length;
+        int start;
+        if (rec == null) {
+            length = 0;
+            start = 0;
+        } else {
+            length = rec.getSequence().length();
+            start = rec.getHeadPos();
+        }
+        return new int[] { length, start };
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("rec.as_ref()") && !translation.rust.contains("rec.unwrap()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "repeatedly_used_guarded_nullable_receiver_is_borrowed",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
