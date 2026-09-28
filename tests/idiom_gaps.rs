@@ -3752,6 +3752,92 @@ fn parses_without_moving_the_optional_array_element() {
 }
 
 #[test]
+fn fallible_numeric_parse_of_nullable_string_array_element_borrows_before_unwrap() {
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(
+        r#"
+class FallibleNullableArrayNumericParse {
+    static double run(String[] fields) throws Exception {
+        return Double.parseDouble(fields[0]);
+    }
+}
+"#,
+        &facts,
+    );
+    assert!(
+        translation.rust.contains(".as_ref().ok_or_else(")
+            && !translation.rust.contains("}).ok_or_else(")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "fallible_nullable_array_numeric_parse",
+        translation.rust,
+        r#"
+#[test]
+fn parses_borrowed_optional_array_element_in_result_context() {
+    assert_eq!(
+        FallibleNullableArrayNumericParse::run(&vec![Some(JavaString::intern("1.25"))]),
+        Ok(1.25)
+    );
+}
+"#,
+    );
+}
+
+#[test]
+fn java_floating_display_uses_java_scientific_notation_thresholds() {
+    let translation = translate_source(
+        r#"
+class JavaFloatingScientificNotation {
+    static String smallDouble() {
+        return Double.toString(0.00007770007770007759d);
+    }
+
+    static String largeDouble() {
+        return Double.toString(10000000.0d);
+    }
+
+    static String boundaryDouble() {
+        return Double.toString(0.001d);
+    }
+
+    static String negativeZero() {
+        return Double.toString(-0.0d);
+    }
+
+    static String smallFloat() {
+        return Float.toString(0.0001f);
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("java_double_to_string")
+            && translation.rust.contains("java_float_to_string")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "java_floating_scientific_notation",
+        translation.rust,
+        r#"
+#[test]
+fn matches_java_floating_to_string_notation() {
+    assert_eq!(JavaFloatingScientificNotation::small_double(), "7.770007770007759E-5");
+    assert_eq!(JavaFloatingScientificNotation::large_double(), "1.0E7");
+    assert_eq!(JavaFloatingScientificNotation::boundary_double(), "0.001");
+    assert_eq!(JavaFloatingScientificNotation::negative_zero(), "-0.0");
+    assert_eq!(JavaFloatingScientificNotation::small_float(), "1.0E-4");
+}
+"#,
+    );
+}
+
+#[test]
 fn primitive_array_post_increment_uses_checked_mutable_slot() {
     let translation = translate_source(
         r#"
@@ -25991,6 +26077,7 @@ class BorrowedNullableTryMapKey {
     let translation = translate_source_with_facts(source, &facts);
     assert!(
         !translation.rust.contains(".get(&key.expect(")
+            && !translation.rust.contains("key.as_ref().ok_or_else(")
             && !translation.rust.contains("Borrow<&JavaString>")
             && !translation.rust.contains("compile_error!"),
         "{}",
@@ -26003,6 +26090,40 @@ class BorrowedNullableTryMapKey {
 #[test]
 fn try_region_map_lookup_uses_the_borrowed_string_key() {
     assert_eq!(BorrowedNullableTryMapKey::run(JavaString::intern("x")), Ok(7));
+}
+"#,
+    );
+}
+
+#[test]
+fn resolved_static_method_invoked_through_instance_uses_associated_call() {
+    let source = r#"
+class StaticThroughInstance {
+    static int twice(int value) { return value * 2; }
+    int run() {
+        StaticThroughInstance receiver = new StaticThroughInstance();
+        return receiver.twice(3);
+    }
+}
+"#;
+    let translation = translate_source(source);
+    assert!(
+        translation.rust.contains("StaticThroughInstance::twice(3)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("receiver.twice(3)"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "resolved_static_method_through_instance",
+        translation.rust,
+        r#"
+#[test]
+fn java_static_dispatch_ignores_the_instance_expression() {
+    assert_eq!(StaticThroughInstance::new().run(), 6);
 }
 "#,
     );
@@ -26080,6 +26201,46 @@ class NullableIdentityMapStringValue {
 #[test]
 fn nullable_array_key_fetches_owned_string_value() {
     assert_eq!(NullableIdentityMapStringValue::run(), 5);
+}
+"#,
+    );
+}
+
+#[test]
+fn owned_nullable_loop_string_key_discharges_null_before_map_lookup() {
+    let source = r#"
+import java.util.HashMap;
+class OwnedNullableLoopMapKey {
+    static int run(String[] keys) {
+        HashMap<String, Integer> values = new HashMap<>();
+        values.put("x", 7);
+        for (String key : keys) {
+            if (values.containsKey(key)) return values.get(key);
+        }
+        return 0;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.java_string_identity_representation = true;
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        !translation.rust.contains("&key.as_ref()")
+            && !translation.rust.contains("Borrow<Option<&JavaString>>")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "owned_nullable_loop_map_key",
+        translation.rust,
+        r#"
+#[test]
+fn loop_key_queries_the_non_null_string_payload() {
+    assert_eq!(
+        OwnedNullableLoopMapKey::run(&vec![Some(JavaString::intern("x"))]),
+        7
+    );
 }
 "#,
     );

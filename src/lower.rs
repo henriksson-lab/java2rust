@@ -26278,10 +26278,17 @@ fn lower_expr_with_refinements(
             let target = retarget_static_owner_call_for_instance_field_receiver(
                 target,
                 receiver.as_deref(),
+                resolved.as_ref(),
                 env,
                 ctx,
             );
-            let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name, env);
+            let target = retarget_java_logging_facade_call(
+                target,
+                receiver.as_deref(),
+                name,
+                resolved.as_ref(),
+                env,
+            );
             let target = retarget_external_receiver_overload_name(
                 target,
                 receiver.as_deref(),
@@ -35516,6 +35523,25 @@ fn lower_args_for_call_target(
         // that carrier rather than projecting its payload to Option<&K>.
         return vec![force_shared_borrow_projection(key)];
     }
+    if let CallTargetPlan::NativeCollectionMethod { method, .. } = target
+        && matches!(
+            method,
+            NativeCollectionMethod::MapGet
+                | NativeCollectionMethod::MapRemove
+                | NativeCollectionMethod::MapContainsKey
+        )
+        && args.len() == 1
+        && let Some(receiver) = call_receiver
+        && let Some((key_ty, _, _)) = map_type_args_from_expr_shape(receiver, env, ctx)
+    {
+        let key = lower_expr_for_slot(
+            &args[0],
+            env,
+            argument_slot(borrowed_sequence_element_shape(key_ty)),
+            ctx,
+        );
+        return vec![lower_map_key_arg_borrow_projection(key, &args[0], env, ctx)];
+    }
     if args.len() == 1 && target.rust_method_name() == Some("write_int") {
         let shape = RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int));
         return vec![lower_expr_for_slot(
@@ -41143,13 +41169,41 @@ fn lower_optional_argument_for_borrowed_target(
             return None;
         }
         // An indexed reference-array read is a Rust place of type
-        // `Option<T>`, even though its semantic read shape is the borrowed
-        // carrier `Option<&T>`.  The array-slot lowering owns the required
-        // `as_ref`/`as_mut` projection.  Bypassing it here and applying the
-        // abstract borrowed-element conversion directly emits
-        // `array[i].expect(..)`, which tries to move the option out of the
-        // shared array.  Keep syntax and shape aligned at their common
-        // boundary for every borrowed consumer of a nullable array element.
+        // `Option<T>`. Checked indexing in a propagating context returns a
+        // `&Option<T>` from its bounds-checking block. For a required shared
+        // argument, project the optional payload before discharging Java
+        // nullability; borrowing the block as a whole first produces
+        // `&&Option<T>` and makes `ok_or_else` try to move through a shared
+        // reference. This is the same Option-to-element boundary as a local
+        // nullable reference, independent of why the argument is borrowed.
+        if matches!(arg, Expr::ArrayAccess(_, _))
+            && target_shape.ownership == OwnershipShape::SharedBorrow
+            && target_shape.optional_element_type().is_none()
+        {
+            let lowered = lower_expr_with_refinements(arg, env, ctx, &ExprRefinements::default());
+            let mut element_shape =
+                optional_element_slot_shape_with_facts(actual_shape, actual_element, ctx.facts);
+            element_shape.ownership = OwnershipShape::SharedBorrow;
+            let borrowed_carrier =
+                receiver_method_call_projection_exact(lowered, "as_ref", Vec::new());
+            let required = make_java_null_expect_catchable_in_propagating_ctx(
+                unwrap_java_null_receiver_projection(borrowed_carrier),
+                ctx,
+            );
+            let converted = apply_expr_to_slot_via_plan(
+                required,
+                element_shape,
+                &argument_slot(target_shape.clone()),
+                ctx.facts,
+            );
+            return Some(RustExpr::shaped_as(
+                RustExprShape::Borrowed,
+                Some(target_shape.clone()),
+                converted,
+            ));
+        }
+        // Mutable array-element borrows retain the slot-aware path, which
+        // owns the checked mutable-place projection.
         if matches!(arg, Expr::ArrayAccess(_, _)) {
             return Some(lower_expr_for_slot(
                 arg,
@@ -44975,9 +45029,18 @@ fn adapt_optional_instance_receiver(
 fn retarget_static_owner_call_for_instance_field_receiver<'a>(
     target: CallTargetPlan<'a>,
     receiver: Option<&'a Expr>,
+    resolved: Option<&ResolvedCall>,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> CallTargetPlan<'a> {
+    // Java permits a static method to be selected through an instance
+    // expression. Resolution is authoritative here: the receiver expression
+    // does not turn the selected static declaration into virtual dispatch.
+    // This retarget only repairs heuristic static-owner classifications made
+    // when no resolved source call is available.
+    if resolved.is_some_and(|call| call.kind == CallKind::Static) {
+        return target;
+    }
     let should_retarget =
         receiver.is_some_and(|receiver| receiver_is_instance_or_outer_field(receiver, env, ctx));
     retarget_static_call_to_receiver_if(target, receiver, should_retarget)
@@ -44987,11 +45050,18 @@ fn retarget_java_logging_facade_call<'a>(
     target: CallTargetPlan<'a>,
     receiver: Option<&'a Expr>,
     name: &str,
+    resolved: Option<&ResolvedCall>,
     env: &ShapeEnv,
 ) -> CallTargetPlan<'a> {
     let Some(receiver) = receiver else {
         return target;
     };
+    if !matches!(name, "info" | "warn" | "debug" | "error" | "trace") {
+        return target;
+    }
+    if resolved.is_some_and(|call| call.kind == CallKind::Static) {
+        return target;
+    }
     // `logger` is also a conventional local-variable name.  The logging
     // facade spelling heuristic must not turn a call on a source-declared
     // Logger value into an associated function call on the type.
@@ -45005,8 +45075,7 @@ fn retarget_java_logging_facade_call<'a>(
             crate::stdlib::canonical_external_receiver_type_key(receiver_name).as_str(),
             "logger" | "Logger"
         )
-    }) || !matches!(name, "info" | "warn" | "debug" | "error" | "trace")
-    {
+    }) {
         return target;
     }
     CallTargetPlan::StaticOwner {
@@ -66863,15 +66932,50 @@ fn lower_map_key_arg_borrow_projection(
     } else {
         None
     };
-    let actual = infer_expr_shape_with_context(
-        arg,
-        env,
-        ExprShapeContext::new(
-            Some(ctx.signatures),
-            Some(ctx.representations),
-            Some(ctx.facts),
-        ),
-    );
+    // The live local shape records the Rust carrier actually emitted for this
+    // binding (including `Option<&T>`). Generic expression inference can only
+    // recover the Java-level `Optional<T>` and may therefore add a second
+    // borrow at map boundaries.
+    let actual = local_name
+        .and_then(|name| {
+            // The flow-sensitive environment is the emitted carrier at this
+            // program point. The callable-wide plan retains only the declared
+            // Java type and can miss an `Option<T>` introduced for a loop or
+            // array element binding.
+            env.local_shape(name).cloned().or_else(|| {
+                ctx.current_local_shapes
+                    .iter()
+                    .rev()
+                    .find(|plan| plan.name() == name)
+                    .map(|plan| plan.shape().clone())
+            })
+        })
+        .unwrap_or_else(|| {
+            infer_expr_shape_with_context(
+                arg,
+                env,
+                ExprShapeContext::new(
+                    Some(ctx.signatures),
+                    Some(ctx.representations),
+                    Some(ctx.facts),
+                ),
+            )
+        });
+    // A Java reference local can have Java type `K` while its concrete Rust
+    // carrier is `Option<K>`. Lowering it for a borrowed map-key slot projects
+    // `Option<&K>` via `as_ref()`; borrowing that carrier would ask HashMap for
+    // the unrelated `K: Borrow<Option<&K>>` contract. A non-nullable Rust map
+    // key instead requires the Java null check to be discharged exactly here.
+    let lowered = if rust_slot_shape_is_option_carrier(&actual, ctx)
+        && !rust_expr_ends_in_java_null_unwrap(&lowered)
+    {
+        make_java_null_expect_catchable_in_propagating_ctx(
+            unwrap_java_null_receiver_projection(lowered),
+            ctx,
+        )
+    } else {
+        lowered
+    };
     normalize_map_key_borrow_projection(lowered, local_name, Some(&actual))
 }
 
@@ -71476,6 +71580,7 @@ fn lower_external_call_expr_for_slot(
     let target = retarget_static_owner_call_for_instance_field_receiver(
         target,
         receiver.as_deref(),
+        resolved.as_ref(),
         env,
         ctx,
     );
@@ -71493,7 +71598,13 @@ fn lower_external_call_expr_for_slot(
         resolved.as_ref(),
         ctx,
     );
-    let target = retarget_java_logging_facade_call(target, receiver.as_deref(), name, env);
+    let target = retarget_java_logging_facade_call(
+        target,
+        receiver.as_deref(),
+        name,
+        resolved.as_ref(),
+        env,
+    );
     let target = retarget_external_receiver_overload_name(
         target,
         receiver.as_deref(),

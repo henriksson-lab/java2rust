@@ -6454,12 +6454,29 @@ impl<T> std::fmt::Display for JavaClass<T> {
 /// output mismatch rather than a compile error.
 pub(crate) fn java_floating_point_display_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
-        r#"pub fn java_double_to_string(value: f64) -> String {
+        r#"fn java_normalize_scientific_string(rendered: String) -> String {
+    let Some((mantissa, exponent)) = rendered.split_once('e') else {
+        return rendered;
+    };
+    let mantissa = if mantissa.contains('.') {
+        mantissa.to_string()
+    } else {
+        format!("{mantissa}.0")
+    };
+    let exponent = exponent.parse::<i32>().expect("Rust scientific exponent");
+    format!("{mantissa}E{exponent}")
+}
+
+pub fn java_double_to_string(value: f64) -> String {
     if value.is_nan() {
         return "NaN".to_string();
     }
     if value.is_infinite() {
         return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(1e-3..1e7).contains(&magnitude) {
+        return java_normalize_scientific_string(format!("{value:e}"));
     }
     if value == value.trunc() && value.abs() < 1e7 {
         return format!("{value:.1}");
@@ -6473,6 +6490,10 @@ pub fn java_float_to_string(value: f32) -> String {
     }
     if value.is_infinite() {
         return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string();
+    }
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(1e-3f32..1e7f32).contains(&magnitude) {
+        return java_normalize_scientific_string(format!("{value:e}"));
     }
     if value == value.trunc() && value.abs() < 1e7 {
         return format!("{value:.1}");
@@ -11110,16 +11131,19 @@ impl JavaPrintValue for i64 {
     fn java_print_value(&self) -> String { self.to_string() }
 }
 impl JavaPrintValue for f32 {
-    fn java_print_value(&self) -> String { self.to_string() }
+    fn java_print_value(&self) -> String { java_float_to_string(*self) }
 }
 impl JavaPrintValue for f64 {
-    fn java_print_value(&self) -> String { self.to_string() }
+    fn java_print_value(&self) -> String { java_double_to_string(*self) }
 }
 impl JavaPrintValue for char {
     fn java_print_value(&self) -> String { self.to_string() }
 }
 impl JavaPrintValue for String {
     fn java_print_value(&self) -> String { self.clone() }
+}
+impl JavaPrintValue for JavaString {
+    fn java_print_value(&self) -> String { self.as_str().to_string() }
 }
 impl JavaPrintValue for &str {
     fn java_print_value(&self) -> String { (*self).to_string() }
@@ -23206,6 +23230,7 @@ mod stdlib_support_item_tests {
         assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
         assert!(support.contains("pub enum PrintStream"));
         assert!(support.contains("pub trait JavaPrintValue"));
+        assert!(support.contains("impl JavaPrintValue for JavaString"));
         assert!(support.contains("impl<T: JavaPrintValue> JavaPrintValue for Option<T>"));
         assert!(support.contains("pub fn println_1<T: JavaPrintValue>"));
     }

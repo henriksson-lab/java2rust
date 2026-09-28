@@ -2064,6 +2064,10 @@ impl std::fmt::Display for InputStream {
     }
 }
 
+pub trait JavaIntoInputStream {
+    fn into_input_stream(self) -> InputStream;
+}
+
 impl JavaIntoInputStream for InputStream {
     fn into_input_stream(self) -> InputStream {
         self
@@ -2352,9 +2356,20 @@ impl<T: JavaErasedCollectionDisplayElement> JavaErasedCollectionDisplayElement f
 impl<T: JavaErasedCollectionDisplayElement> JavaErasedOptionalDisplayElement for Vec<T> {
     fn java_erased_optional_display(&self) -> String { java_erased_collection_to_string(self) }
 }
+fn java_normalize_scientific_string(rendered: String) -> String {
+    let Some((mantissa, exponent)) = rendered.split_once('e') else { return rendered; };
+    let mantissa = if mantissa.contains('.') { mantissa.to_string() } else { format!("{mantissa}.0") };
+    let exponent = exponent.parse::<i32>().expect("Rust scientific exponent");
+    format!("{mantissa}E{exponent}")
+}
+
 pub fn java_double_to_string(value: f64) -> String {
     if value.is_nan() { return "NaN".to_string(); }
     if value.is_infinite() { return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string(); }
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(1e-3..1e7).contains(&magnitude) {
+        return java_normalize_scientific_string(format!("{value:e}"));
+    }
     if value == value.trunc() && value.abs() < 1e7 { return format!("{value:.1}"); }
     value.to_string()
 }
@@ -2362,11 +2377,15 @@ pub fn java_double_to_string(value: f64) -> String {
 pub fn java_float_to_string(value: f32) -> String {
     if value.is_nan() { return "NaN".to_string(); }
     if value.is_infinite() { return if value > 0.0 { "Infinity" } else { "-Infinity" }.to_string(); }
+    let magnitude = value.abs();
+    if magnitude != 0.0 && !(1e-3f32..1e7f32).contains(&magnitude) {
+        return java_normalize_scientific_string(format!("{value:e}"));
+    }
     if value == value.trunc() && value.abs() < 1e7 { return format!("{value:.1}"); }
     value.to_string()
 }
 RUST
-  printf "ClassLoader\nJavaErasedCollectionDisplayElement\nJavaErasedOptionalDisplayElement\njava_erased_collection_to_string\njava_erased_optional_to_string\njava_erased_any_to_string\njava_float_to_string\njava_double_to_string\n" >> "$shared_support_types_path"
+  printf "ClassLoader\nJavaErasedCollectionDisplayElement\nJavaErasedOptionalDisplayElement\njava_erased_collection_to_string\njava_erased_optional_to_string\njava_erased_any_to_string\njava_normalize_scientific_string\njava_float_to_string\njava_double_to_string\n" >> "$shared_support_types_path"
 fi
 
 if grep -R -q '^pub struct Path' "$generated_dir" || grep -R -q '^pub struct URI' "$generated_dir" || grep -R -q '^pub struct File' "$generated_dir" || grep -R -q '^pub struct URL' "$generated_dir" || grep -R -q '^pub struct JarURLConnection' "$generated_dir" || grep -R -q '^pub struct JarFile' "$generated_dir" || grep -R -q '^pub struct JarEntry' "$generated_dir" || grep -R -q '^pub struct Manifest' "$generated_dir" || grep -R -q '^pub struct Attributes' "$generated_dir" || grep -R -q '^pub struct AttributesName' "$generated_dir" || grep -R -q '^pub struct Enumeration' "$generated_dir" || grep -R -q 'JavaIterator' "$generated_dir" || grep -R -q '^pub struct AtomicInteger' "$generated_dir" || grep -R -q '^pub struct IOUtils' "$generated_dir" || grep -R -q '^pub struct BufferedImage' "$generated_dir" || grep -R -q '^pub struct Graphics' "$generated_dir"; then
@@ -2574,6 +2593,33 @@ impl JarEntry {
 
     pub fn new_1<S: Into<String>>(name: S) -> JarEntry {
         JarEntry { name: name.into() }
+    }
+
+    pub fn is_directory(&self) -> Result<bool, JavaException> {
+        Ok(self.name.ends_with('/'))
+    }
+
+    pub fn get_name(&self) -> Result<String, JavaException> {
+        Ok(self.name.clone())
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct ZipEntry {
+    name: String,
+}
+
+impl ZipEntry {
+    pub fn new() -> ZipEntry {
+        ZipEntry::default()
+    }
+
+    pub fn new_0() -> ZipEntry {
+        ZipEntry::default()
+    }
+
+    pub fn new_1<S: Into<String>>(name: S) -> ZipEntry {
+        ZipEntry { name: name.into() }
     }
 
     pub fn is_directory(&self) -> Result<bool, JavaException> {
@@ -3544,6 +3590,16 @@ for rust_path in "$generated_dir"/*.rs; do
   restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path"
   restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
 done
+
+# Dependency-bearing expressions can be restored from the raw module by the
+# closure pass above. Detect dependencies against the final generated surface,
+# not only the pre-restoration modules.
+if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then
+  if ! grep -q '^ndarray[[:space:]]*=' "$crate_dir/Cargo.toml"; then
+    write_ndarray_shim "$crate_dir/ndarray-shim"
+    printf 'ndarray = { path = "ndarray-shim" }\n' >> "$crate_dir/Cargo.toml"
+  fi
+fi
 
 for i in "${!java_files[@]}"; do
   index="$((i + 1))"

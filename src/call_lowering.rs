@@ -832,6 +832,22 @@ fn apply_native_java_static_method(
             };
             primitive_parse_projection(arg, PrimitiveType::Double)
         }
+        NativeJavaStaticMethod::FloatingToString { source } => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Float/Double.toString requires one argument");
+            };
+            function_call_projection(
+                RustExpr::Var(
+                    match source {
+                        PrimitiveType::Float => "java_float_to_string",
+                        PrimitiveType::Double => "java_double_to_string",
+                        _ => unreachable!("floating toString source must be float or double"),
+                    }
+                    .to_string(),
+                ),
+                vec![arg],
+            )
+        }
         NativeJavaStaticMethod::FloatingIsNaN => {
             let Some(arg) = args.into_iter().next() else {
                 return compile_error_call("Float.isNaN/Double.isNaN requires one argument");

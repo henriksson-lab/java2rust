@@ -757,6 +757,9 @@ pub enum NativeJavaStaticMethod {
     LongParseLong,
     FloatParseFloat,
     DoubleParseDouble,
+    FloatingToString {
+        source: PrimitiveType,
+    },
     FloatingIsNaN,
     CharacterPredicate {
         java_name: &'static str,
@@ -1115,7 +1118,8 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
                 NativeJavaStaticMethod::StringFormat
                 | NativeJavaStaticMethod::StringJoin
                 | NativeJavaStaticMethod::StringValueOf
-                | NativeJavaStaticMethod::ObjectsToString,
+                | NativeJavaStaticMethod::ObjectsToString
+                | NativeJavaStaticMethod::FloatingToString { .. },
         } => Some(LoweredType::Slot(Box::new(
             crate::shape_projection::owned_string_value_shape(),
         ))),
@@ -5064,6 +5068,12 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         ("Long", "parseLong" | "parse_long") => NativeJavaStaticMethod::LongParseLong,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
         ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,
+        ("Float", "toString" | "to_string") => NativeJavaStaticMethod::FloatingToString {
+            source: PrimitiveType::Float,
+        },
+        ("Double", "toString" | "to_string") => NativeJavaStaticMethod::FloatingToString {
+            source: PrimitiveType::Double,
+        },
         ("Double" | "Float", "isNaN" | "is_na_n") => NativeJavaStaticMethod::FloatingIsNaN,
         ("Character", "isDigit" | "is_digit") => character_predicate("isDigit", "is_ascii_digit"),
         ("Character", "isLetter" | "is_letter") => character_predicate("isLetter", "is_alphabetic"),

@@ -509,6 +509,16 @@ impl OptionalShapeCoercionPolicy {
 }
 
 fn optional_unwrap_coercion_for_element_plan(element_plan: &ShapeCoercionPlan) -> Coercion {
+    // An optional carrier can already contain a borrowed element (`Option<&T>`),
+    // for example a Java String local projected from a nullable array slot.
+    // Unwrapping that carrier produces the target borrow directly. Calling
+    // `as_ref()` first would manufacture `&&T`, which is observably the wrong
+    // key type at map/set boundaries (`K: Borrow<&K>` instead of `K: Borrow<K>`).
+    if element_plan.actual().ownership == OwnershipShape::SharedBorrow
+        && element_plan.target().ownership == OwnershipShape::SharedBorrow
+    {
+        return Coercion::UnwrapOption;
+    }
     match element_plan.target().ownership {
         OwnershipShape::SharedBorrow => Coercion::UnwrapOptionBorrowed,
         OwnershipShape::MutableBorrow => Coercion::UnwrapOptionMutBorrowed,
@@ -2970,10 +2980,15 @@ pub(crate) fn normalize_map_key_borrow_projection(
     local_name: Option<&str>,
     actual: Option<&RustSlotShape>,
 ) -> RustExpr {
-    let expr = match expr {
+    let mut expr = match expr {
         RustExpr::Raw(rendered) => rendered_projection_or_raw_leaf(&rendered),
         other => other,
     };
+    if let Some(name) = local_name
+        && actual.is_some_and(|shape| shape.ownership == OwnershipShape::SharedBorrow)
+    {
+        expr = collapse_redundant_optional_borrowed_local_as_ref(expr, name);
+    }
     // Slot conversion may already have projected an optional collection
     // element to `&K`.  Its recorded output shape is more authoritative than
     // the source expression's pre-conversion shape; using the latter here
@@ -3020,6 +3035,48 @@ pub(crate) fn normalize_map_key_borrow_projection(
         None,
         BorrowProjectionUse::MapKey,
     )
+}
+
+/// `Option<&K>` is already an optional borrowed carrier. Slot conversion may
+/// conservatively render its null check as `key.as_ref().ok_or_else(..)?`,
+/// whose value is `&&K`. At a map boundary consume the copyable `Option<&K>`
+/// directly so the query remains `&K`.
+fn collapse_redundant_optional_borrowed_local_as_ref(expr: RustExpr, name: &str) -> RustExpr {
+    match expr {
+        RustExpr::Shaped {
+            shape,
+            actual,
+            expr,
+        } => RustExpr::Shaped {
+            shape,
+            actual,
+            expr: Box::new(collapse_redundant_optional_borrowed_local_as_ref(
+                *expr, name,
+            )),
+        },
+        RustExpr::Try(inner) => RustExpr::Try(Box::new(
+            collapse_redundant_optional_borrowed_local_as_ref(*inner, name),
+        )),
+        RustExpr::MethodCall {
+            receiver,
+            method,
+            args,
+        } if matches!(method.as_str(), "ok_or_else" | "expect")
+            && args.len() == 1
+            && matches!(receiver.unshaped(),
+                RustExpr::MethodCall { receiver, method, args }
+                    if method == "as_ref"
+                        && args.is_empty()
+                        && matches!(receiver.unshaped(), RustExpr::Var(local) if local == name)) =>
+        {
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var(name.to_string())),
+                method,
+                args,
+            }
+        }
+        other => other,
+    }
 }
 
 fn rust_expr_is_local_name(expr: &RustExpr, name: &str) -> bool {

@@ -336,6 +336,46 @@ class JavaCoercionEvidenceConstructorResolution {
 }
 
 #[test]
+fn resolver_marks_static_method_invoked_through_instance_as_static() {
+    let parsed = parse_java_source(
+        r#"
+class StaticThroughInstance {
+    static int twice(int value) { return value * 2; }
+    int run() {
+        StaticThroughInstance receiver = new StaticThroughInstance();
+        return receiver.twice(3);
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let run = resolved.program.types[0]
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "run" => method.body.as_ref(),
+            _ => None,
+        })
+        .expect("run body");
+    let Stmt::Return(Some(Expr::Call {
+        resolved: Some(call),
+        ..
+    })) = &run.statements[1]
+    else {
+        panic!("expected resolved static call through instance");
+    };
+
+    assert_eq!(call.kind, CallKind::Static);
+    assert_eq!(call.declaring_type, "StaticThroughInstance");
+    assert_eq!(call.rust_name, "twice");
+}
+
+#[test]
 fn resolve_annotates_same_class_overload_call_targets() {
     let source =
         std::fs::read_to_string("examples/java/03-methods/OverloadSameArity.java").unwrap();

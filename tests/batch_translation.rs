@@ -2989,6 +2989,13 @@ public class MatrixSource {
             && ndarray_shim.contains("pub fn iter(&self) -> Rows<'_, T>"),
         "{ndarray_shim}"
     );
+    let shared_support = fs::read_to_string(out.join("generated-shared-support.rs")).unwrap();
+    assert!(
+        shared_support.contains("fn java_normalize_scientific_string")
+            && shared_support.contains("!(1e-3..1e7).contains(&magnitude)")
+            && shared_support.contains("!(1e-3f32..1e7f32).contains(&magnitude)"),
+        "assembled focused-package support must retain Java floating notation semantics:\n{shared_support}"
+    );
     let summary = fs::read_to_string(out.join("summary.tsv")).unwrap();
     assert!(summary.contains("cargo_check\tok"), "{summary}");
     assert!(summary.contains("cargo_failure_kind\tnone"), "{summary}");
