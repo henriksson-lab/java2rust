@@ -5,7 +5,7 @@ use crate::exception_lowering::exception_result_type;
 use crate::exception_plan::{MethodExceptionPlan, ProgramExceptionPlan};
 use crate::facts::FactSet;
 use crate::java_ir::{
-    ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
+    Block, ConstructorDecl, Expr, FieldDecl, JavaType, Literal, Member, MethodDecl, Modifier,
     PrimitiveType, Program, Stmt, TypeDecl, TypeKind,
 };
 use crate::java_naming::rust_name_for_java_named_type;
@@ -132,9 +132,18 @@ fn type_emission_for_with_facts_and_exceptions(
                     "\n\nimpl Default for {rust_enum_name} {{\n    fn default() -> Self {{ Self::{variant} }}\n}}"
                 )
             });
-            let payload_accessors = java_enum_payload_accessor_methods(ty, variants);
+            let payload_accessors = java_enum_payload_accessor_methods(
+                ty,
+                variants,
+                signatures,
+                facts,
+                representations,
+            );
+            let enum_item = format!(
+                "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        let other = other.borrow();\n        if self.ordinal() < other.ordinal() {{ -1 }} else if self.ordinal() > other.ordinal() {{ 1 }} else {{ 0 }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
+            );
             RepresentationTypeEmission::RawRustItem(format!(
-                "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        let other = other.borrow();\n        if self.ordinal() < other.ordinal() {{ -1 }} else if self.ordinal() > other.ordinal() {{ 1 }} else {{ 0 }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
+                "{enum_item}\n\nimpl JavaEnum for {rust_enum_name} {{\n    fn values() -> Vec<Self> {{ {rust_enum_name}::values() }}\n    fn ordinal(&self) -> i32 {{ {rust_enum_name}::ordinal(self) }}\n    fn name(&self) -> &'static str {{ {rust_enum_name}::name(self) }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {
@@ -264,7 +273,7 @@ pub(crate) fn source_hierarchy_virtual_dispatch_trait_item_for_type(
     let mut items = methods;
     items.extend(field_getters);
     Some(format!(
-        "pub trait {clone_trait_name} {{\n    fn clone_box(&self) -> Box<dyn {trait_name}>;\n}}\n\nimpl<T> {clone_trait_name} for T\nwhere\n    T: {trait_name} + Clone + 'static,\n{{\n    fn clone_box(&self) -> Box<dyn {trait_name}> {{ Box::new(self.clone()) }}\n}}\n\nimpl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}\n\npub trait {trait_name}: {clone_trait_name} {{\n{}\n}}",
+        "pub trait {clone_trait_name} {{\n    fn clone_box(&self) -> Box<dyn {trait_name}>;\n}}\n\nimpl<T> {clone_trait_name} for T\nwhere\n    T: {trait_name} + Clone + 'static,\n{{\n    fn clone_box(&self) -> Box<dyn {trait_name}> {{ Box::new(std::clone::Clone::clone(self)) }}\n}}\n\nimpl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}\n\npub trait {trait_name}: {clone_trait_name} {{\n{}\n}}",
         items.join("\n"),
     ))
 }
@@ -337,6 +346,44 @@ pub(crate) fn source_hierarchy_virtual_param_type(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> String {
+    if let Some(shape) = source_hierarchy_virtual_param_shape(
+        owner,
+        method,
+        index,
+        variants,
+        support_program,
+        signatures,
+        representations,
+    ) {
+        return emit_type(
+            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &shape,
+                facts,
+                representations,
+            ),
+        );
+    }
+    let ty = &method.params[index].ty;
+    if let JavaType::Array(element) = ty
+        && matches!(element.as_ref(), JavaType::Primitive(_))
+    {
+        return format!(
+            "&[{}]",
+            emit_type(&rust_type_for_java_type_with_facts(element, facts))
+        );
+    }
+    emit_type(&rust_type_for_java_type_with_facts(ty, facts))
+}
+
+fn source_hierarchy_virtual_param_shape(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    index: usize,
+    variants: &[String],
+    support_program: &Program,
+    signatures: &SignaturePlan,
+    representations: &RepresentationPlan,
+) -> Option<RustSlotShape> {
     // The carrier is the virtual-call boundary for every concrete payload.
     // Prefer the payload ABI when all implementations agree. This is more
     // authoritative than a separately solved declaration ABI (which can be
@@ -377,13 +424,7 @@ pub(crate) fn source_hierarchy_virtual_param_type(
                 param.shape(),
                 representations,
             );
-            return emit_type(
-                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
-                    &shape,
-                    facts,
-                    representations,
-                ),
-            );
+            return Some(shape);
         }
     }
 
@@ -426,35 +467,14 @@ pub(crate) fn source_hierarchy_virtual_param_type(
     if let Some(first) = implementation_shapes.first()
         && implementation_shapes.iter().all(|shape| shape == first)
     {
-        return emit_type(
-            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
-                first,
-                facts,
-                representations,
-            ),
-        );
+        return Some(first.clone());
     }
-    let ty = &method.params[index].ty;
     if let Some(plan) = signatures.method_param_plans(owner, method)
         && let Some(param) = plan.get(index)
     {
-        return emit_type(
-            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
-                &param.shape(),
-                facts,
-                representations,
-            ),
-        );
+        return Some(param.shape().clone());
     }
-    if let JavaType::Array(element) = ty
-        && matches!(element.as_ref(), JavaType::Primitive(_))
-    {
-        return format!(
-            "&[{}]",
-            emit_type(&rust_type_for_java_type_with_facts(element, facts))
-        );
-    }
-    emit_type(&rust_type_for_java_type_with_facts(ty, facts))
+    None
 }
 
 /// Locate the declaration whose Rust name is the carrier payload name.
@@ -465,6 +485,25 @@ pub(crate) fn source_hierarchy_virtual_param_type(
 /// than `pkg.Outer.Inner`), which is also the identity used by ordinary item
 /// emission in the focused-package pipeline.
 fn emitted_carrier_payload_type<'a>(program: &'a Program, variant: &str) -> Option<&'a TypeDecl> {
+    emitted_carrier_payload_types(program, variant)
+        .into_iter()
+        .min_by_key(|ty| {
+            (
+                ty.name.matches('.').count(),
+                ty.name.len(),
+                ty.name.as_str(),
+            )
+        })
+}
+
+/// All source declarations that erase to one carrier payload.
+///
+/// Focused-package translation intentionally carries both the declaration
+/// being emitted and package-qualified analysis copies.  Representation and
+/// field layout use the emitted declaration selected above, but callable
+/// contracts must be allowed to consult every copy: a compact emitted summary
+/// can omit a generic bound that is retained by the package declaration.
+fn emitted_carrier_payload_types<'a>(program: &'a Program, variant: &str) -> Vec<&'a TypeDecl> {
     fn collect<'a>(ty: &'a TypeDecl, variant: &str, matches: &mut Vec<&'a TypeDecl>) {
         if crate::item_assembly::rust_use_name_for_source_type(ty) == variant {
             matches.push(ty);
@@ -480,13 +519,7 @@ fn emitted_carrier_payload_type<'a>(program: &'a Program, variant: &str) -> Opti
     for ty in &program.types {
         collect(ty, variant, &mut matches);
     }
-    matches.into_iter().min_by_key(|ty| {
-        (
-            ty.name.matches('.').count(),
-            ty.name.len(),
-            ty.name.as_str(),
-        )
-    })
+    matches
 }
 
 pub(crate) fn source_hierarchy_virtual_return_type(
@@ -576,6 +609,16 @@ fn source_hierarchy_carrier_item(
         item.push_str("\n\n");
         item.push_str(&default_impl);
     }
+    item.push_str("\n\n");
+    item.push_str(&source_hierarchy_carrier_display_impl(
+        enum_name,
+        variants,
+        representations,
+        ty,
+        support_program,
+        virtual_dispatch_trait.is_some(),
+        anonymous_sync,
+    ));
     let mut impl_members = Vec::new();
     impl_members.extend(source_hierarchy_carrier_field_accessors(
         variants,
@@ -607,12 +650,75 @@ fn source_hierarchy_carrier_item(
     ));
     if !impl_members.is_empty() {
         item.push_str("\n\n");
+        let impl_target =
+            source_hierarchy_carrier_impl_target(enum_name, ty, support_program, representations);
         item.push_str(&format!(
-            "impl {enum_name} {{\n{}\n}}",
+            "{impl_target} {{\n{}\n}}",
             impl_members.join("\n\n")
         ));
     }
     item
+}
+
+fn source_hierarchy_carrier_display_impl(
+    enum_name: &str,
+    variants: &[String],
+    representations: &RepresentationPlan,
+    owner: &TypeDecl,
+    support_program: &Program,
+    has_anonymous_variant: bool,
+    anonymous_sync: bool,
+) -> String {
+    let mut arms = variants
+        .iter()
+        .map(|variant| {
+            let placement = storage_placement_for_emitted_type_name(representations, variant);
+            let value = if placement.shared() && placement.interior_mutable() {
+                if placement.sync() {
+                    "&*value.lock().unwrap()"
+                } else {
+                    "&*value.borrow()"
+                }
+            } else if placement.shared() {
+                "&**value"
+            } else {
+                "value"
+            };
+            format!("            Self::{variant}(value) => std::fmt::Display::fmt({value}, f),")
+        })
+        .collect::<Vec<_>>();
+    if has_anonymous_variant {
+        let value = if anonymous_sync {
+            "&*value.lock().unwrap()"
+        } else {
+            "&**value"
+        };
+        arms.push(format!(
+            "            Self::Anonymous(value) => std::fmt::Display::fmt({value}, f),"
+        ));
+    }
+    let mut params = crate::item_assembly::rust_impl_params_for_source_type(
+        owner,
+        support_program,
+        Some(representations),
+    );
+    for (index, _type_param) in owner.type_params.iter().enumerate() {
+        if let Some(param) = params.get_mut(index)
+            && !param.split('+').any(|bound| bound.trim() == "Clone")
+        {
+            param.push_str(" + Clone");
+        }
+    }
+    let impl_prefix = if params.is_empty() {
+        "impl".to_string()
+    } else {
+        format!("impl<{}>", params.join(", "))
+    };
+    let use_name = source_hierarchy_carrier_use_name(enum_name, owner);
+    format!(
+        "{impl_prefix} std::fmt::Display for {use_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        match self {{\n{}\n        }}\n    }}\n}}",
+        arms.join("\n")
+    )
 }
 
 fn source_hierarchy_carrier_placeholder_default_impl(
@@ -641,9 +747,67 @@ fn source_hierarchy_carrier_placeholder_default_impl(
     } else {
         "Default::default()".to_string()
     };
+    let impl_prefix = source_hierarchy_carrier_impl_prefix(ty, support_program, representations);
     Some(format!(
-        "impl Default for {enum_name} {{\n    fn default() -> Self {{ Self::{owner_variant}({payload}) }}\n}}"
+        "{impl_prefix} Default for {} {{\n    fn default() -> Self {{ Self::{owner_variant}({payload}) }}\n}}",
+        source_hierarchy_carrier_use_name(enum_name, ty),
     ))
+}
+
+fn source_hierarchy_carrier_use_name(enum_name: &str, owner: &TypeDecl) -> String {
+    if owner.type_params.is_empty() {
+        enum_name.to_string()
+    } else {
+        format!("{enum_name}<{}>", owner.type_params.join(", "))
+    }
+}
+
+fn source_hierarchy_carrier_impl_target(
+    enum_name: &str,
+    owner: &TypeDecl,
+    support_program: &Program,
+    representations: &RepresentationPlan,
+) -> String {
+    let use_name = source_hierarchy_carrier_use_name(enum_name, owner);
+    format!(
+        "{} {use_name}",
+        source_hierarchy_carrier_impl_prefix(owner, support_program, representations)
+    )
+}
+
+fn source_hierarchy_carrier_impl_prefix(
+    owner: &TypeDecl,
+    support_program: &Program,
+    representations: &RepresentationPlan,
+) -> String {
+    let params = crate::item_assembly::rust_impl_params_for_source_type(
+        owner,
+        support_program,
+        Some(representations),
+    );
+    if params.is_empty() {
+        "impl".to_string()
+    } else {
+        format!("impl<{}>", params.join(", "))
+    }
+}
+
+fn java_type_contains_named_type(ty: &JavaType, type_name: &str) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            name == type_name
+                || args
+                    .iter()
+                    .any(|arg| java_type_contains_named_type(arg, type_name))
+        }
+        JavaType::Array(element) => java_type_contains_named_type(element, type_name),
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            java_type_contains_named_type(bound, type_name)
+        }
+        JavaType::Unknown(name) => name == type_name,
+        _ => false,
+    }
 }
 
 fn source_hierarchy_carrier_identity_method(
@@ -718,7 +882,12 @@ fn source_hierarchy_carrier_enum_item(
         variants.push(format!("    Anonymous({payload}),"));
     }
     let variants = variants.join("\n");
-    format!("#[derive(Clone)]\npub enum {enum_name} {{\n{variants}\n}}")
+    let generic_declaration = if owner.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", owner.type_params.join(", "))
+    };
+    format!("#[derive(Clone)]\npub enum {enum_name}{generic_declaration} {{\n{variants}\n}}")
 }
 
 fn carrier_enum_item(
@@ -809,7 +978,7 @@ fn source_hierarchy_carrier_forwarding_methods(
 }
 
 fn source_hierarchy_carrier_forwarding_method(
-    _enum_name: &str,
+    enum_name: &str,
     variants: &[String],
     representations: &RepresentationPlan,
     facts: &FactSet,
@@ -826,7 +995,87 @@ fn source_hierarchy_carrier_forwarding_method(
     {
         return None;
     }
-    let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(method));
+    // A package summary can carry a bodyless/erased copy of this method while
+    // the emitted payload declaration retains its source generic bound. The
+    // carrier forwards to the payload, so derive its callable bounds from the
+    // most informative matching payload declaration and render them through
+    // the same function used by ordinary source methods.
+    let same_callable = |candidate: &MethodDecl| {
+        candidate.name == method.name
+            && candidate.type_params.len() == method.type_params.len()
+            && crate::java_signature::erased_param_types(&candidate.params)
+                == crate::java_signature::erased_param_types(&method.params)
+    };
+    let mut carrier_methods = vec![method];
+    for payload_owner in variants
+        .iter()
+        .flat_map(|variant| emitted_carrier_payload_types(support_program, variant))
+    {
+        carrier_methods.extend(
+            payload_owner
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    Member::Method(candidate) if same_callable(candidate) => Some(candidate),
+                    _ => None,
+                }),
+        );
+        carrier_methods.extend(
+            crate::inherited_members::inherited_instance_method_refs_for_type(
+                payload_owner,
+                support_program,
+            )
+            .into_iter()
+            .map(|inherited| inherited.method())
+            .filter(|candidate| same_callable(candidate)),
+        );
+    }
+    let required_clone_bounds = (0..method.type_params.len())
+        .map(|index| {
+            carrier_methods.iter().any(|candidate| {
+                candidate.type_params.get(index).is_some_and(|type_param| {
+                    crate::item_assembly::callable_type_param_needs_clone_bound_with_support_contexts(
+                        type_param,
+                        &candidate.params,
+                        candidate.body.as_ref(),
+                        &[support_program],
+                    )
+                })
+            })
+        })
+        .collect::<Vec<_>>();
+    let carrier_method = carrier_methods
+        .iter()
+        .copied()
+        .max_by_key(|candidate| {
+            candidate.type_param_bounds.iter().flatten().count()
+                + usize::from(candidate.body.is_some())
+        })
+        .unwrap_or(method);
+    // A bodyless/root summary can retain the Java base name while emitted
+    // payload declarations carry the overload-qualified solved Rust name.
+    // The forwarder invokes payload methods, so its name and every arm must
+    // reuse the most informative payload callable identity rather than
+    // independently falling back to the root Java spelling.
+    let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(
+        carrier_method,
+    ));
+    let type_params =
+        crate::item_assembly::function_type_params_with_required_clone_bounds_and_support_contexts(
+            Some(&carrier_method.name),
+            &carrier_method.type_params,
+            &carrier_method.type_param_bounds,
+            false,
+            &[support_program],
+            &carrier_method.params,
+            carrier_method.body.as_ref(),
+            &required_clone_bounds,
+        );
+    let type_params = if type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", type_params.join(", "))
+    };
     let return_ty = source_hierarchy_virtual_return_type(
         owner,
         method,
@@ -863,6 +1112,22 @@ fn source_hierarchy_carrier_forwarding_method(
         .map(|(name, _)| name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let carrier_param_shapes = method
+        .params
+        .iter()
+        .enumerate()
+        .map(|(index, _)| {
+            source_hierarchy_virtual_param_shape(
+                owner,
+                method,
+                index,
+                variants,
+                support_program,
+                signatures,
+                representations,
+            )
+        })
+        .collect::<Vec<_>>();
     // The enum payload binding shares the method body scope with Java
     // parameters. A user parameter named `value` used to shadow it and made
     // every forwarding arm pass the payload to itself.
@@ -876,22 +1141,155 @@ fn source_hierarchy_carrier_forwarding_method(
         variants,
         owner,
         method,
+        representations,
         support_program,
         signatures,
         support_signatures,
     );
+    let mut materialized_param_types = Vec::new();
     let mut arms = variants
         .iter()
         .map(|variant| {
-            let receiver = source_hierarchy_carrier_payload_receiver(
-                &carrier_binding,
-                variant,
+            let variant_ty =
+                find_type_decl_for_owner_context(support_program, &owner.name, variant);
+            let payload_method = variant_ty.and_then(|variant_ty| {
+                implementing_method_candidates_in_hierarchy(variant_ty, method, support_program)
+                    .into_iter()
+                    // Java override identity excludes the return type. A
+                    // concrete payload may therefore override this carrier
+                    // slot covariantly; selecting only exact return matches
+                    // skips that override and dispatches to the inherited
+                    // base implementation.
+                    .find(|(candidate_owner, candidate)| {
+                        same_callable(candidate)
+                            || source_hierarchy_methods_share_specialized_slot(
+                                support_program,
+                                variant_ty,
+                                owner,
+                                method,
+                                candidate_owner,
+                                candidate,
+                            )
+                    })
+            });
+            let payload_rust_name = payload_method
+                .map(|(_, candidate)| {
+                    rust_identifier_token(&crate::java_signature::source_method_rust_name(
+                        candidate,
+                    ))
+                })
+                .unwrap_or_else(|| rust_name.clone());
+            // A carrier exposes one hierarchy-wide ABI, while an individual
+            // payload can legitimately use another solved ownership/view
+            // shape. Reuse the same shape adapter as trait forwarding so a
+            // slice can be materialized for an owned Vec payload (and owned
+            // strings/arrays can be borrowed in the opposite direction).
+            let arm_arguments = params
+                .iter()
+                .enumerate()
+                .map(|(index, (name, _))| {
+                    let payload_shape = variant_ty.zip(payload_method).and_then(
+                        |(variant_ty, (implementation_owner, implementation_method))| {
+                            let forwarding_owner =
+                                trait_impl_forwarding_owner_for_inherited_source_method(
+                                    variant_ty,
+                                    implementation_owner,
+                                    implementation_method,
+                                );
+                            signatures
+                                .method_signature(forwarding_owner, implementation_method)
+                                .or_else(|| {
+                                    support_signatures
+                                        .method_signature(forwarding_owner, implementation_method)
+                                })
+                                .or_else(|| {
+                                    signatures.method_signature(
+                                        implementation_owner,
+                                        implementation_method,
+                                    )
+                                })
+                                .or_else(|| {
+                                    support_signatures.method_signature(
+                                        implementation_owner,
+                                        implementation_method,
+                                    )
+                                })
+                                .and_then(|signature| signature.params().get(index))
+                                .map(|param| {
+                                    crate::lower::emitted_source_method_param_shape(
+                                        implementation_method,
+                                        &implementation_method.params[index],
+                                        &forwarding_owner.name,
+                                        param.shape(),
+                                        representations,
+                                    )
+                                })
+                        },
+                    );
+                    carrier_param_shapes[index].as_ref().map_or_else(
+                        || name.clone(),
+                        |carrier_shape| {
+                            if let Some(payload_shape) = payload_shape.as_ref()
+                                && let Some(adapted) =
+                                    source_hierarchy_specialized_type_param_forwarded_arg(
+                                        name,
+                                        &method.params[index].ty,
+                                        owner,
+                                        carrier_shape,
+                                        payload_shape,
+                                        support_program,
+                                        facts,
+                                        representations,
+                                    )
+                            {
+                                return adapted;
+                            }
+                            if payload_shape.as_ref().is_some_and(|payload_shape| {
+                                forwarded_arg_requires_owned_view_materialization(
+                                    carrier_shape,
+                                    payload_shape,
+                                )
+                            }) {
+                                materialized_param_types.push(method.params[index].ty.clone());
+                            }
+                            trait_impl_forwarded_arg(name, carrier_shape, payload_shape.as_ref())
+                        },
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let placement = storage_placement_for_emitted_type_name(representations, variant);
+            let call =
+                if placement.shared() && placement.interior_mutable() && placement.is_implemented()
+                {
+                    let companion = format!("{payload_rust_name}_with_outer");
+                    let forwarded_arguments = if arm_arguments.is_empty() {
+                        format!("std::clone::Clone::clone({carrier_binding})")
+                    } else {
+                        format!("std::clone::Clone::clone({carrier_binding}), {arm_arguments}")
+                    };
+                    format!("{variant}::{companion}({forwarded_arguments})")
+                } else {
+                    let receiver = source_hierarchy_carrier_payload_receiver(
+                        &carrier_binding,
+                        variant,
+                        representations,
+                        receiver_plan == ReceiverPlan::Mutable,
+                    );
+                    format!("{receiver}.{payload_rust_name}({arm_arguments})")
+                };
+            let call = adapt_source_hierarchy_carrier_covariant_return(
+                call,
+                enum_name,
+                owner,
+                method,
+                payload_method.map(|(_, candidate)| candidate),
+                support_program,
+                facts,
                 representations,
-                receiver_plan == ReceiverPlan::Mutable,
+                exceptions,
             );
-            format!(
-                "            Self::{variant}({carrier_binding}) => {receiver}.{rust_name}({arguments}),"
-            )
+            format!("            Self::{variant}({carrier_binding}) => {call},")
         })
         .collect::<Vec<_>>();
     if virtual_dispatch_trait.is_some() {
@@ -910,19 +1308,350 @@ fn source_hierarchy_carrier_forwarding_method(
     } else {
         "&self"
     };
+    let mut where_bounds = crate::item_assembly::source_method_class_type_param_where_bounds(
+        owner,
+        method,
+        Some(representations),
+        &[support_program],
+    );
+    for type_param in owner.type_params.iter().chain(method.type_params.iter()) {
+        if materialized_param_types
+            .iter()
+            .any(|ty| java_type_mentions_type_param(ty, type_param))
+        {
+            let bound = format!("{type_param}: Clone");
+            if !where_bounds.contains(&bound) {
+                where_bounds.push(bound);
+            }
+        }
+    }
+    let where_clause = if where_bounds.is_empty() {
+        String::new()
+    } else {
+        format!(" where {}", where_bounds.join(", "))
+    };
     Some(format!(
-        "    pub fn {rust_name}({self_receiver}{parameter_declarations}) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+        "    pub fn {rust_name}{type_params}({self_receiver}{parameter_declarations}) -> {return_ty}{where_clause} {{\n        match self {{\n{arms}\n        }}\n    }}"
     ))
+}
+
+/// Recover a concrete override argument from a generic hierarchy-carrier
+/// slot.
+///
+/// Rust enums cannot express the Java invariant that a particular variant of
+/// `BaseValue<T>` fixes `T` to that subclass's superclass instantiation.  The
+/// generated `From<Child> for BaseValue<Concrete>` impl establishes it at the
+/// construction boundary; dispatch reifies the same invariant with an `Any`
+/// downcast before invoking the concrete override.
+fn source_hierarchy_specialized_type_param_forwarded_arg(
+    arg_name: &str,
+    declared_ty: &JavaType,
+    owner: &TypeDecl,
+    carrier_shape: &RustSlotShape,
+    payload_shape: &RustSlotShape,
+    program: &Program,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    if !owner
+        .type_params
+        .iter()
+        .any(|type_param| java_type_mentions_type_param(declared_ty, type_param))
+        || carrier_shape.java_ty == payload_shape.java_ty
+        || carrier_shape.ownership != OwnershipShape::Owned
+    {
+        return None;
+    }
+    let storage_shape = crate::shape_projection::storage_shape_for_java_type(
+        representations,
+        payload_shape.java_ty.clone(),
+    );
+    let storage_ty = emit_type(
+        &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            &storage_shape,
+            facts,
+            representations,
+        ),
+    );
+    let arg_name = rust_identifier_token(arg_name);
+    if matches!(
+        payload_shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) && let Some(type_param) = owner
+        .type_params
+        .iter()
+        .find(|type_param| java_type_mentions_type_param(declared_ty, type_param))
+        && let Some((_adapter, source_arg, trait_path, payload_type)) =
+            erased_interface_retarget_for_hierarchy_return(
+                owner,
+                type_param,
+                &payload_shape.java_ty,
+                program,
+                facts,
+                representations,
+            )
+    {
+        debug_assert_eq!(payload_type, storage_ty);
+        let source_trait = trait_path.replace("JavaErasedValue", &source_arg);
+        return Some(format!(
+            "{{ let __java_erased_argument = Box::new({arg_name}) as Box<dyn std::any::Any>; match __java_erased_argument.downcast::<{storage_ty}>() {{ Ok(__java_direct_argument) => *__java_direct_argument, Err(__java_erased_argument) => {{ let __java_interface_argument = *__java_erased_argument.downcast::<Box<dyn {source_trait}>>().expect(\"invalid Java boxed generic hierarchy argument carrier\"); std::clone::Clone::clone(__java_interface_argument.as_ref().as_any().downcast_ref::<{storage_ty}>().expect(\"invalid Java generic hierarchy argument\")) }} }} }}"
+        ));
+    }
+    let downcast = format!(
+        "(Box::new({arg_name}) as Box<dyn std::any::Any>).downcast::<{storage_ty}>().expect(\"invalid Java generic hierarchy argument\")"
+    );
+    Some(match payload_shape.ownership {
+        OwnershipShape::Owned | OwnershipShape::CopyValue => format!("*{downcast}"),
+        OwnershipShape::SharedBorrow => format!("&*{downcast}"),
+        OwnershipShape::MutableBorrow => format!("&mut *{downcast}"),
+    })
+}
+
+/// Compare two hierarchy methods after viewing both declarations through the
+/// concrete payload type.
+///
+/// Java override identity applies superclass substitutions before erasure. A
+/// carrier rooted at `Base<T>::write(T)` must therefore dispatch a
+/// `Child extends Base<String>` payload to `Child::write(String)`, including
+/// the overload-qualified Rust name selected for that concrete declaration.
+fn source_hierarchy_methods_share_specialized_slot(
+    program: &Program,
+    target: &TypeDecl,
+    root_owner: &TypeDecl,
+    root_method: &MethodDecl,
+    candidate_owner: &TypeDecl,
+    candidate_method: &MethodDecl,
+) -> bool {
+    if root_method.name != candidate_method.name
+        || root_method.type_params.len() != candidate_method.type_params.len()
+    {
+        return false;
+    }
+    let specialized_slot = |owner: &TypeDecl, method: &MethodDecl| {
+        let substitutions =
+            crate::inherited_members::source_class_ancestor_type_arguments(program, target, owner)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|(name, _)| !method.type_params.contains(name))
+                .collect::<HashMap<_, _>>();
+        let mut specialized = method.clone();
+        for param in &mut specialized.params {
+            param.ty = crate::resolve::substitute_method_type_variables(&param.ty, &substitutions);
+        }
+        crate::java_signature::JavaCallableSlotKey::source_method(&specialized)
+    };
+    specialized_slot(root_owner, root_method) == specialized_slot(candidate_owner, candidate_method)
+}
+
+fn adapt_source_hierarchy_carrier_covariant_return(
+    call: String,
+    enum_name: &str,
+    carrier_owner: &TypeDecl,
+    carrier_method: &MethodDecl,
+    payload_method: Option<&MethodDecl>,
+    program: &Program,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    exceptions: MethodExceptionPlan,
+) -> String {
+    let Some(payload_method) = payload_method else {
+        return call;
+    };
+    if let Some(type_param) = nominal_java_type_name(&carrier_method.return_type)
+        && carrier_owner
+            .type_params
+            .iter()
+            .any(|name| name == type_param)
+        && !java_type_mentions_type_param(&payload_method.return_type, type_param)
+    {
+        // A concrete hierarchy variant can fix the root class's generic
+        // return (`Reader<O>::read`) to a concrete type
+        // (`RealReader::read -> ObservationReal`).  The carrier variant is
+        // only constructible at that matching instantiation, but Rust cannot
+        // express the relationship in the enum definition. Reify the same
+        // construction invariant at dispatch through `Any`, just as the
+        // argument-side carrier adapter does for specialized parameters.
+        let erased_interface_retarget = erased_interface_retarget_for_hierarchy_return(
+            carrier_owner,
+            type_param,
+            &payload_method.return_type,
+            program,
+            facts,
+            representations,
+        );
+        let type_param = rust_identifier_token(type_param);
+        let recover = |value: &str| {
+            if let Some((adapter, source_arg, trait_path, payload_type)) =
+                erased_interface_retarget.as_ref()
+            {
+                return format!(
+                    "{{ let __java_erased_value = Box::new({value}) as Box<dyn std::any::Any>; match __java_erased_value.downcast::<{type_param}>() {{ Ok(__java_direct_value) => *__java_direct_value, Err(__java_erased_value) => {{ let __java_value = *__java_erased_value.downcast::<{payload_type}>().expect(\"invalid Java generic hierarchy payload return\"); *(Box::new(Box::new({adapter}::<{source_arg}, JavaErasedValue>::new(Box::new(__java_value) as Box<dyn {source_trait}>)) as Box<dyn {trait_path}>) as Box<dyn std::any::Any>).downcast::<{type_param}>().expect(\"invalid Java generic hierarchy return\") }} }} }}",
+                    source_trait = trait_path.replace("JavaErasedValue", source_arg),
+                );
+            }
+            format!(
+                "*(Box::new({value}) as Box<dyn std::any::Any>).downcast::<{type_param}>().expect(\"invalid Java generic hierarchy return\")"
+            )
+        };
+        return if exceptions.wrap_returns_in_result() {
+            format!("{call}.map(|__java_value| {})", recover("__java_value"))
+        } else {
+            recover(&call)
+        };
+    }
+    let Some(carrier_return_name) = nominal_java_type_name(&carrier_method.return_type) else {
+        return call;
+    };
+    let Some(payload_return_name) = nominal_java_type_name(&payload_method.return_type) else {
+        return call;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(carrier_return_name)
+        == crate::stdlib::canonical_external_receiver_type_key(payload_return_name)
+    {
+        return call;
+    }
+    let Some((return_carrier, _)) =
+        representations.source_hierarchy_carrier_constructor_parts(carrier_return_name)
+    else {
+        return call;
+    };
+    let Some((payload_carrier, payload_variant)) =
+        representations.source_hierarchy_carrier_parts_for_variant(payload_return_name)
+    else {
+        return call;
+    };
+    if return_carrier != enum_name || payload_carrier != enum_name {
+        return call;
+    }
+    let constructor = format!("{enum_name}::{payload_variant}");
+    if exceptions.wrap_returns_in_result() {
+        format!("{call}.map({constructor})")
+    } else {
+        format!("{constructor}({call})")
+    }
+}
+
+fn erased_interface_retarget_for_hierarchy_return(
+    carrier_owner: &TypeDecl,
+    carrier_type_param: &str,
+    payload_return: &JavaType,
+    program: &Program,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<(String, String, String, String)> {
+    let index = carrier_owner
+        .type_params
+        .iter()
+        .position(|name| name == carrier_type_param)?;
+    let bound = carrier_owner.type_param_bounds.get(index)?.as_ref()?;
+    let JavaType::Named {
+        name: interface_name,
+        args: bound_args,
+    } = bound
+    else {
+        return None;
+    };
+    if bound_args.len() != 1
+        || !matches!(bound_args[0], JavaType::Wildcard(None))
+        || representations
+            .erased_wildcard_bound_carrier_for(interface_name, 0)
+            .is_none()
+    {
+        return None;
+    }
+    let payload_name = nominal_java_type_name(payload_return)?;
+    let payload_decl =
+        find_type_decl_for_owner_context(program, &carrier_owner.name, payload_name)?;
+    let interface = find_type_decl_for_owner_context(program, &carrier_owner.name, interface_name)?;
+    if interface.kind != TypeKind::Interface
+        || !generic_interface_supports_retarget_adapter(program, interface)
+    {
+        return None;
+    }
+    let source_args = interface_type_arguments_in_target(program, payload_decl, interface)?;
+    let [source_arg] = source_args.as_slice() else {
+        return None;
+    };
+    let source_arg = emit_type(
+        &crate::slot_render::rust_type_for_java_generic_arg_with_representations(
+            source_arg,
+            &crate::effective_facts::EffectiveFacts::new(facts),
+            representations,
+        ),
+    );
+    let payload_shape = crate::shape_projection::storage_shape_for_java_type(
+        representations,
+        payload_return.clone(),
+    );
+    let payload_type = emit_type(
+        &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            &payload_shape,
+            facts,
+            representations,
+        ),
+    );
+    let trait_name = rust_name_for_java_named_type(interface_name);
+    Some((
+        generic_interface_retarget_adapter_name(interface_name),
+        source_arg,
+        format!("{trait_name}<JavaErasedValue>"),
+        payload_type,
+    ))
+}
+
+fn nominal_java_type_name(ty: &JavaType) -> Option<&str> {
+    match ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.as_str()),
+        _ => None,
+    }
+}
+
+fn java_type_mentions_type_param(ty: &JavaType, type_param: &str) -> bool {
+    match ty {
+        JavaType::Unknown(name) => name == type_param,
+        JavaType::Named { name, args } => {
+            name == type_param
+                || args
+                    .iter()
+                    .any(|arg| java_type_mentions_type_param(arg, type_param))
+        }
+        JavaType::Array(element)
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(element)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(element))) => {
+            java_type_mentions_type_param(element, type_param)
+        }
+        _ => false,
+    }
 }
 
 fn source_hierarchy_carrier_receiver_plan(
     variants: &[String],
     owner: &TypeDecl,
     method: &MethodDecl,
+    representations: &RepresentationPlan,
     support_program: &Program,
     signatures: &SignaturePlan,
     support_signatures: &SignaturePlan,
 ) -> ReceiverPlan {
+    if source_hierarchy_carrier_uses_only_interior_mutable_handles(
+        &JavaType::Named {
+            name: owner.name.clone(),
+            args: owner
+                .type_params
+                .iter()
+                .cloned()
+                .map(JavaType::Unknown)
+                .collect(),
+        },
+        representations,
+    ) {
+        // The enum is the Java reference value and every payload already
+        // carries interior mutability.  Forwarding through `_with_outer`
+        // mutates the referenced object, not the enum binding, so requiring
+        // `&mut self` would incorrectly turn Java reference mutation into
+        // Rust variable mutation.
+        return ReceiverPlan::Shared;
+    }
     let mut receiver = signatures
         .method_receiver(owner, method)
         .unwrap_or(ReceiverPlan::Shared);
@@ -958,6 +1687,36 @@ fn source_hierarchy_carrier_receiver_plan(
         }
     }
     receiver
+}
+
+/// Whether a closed source-hierarchy carrier is entirely made of shared,
+/// interior-mutable payload handles.
+///
+/// Such a carrier is itself a cheap Java-reference value.  Cloning it keeps
+/// object identity, and mutating a payload does not require mutable access to
+/// the enum binding.  Keep this query canonical so method forwarding and
+/// emitted call ABIs cannot make opposite ownership decisions.
+pub(crate) fn source_hierarchy_carrier_uses_only_interior_mutable_handles(
+    java_ty: &JavaType,
+    representations: &RepresentationPlan,
+) -> bool {
+    let java_ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+    let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = &java_ty else {
+        return false;
+    };
+    let Some(entry) = representations.type_representation(name) else {
+        return false;
+    };
+    let ObjectRepresentation::SourceHierarchyCarrier { variants, .. } = entry.representation()
+    else {
+        return false;
+    };
+    !variants.is_empty()
+        && !representations.anonymous_class_base_requires_virtual_carrier(name)
+        && variants.iter().all(|variant| {
+            let placement = storage_placement_for_emitted_type_name(representations, variant);
+            placement.shared() && placement.interior_mutable() && placement.is_implemented()
+        })
 }
 
 fn source_hierarchy_carrier_field_accessors(
@@ -1028,7 +1787,7 @@ fn source_hierarchy_carrier_field_accessor(
             let projection = if source_hierarchy_carrier_field_accessor_returns_copy(&field.ty) {
                 format!("{receiver}.{storage_name}")
             } else {
-                format!("{receiver}.{storage_name}.clone()")
+                format!("std::clone::Clone::clone(&{receiver}.{storage_name})")
             };
             format!("            Self::{variant}(value) => {projection},")
         })
@@ -1045,8 +1804,50 @@ fn source_hierarchy_carrier_field_accessor(
         ));
     }
     let arms = arms.join("\n");
+    let clone_bounds = (!source_hierarchy_carrier_field_accessor_returns_copy(&field.ty))
+        .then(|| {
+            ty.type_params
+                .iter()
+                .filter(|type_param| java_type_contains_named_type(&field.ty, type_param))
+                .map(|type_param| format!("{type_param}: Clone"))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let where_clause = if clone_bounds.is_empty() {
+        String::new()
+    } else {
+        format!(" where {}", clone_bounds.join(", "))
+    };
+    let getter = format!(
+        "    pub fn {rust_name}(&self) -> {return_ty}{where_clause} {{\n        match self {{\n{arms}\n        }}\n    }}"
+    );
+    if !variants.iter().all(|variant| {
+        let placement = storage_placement_for_emitted_type_name(representations, variant);
+        placement.shared()
+            && placement.interior_mutable()
+            && !placement.sync()
+            && placement.is_implemented()
+    }) || has_anonymous_variant
+    {
+        return Some(getter);
+    }
+    let mutable_arms = variants
+        .iter()
+        .map(|variant| {
+            let storage_name = source_hierarchy_carrier_variant_field_storage_name(
+                variant,
+                ty,
+                field,
+                support_program,
+            );
+            format!(
+                "            Self::{variant}(value) => std::cell::RefMut::map(value.borrow_mut(), |value| &mut value.{storage_name}),"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
     Some(format!(
-        "    pub fn {rust_name}(&self) -> {return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+        "{getter}\n\n    pub fn {rust_name}_mut(&self) -> std::cell::RefMut<'_, {return_ty}> {{\n        match self {{\n{mutable_arms}\n        }}\n    }}"
     ))
 }
 
@@ -1160,17 +1961,20 @@ fn storage_placement_for_emitted_type_name(
         .unwrap_or_else(|| representations.storage_placement_for(emitted_name))
 }
 
-fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> String {
-    let Some(constructor) = ty.members.iter().find_map(|member| match member {
+fn java_enum_payload_accessor_methods(
+    ty: &TypeDecl,
+    variants: &[String],
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> String {
+    let constructor = ty.members.iter().find_map(|member| match member {
         Member::Constructor(constructor) => Some(constructor),
         _ => None,
-    }) else {
-        return String::new();
-    };
-    let field_initializers = java_enum_constructor_field_initializers(constructor);
-    if field_initializers.is_empty() {
-        return String::new();
-    }
+    });
+    let field_initializers = constructor
+        .map(java_enum_constructor_field_initializers)
+        .unwrap_or_default();
     let field_types = ty
         .members
         .iter()
@@ -1182,22 +1986,26 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
         })
         .collect::<HashMap<_, _>>();
     let constants = java_enum_constant_args(ty);
-    field_initializers
+    let immutable_accessors = field_initializers
         .into_iter()
+        .filter(|(field_name, _)| !source_java_enum_field_uses_state(ty, field_name))
         .filter_map(|(field_name, initializer)| {
             let field_ty = field_types.get(&field_name)?;
-            let rust_return_ty = java_enum_payload_accessor_return_type(field_ty)?;
+            let rust_return_ty = java_enum_payload_accessor_return_type(field_ty, facts)?;
             let accessor_name = rust_identifier_token(&crate::parser::to_snake_case(&field_name));
             let arms = variants
                 .iter()
                 .map(|variant| {
                     let value = constants
                         .get(variant)
-                        .and_then(|args| java_enum_payload_initializer_value(
-                            &initializer,
-                            args,
-                            field_ty,
-                        ))
+                        .and_then(|args| {
+                            java_enum_payload_initializer_value(
+                                &initializer,
+                                args,
+                                field_ty,
+                                facts,
+                            )
+                        })
                         .unwrap_or_else(|| java_enum_payload_default_value(field_ty));
                     format!("            Self::{variant} => {value},")
                 })
@@ -1208,7 +2016,82 @@ fn java_enum_payload_accessor_methods(ty: &TypeDecl, variants: &[String]) -> Str
             ))
         })
         .collect::<Vec<_>>()
-        .join("")
+        .join("");
+    let directly_initialized_fields = constructor
+        .map(java_enum_constructor_field_initializers)
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect::<HashSet<_>>();
+    let evaluated_fields = constructor
+        .map(|constructor| java_enum_constructor_constant_field_values(ty, constructor))
+        .unwrap_or_default();
+    let evaluated_accessors = ty
+        .members
+        .iter()
+        .filter_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            let field_name = crate::parser::to_snake_case(&field.name);
+            if field.modifiers.contains(&Modifier::Static)
+                || source_java_enum_field_uses_state(ty, &field_name)
+                || directly_initialized_fields.contains(&field_name)
+            {
+                return None;
+            }
+            let values = variants
+                .iter()
+                .map(|variant| evaluated_fields.get(variant)?.get(&field_name).cloned())
+                .collect::<Option<Vec<_>>>()?;
+            let (rust_return_ty, rendered_values) =
+                java_enum_constant_accessor_values(&field.ty, &values)?;
+            let accessor_name = rust_identifier_token(&field_name);
+            let arms = variants
+                .iter()
+                .zip(rendered_values)
+                .map(|(variant, value)| format!("            Self::{variant} => {value},"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(format!(
+                "\n\n    pub fn {accessor_name}(&self) -> {rust_return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    let state_accessors = ty
+        .members
+        .iter()
+        .filter_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            let field_name = crate::parser::to_snake_case(&field.name);
+            if field.modifiers.contains(&Modifier::Static)
+                || !source_java_enum_field_uses_state(ty, &field_name)
+                || java_enum_payload_accessor_return_type(&field.ty, facts).is_none()
+            {
+                return None;
+            }
+            let shape = signatures.required_field_shape(&ty.name, &field.name);
+            let rust_ty = crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    facts,
+                    representations,
+                ),
+            );
+            let accessor_name = rust_identifier_token(&field_name);
+            let state_name = format!("__java_{}_state", field_name);
+            let setter_name = format!("__java_set_{}", field_name);
+            Some(format!(
+                "\n\n    fn {state_name}() -> &'static std::sync::Mutex<Vec<{rust_ty}>> {{\n        static STATE: std::sync::OnceLock<std::sync::Mutex<Vec<{rust_ty}>>> = std::sync::OnceLock::new();\n        STATE.get_or_init(|| std::sync::Mutex::new(std::iter::repeat_with(Default::default).take({}).collect()))\n    }}\n\n    pub fn {accessor_name}(&self) -> {rust_ty} {{\n        Self::{state_name}().lock().expect(\"Java enum state mutex poisoned\")[self.ordinal() as usize].clone()\n    }}\n\n    pub fn {setter_name}(&self, value: {rust_ty}) {{\n        Self::{state_name}().lock().expect(\"Java enum state mutex poisoned\")[self.ordinal() as usize] = value;\n    }}",
+                variants.len()
+            ))
+        })
+        .collect::<Vec<_>>()
+        .join("");
+    immutable_accessors + &evaluated_accessors + &state_accessors
 }
 
 pub(crate) fn source_java_enum_payload_field_emits_accessor(
@@ -1217,6 +2100,14 @@ pub(crate) fn source_java_enum_payload_field_emits_accessor(
 ) -> bool {
     if ty.kind != TypeKind::Enum {
         return false;
+    }
+    if source_java_enum_field_uses_state(ty, field_name) {
+        return ty.members.iter().any(|member| {
+            matches!(member, Member::Field(field)
+                if !field.modifiers.contains(&Modifier::Static)
+                    && crate::parser::to_snake_case(&field.name) == field_name
+                    && java_enum_payload_accessor_return_type(&field.ty, &FactSet::default()).is_some())
+        });
     }
     let Some(constructor) = ty.members.iter().find_map(|member| match member {
         Member::Constructor(constructor) => Some(constructor),
@@ -1227,19 +2118,399 @@ pub(crate) fn source_java_enum_payload_field_emits_accessor(
     let has_initializer = java_enum_constructor_field_initializers(constructor)
         .iter()
         .any(|(name, _)| name == field_name);
-    has_initializer
+    let constants = java_enum_constant_args(ty);
+    let evaluated = java_enum_constructor_constant_field_values(ty, constructor);
+    let has_evaluated_initializer = !constants.is_empty()
+        && evaluated.len() == constants.len()
+        && evaluated
+            .values()
+            .all(|fields| fields.contains_key(field_name));
+    (has_initializer || has_evaluated_initializer)
         && ty.members.iter().any(|member| {
             matches!(member, Member::Field(field)
                 if !field.modifiers.contains(&Modifier::Static)
                     && crate::parser::to_snake_case(&field.name) == field_name
-                    && java_enum_payload_accessor_return_type(&field.ty).is_some())
+                    && java_enum_payload_accessor_return_type(&field.ty, &FactSet::default()).is_some())
         })
+}
+
+pub(crate) fn source_java_enum_field_uses_state(ty: &TypeDecl, field_name: &str) -> bool {
+    ty.kind == TypeKind::Enum
+        && ty.members.iter().any(|member| {
+            let Member::Method(method) = member else {
+                return false;
+            };
+            method
+                .body
+                .as_ref()
+                .is_some_and(|body| block_assigns_source_enum_field(body, field_name))
+        })
+}
+
+pub(crate) fn source_java_enum_payload_accessor_is_nullable(
+    ty: &TypeDecl,
+    field_name: &str,
+) -> bool {
+    let Some(constructor) = ty.members.iter().find_map(|member| match member {
+        Member::Constructor(constructor) => Some(constructor),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let values = java_enum_constructor_constant_field_values(ty, constructor);
+    !values.is_empty()
+        && values
+            .values()
+            .all(|fields| fields.contains_key(field_name))
+        && values
+            .values()
+            .any(|fields| matches!(fields.get(field_name), Some(JavaEnumConstantValue::Null)))
+}
+
+fn block_assigns_source_enum_field(block: &Block, field_name: &str) -> bool {
+    block
+        .statements
+        .iter()
+        .any(|stmt| stmt_assigns_source_enum_field(stmt, field_name))
+}
+
+fn stmt_assigns_source_enum_field(stmt: &Stmt, field_name: &str) -> bool {
+    match stmt {
+        Stmt::Assign { target, .. } => match target {
+            Expr::Var(name) => {
+                crate::parser::to_snake_case(name.strip_prefix("this.").unwrap_or(name))
+                    == field_name
+            }
+            Expr::FieldAccess(receiver, name) if matches!(receiver.as_ref(), Expr::This) => {
+                crate::parser::to_snake_case(name) == field_name
+            }
+            _ => false,
+        },
+        Stmt::If {
+            then_block,
+            else_block,
+            ..
+        } => {
+            block_assigns_source_enum_field(then_block, field_name)
+                || else_block
+                    .as_ref()
+                    .is_some_and(|block| block_assigns_source_enum_field(block, field_name))
+        }
+        Stmt::While { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::EnhancedFor { body, .. }
+        | Stmt::Block(body)
+        | Stmt::LabeledBlock { body, .. } => block_assigns_source_enum_field(body, field_name),
+        Stmt::For { init, body, .. } => {
+            init.iter()
+                .any(|stmt| stmt_assigns_source_enum_field(stmt, field_name))
+                || block_assigns_source_enum_field(body, field_name)
+        }
+        Stmt::Switch { cases, .. } => cases.iter().any(|case| {
+            case.statements
+                .iter()
+                .any(|stmt| stmt_assigns_source_enum_field(stmt, field_name))
+        }),
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            resources
+                .iter()
+                .any(|stmt| stmt_assigns_source_enum_field(stmt, field_name))
+                || block_assigns_source_enum_field(body, field_name)
+                || catches
+                    .iter()
+                    .any(|catch| block_assigns_source_enum_field(&catch.body, field_name))
+                || finally_block
+                    .as_ref()
+                    .is_some_and(|block| block_assigns_source_enum_field(block, field_name))
+        }
+        _ => false,
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum JavaEnumPayloadInitializer {
     DirectParam(usize),
+    DirectVarargsParam(usize),
     PatternCompileParam(usize),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum JavaEnumConstantValue {
+    Null,
+    Bool(bool),
+    Int(i32),
+    Long(i64),
+    Float(f32),
+    Double(f64),
+    String(String),
+    Char(char),
+    Array(Vec<JavaEnumConstantValue>),
+}
+
+fn java_enum_constructor_constant_field_values(
+    ty: &TypeDecl,
+    constructor: &ConstructorDecl,
+) -> HashMap<String, HashMap<String, JavaEnumConstantValue>> {
+    java_enum_constant_args(ty)
+        .into_iter()
+        .filter_map(|(variant, args)| {
+            let mut values = HashMap::new();
+            let mut arg_index = 0;
+            for param in &constructor.params {
+                if param.is_varargs {
+                    let varargs = args[arg_index..]
+                        .iter()
+                        .map(|arg| java_enum_constant_expr_value(arg, &values, &HashMap::new()))
+                        .collect::<Option<Vec<_>>>()?;
+                    values.insert(
+                        param.source_name.clone(),
+                        JavaEnumConstantValue::Array(varargs),
+                    );
+                    arg_index = args.len();
+                } else {
+                    let value = java_enum_constant_expr_value(
+                        args.get(arg_index)?,
+                        &values,
+                        &HashMap::new(),
+                    )?;
+                    values.insert(param.source_name.clone(), value);
+                    arg_index += 1;
+                }
+            }
+            let mut fields = HashMap::new();
+            let body = constructor.body.as_ref()?;
+            java_enum_evaluate_constructor_block(body, &values, &mut fields)?;
+            Some((variant, fields))
+        })
+        .collect()
+}
+
+fn java_enum_evaluate_constructor_block(
+    block: &Block,
+    params: &HashMap<String, JavaEnumConstantValue>,
+    fields: &mut HashMap<String, JavaEnumConstantValue>,
+) -> Option<()> {
+    for stmt in &block.statements {
+        match stmt {
+            Stmt::Assign { target, value } => {
+                let field_name = match target {
+                    Expr::Var(name) => name.strip_prefix("this.").map(str::to_string),
+                    Expr::FieldAccess(receiver, name)
+                        if matches!(receiver.as_ref(), Expr::This) =>
+                    {
+                        Some(name.clone())
+                    }
+                    _ => None,
+                };
+                let Some(field_name) = field_name else {
+                    continue;
+                };
+                let value = java_enum_constant_expr_value(value, params, fields)?;
+                fields.insert(crate::parser::to_snake_case(&field_name), value);
+            }
+            Stmt::If {
+                condition,
+                then_block,
+                else_block,
+            } => {
+                let JavaEnumConstantValue::Bool(condition) =
+                    java_enum_constant_expr_value(condition, params, fields)?
+                else {
+                    return None;
+                };
+                if condition {
+                    java_enum_evaluate_constructor_block(then_block, params, fields)?;
+                } else if let Some(else_block) = else_block {
+                    java_enum_evaluate_constructor_block(else_block, params, fields)?;
+                }
+            }
+            Stmt::Block(block) => {
+                java_enum_evaluate_constructor_block(block, params, fields)?;
+            }
+            _ => {}
+        }
+    }
+    Some(())
+}
+
+fn java_enum_constant_expr_value(
+    expr: &Expr,
+    params: &HashMap<String, JavaEnumConstantValue>,
+    fields: &HashMap<String, JavaEnumConstantValue>,
+) -> Option<JavaEnumConstantValue> {
+    match expr {
+        Expr::Literal(Literal::Null) => Some(JavaEnumConstantValue::Null),
+        Expr::Literal(Literal::Bool(value)) => Some(JavaEnumConstantValue::Bool(*value)),
+        Expr::Literal(Literal::Int(value)) => Some(JavaEnumConstantValue::Int(*value)),
+        Expr::Literal(Literal::Long(value)) => Some(JavaEnumConstantValue::Long(*value)),
+        Expr::Literal(Literal::Float(value)) => Some(JavaEnumConstantValue::Float(*value)),
+        Expr::Literal(Literal::Double(value)) => Some(JavaEnumConstantValue::Double(*value)),
+        Expr::Literal(Literal::String(value)) => Some(JavaEnumConstantValue::String(value.clone())),
+        Expr::Literal(Literal::Char(value)) => Some(JavaEnumConstantValue::Char(*value)),
+        Expr::Var(name) => params
+            .get(name)
+            .or_else(|| fields.get(&crate::parser::to_snake_case(name)))
+            .cloned(),
+        Expr::FieldAccess(receiver, field) if field == "length" => {
+            let JavaEnumConstantValue::Array(values) =
+                java_enum_constant_expr_value(receiver, params, fields)?
+            else {
+                return None;
+            };
+            Some(JavaEnumConstantValue::Int(values.len() as i32))
+        }
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            fields.get(&crate::parser::to_snake_case(field)).cloned()
+        }
+        Expr::ArrayAccess(array, index) => {
+            let JavaEnumConstantValue::Array(values) =
+                java_enum_constant_expr_value(array, params, fields)?
+            else {
+                return None;
+            };
+            let JavaEnumConstantValue::Int(index) =
+                java_enum_constant_expr_value(index, params, fields)?
+            else {
+                return None;
+            };
+            values.get(usize::try_from(index).ok()?).cloned()
+        }
+        Expr::ArrayCreation {
+            initializer: Some(values),
+            ..
+        }
+        | Expr::ArrayInitializer(values) => Some(JavaEnumConstantValue::Array(
+            values
+                .iter()
+                .map(|value| java_enum_constant_expr_value(value, params, fields))
+                .collect::<Option<Vec<_>>>()?,
+        )),
+        Expr::Unary {
+            op: crate::java_ir::UnaryOp::Not,
+            expr,
+        } => {
+            let JavaEnumConstantValue::Bool(value) =
+                java_enum_constant_expr_value(expr, params, fields)?
+            else {
+                return None;
+            };
+            Some(JavaEnumConstantValue::Bool(!value))
+        }
+        Expr::Binary { op, left, right }
+            if matches!(
+                op,
+                crate::java_ir::BinaryOp::And
+                    | crate::java_ir::BinaryOp::Or
+                    | crate::java_ir::BinaryOp::Eq
+                    | crate::java_ir::BinaryOp::Ne
+            ) =>
+        {
+            let left = java_enum_constant_expr_value(left, params, fields)?;
+            let right = java_enum_constant_expr_value(right, params, fields)?;
+            let value = match op {
+                crate::java_ir::BinaryOp::And => {
+                    matches!(left, JavaEnumConstantValue::Bool(true))
+                        && matches!(right, JavaEnumConstantValue::Bool(true))
+                }
+                crate::java_ir::BinaryOp::Or => {
+                    matches!(left, JavaEnumConstantValue::Bool(true))
+                        || matches!(right, JavaEnumConstantValue::Bool(true))
+                }
+                crate::java_ir::BinaryOp::Eq => left == right,
+                crate::java_ir::BinaryOp::Ne => left != right,
+                _ => unreachable!(),
+            };
+            Some(JavaEnumConstantValue::Bool(value))
+        }
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if matches!(name.as_str(), "equals") && args.len() == 1 => {
+            Some(JavaEnumConstantValue::Bool(
+                java_enum_constant_expr_value(receiver, params, fields)?
+                    == java_enum_constant_expr_value(&args[0], params, fields)?,
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn java_enum_constant_accessor_values(
+    field_ty: &JavaType,
+    values: &[JavaEnumConstantValue],
+) -> Option<(String, Vec<String>)> {
+    match field_ty {
+        JavaType::String => {
+            let nullable = values
+                .iter()
+                .any(|value| matches!(value, JavaEnumConstantValue::Null));
+            let rendered = values
+                .iter()
+                .map(|value| match value {
+                    JavaEnumConstantValue::String(value) if nullable => {
+                        Some(format!("Some({value:?}.to_string())"))
+                    }
+                    JavaEnumConstantValue::String(value) => Some(format!("{value:?}.to_string()")),
+                    JavaEnumConstantValue::Null if nullable => Some("None".to_string()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((
+                if nullable {
+                    "Option<String>".to_string()
+                } else {
+                    "String".to_string()
+                },
+                rendered,
+            ))
+        }
+        JavaType::Array(element) if matches!(element.as_ref(), JavaType::String) => {
+            let rendered = values
+                .iter()
+                .map(|value| {
+                    let JavaEnumConstantValue::Array(values) = value else {
+                        return None;
+                    };
+                    let values = values
+                        .iter()
+                        .map(|value| match value {
+                            JavaEnumConstantValue::String(value) => {
+                                Some(format!("Some({value:?}.to_string())"))
+                            }
+                            JavaEnumConstantValue::Null => Some("None".to_string()),
+                            _ => None,
+                        })
+                        .collect::<Option<Vec<_>>>()?;
+                    Some(format!("vec![{}]", values.join(", ")))
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some(("Vec<Option<String>>".to_string(), rendered))
+        }
+        JavaType::Primitive(primitive) => {
+            let rust_ty = emit_type(&rust_type_for_primitive(*primitive));
+            let rendered = values
+                .iter()
+                .map(|value| match value {
+                    JavaEnumConstantValue::Bool(value) => Some(value.to_string()),
+                    JavaEnumConstantValue::Int(value) => Some(value.to_string()),
+                    JavaEnumConstantValue::Long(value) => Some(format!("{value}i64")),
+                    JavaEnumConstantValue::Float(value) => Some(format!("{value}f32")),
+                    JavaEnumConstantValue::Double(value) => Some(format!("{value}f64")),
+                    JavaEnumConstantValue::Char(value) => Some(format!("{value:?}")),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()?;
+            Some((rust_ty, rendered))
+        }
+        _ => None,
+    }
 }
 
 fn java_enum_constructor_field_initializers(
@@ -1252,7 +2523,7 @@ fn java_enum_constructor_field_initializers(
         .params
         .iter()
         .enumerate()
-        .map(|(index, param)| (param.source_name.clone(), index))
+        .map(|(index, param)| (param.source_name.clone(), (index, param.is_varargs)))
         .collect::<HashMap<_, _>>();
     body.statements
         .iter()
@@ -1275,13 +2546,19 @@ fn java_enum_constructor_field_initializers(
 
 fn java_enum_payload_initializer(
     value: &Expr,
-    param_indices: &HashMap<String, usize>,
+    param_indices: &HashMap<String, (usize, bool)>,
 ) -> Option<JavaEnumPayloadInitializer> {
     if let Expr::Var(param_name) = value {
         return param_indices
             .get(param_name)
             .copied()
-            .map(JavaEnumPayloadInitializer::DirectParam);
+            .map(|(index, is_varargs)| {
+                if is_varargs {
+                    JavaEnumPayloadInitializer::DirectVarargsParam(index)
+                } else {
+                    JavaEnumPayloadInitializer::DirectParam(index)
+                }
+            });
     }
     let Expr::Call {
         receiver: Some(receiver),
@@ -1303,8 +2580,7 @@ fn java_enum_payload_initializer(
     .then(|| {
         param_indices
             .get(param_name)
-            .copied()
-            .map(JavaEnumPayloadInitializer::PatternCompileParam)
+            .map(|(index, _)| JavaEnumPayloadInitializer::PatternCompileParam(*index))
     })
     .flatten()
 }
@@ -1341,15 +2617,25 @@ fn java_enum_constant_field_matches_type(field: &FieldDecl, enum_name: &str) -> 
         && matches!(&field.ty, JavaType::Named { name, .. } if name == enum_name)
 }
 
-fn java_enum_payload_accessor_return_type(field_ty: &JavaType) -> Option<String> {
+fn java_enum_payload_accessor_return_type(field_ty: &JavaType, facts: &FactSet) -> Option<String> {
     match field_ty {
         JavaType::String => Some("String".to_string()),
+        JavaType::Array(element) if matches!(element.as_ref(), JavaType::String) => {
+            Some("Vec<Option<String>>".to_string())
+        }
         JavaType::Primitive(primitive) => Some(emit_type(&rust_type_for_primitive(*primitive))),
         JavaType::Named { name, args }
             if args.is_empty()
                 && crate::stdlib::canonical_external_receiver_type_key(name) == "Pattern" =>
         {
             Some("Pattern".to_string())
+        }
+        JavaType::Named { name, .. }
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Class" =>
+        {
+            Some(crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_java_type_with_facts(field_ty, facts),
+            ))
         }
         _ => None,
     }
@@ -1359,10 +2645,14 @@ fn java_enum_payload_initializer_value(
     initializer: &JavaEnumPayloadInitializer,
     args: &[Expr],
     field_ty: &JavaType,
+    facts: &FactSet,
 ) -> Option<String> {
     match initializer {
         JavaEnumPayloadInitializer::DirectParam(index) => {
-            java_enum_payload_arg_value(args.get(*index)?, field_ty)
+            java_enum_payload_arg_value(args.get(*index)?, field_ty, facts)
+        }
+        JavaEnumPayloadInitializer::DirectVarargsParam(index) => {
+            java_enum_payload_varargs_value(&args[*index..], field_ty)
         }
         JavaEnumPayloadInitializer::PatternCompileParam(index) => {
             let Expr::Literal(Literal::String(pattern)) = args.get(*index)? else {
@@ -1371,6 +2661,24 @@ fn java_enum_payload_initializer_value(
             Some(format!("Pattern::compile_static({pattern:?})"))
         }
     }
+}
+
+fn java_enum_payload_varargs_value(args: &[Expr], field_ty: &JavaType) -> Option<String> {
+    let JavaType::Array(element) = field_ty else {
+        return None;
+    };
+    if !matches!(element.as_ref(), JavaType::String) {
+        return None;
+    }
+    let values = args
+        .iter()
+        .map(|arg| match arg {
+            Expr::Literal(Literal::String(value)) => Some(format!("Some({value:?}.to_string())")),
+            Expr::Literal(Literal::Null) => Some("None".to_string()),
+            _ => None,
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(format!("vec![{}]", values.join(", ")))
 }
 
 fn rust_type_for_primitive(primitive: PrimitiveType) -> RustType {
@@ -1386,7 +2694,7 @@ fn rust_type_for_primitive(primitive: PrimitiveType) -> RustType {
     }
 }
 
-fn java_enum_payload_arg_value(arg: &Expr, field_ty: &JavaType) -> Option<String> {
+fn java_enum_payload_arg_value(arg: &Expr, field_ty: &JavaType, facts: &FactSet) -> Option<String> {
     match (field_ty, arg) {
         (JavaType::String, Expr::Literal(Literal::String(value))) => {
             Some(format!("{value:?}.to_string()"))
@@ -1397,13 +2705,45 @@ fn java_enum_payload_arg_value(arg: &Expr, field_ty: &JavaType) -> Option<String
         (_, Expr::Literal(Literal::Float(value))) => Some(format!("{value}f32")),
         (_, Expr::Literal(Literal::Double(value))) => Some(format!("{value}f64")),
         (_, Expr::Literal(Literal::Char(value))) => Some(format!("{value:?}")),
+        (JavaType::Named { name, .. }, Expr::ClassLiteral(class_ty))
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Class" =>
+        {
+            let token_ty = java_enum_class_payload_token_type(field_ty, facts);
+            Some(crate::emit::emit_expr(
+                &crate::call_lowering::apply_class_literal_token_with_rust_type(class_ty, token_ty),
+            ))
+        }
         _ => None,
+    }
+}
+
+fn java_enum_class_payload_token_type(field_ty: &JavaType, facts: &FactSet) -> RustType {
+    let JavaType::Named { args, .. } = field_ty else {
+        return RustType::Unit;
+    };
+    let Some(arg) = args.first() else {
+        return RustType::Unit;
+    };
+    let effective = match arg {
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => bound.as_ref(),
+        JavaType::Wildcard(None) => return RustType::Unit,
+        other => other,
+    };
+    match effective {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            RustType::Named(rust_name_for_java_named_type(name))
+        }
+        other => crate::slot_render::rust_type_for_java_type_with_facts(other, facts),
     }
 }
 
 fn java_enum_payload_default_value(field_ty: &JavaType) -> String {
     match field_ty {
         JavaType::String => "String::new()".to_string(),
+        JavaType::Array(element) if matches!(element.as_ref(), JavaType::String) => {
+            "Vec::new()".to_string()
+        }
         JavaType::Primitive(crate::java_ir::PrimitiveType::Boolean) => "false".to_string(),
         JavaType::Primitive(crate::java_ir::PrimitiveType::Byte)
         | JavaType::Primitive(crate::java_ir::PrimitiveType::Short)
@@ -1441,7 +2781,7 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
             enum_name, variants, facts, program, ty,
         )),
         ObjectRepresentation::DynTrait { trait_name } => {
-            RepresentationTypeEmission::RawRustItem(trait_item_for_type_with_program(
+            let trait_item = trait_item_for_type_with_program(
                 ty,
                 trait_name,
                 program,
@@ -1450,7 +2790,12 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
                 exceptions,
                 representations,
                 source_interface_requires_send(program, ty, representations),
-            ))
+            );
+            let existential_carrier =
+                existential_interface_carrier_item(ty, facts, representations)
+                    .map(|carrier| format!("\n\n{carrier}"))
+                    .unwrap_or_default();
+            RepresentationTypeEmission::RawRustItem(format!("{trait_item}{existential_carrier}"))
         }
         _ => type_emission_for_with_facts_and_exceptions(
             representations,
@@ -1460,6 +2805,37 @@ pub(crate) fn type_emission_for_program_with_facts_and_exceptions(
             exceptions,
         ),
     }
+}
+
+fn existential_interface_carrier_item(
+    interface: &TypeDecl,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    let carrier = representations.existential_interface_carrier_for_interface(&interface.name)?;
+    let variants = carrier
+        .variants
+        .iter()
+        .map(|variant| {
+            let variant_name = rust_name_for_java_named_type(&variant.implementor_name);
+            let shape = crate::shape_projection::storage_shape_for_java_type(
+                representations,
+                JavaType::Named {
+                    name: variant.implementor_name.clone(),
+                    args: Vec::new(),
+                },
+            );
+            let payload = crate::emit::emit_type(
+                &rust_type_for_slot_with_facts_and_representations(&shape, facts, representations),
+            );
+            format!("    {variant_name}({payload}),")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "#[derive(Clone)]\npub enum {} {{\n{variants}\n}}",
+        carrier.enum_name
+    ))
 }
 
 /// Interface objects are normally local `Box<dyn Trait>` values. Any interface
@@ -1584,7 +2960,13 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
             let interface = find_type_decl_for_owner_context(program, &ty.name, interface_name)?;
             let rendered_args = args
                 .iter()
-                .map(|arg| crate::emit::emit_type(&rust_type_for_java_type_with_facts(arg, facts)))
+                .map(|arg| {
+                    crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                        &RustSlotShape::for_storage(arg.clone()),
+                        facts,
+                        representations,
+                    ))
+                })
                 .collect::<Vec<_>>()
                 .join(", ");
             let trait_path = format!("{trait_name}<{rendered_args}>");
@@ -1655,6 +3037,7 @@ pub(crate) fn source_class_bound_trait_item_for_type(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
 ) -> Option<String> {
     if !source_class_is_used_as_type_param_bound(program, &ty.name) {
         return None;
@@ -1663,6 +3046,7 @@ pub(crate) fn source_class_bound_trait_item_for_type(
         return None;
     }
     let trait_name = source_class_bound_trait_name(&ty.name);
+    let trait_path = parameterized_interface_trait_path(&trait_name, &ty.type_params);
     let declared_method_keys = ty
         .members
         .iter()
@@ -1695,6 +3079,7 @@ pub(crate) fn source_class_bound_trait_item_for_type(
                     facts,
                     exceptions.method_plan(ty, method),
                     return_shape,
+                    representations,
                 ))
             }
             _ => None,
@@ -1705,15 +3090,119 @@ pub(crate) fn source_class_bound_trait_item_for_type(
         facts,
         &declared_method_keys,
     ));
-    // Class-bound traits need the handle forwarding just as interface traits do:
-    // this is the trait a Java `<T extends SomeClass>` bound lowers to, so
-    // `Standards<Rc<FormatLine>>` fails without it (claude_audits/0002b).
-    let forwarding = shared_handle_forwarding_impl(&trait_name, &methods)
-        .map(|item| format!("\n\n{item}"))
+    let erased_methods = ty
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method) if !method.modifiers.contains(&Modifier::Static) => {
+                source_class_bound_erased_value_impl_method(
+                    program,
+                    ty,
+                    method,
+                    signatures,
+                    facts,
+                    exceptions.method_plan(ty, method),
+                    representations,
+                )
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let erased_impl = (!erased_methods.is_empty())
+        .then(|| {
+            format!(
+                "\n\nimpl {trait_path} for JavaErasedValue {{\n{}\n}}",
+                erased_methods.join("\n")
+            )
+        })
         .unwrap_or_default();
+    // Implementors are emitted for each subtype's canonical storage below.
+    // A blanket `Rc<RefCell<T>> where T: Bound` bridge has to borrow `T` and
+    // therefore loses the owning handle.  It cannot implement methods whose
+    // Java body passes `this` across an identity-sensitive boundary.  Concrete
+    // canonical-storage impls can call the subtype's `_with_outer` ABI and
+    // preserve that identity.
     Some(format!(
-        "pub trait {trait_name} {{\n{}\n}}{forwarding}",
+        "pub trait {trait_path}: std::any::Any {{\n{}\n}}{erased_impl}",
         methods.join("\n")
+    ))
+}
+
+fn source_class_bound_erased_value_impl_method(
+    program: &Program,
+    bound: &TypeDecl,
+    method: &MethodDecl,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: MethodExceptionPlan,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    let candidates =
+        source_class_bound_trait_method_implementation_candidates(program, bound, method)
+            .into_iter()
+            .filter(|(ty, _)| ty.type_params.is_empty())
+            .collect::<Vec<_>>();
+    if candidates.is_empty() {
+        return None;
+    }
+    let return_shape = source_class_bound_trait_method_return_shape_plan(
+        bound,
+        method,
+        candidates.as_slice(),
+        signatures,
+    );
+    let signature = source_class_bound_trait_method_signature_with_return_shape(
+        bound,
+        method,
+        program,
+        signatures,
+        facts,
+        exceptions,
+        return_shape,
+        representations,
+    );
+    let bound_signature = signatures.required_method_signature(bound, method);
+    let args = bound_signature
+        .params()
+        .iter()
+        .map(|param| rust_identifier_token(param.name()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let rust_name = method
+        .rust_name
+        .clone()
+        .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
+    let trait_name = source_class_bound_trait_name(&bound.name);
+    let mutable = bound_signature.receiver() == ReceiverPlan::Mutable;
+    let receiver = if mutable {
+        "self.as_any_mut()"
+    } else {
+        "self.as_any()"
+    };
+    let arms = candidates
+        .into_iter()
+        .map(|(ty, _)| {
+            let placement = crate::storage_strategy::effective_storage_placement(
+                facts.storage_placement_for(&ty.name),
+                representations.storage_placement_for(&ty.name),
+            );
+            let rust_ty = crate::item_assembly::rust_use_name_for_source_type(ty);
+            let rust_ty = if placement.shared() && placement.is_implemented() {
+                placement.wrap(rust_ty)
+            } else {
+                rust_ty
+            };
+            let downcast = if mutable { "downcast_mut" } else { "downcast_ref" };
+            let comma = if args.is_empty() { "" } else { ", " };
+            format!(
+                "        if let Some(__java_value) = {receiver}.{downcast}::<{rust_ty}>() {{ return {trait_name}::{rust_name}(__java_value{comma}{args}); }}"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    Some(format!(
+        "{} {{\n{arms}\n        panic!(\"invalid Java erased upper-bound value\")\n    }}",
+        signature.trim_end_matches(';')
     ))
 }
 
@@ -1833,6 +3322,7 @@ pub(crate) fn source_class_bound_trait_impl_emissions_for_type(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
 ) -> Vec<String> {
     if !matches!(ty.kind, TypeKind::Class | TypeKind::Enum) {
         return Vec::new();
@@ -1841,7 +3331,24 @@ pub(crate) fn source_class_bound_trait_impl_emissions_for_type(
         .into_iter()
         .filter_map(|bound| {
             let trait_name = source_class_bound_trait_name(&bound.name);
-            let impl_type_name = rust_name_for_java_named_type(&ty.name);
+            let trait_path = parameterized_interface_trait_path(&trait_name, &bound.type_params);
+            let impl_type_name = crate::item_assembly::rust_use_name_for_source_type(ty);
+            let placement = crate::storage_strategy::effective_storage_placement(
+                facts.storage_placement_for(&ty.name),
+                representations.storage_placement_for(&ty.name),
+            );
+            let impl_type = if placement.shared() && placement.is_implemented() {
+                placement.wrap(impl_type_name)
+            } else {
+                impl_type_name
+            };
+            let impl_params =
+                crate::item_assembly::rust_impl_params_for_source_type(ty, program, None);
+            let impl_prefix = if impl_params.is_empty() {
+                "impl".to_string()
+            } else {
+                format!("impl<{}>", impl_params.join(", "))
+            };
             let methods = bound
                 .members
                 .iter()
@@ -1855,13 +3362,15 @@ pub(crate) fn source_class_bound_trait_impl_emissions_for_type(
                             signatures,
                             facts,
                             exceptions.method_plan(bound, method),
+                            representations,
+                            placement,
                         ))
                     }
                     _ => None,
                 })
                 .collect::<Vec<_>>();
             Some(format!(
-                "impl {trait_name} for {impl_type_name} {{\n{}\n}}",
+                "{impl_prefix} {trait_path} for {impl_type} {{\n{}\n}}",
                 methods.join("\n")
             ))
         })
@@ -1876,6 +3385,7 @@ fn source_class_bound_trait_method_signature_with_return_shape(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     return_shape_override: Option<RustSlotShape>,
+    representations: &RepresentationPlan,
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
@@ -1889,7 +3399,11 @@ fn source_class_bound_trait_method_signature_with_return_shape(
         format!(
             "{}: {}",
             rust_identifier_token(param.name()),
-            emit_type(&rust_type_for_slot_with_facts(shape, facts))
+            emit_type(&rust_type_for_slot_with_facts_and_representations(
+                shape,
+                facts,
+                representations,
+            ))
         )
     }));
     let return_type = source_class_bound_trait_method_return_type_with_shape(
@@ -1897,6 +3411,7 @@ fn source_class_bound_trait_method_signature_with_return_shape(
         facts,
         exceptions,
         return_shape_override.as_ref(),
+        representations,
     )
     .map(|ty| format!(" -> {}", emit_type(&ty)))
     .unwrap_or_default();
@@ -1905,11 +3420,36 @@ fn source_class_bound_trait_method_signature_with_return_shape(
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     let type_params = rust_method_type_params(method, program, &ty.name);
-    let where_clause = rust_generic_trait_method_where_clause(method);
+    let where_clause = source_trait_method_where_clause(ty, method, program, representations);
     format!(
         "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
         params.join(", ")
     )
+}
+
+fn source_trait_method_where_clause(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    program: &Program,
+    representations: &RepresentationPlan,
+) -> String {
+    let mut bounds = Vec::new();
+    if !method.type_params.is_empty() {
+        bounds.push("Self: Sized".to_string());
+    }
+    bounds.extend(
+        crate::item_assembly::source_method_class_type_param_where_bounds(
+            owner,
+            method,
+            Some(representations),
+            &[program],
+        ),
+    );
+    if bounds.is_empty() {
+        String::new()
+    } else {
+        format!(" where {}", bounds.join(", "))
+    }
 }
 
 fn source_class_bound_trait_method_return_type_with_shape(
@@ -1917,6 +3457,7 @@ fn source_class_bound_trait_method_return_type_with_shape(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     return_shape_override: Option<&RustSlotShape>,
+    representations: &RepresentationPlan,
 ) -> Option<RustType> {
     if method.return_type == JavaType::Void {
         if exceptions.wrap_returns_in_result() {
@@ -1925,8 +3466,16 @@ fn source_class_bound_trait_method_return_type_with_shape(
         return None;
     }
     let rust_return = return_shape_override
-        .map(|shape| rust_type_for_slot_with_facts(shape, facts))
-        .unwrap_or_else(|| rust_type_for_java_type_with_facts(&method.return_type, facts));
+        .map(|shape| {
+            rust_type_for_slot_with_facts_and_representations(shape, facts, representations)
+        })
+        .unwrap_or_else(|| {
+            crate::slot_render::rust_type_for_java_type_with_facts_and_representations(
+                &method.return_type,
+                facts,
+                representations,
+            )
+        });
     if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(rust_return))
     } else {
@@ -1942,6 +3491,8 @@ fn source_class_bound_trait_impl_method(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
+    representations: &RepresentationPlan,
+    placement: crate::storage_strategy::StoragePlacement,
 ) -> String {
     let candidates = implementing_method_candidates_in_hierarchy(ty, bound_method, program);
     let trait_return_shape = source_class_bound_trait_method_return_shape_plan(
@@ -1959,6 +3510,7 @@ fn source_class_bound_trait_impl_method(
         facts,
         exceptions,
         trait_return_shape,
+        representations,
     );
     if candidates.is_empty() {
         return trait_impl_method_message_policy(
@@ -2012,24 +3564,29 @@ fn source_class_bound_trait_impl_method(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let receiver_arg = if args.is_empty() {
+    let receiver_arg = if placement.shared() && placement.interior_mutable() {
+        "std::clone::Clone::clone(self)".to_string()
+    } else if placement.shared() {
+        "&**self".to_string()
+    } else {
         trait_impl_forwarding_receiver_arg(
             ty,
             forwarding_owner,
             Some(implementation_signature.receiver()),
         )
+    };
+    let receiver_arg = if args.is_empty() {
+        receiver_arg
     } else {
-        format!(
-            "{}, {args}",
-            trait_impl_forwarding_receiver_arg(
-                ty,
-                forwarding_owner,
-                Some(implementation_signature.receiver())
-            )
-        )
+        format!("{receiver_arg}, {args}")
     };
     let implementing_owner_name = rust_name_for_java_named_type(&forwarding_owner.name);
-    let call = format!("{implementing_owner_name}::{rust_name}({receiver_arg})");
+    let call_name = if placement.shared() && placement.interior_mutable() {
+        format!("{rust_name}_with_outer")
+    } else {
+        rust_name
+    };
+    let call = format!("{implementing_owner_name}::{call_name}({receiver_arg})");
     let call = adapt_source_class_bound_trait_impl_return(
         call,
         trait_return_shape_for_body
@@ -2043,6 +3600,7 @@ fn source_class_bound_trait_impl_method(
         facts,
         exceptions,
         trait_return_shape_for_body.as_ref(),
+        representations,
     )
     .is_some()
     {
@@ -2211,17 +3769,46 @@ fn trait_item_for_type(
             _ => None,
         })
         .collect::<Vec<_>>();
+    let object_defaults =
+        external_object_interface_trait_default_methods(ty, &trait_name, Some(facts), None);
     methods.extend(trait_object_support_method_signatures(&trait_name));
     let forwarding = shared_handle_forwarding_impl_with_policy(&trait_name, &methods, sync_trait)
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
-    let closure_adapter = (!sync_trait)
-        .then(|| zero_arg_closure_trait_impl(ty, &trait_name, facts, signatures))
+    let closure_adapter = if sync_trait {
+        None
+    } else {
+        zero_arg_functional_method(ty).and_then(|functional_method| {
+            zero_arg_closure_trait_impl(
+                ty,
+                &trait_name,
+                facts,
+                signatures,
+                exceptions.method_plan(ty, functional_method),
+            )
+        })
+    };
+    // A boxed source-interface object is the canonical owned representation
+    // when that interface appears as a generic argument.  Forward the same
+    // canonical trait surface through the box so it can satisfy Java bounds
+    // such as `F extends Factory<P>`.  Reuse the signature forwarding policy
+    // used by Rc/Arc carriers; the closure blanket impl is the one case where
+    // a generic Box impl would overlap Rust's coherence rules.
+    let boxed_forwarding = closure_adapter
+        .is_none()
+        .then(|| boxed_trait_forwarding_impl_with_generics(&trait_name, &[], &methods))
         .flatten()
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
+    // Defaults have bodies rather than forwarding signatures, so append them
+    // only after all carrier implementations have consumed the canonical
+    // semicolon-terminated surface.
+    methods.extend(object_defaults);
+    let closure_adapter = closure_adapter
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
     format!(
-        "pub trait {trait_name}{send_bound} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}",
+        "pub trait {trait_name}{send_bound} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{boxed_forwarding}{closure_adapter}",
         methods.join("\n"),
         dyn_trait_anonymous_impl(&trait_name),
         boxed_dyn_trait_clone_impl(&trait_name),
@@ -2467,7 +4054,7 @@ fn boxed_interface_upcast_impls(
                     )
                 } else {
                     format!(
-                        "struct {carrier_name}{generic_impl_params}(std::boxed::Box<dyn {derived_trait_path}>);\n\nimpl{generic_impl_params} Clone for {carrier_path} {{\n    fn clone(&self) -> Self {{ Self(self.0.clone()) }}\n}}"
+                        "struct {carrier_name}{generic_impl_params}(std::boxed::Box<dyn {derived_trait_path}>);\n\nimpl{generic_impl_params} Clone for {carrier_path} {{\n    fn clone(&self) -> Self {{ Self(std::clone::Clone::clone(&self.0)) }}\n}}"
                     )
                 };
                 format!(
@@ -2531,18 +4118,43 @@ fn trait_item_for_type_with_program(
             )
         })
         .collect::<Vec<_>>();
+    let object_defaults = external_object_interface_trait_default_methods(
+        ty,
+        &trait_path,
+        Some(facts),
+        Some(program),
+    );
     methods.extend(trait_object_support_method_signatures(&trait_path));
-    let forwarding = shared_handle_forwarding_impl_with_policy_and_generics(
+    let forwarding = shared_handle_forwarding_impl_with_policy_and_generics_and_cell_policy(
         &trait_path,
         &ty.type_params,
         &methods,
         sync_trait,
+        !interface_has_interior_mutable_implementor(program, ty, facts, representations),
     )
     .map(|item| format!("\n\n{item}"))
     .unwrap_or_default();
     let closure_adapter = (!sync_trait && ty.type_params.is_empty())
-        .then(|| zero_arg_closure_trait_impl(ty, &trait_name, facts, signatures))
+        .then(|| {
+            zero_arg_closure_trait_impl(
+                ty,
+                &trait_name,
+                facts,
+                signatures,
+                zero_arg_functional_method(ty)
+                    .map(|method| trait_method_exception_plan(ty, method, program, exceptions))
+                    .unwrap_or_else(|| MethodExceptionPlan::new(false)),
+            )
+        })
+        .flatten();
+    let boxed_forwarding = closure_adapter
+        .is_none()
+        .then(|| boxed_trait_forwarding_impl_with_generics(&trait_path, &ty.type_params, &methods))
         .flatten()
+        .map(|item| format!("\n\n{item}"))
+        .unwrap_or_default();
+    methods.extend(object_defaults);
+    let closure_adapter = closure_adapter
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
     let upcasts = boxed_interface_upcast_impls(
@@ -2556,13 +4168,364 @@ fn trait_item_for_type_with_program(
     )
     .map(|item| format!("\n\n{item}"))
     .unwrap_or_default();
+    let generic_retarget = generic_interface_retarget_adapter_item(
+        ty,
+        program,
+        signatures,
+        facts,
+        exceptions,
+        representations,
+    )
+    .map(|item| format!("\n\n{item}"))
+    .unwrap_or_default();
     format!(
-        "pub trait {trait_path}{send_bound} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{closure_adapter}{upcasts}",
+        "pub trait {trait_path}{send_bound} {{\n{}\n}}\n\n{}\n\n{}{forwarding}{boxed_forwarding}{closure_adapter}{upcasts}{generic_retarget}",
         methods.join("\n"),
         dyn_trait_anonymous_impl_with_generics(&trait_path, &ty.type_params),
         boxed_dyn_trait_clone_impl_with_generics(&trait_path, &ty.type_params),
         send_bound = if sync_trait { ": Send" } else { "" },
     )
+}
+
+/// Emit an invariant-generic trait adapter for Java's explicitly unchecked
+/// casts between two instantiations of the same interface.
+///
+/// Java erases the interface argument and checks concrete values when a
+/// bridge method eventually consumes them. Rust bakes that argument into the
+/// trait-object vtable, so reinterpreting `Box<dyn Interface<A>>` as
+/// `Box<dyn Interface<B>>` would be unsound. The adapter keeps the original
+/// vtable and performs owned, runtime-checked conversions at every method
+/// boundary. It is emitted only when the complete abstract contract uses the
+/// interface parameter in shapes that can be converted without borrowing or
+/// alias fabrication.
+fn generic_interface_retarget_adapter_item(
+    interface: &TypeDecl,
+    program: &Program,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    let [type_param] = interface.type_params.as_slice() else {
+        return None;
+    };
+    let contracts = specialized_interface_abstract_contracts(program, interface);
+    if contracts.is_empty()
+        || contracts.iter().any(|contract| {
+            contract.method.modifiers.contains(&Modifier::Static)
+                || contract
+                    .method
+                    .type_params
+                    .iter()
+                    .any(|name| name == type_param)
+                || contract
+                    .param_types
+                    .iter()
+                    .any(|ty| !generic_retarget_type_is_supported(ty, type_param, &interface.name))
+                || !generic_retarget_type_is_supported(
+                    &contract.return_type,
+                    type_param,
+                    &interface.name,
+                )
+        })
+    {
+        return None;
+    }
+
+    let trait_name = rust_name_for_java_named_type(&interface.name);
+    let adapter_name = generic_interface_retarget_adapter_name(&interface.name);
+    let from = "__JavaFrom";
+    let to = "__JavaTo";
+    let supports_erased_bound = representations
+        .erased_wildcard_bound_carrier_for(&interface.name, 0)
+        .is_some()
+        && crate::representation::program_declares_unbounded_wildcard_use(program, &interface.name);
+    let substitutions = |replacement: &str| {
+        HashMap::from([(
+            type_param.clone(),
+            JavaType::Named {
+                name: replacement.to_string(),
+                args: Vec::new(),
+            },
+        )])
+    };
+    let target_substitutions = substitutions(to);
+    let mut methods = Vec::new();
+    for contract in contracts {
+        let target_return = crate::resolve::substitute_method_type_variables(
+            &contract.return_type,
+            &target_substitutions,
+        );
+        let target_params = contract
+            .param_types
+            .iter()
+            .map(|ty| crate::resolve::substitute_method_type_variables(ty, &target_substitutions))
+            .collect::<Vec<_>>();
+        let return_shape = (!matches!(target_return, JavaType::Void))
+            .then(|| RustSlotShape::for_storage(target_return));
+        let signature = trait_method_signature_with_receiver_and_return_shape_and_params(
+            contract.owner,
+            contract.method,
+            signatures,
+            facts,
+            trait_method_exception_plan(contract.owner, contract.method, program, exceptions),
+            trait_method_receiver_plan(contract.owner, contract.method, program, signatures),
+            return_shape,
+            program,
+            Some(&target_params),
+            Some(representations),
+        );
+        let signature = signature.trim().strip_suffix(';')?;
+        let args = contract
+            .method
+            .params
+            .iter()
+            .zip(&contract.param_types)
+            .map(|(param, ty)| {
+                let name = rust_identifier_token(&param.name);
+                generic_retarget_value_expr(
+                    &name,
+                    ty,
+                    type_param,
+                    &interface.name,
+                    to,
+                    from,
+                    supports_erased_bound,
+                )
+            })
+            .collect::<Option<Vec<_>>>()?;
+        let rust_name = contract
+            .method
+            .rust_name
+            .clone()
+            .unwrap_or_else(|| crate::parser::to_snake_case(&contract.method.name));
+        let receiver =
+            match trait_method_receiver_plan(contract.owner, contract.method, program, signatures)
+                .unwrap_or(ReceiverPlan::Shared)
+            {
+                ReceiverPlan::Mutable => "&mut *self.__java_inner",
+                ReceiverPlan::Shared | ReceiverPlan::None => "&*self.__java_inner",
+            };
+        let call = format!(
+            "{trait_name}::<{from}>::{rust_name}({receiver}{comma}{args})",
+            comma = if args.is_empty() { "" } else { ", " },
+            args = args.join(", "),
+        );
+        let exception_plan =
+            trait_method_exception_plan(contract.owner, contract.method, program, exceptions);
+        let body = if matches!(contract.return_type, JavaType::Void) {
+            call
+        } else {
+            let converted = generic_retarget_value_expr(
+                "__java_value",
+                &contract.return_type,
+                type_param,
+                &interface.name,
+                from,
+                to,
+                supports_erased_bound,
+            )?;
+            if exception_plan.wrap_returns_in_result() {
+                format!("{call}.map(|__java_value| {converted})")
+            } else {
+                format!("{{ let __java_value = {call}; {converted} }}")
+            }
+        };
+        methods.push(format!("    {signature} {{ {body} }}"));
+    }
+    methods.push("    fn as_any(&self) -> &dyn std::any::Any { self }".to_string());
+    methods.push(format!(
+        "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}<{to}>> {{ std::boxed::Box::new(std::clone::Clone::clone(self)) }}"
+    ));
+    let generic_bound = if supports_erased_bound {
+        "Clone + 'static"
+    } else {
+        "'static"
+    };
+    Some(format!(
+        "pub struct {adapter_name}<{from}: {generic_bound}, {to}: {generic_bound}> {{\n    __java_inner: std::boxed::Box<dyn {trait_name}<{from}>>,\n    __java_marker: std::marker::PhantomData<fn({to})>,\n}}\n\nimpl<{from}: {generic_bound}, {to}: {generic_bound}> Clone for {adapter_name}<{from}, {to}> {{\n    fn clone(&self) -> Self {{ Self {{ __java_inner: std::clone::Clone::clone(&self.__java_inner), __java_marker: std::marker::PhantomData }} }}\n}}\n\nimpl<{from}: {generic_bound}, {to}: {generic_bound}> {adapter_name}<{from}, {to}> {{\n    pub fn new(__java_inner: std::boxed::Box<dyn {trait_name}<{from}>>) -> Self {{ Self {{ __java_inner, __java_marker: std::marker::PhantomData }} }}\n}}\n\nimpl<{from}: {generic_bound}, {to}: {generic_bound}> {trait_name}<{to}> for {adapter_name}<{from}, {to}> {{\n{}\n}}",
+        methods.join("\n")
+    ))
+}
+
+pub(crate) fn generic_interface_retarget_adapter_name(interface_name: &str) -> String {
+    format!(
+        "__JavaGenericRetarget{}",
+        rust_name_for_java_named_type(interface_name)
+    )
+}
+
+pub(crate) fn generic_interface_supports_retarget_adapter(
+    program: &Program,
+    interface: &TypeDecl,
+) -> bool {
+    let [type_param] = interface.type_params.as_slice() else {
+        return false;
+    };
+    let contracts = specialized_interface_abstract_contracts(program, interface);
+    !contracts.is_empty()
+        && contracts.iter().all(|contract| {
+            !contract.method.modifiers.contains(&Modifier::Static)
+                && contract
+                    .param_types
+                    .iter()
+                    .all(|ty| generic_retarget_type_is_supported(ty, type_param, &interface.name))
+                && generic_retarget_type_is_supported(
+                    &contract.return_type,
+                    type_param,
+                    &interface.name,
+                )
+        })
+}
+
+fn generic_retarget_type_is_supported(
+    ty: &JavaType,
+    type_param: &str,
+    interface_name: &str,
+) -> bool {
+    if !java_type_mentions_type_param(ty, type_param) {
+        return true;
+    }
+    match ty {
+        JavaType::Named { name, args } if name == type_param && args.is_empty() => true,
+        JavaType::Array(element) => {
+            generic_retarget_type_is_supported(element, type_param, interface_name)
+        }
+        JavaType::Named { name, args }
+            if args.len() == 1
+                && (crate::facts::external_type_name_matches(name, interface_name)
+                    || generic_retarget_collection_name(name)) =>
+        {
+            generic_retarget_type_is_supported(&args[0], type_param, interface_name)
+        }
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            generic_retarget_type_is_supported(bound, type_param, interface_name)
+        }
+        _ => false,
+    }
+}
+
+fn generic_retarget_value_expr(
+    value: &str,
+    ty: &JavaType,
+    type_param: &str,
+    interface_name: &str,
+    source_param: &str,
+    target_param: &str,
+    supports_erased_bound: bool,
+) -> Option<String> {
+    if !java_type_mentions_type_param(ty, type_param) {
+        return Some(value.to_string());
+    }
+    match ty {
+        JavaType::Named { name, args } if name == type_param && args.is_empty() => {
+            Some(if supports_erased_bound {
+                format!(
+                    "java_retarget_erased_generic_value::<{source_param}, {target_param}>({value})"
+                )
+            } else {
+                format!(
+                    "*(std::boxed::Box::new({value}) as std::boxed::Box<dyn std::any::Any>).downcast::<{target_param}>().expect(\"invalid Java erased generic interface cast\")"
+                )
+            })
+        }
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            generic_retarget_value_expr(
+                value,
+                bound,
+                type_param,
+                interface_name,
+                source_param,
+                target_param,
+                supports_erased_bound,
+            )
+        }
+        JavaType::Array(element) => {
+            let converted = generic_retarget_value_expr(
+                "__java_element",
+                element,
+                type_param,
+                interface_name,
+                source_param,
+                target_param,
+                supports_erased_bound,
+            )?;
+            Some(format!(
+                "{value}.into_iter().map(|__java_element| __java_element.map(|__java_element| {converted})).collect()"
+            ))
+        }
+        JavaType::Named { name, args }
+            if args.len() == 1 && generic_retarget_collection_name(name) =>
+        {
+            let converted = generic_retarget_value_expr(
+                "__java_element",
+                &args[0],
+                type_param,
+                interface_name,
+                source_param,
+                target_param,
+                supports_erased_bound,
+            )?;
+            Some(format!(
+                "{value}.into_iter().map(|__java_element| {converted}).collect()"
+            ))
+        }
+        JavaType::Named { name, args }
+            if args.len() == 1
+                && crate::facts::external_type_name_matches(name, interface_name) =>
+        {
+            let adapter = generic_interface_retarget_adapter_name(interface_name);
+            let trait_name = rust_name_for_java_named_type(interface_name);
+            Some(format!(
+                "std::boxed::Box::new({adapter}::<{source_param}, {target_param}>::new({value})) as std::boxed::Box<dyn {trait_name}<{target_param}>>"
+            ))
+        }
+        _ => None,
+    }
+}
+
+fn generic_retarget_collection_name(name: &str) -> bool {
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "Collection" | "List" | "ArrayList" | "LinkedList" | "Set" | "HashSet" | "LinkedHashSet"
+    )
+}
+
+fn interface_has_interior_mutable_implementor(
+    program: &Program,
+    interface: &TypeDecl,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> bool {
+    fn visit(
+        program: &Program,
+        ty: &TypeDecl,
+        interface: &TypeDecl,
+        facts: &FactSet,
+        representations: &RepresentationPlan,
+    ) -> bool {
+        let placement = crate::storage_strategy::effective_storage_placement(
+            facts.storage_placement_for(&ty.name),
+            representations.storage_placement_for(&ty.name),
+        );
+        (matches!(ty.kind, TypeKind::Class | TypeKind::Enum)
+            && placement.shared()
+            && placement.interior_mutable()
+            && placement.is_implemented()
+            && implemented_interfaces_for_type(program, ty).iter().any(|name| {
+                crate::facts::external_type_name_matches(name, &interface.name)
+            })) || ty
+            .members
+            .iter()
+            .any(|member| matches!(member, Member::Type(nested) if visit(program, nested, interface, facts, representations)))
+    }
+
+    program
+        .types
+        .iter()
+        .any(|ty| visit(program, ty, interface, facts, representations))
 }
 
 pub(crate) fn parameterized_interface_trait_path(
@@ -2801,33 +4764,52 @@ pub(crate) fn zero_arg_closure_trait_impl(
     trait_name: &str,
     facts: &FactSet,
     signatures: &SignaturePlan,
+    exceptions: MethodExceptionPlan,
 ) -> Option<String> {
+    // A blanket `impl<P, F: Fn() -> P> Trait<P> for F` overlaps the generic
+    // `Trait<P> for Box<T>` forwarding impl whenever `Box<T>` is callable.
+    // Parameterized functional interfaces therefore use the nominal adapter
+    // emitted at the conversion site; keep this blanket shortcut for the
+    // coherence-safe non-generic case only.
+    if !ty.type_params.is_empty() {
+        return None;
+    }
     let method = zero_arg_functional_method(ty)?;
     let rust_name = method
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    let (fn_bound, method_return, method_body) = if matches!(method.return_type, JavaType::Void) {
-        ("Fn()".to_string(), String::new(), "self()".to_string())
+    let return_ty = if matches!(method.return_type, JavaType::Void) {
+        RustType::Unit
     } else {
         let return_shape = signatures
             .required_method_signature(ty, method)
             .return_shape()
             .cloned()
             .unwrap_or_else(|| RustSlotShape::for_storage(method.return_type.clone()));
-        let return_ty = emit_type(&rust_type_for_slot_with_facts(&return_shape, facts));
-        (
-            format!("Fn() -> {return_ty}"),
-            format!(" -> {return_ty}"),
-            "self()".to_string(),
-        )
+        rust_type_for_slot_with_facts(&return_shape, facts)
+    };
+    let return_ty = if exceptions.wrap_returns_in_result() {
+        exception_result_type(return_ty)
+    } else {
+        return_ty
+    };
+    let return_ty = emit_type(&return_ty);
+    let fn_bound = format!("Fn() -> {return_ty}");
+    let method_return = format!(" -> {return_ty}");
+    let method_body = "self()".to_string();
+    let impl_params = trait_impl_lifetime_params(&ty.type_params);
+    let impl_params = if impl_params.is_empty() {
+        "__JavaAnonymous".to_string()
+    } else {
+        format!("{impl_params}, __JavaAnonymous")
     };
     Some(format!(
-        "impl<__JavaAnonymous> {trait_name} for __JavaAnonymous\nwhere\n    __JavaAnonymous: {fn_bound} + Clone + 'static,\n{{\n    fn {rust_name}(&self){method_return} {{ {method_body} }}\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}\n}}"
+        "impl<{impl_params}> {trait_name} for __JavaAnonymous\nwhere\n    __JavaAnonymous: {fn_bound} + Clone + 'static,\n{{\n    fn {rust_name}(&self){method_return} {{ {method_body} }}\n    fn as_any(&self) -> &dyn std::any::Any {{ self }}\n    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(std::clone::Clone::clone(self)) }}\n}}"
     ))
 }
 
-fn zero_arg_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
+pub(crate) fn zero_arg_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
     if ty.kind != TypeKind::Interface {
         return None;
     }
@@ -2858,7 +4840,16 @@ fn trait_impl_for_type(
 ) -> Option<String> {
     let trait_name = rust_name_for_java_named_type(trait_name);
     let impl_type_name = rust_name_for_java_named_type(&ty.name);
-    let placement = representations.storage_placement_for(&ty.name);
+    let impl_type = crate::item_assembly::rust_use_name_for_source_type(ty);
+    let impl_params =
+        crate::item_assembly::rust_impl_params_for_source_type(ty, program, Some(representations));
+    let impl_generics = (!impl_params.is_empty())
+        .then(|| format!("<{}>", impl_params.join(", ")))
+        .unwrap_or_default();
+    let placement = crate::storage_strategy::effective_storage_placement(
+        facts.storage_placement_for(&ty.name),
+        representations.storage_placement_for(&ty.name),
+    );
     let shared_adapter =
         (placement.shared() && placement.interior_mutable()).then_some(placement.sync());
     let methods = specialized_interface_instance_contracts(program, interface)
@@ -2876,7 +4867,11 @@ fn trait_impl_for_type(
                 contract.method,
                 &effective_method,
                 program,
-                trait_method_receiver_plan(method_owner, &effective_method, program, signatures),
+                // Receiver mutability belongs to the declared override slot.
+                // The specialized clone substitutes generic parameter types
+                // and is not a SignaturePlan identity; looking it up can choose
+                // a different receiver than the emitted trait declaration.
+                trait_method_receiver_plan(method_owner, contract.method, program, signatures),
                 signatures,
                 facts,
                 trait_method_exception_plan(method_owner, &effective_method, program, exceptions),
@@ -2890,26 +4885,22 @@ fn trait_impl_for_type(
         methods.extend(shared_trait_object_support_impl_methods(&trait_name));
         let trait_base = trait_name.split('<').next().unwrap_or(&trait_name);
         let adapter_name = format!("__JavaShared{impl_type_name}As{trait_base}");
-        let generic_params = ty
-            .type_params
-            .iter()
-            .map(|name| format!("{name}: 'static"))
-            .collect::<Vec<_>>();
-        let impl_generics = (!generic_params.is_empty())
-            .then(|| format!("<{}>", generic_params.join(", ")))
-            .unwrap_or_default();
         let type_args = (!ty.type_params.is_empty())
             .then(|| format!("<{}>", ty.type_params.join(", ")))
             .unwrap_or_default();
-        let impl_type = format!("{impl_type_name}{type_args}");
         let adapter_type = format!("{adapter_name}{type_args}");
         let handle = if sync {
             format!("std::sync::Arc<std::sync::Mutex<{impl_type}>>")
         } else {
             format!("std::rc::Rc<std::cell::RefCell<{impl_type}>>")
         };
+        let direct_methods = methods
+            .iter()
+            .map(|method| method.replace("&self.0", "self").replace("self.0", "self"))
+            .collect::<Vec<_>>()
+            .join("\n");
         return Some(format!(
-            "#[derive(Clone)]\npub struct {adapter_name}{impl_generics}(pub {handle});\n\nimpl{impl_generics} {trait_name} for {adapter_type} {{\n{}\n}}\n\nimpl{impl_generics} From<{handle}> for std::boxed::Box<dyn {trait_name}> {{\n    fn from(value: {handle}) -> Self {{ std::boxed::Box::new({adapter_name}(value)) }}\n}}",
+            "#[derive(Clone)]\npub struct {adapter_name}{impl_generics}(pub {handle});\n\nimpl{impl_generics} {trait_name} for {adapter_type} {{\n{}\n}}\n\nimpl{impl_generics} {trait_name} for {handle} {{\n{direct_methods}\n}}\n\nimpl{impl_generics} From<{handle}> for std::boxed::Box<dyn {trait_name}> {{\n    fn from(value: {handle}) -> Self {{ std::boxed::Box::new({adapter_name}(value)) }}\n}}",
             methods.join("\n")
         ));
     }
@@ -2925,7 +4916,7 @@ fn trait_impl_for_type(
         concrete_is_clone,
     ));
     let concrete_impl = format!(
-        "impl {trait_name} for {impl_type_name} {{\n{}\n}}",
+        "impl{impl_generics} {trait_name} for {impl_type} {{\n{}\n}}",
         methods.join("\n")
     );
     if placement.shared() && !placement.interior_mutable() && placement.is_implemented() {
@@ -2942,7 +4933,7 @@ fn trait_impl_for_type(
             })
             .collect::<Option<Vec<_>>>()?;
         return Some(format!(
-            "{concrete_impl}\n\nimpl {trait_name} for {handle}<{impl_type_name}> {{\n{}\n}}",
+            "{concrete_impl}\n\nimpl{impl_generics} {trait_name} for {handle}<{impl_type}> {{\n{}\n}}",
             forwarded.join("\n")
         ));
     }
@@ -2961,10 +4952,56 @@ pub(crate) fn trait_object_support_method_signatures(trait_name: &str) -> Vec<St
     ]
 }
 
+/// Java Object methods remain callable through an interface reference even
+/// though they are not declared by the interface itself.  Source interfaces
+/// lower to Rust traits, so these methods belong on the trait surface; emitting
+/// an inherent `impl TraitName` is invalid Rust.  Keep this policy beside the
+/// other trait-object support methods so every representation path shares it.
+pub(crate) fn external_object_interface_trait_default_methods(
+    ty: &TypeDecl,
+    trait_name: &str,
+    facts: Option<&FactSet>,
+    program: Option<&Program>,
+) -> Vec<String> {
+    let declares_to_string = ty.members.iter().any(|member| {
+        matches!(member, Member::Method(method)
+            if method.params.is_empty()
+                && matches!(method.name.as_str(), "toString" | "to_string"))
+    });
+    let has_source_interface_parent = program.is_some_and(|program| {
+        ty.extends.iter().chain(&ty.implements).any(|parent| {
+            let JavaType::Named { name, .. } = crate::parser::parse_hierarchy_type(parent) else {
+                return false;
+            };
+            find_type_decl_for_owner_context(program, &ty.name, &name)
+                .is_some_and(|parent| parent.kind == TypeKind::Interface)
+        })
+    });
+    let context_free_inherits_to_string = program.is_none()
+        && facts.is_some_and(|facts| {
+            crate::inherited_members::external_inherited_instance_methods_for_type(ty, facts)
+                .into_iter()
+                .any(|method| {
+                    method.arg_count() == 0
+                        && (matches!(method.method_name(), "toString" | "to_string")
+                            || matches!(method.rust_name(), "toString" | "to_string"))
+                })
+        });
+    if declares_to_string
+        || has_source_interface_parent
+        || (program.is_none() && !context_free_inherits_to_string)
+    {
+        return Vec::new();
+    }
+    vec![format!(
+        "    fn to_string(&self) -> String {{ format!(\"{{}}@0\", {trait_name:?}) }}"
+    )]
+}
+
 fn trait_object_support_impl_methods(trait_name: &str, concrete_is_clone: bool) -> Vec<String> {
     let clone_box = if concrete_is_clone {
         format!(
-            "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}"
+            "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(std::clone::Clone::clone(self)) }}"
         )
     } else {
         format!(
@@ -2979,9 +5016,14 @@ fn trait_object_support_impl_methods(trait_name: &str, concrete_is_clone: bool) 
 
 fn shared_trait_object_support_impl_methods(trait_name: &str) -> Vec<String> {
     vec![
-        "    fn as_any(&self) -> &dyn std::any::Any { self }".to_string(),
+        // A Java interface value carries the runtime identity of the concrete
+        // object, not the implementation detail used to adapt that object to
+        // a Rust trait object.  Expose the shared handle stored in the adapter
+        // so an explicit Java interface-to-class cast can recover it.  The
+        // direct shared-handle impl below rewrites `&self.0` to `self`.
+        "    fn as_any(&self) -> &dyn std::any::Any { &self.0 }".to_string(),
         format!(
-            "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(self.clone()) }}"
+            "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}> {{ std::boxed::Box::new(std::clone::Clone::clone(self)) }}"
         ),
     ]
 }
@@ -3003,11 +5045,12 @@ pub(crate) fn boxed_dyn_trait_clone_impl_with_generics(
     if type_params.is_empty() {
         return boxed_dyn_trait_clone_impl(trait_path);
     }
-    let impl_params = type_params
-        .iter()
-        .map(|name| format!("{name}: 'static"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    // Cloning a trait object only delegates to its object-safe `clone_box`
+    // method. It does not downcast through `Any` or construct a new concrete
+    // implementor, so the trait's generic arguments need no `'static` bound.
+    // Reusing the anonymous-object lifetime parameters here unnecessarily
+    // made every struct containing `Box<dyn Trait<T>>` require `T: 'static`.
+    let impl_params = type_params.join(", ");
     let value_path = trait_value_path(trait_path);
     format!(
         "impl<{impl_params}> Clone for std::boxed::Box<dyn {trait_path}> {{\n    fn clone(&self) -> Self {{ {value_path}::clone_box(&**self) }}\n}}"
@@ -3016,6 +5059,14 @@ pub(crate) fn boxed_dyn_trait_clone_impl_with_generics(
 
 fn trait_value_path(trait_path: &str) -> String {
     trait_path.replacen('<', "::<", 1)
+}
+
+fn trait_impl_lifetime_params(type_params: &[String]) -> String {
+    type_params
+        .iter()
+        .map(|name| format!("{name}: 'static"))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Forwards a trait through a shared handle: `impl<T: Trait> Trait for Rc<T>`.
@@ -3032,6 +5083,7 @@ fn trait_value_path(trait_path: &str) -> String {
 /// `Rc<T>`/`Arc<T>` because it is tied to the handle's own `&self` lifetime;
 /// it is deliberately not forwarded through either cell handle, whose guard
 /// would be dropped at the method boundary.
+#[cfg(test)]
 pub(crate) fn shared_handle_forwarding_impl(
     trait_name: &str,
     signatures: &[String],
@@ -3055,6 +5107,22 @@ pub(crate) fn shared_handle_forwarding_impl_with_policy_and_generics(
     type_params: &[String],
     signatures: &[String],
     sync_trait: bool,
+) -> Option<String> {
+    shared_handle_forwarding_impl_with_policy_and_generics_and_cell_policy(
+        trait_name,
+        type_params,
+        signatures,
+        sync_trait,
+        true,
+    )
+}
+
+fn shared_handle_forwarding_impl_with_policy_and_generics_and_cell_policy(
+    trait_name: &str,
+    type_params: &[String],
+    signatures: &[String],
+    sync_trait: bool,
+    emit_cell_handle_blankets: bool,
 ) -> Option<String> {
     let direct_methods = signatures
         .iter()
@@ -3100,14 +5168,7 @@ pub(crate) fn shared_handle_forwarding_impl_with_policy_and_generics(
     let impl_prefix = if type_params.is_empty() {
         String::new()
     } else {
-        format!(
-            "{}, ",
-            type_params
-                .iter()
-                .map(|name| format!("{name}: 'static"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        format!("{}, ", trait_impl_lifetime_params(type_params))
     };
     let generic_direct_carriers = (!type_params.is_empty() && !sync_trait).then(|| {
         let trait_base = trait_name.split('<').next().unwrap_or(trait_name);
@@ -3116,7 +5177,7 @@ pub(crate) fn shared_handle_forwarding_impl_with_policy_and_generics(
             .map(|(suffix, handle)| {
                 let carrier = format!("__JavaDirect{trait_base}{suffix}Carrier");
                 format!(
-                    "pub struct {carrier}<__JavaShared>({handle}<__JavaShared>);\n\nimpl<__JavaShared> Clone for {carrier}<__JavaShared> {{\n    fn clone(&self) -> Self {{ Self(self.0.clone()) }}\n}}\n\nimpl<__JavaShared> From<{handle}<__JavaShared>> for {carrier}<__JavaShared> {{\n    fn from(value: {handle}<__JavaShared>) -> Self {{ Self(value) }}\n}}"
+                    "pub struct {carrier}<__JavaShared>({handle}<__JavaShared>);\n\nimpl<__JavaShared> Clone for {carrier}<__JavaShared> {{\n    fn clone(&self) -> Self {{ Self(std::clone::Clone::clone(&self.0)) }}\n}}\n\nimpl<__JavaShared> From<{handle}<__JavaShared>> for {carrier}<__JavaShared> {{\n    fn from(value: {handle}<__JavaShared>) -> Self {{ Self(value) }}\n}}"
                 )
             })
             .collect::<Vec<_>>()
@@ -3153,6 +5214,9 @@ pub(crate) fn shared_handle_forwarding_impl_with_policy_and_generics(
         ),
     ];
     for (handle, methods) in cell_handles {
+        if !emit_cell_handle_blankets {
+            continue;
+        }
         if let Some(methods) = methods {
             implementations.push(format!(
                 "impl<{impl_prefix}__JavaShared: {trait_name} + 'static> {trait_name} for {handle} {{\n{}\n}}",
@@ -3163,11 +5227,44 @@ pub(crate) fn shared_handle_forwarding_impl_with_policy_and_generics(
     (!implementations.is_empty()).then(|| implementations.join("\n\n"))
 }
 
+/// Forwards a source interface through its canonical owned trait-object
+/// carrier. This is intentionally generic over the boxed implementor so a
+/// boxed subinterface also satisfies its source superinterface bounds.
+pub(crate) fn boxed_trait_forwarding_impl_with_generics(
+    trait_name: &str,
+    type_params: &[String],
+    signatures: &[String],
+) -> Option<String> {
+    let methods = signatures
+        .iter()
+        .map(|signature| {
+            forwarded_trait_method(signature, SharedTraitHandle::Boxed, Some(trait_name))
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let impl_prefix = if type_params.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "{}, ",
+            type_params
+                .iter()
+                .map(|name| format!("{name}: 'static"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
+    Some(format!(
+        "impl<{impl_prefix}__JavaBoxed: {trait_name} + ?Sized> {trait_name} for std::boxed::Box<__JavaBoxed> {{\n{}\n}}",
+        methods.join("\n")
+    ))
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SharedTraitHandle {
     Direct,
     Local,
     Sync,
+    Boxed,
 }
 
 /// Turns one rendered trait-method signature into a forwarding implementation.
@@ -3191,11 +5288,23 @@ fn forwarded_trait_method(
     let args = forwarded_argument_names(&body[open + 1..close])?;
     let signature_without_semicolon = trimmed.strip_suffix(';')?;
     if name == "clone_box" && args.is_empty() {
+        if handle == SharedTraitHandle::Boxed {
+            let trait_name = trait_value_path(trait_name?);
+            return Some(format!(
+                "    {signature_without_semicolon} {{ {trait_name}::clone_box(&**self) }}"
+            ));
+        }
         return Some(format!(
-            "    {signature_without_semicolon} {{ std::boxed::Box::new(self.clone()) }}"
+            "    {signature_without_semicolon} {{ std::boxed::Box::new(std::clone::Clone::clone(self)) }}"
         ));
     }
     if name == "as_any" && args.is_empty() {
+        if handle == SharedTraitHandle::Boxed {
+            let trait_name = trait_value_path(trait_name?);
+            return Some(format!(
+                "    {signature_without_semicolon} {{ {trait_name}::as_any(&**self) }}"
+            ));
+        }
         // The handle, not its payload, is the Java reference value. Returning
         // the payload here makes an interface downcast recover and clone `T`,
         // silently severing Java alias identity (and mismatching an `Rc<T>` /
@@ -3203,7 +5312,8 @@ fn forwarded_trait_method(
         // the same reason; direct handles must do so as well.
         return Some(format!("    {signature_without_semicolon} {{ self }}"));
     }
-    if (signature_return_is_borrowed(signature) && handle != SharedTraitHandle::Direct)
+    if (signature_return_is_borrowed(signature)
+        && !matches!(handle, SharedTraitHandle::Direct | SharedTraitHandle::Boxed))
         || (mutable_receiver && handle == SharedTraitHandle::Direct)
     {
         return None;
@@ -3214,12 +5324,19 @@ fn forwarded_trait_method(
         SharedTraitHandle::Local => "self.borrow()".to_string(),
         SharedTraitHandle::Sync if mutable_receiver => "self.lock().unwrap()".to_string(),
         SharedTraitHandle::Sync => "self.lock().unwrap()".to_string(),
+        SharedTraitHandle::Boxed => "(**self)".to_string(),
     };
     if let Some(trait_name) = trait_name {
         let trait_name = trait_value_path(trait_name);
         let borrow = if mutable_receiver { "&mut *" } else { "&*" };
         let receiver = match handle {
-            SharedTraitHandle::Direct => "&**self".to_string(),
+            SharedTraitHandle::Direct | SharedTraitHandle::Boxed => {
+                if mutable_receiver {
+                    "&mut **self".to_string()
+                } else {
+                    "&**self".to_string()
+                }
+            }
             SharedTraitHandle::Local | SharedTraitHandle::Sync => {
                 format!("{borrow}{receiver}")
             }
@@ -3312,11 +5429,7 @@ pub(crate) fn dyn_trait_anonymous_impl_with_generics(
     if type_params.is_empty() {
         return dyn_trait_anonymous_impl(trait_path);
     }
-    let impl_params = type_params
-        .iter()
-        .map(|name| format!("{name}: 'static"))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let impl_params = trait_impl_lifetime_params(type_params);
     format!(
         "impl<{impl_params}> dyn {trait_path} {{\n    pub fn anonymous() -> std::boxed::Box<dyn {trait_path}> {{ panic!(\"java2rust: anonymous class body for {trait_path} requires object lowering\") }}\n}}"
     )
@@ -3337,13 +5450,48 @@ fn trait_impl_method(
 ) -> Option<String> {
     let mut trait_return_shape =
         trait_method_return_shape_plan(interface, declared_interface_method, program, signatures);
+    if let Some(mut specialized_shape) = specialized_interface_trait_return_shape(
+        ty,
+        interface,
+        declared_interface_method,
+        interface_method,
+        program,
+        signatures,
+    ) {
+        if let Some(solved_trait_shape) = trait_return_shape.as_ref()
+            && !matches!(solved_trait_shape.dispatch, DispatchShape::Concrete)
+            && matches!(specialized_shape.dispatch, DispatchShape::Concrete)
+        {
+            // Specialization refines the declared Java type, but the emitted
+            // trait signature remains authoritative for its Rust dispatch
+            // carrier. Analysis/context copies do not necessarily carry the
+            // emitted interface's boxed-trait decision.
+            specialized_shape.dispatch = solved_trait_shape.dispatch.clone();
+        }
+        trait_return_shape = Some(specialized_shape);
+    }
     if trait_return_shape.as_ref().is_some_and(|shape| {
         shape.java_ty != interface_method.return_type
             && shape.optional_element_type().as_ref() != Some(&interface_method.return_type)
+            && !java_types_differ_only_by_nested_optionality(
+                &shape.java_ty,
+                &interface_method.return_type,
+            )
     }) {
-        trait_return_shape = Some(RustSlotShape::for_storage(
-            interface_method.return_type.clone(),
-        ));
+        let shape = trait_return_shape.as_mut().expect("checked above");
+        if java_types_share_named_erasure(&shape.java_ty, &interface_method.return_type) {
+            // Full-package analysis can reach the emitted interface through a
+            // generic declaration copy (`Product<T>`) while the effective
+            // contract has already been specialized (`Product<Value>`).
+            // Substitute the Java type without discarding the solved boxed-
+            // trait dispatch: the latter is the trait ABI we must implement.
+            shape.java_ty = interface_method.return_type.clone();
+        } else {
+            trait_return_shape = Some(crate::shape_projection::storage_shape_for_java_type(
+                representations,
+                interface_method.return_type.clone(),
+            ));
+        }
     }
     let trait_return_shape_for_body = trait_return_shape.clone();
     let specialized_param_types = interface_method
@@ -3478,7 +5626,9 @@ fn trait_impl_method(
             let comma_args = (!args.is_empty())
                 .then(|| format!(", {args}"))
                 .unwrap_or_default();
-            format!("{implementing_owner_name}::{rust_name}_with_outer(self.0.clone(){comma_args})")
+            format!(
+                "{implementing_owner_name}::{rust_name}_with_outer(std::clone::Clone::clone(&self.0){comma_args})"
+            )
         } else {
             let borrowed = if sync {
                 "self.0.lock().unwrap()"
@@ -3511,6 +5661,8 @@ fn trait_impl_method(
                 .or(interface_signature.return_shape()),
             &implementation_signature.return_shape_cloned(),
             interface_exceptions,
+            facts,
+            representations,
         )
     } else {
         call
@@ -3538,6 +5690,114 @@ fn trait_impl_method(
         format!("{call};")
     };
     Some(format!("{} {{ {body} }}", signature.trim_end_matches(';')))
+}
+
+fn java_types_share_named_erasure(left: &JavaType, right: &JavaType) -> bool {
+    match (left, right) {
+        (
+            JavaType::Named {
+                name: left_name,
+                args: left_args,
+            },
+            JavaType::Named {
+                name: right_name,
+                args: right_args,
+            },
+        ) => {
+            left_args.len() == right_args.len()
+                && crate::facts::external_type_name_matches(left_name, right_name)
+        }
+        _ => false,
+    }
+}
+
+/// Specialize the already-solved generic trait ABI for one implementor.
+///
+/// Re-projecting directly from the Java declaration loses solver decisions
+/// nested below collections (for example `List<Optional<List<O>>>`).  Keep the
+/// solved shape and substitute only its declared interface parameters, using
+/// the resolver's canonical recursive substitution.
+fn specialized_interface_trait_return_shape(
+    target: &TypeDecl,
+    interface: &TypeDecl,
+    declared_interface_method: &MethodDecl,
+    effective_interface_method: &MethodDecl,
+    program: &Program,
+    signatures: &SignaturePlan,
+) -> Option<RustSlotShape> {
+    let original_interface =
+        find_type_decl_for_owner_context(program, &target.name, &interface.name)?;
+    let original_method = original_interface.members.iter().find_map(|member| {
+        let Member::Method(method) = member else {
+            return None;
+        };
+        (method.name == declared_interface_method.name
+            && method.params.len() == declared_interface_method.params.len())
+        .then_some(method)
+    })?;
+    let args = interface_type_arguments_in_target(program, target, original_interface)?;
+    if original_interface.type_params.len() != args.len() {
+        return None;
+    }
+    let substitutions = original_interface
+        .type_params
+        .iter()
+        .cloned()
+        .zip(args)
+        .collect::<HashMap<_, _>>();
+    let mut shape =
+        trait_method_return_shape_plan(original_interface, original_method, program, signatures)?;
+    shape.java_ty =
+        crate::resolve::substitute_method_type_variables(&shape.java_ty, &substitutions);
+    java_types_differ_only_by_nested_optionality(
+        &shape.java_ty,
+        &effective_interface_method.return_type,
+    )
+    .then_some(shape)
+}
+
+fn java_types_differ_only_by_nested_optionality(left: &JavaType, right: &JavaType) -> bool {
+    if let Some(inner) = crate::types::optional_element_type(left) {
+        return java_types_differ_only_by_nested_optionality(&inner, right);
+    }
+    if let Some(inner) = crate::types::optional_element_type(right) {
+        return java_types_differ_only_by_nested_optionality(left, &inner);
+    }
+    match (left, right) {
+        (JavaType::Array(left), JavaType::Array(right)) => {
+            java_types_differ_only_by_nested_optionality(left, right)
+        }
+        (
+            JavaType::Named {
+                name: left_name,
+                args: left_args,
+            },
+            JavaType::Named {
+                name: right_name,
+                args: right_args,
+            },
+        ) => {
+            crate::facts::external_type_name_matches(left_name, right_name)
+                && left_args.len() == right_args.len()
+                && left_args
+                    .iter()
+                    .zip(right_args)
+                    .all(|(left, right)| java_types_differ_only_by_nested_optionality(left, right))
+        }
+        (JavaType::Wildcard(left), JavaType::Wildcard(right)) => match (left, right) {
+            (None, None) => true,
+            (
+                Some(crate::java_ir::WildcardBound::Extends(left)),
+                Some(crate::java_ir::WildcardBound::Extends(right)),
+            )
+            | (
+                Some(crate::java_ir::WildcardBound::Super(left)),
+                Some(crate::java_ir::WildcardBound::Super(right)),
+            ) => java_types_differ_only_by_nested_optionality(left, right),
+            _ => false,
+        },
+        _ => left == right,
+    }
 }
 
 fn adapt_trait_impl_forwarded_return(
@@ -3576,19 +5836,81 @@ fn adapt_covariant_trait_impl_return(
     trait_return_shape: Option<&RustSlotShape>,
     implementation_return_shape: &Option<RustSlotShape>,
     interface_exceptions: MethodExceptionPlan,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
 ) -> String {
     let Some(trait_shape) = trait_return_shape else {
         return call;
     };
-    let conversion = |value: &str| match &trait_shape.dispatch {
+    let projected_trait_shape = crate::shape_projection::project_java_value_shape(
+        Some(representations),
+        trait_shape.java_ty.clone(),
+    );
+    let trait_dispatch = if matches!(trait_shape.dispatch, DispatchShape::Concrete)
+        && !matches!(projected_trait_shape.dispatch, DispatchShape::Concrete)
+    {
+        &projected_trait_shape.dispatch
+    } else {
+        &trait_shape.dispatch
+    };
+    let implementation_shared_adapter = implementation_return_shape
+        .as_ref()
+        .and_then(|shape| {
+            shape
+                .optional_element_type()
+                .or_else(|| Some(shape.java_ty.clone()))
+        })
+        .and_then(|java_ty| match java_ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+            _ => None,
+        })
+        .is_some_and(|type_name| {
+            let placement = representations.storage_placement_for(&type_name);
+            placement.shared() && placement.interior_mutable() && placement.is_implemented()
+        });
+    let implementation_closed_carrier_variant = implementation_return_shape
+        .as_ref()
+        .and_then(|shape| {
+            shape
+                .optional_element_type()
+                .or_else(|| Some(shape.java_ty.clone()))
+        })
+        .and_then(|java_ty| match java_ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                representations.source_hierarchy_carrier_parts_for_variant(&name)
+            }
+            _ => None,
+        });
+    let conversion = |value: &str| match trait_dispatch {
         DispatchShape::BoxedDynTrait { trait_name } | DispatchShape::DynTrait { trait_name } => {
-            format!(
-                "std::boxed::Box::new({value}) as std::boxed::Box<dyn {}>",
-                rust_name_for_java_named_type(trait_name)
-            )
+            let trait_path = crate::slot_render::parameterized_dyn_trait_path(
+                trait_name,
+                &trait_shape.java_ty,
+                &crate::effective_facts::EffectiveFacts::new(facts),
+                representations,
+            );
+            if implementation_shared_adapter {
+                // Shared source implementors expose a nominal adapter and a
+                // matching `From<Handle>` implementation.  Reuse that
+                // canonical boundary: boxing the Rc/RefCell handle directly
+                // asks the handle itself to implement the source interface.
+                format!("std::convert::Into::<std::boxed::Box<dyn {trait_path}>>::into({value})")
+            } else {
+                format!("std::boxed::Box::new({value}) as std::boxed::Box<dyn {trait_path}>")
+            }
         }
         DispatchShape::ErasedObject => {
             format!("std::boxed::Box::new({value}) as std::boxed::Box<dyn std::any::Any>")
+        }
+        DispatchShape::ClosedEnum { enum_name } => {
+            if let Some((implementation_carrier, variant)) =
+                implementation_closed_carrier_variant.as_ref()
+                && implementation_carrier == enum_name
+            {
+                format!("{enum_name}::{variant}({value})")
+            } else {
+                value.to_string()
+            }
         }
         _ => value.to_string(),
     };
@@ -3636,13 +5958,29 @@ fn trait_impl_forwarding_receiver_arg(
     match trait_receiver.unwrap_or(ReceiverPlan::Shared) {
         ReceiverPlan::Mutable => {
             format!(
-                "&mut {{ let mut __java_super: {owner_name} = self.clone().into(); __java_super }}"
+                "&mut {{ let mut __java_super: {owner_name} = std::clone::Clone::clone(self).into(); __java_super }}"
             )
         }
         ReceiverPlan::Shared | ReceiverPlan::None => {
-            format!("&{{ let __java_super: {owner_name} = self.clone().into(); __java_super }}")
+            format!(
+                "&{{ let __java_super: {owner_name} = std::clone::Clone::clone(self).into(); __java_super }}"
+            )
         }
     }
+}
+
+fn forwarded_arg_requires_owned_view_materialization(
+    boundary_shape: &RustSlotShape,
+    implementation_shape: &RustSlotShape,
+) -> bool {
+    boundary_shape.java_ty == implementation_shape.java_ty
+        && boundary_shape.ownership == OwnershipShape::SharedBorrow
+        && matches!(boundary_shape.view, ViewShape::Slice | ViewShape::Str)
+        && implementation_shape.view == ViewShape::Native
+        && matches!(
+            implementation_shape.ownership,
+            OwnershipShape::Owned | OwnershipShape::SharedBorrow
+        )
 }
 
 fn trait_impl_forwarded_arg(
@@ -3651,6 +5989,19 @@ fn trait_impl_forwarded_arg(
     implementation_shape: Option<&RustSlotShape>,
 ) -> String {
     let arg_name = rust_identifier_token(arg_name);
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.java_ty == shape.java_ty
+            && trait_shape.ownership == OwnershipShape::Owned
+            && trait_shape.view == ViewShape::Native
+            && shape.ownership == OwnershipShape::MutableBorrow
+            && shape.view == ViewShape::Native
+    }) {
+        // The public hierarchy slot owns the argument, while a concrete
+        // override may only mutate it for the duration of the call. Borrow a
+        // moved temporary so the carrier parameter itself need not be declared
+        // `mut`, and each match arm can apply the same adapter independently.
+        return format!("&mut {{ {arg_name} }}");
+    }
     if implementation_shape.is_some_and(|shape| {
         trait_shape.optional_element_type().is_some()
             && trait_shape.java_ty == shape.java_ty
@@ -3678,6 +6029,24 @@ fn trait_impl_forwarded_arg(
             && shape.java_ty == trait_shape.java_ty
     }) {
         return format!("&{arg_name}");
+    }
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.ownership == OwnershipShape::SharedBorrow
+            && trait_shape.view == ViewShape::Slice
+            && shape.ownership == OwnershipShape::SharedBorrow
+            && shape.view == ViewShape::Native
+            && shape.java_ty == trait_shape.java_ty
+    }) {
+        return format!("&{arg_name}.to_vec()");
+    }
+    if implementation_shape.is_some_and(|shape| {
+        trait_shape.ownership == OwnershipShape::SharedBorrow
+            && trait_shape.view == ViewShape::Str
+            && shape.ownership == OwnershipShape::SharedBorrow
+            && shape.view == ViewShape::Native
+            && shape.java_ty == trait_shape.java_ty
+    }) {
+        return format!("&{arg_name}.to_string()");
     }
     if implementation_shape.is_some_and(|shape| {
         trait_shape.ownership == OwnershipShape::SharedBorrow
@@ -3725,6 +6094,29 @@ mod trait_impl_forwarded_arg_tests {
         assert_eq!(
             trait_impl_forwarded_arg("values", &owned_array, Some(&borrowed_slice)),
             "&values"
+        );
+
+        assert_eq!(
+            trait_impl_forwarded_arg("values", &borrowed_slice, Some(&owned_array)),
+            "values.to_vec()"
+        );
+
+        let owned_writer = RustSlotShape::for_storage(JavaType::Named {
+            name: "Writer".to_string(),
+            args: Vec::new(),
+        });
+        let mut mutably_borrowed_writer = owned_writer.clone();
+        mutably_borrowed_writer.ownership = OwnershipShape::MutableBorrow;
+        assert_eq!(
+            trait_impl_forwarded_arg("writer", &owned_writer, Some(&mutably_borrowed_writer),),
+            "&mut { writer }"
+        );
+
+        let mut borrowed_native_array = owned_array.clone();
+        borrowed_native_array.ownership = OwnershipShape::SharedBorrow;
+        assert_eq!(
+            trait_impl_forwarded_arg("values", &borrowed_slice, Some(&borrowed_native_array)),
+            "&values.to_vec()"
         );
     }
 }
@@ -3974,19 +6366,27 @@ fn rust_method_type_params(method: &MethodDecl, program: &Program, owner_name: &
         .iter()
         .enumerate()
         .map(|(index, name)| {
-            let Some(Some(JavaType::Named { name: bound, .. })) =
-                method.type_param_bounds.get(index)
-            else {
+            let Some(Some(bound)) = method.type_param_bounds.get(index) else {
                 return name.clone();
             };
-            match find_type_decl_for_owner_context(program, owner_name, bound) {
-                Some(ty) if matches!(ty.kind, TypeKind::Interface) => {
-                    format!("{name}: {}", rust_name_for_java_named_type(&ty.name))
+            let bounds = crate::item_assembly::rust_bounds_for_java_type_param(bound, &[program]);
+            if bounds.is_empty() {
+                // Preserve the owner-aware fallback for ambiguous simple source
+                // names; the central projector intentionally fails closed.
+                if let JavaType::Named { name: bound, .. } = bound {
+                    return match find_type_decl_for_owner_context(program, owner_name, bound) {
+                        Some(ty) if matches!(ty.kind, TypeKind::Interface) => {
+                            format!("{name}: {}", rust_name_for_java_named_type(&ty.name))
+                        }
+                        Some(ty) if matches!(ty.kind, TypeKind::Class) => {
+                            format!("{name}: {}", source_class_bound_trait_name(&ty.name))
+                        }
+                        _ => name.clone(),
+                    };
                 }
-                Some(ty) if matches!(ty.kind, TypeKind::Class) => {
-                    format!("{name}: {}", source_class_bound_trait_name(&ty.name))
-                }
-                _ => name.clone(),
+                name.clone()
+            } else {
+                format!("{name}: {}", bounds.join(" + "))
             }
         })
         .collect::<Vec<_>>();
@@ -4195,28 +6595,161 @@ pub(crate) fn trait_method_receiver_plan(
     if interface_method.modifiers.contains(&Modifier::Static) {
         return None;
     }
-    let interface_receiver = signatures
-        .required_method_signature(interface, interface_method)
-        .receiver();
-    let mut receiver = interface_receiver;
-    for implementor in program
-        .types
+    // Focused-package assembly can retain both an emitted declaration and a
+    // package-qualified analysis copy of the same Java interface.  Trait items
+    // and concrete impls are then allowed to enter through different copies.
+    // Receiver mutability is an ABI property of the *emitted trait slot*, so
+    // planning it from only the particular TypeDecl pointer makes the two
+    // sides disagree (`&self` versus `&mut self`).  Canonicalize on the emitted
+    // interface and solved Rust callable identities and join every equivalent
+    // declaration/implementor.  This is the same identity boundary used for
+    // item emission and keeps read-only concrete methods read-only: only the
+    // trait adapter is widened when another implementation mutates its receiver.
+    let method_identity = crate::java_signature::source_method_rust_name(interface_method);
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls_for_trait_receiver(ty, &mut types);
+    }
+    let mut slots = types
         .iter()
-        .filter(|ty| type_implements_interface(program, ty, interface))
-    {
-        let interface_method_uses_type_param = interface.type_params.iter().any(|type_param| {
-            java_type_mentions_named_type(&interface_method.return_type, type_param)
-                || interface_method
-                    .params
-                    .iter()
-                    .any(|param| java_type_mentions_named_type(&param.ty, type_param))
+        .copied()
+        .filter(|candidate| {
+            candidate.kind == TypeKind::Interface
+                && crate::facts::external_type_name_matches(&candidate.name, &interface.name)
+        })
+        .flat_map(|candidate_interface| {
+            let method_identity = method_identity.clone();
+            candidate_interface
+                .members
+                .iter()
+                .filter_map(move |member| match member {
+                    Member::Method(candidate_method)
+                        if !candidate_method.modifiers.contains(&Modifier::Static)
+                            && crate::java_signature::source_method_rust_name(candidate_method)
+                                == method_identity =>
+                    {
+                        Some((candidate_interface, candidate_method))
+                    }
+                    _ => None,
+                })
+        })
+        .collect::<Vec<_>>();
+    if slots.is_empty() {
+        slots.push((interface, interface_method));
+    }
+
+    let mut receiver = ReceiverPlan::Shared;
+    // The override graph is the authoritative relation between a Java trait
+    // slot and all of its implementations.  In focused-package translation a
+    // bodyless summary copy can be encountered before the emitted declaration;
+    // choosing the first candidate then hides the latter's mutable receiver.
+    // Join every solved declaration in every matching override group instead.
+    for group in crate::exception_plan::override_groups_for_program(program) {
+        let matches_slot = group.iter().any(|callable| {
+            callable
+                .method_identity_parts()
+                .is_some_and(|(owner, rust_name)| {
+                    crate::facts::external_type_name_matches(owner, &interface.name)
+                        && rust_name == method_identity
+                })
         });
-        let Some((implementation_owner, implementation)) =
+        if !matches_slot {
+            continue;
+        }
+        for callable in group {
+            let Some((owner, rust_name)) = callable.method_identity_parts() else {
+                continue;
+            };
+            for candidate_owner in types.iter().copied().filter(|ty| ty.name == owner) {
+                for candidate_method in candidate_owner.members.iter().filter_map(|member| {
+                    let Member::Method(method) = member else {
+                        return None;
+                    };
+                    (crate::java_signature::source_method_rust_name(method) == rust_name)
+                        .then_some(method)
+                }) {
+                    if signatures
+                        .required_method_signature(candidate_owner, candidate_method)
+                        .receiver()
+                        == ReceiverPlan::Mutable
+                    {
+                        receiver = ReceiverPlan::Mutable;
+                    }
+                }
+            }
+        }
+    }
+    for (candidate_interface, candidate_method) in slots {
+        if signatures
+            .required_method_signature(candidate_interface, candidate_method)
+            .receiver()
+            == ReceiverPlan::Mutable
+        {
+            receiver = ReceiverPlan::Mutable;
+        }
+        for (implementation_owner, implementation) in
+            source_interface_method_implementations(candidate_interface, candidate_method, program)
+        {
+            if signatures
+                .method_signature(implementation_owner, implementation)
+                .unwrap_or_else(|| {
+                    signatures.required_method_signature(implementation_owner, implementation)
+                })
+                .receiver()
+                == ReceiverPlan::Mutable
+            {
+                receiver = ReceiverPlan::Mutable;
+            }
+        }
+    }
+    Some(receiver)
+}
+
+fn collect_type_decls_for_trait_receiver<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
+    out.push(ty);
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_type_decls_for_trait_receiver(nested, out);
+        }
+    }
+}
+
+/// Concrete source methods implementing one interface slot, using the same
+/// generic-erasure compatibility rule as trait emission. Signature solving
+/// also consumes this relation so calls through interface-typed fields see
+/// the exact receiver ABI the emitted trait will expose.
+pub(crate) fn source_interface_method_implementations<'a>(
+    interface: &'a TypeDecl,
+    interface_method: &'a MethodDecl,
+    program: &'a Program,
+) -> Vec<(&'a TypeDecl, &'a MethodDecl)> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls_for_trait_receiver(ty, &mut types);
+    }
+    let method_uses_type_param = interface.type_params.iter().any(|type_param| {
+        java_type_mentions_named_type(&interface_method.return_type, type_param)
+            || interface_method
+                .params
+                .iter()
+                .any(|param| java_type_mentions_named_type(&param.ty, type_param))
+    });
+    types
+        .into_iter()
+        .filter(|ty| {
+            ty.kind == TypeKind::Class
+                && implemented_interfaces_for_type(program, ty)
+                    .iter()
+                    .any(|implemented| {
+                        crate::facts::external_type_name_matches(implemented, &interface.name)
+                    })
+        })
+        .filter_map(|implementor| {
             implementing_method_candidates_in_hierarchy(implementor, interface_method, program)
                 .into_iter()
                 .find(|candidate| {
                     trait_impl_method_compatibility_error(interface_method, candidate.1).is_none()
-                        || (interface_method_uses_type_param
+                        || (method_uses_type_param
                             && candidate.1.params.len() == interface_method.params.len()
                             && candidate
                                 .1
@@ -4225,20 +6758,8 @@ pub(crate) fn trait_method_receiver_plan(
                                 .zip(&interface_method.params)
                                 .all(|(actual, expected)| actual.is_varargs == expected.is_varargs))
                 })
-        else {
-            continue;
-        };
-        let implementation_receiver = signatures
-            .method_signature(implementation_owner, implementation)
-            .unwrap_or_else(|| {
-                signatures.required_method_signature(implementation_owner, implementation)
-            })
-            .receiver();
-        if implementation_receiver == ReceiverPlan::Mutable {
-            receiver = ReceiverPlan::Mutable;
-        }
-    }
-    Some(receiver)
+        })
+        .collect()
 }
 
 fn java_type_mentions_named_type(ty: &JavaType, name: &str) -> bool {
@@ -4390,6 +6911,7 @@ fn type_implements_interface(program: &Program, ty: &TypeDecl, interface: &TypeD
 }
 
 fn source_class_bounds_for_type<'a>(program: &'a Program, ty: &TypeDecl) -> Vec<&'a TypeDecl> {
+    let mut seen = HashSet::new();
     source_type_param_bounds(program)
         .into_iter()
         .filter_map(|bound| {
@@ -4398,6 +6920,7 @@ fn source_class_bounds_for_type<'a>(program: &'a Program, ty: &TypeDecl) -> Vec<
         .filter(|bound| {
             matches!(bound.kind, TypeKind::Class)
                 && (bound.name == ty.name || source_type_extends(program, ty, &bound.name))
+                && seen.insert(bound.name.clone())
         })
         .collect()
 }
@@ -4451,8 +6974,19 @@ fn collect_bound_names(
     seen: &mut HashSet<SourceTypeParamBound>,
     out: &mut Vec<SourceTypeParamBound>,
 ) {
-    for bound in bounds {
-        if let Some(JavaType::Named { name, .. }) = bound {
+    fn collect_one(
+        owner_name: &str,
+        bound: &JavaType,
+        seen: &mut HashSet<SourceTypeParamBound>,
+        out: &mut Vec<SourceTypeParamBound>,
+    ) {
+        if let JavaType::Intersection(bounds) = bound {
+            for bound in bounds {
+                collect_one(owner_name, bound, seen, out);
+            }
+            return;
+        }
+        if let JavaType::Named { name, .. } = bound {
             let bound = SourceTypeParamBound {
                 owner_name: owner_name.to_string(),
                 bound_name: name.clone(),
@@ -4462,16 +6996,21 @@ fn collect_bound_names(
             }
         }
     }
+    for bound in bounds.iter().flatten() {
+        collect_one(owner_name, bound, seen, out);
+    }
 }
 
 fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> bool {
     let mut next = ty.extends.as_deref();
     let mut owner_name = ty.name.as_str();
     while let Some(name) = next {
-        if name == target_name {
+        let erased_name = name.split('<').next().unwrap_or(name).trim();
+        if erased_name == target_name {
             return true;
         }
-        let Some(super_ty) = find_type_decl_for_owner_context(program, owner_name, name) else {
+        let Some(super_ty) = find_type_decl_for_owner_context(program, owner_name, erased_name)
+        else {
             return false;
         };
         if super_ty.name == target_name {
@@ -4595,10 +7134,14 @@ mod type_emission_tests {
     };
     use crate::java_ir::{JavaType, Member};
     use crate::parser::parse_java_source;
-    use crate::representation::{ObjectRepresentation, plan_representations};
+    use crate::representation::{
+        ObjectRepresentation, RepresentationPlan, RepresentationProvenance, TypeRepresentation,
+        plan_representations,
+    };
     use crate::resolve::resolve_program;
     use crate::semantic_analysis::analyze_program;
     use crate::signature::{ReceiverPlan, SignaturePlan, solve_signatures_with_facts};
+    use crate::storage_strategy::TypeStorageFacts;
     use crate::usage::{analyze_usage, analyze_usage_with_facts};
 
     #[test]
@@ -4879,6 +7422,307 @@ interface SpecificFirst extends Specific, General {}
     }
 
     #[test]
+    fn source_hierarchy_carrier_reuses_payload_overload_qualified_name() {
+        let mut parsed = parse_java_source(
+            r#"
+class Base { void compute(int input) {} }
+class Child extends Base { void compute(int input) {} }
+"#,
+        );
+        let owner = &parsed.program.types[0];
+        let root_method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method.clone()),
+                _ => None,
+            })
+            .expect("base method");
+        let child = parsed
+            .program
+            .types
+            .iter_mut()
+            .find(|ty| ty.name == "Child")
+            .expect("child type");
+        let child_method = child
+            .members
+            .iter_mut()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("child method");
+        child_method.rust_name = Some("compute_int".to_string());
+        let owner = parsed.program.types[0].clone();
+
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string(), "Child".to_string()],
+            &crate::representation::RepresentationPlan::default(),
+            &FactSet::default(),
+            &SignaturePlan::default(),
+            MethodExceptionPlan::new(false),
+            &owner,
+            &root_method,
+            &parsed.program,
+            &SignaturePlan::default(),
+            None,
+            false,
+        )
+        .expect("instance method forwards");
+
+        assert!(
+            rendered.contains("pub fn compute_int(&self, input: i32)")
+                && rendered.contains(
+                    "Self::Base(__java_carrier_payload) => __java_carrier_payload.compute(input)"
+                )
+                && rendered.contains(
+                    "Self::Child(__java_carrier_payload) => __java_carrier_payload.compute_int(input)"
+                ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_hierarchy_carrier_matches_generic_super_slot_after_substitution() {
+        let mut parsed = parse_java_source(
+            r#"
+class Base<T> { void write(T value) {} }
+class Child extends Base<String> { void write(String value) {} }
+"#,
+        );
+        let child_method = parsed.program.types[1]
+            .members
+            .iter_mut()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("child method");
+        child_method.rust_name = Some("write_string".to_string());
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let owner = &resolved.program.types[0];
+        let root_method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("base method");
+
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string(), "Child".to_string()],
+            &representations,
+            &semantic.facts,
+            &signatures,
+            MethodExceptionPlan::new(false),
+            owner,
+            root_method,
+            &resolved.program,
+            &signatures,
+            None,
+            false,
+        )
+        .expect("instance method forwards");
+
+        assert!(
+            rendered.contains("Self::Child(__java_carrier_payload)")
+                && rendered.contains(
+                    "write(&*(Box::new(value) as Box<dyn std::any::Any>).downcast::<String>()"
+                ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn source_hierarchy_carrier_reuses_method_type_parameter_bounds() {
+        let parsed = parse_java_source(
+            r#"
+class Observation {}
+class Base {
+    <O extends Observation> void consume(O value) {
+        value.toString();
+        value.toString();
+    }
+}
+"#,
+        );
+        let owner = parsed
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "consume" => Some(method),
+                _ => None,
+            })
+            .expect("generic method");
+
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string()],
+            &crate::representation::RepresentationPlan::default(),
+            &FactSet::default(),
+            &SignaturePlan::default(),
+            MethodExceptionPlan::new(false),
+            owner,
+            method,
+            &parsed.program,
+            &SignaturePlan::default(),
+            None,
+            false,
+        )
+        .expect("carrier method");
+
+        assert!(
+            rendered.contains("pub fn consume<O: ObservationBound + Clone>(&self, value: O)"),
+            "{rendered}"
+        );
+
+        let mut erased_summary_method = method.clone();
+        erased_summary_method.type_param_bounds = vec![None];
+        erased_summary_method.body = None;
+        let rendered_from_erased_summary = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string()],
+            &crate::representation::RepresentationPlan::default(),
+            &FactSet::default(),
+            &SignaturePlan::default(),
+            MethodExceptionPlan::new(false),
+            owner,
+            &erased_summary_method,
+            &parsed.program,
+            &SignaturePlan::default(),
+            None,
+            false,
+        )
+        .expect("carrier method from erased summary");
+        assert!(
+            rendered_from_erased_summary
+                .contains("pub fn consume<O: ObservationBound + Clone>(&self, value: O)"),
+            "{rendered_from_erased_summary}"
+        );
+
+        // Focused-package analysis may keep the short emitted declaration as
+        // a bodyless summary while the package-qualified copy retains the
+        // source bound.  Both erase to the same carrier variant.
+        let mut support = parsed.program.clone();
+        let base_index = support
+            .types
+            .iter()
+            .position(|ty| ty.name == "Base")
+            .expect("base index");
+        let qualified_base = support.types[base_index].clone();
+        if let Some(Member::Method(summary_method)) = support.types[base_index]
+            .members
+            .iter_mut()
+            .find(|member| matches!(member, Member::Method(method) if method.name == "consume"))
+        {
+            summary_method.type_param_bounds = vec![None];
+            summary_method.body = None;
+        }
+        support.types.push(qualified_base);
+        let summary_owner = &support.types[base_index];
+        let summary_method = summary_owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "consume" => Some(method),
+                _ => None,
+            })
+            .expect("summary method");
+        let rendered_from_duplicate_summary = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string()],
+            &crate::representation::RepresentationPlan::default(),
+            &FactSet::default(),
+            &SignaturePlan::default(),
+            MethodExceptionPlan::new(false),
+            summary_owner,
+            summary_method,
+            &support,
+            &SignaturePlan::default(),
+            None,
+            false,
+        )
+        .expect("carrier method from duplicate summary");
+        assert!(
+            rendered_from_duplicate_summary
+                .contains("pub fn consume<O: ObservationBound + Clone>(&self, value: O)"),
+            "{rendered_from_duplicate_summary}"
+        );
+    }
+
+    #[test]
+    fn source_hierarchy_carrier_joins_clone_bounds_from_every_payload() {
+        let parsed = parse_java_source(
+            r#"
+import java.util.List;
+
+abstract class Base {
+    abstract <T> T select(List<T> values);
+}
+class CloneUsingChild extends Base {
+    <T> T select(List<T> values) { return values.get(0); }
+}
+class PlainChild extends Base {
+    <T> T select(List<T> values) { return null; }
+}
+"#,
+        );
+        let owner = parsed
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "select" => Some(method),
+                _ => None,
+            })
+            .expect("generic method");
+
+        // Keep the non-cloning payload last. The old winner-takes-all policy
+        // selected this body and lost the Clone obligation required by the
+        // other match arm.
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["CloneUsingChild".to_string(), "PlainChild".to_string()],
+            &crate::representation::RepresentationPlan::default(),
+            &FactSet::default(),
+            &SignaturePlan::default(),
+            MethodExceptionPlan::new(false),
+            owner,
+            method,
+            &parsed.program,
+            &SignaturePlan::default(),
+            None,
+            false,
+        )
+        .expect("carrier method");
+
+        assert!(rendered.contains("pub fn select<T: Clone>"), "{rendered}");
+    }
+
+    #[test]
     fn source_hierarchy_carrier_joins_mutable_concrete_override_receiver() {
         let parsed = parse_java_source(
             r#"
@@ -4921,12 +7765,97 @@ class Child extends Base {
                 &["Child".to_string()],
                 base,
                 poll,
+                &representations,
                 &resolved.program,
                 &SignaturePlan::default(),
                 &signatures,
             ),
             ReceiverPlan::Mutable
         );
+    }
+
+    #[test]
+    fn all_handle_source_hierarchy_carrier_forwards_mutation_through_shared_receiver() {
+        let parsed = parse_java_source(
+            r#"
+class Base {
+    int count;
+    void bump() { count++; }
+}
+class Child extends Base {
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let mut representations = RepresentationPlan::default();
+        representations.insert_test_type_representation(TypeRepresentation::new(
+            "Base",
+            ObjectRepresentation::SourceHierarchyCarrier {
+                carrier_name: "BaseValue".to_string(),
+                variants: vec!["Base".to_string(), "Child".to_string()],
+            },
+            RepresentationProvenance::ParsedSource,
+            vec!["Child".to_string()],
+        ));
+        representations.insert_test_type_representation(TypeRepresentation::new(
+            "Child",
+            ObjectRepresentation::ConcreteStruct,
+            RepresentationProvenance::ParsedSource,
+            Vec::new(),
+        ));
+        for type_name in ["Base", "Child"] {
+            representations.insert_test_storage_facts(
+                type_name,
+                TypeStorageFacts::default()
+                    .with_locally_aliased(true)
+                    .with_mutated(true),
+            );
+        }
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let base = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .unwrap();
+        let bump = base
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "bump" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(
+            signatures.method_receiver(base, bump),
+            Some(ReceiverPlan::Mutable)
+        );
+
+        let rendered = source_hierarchy_carrier_forwarding_method(
+            "BaseValue",
+            &["Base".to_string(), "Child".to_string()],
+            &representations,
+            &semantic.facts,
+            &signatures,
+            MethodExceptionPlan::new(false),
+            base,
+            bump,
+            &resolved.program,
+            &signatures,
+            None,
+            false,
+        )
+        .expect("carrier bump forwarder");
+
+        assert!(rendered.contains("pub fn bump(&self)"), "{rendered}");
+        assert!(rendered.contains("bump_with_outer"), "{rendered}");
     }
 
     #[test]
@@ -5310,7 +8239,9 @@ class Holder {
 interface Named {
     String name();
     int score(String prefix);
+    Product create();
 }
+class Product {}
 
 "#,
         );
@@ -5345,6 +8276,8 @@ interface Named {
             item.contains("fn score(&self, prefix: String) -> i32;"),
             "{item}"
         );
+        assert!(item.contains("fn create(&self) -> Product;"), "{item}");
+        assert!(!item.contains("fn create(&self) -> &Product;"), "{item}");
         assert!(item.contains("impl Clone for std::boxed::Box<dyn Named>"));
         assert!(!item.contains("Named for std::rc::Rc<__JavaShared>"));
         assert!(item.contains("Named for std::rc::Rc<std::cell::RefCell<__JavaShared>>"));
@@ -5394,7 +8327,7 @@ class ExternalId {}
         assert_eq!(
             type_emission_for_with_facts(&representations, source_ty, &signatures, &facts),
             RepresentationTypeEmission::RawRustItem(
-                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<std::cell::RefCell<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&*self.borrow(), values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<std::sync::Mutex<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&*self.lock().unwrap(), values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
+                "pub trait IdSource {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId>;\n    fn as_any(&self) -> &dyn std::any::Any;\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource>;\n}\n\nimpl dyn IdSource {\n    pub fn anonymous() -> std::boxed::Box<dyn IdSource> { panic!(\"java2rust: anonymous class body for IdSource requires object lowering\") }\n}\n\nimpl Clone for std::boxed::Box<dyn IdSource> {\n    fn clone(&self) -> Self { IdSource::clone_box(&**self) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::rc::Rc<std::cell::RefCell<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&*self.borrow(), values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}\n\nimpl<__JavaShared: IdSource + 'static> IdSource for std::sync::Arc<std::sync::Mutex<__JavaShared>> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&*self.lock().unwrap(), values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}\n\nimpl<__JavaBoxed: IdSource + ?Sized> IdSource for std::boxed::Box<__JavaBoxed> {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { IdSource::ids(&**self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { IdSource::as_any(&**self) }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { IdSource::clone_box(&**self) }\n}"
                     .to_string()
             )
         );
@@ -5439,7 +8372,7 @@ class Dog implements Named {
                 &semantic.facts,
             ),
             vec![
-                "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(self.clone()) }\n}".to_string()
+                "impl Named for Dog {\n    fn name(&self) -> String { Dog::name(self) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}".to_string()
             ]
         );
     }
@@ -5713,7 +8646,7 @@ class Source implements IdSource {
                 &facts,
             ),
             vec![
-                "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(self.clone()) }\n}"
+                "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}"
                     .to_string()
             ]
         );
@@ -6223,7 +9156,7 @@ mod trait_return_shape_tests {
 
 #[cfg(test)]
 mod shared_handle_forwarding_tests {
-    use super::shared_handle_forwarding_impl;
+    use super::{boxed_trait_forwarding_impl_with_generics, shared_handle_forwarding_impl};
 
     #[test]
     fn forwards_a_read_only_surface_through_cell_handles() {
@@ -6252,7 +9185,7 @@ mod shared_handle_forwarding_tests {
 
         assert!(
             rendered.contains(
-                "fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(self.clone()) }"
+                "fn clone_box(&self) -> std::boxed::Box<dyn Named> { std::boxed::Box::new(std::clone::Clone::clone(self)) }"
             ),
             "{rendered}"
         );
@@ -6329,6 +9262,51 @@ mod shared_handle_forwarding_tests {
                 ],
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn boxed_trait_carrier_forwards_parameterized_surface() {
+        let rendered = boxed_trait_forwarding_impl_with_generics(
+            "Product<T>",
+            &["T".to_string()],
+            &[
+                "    fn value(&self, index: i32) -> T;".to_string(),
+                "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
+                "    fn clone_box(&self) -> std::boxed::Box<dyn Product<T>>;".to_string(),
+            ],
+        )
+        .expect("boxed owned interface carrier forwards its trait surface");
+        assert!(
+            rendered.contains(
+                "impl<T: 'static, __JavaBoxed: Product<T> + ?Sized> Product<T> for std::boxed::Box<__JavaBoxed>"
+            ),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("Product::<T>::value(&**self, index)"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn boxed_trait_carrier_forwards_mutating_multi_method_surface() {
+        let rendered = boxed_trait_forwarding_impl_with_generics(
+            "Opdf<O>",
+            &["O".to_string()],
+            &[
+                "    fn log_probability(&mut self, o: O) -> Result<f64, JavaException>;".to_string(),
+                "    fn generate(&mut self) -> Result<O, JavaException>;".to_string(),
+                "    fn fit_o_array_double_array(&mut self, o: Vec<Option<O>>, weights: Vec<f64>) -> Result<(), JavaException>;".to_string(),
+                "    fn clone(&self) -> Result<Box<dyn Opdf<O>>, JavaException>;".to_string(),
+                "    fn as_any(&self) -> &dyn std::any::Any;".to_string(),
+                "    fn clone_box(&self) -> std::boxed::Box<dyn Opdf<O>>;".to_string(),
+            ],
+        )
+        .expect("boxed mutating interface carrier forwards its complete surface");
+        assert!(
+            rendered.contains("Opdf::<O>::fit_o_array_double_array(&mut **self, o, weights)"),
+            "{rendered}"
         );
     }
 

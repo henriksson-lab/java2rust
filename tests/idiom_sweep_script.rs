@@ -230,7 +230,7 @@ fn focused_package_source_conversion_restore_respects_shared_coherence_keys() {
     let script = fs::read_to_string(script_path).unwrap();
 
     assert!(
-        script.contains("shared_trait_keys.add((match.group(1).strip(), match.group(2).strip()))"),
+        script.contains("shared_trait_keys.add((parts[0], parts[1]))"),
         "shared support trait implementations must be indexed by exact coherence key"
     );
     assert!(
@@ -239,7 +239,7 @@ fn focused_package_source_conversion_restore_respects_shared_coherence_keys() {
     );
     assert!(
         script.contains(
-            "restore_missing_source_type_items \"$rust_path\" \"$raw_generated_backup_dir/$(basename \"$rust_path\")\" \"$shared_support_types_path\" \"$shared_support_path\""
+            "restore_missing_source_type_items \"$rust_path\" \"$raw_generated_backup_dir/$(basename \"$rust_path\")\" \"$shared_support_types_path\" \"$shared_support_path\" \"$repo_root/scripts\""
         ),
         "the finalized shared facade must be visible to source reconciliation"
     );
@@ -267,7 +267,7 @@ fn focused_package_source_conversion_restore_skips_only_exact_shared_key() {
     fs::write(
         &harness,
         format!(
-            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\"\n",
+            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n",
             &function_tail[..function_end]
         ),
     )
@@ -305,6 +305,7 @@ impl From<std::sync::Arc<std::sync::Mutex<Source>>> for OtherCarrier {
         .arg(&raw)
         .arg(&shared_types)
         .arg(&shared_support)
+        .arg(root.join("scripts"))
         .output()
         .expect("run source conversion restoration");
     assert!(
@@ -388,7 +389,7 @@ fn focused_package_source_restore_executes_for_trimmomatic_boxed_dyn_clones() {
     fs::write(
         &harness,
         format!(
-            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\"\n",
+            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n",
             &function_tail[..function_end]
         ),
     )
@@ -419,6 +420,7 @@ fn focused_package_source_restore_executes_for_trimmomatic_boxed_dyn_clones() {
             .arg(&raw)
             .arg(&shared_types)
             .arg(&shared_support)
+            .arg(root.join("scripts"))
             .output()
             .expect("run source surface restoration");
         assert!(
@@ -465,6 +467,7 @@ fn focused_package_source_restore_executes_for_trimmomatic_boxed_dyn_clones() {
                 .arg(artifact_raw.join(format!("{stem}.rs")))
                 .arg(&artifact_shared_types)
                 .arg(&artifact_shared_support)
+                .arg(root.join("scripts"))
                 .output()
                 .expect("run source restoration against real assembly artifact");
             assert!(
@@ -486,6 +489,163 @@ fn focused_package_source_restore_executes_for_trimmomatic_boxed_dyn_clones() {
 }
 
 #[test]
+fn focused_package_source_restore_recovers_generic_interface_forwarding_impls() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(root.join("scripts/translate-focused-package.sh")).unwrap();
+    let function_start = script
+        .find("restore_missing_source_type_items() {")
+        .expect("source restoration function");
+    let function_tail = &script[function_start..];
+    let function_end = function_tail
+        .find("\n}\n\nif grep -R -q '^pub struct JavaException'")
+        .expect("end of source restoration function")
+        + 3;
+
+    let dir = unique_temp_dir("focused_generic_interface_forwarding_restore");
+    let harness = dir.join("restore.sh");
+    fs::write(
+        &harness,
+        format!(
+            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n",
+            &function_tail[..function_end]
+        ),
+    )
+    .unwrap();
+    let current = dir.join("00001_Distribution.rs");
+    let raw = dir.join("00001_Distribution.raw.rs");
+    let shared_types = dir.join("shared-types.txt");
+    let shared_support = dir.join("shared-support.rs");
+    fs::write(
+        &current,
+        "pub trait Distribution<O> {\n    fn generate(&mut self) -> O;\n}\n",
+    )
+    .unwrap();
+    fs::write(
+        &raw,
+        r#"pub trait Distribution<O> {
+    fn generate(&mut self) -> O;
+}
+impl<O: 'static, __JavaShared: Distribution<O> + 'static> Distribution<O> for std::rc::Rc<std::cell::RefCell<__JavaShared>> {
+    fn generate(&mut self) -> O { Distribution::<O>::generate(&mut *self.borrow_mut()) }
+}
+impl<O: 'static, __JavaBoxed: Distribution<O> + ?Sized> Distribution<O> for std::boxed::Box<__JavaBoxed> {
+    fn generate(&mut self) -> O { Distribution::<O>::generate(&mut **self) }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "").unwrap();
+    fs::write(&shared_support, "").unwrap();
+
+    let output = Command::new("bash")
+        .arg(&harness)
+        .arg(&current)
+        .arg(&raw)
+        .arg(&shared_types)
+        .arg(&shared_support)
+        .arg(root.join("scripts"))
+        .output()
+        .expect("run source forwarding restoration");
+    assert!(
+        output.status.success(),
+        "restore failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let restored = fs::read_to_string(current).unwrap();
+    assert_eq!(
+        restored.matches("Distribution<O> for std::rc::Rc").count(),
+        1,
+        "{restored}"
+    );
+    assert_eq!(
+        restored
+            .matches("Distribution<O> for std::boxed::Box<__JavaBoxed>")
+            .count(),
+        1,
+        "{restored}"
+    );
+}
+
+#[test]
+fn focused_package_source_restore_recovers_aliases_to_nested_source_nominals() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(root.join("scripts/translate-focused-package.sh")).unwrap();
+    let function_start = script
+        .find("restore_missing_source_type_items() {")
+        .expect("source restoration function");
+    let function_tail = &script[function_start..];
+    let function_end = function_tail
+        .find("\n}\n\nif grep -R -q '^pub struct JavaException'")
+        .expect("end of source restoration function")
+        + 3;
+
+    let dir = unique_temp_dir("focused_nested_source_alias_restore");
+    let harness = dir.join("restore.sh");
+    fs::write(
+        &harness,
+        format!(
+            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n",
+            &function_tail[..function_end]
+        ),
+    )
+    .unwrap();
+    let current = dir.join("00001_CommandLine.rs");
+    let raw = dir.join("00001_CommandLine.raw.rs");
+    let shared_types = dir.join("shared-types.txt");
+    let shared_support = dir.join("shared-support.rs");
+    fs::write(
+        &current,
+        "pub enum CommandLine_Arguments { A, B }\npub struct CommandLine;\n",
+    )
+    .unwrap();
+    fs::write(
+        &raw,
+        r#"pub enum CommandLine_Arguments { A, B }
+pub type Arguments = CommandLine_Arguments;
+pub type ArgumentList<T> = CommandLine_Arguments;
+pub struct CommandLine;
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "Arguments\nArgumentList\n").unwrap();
+    fs::write(&shared_support, "").unwrap();
+
+    let output = Command::new("bash")
+        .arg(&harness)
+        .arg(&current)
+        .arg(&raw)
+        .arg(&shared_types)
+        .arg(&shared_support)
+        .arg(root.join("scripts"))
+        .output()
+        .expect("run nested source alias restoration");
+    assert!(
+        output.status.success(),
+        "restore failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let restored = fs::read_to_string(current).unwrap();
+    assert_eq!(
+        restored
+            .matches("pub type Arguments = CommandLine_Arguments;")
+            .count(),
+        1,
+        "{restored}"
+    );
+    assert_eq!(
+        restored
+            .matches("pub type ArgumentList<T> = CommandLine_Arguments;")
+            .count(),
+        1,
+        "{restored}"
+    );
+}
+
+#[test]
 fn focused_package_source_restore_recovers_wrapper_target_impls() {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let script = fs::read_to_string(root.join("scripts/translate-focused-package.sh")).unwrap();
@@ -503,7 +663,7 @@ fn focused_package_source_restore_recovers_wrapper_target_impls() {
     fs::write(
         &harness,
         format!(
-            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\"\n",
+            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n",
             &function_tail[..function_end]
         ),
     )
@@ -525,6 +685,9 @@ impl Trimmer for std::sync::Arc<LeadingTrimmer> {
 impl Dispatch for std::rc::Rc<std::cell::RefCell<LeadingTrimmer>> {
     fn dispatch(&self) {}
 }
+impl<E: JavaEnum> GenericTrait<E> for LeadingTrimmer<E> {
+    fn generic_dispatch(&self) {}
+}
 "#,
     )
     .unwrap();
@@ -545,6 +708,7 @@ impl Dispatch for std::rc::Rc<std::cell::RefCell<LeadingTrimmer>> {
             .arg(&raw)
             .arg(&shared_types)
             .arg(&shared_support)
+            .arg(root.join("scripts"))
             .output()
             .expect("run wrapper-target source restoration");
         assert!(
@@ -559,6 +723,7 @@ impl Dispatch for std::rc::Rc<std::cell::RefCell<LeadingTrimmer>> {
     for impl_header in [
         "impl Trimmer for std::rc::Rc<LeadingTrimmer>",
         "impl Trimmer for std::sync::Arc<LeadingTrimmer>",
+        "impl<E: JavaEnum> GenericTrait<E> for LeadingTrimmer<E>",
     ] {
         assert_eq!(restored.matches(impl_header).count(), 1, "{restored}");
     }
@@ -569,6 +734,47 @@ impl Dispatch for std::rc::Rc<std::cell::RefCell<LeadingTrimmer>> {
         0,
         "an exact impl already owned by shared support must not be restored locally:\n{restored}"
     );
+
+    // Exercise the bounded generic source impls which JAHMM exposed. The
+    // captured artifacts are optional so this remains runnable in a clean
+    // checkout where `.tmp` is deliberately absent.
+    let jahmm_artifact_root = root.join(".tmp/jahmm-full-v24");
+    let jahmm_generated = jahmm_artifact_root.join("generated-crate/src/generated");
+    let jahmm_raw = jahmm_artifact_root.join("generated-raw-before-support-strip");
+    let jahmm_shared_types = jahmm_artifact_root.join("generated-shared-support-types.tsv");
+    let jahmm_shared_support = jahmm_artifact_root.join("generated-shared-support.rs");
+    if jahmm_generated.is_dir()
+        && jahmm_raw.is_dir()
+        && jahmm_shared_types.is_file()
+        && jahmm_shared_support.is_file()
+    {
+        for (file, expected_impl) in [
+            (
+                "00030_OpdfDiscrete.rs",
+                "impl<E: JavaEnum + std::any::Any> Opdf<std::rc::Rc<std::cell::RefCell<ObservationDiscrete<E>>>> for OpdfDiscrete<E>",
+            ),
+            (
+                "00031_OpdfDiscreteFactory.rs",
+                "impl<E: JavaEnum + std::any::Any> OpdfFactory<OpdfDiscrete<E>> for OpdfDiscreteFactory<E>",
+            ),
+        ] {
+            // Source ownership is derived from the numbered basename.
+            let copied = dir.join(file);
+            fs::copy(jahmm_generated.join(file), &copied).unwrap();
+            let output = Command::new("bash")
+                .arg(&harness)
+                .arg(&copied)
+                .arg(jahmm_raw.join(file))
+                .arg(&jahmm_shared_types)
+                .arg(&jahmm_shared_support)
+                .arg(root.join("scripts"))
+                .output()
+                .expect("restore exact JAHMM bounded-generic artifact");
+            assert!(output.status.success(), "restore failed for {file}");
+            let restored = fs::read_to_string(copied).unwrap();
+            assert_eq!(restored.matches(expected_impl).count(), 1, "{restored}");
+        }
+    }
 
     // Exercise the same final restoration helper against exact captured v4
     // modules when the local full-corpus artifact is available.
@@ -604,6 +810,7 @@ impl Dispatch for std::rc::Rc<std::cell::RefCell<LeadingTrimmer>> {
                 .arg(artifact_raw.join(file))
                 .arg(&artifact_shared_types)
                 .arg(&artifact_shared_support)
+                .arg(root.join("scripts"))
                 .output()
                 .expect("restore exact v4 wrapper artifact");
             assert!(output.status.success(), "restore failed for {file}");
@@ -636,7 +843,7 @@ fn focused_package_final_coherence_cleanup_is_exact_and_preserves_unique_impls()
     fs::write(
         &harness,
         format!(
-            "{}\ndeduplicate_generated_coherence_items \"$1\"\n",
+            "{}\ndeduplicate_generated_coherence_items \"$1\" \"$2\" \"${{3:-}}\"\n",
             &function_tail[..function_end]
         ),
     )
@@ -655,6 +862,7 @@ impl Clone for std::boxed::Box<dyn SourceTrait> { fn clone(&self) -> Self { todo
     let output = Command::new("bash")
         .arg(&harness)
         .arg(&fixture)
+        .arg(root.join("scripts"))
         .output()
         .expect("run final coherence cleanup");
     assert!(
@@ -676,6 +884,42 @@ impl Clone for std::boxed::Box<dyn SourceTrait> { fn clone(&self) -> Self { todo
             .count(),
         1,
         "{cleaned}"
+    );
+
+    let shared = dir.join("shared.rs");
+    fs::write(
+        &shared,
+        "impl<T: Bound> SharedTrait for Source<T> { fn shared(&self) {} }\n",
+    )
+    .unwrap();
+    let cross_module = dir.join("cross_module.rs");
+    fs::write(
+        &cross_module,
+        r#"impl<T: Bound> SharedTrait for Source<T> { fn shared(&self) { panic!() } }
+impl<T: Bound> UniqueTrait for Source<T> { fn unique(&self) {} }
+"#,
+    )
+    .unwrap();
+    let output = Command::new("bash")
+        .arg(&harness)
+        .arg(&cross_module)
+        .arg(root.join("scripts"))
+        .arg(&shared)
+        .output()
+        .expect("run crate-wide coherence cleanup");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cross_cleaned = fs::read_to_string(&cross_module).unwrap();
+    assert!(
+        !cross_cleaned.contains("impl<T: Bound> SharedTrait"),
+        "{cross_cleaned}"
+    );
+    assert!(
+        cross_cleaned.contains("impl<T: Bound> UniqueTrait"),
+        "{cross_cleaned}"
     );
 
     // Exercise the exact fresh full-corpus artifact when it is available.
@@ -701,6 +945,7 @@ impl Clone for std::boxed::Box<dyn SourceTrait> { fn clone(&self) -> Self { todo
             let output = Command::new("bash")
                 .arg(&harness)
                 .arg(&copy)
+                .arg(root.join("scripts"))
                 .output()
                 .expect("clean exact v8 generated module");
             assert!(
@@ -759,6 +1004,27 @@ fn focused_package_top_slowest_reports_do_not_trip_pipefail() {
 
     assert!(!script.contains("| head -20"), "{script}");
     assert_eq!(script.matches("| awk 'NR <= 20'").count(), 2, "{script}");
+}
+
+#[test]
+fn focused_package_ndarray_shim_supports_java_outer_length_and_chained_indexing() {
+    let script_path =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");
+    let script = fs::read_to_string(script_path).unwrap();
+
+    assert!(
+        script.contains("pub fn len(&self) -> usize {\n        self.rows"),
+        "{script}"
+    );
+    assert!(
+        script.contains("impl<T> Index<usize> for Array2<T>"),
+        "{script}"
+    );
+    assert!(script.contains("type Output = [T];"), "{script}");
+    assert!(
+        script.contains("impl<T> IndexMut<usize> for Array2<T>"),
+        "{script}"
+    );
 }
 
 #[test]
@@ -882,6 +1148,38 @@ fn focused_package_shared_support_stripper_matches_generic_inherent_impl_targets
             "sub(/(<[^{}]+>)?[[:space:]]*(\\{|where([[:space:]]|$)).*$/, \"\", impl_name)"
         ),
         "{script}"
+    );
+}
+
+#[test]
+fn shared_rust_item_parser_handles_nested_impl_generic_bounds() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let output = Command::new("python3")
+        .current_dir(repo)
+        .args([
+            "-c",
+            "import sys; sys.path.insert(0, 'scripts'); from rust_item_utils import impl_header_parts, inherent_impl_target_name; header = 'impl<O: Opdf<Box<dyn std::any::Any>> + std::any::Any> OpdfReader<O> {'; assert impl_header_parts(header) == (None, 'OpdfReader<O>'); assert inherent_impl_target_name(header) == 'OpdfReader'; trait_header = 'impl<O: Opdf<Box<dyn std::any::Any>>> Reader<O> for OpdfReader<O> {'; assert impl_header_parts(trait_header) == ('Reader<O>', 'OpdfReader<O>')",
+        ])
+        .output()
+        .expect("run shared Rust item parser regression");
+    assert!(output.status.success(), "{:?}", output);
+
+    let script = fs::read_to_string(repo.join("scripts/translate-focused-package.sh")).unwrap();
+    assert!(
+        script.contains(
+            "from rust_item_utils import impl_header_parts, impl_target_name, inherent_impl_target_name"
+        )
+            && script.contains("target = inherent_impl_target_name(lines[index])")
+            && script.contains(
+                "target = inherent_impl_target_name(line) if raw_after_primary else None"
+            ),
+        "{script}"
+    );
+    assert!(
+        script.matches("from rust_item_utils import").count() >= 4
+            && !script.contains("inherent_impl_re = re.compile")
+            && !script.contains("trait_impl_re = re.compile"),
+        "every Python reconciliation phase should reuse the structural impl parser"
     );
 }
 
@@ -1939,6 +2237,7 @@ pub struct StringBuffer {
 
 impl StringBuffer {
     pub fn set_length(&mut self, new_len: i32) {
+        let _support_limit = JAVA_STRING_BUFFER_LIMIT + JAVA_STRING_BUFFER_OFFSET;
         java_string_buffer_set_length(&mut self.value, new_len);
         java_string_buffer_multiline_helper(
             &self.value,
@@ -1946,6 +2245,10 @@ impl StringBuffer {
         );
     }
 }
+
+const JAVA_STRING_BUFFER_LIMIT: i32 =
+    1024;
+static JAVA_STRING_BUFFER_OFFSET: i32 = 0;
 
 fn java_string_buffer_byte_index(value: &str, char_index: i32) -> usize {
     value.char_indices().nth(char_index as usize).map(|(index, _)| index).unwrap_or(value.len())
@@ -2058,6 +2361,14 @@ fn java_already_shared_helper() -> i32 {
         "{shared}"
     );
     assert!(
+        shared.contains("pub(crate) const JAVA_STRING_BUFFER_LIMIT: i32"),
+        "{shared}"
+    );
+    assert!(
+        shared.contains("pub(crate) static JAVA_STRING_BUFFER_OFFSET: i32"),
+        "{shared}"
+    );
+    assert!(
         shared.contains("java_string_buffer_byte_index(value, char_index)"),
         "{shared}"
     );
@@ -2087,6 +2398,8 @@ fn java_already_shared_helper() -> i32 {
         "java_already_shared_helper",
         "java_pattern_matches",
         "java_pattern_simple_regex_literal",
+        "JAVA_STRING_BUFFER_LIMIT",
+        "JAVA_STRING_BUFFER_OFFSET",
     ] {
         assert!(
             shared_type_names.lines().any(|name| name == helper),
@@ -2103,6 +2416,14 @@ fn java_already_shared_helper() -> i32 {
             "{source}"
         );
         assert!(!source.contains("fn java_pattern_matches"), "{source}");
+        assert!(
+            !source.contains("const JAVA_STRING_BUFFER_LIMIT"),
+            "{source}"
+        );
+        assert!(
+            !source.contains("static JAVA_STRING_BUFFER_OFFSET"),
+            "{source}"
+        );
     }
 }
 
@@ -2296,21 +2617,21 @@ fn nominal_closure_keeps_aliased_nested_source_type_in_its_module() {
     fs::write(
         generated_dir.join("00001_Outer.rs"),
         r#"
-pub struct Outer_Child;
-pub type Child = Outer_Child;
+pub struct Outer_Child<L, K>(std::marker::PhantomData<(L, K)>);
+pub type Child<L, K> = Outer_Child<L, K>;
 
-impl std::fmt::Display for Outer_Child {
+impl<L, K> std::fmt::Display for Outer_Child<L, K> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("child")
     }
 }
 
-pub fn nested_value() -> Outer_Child { Outer_Child }
+pub fn nested_value() -> Outer_Child<i32, i32> { Outer_Child(std::marker::PhantomData) }
 
 pub struct Outer;
 
 impl Outer {
-    pub fn child() -> Outer_Child { nested_value() }
+    pub fn child() -> Outer_Child<i32, i32> { nested_value() }
 }
 "#,
     )
@@ -2325,14 +2646,15 @@ impl Outer {
     fs::write(
         &shared_support,
         r#"
-pub struct Outer_Child;
-impl Outer_Child {
+pub struct Outer_Child<L, K>(std::marker::PhantomData<(L, K)>);
+pub type Child = Outer_Child;
+impl<L, K> Outer_Child<L, K> {
     pub fn summary_only(&self) -> i32 { 0 }
 }
 "#,
     )
     .unwrap();
-    fs::write(&shared_types, "").unwrap();
+    fs::write(&shared_types, "Child\nOuter_Child\n").unwrap();
     let script =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
     let output = Command::new("python3")
@@ -2351,12 +2673,18 @@ impl Outer_Child {
 
     let shared = fs::read_to_string(shared_support).unwrap();
     assert!(!shared.contains("pub struct Outer_Child"), "{shared}");
+    assert!(!shared.contains("pub type Child"), "{shared}");
     assert!(!shared.contains("summary_only"), "{shared}");
+    let shared_names = fs::read_to_string(shared_types).unwrap();
+    assert!(!shared_names.lines().any(|name| name == "Child"));
     let module = fs::read_to_string(generated_dir.join("00001_Outer.rs")).unwrap();
     assert!(module.contains("pub struct Outer_Child"), "{module}");
-    assert!(module.contains("pub type Child = Outer_Child"), "{module}");
     assert!(
-        module.contains("impl std::fmt::Display for Outer_Child"),
+        module.contains("pub type Child<L, K> = Outer_Child<L, K>"),
+        "{module}"
+    );
+    assert!(
+        module.contains("impl<L, K> std::fmt::Display for Outer_Child<L, K>"),
         "{module}"
     );
 }
@@ -2609,10 +2937,12 @@ fn shared_support_merger_merges_erased_object_facade_trait_and_complex_impl() {
         r#"
 pub trait JavaErasedObjectFacade {
     fn close(&self) -> Result<(), JavaException>;
+    fn factor(&self) -> Box<dyn std::any::Any>;
 }
 
 impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
     fn close(&self) -> Result<(), JavaException> { Ok(()) }
+    fn factor(&self) -> Box<dyn std::any::Any> { panic!() }
 }
 
 pub struct UseA;
@@ -2624,10 +2954,12 @@ pub struct UseA;
         r#"
 pub trait JavaErasedObjectFacade {
     fn length(&self) -> ();
+    fn factor(&self) -> ConcreteProduct;
 }
 
 impl JavaErasedObjectFacade for Box<dyn std::any::Any> {
     fn length(&self) -> () { () }
+    fn factor(&self) -> ConcreteProduct { panic!() }
 }
 
 pub struct UseB;
@@ -2669,6 +3001,17 @@ pub struct UseB;
         "{shared}"
     );
     assert!(shared.contains("fn length(&self) -> ();"), "{shared}");
+    assert!(
+        shared
+            .matches("fn factor(&self) -> Box<dyn std::any::Any>")
+            .count()
+            == 2,
+        "merged trait and impl must share the same erased ABI:\n{shared}"
+    );
+    assert!(
+        !shared.contains("fn factor(&self) -> ConcreteProduct"),
+        "{shared}"
+    );
     assert!(
         shared.contains("impl JavaErasedObjectFacade for Box<dyn std::any::Any>"),
         "{shared}"
@@ -4740,4 +5083,68 @@ pub struct SOURCE;
         "merged monitor support did not compile: {}\n{shared}",
         String::from_utf8_lossy(&compiled.stderr)
     );
+}
+
+#[test]
+fn shared_support_merger_prefers_complete_forwarding_method_generic_bounds() {
+    let dir = unique_temp_dir("shared_support_forwarding_generic_bounds");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_UseA.rs"),
+        r#"
+pub struct ForwardValue;
+
+impl ForwardValue {
+    pub fn compute<O: ObservationBound + Clone>(&mut self, value: O) { let _ = value; }
+}
+
+pub struct UseA;
+"#,
+    )
+    .unwrap();
+    fs::write(
+        generated_dir.join("00002_UseB.rs"),
+        r#"
+pub struct ForwardValue;
+
+impl ForwardValue {
+    pub fn compute<O: Clone>(&mut self, value: O) { let _ = value; }
+}
+
+pub struct UseB;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    assert!(
+        shared.contains("pub fn compute<O: ObservationBound + Clone>"),
+        "{shared}"
+    );
+    assert!(!shared.contains("pub fn compute<O: Clone>"), "{shared}");
 }

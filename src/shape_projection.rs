@@ -5,6 +5,108 @@ use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{optional_element_type, optional_java_type};
 
+/// Applies a resolver-specialized Java type to an already-solved Rust slot.
+///
+/// Signature solving may add `Optional` at any nesting depth.  A resolved
+/// generic call supplies the concrete Java parameter type, but replacing the
+/// shape wholesale would discard those nullability decisions.  This overlay
+/// keeps optional wrappers from the solved ABI and takes nominal/generic
+/// arguments from the resolver everywhere else.
+pub(crate) fn specialize_slot_shape_java_type(
+    shape: &RustSlotShape,
+    specialized: &JavaType,
+) -> RustSlotShape {
+    let mut specialized_shape = shape.clone();
+    specialized_shape.java_ty =
+        specialize_java_type_preserving_optionality(&shape.java_ty, specialized);
+    specialized_shape
+}
+
+/// Specializes a solved source-method return at a resolved generic call site.
+///
+/// A declaration such as `Factory<D>::factor() -> D` necessarily has an
+/// erased dispatch shape while its body is planned.  At a call through
+/// `Factory<Product>`, however, the resolver has proved the return is the
+/// product representation.  Keeping only the substituted Java type while
+/// retaining `ErasedObject` dispatch invents an `Any -> dyn Product`
+/// downcast that Java never performs.  Re-project the escaping representation
+/// when generic substitution changed an erased declaration into a concrete
+/// runtime type, while retaining solver-owned optionality recursively.
+pub(crate) fn specialize_resolved_return_shape(
+    representations: &RepresentationPlan,
+    shape: &RustSlotShape,
+    specialized: &JavaType,
+) -> RustSlotShape {
+    let specialized_shape = specialize_slot_shape_java_type(shape, specialized);
+    if let Some(projected) = return_shape_for_java_type(representations, &specialized_shape.java_ty)
+        && projected.dispatch != specialized_shape.dispatch
+        && matches!(
+            projected.dispatch,
+            DispatchShape::ClosedEnum { .. } | DispatchShape::BoxedDynTrait { .. }
+        )
+    {
+        // The emitted source-method ABI is representation-aware even when
+        // generic substitution leaves the Java spelling unchanged. A solved
+        // `Concrete Hmm<O>` shape and the generated `HmmValue<O>` return are
+        // not two values requiring a wrap; they are two descriptions of the
+        // same carrier. Make the call-site shape agree with that ABI before
+        // assignment coercion plans another carrier construction.
+        return projected;
+    }
+    if shape.java_ty == specialized_shape.java_ty
+        || !matches!(shape.dispatch, DispatchShape::ErasedObject)
+        || java_type_is_erased_object_boundary(&specialized_shape.java_ty)
+    {
+        return specialized_shape;
+    }
+
+    return_shape_for_java_type(representations, &specialized_shape.java_ty)
+        .unwrap_or(specialized_shape)
+}
+
+fn specialize_java_type_preserving_optionality(
+    solved: &JavaType,
+    specialized: &JavaType,
+) -> JavaType {
+    if let Some(solved_inner) = optional_element_type(solved) {
+        let specialized_inner =
+            optional_element_type(specialized).unwrap_or_else(|| specialized.clone());
+        return optional_java_type(specialize_java_type_preserving_optionality(
+            &solved_inner,
+            &specialized_inner,
+        ));
+    }
+    match (solved, specialized) {
+        (JavaType::Array(solved), JavaType::Array(specialized)) => JavaType::Array(Box::new(
+            specialize_java_type_preserving_optionality(solved, specialized),
+        )),
+        (
+            JavaType::Named {
+                name: solved_name,
+                args: solved_args,
+            },
+            JavaType::Named {
+                name: specialized_name,
+                args: specialized_args,
+            },
+        ) if crate::facts::external_type_name_matches(solved_name, specialized_name)
+            && solved_args.len() == specialized_args.len() =>
+        {
+            JavaType::Named {
+                name: specialized_name.clone(),
+                args: solved_args
+                    .iter()
+                    .zip(specialized_args)
+                    .map(|(solved, specialized)| {
+                        specialize_java_type_preserving_optionality(solved, specialized)
+                    })
+                    .collect(),
+            }
+        }
+        _ => specialized.clone(),
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DispatchProjectionPolicy {
     dispatch: DispatchShape,
@@ -272,8 +374,7 @@ pub fn storage_arg_shape_with_effective_facts(
         );
         return shape;
     }
-    if let JavaType::Named { name, args } = &java_ty
-        && args.is_empty()
+    if let JavaType::Named { name, .. } = &java_ty
         && facts.object_safe_trait_fact_for_name(name) == Some(true)
     {
         apply_required_dispatch(
@@ -734,6 +835,43 @@ pub fn sequence_element_projection_policy_with_effective_facts(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn slot_specialization_preserves_nested_sequence_optionality() {
+        let type_param = JavaType::Named {
+            name: "O".to_string(),
+            args: Vec::new(),
+        };
+        let concrete = JavaType::Named {
+            name: "ConcreteObservation".to_string(),
+            args: Vec::new(),
+        };
+        let solved = RustSlotShape::for_storage(JavaType::Named {
+            name: "List".to_string(),
+            args: vec![optional_java_type(JavaType::Named {
+                name: "List".to_string(),
+                args: vec![type_param],
+            })],
+        });
+        let specialized = JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::Named {
+                name: "List".to_string(),
+                args: vec![concrete.clone()],
+            }],
+        };
+
+        assert_eq!(
+            specialize_slot_shape_java_type(&solved, &specialized).java_ty,
+            JavaType::Named {
+                name: "List".to_string(),
+                args: vec![optional_java_type(JavaType::Named {
+                    name: "List".to_string(),
+                    args: vec![concrete],
+                })],
+            }
+        );
+    }
 
     #[test]
     fn shape_projection_policy_owns_dispatch_axis_effects() {

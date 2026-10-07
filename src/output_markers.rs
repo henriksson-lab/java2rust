@@ -256,9 +256,6 @@ pub fn count_invalid_patterns(rust: &str) -> usize {
                 || line_contains_outside_literals(line, UNSUPPORTED_JAVA_ARRAY_CREATION)
                 || line_contains_outside_literals(line, UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE)
                 || line_contains_outside_literals(line, &inner_capture_panic_prefix)
-                || (line_contains_outside_literals(line, "= None;")
-                    && !line_contains_outside_literals(line, "let mut ")
-                    && !line_contains_outside_literals(line, ": Option<"))
         })
         .count()
 }
@@ -826,13 +823,14 @@ mod tests {
              /* {UNTRANSLATED_JAVA_PUT_CALL} */\n\
              /* {UNSUPPORTED_JAVA_ARRAY_CREATION} */\n\
              /* {UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE} */\n\
-             panic!(\"{UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE} for Inner\");\n\
-             field = None;\n"
+             panic!(\"{UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE} for Inner\");\n"
         );
-        assert_eq!(count_invalid_patterns(&real), 7);
+        assert_eq!(count_invalid_patterns(&real), 6);
 
         assert_eq!(
-            count_invalid_patterns("let mut field = None;\nlet opt: Option<i32> = None;\n"),
+            count_invalid_patterns(
+                "let mut field = None;\nlet opt: Option<i32> = None;\nself.pending = None;\n"
+            ),
             0
         );
     }

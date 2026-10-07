@@ -22,8 +22,8 @@ use crate::coercion::{
     erased_object_constructor_projection, expr_is_result_propagated,
     external_crate_associated_path_projection, external_crate_path_projection,
     external_facade_rust_path_projection, facade_method_name, field_projection,
-    file_exists_projection, free_function_path_projection, function_call_projection,
-    index_to_usize_projection, java_class_literal_path_projection,
+    file_exists_projection, force_shared_borrow_projection, free_function_path_projection,
+    function_call_projection, index_to_usize_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_integral_parse_null_argument_as_number_format,
     java_iterator_from_collection_projection, java_list_hash_code_projection,
     java_list_iterator_from_collection_at_projection,
@@ -33,8 +33,9 @@ use crate::coercion::{
     math_floor_div_projection, math_floor_mod_projection, math_max_projection, math_min_projection,
     math_pow_projection, math_round_projection, math_to_int_exact_projection,
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
-    native_collection_from_source_projection, native_collection_with_capacity_projection,
-    objects_equals_projection, objects_is_null_projection, objects_non_null_projection,
+    native_collection_from_source_projection, native_collection_from_typed_source_projection,
+    native_collection_with_capacity_projection, objects_equals_projection,
+    objects_is_null_projection, objects_non_null_projection,
     optional_get_owned_value_result_projection, optional_of_projection,
     optional_or_else_owned_value_projection, owned_collection_to_vec_projection_for_receiver_type,
     owned_map_keys_vec_projection, owned_map_values_vec_projection,
@@ -1148,6 +1149,25 @@ fn apply_native_collection_static_method(
             let value = args.get(1).cloned().unwrap_or_else(unit_expr);
             collections_n_copies_projection(count, value)
         }
+        NativeCollectionStaticMethod::EnumSetOf => RustExpr::Call {
+            function: Box::new(RustExpr::path(["std", "collections", "BTreeSet", "from"])),
+            args: vec![RustExpr::ArrayLiteral(args)],
+        },
+        NativeCollectionStaticMethod::EnumSetAllOf => {
+            let class_token = args.into_iter().next().unwrap_or_else(unit_expr);
+            native_collection_from_source_projection(
+                crate::stdlib::JavaCollectionKind::SortedSet,
+                receiver_method_call_projection(class_token, "enum_constants", Vec::new()),
+            )
+        }
+        NativeCollectionStaticMethod::EnumSetComplementOf => function_call_projection(
+            free_function_path_projection("java_enum_set_complement"),
+            vec![force_shared_borrow_projection(
+                args.into_iter()
+                    .next()
+                    .unwrap_or_else(collections_empty_sorted_set_projection),
+            )],
+        ),
     }
 }
 
@@ -2294,35 +2314,27 @@ fn apply_list_set(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     let value = args.pop().expect("len checked");
     let index = args.pop().expect("len checked");
     let index_name = "__java_list_set_index";
-    let old_name = "__java_list_set_old";
     let index_expr = RustExpr::Var(index_name.to_string());
     RustExpr::Block {
-        stmts: vec![
-            RustStmt::Let {
-                mutable: false,
-                name: index_name.to_string(),
-                ty: None,
-                value: Some(index_to_usize_projection(
-                    index,
-                    IndexToUsizeProjection::StreamLambdaArgument,
-                )),
-            },
-            RustStmt::Let {
-                mutable: false,
-                name: old_name.to_string(),
-                ty: None,
-                value: Some(receiver_method_call_projection_exact(
-                    RustExpr::Index(Box::new(receiver.clone()), Box::new(index_expr.clone())),
-                    "clone",
-                    Vec::new(),
-                )),
-            },
-            RustStmt::Assign {
-                target: RustExpr::Index(Box::new(receiver), Box::new(index_expr)),
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: index_name.to_string(),
+            ty: None,
+            value: Some(index_to_usize_projection(
+                index,
+                IndexToUsizeProjection::StreamLambdaArgument,
+            )),
+        }],
+        tail: Some(Box::new(function_call_projection(
+            RustExpr::raw_leaf("std::mem::replace"),
+            vec![
+                RustExpr::Unary {
+                    op: "&mut ".to_string(),
+                    expr: Box::new(RustExpr::Index(Box::new(receiver), Box::new(index_expr))),
+                },
                 value,
-            },
-        ],
-        tail: Some(Box::new(RustExpr::Var(old_name.to_string()))),
+            ],
+        ))),
     }
 }
 
@@ -2333,32 +2345,19 @@ pub(crate) fn list_set_result_projection(
 ) -> RustExpr {
     let index_name = "__java_list_set_index";
     let index_usize_name = "__java_list_set_index_usize";
-    let old_name = "__java_list_set_old";
+    let receiver_name = "__java_list_set_receiver";
+    let slot_name = "__java_list_set_slot";
     let index_var = RustExpr::Var(index_name.to_string());
     let index_usize_var = RustExpr::Var(index_usize_name.to_string());
     let out_of_bounds = list_index_out_of_bounds_exception_expr();
-    let old_value = receiver_method_call_projection_exact(
+    let slot = RustExpr::Try(Box::new(ok_or_else_java_exception_projection(
         receiver_method_call_projection_exact(
-            receiver.clone(),
-            "get",
-            vec![index_usize_var.clone()],
+            RustExpr::Var(receiver_name.to_string()),
+            "get_mut",
+            vec![index_usize_var],
         ),
-        "cloned",
-        Vec::new(),
-    );
-    let old_value = RustExpr::Try(Box::new(ok_or_else_java_exception_projection(
-        old_value,
         out_of_bounds.clone(),
     )));
-    let target = RustExpr::Unary {
-        op: "*".to_string(),
-        expr: Box::new(RustExpr::Try(Box::new(
-            ok_or_else_java_exception_projection(
-                receiver_method_call_projection_exact(receiver, "get_mut", vec![index_usize_var]),
-                out_of_bounds.clone(),
-            ),
-        ))),
-    };
     RustExpr::Block {
         stmts: vec![RustStmt::Let {
             mutable: false,
@@ -2380,6 +2379,20 @@ pub(crate) fn list_set_result_projection(
                 stmts: vec![
                     RustStmt::Let {
                         mutable: false,
+                        name: receiver_name.to_string(),
+                        ty: None,
+                        // A hierarchy field accessor may return a temporary
+                        // `RefMut<Vec<_>>`. Borrowing that temporary in a let
+                        // initializer extends it through the replacement,
+                        // while the same projection also handles an ordinary
+                        // Vec place without moving it.
+                        value: Some(RustExpr::Unary {
+                            op: "&mut ".to_string(),
+                            expr: Box::new(receiver),
+                        }),
+                    },
+                    RustStmt::Let {
+                        mutable: false,
                         name: index_usize_name.to_string(),
                         ty: None,
                         value: Some(RustExpr::Cast {
@@ -2389,15 +2402,17 @@ pub(crate) fn list_set_result_projection(
                     },
                     RustStmt::Let {
                         mutable: false,
-                        name: old_name.to_string(),
+                        name: slot_name.to_string(),
                         ty: None,
-                        value: Some(old_value),
+                        value: Some(slot),
                     },
-                    RustStmt::Assign { target, value },
                 ],
                 tail: Some(Box::new(function_call_projection(
                     RustExpr::Var("Ok".to_string()),
-                    vec![RustExpr::Var(old_name.to_string())],
+                    vec![function_call_projection(
+                        RustExpr::raw_leaf("std::mem::replace"),
+                        vec![RustExpr::Var(slot_name.to_string()), value],
+                    )],
                 ))),
             }),
         })),
@@ -3148,6 +3163,40 @@ pub(crate) fn wrap_source_hierarchy_carrier_value(
     }
 }
 
+/// Wraps an already-materialized source storage handle in its hierarchy
+/// carrier.  Unlike `wrap_source_hierarchy_carrier_value`, this must not apply
+/// the source type's storage placement again: callers use it for Java `this`
+/// and other values that are already `Rc<_>`/`Rc<RefCell<_>>` handles.
+pub(crate) fn wrap_source_hierarchy_carrier_handle_value(
+    handle: RustExpr,
+    owner_name: &str,
+    representations: &RepresentationPlan,
+) -> RustExpr {
+    let Some((carrier_name, owner_variant)) =
+        representations.source_hierarchy_carrier_parts_for_variant(owner_name)
+    else {
+        return handle;
+    };
+    function_call_projection(
+        RustExpr::path([carrier_name, owner_variant.as_str()]),
+        vec![handle],
+    )
+}
+
+pub(crate) fn wrap_source_hierarchy_carrier_variant_value(
+    value: RustExpr,
+    owner_name: &str,
+    representations: &RepresentationPlan,
+) -> RustExpr {
+    let placement = representations.storage_placement_for(owner_name);
+    let payload = if placement.shared() && placement.is_implemented() {
+        crate::slot_render::storage_placement_construction_expr(placement, value)
+    } else {
+        value
+    };
+    wrap_source_hierarchy_carrier_handle_value(payload, owner_name, representations)
+}
+
 fn constructor_owner_associated_path_projection(
     owner_shape: &crate::slot_shape::RustSlotShape,
     member: &str,
@@ -3169,6 +3218,7 @@ fn boxed_primitive_constructor_owner(java_ty: &JavaType) -> bool {
         | JavaType::String
         | JavaType::Void
         | JavaType::Array(_)
+        | JavaType::Intersection(_)
         | JavaType::Wildcard(_) => false,
     }
 }
@@ -3330,9 +3380,9 @@ fn apply_native_collection_new_target(
             .pop()
             .map(array_blocking_queue_from_source_projection)
             .unwrap_or_else(array_blocking_queue_empty_new_projection),
-        NativeCollectionNewTarget::FromSource { kind } => args
+        NativeCollectionNewTarget::FromSource { kind, source_kind } => args
             .pop()
-            .map(|source| native_collection_from_source_projection(kind, source))
+            .map(|source| native_collection_from_typed_source_projection(kind, source_kind, source))
             .unwrap_or_else(|| native_collection_default_constructor_projection(kind)),
         NativeCollectionNewTarget::FromSingleArg { .. } if is_priority_queue => args
             .pop()
@@ -3579,7 +3629,7 @@ fn native_collection_new_target_kind(
     match target {
         NativeCollectionNewTarget::Empty { kind }
         | NativeCollectionNewTarget::WithCapacity { kind }
-        | NativeCollectionNewTarget::FromSource { kind }
+        | NativeCollectionNewTarget::FromSource { kind, .. }
         | NativeCollectionNewTarget::FromSingleArg { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { kind }
         | NativeCollectionNewTarget::PriorityQueueComparatorCallback { kind }
@@ -3733,6 +3783,27 @@ mod tests {
                 && rendered.contains("IndexOutOfBoundsException")
                 && rendered.contains("values.insert(__java_list_insert_index_usize, value);")
                 && rendered.contains("Ok(())"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn list_set_result_projection_extends_temporary_mutable_receiver_lifetime() {
+        let lowered = list_set_result_projection(
+            RustExpr::MethodCall {
+                receiver: Box::new(RustExpr::Var("carrier".to_string())),
+                method: "values_mut".to_string(),
+                args: Vec::new(),
+            },
+            RustExpr::Var("index".to_string()),
+            RustExpr::Var("value".to_string()),
+        );
+        let rendered = emit::emit_expr(&lowered);
+
+        assert!(
+            rendered.contains("let __java_list_set_receiver = &mut carrier.values_mut();")
+                && rendered.contains("__java_list_set_receiver.get_mut(")
+                && rendered.contains("std::mem::replace(__java_list_set_slot, value)"),
             "{rendered}"
         );
     }

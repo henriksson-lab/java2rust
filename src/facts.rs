@@ -35,6 +35,7 @@ pub struct FactSet {
     pub closed_hierarchy_facts: Vec<ClosedHierarchyFact>,
     pub sealed_permits_facts: Vec<SealedPermitsFact>,
     pub object_safety_facts: Vec<ObjectSafetyFact>,
+    pub generic_parameter_variance_facts: Vec<GenericParameterVarianceFact>,
     pub type_capability_overrides: Vec<TypeCapabilityOverride>,
     pub owned_recovery_capability_facts: Vec<OwnedRecoveryCapabilityFact>,
     pub field_nullability_facts: Vec<FieldNullabilityFact>,
@@ -81,6 +82,7 @@ impl Default for FactSet {
             closed_hierarchy_facts: Vec::new(),
             sealed_permits_facts: Vec::new(),
             object_safety_facts: Vec::new(),
+            generic_parameter_variance_facts: Vec::new(),
             type_capability_overrides: Vec::new(),
             owned_recovery_capability_facts: Vec::new(),
             field_nullability_facts: Vec::new(),
@@ -1836,6 +1838,10 @@ fn external_type_pattern_for_java_type(ty: &JavaType) -> TypePattern {
             "{}[]",
             external_type_pattern_key_for_java_type(element)
         )),
+        JavaType::Intersection(bounds) => bounds
+            .first()
+            .map(external_type_pattern_for_java_type)
+            .unwrap_or(TypePattern::Any),
         JavaType::Unknown(_) | JavaType::Wildcard(_) | JavaType::Void => TypePattern::Any,
     }
 }
@@ -1848,6 +1854,10 @@ fn external_type_pattern_key_for_java_type(ty: &JavaType) -> String {
         JavaType::Array(element) => {
             format!("{}[]", external_type_pattern_key_for_java_type(element))
         }
+        JavaType::Intersection(bounds) => bounds
+            .first()
+            .map(external_type_pattern_key_for_java_type)
+            .unwrap_or_else(|| "Object".to_string()),
         JavaType::Wildcard(_) => "Object".to_string(),
         JavaType::Void => "void".to_string(),
     }
@@ -2126,6 +2136,15 @@ pub struct ObjectSafetyFact {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GenericParameterVarianceFact {
+    pub type_name: String,
+    pub parameter_index: usize,
+    pub consumed: bool,
+    pub produced: bool,
+    pub provenance: FactProvenance,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ObjectSafetyViolation {
     ExplicitNonObjectSafeFact {
         provenance: FactProvenance,
@@ -2318,6 +2337,8 @@ impl FactSet {
             .extend(other.closed_hierarchy_facts);
         self.sealed_permits_facts.extend(other.sealed_permits_facts);
         self.object_safety_facts.extend(other.object_safety_facts);
+        self.generic_parameter_variance_facts
+            .extend(other.generic_parameter_variance_facts);
         self.type_capability_overrides
             .extend(other.type_capability_overrides);
         self.owned_recovery_capability_facts
@@ -3554,6 +3575,21 @@ impl FactSet {
         crate::effective_facts::EffectiveFacts::new(self).object_safe_trait_fact_for_name(type_name)
     }
 
+    pub fn generic_parameter_is_input_only(&self, type_name: &str, parameter_index: usize) -> bool {
+        let matching = self.generic_parameter_variance_facts.iter().filter(|fact| {
+            fact.parameter_index == parameter_index
+                && external_type_name_matches(&fact.type_name, type_name)
+        });
+        let mut found = false;
+        for fact in matching {
+            found = true;
+            if !fact.consumed || fact.produced {
+                return false;
+            }
+        }
+        found
+    }
+
     pub fn object_safe_trait_fact_for(&self, java_ty: &JavaType) -> Option<bool> {
         crate::effective_facts::EffectiveFacts::new(self).object_safe_trait_fact_for(java_ty)
     }
@@ -3955,6 +3991,9 @@ fn type_key_matches_java_type(type_name: &str, java_ty: &JavaType) -> bool {
             external_type_name_matches(normalized, name)
         }
         JavaType::Array(_) => false,
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(|bound| type_key_matches_java_type(normalized, bound)),
         JavaType::Void => matches!(normalized, "void" | "Void" | "()"),
         JavaType::String => {
             external_type_name_matches(normalized, "String")

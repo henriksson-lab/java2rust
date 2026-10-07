@@ -9,6 +9,334 @@ use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn batch_inherited_wildcard_method_keeps_source_hierarchy_carrier_argument() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "CarrierObservation.java".to_string(),
+            "package carrier; public class CarrierObservation {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "ConcreteCarrierObservation.java".to_string(),
+            "package carrier; public class ConcreteCarrierObservation extends CarrierObservation {}"
+                .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "CarrierModel.java".to_string(),
+            r#"package carrier;
+public class CarrierModel<O extends CarrierObservation> {
+    int count = 7;
+    public void touch() { count = count; }
+    public int size() { return count; }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "CarrierSpecialModel.java".to_string(),
+            r#"package carrier;
+public class CarrierSpecialModel<O extends CarrierObservation> extends CarrierModel<O> {
+    public int size() { return count; }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "CarrierDrawer.java".to_string(),
+            r#"package carrier;
+public class CarrierDrawer<H extends CarrierModel<?>> {
+    public int write(H model) { return model.size(); }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "GenericCarrierDrawer.java".to_string(),
+            r#"package carrier;
+public class GenericCarrierDrawer extends CarrierDrawer<CarrierModel<?>> {}"#.to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "CarrierUse.java".to_string(),
+            r#"package carrier;
+public class CarrierUse {
+    public static int run(CarrierModel<ConcreteCarrierObservation> model) {
+        return new GenericCarrierDrawer().write(model);
+    }
+}"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let use_module = translations
+        .iter()
+        .find(|translation| translation.path() == "CarrierUse.java")
+        .expect("use translation")
+        .rust();
+    assert!(
+        use_module.contains("model: CarrierModelValue<")
+            && use_module.contains(".write(model)")
+            && !use_module.contains("match model { CarrierModelValue::"),
+        "{use_module}"
+    );
+}
+
+#[test]
+fn batch_nullable_enhanced_for_collection_borrows_before_owned_recovery() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "Observation.java".to_string(),
+            "package repro; public abstract class Observation {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Holder.java".to_string(),
+            r#"package repro;
+import java.util.List;
+public class Holder<T extends Observation> {
+    private List<? extends T> values;
+    public Holder(List<? extends T> values) { this.values = values; }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Learner.java".to_string(),
+            r#"package repro;
+import java.util.List;
+public class Learner {
+    public <O extends Observation> Holder<O> consume(List<? extends O> values) {
+        return new Holder<O>(values);
+    }
+    public <O extends Observation> void run(List<? extends List<? extends O>> groups) {
+        for (List<? extends O> values : groups) consume(values);
+    }
+    public <O extends Observation> void allowNullGroup(List<List<O>> groups) {
+        groups.set(0, null);
+        run(groups);
+    }
+}"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let learner = translations
+        .iter()
+        .find(|translation| translation.path() == "Learner.java")
+        .expect("learner translation")
+        .rust();
+    assert!(
+        learner.contains("values.as_ref().ok_or_else")
+            || learner.contains("values.as_ref().expect"),
+        "borrowed nullable loop elements must borrow before unwrapping: {learner}"
+    );
+    assert!(
+        !learner.contains("values.ok_or_else") && !learner.contains("values.expect"),
+        "borrowed nullable loop elements must not be moved: {learner}"
+    );
+}
+
+#[test]
+fn batch_source_call_uses_owned_all_handle_carrier_parameter_abi() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "Model.java".to_string(),
+            r#"package model;
+public class Model<T> {
+    int state;
+    public void setState(int state) { this.state = state; }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "SpecializedModel.java".to_string(),
+            r#"package model;
+public class SpecializedModel<T> extends Model<T> {}"#
+                .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Trainer.java".to_string(),
+            r#"package model;
+public class Trainer<T> {
+    private int state;
+    private void alias(Model<T> first) {
+        Model<T> second = first;
+        second.setState(2);
+    }
+    private void aliasSpecial(SpecializedModel<T> first) {
+        SpecializedModel<T> second = first;
+        second.setState(3);
+    }
+    private void consume(Model<?> model) { model.setState(state); }
+    public Model<T> run() {
+        Model<T> model = new Model<T>();
+        consume(model);
+        return model;
+    }
+}"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let trainer = translations
+        .iter()
+        .find(|translation| translation.path() == "Trainer.java")
+        .expect("trainer translation")
+        .rust();
+    assert!(trainer.contains("pub fn consume"), "{trainer}");
+    assert!(trainer.contains("model: ModelValue<"), "{trainer}");
+    assert!(
+        !trainer.contains("self.consume(&model)") && !trainer.contains("self.consume(&mut model)"),
+        "owned emitted parameter must not receive a borrow: {trainer}"
+    );
+    assert!(
+        trainer.contains("self.consume(std::clone::Clone::clone(&model)")
+            || trainer.contains("self.consume(model.clone()"),
+        "owned all-handle carrier arguments must preserve Java aliasing: {trainer}"
+    );
+}
+
+#[test]
+fn batch_inherited_handle_companion_uses_declared_child_receiver() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "Base.java".to_string(),
+            r#"package model;
+public class Base<T> {
+    int value;
+    public void bump(int amount) { value += amount; }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Child.java".to_string(),
+            r#"package model;
+public class Child<T> extends Base<T> {
+    public Child<T> copy() { return this; }
+}"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "Use.java".to_string(),
+            r#"package model;
+public class Use<T> {
+    public void run(Child<T> child) {
+        java.util.List<Child<T>> values = new java.util.ArrayList<Child<T>>();
+        values.add(child);
+        Child<T> copy = values.get(0).copy();
+        copy.bump(3);
+    }
+}"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let use_module = translations
+        .iter()
+        .find(|translation| translation.path() == "Use.java")
+        .expect("use translation")
+        .rust();
+    assert!(
+        use_module.contains("Child::bump_with_outer")
+            && !use_module.contains("Base::bump_with_outer"),
+        "{use_module}"
+    );
+}
+
+#[test]
+fn batch_carrier_receiver_reuses_generic_method_clone_requirement() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "SampleObservation.java".to_string(),
+            "package model; public abstract class SampleObservation {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "GenericProduct.java".to_string(),
+            r#"
+package model;
+public interface GenericProduct<O extends SampleObservation> { O generate(); }
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "GenericProductProvider.java".to_string(),
+            r#"
+package model;
+import java.util.List;
+public class GenericProductProvider<O extends SampleObservation> {
+    List<GenericProduct<O>> products;
+    public GenericProduct<O> product() { return products.get(0); }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "SpecializedGenericProductProvider.java".to_string(),
+            r#"
+package model;
+public class SpecializedGenericProductProvider<O extends SampleObservation>
+        extends GenericProductProvider<O> {}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "ProductHolder.java".to_string(),
+            r#"
+package model;
+public class ProductHolder<O extends SampleObservation> {
+    GenericProductProvider<O> provider;
+    public O take() { return provider.product().generate(); }
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let holder = translations
+        .iter()
+        .find(|translation| translation.path() == "ProductHolder.java")
+        .expect("holder translation")
+        .rust();
+    assert!(
+        holder.contains("pub fn take(&self) -> O where O: Clone"),
+        "{holder}"
+    );
+}
+
+#[test]
 fn batch_nullable_collection_constructor_parameter_and_stored_field_share_shape() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new(
@@ -240,6 +568,9 @@ public class StreamFactory implements StreamService {
         return child;
     }
     public int read(BaseStream stream) { return ((ChildStream) stream).childValue; }
+    public static BaseStream makeFallible() throws Exception {
+        return new ChildStream(9);
+    }
 
     private static class ChildStream extends BaseStream {
         int childValue;
@@ -276,6 +607,20 @@ public interface StreamService {
 "#
             .to_string(),
         ),
+        new_java2rust::BatchSource::new(
+            "StreamUse.java".to_string(),
+            r#"
+package example.streams;
+
+public class StreamUse {
+    public BaseStream load() throws Exception {
+        BaseStream stream = StreamFactory.makeFallible();
+        return stream;
+    }
+}
+"#
+            .to_string(),
+        ),
     ];
 
     let translations =
@@ -300,6 +645,17 @@ public interface StreamService {
             && !rendered
                 .contains("match BaseStream::new(3) { BaseStreamValue::BaseStream(value) => value"),
         "{rendered}"
+    );
+    let use_module = translations
+        .iter()
+        .find(|translation| translation.path() == "StreamUse.java")
+        .expect("stream use translation")
+        .rust();
+    assert!(
+        use_module.contains("let stream: BaseStreamValue = StreamFactory::make_fallible()?")
+            && !use_module
+                .contains("BaseStreamValue::BaseStream(StreamFactory::make_fallible()?)?"),
+        "cross-file calls must retain the emitted carrier ABI instead of wrapping its Result payload twice: {use_module}"
     );
 }
 
@@ -417,6 +773,8 @@ class NullableFutureUse {
         .expect("threaded sink translation");
     assert!(
         threaded.rust().contains(
+            "let __java_array_blocking_queue_timed_offer_value = std::clone::Clone::clone(&future).ok_or_else"
+        ) || threaded.rust().contains(
             "let __java_array_blocking_queue_timed_offer_value = future.clone().ok_or_else"
         ),
         "{}",
@@ -686,6 +1044,43 @@ public class B {
             ("emit_start", 2, "running"),
             ("emit_end", 2, "ok")
         ]
+    );
+}
+
+#[test]
+fn batch_flattened_nested_enum_values_keeps_instance_loop_binding() {
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &[new_java2rust::BatchSource::new(
+                "EnumOwner.java",
+                r#"
+class EnumOwner {
+    enum Arguments {
+        FIRST, SECOND;
+        boolean set;
+        void setSet(boolean value) { set = value; }
+    }
+
+    static void reset() {
+        for (Arguments arg : Arguments.values()) {
+            arg.setSet(false);
+        }
+    }
+}
+"#,
+            )],
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let rust = report.translations()[0].rust();
+    assert!(
+        rust.contains("EnumOwner_Arguments::values().iter().copied()")
+            && rust.contains("arg.set_set(false)")
+            && !rust.contains("Arg::set_set(false)"),
+        "{rust}"
     );
 }
 
@@ -1181,20 +1576,16 @@ public class Second {
             &new_java2rust::facts::FactSet::default(),
             &new_java2rust::BatchTranslationOptions::new(2, None),
         );
-    for (path, other) in [
-        ("a/First.java", "Second::logger"),
-        ("b/Second.java", "First::logger"),
+    for (path, owner, other) in [
+        ("a/First.java", "First::logger.log_3(", "Second::logger"),
+        ("b/Second.java", "Second::logger.log_3(", "First::logger"),
     ] {
         let translation = report
             .translations()
             .iter()
             .find(|translation| translation.path() == path)
             .expect("translated source");
-        assert!(
-            translation.rust().contains("Self::logger.log_3("),
-            "{}",
-            translation.rust()
-        );
+        assert!(translation.rust().contains(owner), "{}", translation.rust());
         assert!(
             !translation.rust().contains(other),
             "{}",
@@ -1368,7 +1759,7 @@ public class FallibleSummaryOwner {
     );
     assert!(
         value.rust().contains(
-            "std::rc::Rc::new(std::cell::RefCell::new(FallibleSummaryValue::new_string_string_string_string_int(text.clone()"
+            "std::rc::Rc::new(std::cell::RefCell::new(FallibleSummaryValue::new_string_string_string_string_int("
         ) && value.rust().contains(", 33)?))"),
         "{}",
         value.rust()
@@ -1689,7 +2080,7 @@ public class Noise {
             )
             && parser
                 .rust()
-                .contains("wrap_stream_for_serializing(stream, name, None)")
+                .contains("wrap_stream_for_serializing(stream, name, None::<i32>)")
             && parser.rust().contains("_arg2: Option<i32>"),
         "{}",
         parser.rust()
@@ -1697,7 +2088,7 @@ public class Noise {
 }
 
 #[test]
-fn nullable_shared_summary_subclass_adapts_to_external_super_method_slot() {
+fn nullable_shared_summary_subclass_does_not_fabricate_external_super_conversion() {
     let parser_source = r#"
 package example.fastq;
 import java.io.InputStream;
@@ -1766,15 +2157,20 @@ public class CompressionFormat {
         .filter(|line| line.contains("pub fn new"))
         .collect::<Vec<_>>()
         .join("\n");
+    let has_compile_error = wrap_args.contains("compile_error!");
+    let has_upcast_diagnostic = wrap_args.contains("unsupported Java class upcast");
+    let has_fabricated_conversion = parser
+        .rust()
+        .contains("impl From<std::rc::Rc<PositionTrackingInputStream>> for InputStream");
+    let has_summary_constructor = parser
+        .rust()
+        .contains("pub fn new(_arg0: InputStream, _arg1: i64) -> Self");
     assert!(
-        wrap_args.contains(".into()")
-            && parser
-                .rust()
-                .contains("impl From<std::rc::Rc<PositionTrackingInputStream>> for InputStream")
-            && parser
-                .rust()
-                .contains("pub fn new(_arg0: InputStream, _arg1: i64) -> Self"),
-        "wrap args: {wrap_args}\nconstructors:\n{constructor_signatures}"
+        has_compile_error
+            && has_upcast_diagnostic
+            && !has_fabricated_conversion
+            && has_summary_constructor,
+        "compile_error={has_compile_error} upcast_diagnostic={has_upcast_diagnostic} fabricated_conversion={has_fabricated_conversion} summary_constructor={has_summary_constructor}\nwrap args: {wrap_args}\nconstructors:\n{constructor_signatures}"
     );
 }
 
@@ -1831,6 +2227,78 @@ public class PairingValidator {
                 .contains("OrgUsadellabTrimmomaticFastqRecordNamePattern::canonicalize("),
         "{}",
         validator.rust()
+    );
+}
+
+#[test]
+fn batch_static_object_calls_reuse_declared_storage_accessor_in_every_method() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/LogMath.java".to_string(),
+            r#"
+package example;
+
+class LogMath {
+    static LogMath INST = new LogMath();
+    double log(double value) { return Math.log(value); }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/LogMathUse.java".to_string(),
+            r#"
+package example;
+
+class LogMathUse {
+    LogMathUse() {
+        accept(LogMath.INST.log(1.0));
+    }
+
+    double apply(double value) {
+        ValueSink sink = new ValueSink();
+        sink.accept(LogMath.INST.log(value));
+        return LogMath.INST.log(sink.read());
+    }
+
+    void accept(double value) {}
+}
+
+class ValueSink {
+    double value;
+    void accept(double value) { this.value = value; }
+    double read() { return value; }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let use_translation = translations
+        .iter()
+        .find(|translation| translation.path() == "example/LogMathUse.java")
+        .expect("translated static object user");
+
+    assert_eq!(
+        use_translation
+            .rust()
+            .matches("LogMath::__static_i_n_s_t()")
+            .count(),
+        3,
+        "{}",
+        use_translation.rust()
+    );
+    assert!(
+        !use_translation.rust().contains("LogMath::INST"),
+        "{}",
+        use_translation.rust()
     );
 }
 
@@ -1939,7 +2407,9 @@ public class Sink {
         .expect("translated owner");
 
     assert!(
-        owner
+        owner.rust().contains(
+            "let __java_call_receiver = std::clone::Clone::clone(&__java_self.borrow().sink)"
+        ) || owner
             .rust()
             .contains("let __java_call_receiver = __java_self.borrow().sink.clone()")
             || owner
@@ -2276,10 +2746,17 @@ public class Main {
             rust: format!(
                 "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
                  impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
+                 pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display {{ fn values() -> Vec<Self> where Self: Sized; fn ordinal(&self) -> i32; fn name(&self) -> &'static str; }}\n\
                  pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ panic!(\"unsupported Java erased object display: runtime target is erased\") }}\n\
                  {}\n{}\n{}",
-                generated_source_items_from_marker(&a_mode.rust(), "pub enum AMode"),
-                generated_source_items_from_marker(&b_mode.rust(), "pub enum BMode"),
+                format!(
+                    "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\n{}",
+                    generated_source_items_from_marker(&a_mode.rust(), "pub enum AMode")
+                ),
+                format!(
+                    "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\n{}",
+                    generated_source_items_from_marker(&b_mode.rust(), "pub enum BMode")
+                ),
                 generated_source_items_from_marker(&main.rust(), "pub struct Main")
             ),
             tests: "",
@@ -3633,9 +4110,9 @@ public class Consumer {
         .find(|translation| translation.path() == "example/consumer/Consumer.java")
         .expect("translated consumer");
     assert!(
-        consumer
-            .rust()
-            .contains("Record::new_record_string_string_int(input, value.clone()"),
+        consumer.rust().contains(
+            "Record::new_record_string_string_int(input, std::clone::Clone::clone(&value)"
+        ),
         "{}",
         consumer.rust()
     );
@@ -3790,8 +4267,457 @@ public class Consumer {
         .find(|translation| translation.path() == "example/consumer/Consumer.java")
         .expect("translated consumer");
     assert!(
-        consumer.rust().contains(".borrow().get_name()"),
+        consumer.rust().contains(".borrow().get_name()")
+            || (consumer.rust().contains("Record::get_name_with_outer(")
+                && consumer.rust().contains(
+                    ".as_ref().ok_or_else(|| JavaException::new(\"NullPointerException\""
+                )),
         "{}",
         consumer.rust()
     );
+}
+
+#[test]
+fn batch_nested_enum_loop_keeps_lexical_element_type_and_payload_accessors() {
+    let owner = r#"
+package example.cli;
+import java.util.Arrays;
+class WrongArgumentsException extends Exception {
+    WrongArgumentsException(String message) { super(message); }
+}
+public class CommandLineArguments {
+    static enum Arguments {
+        A("-a", ""), B("-b", "x", "y");
+        final String argString;
+        final String[] allowedValues;
+        String value;
+        boolean isSet;
+        Arguments(String argString, String... allowedValues) {
+            this.isSet = false;
+            this.argString = argString;
+            if (allowedValues.length == 1 && !allowedValues[0].equals(""))
+                this.allowedValues = new String[] { "" };
+            else
+                this.allowedValues = allowedValues;
+        }
+        boolean hasAllowedValues() { return allowedValues.length != 0; }
+        void set(String value) { this.value = value; }
+        boolean getIsSet() { return isSet; }
+        void setIsSet(boolean isSet) { this.isSet = isSet; }
+        public String toString() { return argString; }
+        String get() throws WrongArgumentsException {
+            if (!isSet) throw new WrongArgumentsException("missing");
+            return value;
+        }
+    }
+
+    static void parse(String[] values) throws WrongArgumentsException {
+        outer:
+        for (int i = 0; i < values.length; i++) {
+            for (Arguments arg : Arguments.values())
+                if (arg.argString.equals(values[i])) {
+                    if (arg.getIsSet()) throw new WrongArgumentsException("duplicate");
+                    arg.setIsSet(true);
+                    if (arg.hasAllowedValues()) {
+                        String subArg = values[++i];
+                        if (!arg.allowedValues[0].equals("") &&
+                            !Arrays.asList(arg.allowedValues).contains(subArg))
+                            throw new WrongArgumentsException("invalid");
+                        arg.set(subArg);
+                    }
+                    continue outer;
+                }
+        }
+    }
+
+    static String selected() throws WrongArgumentsException { return Arguments.A.get(); }
+
+    static Arguments parseAction(String[] values) {
+        if (values.length == 0) return null;
+        Arguments selected = null;
+        for (Arguments action : Arguments.values())
+            if (action.toString().equals(values[0])) selected = action;
+        return selected;
+    }
+}
+"#;
+    let consumer = r#"
+package example.cli;
+import example.cli.CommandLineArguments.Arguments;
+public class Consumer {
+    static boolean uses(Arguments value) { return value == Arguments.A; }
+}
+"#;
+    let cli = r#"
+package example.cli;
+public class Cli {
+    public static void main(String[] args) throws WrongArgumentsException {
+        CommandLineArguments.parse(args);
+        CommandLineArguments.parseAction(args);
+    }
+}
+"#;
+    let nullable_strings = r#"
+package example.cli;
+class NullableStrings {
+    static String[] values() { return new String[] { null }; }
+}
+"#;
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &[
+                new_java2rust::BatchSource::new(
+                    "example/cli/CommandLineArguments.java".to_string(),
+                    owner.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/cli/Consumer.java".to_string(),
+                    consumer.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/cli/Cli.java".to_string(),
+                    cli.to_string(),
+                ),
+                new_java2rust::BatchSource::new(
+                    "example/cli/NullableStrings.java".to_string(),
+                    nullable_strings.to_string(),
+                ),
+            ],
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let owner = translations
+        .iter()
+        .find(|translation| translation.path() == "example/cli/CommandLineArguments.java")
+        .expect("translated enum owner")
+        .rust();
+    assert!(owner.contains("arg.arg_string()"), "{owner}");
+    assert!(
+        (owner.contains("arg.set_is_set(true)") || owner.contains("arg.__java_set_is_set(true)"))
+            && owner.contains("arg.has_allowed_values()")
+            && owner.contains("arg.allowed_values()")
+            && !owner.contains("Arg::"),
+        "{owner}"
+    );
+    cargo_check_generated_modules(
+        "batch_nested_enum_payload_accessors",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: owner.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn batch_constructor_argument_preserves_closed_hierarchy_carrier() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/model/Observation.java".to_string(),
+            "package example.model; public abstract class Observation {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/model/Model.java".to_string(),
+            r#"
+package example.model;
+public class Model<O extends Observation> {
+    private int count;
+    public O value() { return null; }
+    public void bump() { count++; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/model/SpecializedModel.java".to_string(),
+            r#"
+package example.model;
+public class SpecializedModel<O extends Observation> extends Model<O> {
+    public O value() { return null; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/consume/Consumer.java".to_string(),
+            r#"
+package example.consume;
+import example.model.Model;
+import example.model.Observation;
+public class Consumer<O extends Observation> {
+    private final Model<O> model;
+    public Consumer(Model<O> model) {
+        if (model == null) throw new IllegalArgumentException();
+        this.model = model;
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/use/Caller.java".to_string(),
+            r#"
+package example.use;
+import example.consume.Consumer;
+import example.model.Model;
+import example.model.Observation;
+import example.model.SpecializedModel;
+public class Caller {
+    public static <O extends Observation> Consumer<O> make(Model<O> model) {
+        model.bump();
+        return new Consumer<O>(model);
+    }
+    public static <O extends Observation> Model<O> specialized() {
+        return new SpecializedModel<O>();
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let caller = translations
+        .iter()
+        .find(|translation| translation.path() == "example/use/Caller.java")
+        .expect("translated caller");
+    assert!(
+        caller.rust().contains("Consumer::new(Some(model))")
+            && !caller.rust().contains("match model { ModelValue::"),
+        "{}",
+        caller.rust()
+    );
+}
+
+#[test]
+fn batch_overloaded_source_call_uses_selected_mixed_parameter_abis() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/model/Observation.java".to_string(),
+            "package example.model; public abstract class Observation {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/io/Token.java".to_string(),
+            r#"
+package example.io;
+public class Token {
+    int position;
+    public void advance() { position++; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/io/ObservationReader.java".to_string(),
+            r#"
+package example.io;
+import example.model.Observation;
+public abstract class ObservationReader<O extends Observation> {
+    public abstract O read(Token token);
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/io/ConcreteReader.java".to_string(),
+            r#"
+package example.io;
+import example.model.Observation;
+public class ConcreteReader<O extends Observation> extends ObservationReader<O> {
+    public O read(Token token) { token.advance(); return null; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/io/SequenceReader.java".to_string(),
+            r#"
+package example.io;
+import example.model.Observation;
+public class SequenceReader {
+    public static <O extends Observation> ObservationReader<O> concrete() {
+        return new ConcreteReader<O>();
+    }
+    public static <O extends Observation> O read(ObservationReader<O> reader, String input) {
+        Token token = new Token();
+        O value = null;
+        while (token.position < 2) value = read(reader, token);
+        return value;
+    }
+    public static <O extends Observation> O read(ObservationReader<O> reader, Token token) {
+        token.advance();
+        while (token.position < 2) reader.read(token);
+        return reader.read(token);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let sequence_reader = translations
+        .iter()
+        .find(|translation| translation.path() == "example/io/SequenceReader.java")
+        .expect("translated sequence reader");
+    assert!(
+        sequence_reader
+            .rust()
+            .contains("reader: ObservationReaderValue<O>, token: &mut Token")
+            && sequence_reader
+                .rust()
+                .contains("read_observation_reader_token(std::clone::Clone::clone(&reader)")
+            && sequence_reader.rust().contains(", &mut token)?"),
+        "{}",
+        sequence_reader.rust()
+    );
+}
+
+#[test]
+fn batch_specialized_generic_subclass_keeps_direct_reader_abi() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Observation.java".to_string(),
+            "package example; public abstract class Observation {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Token.java".to_string(),
+            "package example; public class Token { public void advance() {} }".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/ObservationReader.java".to_string(),
+            r#"
+package example;
+public abstract class ObservationReader<O extends Observation> {
+    public abstract O read(Token token);
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/IntegerObservation.java".to_string(),
+            "package example; public final class IntegerObservation extends Observation {}"
+                .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/IntegerReader.java".to_string(),
+            r#"
+package example;
+public final class IntegerReader extends ObservationReader<IntegerObservation> {
+    public IntegerObservation read(Token token) { token.advance(); return null; }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/SequenceReader.java".to_string(),
+            r#"
+package example;
+public class SequenceReader {
+    public static <O extends Observation> O read(ObservationReader<O> reader, String input) {
+        Token token = new Token();
+        return read(reader, token);
+    }
+    public static <O extends Observation> O read(ObservationReader<O> reader, Token token) {
+        return reader.read(token);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let sequence_reader = translations
+        .iter()
+        .find(|translation| translation.path() == "example/SequenceReader.java")
+        .expect("translated sequence reader");
+    assert!(
+        sequence_reader
+            .rust()
+            .contains("reader: ObservationReader<O>, token: &mut Token"),
+        "{}",
+        sequence_reader.rust()
+    );
+    assert!(
+        sequence_reader
+            .rust()
+            .contains("read_observation_reader_token(reader, &mut token)?"),
+        "{}",
+        sequence_reader.rust()
+    );
+}
+
+#[test]
+fn batch_concrete_inherited_value_reuses_mutable_borrow_abi() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Base.java".to_string(),
+            "package example; public class Base { int value; public void bump() { value++; } }"
+                .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Child.java".to_string(),
+            "package example; public class Child extends Base {}".to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Use.java".to_string(),
+            r#"
+package example;
+public class Use {
+    private void first(Base value) { value.bump(); }
+    private void second(Base value) { value.bump(); }
+    private void third(Base value) { value.bump(); }
+    public void run() {
+        Base value = new Base();
+        first(value);
+        second(value);
+        third(value);
+    }
+}
+"#
+            .to_string(),
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let use_translation = translations
+        .iter()
+        .find(|translation| translation.path() == "example/Use.java")
+        .expect("translated use class");
+    for method in ["first", "second", "third"] {
+        assert!(
+            use_translation
+                .rust()
+                .contains(&format!("Self::{method}(&mut value)?")),
+            "{}",
+            use_translation.rust()
+        );
+    }
 }

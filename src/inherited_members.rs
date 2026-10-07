@@ -3,7 +3,9 @@ use std::collections::{HashMap, HashSet};
 use crate::facts::{
     ExternalApiEffectFact, ExternalFieldFact, ExternalFieldKind, FactSet, NullabilityState,
 };
-use crate::java_ir::{FieldDecl, JavaType, Member, MethodDecl, Modifier, Program, TypeDecl};
+use crate::java_ir::{
+    FieldDecl, JavaType, Member, MethodDecl, Modifier, Program, TypeDecl, WildcardBound,
+};
 use crate::java_signature::{
     JavaCallableSlotKey, source_method_overload_rust_name, source_method_rust_name,
 };
@@ -1034,6 +1036,426 @@ pub(crate) fn find_type_decl_for_owner_context<'a>(
     find_exact_type_decl(program, type_name)
         .or_else(|| find_same_package_type_decl(program, owner_name, type_name))
         .or_else(|| find_type_decl(program, type_name))
+}
+
+/// Type arguments with which `target` reaches one source class ancestor.
+///
+/// Java inherited members are viewed after substituting every generic
+/// `extends` edge.  Keep that operation in the shared inheritance module so
+/// member discovery, signature planning, lowering, and hierarchy-carrier
+/// dispatch cannot each invent a subtly different substitution walk.
+pub(crate) fn source_class_ancestor_type_arguments(
+    program: &Program,
+    target: &TypeDecl,
+    ancestor: &TypeDecl,
+) -> Option<HashMap<String, JavaType>> {
+    if target.name == ancestor.name {
+        return Some(HashMap::new());
+    }
+    let mut current = target;
+    let mut substitutions = HashMap::<String, JavaType>::new();
+    let mut seen = HashSet::new();
+    while seen.insert(current.name.clone()) {
+        let parent_ref = current.extends.as_deref()?;
+        let JavaType::Named { name, args } = crate::parser::parse_hierarchy_type(parent_ref) else {
+            return None;
+        };
+        let parent = find_type_decl_for_owner_context(program, &current.name, &name)?;
+        let args = parent
+            .type_params
+            .iter()
+            .enumerate()
+            .map(|(index, type_param)| {
+                let actual = args.get(index).cloned().unwrap_or_else(|| JavaType::Named {
+                    name: type_param.clone(),
+                    args: Vec::new(),
+                });
+                crate::resolve::substitute_method_type_variables(&actual, &substitutions)
+            })
+            .collect::<Vec<_>>();
+        substitutions = parent.type_params.iter().cloned().zip(args).collect();
+        if parent.name == ancestor.name {
+            return Some(substitutions);
+        }
+        current = parent;
+    }
+    None
+}
+
+/// Clone an inherited declaration as Java sees it from `target`.
+///
+/// Method type parameters shadow class type parameters, so those names are
+/// deliberately removed before substituting the owner-level declaration.
+pub(crate) fn specialized_inherited_method_for_type(
+    program: &Program,
+    target: &TypeDecl,
+    inherited: &InheritedInstanceMethodRef<'_>,
+) -> MethodDecl {
+    let mut method = inherited.method().clone();
+    let mut substitutions =
+        source_class_ancestor_type_arguments(program, target, inherited.declaring_ty())
+            .unwrap_or_default();
+    for type_param in &method.type_params {
+        substitutions.remove(type_param);
+    }
+    if substitutions.is_empty() {
+        return method;
+    }
+    for param in &mut method.params {
+        param.ty = crate::resolve::substitute_method_type_variables(&param.ty, &substitutions);
+    }
+    method.return_type =
+        crate::resolve::substitute_method_type_variables(&method.return_type, &substitutions);
+    method.throws = method
+        .throws
+        .iter()
+        .map(|ty| crate::resolve::substitute_method_type_variables(ty, &substitutions))
+        .collect();
+    method.type_param_bounds = method
+        .type_param_bounds
+        .iter()
+        .map(|bound| {
+            bound
+                .as_ref()
+                .map(|ty| crate::resolve::substitute_method_type_variables(ty, &substitutions))
+        })
+        .collect();
+    method
+}
+
+/// Give source-generic wildcard input parameters a Rust-representable
+/// existential ABI.
+///
+/// A Java parameter `Model<?>` accepts `Model<X>` for any admissible `X`.
+/// Rendering the wildcard as `Box<dyn Any>` instead produces the invariant and
+/// unrelated type `Model<Box<dyn Any>>`.  A fresh method type parameter is the
+/// direct Rust encoding of that input existential: callers infer it from the
+/// argument and the source generic's declared bound remains available inside
+/// the method body.
+pub(crate) fn method_with_synthesized_source_wildcard_params(
+    method: &MethodDecl,
+    emitted_owner: &TypeDecl,
+    support_programs: &[&Program],
+) -> MethodDecl {
+    let mut effective = method.clone();
+    let mut used_names = emitted_owner
+        .type_params
+        .iter()
+        .chain(method.type_params.iter())
+        .cloned()
+        .collect::<HashSet<_>>();
+    let mut next_index = 0usize;
+    let mut synthesized = Vec::<(String, Option<JavaType>)>::new();
+
+    // `class C<H extends Model<?>> { f(H value) { ... } }` has the same
+    // existential input problem as an explicit `f(Model<?> value)`.  Rust
+    // cannot express the hidden `Model` argument through the invariant class
+    // parameter `H`, and spelling its bound as `Model<Box<dyn Any>>` invents
+    // a concrete, usually invalid instantiation.  Reify a direct input-only
+    // class parameter at the method boundary, exactly as inheritance already
+    // does after substituting `H` with `Model<?>` on a child.
+    //
+    // Reuse one synthesized wildcard for every `H` parameter in the method:
+    // Java requires those inputs to have the same H.  Fail closed when H is
+    // nested in another invariant carrier or escapes through the return/
+    // throws surface; those cases need a richer existential representation.
+    // An abstract generic owner defines a subtype/override contract: its
+    // class parameter identifies the concrete payload accepted by each
+    // implementation.  Turning that parameter into an independent method
+    // generic would weaken `Writer<D>::write(D)` into `write<Product<W>>`
+    // and disconnect hierarchy-carrier dispatch from D.  Concrete owners can
+    // use the input-only erasure below after the escape checks prove that the
+    // parameter has no other material role.
+    let reify_owner_params = !emitted_owner.modifiers.contains(&Modifier::Abstract);
+    for (index, owner_param) in emitted_owner
+        .type_params
+        .iter()
+        .enumerate()
+        .filter(|_| reify_owner_params)
+    {
+        if method.type_params.contains(owner_param)
+            || java_type_contains_named_type_param(&method.return_type, owner_param)
+            || method
+                .throws
+                .iter()
+                .any(|ty| java_type_contains_named_type_param(ty, owner_param))
+            || method
+                .type_param_bounds
+                .iter()
+                .flatten()
+                .any(|ty| java_type_contains_named_type_param(ty, owner_param))
+        {
+            continue;
+        }
+        let matching_params = effective
+            .params
+            .iter()
+            .enumerate()
+            .filter(|(_, param)| java_type_contains_named_type_param(&param.ty, owner_param))
+            .collect::<Vec<_>>();
+        if matching_params.is_empty()
+            || matching_params
+                .iter()
+                .any(|(_, param)| !java_type_is_named_type_param(&param.ty, owner_param))
+        {
+            continue;
+        }
+        let Some(Some(bound)) = emitted_owner.type_param_bounds.get(index) else {
+            continue;
+        };
+        let synthesized_before = synthesized.len();
+        let reified_bound = synthesize_source_wildcards_in_type(
+            bound,
+            &emitted_owner.name,
+            support_programs,
+            &mut used_names,
+            &mut next_index,
+            &mut synthesized,
+        );
+        if synthesized.len() == synthesized_before {
+            continue;
+        }
+        for param in &mut effective.params {
+            if java_type_is_named_type_param(&param.ty, owner_param) {
+                param.ty = reified_bound.clone();
+            }
+        }
+    }
+    for param in &mut effective.params {
+        param.ty = synthesize_source_wildcards_in_type(
+            &param.ty,
+            &emitted_owner.name,
+            support_programs,
+            &mut used_names,
+            &mut next_index,
+            &mut synthesized,
+        );
+    }
+    for (name, bound) in synthesized {
+        effective.type_params.push(name);
+        effective.type_param_bounds.push(bound);
+    }
+    effective
+}
+
+fn java_type_is_named_type_param(ty: &JavaType, type_param: &str) -> bool {
+    matches!(ty, JavaType::Named { name, args } if name == type_param && args.is_empty())
+}
+
+fn java_type_contains_named_type_param(ty: &JavaType, type_param: &str) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            (name == type_param && args.is_empty())
+                || args
+                    .iter()
+                    .any(|arg| java_type_contains_named_type_param(arg, type_param))
+        }
+        JavaType::Array(element) => java_type_contains_named_type_param(element, type_param),
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            java_type_contains_named_type_param(bound, type_param)
+        }
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(|bound| java_type_contains_named_type_param(bound, type_param)),
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Wildcard(None)
+        | JavaType::Unknown(_) => false,
+    }
+}
+
+/// Whether every material use of an owner parameter bounded by `Source<?>`
+/// can be represented by the method-level wildcard reification above.
+///
+/// This is also the proof that the enclosing Rust `impl` must not carry the
+/// false invariant bound `H: SourceBound<Box<dyn Any>>`: each usable H value
+/// has moved to an input method generic, while fields, constructors, nested
+/// invariant carriers, and escaping return types deliberately fail closed.
+pub(crate) fn owner_wildcard_bound_is_fully_input_reified(
+    owner: &TypeDecl,
+    type_param: &str,
+    bound: &JavaType,
+    support_programs: &[&Program],
+) -> bool {
+    if owner.modifiers.contains(&Modifier::Abstract) {
+        return false;
+    }
+    let JavaType::Named { name, args } = bound else {
+        return false;
+    };
+    if args.is_empty()
+        || !args.iter().any(|arg| matches!(arg, JavaType::Wildcard(_)))
+        || support_programs
+            .iter()
+            .all(|program| find_type_decl_for_owner_context(program, &owner.name, name).is_none())
+        || owner.members.iter().any(|member| match member {
+            Member::Field(field) => java_type_contains_named_type_param(&field.ty, type_param),
+            Member::Constructor(constructor) => constructor
+                .params
+                .iter()
+                .any(|param| java_type_contains_named_type_param(&param.ty, type_param)),
+            Member::Method(method) => {
+                java_type_contains_named_type_param(&method.return_type, type_param)
+                    || method
+                        .throws
+                        .iter()
+                        .any(|ty| java_type_contains_named_type_param(ty, type_param))
+                    || method
+                        .type_param_bounds
+                        .iter()
+                        .flatten()
+                        .any(|ty| java_type_contains_named_type_param(ty, type_param))
+                    || method.params.iter().any(|param| {
+                        java_type_contains_named_type_param(&param.ty, type_param)
+                            && !java_type_is_named_type_param(&param.ty, type_param)
+                    })
+            }
+            Member::Type(_) | Member::Unsupported { .. } => false,
+        })
+    {
+        return false;
+    }
+
+    owner.members.iter().any(|member| match member {
+        Member::Method(method) => method
+            .params
+            .iter()
+            .any(|param| java_type_is_named_type_param(&param.ty, type_param)),
+        _ => false,
+    })
+}
+
+fn synthesize_source_wildcards_in_type(
+    ty: &JavaType,
+    owner_name: &str,
+    support_programs: &[&Program],
+    used_names: &mut HashSet<String>,
+    next_index: &mut usize,
+    synthesized: &mut Vec<(String, Option<JavaType>)>,
+) -> JavaType {
+    match ty {
+        JavaType::Array(element) => JavaType::Array(Box::new(synthesize_source_wildcards_in_type(
+            element,
+            owner_name,
+            support_programs,
+            used_names,
+            next_index,
+            synthesized,
+        ))),
+        JavaType::Named { name, args } => {
+            let source_decl = support_programs
+                .iter()
+                .find_map(|program| find_type_decl_for_owner_context(program, owner_name, name));
+            let args = args
+                .iter()
+                .enumerate()
+                .map(|(index, arg)| match arg {
+                    JavaType::Wildcard(None) if source_decl.is_some() => {
+                        let synthetic = fresh_wildcard_type_param(used_names, next_index);
+                        let bound = source_decl
+                            .and_then(|decl| decl.type_param_bounds.get(index))
+                            .cloned()
+                            .flatten();
+                        synthesized.push((synthetic.clone(), bound));
+                        JavaType::Named {
+                            name: synthetic,
+                            args: Vec::new(),
+                        }
+                    }
+                    JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+                        if source_decl.is_some() =>
+                    {
+                        let synthetic = fresh_wildcard_type_param(used_names, next_index);
+                        synthesized.push((synthetic.clone(), Some(bound.as_ref().clone())));
+                        JavaType::Named {
+                            name: synthetic,
+                            args: Vec::new(),
+                        }
+                    }
+                    other => synthesize_source_wildcards_in_type(
+                        other,
+                        owner_name,
+                        support_programs,
+                        used_names,
+                        next_index,
+                        synthesized,
+                    ),
+                })
+                .collect();
+            JavaType::Named {
+                name: name.clone(),
+                args,
+            }
+        }
+        JavaType::Intersection(bounds) => JavaType::Intersection(
+            bounds
+                .iter()
+                .map(|bound| {
+                    synthesize_source_wildcards_in_type(
+                        bound,
+                        owner_name,
+                        support_programs,
+                        used_names,
+                        next_index,
+                        synthesized,
+                    )
+                })
+                .collect(),
+        ),
+        other => other.clone(),
+    }
+}
+
+fn fresh_wildcard_type_param(used_names: &mut HashSet<String>, next_index: &mut usize) -> String {
+    loop {
+        let candidate = format!("__JavaWildcard{}", *next_index);
+        *next_index += 1;
+        if used_names.insert(candidate.clone()) {
+            return candidate;
+        }
+    }
+}
+
+/// Whether a type parameter belongs to the reserved namespace used when a
+/// public source wildcard is reified as a Rust callable generic.
+pub(crate) fn is_synthesized_source_wildcard_type_param(name: &str) -> bool {
+    name.strip_prefix("__JavaWildcard").is_some_and(|suffix| {
+        !suffix.is_empty() && suffix.bytes().all(|byte| byte.is_ascii_digit())
+    })
+}
+
+/// Whether an emitted Java type mentions a callable-generic introduced by
+/// wildcard reification.
+///
+/// These parameters are inferred by Rust at the rewritten method boundary.
+/// They are not Java resolver variables and therefore must not be replaced by
+/// the resolver's pre-rewrite owner type parameter during call specialization.
+pub(crate) fn java_type_contains_synthesized_source_wildcard(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Array(element) => {
+            java_type_contains_synthesized_source_wildcard(element.as_ref())
+        }
+        JavaType::Named { name, args } => {
+            is_synthesized_source_wildcard_type_param(name)
+                || args
+                    .iter()
+                    .any(java_type_contains_synthesized_source_wildcard)
+        }
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(java_type_contains_synthesized_source_wildcard),
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            java_type_contains_synthesized_source_wildcard(bound.as_ref())
+        }
+        JavaType::Void
+        | JavaType::Primitive(_)
+        | JavaType::String
+        | JavaType::Wildcard(None)
+        | JavaType::Unknown(_) => false,
+    }
 }
 
 fn find_exact_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {

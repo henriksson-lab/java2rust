@@ -607,9 +607,16 @@ pub(crate) fn exception_result_type(ok_type: RustType) -> RustType {
 pub(crate) fn exception_try_ok_type(
     return_shape: Option<&RustSlotShape>,
     facts: &crate::facts::FactSet,
+    representations: &crate::representation::RepresentationPlan,
 ) -> RustType {
     return_shape
-        .map(|shape| crate::slot_render::rust_type_for_slot_with_facts(shape, facts))
+        .map(|shape| {
+            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                shape,
+                facts,
+                representations,
+            )
+        })
         .unwrap_or(RustType::Unit)
 }
 

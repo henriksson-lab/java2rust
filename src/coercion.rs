@@ -352,6 +352,11 @@ pub enum Coercion {
     CloneRecovery {
         policy: CloneRecoveryPolicy,
     },
+    /// Ownership recovery for a source type whose translated inherent
+    /// `clone()` would otherwise shadow Rust's `Clone` trait.
+    RustCloneRecovery {
+        policy: CloneRecoveryPolicy,
+    },
     UnsupportedOwnership {
         actual_ownership: OwnershipShape,
         target_ownership: OwnershipShape,
@@ -452,6 +457,22 @@ impl ShapeCoercionPlan {
             return non_identity_or_identity(plan);
         }
         plan.extend(self.dispatch().coercions());
+        if matches!(
+            self.dispatch(),
+            DispatchCoercionPolicy::DowncastDynTrait { .. }
+                | DispatchCoercionPolicy::DowncastBoxedDynTrait { .. }
+        ) && self.target().ownership == OwnershipShape::Owned
+        {
+            // `Any::downcast_ref` is necessarily a borrow, even when the
+            // source and destination describe owned Java references. Recover
+            // the owned Rust reference carrier here. For shared classes this
+            // clones Rc/Arc and therefore preserves Java object identity.
+            plan.push(Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                    java_ty: self.target().java_ty.clone(),
+                },
+            });
+        }
         let view_coercions = self.view().coercions();
         if !view_coercions.is_empty() {
             plan.extend(view_coercions);
@@ -915,6 +936,28 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
             return apply_shape_coercion_plan(expr, &optional_unwrap_followup_plan(element_plan));
         }
         OptionalShapeCoercionPolicy::MapElement { element_plan, .. } => {
+            if plan
+                .actual()
+                .optional_element_type()
+                .zip(plan.target().optional_element_type())
+                .is_some_and(|(actual, target)| actual == target)
+                && plan.actual().ownership == OwnershipShape::SharedBorrow
+                && plan.target().ownership == OwnershipShape::Owned
+                && matches!(
+                    element_plan.ownership(),
+                    OwnershipCoercionPolicy::RecoverOwnedWithClone { .. }
+                )
+            {
+                // A nullable borrowed local is represented as `Option<&T>`.
+                // Mapping Rust's `Clone::clone` over it clones the reference
+                // (`&T -> &T`), not the Java value required by an owned
+                // `Option<T>` boundary. `Option::cloned` states that carrier
+                // conversion directly and works for every cloneable payload.
+                return optional_projected_structured_expr(
+                    zero_arg_method_projection(expr, "cloned"),
+                    element_plan.target(),
+                );
+            }
             if optional_map_targets_borrowed_string_view(plan) {
                 let target_element_ty = plan
                     .target()
@@ -937,6 +980,24 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
             }
             let mapped_value =
                 apply_shape_coercion_plan(RustExpr::Var("value".to_string()), element_plan);
+            if matches!(
+                element_plan.dispatch(),
+                DispatchCoercionPolicy::CloneBoxDynTrait { .. }
+            ) {
+                // Native collection reads expose a borrowed optional storage
+                // slot (`&Option<Box<dyn Trait>>`). Mapping that reference
+                // directly would try to consume the Option. Borrow its
+                // payload first, then let the object-safe clone adapter
+                // materialize the owned trait object required by the target.
+                return optional_projected_structured_expr(
+                    optional_map_projection_expr(
+                        expr,
+                        OptionalMapReceiverProjection::AsRef,
+                        mapped_value,
+                    ),
+                    element_plan.target(),
+                );
+            }
             return optional_element_projection(expr, mapped_value, element_plan.target());
         }
         OptionalShapeCoercionPolicy::NoChange => {}
@@ -1955,6 +2016,17 @@ pub(crate) fn owner_associated_path_projection(owner: &str, member: &str) -> Rus
         let owner = crate::java_naming::rust_name_for_java_named_type(owner);
         return associated_path_projection([owner.as_str(), member]);
     }
+    if owner.contains('<') {
+        // In expression position Rust requires a turbofish before an
+        // associated item (`Owner::<T>::item`).  Keeping `Owner<T>` as an
+        // opaque path segment rendered the type spelling verbatim and was
+        // parsed as chained comparisons. Reuse the structured Rust-type
+        // parser so nested generic owners follow the same rule.
+        return rust_type_associated_path_projection(
+            rust_type_arg_projection_or_raw(owner),
+            member,
+        );
+    }
     associated_path_projection([owner, member])
 }
 
@@ -2396,6 +2468,12 @@ fn rendered_vec_macro_body(rendered: &str) -> Option<String> {
 }
 
 pub(crate) fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
+    if result_success_slot_shape(&expr).is_some_and(|shape| {
+        shape.ownership == OwnershipShape::Owned
+            && matches!(shape.dispatch, DispatchShape::BoxedDynTrait { .. })
+    }) {
+        return borrow_boxed_as_dyn_trait(expr, trait_name);
+    }
     let trait_name = normalize_emitted_java_type_name(trait_name);
     RustExpr::shaped(
         RustExprShape::Borrowed,
@@ -2404,6 +2482,20 @@ pub(crate) fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr 
             ty: format!("&dyn {trait_name}"),
         },
     )
+}
+
+fn result_success_slot_shape(expr: &RustExpr) -> Option<&RustSlotShape> {
+    expr.recorded_slot_shape().or_else(|| match expr {
+        RustExpr::Shaped {
+            shape: RustExprShape::ResultPropagated,
+            expr,
+            ..
+        } => match expr.as_ref() {
+            RustExpr::Try(success) => success.recorded_slot_shape(),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 fn borrow_boxed_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
@@ -5586,7 +5678,8 @@ pub(crate) fn owned_collection_to_vec_projection_for_receiver_type(
 }
 
 pub(crate) fn owned_sequence_elements_to_optional_vec_projection(receiver: RustExpr) -> RustExpr {
-    RustExpr::shaped(
+    let result_already_propagated = expr_is_result_propagated(&receiver);
+    let projected = RustExpr::shaped(
         RustExprShape::OwnedRecovery,
         typed_collect_projection(
             receiver_method_call_projection_exact(
@@ -5596,6 +5689,98 @@ pub(crate) fn owned_sequence_elements_to_optional_vec_projection(receiver: RustE
             ),
             "Vec<_>",
         ),
+    );
+    if result_already_propagated {
+        // Representation adapters run after a fallible producer has already
+        // been unwrapped. Preserve that effect marker outside the adapter so
+        // statement/assignment lowering cannot append a second `?` to the
+        // resulting plain `Vec`.
+        RustExpr::shaped(RustExprShape::ResultPropagated, projected)
+    } else {
+        projected
+    }
+}
+
+/// Cross an owned Java sequence boundary whose source carrier permits null
+/// elements but whose solved destination carrier does not.
+///
+/// Java arrays and collections may contain null even when their declared
+/// element type is non-null-looking.  When whole-program signature solving
+/// proves a callee only consumes non-null elements, its Rust ABI can be
+/// `Vec<T>` while an array-backed caller remains `Vec<Option<T>>`.  Keep that
+/// representation decision local to the boundary and perform the same null
+/// check for every element instead of teaching individual library calls about
+/// the two carriers.
+pub(crate) fn owned_optional_sequence_elements_to_non_null_vec_projection(
+    receiver: RustExpr,
+) -> RustExpr {
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        typed_collect_projection(
+            receiver_method_call_projection_exact(
+                receiver_method_call_projection_exact(receiver, "into_iter", Vec::new()),
+                "map",
+                vec![RustExpr::Closure {
+                    is_move: false,
+                    return_type: None,
+                    params: vec![RustClosureParam {
+                        pattern: "__java_element".to_string(),
+                        ty: None,
+                    }],
+                    body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                        RustExpr::Var("__java_element".to_string()),
+                        "expect",
+                        vec![rust_string_literal_projection("Java null sequence element")],
+                    ))),
+                }],
+            ),
+            "Vec<_>",
+        ),
+    )
+}
+
+/// Cross a borrowed Java sequence boundary whose source carrier permits null
+/// elements but whose solved destination carrier does not.
+///
+/// The element validation necessarily materializes a temporary `Vec<T>`: a
+/// `&[Option<T>]` cannot be reinterpreted as `&[T]`.  Borrow its slice only
+/// after applying the same checked element conversion used by the owned ABI;
+/// Rust then keeps the temporary alive for the enclosing call expression.
+pub(crate) fn borrowed_optional_sequence_elements_to_non_null_slice_projection(
+    receiver: RustExpr,
+) -> RustExpr {
+    let checked = typed_collect_projection(
+        receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(receiver, "iter", Vec::new()),
+            "map",
+            vec![RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![RustClosureParam {
+                    pattern: "__java_element".to_string(),
+                    ty: None,
+                }],
+                body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                    receiver_method_call_projection_exact(
+                        receiver_method_call_projection_exact(
+                            RustExpr::Var("__java_element".to_string()),
+                            "as_ref",
+                            Vec::new(),
+                        ),
+                        "expect",
+                        vec![rust_string_literal_projection("Java null sequence element")],
+                    ),
+                    "clone",
+                    Vec::new(),
+                ))),
+            }],
+        ),
+        "Vec<_>",
+    );
+    receiver_method_call_projection_exact(
+        RustExpr::shaped(RustExprShape::OwnedRecovery, checked),
+        "as_slice",
+        Vec::new(),
     )
 }
 
@@ -6151,6 +6336,35 @@ pub(crate) fn native_collection_from_source_projection(
             source
         }
     }
+}
+
+/// Constructs one native collection from another while retaining the source
+/// collection's semantic kind. A Java `new ArrayList(set)` must collect the
+/// set's iterator; treating every list source as an already-materialized Vec
+/// only happened to work for list-to-list construction.
+pub(crate) fn native_collection_from_typed_source_projection(
+    target_kind: crate::stdlib::JavaCollectionKind,
+    source_kind: crate::stdlib::JavaCollectionKind,
+    source: RustExpr,
+) -> RustExpr {
+    if matches!(target_kind, crate::stdlib::JavaCollectionKind::List)
+        && !matches!(source_kind, crate::stdlib::JavaCollectionKind::List)
+    {
+        return typed_collect_projection(zero_arg_method_projection(source, "into_iter"), "Vec<_>");
+    }
+    native_collection_from_source_projection(target_kind, source)
+}
+
+/// Materialize a Java hash set whose element equality is carried explicitly,
+/// then expose the abstract `Collection` representation used by translated
+/// signatures. This is the generic-key counterpart of the native HashSet
+/// constructor path and avoids imposing Rust structural `Eq + Hash`.
+pub(crate) fn java_semantic_hash_set_vec_projection(source: RustExpr) -> RustExpr {
+    let set = typed_collect_projection(
+        zero_arg_method_projection(source, "into_iter"),
+        "JavaSemanticHashSet<_>",
+    );
+    typed_collect_projection(zero_arg_method_projection(set, "into_iter"), "Vec<_>")
 }
 
 pub(crate) fn array_blocking_queue_from_source_projection(source: RustExpr) -> RustExpr {
@@ -8117,6 +8331,13 @@ pub(crate) fn sequence_get_expect_projection(receiver: RustExpr, index: RustExpr
             body: RustClosureBody::Expr(Box::new(index_out_of_bounds_exception_expr())),
         }],
     ))
+}
+
+pub(crate) fn sequence_get_mut_expect_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
+    method_expect_projection(
+        method_call_projection(receiver, "get_mut", vec![index]),
+        "Java null receiver",
+    )
 }
 
 fn index_out_of_bounds_exception_expr() -> RustExpr {
@@ -11132,11 +11353,20 @@ fn recover_rendered_direct_clone_recovery_projection(rendered: &str) -> Option<R
 }
 
 fn rust_expr_has_direct_clone_recovery_projection(expr: &RustExpr) -> bool {
-    matches!(
-        expr.unshaped(),
-        RustExpr::MethodCall { method, args, .. }
-            if args.is_empty() && matches!(method.as_str(), "clone" | "clone_box")
-    )
+    match expr.unshaped() {
+        RustExpr::MethodCall { method, args, .. } => {
+            args.is_empty() && matches!(method.as_str(), "clone" | "clone_box")
+        }
+        RustExpr::Call { function, args } => {
+            args.len() == 1
+                && matches!(
+                    function.unshaped(),
+                    RustExpr::Path(path)
+                        if path == &["std", "clone", "Clone", "clone"]
+                )
+        }
+        _ => false,
+    }
 }
 
 /// Whether an owned value has already been recovered from a borrow here.
@@ -11308,18 +11538,9 @@ pub(crate) fn apply_audited_clone_recovery(expr: RustExpr) -> RustExpr {
 }
 
 pub(crate) fn apply_clone_projection(expr: RustExpr) -> RustExpr {
-    let receiver = if expr.is_raw_leaf() {
-        clone_method_receiver(expr, true)
-    } else {
-        parenthesize_method_receiver(expr)
-    };
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
-        RustExpr::MethodCall {
-            receiver: Box::new(receiver),
-            method: "clone".to_string(),
-            args: Vec::new(),
-        },
+        rust_clone_trait_projection(expr),
     )
 }
 
@@ -11461,7 +11682,19 @@ pub(crate) fn java_primitive_updated_value_projection(
         PrimitiveType::Char => Some(java_char_from_u32_mask_projection(
             char_update_wrapping_value_projection(target, method),
         )),
-        PrimitiveType::Float | PrimitiveType::Double | PrimitiveType::Boolean => None,
+        PrimitiveType::Float | PrimitiveType::Double => Some(RustExpr::Binary {
+            op: if increment { "+" } else { "-" }.to_string(),
+            left: Box::new(target),
+            right: Box::new(RustExpr::Literal(
+                if primitive == PrimitiveType::Float {
+                    "1f32"
+                } else {
+                    "1f64"
+                }
+                .to_string(),
+            )),
+        }),
+        PrimitiveType::Boolean => None,
     }
 }
 
@@ -12157,6 +12390,7 @@ fn string_view_expr(expr: RustExpr) -> RustExpr {
 /// text ending in `.as_slice()` is no longer semantic evidence here.
 fn expr_is_slice_view(expr: &RustExpr) -> bool {
     expr.recorded_shape() == Some(RustExprShape::SliceView)
+        || rust_expr_is_zero_arg_method_call(expr, "as_slice")
 }
 
 /// A slice view produced by an adapter.
@@ -12368,17 +12602,21 @@ fn erased_object_closed_enum_pattern_downcast_projection(
     let variant_tail = variants.iter().rev().fold(
         RustExpr::Path(vec!["None".to_string()]),
         |else_expr, variant| {
-            let variant = normalize_emitted_java_type_name(variant);
+            let payload_type = normalize_emitted_java_type_name(variant);
+            let variant_name = closed_enum_variant_name_for_payload_type(&payload_type);
             let downcast = method_expect_projection(
-                erased_object_downcast_ref_projection(object.clone(), &variant),
+                erased_object_downcast_ref_projection(object.clone(), &payload_type),
                 crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
             );
             RustExpr::If {
-                condition: Box::new(erased_object_is_type_projection(object.clone(), &variant)),
+                condition: Box::new(erased_object_is_type_projection(
+                    object.clone(),
+                    &payload_type,
+                )),
                 then_expr: Box::new(RustExpr::Call {
                     function: Box::new(RustExpr::path(["Some"])),
                     args: vec![RustExpr::Call {
-                        function: Box::new(RustExpr::path([enum_name, variant.as_str()])),
+                        function: Box::new(RustExpr::path([enum_name, variant_name.as_str()])),
                         args: vec![apply_clone_projection(downcast)],
                     }],
                 }),
@@ -12460,10 +12698,13 @@ fn closed_enum_downcast_projection(
 }
 
 fn dyn_trait_downcast_ref_projection(expr: RustExpr, target_type: &str) -> RustExpr {
-    typed_zero_arg_method_projection(
-        zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_any"),
-        "downcast_ref",
-        target_type,
+    RustExpr::shaped(
+        RustExprShape::Borrowed,
+        typed_zero_arg_method_projection(
+            zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_any"),
+            "downcast_ref",
+            target_type,
+        ),
     )
 }
 
@@ -12997,7 +13238,7 @@ fn apply_optional_borrowed_element_target_view(
                 || crate::types::sequence_element_type(&target_element.java_ty).is_some() =>
         {
             if crate::types::two_dimensional_array_element_type(&target_element.java_ty).is_some() {
-                zero_arg_method_projection(expr.clone(), "as_ref")
+                zero_arg_method_projection(strip_terminal_as_ref_projection(expr.clone()), "as_ref")
             } else {
                 zero_arg_method_projection(
                     strip_terminal_as_ref_projection(expr.clone()),
@@ -14745,7 +14986,18 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             enum_name,
             variant_name,
             invalid_cast,
-        } => closed_enum_downcast_projection(expr, enum_name, variant_name, invalid_cast),
+        } => {
+            if java_type_param_variant_name(variant_name) {
+                // A Java type parameter bounded by a closed hierarchy is not
+                // a runtime subclass/variant.  After inherited generic
+                // specialization the expression is already the carrier for
+                // that bound, so a synthetic `Carrier::T(...)` match would
+                // name a variant that cannot exist.
+                expr
+            } else {
+                closed_enum_downcast_projection(expr, enum_name, variant_name, invalid_cast)
+            }
+        }
         Coercion::DowncastDynTrait {
             target_type,
             invalid_cast,
@@ -14824,7 +15076,16 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             clone_erased_object_helper_once(expr, helper)
         }
         Coercion::ToOwnedSequence { policy } => apply_to_owned_sequence(expr, policy),
-        Coercion::CloneRecovery { policy } => apply_clone_recovery(expr, policy),
+        Coercion::CloneRecovery { policy } | Coercion::RustCloneRecovery { policy } => {
+            if rust_expr_has_clone_recovery(&expr) {
+                RustExpr::shaped(RustExprShape::OwnedRecovery, expr)
+            } else {
+                RustExpr::shaped(
+                    RustExprShape::OwnedRecovery,
+                    clone_recovery_postfix_marker_expr(rust_clone_trait_projection(expr), policy),
+                )
+            }
+        }
         Coercion::UnsupportedOwnership {
             actual_ownership,
             target_ownership,
@@ -15288,15 +15549,19 @@ fn apply_erased_object_closed_enum_downcast(
         ))],
     };
     let tail = variants.iter().rev().fold(fallback, |else_expr, variant| {
-        let variant = normalize_emitted_java_type_name(variant);
+        let payload_type = normalize_emitted_java_type_name(variant);
+        let variant_name = closed_enum_variant_name_for_payload_type(&payload_type);
         let downcast = method_expect_projection(
-            erased_object_downcast_ref_projection(object.clone(), &variant),
+            erased_object_downcast_ref_projection(object.clone(), &payload_type),
             crate::output_markers::INVALID_JAVA_CAST_MESSAGE,
         );
         RustExpr::If {
-            condition: Box::new(erased_object_is_type_projection(object.clone(), &variant)),
+            condition: Box::new(erased_object_is_type_projection(
+                object.clone(),
+                &payload_type,
+            )),
             then_expr: Box::new(RustExpr::Call {
-                function: Box::new(RustExpr::path([enum_name, variant.as_str()])),
+                function: Box::new(RustExpr::path([enum_name, variant_name.as_str()])),
                 args: vec![apply_clone_projection(downcast)],
             }),
             else_expr: Box::new(else_expr),
@@ -15311,6 +15576,35 @@ fn apply_erased_object_closed_enum_downcast(
         }],
         tail: Some(Box::new(tail)),
     }
+}
+
+fn closed_enum_variant_name_for_payload_type(payload_type: &str) -> String {
+    let mut nominal = payload_type.trim();
+    loop {
+        let inner = shared_handle_inner_type(nominal)
+            .or_else(|| {
+                nominal
+                    .strip_prefix("std::cell::RefCell<")
+                    .and_then(|inner| inner.strip_suffix('>'))
+            })
+            .or_else(|| {
+                nominal
+                    .strip_prefix("std::sync::Mutex<")
+                    .and_then(|inner| inner.strip_suffix('>'))
+            });
+        let Some(inner) = inner else {
+            break;
+        };
+        nominal = inner.trim();
+    }
+    nominal
+        .split('<')
+        .next()
+        .unwrap_or(nominal)
+        .rsplit("::")
+        .next()
+        .unwrap_or(nominal)
+        .to_string()
 }
 
 fn expr_is_unresolved_static_owner_value_call(expr: &RustExpr) -> bool {
@@ -15532,20 +15826,92 @@ fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExp
         );
     }
     if !expr.is_raw_leaf() {
+        // Every clone inserted by ownership recovery is Rust's `Clone`, not a
+        // translated Java `clone()` member.  UFCS keeps that distinction
+        // explicit even when a source interface declares its own `clone`
+        // method with a different return or exception contract.  The audit
+        // marker still records that capability inference was conservative.
+        let cloned = rust_clone_trait_projection(expr);
         return RustExpr::shaped(
             RustExprShape::OwnedRecovery,
-            clone_recovery_postfix_marker_expr(
-                zero_arg_method_projection(parenthesize_method_receiver(expr), "clone"),
-                policy,
-            ),
+            clone_recovery_postfix_marker_expr(cloned, policy),
         );
     }
+    let cloned = rust_clone_trait_projection(expr);
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
-        clone_recovery_postfix_marker_expr(
-            zero_arg_method_projection(clone_method_receiver(expr, false), "clone"),
-            policy,
-        ),
+        clone_recovery_postfix_marker_expr(cloned, policy),
+    )
+}
+
+/// Invoke Rust's ownership clone without allowing a translated Java
+/// `clone()` inherent method to win method lookup.
+///
+/// Java `clone()` and Rust `Clone::clone` have different contracts (the former
+/// may deep-copy and throw). Every recovery routed here is inserted solely to
+/// preserve Java reference/value availability across a Rust move, so its
+/// operation is the Rust trait even when the source class declares `clone()`.
+fn rust_clone_trait_projection(expr: RustExpr) -> RustExpr {
+    let already_borrowed = rust_clone_trait_argument_is_already_borrowed(&expr);
+    let argument = if already_borrowed {
+        expr
+    } else {
+        let expr = if expr.is_raw_leaf() {
+            clone_method_receiver(expr, false)
+        } else {
+            expr
+        };
+        borrowed_raw_safe_expr(expr)
+    };
+    function_call_projection(
+        RustExpr::path(["std", "clone", "Clone", "clone"]),
+        vec![argument],
+    )
+}
+
+fn rust_clone_trait_argument_is_already_borrowed(expr: &RustExpr) -> bool {
+    if expr.recorded_slot_shape().is_some_and(|shape| {
+        matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    }) || matches!(
+        expr.recorded_shape(),
+        Some(RustExprShape::Borrowed | RustExprShape::MutBorrowed)
+    ) || matches!(
+        expr.unshaped(),
+        RustExpr::Unary { op, .. } if matches!(op.as_str(), "&" | "&mut")
+    ) || matches!(
+        expr.unshaped(),
+        RustExpr::MethodCall { method, .. }
+            if matches!(method.as_str(), "as_ref" | "as_deref" | "downcast_ref")
+                || method.starts_with("downcast_ref::<")
+    ) {
+        return true;
+    }
+    if let RustExpr::Grouped(inner) = expr.unshaped() {
+        return rust_clone_trait_argument_is_already_borrowed(inner);
+    }
+    if let RustExpr::Try(inner) = expr.unshaped() {
+        // `option.as_ref().ok_or_else(...)?` evaluates to `&T`.  UFCS clone
+        // must receive that reference directly so `Self` is inferred as T;
+        // borrowing it again would infer `Self = &T` and merely clone the
+        // reference instead of recovering the owned Java value.
+        return rust_clone_trait_argument_is_already_borrowed(inner);
+    }
+    if let RustExpr::Raw(raw) = expr.unshaped()
+        && (raw.contains(".downcast_ref::<")
+            || raw.ends_with(".as_ref()")
+            || raw.ends_with(".as_deref()"))
+    {
+        return true;
+    }
+    matches!(
+        expr.unshaped(),
+        RustExpr::MethodCall { receiver, method, args }
+            if ((method == "unwrap" && args.is_empty())
+                || matches!(method.as_str(), "expect" | "ok_or" | "ok_or_else"))
+                && rust_clone_trait_argument_is_already_borrowed(receiver)
     )
 }
 
@@ -15555,14 +15921,6 @@ fn rust_expr_is_target_typed_into_function(function: &RustExpr) -> bool {
         RustExpr::Raw(path)
             if path.starts_with("std::convert::Into::<") && path.ends_with(">::into")
     )
-}
-
-fn parenthesize_method_receiver(expr: RustExpr) -> RustExpr {
-    if structured_method_receiver_needs_parentheses(&expr) {
-        RustExpr::Grouped(Box::new(expr))
-    } else {
-        parenthesize_raw_method_receiver(expr)
-    }
 }
 
 #[cfg(test)]
@@ -15683,6 +16041,23 @@ mod tests {
     use crate::rust_ir::RustPattern;
 
     use super::*;
+
+    #[test]
+    fn optional_element_vec_adapter_preserves_consumed_result_marker() {
+        let produced = propagate_result_projection(function_call_projection(
+            RustExpr::path(["make_values"]),
+            Vec::new(),
+        ));
+        let adapted = owned_sequence_elements_to_optional_vec_projection(produced);
+        let normalized = propagate_result_projection(adapted);
+        let rendered = crate::emit::emit_expr(&normalized);
+
+        assert_eq!(rendered.matches('?').count(), 1, "{rendered}");
+        assert!(
+            rendered.contains("make_values()?.into_iter().map(Some).collect::<Vec<_>>()"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn primitive_type_name_policy_names_rust_scalars() {
@@ -16097,6 +16472,39 @@ mod tests {
             "matrix.as_ref()",
             "Array2 is a sized matrix carrier, not a flat sequence view"
         );
+    }
+
+    #[test]
+    fn optional_borrowed_array2_projection_is_idempotent_without_shape_metadata() {
+        let array2_ty = JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Double,
+        )))));
+        let carrier_shape =
+            RustSlotShape::conservative(crate::types::optional_java_type(array2_ty.clone()));
+        let element_shape = RustSlotShape::conservative(array2_ty.clone());
+        let mut target = RustSlotShape::conservative(crate::types::optional_java_type(array2_ty));
+        target.ownership = OwnershipShape::SharedBorrow;
+        target.view = ViewShape::Slice;
+        let policy = BorrowedElementSlotAdapterPolicy::new(
+            target,
+            carrier_shape,
+            element_shape,
+            BorrowedElementCarrier::Option,
+            true,
+            None,
+        );
+        let already_projected = zero_arg_method_projection(
+            RustExpr::Try(Box::new(function_call_projection(
+                RustExpr::Var("matrix".to_string()),
+                Vec::new(),
+            ))),
+            "as_ref",
+        );
+
+        let projected = apply_optional_borrowed_element_target_view(&already_projected, &policy)
+            .expect("Array2 optional payload borrow");
+
+        assert_eq!(emit::emit_expr(&projected), "matrix()?.as_ref()");
     }
 
     #[test]
@@ -20612,6 +21020,14 @@ mod tests {
             RustExpr::Path(vec!["Owner".to_string(), "build".to_string()])
         );
         assert_eq!(
+            emit::emit_expr(&owner_associated_path_projection("Owner<T>", "build")),
+            "Owner::<T>::build"
+        );
+        assert!(matches!(
+            owner_associated_path_projection("Owner<T>", "build"),
+            RustExpr::GenericPath { .. }
+        ));
+        assert_eq!(
             emit::emit_expr(&java_class_static_path_projection("for_name")),
             "JavaClass::<()>::for_name"
         );
@@ -20677,7 +21093,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&subtype_ctor),
-            "pkg::Outer::<T>::new_1(value.clone())"
+            "pkg::Outer::<T>::new_1(std::clone::Clone::clone(&value))"
         );
         assert!(matches!(
             subtype_ctor,
@@ -20685,8 +21101,7 @@ mod tests {
                 if matches!(function.as_ref(), RustExpr::Path(path)
                     if path == &vec!["pkg".to_string(), "Outer::<T>".to_string(), "new_1".to_string()])
                     && matches!(args.as_slice(), [arg]
-                        if matches!(arg.unshaped(), RustExpr::MethodCall { method, .. }
-                            if method == "clone"))
+                        if rust_expr_has_direct_clone_recovery(arg))
         ));
         assert_eq!(
             emit::emit_expr(&static_storage_accessor_projection("VALUES")),
@@ -20904,6 +21319,20 @@ mod tests {
                 args: vec![RustExpr::Literal("1".to_string())],
             }
         );
+        let double_updated_value = java_primitive_updated_value_projection(
+            RustExpr::Var("probability".to_string()),
+            true,
+            PrimitiveType::Double,
+        )
+        .expect("double update value should lower");
+        assert_eq!(emit::emit_expr(&double_updated_value), "probability + 1f64");
+        let float_updated_value = java_primitive_updated_value_projection(
+            RustExpr::Var("weight".to_string()),
+            false,
+            PrimitiveType::Float,
+        )
+        .expect("float update value should lower");
+        assert_eq!(emit::emit_expr(&float_updated_value), "weight - 1f32");
         let raw_updated_value = java_primitive_updated_value_projection(
             RustExpr::Raw("left + right".to_string()),
             false,
@@ -22920,7 +23349,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&subtype_constructor),
-            "Locatable::new_1(value.clone())"
+            "Locatable::new_1(std::clone::Clone::clone(&value))"
         );
         assert!(matches!(
             subtype_constructor,
@@ -22930,13 +23359,7 @@ mod tests {
                     && matches!(
                         args.as_slice(),
                         [arg] if arg.recorded_shape() == Some(RustExprShape::OwnedRecovery)
-                            && matches!(
-                                arg.unshaped(),
-                                RustExpr::MethodCall { receiver, method, args }
-                                    if method == "clone"
-                                        && args.is_empty()
-                                        && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
-                            )
+                            && rust_expr_has_direct_clone_recovery(arg)
                     )
         ));
         let generic_subtype_constructor = subtype_owned_constructor_from_borrowed_projection(
@@ -22945,7 +23368,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&generic_subtype_constructor),
-            "JavaClass::<Vec<T>>::new_1(value.clone())"
+            "JavaClass::<Vec<T>>::new_1(std::clone::Clone::clone(&value))"
         );
         assert!(matches!(
             generic_subtype_constructor,
@@ -22962,7 +23385,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&generic_owner_fallback),
-            "std::rc::Rc<FormatLine>::new_1(value.clone())"
+            "std::rc::Rc<FormatLine>::new_1(std::clone::Clone::clone(&value))"
         );
         assert!(matches!(
             generic_owner_fallback,
@@ -22984,7 +23407,7 @@ mod tests {
         );
         assert_eq!(
             emit::emit_expr(&raw_subtype_constructor),
-            "Locatable::new_1((left + right).clone())"
+            "Locatable::new_1(std::clone::Clone::clone(&(left + right)))"
         );
         assert!(matches!(
             raw_subtype_constructor,
@@ -22994,23 +23417,7 @@ mod tests {
                     && matches!(
                         args.as_slice(),
                         [arg] if arg.recorded_shape() == Some(RustExprShape::OwnedRecovery)
-                            && matches!(
-                                arg.unshaped(),
-                                RustExpr::MethodCall { receiver, method, args }
-                                    if method == "clone"
-                                        && args.is_empty()
-                                        && matches!(
-                                            receiver.as_ref(),
-                                            RustExpr::Grouped(grouped)
-                                                if matches!(
-                                                    grouped.as_ref(),
-                                                    RustExpr::Binary { op, left, right }
-                                                        if op == "+"
-                                                            && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
-                                                            && matches!(right.as_ref(), RustExpr::Var(name) if name == "right")
-                                                )
-                                        )
-                            )
+                            && rust_expr_has_direct_clone_recovery(arg)
                     )
         ));
         assert_eq!(
@@ -23591,6 +23998,20 @@ mod tests {
     }
 
     #[test]
+    fn closed_enum_type_parameter_downcast_is_representation_identity() {
+        let value = RustExpr::Var("hmm".to_string());
+        let lowered = apply_coercions(
+            value.clone(),
+            &[Coercion::DowncastClosedEnum {
+                enum_name: "HmmValue".to_string(),
+                variant_name: "H".to_string(),
+                invalid_cast: InvalidCastPolicy::Panic,
+            }],
+        );
+        assert_eq!(lowered, value);
+    }
+
+    #[test]
     fn erased_object_type_method_projections_are_structured() {
         let is_type = erased_object_is_type_projection(RustExpr::Var("obj".to_string()), "Target");
         assert_eq!(emit::emit_expr(&is_type), "obj.is::<Target>()");
@@ -23788,15 +24209,15 @@ mod tests {
         .expect("erased-object source carrier instanceof should expose pattern recovery");
         let rendered = emit::emit_expr(&erased_carrier_downcast);
         assert!(
-            rendered.contains("Some(__java_instanceof_value.downcast_ref::<AnimalValue>().expect(\"invalid Java cast\").clone())"),
+            rendered.contains("Some(std::clone::Clone::clone(__java_instanceof_value.downcast_ref::<AnimalValue>().expect(\"invalid Java cast\")))"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("Some(AnimalValue::Animal(__java_instanceof_value.downcast_ref::<Animal>().expect(\"invalid Java cast\").clone()))"),
+            rendered.contains("Some(AnimalValue::Animal(std::clone::Clone::clone(__java_instanceof_value.downcast_ref::<Animal>().expect(\"invalid Java cast\"))))"),
             "{rendered}"
         );
         assert!(
-            rendered.contains("Some(AnimalValue::Dog(__java_instanceof_value.downcast_ref::<Dog>().expect(\"invalid Java cast\").clone()))"),
+            rendered.contains("Some(AnimalValue::Dog(std::clone::Clone::clone(__java_instanceof_value.downcast_ref::<Dog>().expect(\"invalid Java cast\"))))"),
             "{rendered}"
         );
     }
@@ -25411,69 +25832,38 @@ mod tests {
         let expr = apply_audited_clone_recovery(RustExpr::Var("value".to_string()));
         assert_eq!(
             emit::emit_expr(&expr),
-            "value.clone()/* TODO(translation): validate added clone */"
+            "std::clone::Clone::clone(&value)/* TODO(translation): validate added clone */"
         );
         assert!(matches!(
             expr.into_unshaped(),
             RustExpr::PostfixComment { expr, comment }
                 if comment == "/* TODO(translation): validate added clone */"
-                    && matches!(
-                        expr.as_ref(),
-                        RustExpr::MethodCall { receiver, method, args }
-                            if method == "clone"
-                                && args.is_empty()
-                                && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
-                    )
+                    && rust_expr_has_direct_clone_recovery(&expr)
         ));
 
         let raw_expr = apply_audited_clone_recovery(RustExpr::Raw("left + right".to_string()));
         assert_eq!(
             emit::emit_expr(&raw_expr),
-            "(left + right).clone()/* TODO(translation): validate added clone */"
+            "std::clone::Clone::clone(&(left + right))/* TODO(translation): validate added clone */"
         );
         assert!(matches!(
             raw_expr.into_unshaped(),
             RustExpr::PostfixComment { expr, comment }
                 if comment == "/* TODO(translation): validate added clone */"
-                    && matches!(
-                        expr.as_ref(),
-                        RustExpr::MethodCall { receiver, method, args }
-                            if method == "clone"
-                                && args.is_empty()
-                                && matches!(
-                                    receiver.as_ref(),
-                                    RustExpr::Grouped(grouped)
-                                        if matches!(grouped.as_ref(), RustExpr::Binary { op, left, right }
-                                            if op == "+"
-                                                && matches!(left.as_ref(), RustExpr::Var(name) if name == "left")
-                                                && matches!(right.as_ref(), RustExpr::Var(name) if name == "right"))
-                                )
-                    )
+                    && rust_expr_has_direct_clone_recovery(&expr)
         ));
 
         let recoverable_raw =
             apply_audited_clone_recovery(RustExpr::Raw("value.to_owned()".to_string()));
         assert_eq!(
             emit::emit_expr(&recoverable_raw),
-            "value.to_owned().clone()/* TODO(translation): validate added clone */"
+            "std::clone::Clone::clone(&value.to_owned())/* TODO(translation): validate added clone */"
         );
         assert!(matches!(
             recoverable_raw.into_unshaped(),
             RustExpr::PostfixComment { expr, comment }
                 if comment == "/* TODO(translation): validate added clone */"
-                    && matches!(
-                        expr.as_ref(),
-                        RustExpr::MethodCall { receiver, method, args }
-                            if method == "clone"
-                                && args.is_empty()
-                                && matches!(
-                                    receiver.as_ref(),
-                                    RustExpr::MethodCall { receiver, method, args }
-                                        if method == "to_owned"
-                                            && args.is_empty()
-                                            && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
-                                )
-                    )
+                    && rust_expr_has_direct_clone_recovery(&expr)
         ));
 
         let already_cloned_raw =
@@ -25493,26 +25883,30 @@ mod tests {
     }
 
     #[test]
+    fn clone_recovery_does_not_reborrow_propagated_optional_shared_value() {
+        let borrowed = RustExpr::Try(Box::new(RustExpr::MethodCall {
+            receiver: Box::new(zero_arg_method_projection(
+                RustExpr::Var("value".to_string()),
+                "as_ref",
+            )),
+            method: "ok_or_else".to_string(),
+            args: vec![RustExpr::Var("missing".to_string())],
+        }));
+
+        let recovered = apply_audited_clone_recovery(borrowed);
+
+        assert_eq!(
+            emit::emit_expr(&recovered),
+            "std::clone::Clone::clone(value.as_ref().ok_or_else(missing)?)/* TODO(translation): validate added clone */"
+        );
+    }
+
+    #[test]
     fn direct_clone_projection_records_recovery_shape() {
         let expr = apply_clone_projection(RustExpr::Var("value".to_string()));
-        assert_eq!(emit::emit_expr(&expr), "value.clone()");
-        assert_eq!(
-            expr.clone().into_unshaped(),
-            RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Var("value".to_string())),
-                method: "clone".to_string(),
-                args: Vec::new(),
-            }
-        );
+        assert_eq!(emit::emit_expr(&expr), "std::clone::Clone::clone(&value)");
         assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
         assert!(rust_expr_has_clone_recovery(&expr));
-        assert!(matches!(
-            expr.clone().into_unshaped(),
-            RustExpr::MethodCall { receiver, method, args }
-                if method == "clone"
-                    && args.is_empty()
-                    && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
-        ));
         assert!(rust_expr_has_direct_clone_recovery(&expr));
         assert!(!rust_expr_has_direct_clone_recovery(&RustExpr::shaped(
             RustExprShape::OwnedRecovery,
@@ -25561,81 +25955,60 @@ mod tests {
     fn clone_recovery_parenthesizes_only_receiver_level_casts() {
         assert_eq!(
             render_clone_projection("value as Target"),
-            "(value as Target).clone()"
+            "std::clone::Clone::clone(&(value as Target))"
         );
-        assert_eq!(render_clone_projection("*value"), "(*value).clone()");
+        assert_eq!(
+            render_clone_projection("*value"),
+            "std::clone::Clone::clone(&(*value))"
+        );
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
                 "value as Target".to_string()
             ))),
-            "(value as Target).clone()"
+            "std::clone::Clone::clone(&(value as Target))"
         );
-        assert!(matches!(
-            apply_clone_projection(RustExpr::Raw("value as Target".to_string())).into_unshaped(),
-            RustExpr::MethodCall { receiver, method, args }
-                if method == "clone"
-                    && args.is_empty()
-                    && matches!(receiver.as_ref(), RustExpr::Grouped(grouped)
-                        if matches!(
-                            grouped.as_ref(),
-                            RustExpr::Cast { expr, ty }
-                                if ty == "Target"
-                                    && matches!(expr.as_ref(), RustExpr::Var(name) if name == "value")
-                        ))
+        assert!(rust_expr_has_direct_clone_recovery(
+            &apply_clone_projection(RustExpr::Raw("value as Target".to_string()))
         ));
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
                 "format!(\" as \")".to_string()
             ))),
-            "format!(\" as \").clone()"
+            "std::clone::Clone::clone(&format!(\" as \"))"
         );
-        assert!(matches!(
-            apply_clone_projection(RustExpr::Raw("\" as \"".to_string())).into_unshaped(),
-            RustExpr::MethodCall { receiver, method, args }
-                if method == "clone"
-                    && args.is_empty()
-                    && matches!(receiver.as_ref(), RustExpr::Literal(raw) if raw == "\" as \"")
+        assert!(rust_expr_has_direct_clone_recovery(
+            &apply_clone_projection(RustExpr::Raw("\" as \"".to_string()))
         ));
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
                 "\" as \"".to_string()
             ))),
-            "\" as \".clone()"
+            "std::clone::Clone::clone(&\" as \")"
         );
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
                 "r#\" as \"#".to_string()
             ))),
-            "r#\" as \"#.clone()"
+            "std::clone::Clone::clone(&r#\" as \"#)"
         );
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
                 "r#\"quoted \" as text\"#".to_string()
             ))),
-            "r#\"quoted \" as text\"#.clone()"
+            "std::clone::Clone::clone(&r#\"quoted \" as text\"#)"
         );
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw(
                 "Table::VALUES[index as usize]".to_string()
             ))),
-            "Table::VALUES[index as usize].clone()"
+            "std::clone::Clone::clone(&Table::VALUES[index as usize])"
         );
-        assert!(matches!(
-            apply_clone_projection(RustExpr::Raw("value.to_owned()".to_string())).into_unshaped(),
-            RustExpr::MethodCall { receiver, method, args }
-                if method == "clone"
-                    && args.is_empty()
-                    && matches!(
-                        receiver.as_ref(),
-                        RustExpr::MethodCall { receiver, method, args }
-                            if method == "to_owned"
-                                && args.is_empty()
-                                && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
-                    )
+        assert!(rust_expr_has_direct_clone_recovery(
+            &apply_clone_projection(RustExpr::Raw("value.to_owned()".to_string()))
         ));
         assert_eq!(
             emit::emit_expr(&apply_clone_projection(RustExpr::Raw("*value".to_string()))),
-            "(*value).clone()"
+            "std::clone::Clone::clone(&(*value))"
         );
     }
 
@@ -25703,14 +26076,14 @@ mod tests {
             apply_audited_clone_recovery(RustExpr::Raw("value.clone() trailing".to_string()));
         assert_eq!(
             emit::emit_expr(&malformed_suffix),
-            "(value.clone() trailing).clone()/* TODO(translation): validate added clone */"
+            "std::clone::Clone::clone(&(value.clone() trailing))/* TODO(translation): validate added clone */"
         );
 
         let nested_clone =
             apply_audited_clone_recovery(RustExpr::Raw("left + value.clone()".to_string()));
         assert_eq!(
             emit::emit_expr(&nested_clone),
-            "(left + value.clone()).clone()/* TODO(translation): validate added clone */"
+            "std::clone::Clone::clone(&(left + value.clone()))/* TODO(translation): validate added clone */"
         );
 
         assert!(rust_expr_has_clone_recovery(&RustExpr::Raw(
@@ -25747,7 +26120,7 @@ mod tests {
         let expr = apply_audited_clone_recovery(RustExpr::Raw("Some(value)".to_string()));
         assert_eq!(
             emit::emit_expr(&expr),
-            "Some(value.clone()/* TODO(translation): validate added clone */)"
+            "Some(std::clone::Clone::clone(&value)/* TODO(translation): validate added clone */)"
         );
     }
 
@@ -27403,6 +27776,35 @@ mod tests {
     }
 
     #[test]
+    fn proven_clone_before_target_typed_into_uses_rust_clone_trait() {
+        let source_ty = JavaType::Named {
+            name: "Child".to_string(),
+            args: Vec::new(),
+        };
+        let target_ty = JavaType::Named {
+            name: "Base".to_string(),
+            args: Vec::new(),
+        };
+        let projected = apply_coercions(
+            RustExpr::Var("value".to_string()),
+            &[
+                Coercion::ExternalInto {
+                    from_type: source_ty.clone(),
+                    to_type: target_ty,
+                },
+                Coercion::CloneRecovery {
+                    policy: CloneRecoveryPolicy::ProvenCloneCapability { java_ty: source_ty },
+                },
+            ],
+        );
+
+        assert_eq!(
+            emit::emit_expr(&projected),
+            "std::convert::Into::<Base>::into(std::clone::Clone::clone(&value))"
+        );
+    }
+
+    #[test]
     fn to_owned_sequence_projection_keeps_proven_recovery_structured() {
         let proven = to_owned_sequence_projection(
             RustExpr::Var("values".to_string()),
@@ -27697,13 +28099,13 @@ mod tests {
     fn audited_clone_recovery_preserves_into_suffix() {
         assert_eq!(
             render_audited_clone_recovery("value.into()"),
-            "value.clone()/* TODO(translation): validate added clone */.into()"
+            "std::clone::Clone::clone(&value)/* TODO(translation): validate added clone */.into()"
         );
         let expr =
             apply_audited_clone_recovery(into_projection(RustExpr::Var("value".to_string())));
         assert_eq!(
             emit::emit_expr(&expr),
-            "value.clone()/* TODO(translation): validate added clone */.into()"
+            "std::clone::Clone::clone(&value)/* TODO(translation): validate added clone */.into()"
         );
         assert_eq!(expr.recorded_shape(), Some(RustExprShape::OwnedRecovery));
     }
@@ -28029,6 +28431,12 @@ mod tests {
         let twice = apply_one(once.clone(), &Coercion::AsSlice);
         assert_eq!(twice, once);
         assert_eq!(emit::emit_expr(&twice), "values.as_slice()");
+
+        let recovered = apply_one(
+            RustExpr::Raw("values.as_slice()".to_string()),
+            &Coercion::AsSlice,
+        );
+        assert_eq!(emit::emit_expr(&recovered), "values.as_slice()");
     }
 
     /// Mutable slice idempotence is also producer-recorded. A raw spelling that
@@ -28144,6 +28552,30 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn boxed_trait_borrow_recovers_success_shape_through_result_propagation() {
+        let mut boxed_shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "Readable".to_string(),
+            args: Vec::new(),
+        });
+        boxed_shape.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "Readable".to_string(),
+        };
+        let produced = RustExpr::shaped_as(
+            RustExprShape::SlotAdapted,
+            Some(boxed_shape.clone()),
+            RustExpr::Raw("copy()".to_string()),
+        );
+
+        let propagated = propagate_result_projection(produced);
+        assert_eq!(propagated.recorded_slot_shape(), None);
+        assert_eq!(result_success_slot_shape(&propagated), Some(&boxed_shape));
+        assert_eq!(
+            emit::emit_expr(&borrow_as_dyn_trait(propagated, "Readable")),
+            "copy()?.as_ref() as &dyn Readable"
+        );
+    }
+
     /// The recorded answer does not depend on which variant carries it, which
     /// is the difference between asking the expression and matching its text.
     #[test]
@@ -28163,5 +28595,27 @@ mod tests {
         assert!(!expr_is_result_propagated(&RustExpr::Raw(
             "call()?".to_string()
         )));
+    }
+
+    #[test]
+    fn erased_closed_enum_downcast_keeps_variant_name_separate_from_payload_type() {
+        let lowered = apply_erased_object_closed_enum_downcast(
+            RustExpr::Var("object".to_string()),
+            "HmmValue",
+            &["std::rc::Rc<std::cell::RefCell<Hmm<Box<dyn std::any::Any>>>>".to_string()],
+            &InvalidCastPolicy::Panic,
+        );
+        let rendered = emit::emit_expr(&lowered);
+        assert!(
+            rendered.contains("HmmValue::Hmm(std::clone::Clone::clone("),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains(
+                "downcast_ref::<std::rc::Rc<std::cell::RefCell<Hmm<Box<dyn std::any::Any>>>>>()"
+            ),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("HmmValue::std::rc::Rc"), "{rendered}");
     }
 }

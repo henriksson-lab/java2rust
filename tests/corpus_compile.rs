@@ -200,6 +200,13 @@ mod ndarray {
             }
         }
 
+        pub fn rows(&self) -> Rows<'_, T> {
+            Rows {
+                matrix: self,
+                row: 0,
+            }
+        }
+
         pub fn iter(&self) -> Rows<'_, T> {
             Rows {
                 matrix: self,

@@ -208,6 +208,64 @@ fn parses_array_creation_and_unary_plus_without_raw_fallbacks() {
 }
 
 #[test]
+fn preserves_trailing_unspecified_array_dimensions_in_element_type() {
+    let parsed = parse_java_source(
+        r#"
+class PartialArrayCreation {
+    void rows(int n) {
+        double[][] values = new double[n][];
+    }
+
+    void matrices(int n) {
+        double[][][] values = new double[n][][];
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let rows = method_body(&parsed.program.types[0], "rows");
+    let Stmt::VarDecl {
+        initializer:
+            Some(Expr::ArrayCreation {
+                element_type,
+                dimensions,
+                initializer: None,
+            }),
+        ..
+    } = &rows.statements[0]
+    else {
+        panic!("expected partially specified row array");
+    };
+    assert_eq!(
+        element_type,
+        &JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Double)))
+    );
+    assert_eq!(dimensions.len(), 1);
+
+    let matrices = method_body(&parsed.program.types[0], "matrices");
+    let Stmt::VarDecl {
+        initializer:
+            Some(Expr::ArrayCreation {
+                element_type,
+                dimensions,
+                initializer: None,
+            }),
+        ..
+    } = &matrices.statements[0]
+    else {
+        panic!("expected partially specified matrix array");
+    };
+    assert_eq!(
+        element_type,
+        &JavaType::Array(Box::new(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Double
+        )))))
+    );
+    assert_eq!(dimensions.len(), 1);
+}
+
+#[test]
 fn parses_nested_qualified_constructor_type_from_object_creation_prefix() {
     let parsed = parse_java_source(
         r#"
@@ -494,6 +552,41 @@ fn parses_typed_array_initializer_without_raw_fallbacks() {
     assert_eq!(element_type, JavaType::String);
     assert!(dimensions.is_empty());
     assert_eq!(elements.len(), 1);
+}
+
+#[test]
+fn typed_source_array_initializer_keeps_element_rank_not_container_rank() {
+    let expr = new_java2rust::parser::parse_expr("new ReaderBase[] { new Child() }");
+    let Expr::ArrayCreation {
+        element_type,
+        dimensions,
+        initializer: Some(elements),
+    } = expr
+    else {
+        panic!("expected typed source array initializer");
+    };
+
+    assert_eq!(
+        element_type,
+        JavaType::Named {
+            name: "ReaderBase".to_string(),
+            args: Vec::new(),
+        }
+    );
+    assert!(dimensions.is_empty());
+    assert_eq!(elements.len(), 1);
+
+    let matrix = new_java2rust::parser::parse_expr("new ReaderBase[][] { null }");
+    assert!(matches!(
+        matrix,
+        Expr::ArrayCreation {
+            element_type: JavaType::Array(inner),
+            dimensions,
+            initializer: Some(_),
+        } if dimensions.is_empty()
+            && matches!(inner.as_ref(), JavaType::Named { name, args }
+                if name == "ReaderBase" && args.is_empty())
+    ));
 }
 
 #[test]

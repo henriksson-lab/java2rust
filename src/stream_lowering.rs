@@ -897,7 +897,8 @@ fn emit_stream_lambda_member_access_through_plan_expr(
         | crate::member_access_plan::MemberAccessOp::Array2RowsAsI32
         | crate::member_access_plan::MemberAccessOp::Array2ColsAsI32 => 6,
         crate::member_access_plan::MemberAccessOp::StaticConstant { .. } => 12,
-        crate::member_access_plan::MemberAccessOp::RustField { .. } => 11,
+        crate::member_access_plan::MemberAccessOp::RustField { .. }
+        | crate::member_access_plan::MemberAccessOp::RustGetter { .. } => 11,
     };
     let lowered_receiver = emit_stream_lambda_receiver_with_locals_expr(
         receiver,

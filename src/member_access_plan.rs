@@ -12,8 +12,18 @@ pub enum MemberAccessOp {
     LenAsI32,
     Array2RowsAsI32,
     Array2ColsAsI32,
-    StaticConstant { owner: String },
-    RustField { rust_name: String },
+    StaticConstant {
+        owner: String,
+    },
+    RustField {
+        rust_name: String,
+    },
+    /// A Java public field whose runtime carrier keeps mutable object state
+    /// behind shared identity.  Reading it must take a snapshot through an
+    /// accessor rather than exposing a stale Rust struct field.
+    RustGetter {
+        rust_name: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,9 +198,14 @@ pub fn plan_member_access_with_facts(
             )
             .or_else(|| static_constant_owner(receiver, policy.member(), env))?,
         },
-        JavaMemberAccessKind::InstanceField => MemberAccessOp::RustField {
-            rust_name: crate::parser::to_snake_case(policy.member()),
-        },
+        JavaMemberAccessKind::InstanceField => {
+            let rust_name = crate::parser::to_snake_case(policy.member());
+            if runtime_backed_instance_field_uses_getter(receiver, policy.member(), env) {
+                MemberAccessOp::RustGetter { rust_name }
+            } else {
+                MemberAccessOp::RustField { rust_name }
+            }
+        }
     };
     let shape = member_access_shape(policy.kind(), policy.java_ty().clone());
     Some(MemberAccessPlan::new(
@@ -199,6 +214,15 @@ pub fn plan_member_access_with_facts(
         shape,
         op,
     ))
+}
+
+fn runtime_backed_instance_field_uses_getter(receiver: &Expr, member: &str, env: &TypeEnv) -> bool {
+    let receiver_ty = crate::types::infer_expr_type(receiver, env);
+    let Some(owner) = crate::stdlib::external_named_receiver_owner_key(&receiver_ty) else {
+        return false;
+    };
+    crate::stdlib::canonical_external_receiver_type_key(&owner) == "StreamTokenizer"
+        && matches!(member, "ttype" | "sval" | "nval")
 }
 
 fn array_length_member_access_op(receiver: &Expr, env: &TypeEnv) -> MemberAccessOp {
@@ -246,7 +270,10 @@ fn static_constant_owner(receiver: &Expr, member: &str, env: &TypeEnv) -> Option
         // `Matrix`.
         Some(crate::java_naming::rust_name_for_java_named_type(owner))
     } else if let Some(alias) = env.static_type_alias(owner) {
-        Some(crate::java_naming::rust_name_for_java_named_type(alias))
+        let canonical = crate::stdlib::canonical_external_receiver_type_key(alias);
+        Some(crate::java_naming::rust_name_for_java_named_type(
+            &canonical,
+        ))
     } else if source_type_static_field_exists(owner, member, env) {
         Some(crate::java_naming::rust_name_for_java_named_type(owner))
     } else if known_builtin_static_constant_owner(owner) {

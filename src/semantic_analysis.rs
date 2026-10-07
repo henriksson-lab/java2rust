@@ -4336,6 +4336,18 @@ fn collect_type_dispatch_requirement_facts(ty: &TypeDecl, facts: &mut FactSet) {
     for member in &ty.members {
         match member {
             Member::Field(field) => {
+                if let Some(root) = class_token_extends_root(&field.ty) {
+                    // A stored `Class<? extends Base>` is a reified subtype
+                    // selector. If it is later constructed reflectively, the
+                    // resulting value must retain subtype dispatch; recording
+                    // that requirement here lets the object-model planner use
+                    // its existing source hierarchy carrier.
+                    push_dispatch_requirement_fact(
+                        facts,
+                        root,
+                        DispatchRequirementKind::NeedsSubtypeDispatch,
+                    );
+                }
                 if let Some(initializer) = &field.initializer {
                     collect_dispatch_requirement_facts_from_expr(initializer, facts);
                 }
@@ -4354,6 +4366,20 @@ fn collect_type_dispatch_requirement_facts(ty: &TypeDecl, facts: &mut FactSet) {
             Member::Unsupported { .. } => {}
         }
     }
+}
+
+fn class_token_extends_root(java_ty: &JavaType) -> Option<&JavaType> {
+    let JavaType::Named { name, args } = java_ty else {
+        return None;
+    };
+    if !matches!(name.rsplit('.').next(), Some("Class" | "JavaClass")) {
+        return None;
+    }
+    let [JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(root)))] = args.as_slice()
+    else {
+        return None;
+    };
+    Some(root)
 }
 
 fn collect_dispatch_requirement_facts_from_block(block: &Block, facts: &mut FactSet) {

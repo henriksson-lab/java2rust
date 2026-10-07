@@ -41,6 +41,27 @@ impl<'a> CallableAnalysis<'a> {
             .resolved_source_method_usage_for_owner(owner, method)
     }
 
+    pub(crate) fn source_method_has_nonself_call(&self, owner: &str, method: &MethodDecl) -> bool {
+        self.usage.method_entries().any(|(_, usage)| {
+            usage.call_sites().iter().any(|call| {
+                call.resolved().is_some_and(|resolved| {
+                    resolved.kind == crate::java_ir::CallKind::Instance
+                        && crate::facts::external_type_name_matches(&resolved.declaring_type, owner)
+                        && resolved.rust_name
+                            == method
+                                .rust_name
+                                .clone()
+                                .unwrap_or_else(|| crate::parser::to_snake_case(&method.name))
+                        && !call.receiver_is_self()
+                })
+            })
+        })
+    }
+
+    pub(crate) fn source_method_name_anywhere_mutates(&self, method_name: &str) -> bool {
+        self.usage.source_method_name_anywhere_mutates(method_name)
+    }
+
     pub(crate) fn binding_use_count_for_rust_method_family(
         &self,
         type_name: &str,

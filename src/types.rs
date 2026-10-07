@@ -409,6 +409,19 @@ pub fn sequence_mutation_element_type(java_ty: &JavaType) -> Option<JavaType> {
     })
 }
 
+/// Projects the value type produced when a Java generic container is read.
+///
+/// A value read through `? extends T` has the usable static type `T`; retaining
+/// the existential wildcard at that boundary incorrectly turns concrete
+/// native carriers (for example `List<T>`) into erased objects.  Contravariant
+/// `? super T` does not have that property and therefore remains unchanged.
+pub fn generic_read_type(ty: &JavaType) -> JavaType {
+    match ty {
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound))) => bound.as_ref().clone(),
+        _ => ty.clone(),
+    }
+}
+
 pub fn sequence_element_type_after_optional(java_ty: &JavaType) -> Option<JavaType> {
     sequence_element_type(java_ty).or_else(|| {
         optional_element_type(java_ty)

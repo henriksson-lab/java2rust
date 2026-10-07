@@ -825,6 +825,7 @@ fn collection_storage_type_matches(left: &JavaType, right: &JavaType) -> bool {
 fn dispatch_requirement_type_name(java_ty: &JavaType) -> Option<&str> {
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::Intersection(bounds) => bounds.iter().find_map(dispatch_requirement_type_name),
         JavaType::String => Some("String"),
         JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
             None

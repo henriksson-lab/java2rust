@@ -248,6 +248,14 @@ pub fn borrowed_content_type_policy_with_effective_facts(
     let capability = borrowed_content_capability_policy_with_effective_facts(java_ty, facts);
     let policy = if capability.string_content() {
         Some(BorrowedContentPolicy::string_like_view())
+    } else if crate::stdlib::java_collection_kind_for_type(java_ty)
+        .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::List)
+    {
+        // Sets and maps are containers but not contiguous Java sequences.
+        // Rendering their borrowed content as a Rust slice invents
+        // `.as_slice()` on HashSet/HashMap and, more importantly, loses their
+        // membership/key semantics. Keep their native carrier ABI.
+        None
     } else if capability.sequence_element().is_some() {
         Some(BorrowedContentPolicy::sequence_like_view())
     } else {
@@ -2679,6 +2687,33 @@ mod tests {
                 &effective_facts
             ),
             "id-less compatibility must not attribute a lambda parameter assignment to the outer returned parameter"
+        );
+    }
+
+    #[test]
+    fn borrowed_content_policy_keeps_sets_native_instead_of_slicing_them() {
+        let facts = crate::stdlib::rust_stdlib_signature_facts();
+        let enum_set = JavaType::Named {
+            name: "java.util.EnumSet".to_string(),
+            args: vec![JavaType::Named {
+                name: "Flag".to_string(),
+                args: Vec::new(),
+            }],
+        };
+        let list = JavaType::Named {
+            name: "java.util.List".to_string(),
+            args: vec![JavaType::String],
+        };
+
+        assert!(
+            borrowed_content_type_policy(&enum_set, &facts)
+                .policy()
+                .is_none()
+        );
+        assert!(
+            borrowed_content_type_policy(&list, &facts)
+                .policy()
+                .is_some()
         );
     }
 }

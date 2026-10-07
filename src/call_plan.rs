@@ -655,6 +655,9 @@ pub enum NativeCollectionStaticMethod {
     CollectionsSingletonList,
     CollectionsSingletonMap,
     CollectionsNCopies,
+    EnumSetOf,
+    EnumSetAllOf,
+    EnumSetComplementOf,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -2167,6 +2170,7 @@ pub enum NativeCollectionNewTarget {
     },
     FromSource {
         kind: crate::stdlib::JavaCollectionKind,
+        source_kind: crate::stdlib::JavaCollectionKind,
     },
     FromSingleArg {
         kind: crate::stdlib::JavaCollectionKind,
@@ -4195,6 +4199,20 @@ fn plan_native_collection_static_call<'a>(
         };
         return Some(CallTargetPlan::NativeCollectionStatic { method });
     }
+    if receiver_key == "EnumSet" {
+        if resolved_static_owner_shadows_native_owner(resolved, receiver_name, "EnumSet", types)
+            || static_type_alias_shadows_native_owner(receiver_name, "EnumSet", types)
+        {
+            return None;
+        }
+        let method = match name {
+            "of" => NativeCollectionStaticMethod::EnumSetOf,
+            "allOf" | "all_of" => NativeCollectionStaticMethod::EnumSetAllOf,
+            "complementOf" | "complement_of" => NativeCollectionStaticMethod::EnumSetComplementOf,
+            _ => return None,
+        };
+        return Some(CallTargetPlan::NativeCollectionStatic { method });
+    }
     None
 }
 
@@ -5065,6 +5083,41 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         {
             NativeJavaStaticMethod::IntegerValueOfString
         }
+        ("Byte", "valueOf" | "value_of")
+            if args
+                .and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::ByteParseByte
+        }
+        ("Short", "valueOf" | "value_of")
+            if args
+                .and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::ShortParseShort
+        }
+        ("Long", "valueOf" | "value_of")
+            if args
+                .and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::LongParseLong
+        }
+        ("Float", "valueOf" | "value_of")
+            if args
+                .and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::FloatParseFloat
+        }
+        ("Double", "valueOf" | "value_of")
+            if args
+                .and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::DoubleParseDouble
+        }
         ("Long", "parseLong" | "parse_long") => NativeJavaStaticMethod::LongParseLong,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
         ("Double", "parseDouble" | "parse_double") => NativeJavaStaticMethod::DoubleParseDouble,
@@ -5809,11 +5862,16 @@ pub(crate) fn plan_native_collection_constructor_for_args(
     let kind = native_collection_constructor_kind_with_facts(ty, facts)?;
     match args {
         [] => Some(NativeCollectionNewTarget::Empty { kind }),
+        [arg] if enum_map_constructor_class_token(ty, arg, types) => {
+            Some(NativeCollectionNewTarget::Empty { kind })
+        }
         [arg] if kind.supports_capacity_constructor() && is_integral_capacity_arg(arg, types) => {
             Some(NativeCollectionNewTarget::WithCapacity { kind })
         }
         [arg] if is_collection_source_arg(arg, types) => {
-            Some(NativeCollectionNewTarget::FromSource { kind })
+            let source_kind =
+                crate::stdlib::java_collection_kind_for_type(&infer_expr_type(arg, types))?;
+            Some(NativeCollectionNewTarget::FromSource { kind, source_kind })
         }
         [arg]
             if matches!(
@@ -5838,6 +5896,24 @@ pub(crate) fn plan_native_collection_constructor_for_args(
         [_] => Some(NativeCollectionNewTarget::FromSingleArg { kind }),
         _ => None,
     }
+}
+
+fn enum_map_constructor_class_token(ty: &JavaType, arg: &Expr, types: &TypeEnv) -> bool {
+    let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = ty else {
+        return false;
+    };
+    if crate::stdlib::canonical_external_receiver_type_key(name)
+        .rsplit('.')
+        .next()
+        != Some("EnumMap")
+    {
+        return false;
+    }
+    matches!(
+        infer_expr_type(arg, types),
+        JavaType::Named { name, .. }
+            if matches!(name.rsplit('.').next(), Some("Class" | "JavaClass"))
+    )
 }
 
 fn native_collection_constructor_kind_with_facts(
@@ -6079,7 +6155,8 @@ fn resolved_call_signature_arg_shapes(
         signature
             .params()
             .iter()
-            .map(|param| param.shape().clone())
+            .enumerate()
+            .map(|(index, param)| resolved_signature_arg_shape(call, index, param.shape()))
             .collect(),
     )
 }
@@ -6101,7 +6178,8 @@ fn resolved_call_signature_arg_shapes_by_java_key(
         signature
             .params()
             .iter()
-            .map(|param| param.shape().clone())
+            .enumerate()
+            .map(|(index, param)| resolved_signature_arg_shape(call, index, param.shape()))
             .collect(),
     )
 }
@@ -6146,9 +6224,48 @@ fn resolved_call_signature_arg_shapes_by_args(
         signature
             .params()
             .iter()
-            .map(|param| param.shape().clone())
+            .enumerate()
+            .map(|(index, param)| resolved_signature_arg_shape(call, index, param.shape()))
             .collect(),
     )
+}
+
+pub(crate) fn resolved_signature_arg_shape(
+    call: &ResolvedCall,
+    index: usize,
+    solved: &RustSlotShape,
+) -> RustSlotShape {
+    if crate::inherited_members::java_type_contains_synthesized_source_wildcard(&solved.java_ty) {
+        // Wildcard reification has replaced a pre-rewrite owner parameter
+        // (for example `H extends Model<?>`) with a fresh callable generic
+        // (`Model<W>`).  Rust infers W from the actual argument.  Overlaying
+        // the Java resolver's stale H here reverses that ABI rewrite and can
+        // request an impossible conversion between two identical carriers.
+        return solved.clone();
+    }
+    resolved_call_arg_target_type(call, index)
+        .map(|specialized| {
+            crate::shape_projection::specialize_slot_shape_java_type(solved, specialized)
+        })
+        .unwrap_or_else(|| solved.clone())
+}
+
+/// Reapplies resolver-owned generic instantiation after an emitted ABI plan
+/// has supplied its authoritative ownership, view, and dispatch shapes.
+pub(crate) fn specialize_resolved_call_argument_plan(
+    plan: ArgumentLoweringPlan,
+    call: &ResolvedCall,
+) -> ArgumentLoweringPlan {
+    match plan {
+        ArgumentLoweringPlan::Shaped(shapes) => ArgumentLoweringPlan::Shaped(
+            shapes
+                .iter()
+                .enumerate()
+                .map(|(index, shape)| resolved_signature_arg_shape(call, index, shape))
+                .collect(),
+        ),
+        other => other,
+    }
 }
 
 fn resolved_call_boundary_arg_shape(call: &ResolvedCall, index: usize) -> RustSlotShape {
@@ -6625,7 +6742,19 @@ pub(crate) fn plan_native_collection_extend_arg(
     arg_shape: &RustSlotShape,
 ) -> Option<NativeCollectionExtendArgPlan> {
     let receiver_ty = effective_native_collection_receiver_type(receiver_ty);
-    if arg_shape.ownership == OwnershipShape::SharedBorrow && arg_shape.view == ViewShape::Slice {
+    // A Java bulk insertion copies references out of its source collection.
+    // A loop variable for an inner `List<? extends T>` is represented as a
+    // shared borrow of the native Vec, but its view remains `Native` rather
+    // than `Slice`.  Ownership plus sequence identity is the authoritative
+    // distinction here; requiring the incidental Slice view sent that case
+    // through the owned-source path and emitted `Vec::extend(&Vec<T>)`.
+    let borrowed_sequence = arg_shape.ownership == OwnershipShape::SharedBorrow
+        && (arg_shape.view == ViewShape::Slice
+            || crate::types::sequence_element_type(&arg_shape.java_ty).is_some()
+            || crate::types::optional_element_type(&arg_shape.java_ty)
+                .and_then(|ty| crate::types::sequence_element_type(&ty))
+                .is_some());
+    if borrowed_sequence {
         let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
         return Some(NativeCollectionExtendArgPlan::BorrowedSequenceSource {
             element_shape: RustSlotShape::for_storage(element_ty),
@@ -7736,6 +7865,25 @@ pub fn resolved_constructor_arg_shapes(
                     &constructor.rust_name,
                     index,
                 )
+                .map(|mut shape| {
+                    if let Some(resolved_param) = constructor.params.get(index)
+                        && shape.java_ty != resolved_param.ty
+                    {
+                        // The signature owns the solved Rust ABI, but its Java
+                        // type can still contain the declaring class's generic
+                        // parameter (`Box<E>::new(E)`). Resolution has already
+                        // specialized that parameter from the constructed type
+                        // (`new Box<Packet>(this)`). Keep ownership/view/
+                        // dispatch from the signature and replace only this
+                        // stale Java identity so lowering does not invent an
+                        // erased downcast from `Packet` back to `E`.
+                        shape = crate::shape_projection::specialize_slot_shape_java_type(
+                            &shape,
+                            &resolved_param.ty,
+                        );
+                    }
+                    shape
+                })
                 .unwrap_or_else(|| resolved_constructor_boundary_arg_shape(constructor, index))
         })
         .collect()

@@ -32441,6 +32441,66 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
     );
     adapters.extend([
         ExternalConversionAdapterFact {
+            from_type: "java.io.InputStreamReader".to_string(),
+            to_type: "java.io.Reader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "InputStreamReader".to_string(),
+            to_type: "Reader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.io.OutputStreamWriter".to_string(),
+            to_type: "java.io.Writer".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "OutputStreamWriter".to_string(),
+            to_type: "Writer".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.io.PrintStream".to_string(),
+            to_type: "java.io.OutputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "PrintStream".to_string(),
+            to_type: "OutputStream".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.io.BufferedReader".to_string(),
+            to_type: "java.io.Reader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "BufferedReader".to_string(),
+            to_type: "Reader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "java.io.StringReader".to_string(),
+            to_type: "java.io.Reader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
+            from_type: "StringReader".to_string(),
+            to_type: "Reader".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        },
+        ExternalConversionAdapterFact {
             from_type: "java.io.FileReader".to_string(),
             to_type: "InputStreamReader".to_string(),
             kind: ExternalConversionAdapterKind::Into,

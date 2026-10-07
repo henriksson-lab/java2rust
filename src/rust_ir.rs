@@ -50,6 +50,7 @@ pub struct RustFunction {
     pub type_params: Vec<String>,
     pub params: Vec<RustParam>,
     pub return_type: Option<RustType>,
+    pub where_bounds: Vec<String>,
     pub body: Vec<RustStmt>,
     pub is_pub: bool,
     pub receiver: Option<RustReceiver>,

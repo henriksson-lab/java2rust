@@ -1997,27 +1997,53 @@ fn supertype_methods_matching_slot<'a>(
     let mut pending = ty
         .extends
         .iter()
-        .cloned()
-        .chain(ty.implements.iter().cloned())
+        .chain(ty.implements.iter())
+        .map(|name| crate::parser::parse_hierarchy_type(name))
         .collect::<Vec<_>>();
     let mut seen = std::collections::HashSet::new();
-    while let Some(name) = pending.pop() {
+    while let Some(super_ref) = pending.pop() {
+        let JavaType::Named { name, args } = super_ref else {
+            continue;
+        };
         if !seen.insert(name.clone()) {
             continue;
         }
         let Some(supertype) = by_name.get(name.as_str()) else {
             continue;
         };
+        let substitutions = supertype
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args)
+            .collect::<HashMap<_, _>>();
         for member in &supertype.members {
             let Member::Method(candidate) = member else {
                 continue;
             };
-            if JavaCallableSlotKey::source_method(candidate) == wanted {
-                matches.push((name.clone(), candidate));
+            // Java override identity is checked after substituting the
+            // implemented supertype's arguments.  Comparing `write(T)`
+            // directly with `write(String)` loses generic interface override
+            // groups and prevents fallibility from reaching the trait.
+            let mut specialized = candidate.clone();
+            for param in &mut specialized.params {
+                param.ty =
+                    crate::resolve::substitute_method_type_variables(&param.ty, &substitutions);
+            }
+            if JavaCallableSlotKey::source_method(&specialized) == wanted {
+                matches.push((supertype.name.clone(), candidate));
             }
         }
-        pending.extend(supertype.extends.iter().cloned());
-        pending.extend(supertype.implements.iter().cloned());
+        pending.extend(
+            supertype
+                .extends
+                .iter()
+                .chain(supertype.implements.iter())
+                .map(|parent| crate::parser::parse_hierarchy_type(parent))
+                .map(|parent| {
+                    crate::resolve::substitute_method_type_variables(&parent, &substitutions)
+                }),
+        );
     }
     matches
 }
@@ -2732,6 +2758,52 @@ class FixedMetric implements Metric {
         }
 
         let _semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    }
+
+    #[test]
+    fn generic_interface_override_group_substitutes_type_arguments() {
+        let parsed = parse_java_source(
+            r#"
+interface Sink<T> {
+    void write(T value);
+}
+class Payload {}
+class PayloadSink implements Sink<Payload> {
+    public void write(Payload value) throws IOException {
+        throw new IOException();
+    }
+}
+class IOException extends Exception {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = resolved.facts.clone();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        let override_groups = override_groups_for_program(&resolved.program);
+
+        for type_name in ["PayloadSink", "Sink"] {
+            let ty = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == type_name)
+                .expect("test type is present");
+            let method = ty
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == "write" => Some(method),
+                    _ => None,
+                })
+                .expect("write method is present");
+            let key = CallableKey::source_method_for_type(ty, method);
+            assert!(
+                fallibility.returns_result(&key),
+                "{key:?}: {:?}; groups={override_groups:?}",
+                fallibility.callable(&key).map(CallableFallibility::reasons)
+            );
+        }
     }
 
     #[test]

@@ -2349,6 +2349,11 @@ fn collect_type_name_dependencies(ty: &JavaType, out: &mut Vec<String>) {
             }
         }
         JavaType::Array(element) => collect_type_name_dependencies(element, out),
+        JavaType::Intersection(bounds) => {
+            for bound in bounds {
+                collect_type_name_dependencies(bound, out);
+            }
+        }
         JavaType::Wildcard(bound) => match bound.as_ref() {
             Some(
                 crate::java_ir::WildcardBound::Extends(bound)
@@ -5676,6 +5681,9 @@ fn external_pack_field_receiver_type(
         Some(JavaType::String) => Some("String".to_string()),
         Some(JavaType::Array(_)) => Some("Array".to_string()),
         Some(JavaType::Primitive(primitive)) => Some(format!("{primitive:?}")),
+        Some(JavaType::Intersection(bounds)) => {
+            bounds.iter().find_map(|bound| java_type_key(bound))
+        }
         Some(JavaType::Void | JavaType::Wildcard(_)) | None => None,
     }
 }
@@ -5741,6 +5749,9 @@ fn source_dependency_field_receiver_type(
         Some(JavaType::String) => Some("String".to_string()),
         Some(JavaType::Array(_)) => Some("Array".to_string()),
         Some(JavaType::Primitive(primitive)) => Some(format!("{primitive:?}")),
+        Some(JavaType::Intersection(bounds)) => {
+            bounds.iter().find_map(|bound| java_type_key(bound))
+        }
         Some(JavaType::Void | JavaType::Wildcard(_)) | None => None,
     }
 }
@@ -8832,6 +8843,7 @@ fn java_type_key(java_ty: &crate::java_ir::JavaType) -> Option<String> {
         crate::java_ir::JavaType::Unknown(name) => {
             Some(crate::stdlib::canonical_external_receiver_type_key(name))
         }
+        crate::java_ir::JavaType::Intersection(bounds) => bounds.iter().find_map(java_type_key),
         crate::java_ir::JavaType::Void
         | crate::java_ir::JavaType::Primitive(_)
         | crate::java_ir::JavaType::Wildcard(_) => None,
@@ -8842,6 +8854,9 @@ fn java_type_raw_name(java_ty: &crate::java_ir::JavaType) -> Option<&str> {
     match java_ty {
         crate::java_ir::JavaType::Named { name, .. } | crate::java_ir::JavaType::Unknown(name) => {
             Some(name)
+        }
+        crate::java_ir::JavaType::Intersection(bounds) => {
+            bounds.iter().find_map(java_type_raw_name)
         }
         crate::java_ir::JavaType::String
         | crate::java_ir::JavaType::Array(_)
@@ -8952,6 +8967,11 @@ fn java_type_summary(java_ty: &crate::java_ir::JavaType) -> String {
             format!("{}[]", java_type_summary(element))
         }
         crate::java_ir::JavaType::Unknown(name) => format!("?{name}"),
+        crate::java_ir::JavaType::Intersection(bounds) => bounds
+            .iter()
+            .map(java_type_summary)
+            .collect::<Vec<_>>()
+            .join(" & "),
         crate::java_ir::JavaType::Primitive(primitive) => format!("{primitive:?}"),
         crate::java_ir::JavaType::Void => "void".to_string(),
         crate::java_ir::JavaType::Wildcard(None) => "?".to_string(),

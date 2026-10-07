@@ -1,6 +1,20 @@
 use crate::rust_ir::*;
 
-use crate::java_naming::rust_keyword_is_rawable_identifier;
+use crate::java_naming::{rust_keyword_escape, rust_keyword_is_rawable_identifier};
+
+const JAVA_KEYWORD_LABEL_PREFIX: &str = "__java_keyword_label_";
+
+/// Rust does not permit keyword spellings as loop labels, even where the same
+/// spelling is usable as a raw identifier. Java has a different keyword set,
+/// so valid labels such as `loop:` need a stable escape shared by the label
+/// declaration and every `break`/`continue` that targets it.
+fn rust_label_ident(name: &str) -> String {
+    if rust_keyword_escape(name).is_some() || name.starts_with(JAVA_KEYWORD_LABEL_PREFIX) {
+        format!("{JAVA_KEYWORD_LABEL_PREFIX}{name}")
+    } else {
+        name.to_string()
+    }
+}
 
 fn string_value_of_call(function: &RustExpr, args: &[RustExpr]) -> bool {
     if args.len() != 1 {
@@ -111,10 +125,25 @@ fn emit_impl(imp: &RustImpl) -> String {
 }
 
 fn emit_trait_impl_header(target: &str, trait_name: &str) -> String {
-    if let Some((generics, ty)) = target.split_once(' ')
-        && generics.starts_with('<')
-    {
-        return format!("impl{generics} {trait_name} for {ty} {{\n");
+    if target.starts_with('<') {
+        let mut depth = 0usize;
+        for (index, ch) in target.char_indices() {
+            match ch {
+                '<' => depth += 1,
+                '>' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let generics = &target[..=index];
+                        let ty = target[index + ch.len_utf8()..].trim_start();
+                        if !ty.is_empty() {
+                            return format!("impl{generics} {trait_name} for {ty} {{\n");
+                        }
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
     }
     format!("impl {trait_name} for {target} {{\n")
 }
@@ -145,8 +174,13 @@ fn emit_function(function: &RustFunction, indent: usize) -> String {
     } else {
         format!("<{}>", function.type_params.join(", "))
     };
+    let where_clause = if function.where_bounds.is_empty() {
+        String::new()
+    } else {
+        format!(" where {}", function.where_bounds.join(", "))
+    };
     let mut out = format!(
-        "{pad}{vis}fn {}{type_params}({}){ret} {{\n",
+        "{pad}{vis}fn {}{type_params}({}){ret}{where_clause} {{\n",
         rust_ident(&function.name),
         params.join(", ")
     );
@@ -240,7 +274,7 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
         } => {
             let label = label
                 .as_ref()
-                .map(|l| format!("'{l}: "))
+                .map(|l| format!("'{}: ", rust_label_ident(l)))
                 .unwrap_or_default();
             let mut out = format!("{pad}{label}while let {pattern} = {} {{\n", emit_expr(expr));
             out.push_str(&emit_statements(body, indent + 1));
@@ -255,7 +289,7 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
         } => {
             let label = label
                 .as_ref()
-                .map(|l| format!("'{l}: "))
+                .map(|l| format!("'{}: ", rust_label_ident(l)))
                 .unwrap_or_default();
             let mut out = format!("{pad}{label}for {pattern} in {} {{\n", emit_expr(iterable));
             out.push_str(&emit_statements(body, indent + 1));
@@ -265,7 +299,7 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
         RustStmt::Loop { label, body } => {
             let label = label
                 .as_ref()
-                .map(|l| format!("'{l}: "))
+                .map(|l| format!("'{}: ", rust_label_ident(l)))
                 .unwrap_or_default();
             let mut out = format!("{pad}{label}loop {{\n");
             out.push_str(&emit_statements(body, indent + 1));
@@ -273,15 +307,24 @@ fn emit_stmt(stmt: &RustStmt, indent: usize) -> String {
             out
         }
         RustStmt::Break(label) => {
-            let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
+            let label = label
+                .as_ref()
+                .map(|l| format!(" '{}", rust_label_ident(l)))
+                .unwrap_or_default();
             format!("{pad}break{label};\n")
         }
         RustStmt::BreakValue { label, value } => {
-            let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
+            let label = label
+                .as_ref()
+                .map(|l| format!(" '{}", rust_label_ident(l)))
+                .unwrap_or_default();
             format!("{pad}break{label} {};\n", emit_expr(value))
         }
         RustStmt::Continue(label) => {
-            let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
+            let label = label
+                .as_ref()
+                .map(|l| format!(" '{}", rust_label_ident(l)))
+                .unwrap_or_default();
             format!("{pad}continue{label};\n")
         }
         RustStmt::Raw(raw) => raw
@@ -656,7 +699,10 @@ fn emit_stmt_as_block_part(stmt: &RustStmt) -> String {
         RustStmt::Return(Some(expr)) => format!("return {};", emit_expr(expr)),
         RustStmt::Return(None) => "return;".to_string(),
         RustStmt::BreakValue { label, value } => {
-            let label = label.as_ref().map(|l| format!(" '{l}")).unwrap_or_default();
+            let label = label
+                .as_ref()
+                .map(|l| format!(" '{}", rust_label_ident(l)))
+                .unwrap_or_default();
             format!("break{label} {};", emit_expr(value))
         }
         RustStmt::If {
@@ -714,7 +760,7 @@ fn emit_stmt_as_block_part(stmt: &RustStmt) -> String {
         } => {
             let label = label
                 .as_ref()
-                .map(|l| format!("'{l}: "))
+                .map(|l| format!("'{}: ", rust_label_ident(l)))
                 .unwrap_or_default();
             let body = body
                 .iter()
@@ -735,7 +781,7 @@ fn emit_stmt_as_block_part(stmt: &RustStmt) -> String {
         } => {
             let label = label
                 .as_ref()
-                .map(|l| format!("'{l}: "))
+                .map(|l| format!("'{}: ", rust_label_ident(l)))
                 .unwrap_or_default();
             let body = body
                 .iter()
@@ -1115,6 +1161,13 @@ mod tests {
             emit_item(&empty_impl("<T> Target<T>", Some("From<Source<T>>"))),
             "impl<T> From<Source<T>> for Target<T> {\n}\n"
         );
+        assert_eq!(
+            emit_item(&empty_impl(
+                "<K, V: Into<Pair<A, B>>> Target<K, V>",
+                Some("From<Source<K, V>>"),
+            )),
+            "impl<K, V: Into<Pair<A, B>>> From<Source<K, V>> for Target<K, V> {\n}\n"
+        );
     }
 
     #[test]
@@ -1429,6 +1482,23 @@ mod tests {
                 1,
             ),
             "    'items: for mut item in values.iter() {\n        item.touch();\n    }\n"
+        );
+    }
+
+    #[test]
+    fn rust_keyword_loop_labels_use_one_stable_escape() {
+        assert_eq!(
+            emit_stmt(
+                &RustStmt::Loop {
+                    label: Some("loop".to_string()),
+                    body: vec![
+                        RustStmt::Continue(Some("loop".to_string())),
+                        RustStmt::Break(Some("loop".to_string())),
+                    ],
+                },
+                0,
+            ),
+            "'__java_keyword_label_loop: loop {\n    continue '__java_keyword_label_loop;\n    break '__java_keyword_label_loop;\n}\n"
         );
     }
 

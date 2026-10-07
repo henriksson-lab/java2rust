@@ -726,6 +726,7 @@ fn constructed_type_names_include(names: &HashSet<String>, ty_name: &str) -> boo
 fn java_type_name(ty: &JavaType) -> Option<&str> {
     match ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::Intersection(bounds) => bounds.iter().find_map(java_type_name),
         JavaType::Void
         | JavaType::Primitive(_)
         | JavaType::String

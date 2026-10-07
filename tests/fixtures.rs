@@ -259,6 +259,74 @@ fn cargo_test_translation(crate_name: &str, rust: String, tests: &'static str) {
 }
 
 #[test]
+fn iterator_remove_mutates_the_shared_backing_list() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.List;
+
+class LiveIteratorList {
+    private List<Integer> values = new ArrayList<Integer>();
+
+    LiveIteratorList() {
+        values.add(1);
+        values.add(2);
+        values.add(3);
+    }
+
+    Iterator<Integer> iterator() { return values.iterator(); }
+    int size() { return values.size(); }
+    void append(int value) { values.add(value); }
+    void removeCurrent(Iterator<Integer> iterator) { iterator.remove(); }
+
+    int removeThroughBorrowedOwner() {
+        Iterator<Integer> iterator = iterator();
+        int first = iterator.next();
+        removeCurrent(iterator);
+        return first * 10 + size();
+    }
+
+    static int run() {
+        LiveIteratorList value = new LiveIteratorList();
+        LiveIteratorList alias = value;
+        value.append(4);
+        Iterator<Integer> iterator = value.iterator();
+        int first = iterator.next();
+        iterator.remove();
+        return first * 10 + alias.size();
+    }
+
+    static int runReentrant() {
+        return new LiveIteratorList().removeThroughBorrowedOwner();
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("JavaIterator::new_with_remove"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("flush_pending_remove_result"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "iterator_remove_live_backing_list",
+        translation.rust,
+        r#"
+#[test]
+fn remove_updates_the_original_list_and_all_object_aliases() {
+    assert_eq!(LiveIteratorList::run().unwrap(), 13);
+    assert_eq!(LiveIteratorList::run_reentrant().unwrap(), 12);
+}
+"#,
+    );
+}
+
+#[test]
 fn all_java_fixtures_are_loadable() {
     let fixtures = load_java_fixtures("examples/java").unwrap();
     assert_eq!(fixtures.len(), 67);

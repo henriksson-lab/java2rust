@@ -74,6 +74,12 @@ pub struct ShapeEnv {
     simple_immutable_map_entry_locals_by_binding: HashSet<BindingId>,
     nested_array2_locals: HashSet<String>,
     nested_array2_locals_by_binding: HashSet<BindingId>,
+    /// A nonescaping Java row local represented by its already-evaluated row
+    /// index. Element reads and writes project through the owning ndarray,
+    /// avoiding a Rust borrow whose lifetime would otherwise span unrelated
+    /// accesses to the same matrix.
+    array_row_projection_owners: HashMap<String, Expr>,
+    array_row_projection_owners_by_binding: HashMap<BindingId, Expr>,
 }
 
 impl ShapeEnv {
@@ -285,6 +291,27 @@ impl ShapeEnv {
         self.nested_array2_locals.contains(name)
     }
 
+    pub(crate) fn insert_array_row_projection_owner(
+        &mut self,
+        name: impl Into<String>,
+        owner: Expr,
+    ) {
+        let name = name.into();
+        if let Some(binding) = self.binding_ids.get(&name).cloned() {
+            self.array_row_projection_owners_by_binding
+                .insert(binding, owner);
+        } else {
+            self.array_row_projection_owners.insert(name, owner);
+        }
+    }
+
+    pub(crate) fn array_row_projection_owner(&self, name: &str) -> Option<&Expr> {
+        if let Some(binding) = self.binding_ids.get(name) {
+            return self.array_row_projection_owners_by_binding.get(binding);
+        }
+        self.array_row_projection_owners.get(name)
+    }
+
     fn clear_local_side_facts(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.map_key_set_view_receivers_by_binding.remove(binding);
@@ -300,6 +327,7 @@ impl ShapeEnv {
             self.simple_immutable_map_entry_locals_by_binding
                 .remove(binding);
             self.nested_array2_locals_by_binding.remove(binding);
+            self.array_row_projection_owners_by_binding.remove(binding);
         }
         self.map_key_set_view_receivers.remove(name);
         self.map_values_view_receivers.remove(name);
@@ -311,6 +339,7 @@ impl ShapeEnv {
         self.simple_map_entry_values.remove(name);
         self.simple_immutable_map_entry_locals.remove(name);
         self.nested_array2_locals.remove(name);
+        self.array_row_projection_owners.remove(name);
     }
 
     fn clear_local_side_facts_for_access_name(&mut self, name: &str, access_name: &str) {
@@ -1234,6 +1263,11 @@ fn java_type_erased_occurrence_key(ty: &JavaType) -> String {
         JavaType::Primitive(primitive) => format!("primitive:{primitive:?}"),
         JavaType::String => "String".to_string(),
         JavaType::Array(inner) => format!("array:{}", java_type_erased_occurrence_key(inner)),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .map(java_type_erased_occurrence_key)
+            .collect::<Vec<_>>()
+            .join(" & "),
         JavaType::Named { name, .. } | JavaType::Unknown(name) => {
             format!(
                 "named:{}",
@@ -1390,13 +1424,19 @@ pub fn infer_expr_shape_with_context(
                         // type disagree with the slot planner. Conversely, a
                         // positively modelled external declaration owns its ABI even
                         // if the resolver attached a compatibility signature to it.
-                        resolved_call_return_shape_by_java_key(call, name, args.len(), signatures)
-                            .or_else(|| {
-                                signatures.method_return_shape_by_rust_name(
-                                    &call.declaring_type,
-                                    &call.rust_name,
-                                )
-                            })
+                        resolved_call_return_shape_by_java_key(
+                            call,
+                            name,
+                            args.len(),
+                            signatures,
+                            ctx.representations,
+                        )
+                        .or_else(|| {
+                            signatures.method_return_shape_by_rust_name(
+                                &call.declaring_type,
+                                &call.rust_name,
+                            )
+                        })
                     })
                 })
                 .or_else(|| {
@@ -1483,11 +1523,21 @@ fn resolved_call_return_shape_by_java_key(
     source_name: &str,
     arg_count: usize,
     signatures: &SignaturePlan,
+    representations: Option<&RepresentationPlan>,
 ) -> Option<RustSlotShape> {
     if call.arg_target_types.len() != arg_count {
         return None;
     }
-    signatures.resolved_source_method_return_shape(call, source_name)
+    let shape = signatures.resolved_source_method_return_shape(call, source_name)?;
+    Some(if let Some(representations) = representations {
+        crate::shape_projection::specialize_resolved_return_shape(
+            representations,
+            &shape,
+            &call.return_type,
+        )
+    } else {
+        crate::shape_projection::specialize_slot_shape_java_type(&shape, &call.return_type)
+    })
 }
 
 fn native_java_call_expr_shape(

@@ -440,6 +440,11 @@ fn qualify_java_sql_expr(expr: &mut Expr, imported: &JavaSqlImports) {
 fn qualify_java_sql_type(ty: &mut JavaType, imported: &JavaSqlImports) {
     match ty {
         JavaType::Array(inner) => qualify_java_sql_type(inner, imported),
+        JavaType::Intersection(bounds) => {
+            for bound in bounds {
+                qualify_java_sql_type(bound, imported);
+            }
+        }
         JavaType::Named { name, args } => {
             if let Some(qualified) = imported.qualify(name) {
                 *name = qualified.to_string();
@@ -2466,14 +2471,47 @@ fn parse_yield_statement_value(node: tree_sitter::Node, source: &str) -> Option<
 }
 
 fn parse_array_creation_expr(node: tree_sitter::Node, source: &str) -> Expr {
-    let element_type = node
+    let mut element_type = node
         .child_by_field_name("type")
         .map(|node| parse_type_node(node, source))
         .unwrap_or_else(|| JavaType::Unknown("array".to_string()));
+    // Tree-sitter separates dimensions with expressions from trailing empty
+    // dimensions. In `new double[n][][]`, `double` is the `type`, `[n]` is a
+    // `dimensions_expr`, and `[][]` is a `dimensions` node. Preserve those
+    // empty dimensions in the element type: the allocated outer array's
+    // elements have type `double[][]` and initially contain Java null.
+    let trailing_dimensions = named_children(node)
+        .into_iter()
+        .flat_map(|child| {
+            if child.kind() == "dimensions_expr" {
+                named_children(child)
+            } else {
+                vec![child]
+            }
+        })
+        .filter(|child| child.kind() == "dimensions")
+        .map(dimensions_node_depth)
+        .sum::<usize>();
+    for _ in 0..trailing_dimensions {
+        element_type = JavaType::Array(Box::new(element_type));
+    }
     let initializer = named_children(node)
         .into_iter()
         .find(|child| child.kind() == "array_initializer")
         .map(|initializer| parse_array_initializer_elements(initializer, source));
+    // For initializer syntax, one empty `[]` denotes the array being
+    // constructed rather than an additional dimension of its element type.
+    // Tree-sitter reports that bracket pair as a trailing `dimensions` node
+    // for user-defined types (while some built-in types arrive already
+    // normalized). Keep any remaining pairs as the element's array rank:
+    // `new Item[] {...}` has element `Item`, and `new Item[][] {...}` has
+    // element `Item[]`.
+    if initializer.is_some()
+        && trailing_dimensions > 0
+        && let JavaType::Array(element) = element_type
+    {
+        element_type = *element;
+    }
     let dimensions = named_children(node)
         .into_iter()
         .filter(|child| child.kind() == "dimensions_expr")
@@ -2761,14 +2799,16 @@ fn array_type_node_dimension_depth(node: tree_sitter::Node) -> usize {
     let mut cursor = node.walk();
     node.children(&mut cursor)
         .filter(|child| child.kind() == "dimensions")
-        .map(|dimensions| {
-            let mut dim_cursor = dimensions.walk();
-            dimensions
-                .children(&mut dim_cursor)
-                .filter(|token| token.kind() == "[")
-                .count()
-        })
+        .map(dimensions_node_depth)
         .sum()
+}
+
+fn dimensions_node_depth(dimensions: tree_sitter::Node) -> usize {
+    let mut cursor = dimensions.walk();
+    dimensions
+        .children(&mut cursor)
+        .filter(|token| token.kind() == "[")
+        .count()
 }
 
 fn parse_generic_type_node(node: tree_sitter::Node, source: &str) -> Option<JavaType> {
@@ -3568,19 +3608,19 @@ fn type_parameter_name(param: tree_sitter::Node, source: &str) -> Option<String>
         .filter(|name| !name.is_empty())
 }
 
-/// The first type of a parameter's `type_bound`.
-///
-/// An intersection bound (`T extends A & B`) keeps only `A`, matching what the
-/// downstream shape model can currently express; the tree makes the rest
-/// available when that changes.
 fn type_parameter_bound(param: tree_sitter::Node, source: &str) -> Option<JavaType> {
     let bound = named_children(param)
         .into_iter()
         .find(|child| child.kind() == "type_bound")?;
-    named_children(bound)
+    let mut bounds = named_children(bound)
         .into_iter()
-        .next()
         .map(|ty| parse_type_node(ty, source))
+        .collect::<Vec<_>>();
+    match bounds.len() {
+        0 => None,
+        1 => bounds.pop(),
+        _ => Some(JavaType::Intersection(bounds)),
+    }
 }
 
 fn matching_angle_close(src: &str, open: usize) -> Option<usize> {
@@ -3708,6 +3748,11 @@ pub(crate) fn type_suffix(ty: &JavaType, is_varargs: bool) -> String {
         JavaType::Primitive(p) => format!("{p:?}").to_ascii_lowercase(),
         JavaType::String => "string".to_string(),
         JavaType::Array(inner) => format!("{}_array", type_suffix(inner, false)),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .map(|bound| type_suffix(bound, false))
+            .collect::<Vec<_>>()
+            .join("_and_"),
         JavaType::Named { name, .. } => to_snake_case(&java_type_suffix_name(name)),
         JavaType::Wildcard(_) => "wildcard".to_string(),
         JavaType::Unknown(raw) => to_snake_case(&java_type_suffix_name(raw)),

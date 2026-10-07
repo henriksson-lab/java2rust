@@ -2032,16 +2032,15 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
     .into_unshaped();
     assert_eq!(
         emit_expr(&clone_recovery),
-        "value.clone()/* TODO(translation): validate added clone */"
+        "std::clone::Clone::clone(&value)/* TODO(translation): validate added clone */"
     );
     assert!(matches!(
         clone_recovery,
         RustExpr::PostfixComment { expr, .. }
             if matches!(
                 expr.as_ref(),
-                RustExpr::MethodCall { receiver, method, .. }
-                    if method == "clone"
-                        && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
+                RustExpr::Call { function, .. }
+                    if emit_expr(function) == "std::clone::Clone::clone"
             )
     ));
     let proven = apply_coercions(
@@ -2055,12 +2054,11 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
             },
         }],
     );
-    assert_eq!(emit_expr(&proven), "value.clone()");
+    assert_eq!(emit_expr(&proven), "std::clone::Clone::clone(&value)");
     assert!(matches!(
         proven.clone().into_unshaped(),
-        RustExpr::MethodCall { receiver, method, .. }
-            if method == "clone"
-                && matches!(receiver.as_ref(), RustExpr::Var(name) if name == "value")
+        RustExpr::Call { function, .. }
+            if emit_expr(&function) == "std::clone::Clone::clone"
     ));
     assert_eq!(proven.recorded_shape(), Some(RustExprShape::OwnedRecovery));
 
@@ -2070,13 +2068,10 @@ fn clone_recovery_policy_is_explicit_in_coercion_adapter() {
             policy: CloneRecoveryPolicy::AuditRequired,
         }],
     );
+    assert_eq!(emit_expr(&already_recovered), "value.clone()");
     assert_eq!(
-        already_recovered.clone().into_unshaped(),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::Var("value".to_string())),
-            method: "clone".to_string(),
-            args: Vec::new(),
-        }
+        already_recovered.recorded_shape(),
+        Some(RustExprShape::OwnedRecovery)
     );
     assert_eq!(
         already_recovered.recorded_shape(),
@@ -4603,10 +4598,20 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
     });
     assert_eq!(
         plan_shape_coercion_with_facts(&dyn_actual, &downcast_target, &FactSet::default()),
-        vec![Coercion::DowncastDynTrait {
-            target_type: "Dog".to_string(),
-            invalid_cast: InvalidCastPolicy::Panic,
-        }]
+        vec![
+            Coercion::DowncastDynTrait {
+                target_type: "Dog".to_string(),
+                invalid_cast: InvalidCastPolicy::Panic,
+            },
+            Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                    java_ty: JavaType::Named {
+                        name: "Dog".to_string(),
+                        args: Vec::new(),
+                    },
+                },
+            },
+        ]
     );
     let dyn_downcast = apply_expr_to_slot_with_facts(
         RustExpr::Var("animal".to_string()),
@@ -4616,12 +4621,9 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
     );
     assert_eq!(
         emit_expr(&dyn_downcast),
-        "animal.as_any().downcast_ref::<Dog>().expect(\"invalid Java cast\")"
+        "std::clone::Clone::clone(animal.as_any().downcast_ref::<Dog>().expect(\"invalid Java cast\"))"
     );
-    assert!(matches!(
-        dyn_downcast,
-        RustExpr::MethodCall { ref method, .. } if method == "expect"
-    ));
+    assert!(matches!(dyn_downcast, RustExpr::Shaped { .. }));
 
     let mut boxed_downcast_actual = RustSlotShape::conservative(JavaType::Named {
         name: "Animal".to_string(),
@@ -4636,10 +4638,20 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
             &downcast_target,
             &FactSet::default()
         ),
-        vec![Coercion::DowncastBoxedDynTrait {
-            target_type: "Dog".to_string(),
-            invalid_cast: InvalidCastPolicy::Panic,
-        }]
+        vec![
+            Coercion::DowncastBoxedDynTrait {
+                target_type: "Dog".to_string(),
+                invalid_cast: InvalidCastPolicy::Panic,
+            },
+            Coercion::CloneRecovery {
+                policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                    java_ty: JavaType::Named {
+                        name: "Dog".to_string(),
+                        args: Vec::new(),
+                    },
+                },
+            },
+        ]
     );
     let boxed_downcast = apply_expr_to_slot_with_facts(
         RustExpr::Var("animal".to_string()),
@@ -4649,12 +4661,9 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
     );
     assert_eq!(
         emit_expr(&boxed_downcast),
-        "animal.as_ref().as_any().downcast_ref::<Dog>().expect(\"invalid Java cast\")"
+        "std::clone::Clone::clone(animal.as_ref().as_any().downcast_ref::<Dog>().expect(\"invalid Java cast\"))"
     );
-    assert!(matches!(
-        boxed_downcast,
-        RustExpr::MethodCall { ref method, .. } if method == "expect"
-    ));
+    assert!(matches!(boxed_downcast, RustExpr::Shaped { .. }));
 
     let mut erased_actual = RustSlotShape::conservative(JavaType::Named {
         name: "Object".to_string(),
@@ -4743,21 +4752,15 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
     .into_unshaped();
     assert_eq!(
         emit_expr(&boxed_dyn_clone_recovery),
-        "(Box::new(writer) as Box<dyn Animal>).clone()/* TODO(translation): validate added clone */"
+        "std::clone::Clone::clone(&(Box::new(writer) as Box<dyn Animal>))/* TODO(translation): validate added clone */"
     );
     assert!(matches!(
         boxed_dyn_clone_recovery,
         RustExpr::PostfixComment { expr, .. }
             if matches!(
                 expr.as_ref(),
-                RustExpr::MethodCall { receiver, method, .. }
-                    if method == "clone"
-                        && (matches!(receiver.as_ref(), RustExpr::Cast { .. })
-                            || matches!(
-                                receiver.as_ref(),
-                                RustExpr::Grouped(grouped)
-                                    if matches!(grouped.as_ref(), RustExpr::Cast { .. })
-                            ))
+                RustExpr::Call { function, .. }
+                    if emit_expr(function) == "std::clone::Clone::clone"
             )
     ));
 
@@ -4986,11 +4989,11 @@ fn shape_coercion_recovers_erased_object_into_source_hierarchy_carrier() {
         "{rendered}"
     );
     assert!(
-        rendered.contains("AnimalValue::Animal(__java_erased_object.downcast_ref::<Animal>().expect(\"invalid Java cast\").clone())"),
+        rendered.contains("AnimalValue::Animal(std::clone::Clone::clone(__java_erased_object.downcast_ref::<Animal>().expect(\"invalid Java cast\")))"),
         "{rendered}"
     );
     assert!(
-        rendered.contains("AnimalValue::Dog(__java_erased_object.downcast_ref::<Dog>().expect(\"invalid Java cast\").clone())"),
+        rendered.contains("AnimalValue::Dog(std::clone::Clone::clone(__java_erased_object.downcast_ref::<Dog>().expect(\"invalid Java cast\")))"),
         "{rendered}"
     );
 }

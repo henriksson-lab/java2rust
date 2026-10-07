@@ -25,6 +25,22 @@ pub(crate) fn array_expr_with_object_default(
         ArrayExprPlan::Creation { element_type, .. } => {
             let default = default_array_element_expr(element_type)
                 .or_else(|| element_has_default.then(object_element_default_expr));
+            if children.len() >= 3
+                && let Some(default) = default
+            {
+                // `Array2` is deliberately restricted to an exactly
+                // two-dimensional primitive array. Higher-rank Java arrays
+                // retain their nested/ragged representation, even when every
+                // dimension happens to be supplied by one creation
+                // expression. Build that representation from the innermost
+                // dimension out instead of returning the old empty-vector
+                // fallback (which made every subsequent index fail).
+                return nested_array_from_elem_projection(
+                    &children,
+                    default,
+                    nullable_array_default_needs_repeat_with(element_type),
+                );
+            }
             if children.len() == 2
                 && let Some(default) = default
             {
@@ -112,6 +128,52 @@ pub(crate) fn nested_array2_from_elem_projection(
             len: Box::new(array_dimension_len_projection(rows)),
         }
     }
+}
+
+/// A fully-sized two-dimensional Java array stored in a ragged carrier.
+///
+/// A destination can require nullable rows after another assignment creates
+/// the same array with an omitted inner dimension (`new T[n][]`).  A later
+/// `new T[n][m]` still creates every row, so retain the destination carrier
+/// while wrapping each newly-created row in `Some`.  `repeat_with` constructs
+/// rows independently and therefore also works when their elements are not
+/// `Clone`.
+pub(crate) fn nested_array2_with_nullable_rows_projection(
+    rows: RustExpr,
+    cols: RustExpr,
+    element_type: &JavaType,
+    element_has_default: bool,
+) -> Option<RustExpr> {
+    let default = default_array_element_expr(element_type)
+        .or_else(|| element_has_default.then(object_element_default_expr))?;
+    let row = array_from_elem_projection_for_element_type(
+        cols,
+        default,
+        nullable_array_default_needs_repeat_with(element_type),
+    );
+    let present_row = function_call_projection(RustExpr::path(["Some"]), vec![row]);
+    Some(repeat_with_projection(present_row, rows))
+}
+
+/// A fully-sized Java array with three or more dimensions.
+///
+/// Rust's carrier for these arrays is a nested `Vec`, because Java arrays of
+/// rank greater than two may later become ragged. Repeating from the inside
+/// out preserves the dimension order. Nullable reference elements use
+/// `repeat_with` at every level so allocation does not invent a `T: Clone`
+/// requirement merely to repeat `None`-filled inner arrays.
+fn nested_array_from_elem_projection(
+    dimensions: &[RustExpr],
+    default: RustExpr,
+    repeat_with_default: bool,
+) -> RustExpr {
+    dimensions
+        .iter()
+        .rev()
+        .cloned()
+        .fold(default, |value, dimension| {
+            array_from_elem_projection_for_element_type(dimension, value, repeat_with_default)
+        })
 }
 
 #[cfg(test)]
@@ -215,6 +277,71 @@ pub(crate) fn array2_from_rows_projection(
     }
 }
 
+/// Materialize Java's nested-array carrier as the rectangular primitive
+/// carrier required by a destination slot.
+///
+/// `new T[n][]` must initially retain nullable rows, even when every row is
+/// subsequently filled.  Crossing into a method declared with an ordinary
+/// rectangular `T[][]` ABI is the point where those row references can be
+/// checked and collected into `Array2<T>`.
+pub(crate) fn array2_from_nested_rows_projection(
+    rows: RustExpr,
+    rows_are_nullable: bool,
+    ownership: OwnershipShape,
+) -> Option<RustExpr> {
+    let iter = receiver_method_call_projection_exact(rows, "iter", Vec::new());
+    let row = RustExpr::Var("__java_row".to_string());
+    let projected_row = if rows_are_nullable {
+        let borrowed = receiver_method_call_projection_exact(row, "as_deref", Vec::new());
+        receiver_method_call_projection_exact(
+            borrowed,
+            "ok_or_else",
+            vec![RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: Vec::new(),
+                body: RustClosureBody::Expr(Box::new(
+                    crate::exception_lowering::new_exception_expr(
+                        "NullPointerException",
+                        crate::coercion::rust_string_literal_projection("Java null array row"),
+                    ),
+                )),
+            }],
+        )
+    } else {
+        receiver_method_call_projection_exact(row, "as_slice", Vec::new())
+    };
+    let mapped = receiver_method_call_projection_exact(
+        iter,
+        "map",
+        vec![RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![crate::rust_ir::RustClosureParam {
+                pattern: "__java_row".to_string(),
+                ty: None,
+            }],
+            body: RustClosureBody::Expr(Box::new(projected_row)),
+        }],
+    );
+    let row_refs = if rows_are_nullable {
+        RustExpr::Try(Box::new(receiver_method_call_projection_exact(
+            mapped,
+            "collect::<Result<Vec<_>, JavaException>>",
+            Vec::new(),
+        )))
+    } else {
+        receiver_method_call_projection_exact(mapped, "collect::<Vec<_>>", Vec::new())
+    };
+    array2_from_rows_projection(
+        RustExpr::Unary {
+            op: "&".to_string(),
+            expr: Box::new(row_refs),
+        },
+        ownership,
+    )
+}
+
 pub(crate) fn array2_index_projection(array: RustExpr, row: RustExpr, col: RustExpr) -> RustExpr {
     RustExpr::Index(
         Box::new(postfix_receiver_projection(array)),
@@ -251,10 +378,9 @@ pub(crate) fn array2_row_mut_assign_stmt(
 
 pub(crate) fn ragged_array_outer_creation_projection(len: RustExpr) -> RustExpr {
     RustExpr::VecRepeat {
-        value: Box::new(function_call_projection(
-            RustExpr::path(["Vec", "new"]),
-            Vec::new(),
-        )),
+        // A trailing, unspecified Java array dimension is not an empty inner
+        // array. Each allocated outer slot contains null until assigned.
+        value: Box::new(RustExpr::path(["None"])),
         len: Box::new(recover_parseable_raw_operand_projection(len)),
     }
 }
@@ -301,6 +427,34 @@ fn array2_initializer_row_items(row: &RustExpr) -> Option<Vec<RustExpr>> {
     match row {
         RustExpr::VecLiteral(items) | RustExpr::ArrayLiteral(items) => Some(items.clone()),
         RustExpr::Shaped { expr, .. } => array2_initializer_row_items(expr),
+        // Slot-aware array lowering gives each nested row an explicit local
+        // type so empty and generic Java initializers do not depend on Rust
+        // inference.  That annotation is representation-neutral, but it used
+        // to hide an otherwise rectangular primitive literal from the Array2
+        // recognizer.  Recover only the structured block we emit ourselves;
+        // arbitrary blocks must remain opaque because they may have effects.
+        RustExpr::Block { stmts, tail }
+            if matches!(
+                (stmts.as_slice(), tail.as_deref()),
+                ([RustStmt::Let {
+                    mutable: false,
+                    name,
+                    value: Some(_),
+                    ..
+                }], Some(RustExpr::Var(tail_name)))
+                    if name == "__java_typed_array" && tail_name == name
+            ) =>
+        {
+            let [
+                RustStmt::Let {
+                    value: Some(value), ..
+                },
+            ] = stmts.as_slice()
+            else {
+                unreachable!("matched one typed-array let statement")
+            };
+            array2_initializer_row_items(value)
+        }
         _ => None,
     }
 }
@@ -405,6 +559,27 @@ mod tests {
             "ndarray::Array2::from_elem((rows as usize, cols as usize), 0)"
         );
         assert!(matches!(array2_creation, RustExpr::Call { .. }));
+
+        let array3_creation = array_expr(
+            &ArrayExprPlan::Creation {
+                element_type: &JavaType::Primitive(PrimitiveType::Double),
+                dimensions: &[
+                    Expr::Var("planes".to_string()),
+                    Expr::Var("rows".to_string()),
+                    Expr::Var("cols".to_string()),
+                ],
+            },
+            vec![
+                RustExpr::Var("planes".to_string()),
+                RustExpr::Var("rows".to_string()),
+                RustExpr::Var("cols".to_string()),
+            ],
+        );
+        assert_eq!(
+            emit_expr(&array3_creation),
+            "vec![vec![vec![0.0; cols as usize]; rows as usize]; planes as usize]"
+        );
+        assert!(matches!(array3_creation, RustExpr::VecRepeat { .. }));
 
         let initializer_elements = [
             Expr::Literal(Literal::Int(1)),
@@ -660,6 +835,16 @@ mod tests {
             )
             .is_none()
         );
+        let nullable_rows = array2_from_nested_rows_projection(
+            RustExpr::Var("rows".to_string()),
+            true,
+            OwnershipShape::Owned,
+        )
+        .expect("owned rectangular handoff");
+        let nullable_rows = emit_expr(&nullable_rows);
+        assert!(nullable_rows.starts_with("ndarray::Array2::from_rows(&rows.iter().map("));
+        assert!(nullable_rows.contains("__java_row.as_deref().ok_or_else("));
+        assert!(nullable_rows.contains("collect::<Result<Vec<_>, JavaException>>()?"));
         assert_eq!(
             emit_expr(&array2_index_projection(
                 RustExpr::Var("values".to_string()),
@@ -842,14 +1027,11 @@ mod tests {
             emit_expr(&ragged_array_outer_creation_projection(RustExpr::Raw(
                 "base_names.len() as i32 as usize".to_string()
             ))),
-            "vec![Vec::new(); base_names.len() as i32 as usize]"
+            "vec![None; base_names.len() as i32 as usize]"
         );
         let recovered_ragged_len =
             ragged_array_outer_creation_projection(RustExpr::Raw("left + right".to_string()));
-        assert_eq!(
-            emit_expr(&recovered_ragged_len),
-            "vec![Vec::new(); left + right]"
-        );
+        assert_eq!(emit_expr(&recovered_ragged_len), "vec![None; left + right]");
         assert!(matches!(
             recovered_ragged_len,
             RustExpr::VecRepeat { len, .. }

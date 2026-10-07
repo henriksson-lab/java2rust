@@ -59,12 +59,6 @@ const FIXTURES: &[MarkerFixture] = &[
         counters: &["invalid_patterns"],
     },
     MarkerFixture {
-        marker: "unsupported_java_array_creation",
-        // Three-dimensional array creation still takes the loud fallback.
-        java: "public class MarkerUnsupportedArray { public int m() { int[][][] ns = new int[1][1][1]; return ns.length; } }",
-        counters: &["invalid_patterns"],
-    },
-    MarkerFixture {
         marker: "untranslated_add_all",
         java: "import com.unmodelled.Bag;\npublic class MarkerAddAll { public void m(Bag b, Bag other) { b.addAll(other); } }",
         counters: &["invalid_patterns"],
@@ -85,6 +79,13 @@ const FIXTURES: &[MarkerFixture] = &[
 /// covered by a dedicated test rather than by a [`FIXTURES`] entry. Each entry
 /// names the test, so "covered elsewhere" is a claim someone can check.
 const COVERED_BY_DEDICATED_TEST: &[(&str, &str)] = &[
+    // Fully-sized higher-rank arrays now lower structurally. Keep the loud
+    // fallback itself covered directly; there is no honest Java source
+    // fixture that should be forced through it merely to move the counter.
+    (
+        "unsupported_java_array_creation",
+        "array_lowering::tests::array_expr_builds_structured_array_values",
+    ),
     (
         "unmodelled_static_constant",
         "unmodelled_static_constant_is_counted",

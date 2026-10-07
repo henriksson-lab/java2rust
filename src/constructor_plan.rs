@@ -55,6 +55,9 @@ pub enum DelegatedConstructorTrailingStmt<'a> {
     Statement {
         stmt: &'a Stmt,
     },
+    OwnedStatement {
+        stmt: Stmt,
+    },
     ExprStatement {
         expr: &'a Expr,
     },

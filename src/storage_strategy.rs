@@ -523,6 +523,25 @@ impl StoragePlacement {
     }
 }
 
+/// Reconcile analysis-derived storage with the representation plan.
+///
+/// Analysis can prove sharing after the representation plan has selected a
+/// nominal carrier.  Once that proof names an implemented shared ABI it is
+/// authoritative; otherwise the representation plan remains the fallback.
+/// Keeping this choice here prevents signatures, expression lowering, and
+/// generated trait adapters from selecting different Rust types for one Java
+/// object.
+pub(crate) fn effective_storage_placement(
+    fact_placement: StoragePlacement,
+    representation_placement: StoragePlacement,
+) -> StoragePlacement {
+    if fact_placement.is_implemented() && fact_placement.shared() {
+        fact_placement
+    } else {
+        representation_placement
+    }
+}
+
 /// One decision per source type.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StoragePlan {
@@ -1658,6 +1677,15 @@ fn source_type_decl_for_owner_context<'a>(
     owner_name: &str,
     type_name: &str,
 ) -> Option<&'a TypeDecl> {
+    // Hierarchy edges retain their source generic arguments (`Base<T>`),
+    // while declarations are keyed by their nominal name (`Base`). Storage
+    // propagation is a per-declaration property, so traverse the erased edge
+    // just as representation planning does.
+    let parsed_type_name = crate::parser::parse_hierarchy_type(type_name);
+    let type_name = match &parsed_type_name {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
+        _ => type_name,
+    };
     let types = program
         .types
         .iter()
@@ -3153,6 +3181,61 @@ public class Outer {
 }
 "#,
             "Outer.Cell",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn aggregate_field_mutation_in_a_shared_subtype_requires_interior_mutability() {
+        let strategy = strategy_of(
+            r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class AggregateBase<T> {}
+class AggregateChild<T> extends AggregateBase<T> {
+    double[] values = new double[2];
+    List<T> items = new ArrayList<T>();
+
+    void setValue(int index, double value) { values[index] = value; }
+    void setItem(int index, T value) { items.set(index, value); }
+}
+class AggregateUse {
+    static AggregateBase<String> mutate(AggregateChild<String> value) {
+        AggregateChild<String> alias = value;
+        value.setValue(0, 1.0);
+        return alias;
+    }
+}
+"#,
+            "AggregateChild",
+        );
+        assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn inherited_aggregate_mutators_make_a_shared_subtype_interior_mutable() {
+        let strategy = strategy_of(
+            r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class MutableAggregateBase<T> {
+    double[] values = new double[2];
+    List<T> items = new ArrayList<T>();
+
+    void setValue(int index, double value) { values[index] = value; }
+    void setItem(int index, T value) { items.set(index, value); }
+}
+class MutableAggregateChild<T> extends MutableAggregateBase<T> {}
+class MutableAggregateUse {
+    static MutableAggregateBase<String> alias(MutableAggregateChild<String> value) {
+        MutableAggregateChild<String> copy = value;
+        return copy;
+    }
+}
+"#,
+            "MutableAggregateChild",
         );
         assert_eq!(strategy, StorageStrategy::SharedLocal);
     }

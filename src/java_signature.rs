@@ -153,6 +153,10 @@ pub(crate) fn erased_type_name(ty: &JavaType, is_varargs: bool) -> String {
         JavaType::String => "java.lang.String".to_string(),
         JavaType::Array(element) => format!("{}[]", erased_type_name(element, false)),
         JavaType::Named { name, .. } => name.clone(),
+        JavaType::Intersection(bounds) => bounds
+            .first()
+            .map(|bound| erased_type_name(bound, false))
+            .unwrap_or_else(|| "java.lang.Object".to_string()),
         JavaType::Wildcard(bound) => bound
             .as_ref()
             .map(|bound| match bound {

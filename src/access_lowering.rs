@@ -142,7 +142,10 @@ fn lower_nullable_array_element_member_receiver(
     plan: &MemberAccessPlan,
     lowered_receiver: RustExpr,
 ) -> RustExpr {
-    if !matches!(plan.op(), MemberAccessOp::RustField { .. }) {
+    if !matches!(
+        plan.op(),
+        MemberAccessOp::RustField { .. } | MemberAccessOp::RustGetter { .. }
+    ) {
         return lowered_receiver;
     }
     lower_nullable_array_element_receiver(receiver, type_env, lowered_receiver)
@@ -215,6 +218,9 @@ fn apply_member_access_plan(plan: &MemberAccessPlan, receiver: RustExpr) -> Rust
             associated_const_projection(&owner, &rust_associated_const_ident(plan.member()))
         }
         MemberAccessOp::RustField { rust_name } => field_projection(receiver, rust_name),
+        MemberAccessOp::RustGetter { rust_name } => {
+            crate::coercion::receiver_method_call_projection_exact(receiver, rust_name, Vec::new())
+        }
     }
 }
 

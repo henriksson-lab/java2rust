@@ -670,6 +670,7 @@ fn java_type_uses_broad_ioutils_facade(ty: &JavaType) -> bool {
             is_broad_ioutils_type_name(name) || args.iter().any(java_type_uses_broad_ioutils_facade)
         }
         JavaType::Array(inner) => java_type_uses_broad_ioutils_facade(inner),
+        JavaType::Intersection(bounds) => bounds.iter().any(java_type_uses_broad_ioutils_facade),
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
             java_type_uses_broad_ioutils_facade(bound)

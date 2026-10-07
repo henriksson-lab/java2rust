@@ -20,6 +20,7 @@ Options:
   --translate-timeout-sec <n>         Mark a single Java file translation failed after n seconds.
   --verbose-cargo                     Run cargo check without --quiet.
   --offline-cargo                     Run cargo check with --offline.
+  --resume-assembly                   Reuse a completed translation in --out and resume crate assembly.
   --help                              Show this help.
 
 Output:
@@ -55,6 +56,7 @@ translate_timeout_sec="${TRANSLATE_TIMEOUT_SEC:-}"
 verbose_cargo=0
 offline_cargo=0
 batch_translate="${BATCH_TRANSLATE:-1}"
+resume_assembly=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -121,6 +123,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --offline-cargo)
       offline_cargo=1
+      shift
+      ;;
+    --resume-assembly)
+      resume_assembly=1
       shift
       ;;
     --help|-h)
@@ -227,6 +233,17 @@ impl<T: Clone> Array2<T> {
 }
 
 impl<T> Array2<T> {
+    /// Java's `array.length` on a two-dimensional array reports the outer
+    /// dimension. Generated Java array code therefore uses `len()` for rows,
+    /// not the total scalar element count used by ndarray proper.
+    pub fn len(&self) -> usize {
+        self.rows
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.rows == 0
+    }
+
     pub fn nrows(&self) -> usize {
         self.rows
     }
@@ -249,6 +266,15 @@ impl<T> Array2<T> {
         }
     }
 
+    /// Iterate the Java outer-array dimension without flattening the matrix.
+    /// This mirrors ndarray's row-lane API used by enhanced-for lowering.
+    pub fn rows(&self) -> Rows<'_, T> {
+        Rows {
+            matrix: self,
+            row: 0,
+        }
+    }
+
     pub fn iter(&self) -> Rows<'_, T> {
         Rows {
             matrix: self,
@@ -268,6 +294,22 @@ impl<T> Index<[usize; 2]> for Array2<T> {
 impl<T> IndexMut<[usize; 2]> for Array2<T> {
     fn index_mut(&mut self, index: [usize; 2]) -> &mut Self::Output {
         &mut self.data[index[0] * self.cols + index[1]]
+    }
+}
+
+impl<T> Index<usize> for Array2<T> {
+    type Output = [T];
+
+    fn index(&self, row: usize) -> &Self::Output {
+        let start = row * self.cols;
+        &self.data[start..start + self.cols]
+    }
+}
+
+impl<T> IndexMut<usize> for Array2<T> {
+    fn index_mut(&mut self, row: usize) -> &mut Self::Output {
+        let start = row * self.cols;
+        &mut self.data[start..start + self.cols]
     }
 }
 
@@ -310,6 +352,16 @@ pub struct RowMut<'a, T> {
 impl<'a, T: Clone> RowMut<'a, T> {
     pub fn assign(&mut self, source: &ArrayView1<'_, T>) {
         self.data.clone_from_slice(source.data);
+    }
+
+    pub fn fill(&mut self, value: T) {
+        self.data.fill(value);
+    }
+}
+
+impl<'a, T> RowMut<'a, T> {
+    pub fn as_slice_mut(&mut self) -> Option<&mut [T]> {
+        Some(self.data)
     }
 }
 
@@ -374,12 +426,25 @@ slowest_workers_path="$out_dir/slowest-workers.tsv"
 script_start_ms="$(now_ms)"
 
 mkdir -p "$generated_dir" "$translate_log_dir"
-rm -f "$status_path" "$batch_manifest_path" "$analysis_profile_path" "$compile_log" "$invalid_patterns_path" "$parse_failures_path" "$top_compile_errors" "$resolver_log" "$idiom_sweep_tsv" "$idiom_sweep_md" "$phase_events_path" "$worker_events_path" "$slowest_phases_path" "$slowest_workers_path"
-find "$generated_dir" -type f -name '*.rs' -delete
-printf "phase\tstatus\telapsed_ms\tdetail\n" > "$phase_events_path"
-printf "event\tpid\tindex\tsource\telapsed_ms\tstatus\trust_path\n" > "$worker_events_path"
+if [[ "$resume_assembly" -eq 0 ]]; then
+  rm -f "$status_path" "$batch_manifest_path" "$analysis_profile_path" "$compile_log" "$invalid_patterns_path" "$parse_failures_path" "$top_compile_errors" "$resolver_log" "$idiom_sweep_tsv" "$idiom_sweep_md" "$phase_events_path" "$worker_events_path" "$slowest_phases_path" "$slowest_workers_path"
+  find "$generated_dir" -type f -name '*.rs' -delete
+  printf "phase\tstatus\telapsed_ms\tdetail\n" > "$phase_events_path"
+  printf "event\tpid\tindex\tsource\telapsed_ms\tstatus\trust_path\n" > "$worker_events_path"
+else
+  raw_resume_dir="$out_dir/generated-raw-before-support-strip"
+  if [[ ! -s "$status_path" || ! -d "$raw_resume_dir" || ! -f "$crate_dir/Cargo.toml" ]]; then
+    echo "--resume-assembly requires completed translation artifacts in: $out_dir" >&2
+    exit 1
+  fi
+  find "$generated_dir" -type f -name '*.rs' -delete
+  cp "$raw_resume_dir"/*.rs "$generated_dir"/
+  printf "assembly_resume\trunning\t0\t%s\n" "$out_dir" >> "$phase_events_path"
+fi
 
-if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
+if [[ "$resume_assembly" -eq 1 ]]; then
+  :
+elif [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
   if [[ ! -x "$binary" ]]; then
     echo "NEW_JAVA2RUST_BIN is not executable: $binary" >&2
     exit 1
@@ -407,6 +472,7 @@ if [[ "${#manifest_paths[@]}" -gt 0 ]]; then
   fi
 fi
 
+if [[ "$resume_assembly" -eq 0 ]]; then
 cat > "$crate_dir/Cargo.toml" <<'TOML'
 [package]
 name = "new-java2rust-focused-output"
@@ -428,6 +494,7 @@ Each Java input file is emitted into one Rust module. Translation receives the
 focused package as source context so source method signatures and overload
 names can be shared across sibling modules.
 README
+fi
 
 resolver_args=("resolver-bench")
 if [[ "$enable_builtin_packs" -eq 0 ]]; then
@@ -452,7 +519,7 @@ resolver_args+=("$primary")
 
 resolver_status="skipped"
 resolver_elapsed_ms=0
-if [[ "$run_resolver_bench" -eq 1 ]]; then
+if [[ "$resume_assembly" -eq 0 && "$run_resolver_bench" -eq 1 ]]; then
   resolver_start_ms="$(now_ms)"
   if "$binary" "${resolver_args[@]}" > "$resolver_log" 2>&1; then
     resolver_status="ok"
@@ -461,9 +528,13 @@ if [[ "$run_resolver_bench" -eq 1 ]]; then
   fi
   resolver_elapsed_ms="$(elapsed_ms_since "$resolver_start_ms")"
 fi
-printf "resolver_bench\t%s\t%s\t%s\n" "$resolver_status" "$resolver_elapsed_ms" "$resolver_log" >> "$phase_events_path"
+if [[ "$resume_assembly" -eq 0 ]]; then
+  printf "resolver_bench\t%s\t%s\t%s\n" "$resolver_status" "$resolver_elapsed_ms" "$resolver_log" >> "$phase_events_path"
+fi
 
-printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\n" > "$status_path"
+if [[ "$resume_assembly" -eq 0 ]]; then
+  printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n" > "$status_path"
+fi
 mapfile -t java_files < <(find "$primary" -type f -name '*.java' | sort)
 
 if [[ "${#java_files[@]}" -eq 0 ]]; then
@@ -651,6 +722,8 @@ for pack_name in "${builtin_packs[@]}"; do
   translate_args+=("--builtin-external-pack" "$pack_name")
 done
 
+translation_elapsed_ms=0
+if [[ "$resume_assembly" -eq 0 ]]; then
 status_fragments_dir="$out_dir/status-fragments"
 mkdir -p "$status_fragments_dir"
 find "$status_fragments_dir" -type f -name '*.tsv' -delete
@@ -719,6 +792,9 @@ else
 fi
 translation_elapsed_ms="$(elapsed_ms_since "$translation_start_ms")"
 printf "translation\tok\t%s\t%s files\n" "$translation_elapsed_ms" "${#java_files[@]}" >> "$phase_events_path"
+else
+  printf "translation_reuse\tok\t0\t%s files\n" "${#java_files[@]}" >> "$phase_events_path"
+fi
 
 assembly_start_ms="$(now_ms)"
 module_types_path="$out_dir/generated-module-types.tsv"
@@ -889,10 +965,16 @@ strip_shared_support_items() {
 strip_source_type_facade_stubs() {
   local rust_path="$1"
   local source_types_path="$2"
-  python3 - "$rust_path" "$source_types_path" <<'PY'
+  local rust_item_utils_dir="${3:-}"
+  python3 - "$rust_path" "$source_types_path" "$rust_item_utils_dir" <<'PY'
 import re
 import sys
 from pathlib import Path
+
+if not sys.argv[3]:
+    raise SystemExit("strip_source_type_facade_stubs requires the shared Rust item utility directory")
+sys.path.insert(0, sys.argv[3])
+from rust_item_utils import impl_header_parts, impl_target_name, inherent_impl_target_name
 
 rust_path = Path(sys.argv[1])
 source_types_path = Path(sys.argv[2])
@@ -913,13 +995,6 @@ source_types = {
 
 lines = rust_path.read_text().splitlines(keepends=True)
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
-inherent_impl_re = re.compile(
-    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
-)
-trait_impl_re = re.compile(
-    r"^impl(?:\s*<[^>{}]*>)?\s+.+?\s+for\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?:\{|where\b)"
-)
 derive_re = re.compile(r"^#\[derive")
 
 
@@ -1029,13 +1104,9 @@ while index < len(lines):
         if decl:
             target = decl.group(2)
         else:
-            inherent = inherent_impl_re.match(line)
-            if inherent:
-                target = inherent.group(1)
-            else:
-                trait_impl = trait_impl_re.match(line)
-                if trait_impl:
-                    target = trait_impl.group(1)
+            target = inherent_impl_target_name(line)
+            if target is None and (parts := impl_header_parts(line)) is not None:
+                target = impl_target_name(parts[1])
 
         if target in source_types:
             start = attached_start(index) if decl else index
@@ -1057,10 +1128,16 @@ restore_missing_prelude_support_items() {
   local raw_path="$2"
   local source_types_path="$3"
   local shared_types_path="$4"
-  python3 - "$rust_path" "$raw_path" "$source_types_path" "$shared_types_path" <<'PY'
+  local rust_item_utils_dir="${5:-}"
+  python3 - "$rust_path" "$raw_path" "$source_types_path" "$shared_types_path" "$rust_item_utils_dir" <<'PY'
 import re
 import sys
 from pathlib import Path
+
+if not sys.argv[5]:
+    raise SystemExit("restore_missing_prelude_support_items requires the shared Rust item utility directory")
+sys.path.insert(0, sys.argv[5])
+from rust_item_utils import impl_header_parts, impl_target_name
 
 rust_path = Path(sys.argv[1])
 raw_path = Path(sys.argv[2])
@@ -1085,13 +1162,11 @@ shared_types = {
 
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
-static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
-derive_re = re.compile(r"^#\[derive")
-inherent_impl_re = re.compile(
-    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
+static_re = re.compile(
+    r"^(?:(?:pub\s+)?static\s+|std::thread_local!\s*\{\s*static\s+)"
+    r"([A-Za-z_][A-Za-z0-9_]*)\b"
 )
-trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
+derive_re = re.compile(r"^#\[derive")
 
 
 def source_owned_nested_type_name(name: str) -> bool:
@@ -1267,11 +1342,9 @@ def imported_top_level_names(lines: list[str]) -> set[str]:
 
 
 def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
-    referenced = set()
-    for name in candidate_names:
-        if re.search(rf"\b{re.escape(name)}\s*(?:<|\()", text):
-            referenced.add(name)
-    return referenced
+    return candidate_names.intersection(
+        re.findall(r"\b[A-Za-z_][A-Za-z0-9_]*\b", text)
+    )
 
 
 def support_item_name(line: str):
@@ -1279,10 +1352,8 @@ def support_item_name(line: str):
         return match.group(2)
     if match := alias_re.match(line):
         return match.group(1)
-    if match := inherent_impl_re.match(line):
-        return match.group(1)
-    if match := trait_impl_re.match(line):
-        return match.group(2)
+    if (parts := impl_header_parts(line)) is not None:
+        return impl_target_name(parts[1])
     return None
 
 
@@ -1387,16 +1458,24 @@ PY
 
 deduplicate_generated_coherence_items() {
   local rust_path="$1"
-  python3 - "$rust_path" <<'PY'
+  local rust_item_utils_dir="${2:-}"
+  local shared_support_path="${3:-}"
+  python3 - "$rust_path" "$rust_item_utils_dir" "$shared_support_path" <<'PY'
 import re
 import sys
 from pathlib import Path
 
+if not sys.argv[2]:
+    raise SystemExit("deduplicate_generated_coherence_items requires the shared Rust item utility directory")
+sys.path.insert(0, sys.argv[2])
+from rust_item_utils import impl_header_parts
+
 path = Path(sys.argv[1])
 lines = path.read_text().splitlines(keepends=True)
-static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
-trait_impl_re = re.compile(
-    r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)"
+shared_support_path = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
+static_re = re.compile(
+    r"^(?:(?:pub\s+)?static\s+|std::thread_local!\s*\{\s*static\s+)"
+    r"([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 
 
@@ -1470,6 +1549,16 @@ def item_end(start: int) -> int:
 # when their bodies happen to differ.  Inherent impls and unique companion
 # impls (notably Clone for Box<dyn SourceTrait>) are outside this filter.
 seen = set()
+# Rust coherence is crate-wide, not module-local. Shared support is included at
+# the crate root before source modules, so an exact `(trait, target)` already
+# present there owns the key. Seed the module cleanup with those keys; otherwise
+# the final source-surface restoration can reintroduce a duplicate such as
+# `ObservationBound for ObservationDiscrete<E>` after its earlier guard ran.
+if shared_support_path and shared_support_path.exists():
+    for shared_line in shared_support_path.read_text().splitlines():
+        parts = impl_header_parts(shared_line)
+        if parts is not None and parts[0] is not None:
+            seen.add(("trait_impl", parts[0], parts[1]))
 remove = set()
 depth = 0
 index = 0
@@ -1479,8 +1568,8 @@ while index < len(lines):
     if depth == 0:
         if match := static_re.match(line):
             key = ("static", match.group(1))
-        elif match := trait_impl_re.match(line):
-            key = ("trait_impl", match.group(1).strip(), match.group(2).strip())
+        elif (parts := impl_header_parts(line)) is not None and parts[0] is not None:
+            key = ("trait_impl", parts[0], parts[1])
     if key is not None:
         end = item_end(index)
         if key in seen:
@@ -1503,10 +1592,16 @@ restore_missing_source_type_items() {
   local raw_path="$2"
   local shared_types_path="${3:-}"
   local shared_support_path="${4:-}"
-  python3 - "$rust_path" "$raw_path" "$shared_types_path" "$shared_support_path" <<'PY'
+  local rust_item_utils_dir="${5:-}"
+  python3 - "$rust_path" "$raw_path" "$shared_types_path" "$shared_support_path" "$rust_item_utils_dir" <<'PY'
 import re
 import sys
 from pathlib import Path
+
+if not sys.argv[5]:
+    raise SystemExit("restore_missing_source_type_items requires the shared Rust item utility directory")
+sys.path.insert(0, sys.argv[5])
+from rust_item_utils import impl_header_parts, impl_target_name, inherent_impl_target_name
 
 rust_path = Path(sys.argv[1])
 raw_path = Path(sys.argv[2])
@@ -1520,13 +1615,16 @@ stem = rust_path.stem
 current_source = re.sub(r"^\d+_", "", stem)
 decl_re = re.compile(r"^pub\s+(struct|enum|trait|type)\s+([A-Za-z_][A-Za-z0-9_]*)")
 derive_re = re.compile(r"^#\[derive")
-inherent_impl_re = re.compile(
-    r"^impl(?:\s*<[^>{}]*>)?\s+(?:dyn\s+)?"
-    r"([A-Za-z_][A-Za-z0-9_]*)(?:<[^>{}]*>)?\s*(?:\{|where\b)"
-)
-trait_impl_re = re.compile(r"^impl(?:\s*<[^>{}]*>)?\s+(.+?)\s+for\s+(.+?)\s*(?:\{|where\b)")
 alias_re = re.compile(r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([A-Za-z_][A-Za-z0-9_]*)\s*;")
-static_re = re.compile(r"^(?:pub\s+)?static\s+([A-Za-z_][A-Za-z0-9_]*)\b")
+source_alias_re = re.compile(
+    r"^pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"
+    r"(?:\s*<[^=]*>)?\s*=\s*"
+    r"(?:(?:[A-Za-z_][A-Za-z0-9_]*)::)*([A-Za-z_][A-Za-z0-9_]*)"
+)
+static_re = re.compile(
+    r"^(?:(?:pub\s+)?static\s+|std::thread_local!\s*\{\s*static\s+)"
+    r"([A-Za-z_][A-Za-z0-9_]*)\b"
+)
 method_re = re.compile(
     r"^\s*(?:pub(?:\(crate\))?\s+)?(?:const\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\b"
 )
@@ -1686,6 +1784,22 @@ source_owned_names = {
     for name in source_owned_names
     if name == current_source or name not in shared_names
 }
+# A flattened nested source declaration is often followed by its Java-visible
+# short-name alias (`type Arguments = Owner_Arguments`).  The alias is part of
+# the source API even when support merging indexed it as a duplicate.  Close
+# ownership transitively so alias chains and generic aliases stay beside the
+# nominal declaration they name.
+while True:
+    aliases = {
+        match.group(1)
+        for line in raw_lines
+        if (match := source_alias_re.match(line))
+        and match.group(2) in source_owned_names
+    }
+    new_aliases = aliases - source_owned_names
+    if not new_aliases:
+        break
+    source_owned_names.update(new_aliases)
 missing_names = source_owned_names - present
 # A wholly missing source declaration is restored below together with all of
 # its attached impls. Surface-level reconciliation is only for declarations
@@ -1698,11 +1812,10 @@ def inherent_method_names(lines: list[str], owned_names: set[str]) -> dict[str, 
     names = {name: set() for name in owned_names}
     index = 0
     while index < len(lines):
-        match = inherent_impl_re.match(lines[index])
-        if not match or match.group(1) not in owned_names:
+        target = inherent_impl_target_name(lines[index])
+        if target not in owned_names:
             index += 1
             continue
-        target = match.group(1)
         end = item_end(lines, index)
         inner = index + 1
         while inner < max(index + 1, end - 1):
@@ -1752,7 +1865,7 @@ def source_carrier_target_name(target: str):
         return None
     wrapper = wrapped.group(1).strip().rsplit("::", 1)[-1]
     if wrapper not in {"Rc", "Arc", "RefCell", "Cell", "Mutex", "RwLock"}:
-        return None
+        return impl_target_name(target)
     return source_carrier_target_name(wrapped.group(2))
 
 
@@ -1760,6 +1873,17 @@ def source_owned_trait_impl(
     trait: str, target: str, owned_names: set[str]
 ) -> bool:
     if source_carrier_target_name(target) in owned_names:
+        return True
+    trait_name = trait.split("<", 1)[0].strip().rsplit("::", 1)[-1]
+    if (
+        trait_name in owned_names
+        and re.search(r"\b__Java(?:Boxed|Shared)\b", target)
+    ):
+        # Generic forwarding impls are part of the source interface surface
+        # even though their target is a placeholder carrier rather than the
+        # nominal interface (`Box<__JavaBoxed>`, `Rc<RefCell<__JavaShared>>`,
+        # and the Arc/Mutex counterpart). Assembly may deduplicate the
+        # prelude, but it must restore these implementations with the trait.
         return True
     return (
         trait == "Clone"
@@ -1770,9 +1894,9 @@ def source_owned_trait_impl(
 def trait_impl_keys(lines: list[str], owned_names: set[str]) -> set[tuple[str, str]]:
     keys = set()
     for line in lines:
-        if match := trait_impl_re.match(line):
-            trait = match.group(1).strip()
-            target = match.group(2).strip()
+        parts = impl_header_parts(line)
+        if parts is not None and parts[0] is not None:
+            trait, target = parts
             if source_owned_trait_impl(trait, target, owned_names):
                 keys.add((trait, target))
     return keys
@@ -1780,9 +1904,9 @@ def trait_impl_keys(lines: list[str], owned_names: set[str]) -> set[tuple[str, s
 
 def all_trait_impl_keys(lines: list[str]) -> set[tuple[str, str]]:
     return {
-        (match.group(1).strip(), match.group(2).strip())
+        (parts[0], parts[1])
         for line in lines
-        if (match := trait_impl_re.match(line))
+        if (parts := impl_header_parts(line)) is not None and parts[0] is not None
     }
 
 
@@ -1805,8 +1929,9 @@ existing_all_traits = all_trait_impl_keys(current_lines_for_surface)
 shared_trait_keys = set()
 if shared_support_path and shared_support_path.exists():
     for line in shared_support_path.read_text().splitlines():
-        if match := trait_impl_re.match(line):
-            shared_trait_keys.add((match.group(1).strip(), match.group(2).strip()))
+        parts = impl_header_parts(line)
+        if parts is not None and parts[0] is not None:
+            shared_trait_keys.add((parts[0], parts[1]))
 source_surface_chunks = []
 raw_after_primary = False
 index = 0
@@ -1815,8 +1940,8 @@ while index < len(raw_lines):
     if match := decl_re.match(line):
         if match.group(2) == current_source:
             raw_after_primary = True
-    if raw_after_primary and (match := inherent_impl_re.match(line)):
-        target = match.group(1)
+    target = inherent_impl_target_name(line) if raw_after_primary else None
+    if target is not None:
         end = item_end(raw_lines, index)
         if target in surface_owned_names:
             missing_methods = []
@@ -1838,9 +1963,10 @@ while index < len(raw_lines):
                 )
         index = end
         continue
-    if raw_after_primary and (match := trait_impl_re.match(line)):
-        target = match.group(2).strip()
-        key = (match.group(1).strip(), target)
+    parts = impl_header_parts(line) if raw_after_primary else None
+    if parts is not None and parts[0] is not None:
+        target = parts[1]
+        key = (parts[0], target)
         end = item_end(raw_lines, index)
         if (
             source_owned_trait_impl(key[0], target, surface_owned_names)
@@ -1860,12 +1986,11 @@ while index < len(raw_lines):
 from_source_re = re.compile(r"^From<(.+)>$")
 index = 0
 while index < len(raw_lines):
-    match = trait_impl_re.match(raw_lines[index])
-    if not match:
+    parts = impl_header_parts(raw_lines[index])
+    if parts is None or parts[0] is None:
         index += 1
         continue
-    trait = match.group(1).strip()
-    target = match.group(2).strip()
+    trait, target = parts
     source_match = from_source_re.match(trait)
     from_source_names = (
         set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", source_match.group(1)))
@@ -1920,10 +2045,8 @@ while index < len(raw_lines):
     if match := decl_re.match(line):
         target = match.group(2)
         start = attached_start(raw_lines, index)
-    elif match := inherent_impl_re.match(line):
-        target = match.group(1)
-    elif match := trait_impl_re.match(line):
-        target = match.group(2)
+    elif (parts := impl_header_parts(line)) is not None:
+        target = impl_target_name(parts[1])
     elif match := alias_re.match(line):
         alias = (match.group(1), match.group(2))
         target = match.group(2)
@@ -3480,8 +3603,8 @@ done
 if [[ -s "$shared_support_path" ]]; then
   for rust_path in "$generated_dir"/*.rs; do
     strip_shared_support_items "$rust_path" "$shared_support_types_path"
-    strip_source_type_facade_stubs "$rust_path" "$source_types_path"
-    restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
+    strip_source_type_facade_stubs "$rust_path" "$source_types_path" "$repo_root/scripts"
+    restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
   done
 else
   touch "$shared_support_path" "$shared_support_types_path"
@@ -3587,8 +3710,8 @@ fi
 # The restoration helper only copies raw statics still referenced by the final
 # module, so support-prelude state remains excluded.
 for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path"
-  restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path"
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path" "$repo_root/scripts"
+  restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
 done
 
 # Dependency-bearing expressions can be restored from the raw module by the
@@ -3681,9 +3804,36 @@ done
 # restore nominal declarations; this final pass protects non-nominal companion
 # items such as trait-object carrier impls from every assembly ordering.
 for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path"
-  deduplicate_generated_coherence_items "$rust_path"
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path" "$repo_root/scripts"
+  # Restored companion items can introduce dependencies on prelude helpers
+  # after the main facade merge has already computed its closure. Re-run the
+  # local support closure at the final module surface so those helpers remain
+  # beside their source-owned companion instead of being dropped.
+  restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
+  deduplicate_generated_coherence_items "$rust_path" "$repo_root/scripts" "$shared_support_path"
 done
+
+# Batch translation records marker counts before crate assembly strips and
+# centralizes shared support. Those raw counts describe the intermediate
+# transport format, not the Rust modules users compile. Refresh only the
+# marker column from the final module surface while preserving per-source
+# diagnostics and status.
+final_status_path="$status_path.final"
+printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n" > "$final_status_path"
+while IFS=$'\t' read -r source rust_path translate_status diagnostics _invalid_patterns unsupported_members stubbed_constants; do
+  if ! final_invalid_patterns="$("$binary" count-invalid-patterns "$rust_path" 2>/dev/null)" \
+      || [[ ! "$final_invalid_patterns" =~ ^[0-9]+$ ]]; then
+    # Test doubles and older externally supplied translators may not expose
+    # the counter subcommand. Preserve their reported value rather than
+    # turning a reporting refresh into an assembly failure.
+    final_invalid_patterns="$_invalid_patterns"
+  fi
+  printf "%s\t%s\t%s\t%s\t%s\t%s\t%s\n" \
+    "$source" "$rust_path" "$translate_status" "$diagnostics" \
+    "$final_invalid_patterns" "$unsupported_members" "${stubbed_constants:-0}" \
+    >> "$final_status_path"
+done < <(tail -n +2 "$status_path")
+mv "$final_status_path" "$status_path"
 
 {
   printf "#![allow(dead_code, unused_imports, unused_variables, non_snake_case, non_camel_case_types, non_upper_case_globals)]\n"
@@ -3733,7 +3883,7 @@ parse_failure_scan_elapsed_ms="$(elapsed_ms_since "$parse_failure_scan_start_ms"
 printf "parse_failure_scan\tok\t%s\t%s\n" "$parse_failure_scan_elapsed_ms" "$parse_failures_path" >> "$phase_events_path"
 
 total_files="${#java_files[@]}"
-translated_failed="$(awk -F '\t' 'NR > 1 && $3 != "ok" { count++ } END { print count + 0 }' "$status_path")"
+translated_failed="$(awk -F '\t' 'NR > 1 && $3 == "errors" { count++ } END { print count + 0 }' "$status_path")"
 diagnostic_files="$(awk -F '\t' 'NR > 1 && $4 > 0 { count++ } END { print count + 0 }' "$status_path")"
 invalid_pattern_files="$(awk -F '\t' 'NR > 1 && $5 > 0 { count++ } END { print count + 0 }' "$status_path")"
 compile_error_count="$(grep -E 'error(\[[A-Z0-9]+\])?:' "$compile_log" | wc -l | tr -d ' ')"

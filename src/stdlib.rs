@@ -28,7 +28,7 @@ use crate::slot_render::{
 };
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape};
 use crate::types::{
-    TypeEnv, raw_generic_type_head, raw_rust_option_inner, raw_rust_result_args,
+    TypeEnv, generic_read_type, raw_generic_type_head, raw_rust_option_inner, raw_rust_result_args,
     raw_rust_type_is_option, raw_rust_type_is_result,
 };
 
@@ -699,7 +699,7 @@ pub(crate) fn java_collection_kind_for_name(name: &str) -> Option<JavaCollection
         Some(JavaCollectionKind::SortedMap)
     } else if matches!(name, "LinkedHashMap") {
         Some(JavaCollectionKind::InsertionOrderedMap)
-    } else if matches!(name, "TreeSet" | "SortedSet" | "NavigableSet") {
+    } else if matches!(name, "TreeSet" | "SortedSet" | "NavigableSet" | "EnumSet") {
         Some(JavaCollectionKind::SortedSet)
     } else if matches!(name, "LinkedHashSet") {
         Some(JavaCollectionKind::InsertionOrderedSet)
@@ -2777,6 +2777,44 @@ fn jdk_result_static_abi(
 }
 
 fn add_jdk_platform_stream_facts(facts: &mut FactSet) {
+    for owner in ["java.io.StreamTokenizer", "StreamTokenizer"] {
+        for method in ["nextToken", "next_token"] {
+            let mut effect =
+                jdk_instance_api_fact(owner, method, 0, JavaType::Primitive(PrimitiveType::Int));
+            effect.thrown = vec![JavaType::Named {
+                name: "IOException".to_string(),
+                args: Vec::new(),
+            }];
+            facts.external_api_effect_facts.push(effect);
+
+            let mut abi = jdk_result_method_abi(
+                owner,
+                method,
+                0,
+                "StreamTokenizer::next_token_result",
+                Vec::new(),
+                FacadeSlot::Owned,
+            );
+            abi.receiver = ReceiverAbi::BorrowedSelf;
+            facts.facade_abi_facts.push(abi);
+        }
+        for (field, ty) in [
+            ("ttype", JavaType::Primitive(PrimitiveType::Int)),
+            ("sval", JavaType::String),
+            ("nval", JavaType::Primitive(PrimitiveType::Double)),
+        ] {
+            facts
+                .external_field_facts
+                .push(jdk_instance_field_fact(owner, field, ty));
+        }
+        for field in ["TT_EOF", "TT_EOL", "TT_NUMBER", "TT_WORD"] {
+            facts.external_field_facts.push(jdk_static_final_field_fact(
+                owner,
+                field,
+                JavaType::Primitive(PrimitiveType::Int),
+            ));
+        }
+    }
     for owner in ["java.util.zip.GZIPInputStream", "GZIPInputStream"] {
         facts.external_field_facts.push(jdk_static_final_field_fact(
             owner,
@@ -4648,6 +4686,18 @@ fn known_argument_sensitive_external_method_return_type(
             name: "EnumSet".to_string(),
             args: vec![common_enum_set_element_type(args)],
         }),
+        (Some("EnumSet"), "allOf" | "all_of", [class_token]) => {
+            class_token_element_type(class_token).map(|element| JavaType::Named {
+                name: "EnumSet".to_string(),
+                args: vec![element],
+            })
+        }
+        (Some("EnumSet"), "complementOf" | "complement_of", [source]) => {
+            collection_element_type(source).map(|element| JavaType::Named {
+                name: "EnumSet".to_string(),
+                args: vec![element.clone()],
+            })
+        }
         (Some("Iterators"), "forEnumeration", [enumeration]) => {
             collection_element_type(enumeration).map(|element| JavaType::Named {
                 name: "Iterator".to_string(),
@@ -4917,15 +4967,6 @@ fn iterator_return_type(element: JavaType) -> JavaType {
     }
 }
 
-fn generic_read_type(ty: &JavaType) -> JavaType {
-    match ty {
-        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound))) => {
-            bound.as_ref().clone()
-        }
-        _ => ty.clone(),
-    }
-}
-
 fn immutable_map_factory_return_type(map_name: &str, args: &[JavaType]) -> Option<JavaType> {
     if args.len() % 2 != 0 {
         return None;
@@ -4964,6 +5005,17 @@ fn common_enum_set_element_type(args: &[JavaType]) -> JavaType {
             name: "Enum".to_string(),
             args: Vec::new(),
         }
+    }
+}
+
+fn class_token_element_type(ty: &JavaType) -> Option<JavaType> {
+    match ty {
+        JavaType::Named { name, args }
+            if matches!(name.rsplit('.').next(), Some("Class" | "JavaClass")) =>
+        {
+            args.first().cloned()
+        }
+        _ => None,
     }
 }
 
@@ -5604,6 +5656,9 @@ fn is_string_join_receiver(receiver: &str) -> bool {
 
 fn external_known_builtin_receiver_owner_key(receiver_type: &JavaType) -> Option<String> {
     match receiver_type {
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .find_map(external_known_builtin_receiver_owner_key),
         JavaType::Named { .. } | JavaType::Unknown(_) => {
             external_named_receiver_owner_key(receiver_type)
         }
@@ -5637,6 +5692,9 @@ pub(crate) fn external_api_receiver_owner_key(
         return external_api_receiver_owner_key(bound, types);
     }
     match receiver_type {
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .find_map(|bound| external_api_receiver_owner_key(bound, types)),
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(
             canonical_external_receiver_type_key(rust_path_simple_type_name(name)),
         ),
@@ -5835,7 +5893,7 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "objects" | "java.util.Objects" | "JavaUtilObjects" | "java_util_objects" => "Objects",
         "collections" => "Collections",
         "collectors" => "Collectors",
-        "enum_set" => "EnumSet",
+        "enum_set" | "java.util.EnumSet" | "JavaUtilEnumSet" | "java_util_enum_set" => "EnumSet",
         "iterators" => "Iterators",
         "file" => "File",
         "files" => "Files",
@@ -5844,6 +5902,12 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         "print_stream" | "java.io.PrintStream" | "JavaIoPrintStream" | "java_io_print_stream" => {
             "PrintStream"
         }
+        "java.io.Reader" | "JavaIoReader" | "java_io_reader" => "Reader",
+        "java.io.StringReader" | "JavaIoStringReader" | "java_io_string_reader" => "StringReader",
+        "java.io.StreamTokenizer"
+        | "JavaIoStreamTokenizer"
+        | "java_io_stream_tokenizer"
+        | "stream_tokenizer" => "StreamTokenizer",
         "system_utils" => "SystemUtils",
         "help_constants" => "HelpConstants",
         "defaults" => "Defaults",
@@ -6255,6 +6319,11 @@ pub(crate) fn class_literal_java_name(ty: &JavaType) -> String {
         }
         .to_string(),
         JavaType::Array(element) => format!("{}[]", class_literal_java_name(element)),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .map(class_literal_java_name)
+            .collect::<Vec<_>>()
+            .join(" & "),
         JavaType::Named { name, args } if args.is_empty() => name.clone(),
         JavaType::Named { name, args } => {
             let args = args
@@ -6343,6 +6412,12 @@ pub struct JavaClass<T> {
     _marker: std::marker::PhantomData<T>,
 }
 
+impl<T> Default for JavaClass<T> {
+    fn default() -> Self {
+        Self { name: String::new(), _marker: std::marker::PhantomData }
+    }
+}
+
 impl<T> JavaClass<T> {
     pub fn literal(name: &'static str) -> JavaClass<T> {
         JavaClass { name: name.to_string(), _marker: std::marker::PhantomData }
@@ -6393,6 +6468,28 @@ impl<T> JavaClass<T> {
 
     pub fn equals<U>(&self, other: JavaClass<U>) -> bool {
         self.name == other.name
+    }
+
+    pub fn enum_constants(&self) -> Vec<T>
+    where
+        T: JavaEnum,
+    {
+        T::values()
+    }
+}
+
+pub struct JavaDeclaredConstructor<T> {
+    class_name: String,
+    factory: fn(&str) -> T,
+}
+
+impl<T> JavaDeclaredConstructor<T> {
+    pub fn new<S: Into<String>>(class_name: S, factory: fn(&str) -> T) -> Self {
+        Self { class_name: class_name.into(), factory }
+    }
+
+    pub fn new_instance(&self) -> T {
+        (self.factory)(&self.class_name)
     }
 }
 
@@ -6525,7 +6622,31 @@ impl<T: Ord> JavaComparable for T {
     )
 }
 
-pub(crate) fn java_map_entry_value_support_item() -> crate::rust_ir::RustItem {
+pub(crate) fn java_enum_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"/// Capabilities guaranteed by `java.lang.Enum<E>`.
+pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display {
+    fn values() -> Vec<Self>
+    where
+        Self: Sized;
+    fn ordinal(&self) -> i32;
+    fn name(&self) -> &'static str;
+}
+
+/// Return the enum universe minus `source`, preserving Java enum order.
+pub fn java_enum_set_complement<E: JavaEnum>(
+    source: &std::collections::BTreeSet<E>,
+) -> std::collections::BTreeSet<E> {
+    E::values()
+        .into_iter()
+        .filter(|value| !source.contains(value))
+        .collect()
+}"#
+        .to_string(),
+    )
+}
+
+pub(crate) fn java_map_entry_trait_support_item() -> crate::rust_ir::RustItem {
     crate::rust_ir::RustItem::Raw(
         r#"/// Dynamic Java `Map.Entry<K,V>` behavior. A tuple snapshot cannot
 /// preserve a source implementation's `toString`, `setValue`, or identity.
@@ -6535,7 +6656,227 @@ pub trait JavaMapEntry<K, V> {
     fn set_value(&self, value: Option<V>) -> Result<Option<V>, JavaException>;
     fn java_to_string(&self) -> Result<String, JavaException>;
 }
+"#
+        .to_string(),
+    )
+}
 
+/// Equality boundary for Java hash-based collections whose key is not known to
+/// satisfy Rust's `Eq + Hash` contract.  Java supplies `equals`/`hashCode` to
+/// every reference; source classes which inherit `Object.equals` must compare
+/// by handle identity rather than by their translated fields.  The semantic
+/// carriers deliberately use a linear table: it keeps that contract explicit
+/// and correct without manufacturing a structural Rust hash for Java objects.
+pub(crate) fn java_semantic_hash_collection_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"pub trait JavaMapKey {
+    fn java_map_key_eq(&self, other: &Self) -> bool;
+}
+
+macro_rules! java_value_map_key {
+    ($($ty:ty),* $(,)?) => {$(
+        impl JavaMapKey for $ty {
+            fn java_map_key_eq(&self, other: &Self) -> bool { self == other }
+        }
+    )*};
+}
+
+java_value_map_key!(bool, char, i8, i16, i32, i64, u8, u16, u32, u64, usize, String);
+
+impl JavaMapKey for f32 {
+    fn java_map_key_eq(&self, other: &Self) -> bool {
+        (self.is_nan() && other.is_nan()) || self.to_bits() == other.to_bits()
+    }
+}
+
+impl JavaMapKey for f64 {
+    fn java_map_key_eq(&self, other: &Self) -> bool {
+        (self.is_nan() && other.is_nan()) || self.to_bits() == other.to_bits()
+    }
+}
+
+impl<T: JavaMapKey> JavaMapKey for Option<T> {
+    fn java_map_key_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Some(left), Some(right)) => left.java_map_key_eq(right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct JavaSemanticHashMap<K, V> {
+    entries: Vec<(K, V)>,
+}
+
+impl<K: JavaMapKey, V> JavaSemanticHashMap<K, V> {
+    pub fn new() -> Self { Self { entries: Vec::new() } }
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self { entries: Vec::with_capacity(capacity) }
+    }
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        if let Some((_, stored)) = self.entries.iter_mut()
+            .find(|(stored_key, _)| stored_key.java_map_key_eq(&key))
+        {
+            Some(std::mem::replace(stored, value))
+        } else {
+            self.entries.push((key, value));
+            None
+        }
+    }
+    pub fn get(&self, key: &K) -> Option<&V> {
+        self.entries.iter()
+            .find(|(stored_key, _)| stored_key.java_map_key_eq(key))
+            .map(|(_, value)| value)
+    }
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.entries.iter_mut()
+            .find(|(stored_key, _)| stored_key.java_map_key_eq(key))
+            .map(|(_, value)| value)
+    }
+    pub fn remove(&mut self, key: &K) -> Option<V> {
+        let index = self.entries.iter()
+            .position(|(stored_key, _)| stored_key.java_map_key_eq(key))?;
+        Some(self.entries.remove(index).1)
+    }
+    pub fn contains_key(&self, key: &K) -> bool { self.get(key).is_some() }
+    pub fn contains_value(&self, value: &V) -> bool where V: PartialEq {
+        self.entries.iter().any(|(_, stored)| stored == value)
+    }
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn keys(&self) -> impl Iterator<Item = &K> { self.entries.iter().map(|(key, _)| key) }
+    pub fn values(&self) -> impl Iterator<Item = &V> { self.entries.iter().map(|(_, value)| value) }
+    pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
+        self.entries.iter_mut().map(|(_, value)| value)
+    }
+    pub fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.entries.iter().map(|(key, value)| (key, value))
+    }
+    pub fn extend<I: IntoIterator<Item = (K, V)>>(&mut self, values: I) {
+        for (key, value) in values { self.insert(key, value); }
+    }
+    pub fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, mut predicate: F) {
+        self.entries.retain_mut(|(key, value)| predicate(key, value));
+    }
+}
+
+impl<K: JavaMapKey, V> Default for JavaSemanticHashMap<K, V> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<K: JavaMapKey, V> From<std::collections::HashMap<K, V>> for JavaSemanticHashMap<K, V> {
+    fn from(value: std::collections::HashMap<K, V>) -> Self {
+        value.into_iter().collect()
+    }
+}
+
+impl<K: JavaMapKey, V> std::iter::FromIterator<(K, V)> for JavaSemanticHashMap<K, V> {
+    fn from_iter<I: IntoIterator<Item = (K, V)>>(values: I) -> Self {
+        let mut map = Self::new();
+        map.extend(values);
+        map
+    }
+}
+
+impl<K, V> IntoIterator for JavaSemanticHashMap<K, V> {
+    type Item = (K, V);
+    type IntoIter = std::vec::IntoIter<(K, V)>;
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+}
+
+impl<K: JavaMapKey, V: PartialEq> PartialEq for JavaSemanticHashMap<K, V> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len()
+            && self.entries.iter().all(|(key, value)| other.get(key) == Some(value))
+    }
+}
+
+impl<K: JavaMapKey, V: Eq> Eq for JavaSemanticHashMap<K, V> {}
+
+#[derive(Clone, Debug)]
+pub struct JavaSemanticHashSet<T> {
+    entries: Vec<T>,
+}
+
+impl<T: JavaMapKey> JavaSemanticHashSet<T> {
+    pub fn new() -> Self { Self { entries: Vec::new() } }
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self { entries: Vec::with_capacity(capacity) }
+    }
+    pub fn insert(&mut self, value: T) -> bool {
+        if self.contains(&value) { false } else { self.entries.push(value); true }
+    }
+    pub fn remove(&mut self, value: &T) -> bool {
+        let Some(index) = self.entries.iter().position(|stored| stored.java_map_key_eq(value))
+        else { return false; };
+        self.entries.remove(index);
+        true
+    }
+    pub fn contains(&self, value: &T) -> bool {
+        self.entries.iter().any(|stored| stored.java_map_key_eq(value))
+    }
+    pub fn len(&self) -> usize { self.entries.len() }
+    pub fn is_empty(&self) -> bool { self.entries.is_empty() }
+    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn iter(&self) -> std::slice::Iter<'_, T> { self.entries.iter() }
+    pub fn extend<I: IntoIterator<Item = T>>(&mut self, values: I) {
+        for value in values { self.insert(value); }
+    }
+}
+
+impl<T: JavaMapKey> Default for JavaSemanticHashSet<T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<T: JavaMapKey> From<std::collections::HashSet<T>> for JavaSemanticHashSet<T> {
+    fn from(value: std::collections::HashSet<T>) -> Self { value.into_iter().collect() }
+}
+
+impl<T: JavaMapKey> std::iter::FromIterator<T> for JavaSemanticHashSet<T> {
+    fn from_iter<I: IntoIterator<Item = T>>(values: I) -> Self {
+        let mut set = Self::new();
+        set.extend(values);
+        set
+    }
+}
+
+impl<T> IntoIterator for JavaSemanticHashSet<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter { self.entries.into_iter() }
+}
+
+impl<T: JavaMapKey> PartialEq for JavaSemanticHashSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.len() == other.len() && self.entries.iter().all(|value| other.contains(value))
+    }
+}
+
+impl<T: JavaMapKey> Eq for JavaSemanticHashSet<T> {}
+
+/// Java `List.remove(Object)` compares elements with Java `equals`, not with
+/// Rust's structural `PartialEq`. Generic source elements carry that contract
+/// through `JavaMapKey`, which also covers inherited identity equality.
+pub fn java_list_remove_by_map_key<T: JavaMapKey>(values: &mut Vec<T>, needle: &T) -> bool {
+    let Some(index) = values
+        .iter()
+        .position(|stored| stored.java_map_key_eq(needle))
+    else {
+        return false;
+    };
+    values.remove(index);
+    true
+}"#
+        .to_string(),
+    )
+}
+
+pub(crate) fn java_map_entry_value_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"
 pub struct JavaMapEntryValue<K, V> {
     entry: std::rc::Rc<dyn JavaMapEntry<K, V>>,
 }
@@ -8324,10 +8665,99 @@ impl<T: Default> Enumeration<T> {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum JavaIteratorRemoveStatus {
+    Applied,
+    Deferred,
+}
+
 pub struct JavaIterator<T> {
     items: Vec<T>,
     index: usize,
+    last_returned: Option<usize>,
+    removed_count: usize,
+    can_remove: bool,
+    pending_remove: Option<usize>,
+    remove_callback:
+        Option<std::rc::Rc<dyn Fn(usize) -> Result<JavaIteratorRemoveStatus, JavaException>>>,
+}
+
+impl<T: std::fmt::Debug> std::fmt::Debug for JavaIterator<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("JavaIterator")
+            .field("items", &self.items)
+            .field("index", &self.index)
+            .field("last_returned", &self.last_returned)
+            .field("removed_count", &self.removed_count)
+            .field("can_remove", &self.can_remove)
+            .field("pending_remove", &self.pending_remove)
+            .field("supports_remove", &self.remove_callback.is_some())
+            .finish()
+    }
+}
+
+impl<T: Clone> Clone for JavaIterator<T> {
+    fn clone(&self) -> Self {
+        Self {
+            items: self.items.clone(),
+            index: self.index,
+            last_returned: self.last_returned,
+            removed_count: self.removed_count,
+            can_remove: self.can_remove,
+            pending_remove: self.pending_remove,
+            remove_callback: self.remove_callback.clone(),
+        }
+    }
+}
+
+impl<T: PartialEq> PartialEq for JavaIterator<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.items == other.items
+            && self.index == other.index
+            && self.last_returned == other.last_returned
+            && self.removed_count == other.removed_count
+            && self.can_remove == other.can_remove
+            && self.pending_remove == other.pending_remove
+            && self.remove_callback.is_some() == other.remove_callback.is_some()
+    }
+}
+
+impl<T: Eq> Eq for JavaIterator<T> {}
+
+impl<T: std::hash::Hash> std::hash::Hash for JavaIterator<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.items.hash(state);
+        self.index.hash(state);
+        self.last_returned.hash(state);
+        self.removed_count.hash(state);
+        self.can_remove.hash(state);
+        self.pending_remove.hash(state);
+        self.remove_callback.is_some().hash(state);
+    }
+}
+
+impl<T> Default for JavaIterator<T> {
+    fn default() -> Self {
+        Self {
+            items: Vec::new(),
+            index: 0,
+            last_returned: None,
+            removed_count: 0,
+            can_remove: false,
+            pending_remove: None,
+            remove_callback: None,
+        }
+    }
+}
+
+impl<T> Drop for JavaIterator<T> {
+    fn drop(&mut self) {
+        if let (Some(backing_index), Some(remove_callback)) =
+            (self.pending_remove, self.remove_callback.as_ref())
+        {
+            let _ = remove_callback(backing_index);
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
@@ -9400,26 +9830,110 @@ impl<K: Ord + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringEl
 
 impl<T: Clone> JavaIterator<T> {
     pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaIterator<T> {
-        JavaIterator { items: items.into_iter().collect(), index: 0 }
+        JavaIterator {
+            items: items.into_iter().collect(),
+            index: 0,
+            last_returned: None,
+            removed_count: 0,
+            can_remove: false,
+            pending_remove: None,
+            remove_callback: None,
+        }
+    }
+
+    pub fn new_with_remove<I, F>(items: I, remove_callback: F) -> JavaIterator<T>
+    where
+        I: IntoIterator<Item = T>,
+        F: Fn(usize) -> Result<JavaIteratorRemoveStatus, JavaException> + 'static,
+    {
+        JavaIterator {
+            items: items.into_iter().collect(),
+            index: 0,
+            last_returned: None,
+            removed_count: 0,
+            can_remove: false,
+            pending_remove: None,
+            remove_callback: Some(std::rc::Rc::new(remove_callback)),
+        }
     }
 
     pub fn has_next(&self) -> bool {
         self.index < self.items.len()
     }
 
+    pub fn remove(&mut self) {
+        self.remove_result()
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+
+    pub fn remove_result(&mut self) -> Result<(), JavaException> {
+        self.flush_pending_remove_result()?;
+        let Some(remove_callback) = self.remove_callback.as_ref() else {
+            return Err(JavaException::new(
+                "UnsupportedOperationException",
+                "Java snapshot iterator mutation is not supported".to_string(),
+            ));
+        };
+        if !self.can_remove {
+            return Err(JavaException::new(
+                "IllegalStateException",
+                "Java Iterator.remove requires one successful next call".to_string(),
+            ));
+        }
+        let snapshot_index = self.last_returned.expect("can_remove implies last_returned");
+        let backing_index = snapshot_index.checked_sub(self.removed_count).ok_or_else(|| {
+            JavaException::new(
+                "ConcurrentModificationException",
+                "Java iterator backing index is no longer valid".to_string(),
+            )
+        })?;
+        if remove_callback(backing_index)? == JavaIteratorRemoveStatus::Deferred {
+            self.pending_remove = Some(backing_index);
+        }
+        self.removed_count += 1;
+        self.can_remove = false;
+        Ok(())
+    }
+
+    /// Complete a backing-list mutation that was requested while the owning
+    /// Java object was already mutably borrowed by a translated wrapper.
+    /// Wrappers call this after releasing their object borrow; traversal also
+    /// flushes defensively before advancing.
+    pub fn flush_pending_remove_result(&mut self) -> Result<(), JavaException> {
+        let Some(backing_index) = self.pending_remove else {
+            return Ok(());
+        };
+        let remove_callback = self
+            .remove_callback
+            .as_ref()
+            .expect("pending Java iterator removal requires a callback");
+        match remove_callback(backing_index)? {
+            JavaIteratorRemoveStatus::Applied => {
+                self.pending_remove = None;
+                Ok(())
+            }
+            JavaIteratorRemoveStatus::Deferred => Err(JavaException::new(
+                "ConcurrentModificationException",
+                "Java iterator backing list is still mutably borrowed".to_string(),
+            )),
+        }
+    }
     pub fn next(&mut self) -> T {
         self.next_result()
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
     }
 
     pub fn next_result(&mut self) -> Result<T, JavaException> {
+        self.flush_pending_remove_result()?;
         let value = self.items.get(self.index).cloned().ok_or_else(|| {
             JavaException::new(
                 "NoSuchElementException",
                 "Java iterator has no more elements".to_string(),
             )
         })?;
+        self.last_returned = Some(self.index);
         self.index += 1;
+        self.can_remove = true;
         Ok(value)
     }
 
@@ -9430,18 +9944,6 @@ impl<T: Clone> JavaIterator<T> {
         while self.has_next() {
             f(self.next());
         }
-    }
-
-    pub fn remove(&mut self) {
-        self.remove_result()
-            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
-    }
-
-    pub fn remove_result(&mut self) -> Result<(), JavaException> {
-        Err(JavaException::new(
-            "UnsupportedOperationException",
-            "Java snapshot iterator mutation is not supported".to_string(),
-        ))
     }
 }
 
@@ -10765,6 +11267,14 @@ impl InputStreamReader {
         }
     }
 
+    pub fn new_1<S: JavaIntoInputStream>(stream: S) -> InputStreamReader {
+        Self::new(stream)
+    }
+
+    pub fn new_2<S: JavaIntoInputStream, C>(stream: S, _charset: C) -> InputStreamReader {
+        Self::new(stream)
+    }
+
     pub fn from_path<P: JavaPathArg>(path: P) -> InputStreamReader {
         let path = path.into_path_value();
         let stream = match std::fs::read(std::path::Path::new(&path)) {
@@ -10786,6 +11296,137 @@ impl From<String> for InputStreamReader {
 impl std::fmt::Display for InputStreamReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "java.io.InputStreamReader@0")
+    }
+}
+
+struct JavaReaderState {
+    chars: Vec<char>,
+    position: std::cell::Cell<usize>,
+    closed: std::cell::Cell<bool>,
+    error: Option<String>,
+}
+
+/// Identity-preserving carrier for `java.io.Reader` values.
+///
+/// Concrete readers convert into this carrier without losing their cursor.
+/// Clones intentionally share position and close state, as Java references do.
+#[derive(Clone)]
+pub struct Reader {
+    state: std::rc::Rc<JavaReaderState>,
+}
+
+impl Reader {
+    pub fn from_string<S: AsRef<str>>(text: S) -> Reader {
+        Reader {
+            state: std::rc::Rc::new(JavaReaderState {
+                chars: text.as_ref().chars().collect(),
+                position: std::cell::Cell::new(0),
+                closed: std::cell::Cell::new(false),
+                error: None,
+            }),
+        }
+    }
+
+    fn from_input_stream(stream: InputStream) -> Reader {
+        let mut bytes = Vec::new();
+        let mut error = None;
+        loop {
+            match stream.read_0() {
+                Ok(value) if value >= 0 => bytes.push(value as u8),
+                Ok(_) => break,
+                Err(exception) => {
+                    error = Some(exception.to_string());
+                    break;
+                }
+            }
+        }
+        Reader {
+            state: std::rc::Rc::new(JavaReaderState {
+                chars: String::from_utf8_lossy(&bytes).chars().collect(),
+                position: std::cell::Cell::new(0),
+                closed: std::cell::Cell::new(false),
+                error,
+            }),
+        }
+    }
+
+    fn read_char(&self) -> Result<Option<char>, JavaException> {
+        if self.state.closed.get() {
+            return Err(JavaException::new("IOException", "Reader closed".to_string()));
+        }
+        if let Some(message) = self.state.error.as_ref() {
+            return Err(JavaException::new("IOException", message.clone()));
+        }
+        let position = self.state.position.get();
+        let Some(ch) = self.state.chars.get(position).copied() else {
+            return Ok(None);
+        };
+        self.state.position.set(position + 1);
+        Ok(Some(ch))
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        self.state.closed.set(true);
+        Ok(())
+    }
+}
+
+impl Default for Reader {
+    fn default() -> Self { Self::from_string("") }
+}
+
+impl std::fmt::Debug for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Reader")
+            .field("position", &self.state.position.get())
+            .finish()
+    }
+}
+
+impl PartialEq for Reader {
+    fn eq(&self, other: &Self) -> bool { std::rc::Rc::ptr_eq(&self.state, &other.state) }
+}
+
+impl Eq for Reader {}
+
+impl std::hash::Hash for Reader {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(std::rc::Rc::as_ptr(&self.state), state);
+    }
+}
+
+impl std::fmt::Display for Reader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.Reader@{:p}", std::rc::Rc::as_ptr(&self.state))
+    }
+}
+
+impl From<InputStreamReader> for Reader {
+    fn from(value: InputStreamReader) -> Self { Reader::from_input_stream(value.stream) }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct StringReader {
+    reader: Reader,
+}
+
+impl StringReader {
+    pub fn new<S: AsRef<str>>(text: S) -> StringReader {
+        StringReader { reader: Reader::from_string(text) }
+    }
+
+    pub fn new_1<S: AsRef<str>>(text: S) -> StringReader { Self::new(text) }
+
+    pub fn close(&self) -> Result<(), JavaException> { self.reader.close() }
+}
+
+impl From<StringReader> for Reader {
+    fn from(value: StringReader) -> Self { value.reader }
+}
+
+impl std::fmt::Display for StringReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.StringReader@{:p}", std::rc::Rc::as_ptr(&self.reader.state))
     }
 }
 
@@ -10819,6 +11460,270 @@ impl BufferedReader {
     }
 }
 
+impl From<BufferedReader> for Reader {
+    fn from(value: BufferedReader) -> Self { Reader::from_input_stream(value.stream) }
+}
+
+const JAVA_STREAM_TOKENIZER_ORDINARY: u8 = 0;
+const JAVA_STREAM_TOKENIZER_WORD: u8 = 1;
+const JAVA_STREAM_TOKENIZER_WHITESPACE: u8 = 2;
+const JAVA_STREAM_TOKENIZER_COMMENT: u8 = 3;
+
+struct JavaStreamTokenizerState {
+    reader: Reader,
+    syntax: [u8; 256],
+    eol_significant: bool,
+    line_number: i32,
+    lookahead: Option<char>,
+    pushed_back: bool,
+    ttype: i32,
+    sval: Option<String>,
+    nval: f64,
+}
+
+/// Stateful `java.io.StreamTokenizer` with Java reference identity.
+/// Public Java fields are exposed through snapshot getters by lowering, so a
+/// clone observes the same current token and syntax table.
+#[derive(Clone)]
+pub struct StreamTokenizer {
+    state: std::rc::Rc<std::cell::RefCell<JavaStreamTokenizerState>>,
+}
+
+impl StreamTokenizer {
+    pub const TT_EOF: i32 = -1;
+    pub const TT_EOL: i32 = 10;
+    pub const TT_NUMBER: i32 = -2;
+    pub const TT_WORD: i32 = -3;
+
+    pub fn new<R: Into<Reader>>(reader: R) -> StreamTokenizer {
+        let mut syntax = [JAVA_STREAM_TOKENIZER_ORDINARY; 256];
+        for slot in &mut syntax[..=32] {
+            *slot = JAVA_STREAM_TOKENIZER_WHITESPACE;
+        }
+        for byte in b'a'..=b'z' {
+            syntax[byte as usize] = JAVA_STREAM_TOKENIZER_WORD;
+        }
+        for byte in b'A'..=b'Z' {
+            syntax[byte as usize] = JAVA_STREAM_TOKENIZER_WORD;
+        }
+        for slot in &mut syntax[160..] {
+            *slot = JAVA_STREAM_TOKENIZER_WORD;
+        }
+        syntax[b'/' as usize] = JAVA_STREAM_TOKENIZER_COMMENT;
+        StreamTokenizer {
+            state: std::rc::Rc::new(std::cell::RefCell::new(JavaStreamTokenizerState {
+                reader: reader.into(),
+                syntax,
+                eol_significant: false,
+                line_number: 1,
+                lookahead: None,
+                pushed_back: false,
+                ttype: 0,
+                sval: None,
+                nval: 0.0,
+            })),
+        }
+    }
+
+    pub fn new_1<R: Into<Reader>>(reader: R) -> StreamTokenizer { Self::new(reader) }
+
+    pub fn ttype(&self) -> i32 { self.state.borrow().ttype }
+    pub fn sval(&self) -> String { self.state.borrow().sval.clone().unwrap_or_default() }
+    pub fn nval(&self) -> f64 { self.state.borrow().nval }
+    pub fn lineno(&self) -> i32 { self.state.borrow().line_number }
+
+    pub fn reset_syntax(&self) {
+        self.state.borrow_mut().syntax.fill(JAVA_STREAM_TOKENIZER_ORDINARY);
+    }
+
+    pub fn word_chars<C0: JavaTokenizerCharCode, C1: JavaTokenizerCharCode>(
+        &self,
+        low: C0,
+        high: C1,
+    ) {
+        self.set_syntax_range(low.java_tokenizer_char_code(), high.java_tokenizer_char_code(), JAVA_STREAM_TOKENIZER_WORD);
+    }
+
+    pub fn whitespace_chars<C0: JavaTokenizerCharCode, C1: JavaTokenizerCharCode>(
+        &self,
+        low: C0,
+        high: C1,
+    ) {
+        self.set_syntax_range(low.java_tokenizer_char_code(), high.java_tokenizer_char_code(), JAVA_STREAM_TOKENIZER_WHITESPACE);
+    }
+
+    pub fn ordinary_char<C: JavaTokenizerCharCode>(&self, ch: C) {
+        let ch = ch.java_tokenizer_char_code();
+        self.set_syntax_range(ch, ch, JAVA_STREAM_TOKENIZER_ORDINARY);
+    }
+
+    pub fn comment_char<C: JavaTokenizerCharCode>(&self, ch: C) {
+        let ch = ch.java_tokenizer_char_code();
+        self.set_syntax_range(ch, ch, JAVA_STREAM_TOKENIZER_COMMENT);
+    }
+
+    pub fn eol_is_significant(&self, significant: bool) {
+        self.state.borrow_mut().eol_significant = significant;
+    }
+
+    pub fn push_back(&self) {
+        let mut state = self.state.borrow_mut();
+        if state.ttype != Self::TT_EOF {
+            state.pushed_back = true;
+        }
+    }
+
+    pub fn next_token(&self) -> i32 {
+        self.next_token_result()
+            .unwrap_or_else(|exception| panic!("uncaught Java exception: {}", exception))
+    }
+
+    pub fn next_token_result(&self) -> Result<i32, JavaException> {
+        let mut state = self.state.borrow_mut();
+        if state.pushed_back {
+            state.pushed_back = false;
+            return Ok(state.ttype);
+        }
+        // Spell the optional reset explicitly.  Besides documenting the slot
+        // shape, this cannot be confused with the translator's diagnostic
+        // marker for assigning Java null to a non-optional Rust field.
+        state.sval = Option::None;
+        loop {
+            let Some(ch) = Self::take_char(&mut state)? else {
+                state.ttype = Self::TT_EOF;
+                return Ok(Self::TT_EOF);
+            };
+            let syntax = Self::syntax_for(&state, ch);
+            if syntax == JAVA_STREAM_TOKENIZER_WHITESPACE {
+                if ch == '\n' {
+                    state.line_number = state.line_number.saturating_add(1);
+                    if state.eol_significant {
+                        state.ttype = Self::TT_EOL;
+                        return Ok(Self::TT_EOL);
+                    }
+                }
+                continue;
+            }
+            if syntax == JAVA_STREAM_TOKENIZER_COMMENT {
+                loop {
+                    match Self::take_char(&mut state)? {
+                        Some('\n') => {
+                            state.line_number = state.line_number.saturating_add(1);
+                            if state.eol_significant {
+                                state.ttype = Self::TT_EOL;
+                                return Ok(Self::TT_EOL);
+                            }
+                            break;
+                        }
+                        Some(_) => {}
+                        None => {
+                            state.ttype = Self::TT_EOF;
+                            return Ok(Self::TT_EOF);
+                        }
+                    }
+                }
+                continue;
+            }
+            if syntax == JAVA_STREAM_TOKENIZER_WORD {
+                let mut word = String::new();
+                word.push(ch);
+                loop {
+                    let Some(next) = Self::take_char(&mut state)? else { break };
+                    if Self::syntax_for(&state, next) == JAVA_STREAM_TOKENIZER_WORD {
+                        word.push(next);
+                    } else {
+                        state.lookahead = Some(next);
+                        break;
+                    }
+                }
+                state.sval = Some(word);
+                state.ttype = Self::TT_WORD;
+                return Ok(Self::TT_WORD);
+            }
+            state.ttype = ch as u32 as i32;
+            return Ok(state.ttype);
+        }
+    }
+
+    fn set_syntax_range(&self, low: i32, high: i32, syntax: u8) {
+        let start = low.clamp(0, 255);
+        let end = high.clamp(0, 255);
+        if start > end || high < 0 || low > 255 {
+            return;
+        }
+        self.state.borrow_mut().syntax[start as usize..=end as usize].fill(syntax);
+    }
+
+    fn syntax_for(state: &JavaStreamTokenizerState, ch: char) -> u8 {
+        let code = ch as u32;
+        if code > 255 { JAVA_STREAM_TOKENIZER_WORD } else { state.syntax[code as usize] }
+    }
+
+    fn take_char(state: &mut JavaStreamTokenizerState) -> Result<Option<char>, JavaException> {
+        let ch = match state.lookahead.take() {
+            Some(ch) => Some(ch),
+            None => state.reader.read_char()?,
+        };
+        if ch != Some('\r') {
+            return Ok(ch);
+        }
+        let next = state.reader.read_char()?;
+        if next != Some('\n') {
+            state.lookahead = next;
+        }
+        Ok(Some('\n'))
+    }
+}
+
+impl Default for StreamTokenizer {
+    fn default() -> Self { Self::new(Reader::default()) }
+}
+
+impl std::fmt::Debug for StreamTokenizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StreamTokenizer")
+            .field("ttype", &self.ttype())
+            .field("sval", &self.state.borrow().sval)
+            .field("lineno", &self.lineno())
+            .finish()
+    }
+}
+
+impl PartialEq for StreamTokenizer {
+    fn eq(&self, other: &Self) -> bool { std::rc::Rc::ptr_eq(&self.state, &other.state) }
+}
+
+impl Eq for StreamTokenizer {}
+
+impl std::hash::Hash for StreamTokenizer {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::ptr::hash(std::rc::Rc::as_ptr(&self.state), state);
+    }
+}
+
+impl std::fmt::Display for StreamTokenizer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.ttype() {
+            Self::TT_EOF => f.write_str("Token[EOF]"),
+            Self::TT_EOL => f.write_str("Token[EOL]"),
+            Self::TT_WORD => write!(f, "Token[{}]", self.sval()),
+            token => write!(f, "Token['{}']", char::from_u32(token as u32).unwrap_or('\u{fffd}')),
+        }
+    }
+}
+
+pub trait JavaTokenizerCharCode {
+    fn java_tokenizer_char_code(self) -> i32;
+}
+
+impl JavaTokenizerCharCode for i32 {
+    fn java_tokenizer_char_code(self) -> i32 { self }
+}
+
+impl JavaTokenizerCharCode for char {
+    fn java_tokenizer_char_code(self) -> i32 { self as u32 as i32 }
+}
+
 impl std::fmt::Display for BufferedReader {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "java.io.BufferedReader@0")
@@ -10828,6 +11733,8 @@ impl std::fmt::Display for BufferedReader {
 enum JavaOutputTarget {
     Memory(Vec<u8>),
     File(std::fs::File),
+    Stdout,
+    Stderr,
     Failed(String),
 }
 
@@ -10869,6 +11776,24 @@ impl OutputStream {
         }
     }
 
+    fn stdout() -> OutputStream {
+        OutputStream {
+            state: std::rc::Rc::new(std::cell::RefCell::new(JavaOutputState {
+                target: JavaOutputTarget::Stdout,
+                closed: false,
+            })),
+        }
+    }
+
+    fn stderr() -> OutputStream {
+        OutputStream {
+            state: std::rc::Rc::new(std::cell::RefCell::new(JavaOutputState {
+                target: JavaOutputTarget::Stderr,
+                closed: false,
+            })),
+        }
+    }
+
     fn write_bytes(&self, bytes: &[u8]) -> Result<(), JavaException> {
         use std::io::Write as _;
         let mut state = self.state.borrow_mut();
@@ -10881,6 +11806,12 @@ impl OutputStream {
                 Ok(())
             }
             JavaOutputTarget::File(output) => output
+                .write_all(bytes)
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Stdout => std::io::stdout()
+                .write_all(bytes)
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Stderr => std::io::stderr()
                 .write_all(bytes)
                 .map_err(|error| JavaException::from_display("IOException", error)),
             JavaOutputTarget::Failed(message) => {
@@ -10939,6 +11870,12 @@ impl OutputStream {
             JavaOutputTarget::File(output) => output
                 .flush()
                 .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Stdout => std::io::stdout()
+                .flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Stderr => std::io::stderr()
+                .flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
             JavaOutputTarget::Failed(message) => {
                 Err(JavaException::new("IOException", message.clone()))
             }
@@ -10957,11 +11894,20 @@ impl OutputStream {
             JavaOutputTarget::File(output) => output
                 .flush()
                 .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Stdout => std::io::stdout()
+                .flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
+            JavaOutputTarget::Stderr => std::io::stderr()
+                .flush()
+                .map_err(|error| JavaException::from_display("IOException", error)),
             JavaOutputTarget::Failed(message) => {
                 Err(JavaException::new("IOException", message.clone()))
             }
         };
-        if !matches!(state.target, JavaOutputTarget::Memory(_)) {
+        if !matches!(
+            state.target,
+            JavaOutputTarget::Memory(_) | JavaOutputTarget::Stdout | JavaOutputTarget::Stderr
+        ) {
             state.closed = true;
         }
         result
@@ -11142,9 +12088,6 @@ impl JavaPrintValue for char {
 impl JavaPrintValue for String {
     fn java_print_value(&self) -> String { self.clone() }
 }
-impl JavaPrintValue for JavaString {
-    fn java_print_value(&self) -> String { self.as_str().to_string() }
-}
 impl JavaPrintValue for &str {
     fn java_print_value(&self) -> String { (*self).to_string() }
 }
@@ -11306,6 +12249,22 @@ impl std::fmt::Display for PrintStream {
     }
 }
 
+impl From<PrintStream> for OutputStream {
+    fn from(value: PrintStream) -> OutputStream {
+        match value {
+            PrintStream::Stdout => OutputStream::stdout(),
+            PrintStream::Stderr => OutputStream::stderr(),
+            PrintStream::Stream(stream) => stream,
+        }
+    }
+}
+
+impl JavaIntoOutputStream for PrintStream {
+    fn into_output_stream(self) -> OutputStream {
+        self.into()
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
 pub struct ByteArrayOutputStream {
     stream: OutputStream,
@@ -11378,6 +12337,42 @@ impl OutputStreamWriter {
 
     pub fn flush(&self) -> Result<(), JavaException> { self.stream.flush() }
     pub fn close(&self) -> Result<(), JavaException> { self.stream.close() }
+}
+
+/// Stateful carrier for the abstract `java.io.Writer` base class.
+///
+/// Concrete writer upcasts must retain the same output sink.  A facade that
+/// stores the concrete writer does that while presenting the base-class ABI
+/// used by translated method signatures.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
+pub struct Writer {
+    writer: OutputStreamWriter,
+}
+
+impl Writer {
+    pub fn write<S: AsRef<str>>(&self, value: S) -> Result<(), JavaException> {
+        self.writer.write(value)
+    }
+
+    pub fn flush(&self) -> Result<(), JavaException> {
+        self.writer.flush()
+    }
+
+    pub fn close(&self) -> Result<(), JavaException> {
+        self.writer.close()
+    }
+}
+
+impl From<OutputStreamWriter> for Writer {
+    fn from(writer: OutputStreamWriter) -> Writer {
+        Writer { writer }
+    }
+}
+
+impl std::fmt::Display for Writer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "java.io.Writer@0")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Default)]
@@ -11806,12 +12801,92 @@ impl JavaPlainObject {{
     }}
 }}
 
+/// Cloneable carrier for a Java wildcard whose declared upper bound must be
+/// preserved across Rust's invariant generic boundary. The payload retains
+/// its concrete runtime type; generated bridge adapters recover that type
+/// when a method consumes the wildcard value.
+pub struct JavaErasedValue {{
+    value: std::rc::Rc<dyn std::any::Any>,
+    clone_value: fn(&dyn std::any::Any) -> std::boxed::Box<dyn std::any::Any>,
+}}
+
+impl JavaErasedValue {{
+    pub fn new<T: Clone + std::any::Any>(value: T) -> Self {{
+        fn clone_value<T: Clone + std::any::Any>(value: &dyn std::any::Any) -> std::boxed::Box<dyn std::any::Any> {{
+            std::boxed::Box::new(value.downcast_ref::<T>().expect("Java erased value type").clone())
+        }}
+        Self {{ value: std::rc::Rc::new(value), clone_value: clone_value::<T> }}
+    }}
+
+    pub fn downcast_clone<T: std::any::Any>(&self) -> T {{
+        *(self.clone_value)(self.value.as_ref())
+            .downcast::<T>()
+            .expect("invalid Java erased generic interface cast")
+    }}
+
+    pub fn as_any(&self) -> &dyn std::any::Any {{ self.value.as_ref() }}
+
+    pub fn as_any_mut(&mut self) -> &mut dyn std::any::Any {{
+        std::rc::Rc::get_mut(&mut self.value)
+            .expect("mutating aliased Java erased value requires shared source storage")
+    }}
+}}
+
+impl Clone for JavaErasedValue {{
+    fn clone(&self) -> Self {{
+        Self {{ value: std::clone::Clone::clone(&self.value), clone_value: self.clone_value }}
+    }}
+}}
+
+impl Default for JavaErasedValue {{
+    fn default() -> Self {{ Self::new(JavaPlainObject::new()) }}
+}}
+
+impl std::fmt::Debug for JavaErasedValue {{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{
+        f.debug_struct("JavaErasedValue").finish_non_exhaustive()
+    }}
+}}
+
+impl PartialEq for JavaErasedValue {{
+    fn eq(&self, other: &Self) -> bool {{ std::rc::Rc::ptr_eq(&self.value, &other.value) }}
+}}
+
+impl Eq for JavaErasedValue {{}}
+
+pub fn java_retarget_erased_generic_value<
+    Source: Clone + std::any::Any,
+    Target: Clone + std::any::Any,
+>(value: Source) -> Target {{
+    if std::any::TypeId::of::<Target>() == std::any::TypeId::of::<JavaErasedValue>() {{
+        return *(std::boxed::Box::new(JavaErasedValue::new(value))
+            as std::boxed::Box<dyn std::any::Any>)
+            .downcast::<Target>()
+            .expect("Java erased target type");
+    }}
+    if std::any::TypeId::of::<Source>() == std::any::TypeId::of::<JavaErasedValue>() {{
+        let erased = *(std::boxed::Box::new(value) as std::boxed::Box<dyn std::any::Any>)
+            .downcast::<JavaErasedValue>()
+            .expect("Java erased source type");
+        return erased.downcast_clone::<Target>();
+    }}
+    *(std::boxed::Box::new(value) as std::boxed::Box<dyn std::any::Any>)
+        .downcast::<Target>()
+        .expect("invalid Java erased generic interface cast")
+}}
+
 pub trait JavaErasedDisplayResult {{
     fn into_java_erased_display_result(self) -> Result<String, JavaException>;
 }}
 
 impl JavaErasedDisplayResult for String {{
     fn into_java_erased_display_result(self) -> Result<String, JavaException> {{ Ok(self) }}
+}}
+
+impl JavaErasedDisplayResult for Option<String> {{
+    fn into_java_erased_display_result(self) -> Result<String, JavaException> {{
+        Ok(self.unwrap_or_else(|| "null".to_string()))
+    }}
 }}
 
 impl JavaErasedDisplayResult for Result<String, JavaException> {{
@@ -12941,13 +14016,13 @@ fn platform_erased_object_to_string_downcasts(programs: &[&Program]) -> String {
 
 fn erased_display_to_string_downcast_arms(rust_type: &str) -> String {
     format!(
-        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return java_erased_display_unwrap(value.to_string());\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return java_erased_display_unwrap((*value).to_string());\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return java_erased_display_unwrap(value.to_string());\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return java_erased_display_unwrap(value.to_string());\n    }}"
+        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return java_erased_display_unwrap(std::string::ToString::to_string(value));\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return java_erased_display_unwrap(std::string::ToString::to_string(*value));\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return java_erased_display_unwrap(std::string::ToString::to_string(value));\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return java_erased_display_unwrap(std::string::ToString::to_string(value));\n    }}"
     )
 }
 
 fn erased_display_to_string_result_downcast_arms(rust_type: &str) -> String {
     format!(
-        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return value.to_string().into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return (*value).to_string().into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return value.to_string().into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return value.to_string().into_java_erased_display_result();\n    }}"
+        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return std::string::ToString::to_string(value).into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<&{rust_type}>() {{\n        return std::string::ToString::to_string(*value).into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<std::rc::Rc<{rust_type}>>() {{\n        return std::string::ToString::to_string(value).into_java_erased_display_result();\n    }}\n    if let Some(value) = value.downcast_ref::<std::sync::Arc<{rust_type}>>() {{\n        return std::string::ToString::to_string(value).into_java_erased_display_result();\n    }}"
     )
 }
 
@@ -13423,6 +14498,9 @@ fn java_type_mentions_simple_name(java_ty: &JavaType, target_simple_name: &str) 
         }
         JavaType::Unknown(name) => external_receiver_name_matches_simple(name, target_simple_name),
         JavaType::Array(element) => java_type_mentions_simple_name(element, target_simple_name),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(|bound| java_type_mentions_simple_name(bound, target_simple_name)),
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
             java_type_mentions_simple_name(bound, target_simple_name)
@@ -13511,6 +14589,19 @@ fn collect_source_generic_display_arm_for_java_type(
     arms: &mut BTreeSet<String>,
 ) {
     match ty {
+        JavaType::Intersection(bounds) => {
+            for bound in bounds {
+                collect_source_generic_display_arm_for_java_type(
+                    bound,
+                    programs,
+                    facts,
+                    representations,
+                    type_param_names,
+                    result_mode,
+                    arms,
+                );
+            }
+        }
         JavaType::Named { name, args } => {
             for arg in args {
                 collect_source_generic_display_arm_for_java_type(
@@ -13524,9 +14615,10 @@ fn collect_source_generic_display_arm_for_java_type(
                 );
             }
             if args.is_empty()
-                || args
-                    .iter()
-                    .any(|arg| java_type_mentions_any_type_param(arg, type_param_names))
+                || args.iter().any(|arg| {
+                    java_type_mentions_any_type_param(arg, type_param_names)
+                        || crate::types::contains_wildcard_type(arg)
+                })
             {
                 return;
             }
@@ -13717,6 +14809,9 @@ fn java_type_mentions_any_type_param(ty: &JavaType, names: &BTreeSet<String>) ->
         }
         JavaType::Unknown(name) => names.contains(name),
         JavaType::Array(element) => java_type_mentions_any_type_param(element, names),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(|bound| java_type_mentions_any_type_param(bound, names)),
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
             java_type_mentions_any_type_param(bound, names)
@@ -14921,6 +16016,9 @@ impl From<&str> for JavaString { fn from(value: &str) -> Self { Self::fresh(valu
 impl std::fmt::Display for JavaString { fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { self.0.fmt(f) } }
 impl PartialEq for JavaString { fn eq(&self, other: &Self) -> bool { self.java_equals(other) } }
 impl Eq for JavaString {}
+impl JavaMapKey for JavaString {
+    fn java_map_key_eq(&self, other: &Self) -> bool { self.java_equals(other) }
+}
 impl std::hash::Hash for JavaString { fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.0.hash(state) } }
 impl PartialOrd for JavaString { fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> { Some(self.cmp(other)) } }
 impl Ord for JavaString { fn cmp(&self, other: &Self) -> std::cmp::Ordering { self.0.cmp(&other.0) } }
@@ -14961,6 +16059,10 @@ pub(crate) fn java_string_path_arg_support_item() -> crate::rust_ir::RustItem {
 
 impl JavaPathArg for &JavaString {
     fn into_path_value(self) -> String { self.as_str().to_string() }
+}
+
+impl JavaPrintValue for JavaString {
+    fn java_print_value(&self) -> String { self.as_str().to_string() }
 }
 
 impl From<JavaString> for InputStreamReader {
@@ -15157,10 +16259,20 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         .iter()
         .filter_map(|type_key| {
             let rust_name = rust_name_for_java_named_type(type_key);
+            let explicitly_imported_jdk_runtime = program
+                .imports
+                .iter()
+                .chain(local_type_program.imports.iter())
+                .any(|import| {
+                    !import.is_static
+                        && !import.is_wildcard
+                        && canonical_external_receiver_type_key(&import.path) == rust_name
+                });
             (is_builtin_external_facade_type(&rust_name)
                 && !emitted_local_types.contains(type_key)
-                && !emitted_local_types.contains(&rust_name))
-            .then_some(rust_name)
+                && !emitted_local_types.contains(&rust_name)
+                && !explicitly_imported_jdk_runtime)
+                .then_some(rust_name)
         })
         .collect::<BTreeSet<_>>();
     let mut used_calls = collect_program_call_arities(program);
@@ -15183,6 +16295,11 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         declared_external_type_exclusions: declared_external_type_exclusions.clone(),
         opaque_types: source_declared_facade_shadows.clone(),
         source_declared_facade_shadows,
+        source_generic_type_arities: source_generic_type_arities([
+            program,
+            local_type_program,
+            source_summary_type_program,
+        ]),
         uses_java_string_runtime_helpers: program_uses_java_string_runtime_helpers(program),
         uses_java_string_buffer_runtime_surfaces: program_uses_java_string_buffer_runtime_surfaces(
             program,
@@ -15816,7 +16933,8 @@ pub(crate) fn source_summary_method_return_nullability(java_type: &JavaType) -> 
         | JavaType::Primitive(_)
         | JavaType::Named { .. }
         | JavaType::String
-        | JavaType::Array(_) => NullabilityState::DefinitelyNonNull,
+        | JavaType::Array(_)
+        | JavaType::Intersection(_) => NullabilityState::DefinitelyNonNull,
         JavaType::Wildcard(_) | JavaType::Unknown(_) => NullabilityState::MaybeNull,
     }
 }
@@ -16230,6 +17348,7 @@ struct ExternalApiFacadeSupport {
     emitted_source_methods: BTreeSet<(String, String, usize)>,
     source_summary_declared_methods: BTreeSet<(String, String, usize)>,
     erased_source_alias_owners: BTreeSet<String>,
+    source_generic_type_arities: BTreeMap<String, usize>,
     uses_java_string_runtime_helpers: bool,
     uses_java_string_buffer_runtime_surfaces: bool,
     /// Set when the source-summary surface fixpoint hit its budget. Surfaced as
@@ -16269,6 +17388,27 @@ struct ExternalErasedObjectMethod {
     name: String,
     arg_count: usize,
     return_type: String,
+}
+
+fn disambiguate_erased_object_method_names(
+    mut methods: Vec<ExternalErasedObjectMethod>,
+) -> Vec<ExternalErasedObjectMethod> {
+    let mut arities_by_name = BTreeMap::<String, BTreeSet<usize>>::new();
+    for method in &methods {
+        arities_by_name
+            .entry(method.name.clone())
+            .or_default()
+            .insert(method.arg_count);
+    }
+    for method in &mut methods {
+        if arities_by_name
+            .get(&method.name)
+            .is_some_and(|arities| arities.len() > 1)
+        {
+            method.name = format!("{}_{}", method.name, method.arg_count);
+        }
+    }
+    methods
 }
 
 #[derive(Clone)]
@@ -16902,6 +18042,15 @@ impl ExternalApiFacadeSupport {
         emitted_local_types: &BTreeSet<String>,
     ) {
         match java_type {
+            JavaType::Intersection(bounds) => {
+                for bound in bounds {
+                    self.add_source_summary_java_type(
+                        bound,
+                        source_summary_types,
+                        emitted_local_types,
+                    );
+                }
+            }
             JavaType::Named { name, args } => {
                 let type_key = canonical_external_receiver_type_key(name);
                 let rust_name = rust_name_for_java_named_type(&type_key);
@@ -17046,6 +18195,31 @@ impl ExternalApiFacadeSupport {
                         effective_return_type,
                         effective_nullability,
                     );
+                let erased_type_params = method_owner
+                    .type_params
+                    .iter()
+                    .chain(method.type_params.iter())
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                if java_type_mentions_any_type_param(effective_return_type, &erased_type_params) {
+                    // This owner is represented by a non-generic compatibility
+                    // facade in the current module. Its Java type parameters
+                    // are therefore out of scope here and must follow Java
+                    // erasure rather than leaking a bare `O`, `K`, etc. into
+                    // crate-wide facade traits and impls.
+                    return_type = external_facade_method_return_type_with_facts_and_representations(
+                        facts,
+                        representations,
+                        Some(type_key),
+                        &method.name,
+                        Some(arity),
+                        &JavaType::Named {
+                            name: "Object".to_string(),
+                            args: Vec::new(),
+                        },
+                        effective_nullability,
+                    );
+                }
                 if crate::java_signature::method_staticness(method)
                     == crate::java_signature::JavaCallableStaticness::Static
                     && return_type == "()"
@@ -17436,6 +18610,20 @@ impl ExternalApiFacadeSupport {
                 let method_name = inherited.method_name();
                 let rust_name = inherited.rust_name();
                 let arg_count = inherited.arg_count();
+                // A source interface is emitted as a Rust trait, so an
+                // inherent `impl Interface { ... }` is never valid Rust.
+                // Java Object methods that remain callable through an
+                // interface are materialized as object-safe trait defaults by
+                // representation lowering instead.
+                if ty.kind == TypeKind::Interface
+                    && external_object_method_uses_interface_trait_default(
+                        method_name,
+                        rust_name,
+                        arg_count,
+                    )
+                {
+                    continue;
+                }
                 if !uses_embedded_super_carrier
                     && !used_calls
                         .get(rust_name)
@@ -17506,6 +18694,15 @@ impl ExternalApiFacadeSupport {
                 let method_name = inherited.method_name();
                 let rust_name = inherited.rust_name();
                 let arg_count = inherited.arg_count();
+                if ty.kind == TypeKind::Interface
+                    && external_object_method_uses_interface_trait_default(
+                        method_name,
+                        rust_name,
+                        arg_count,
+                    )
+                {
+                    continue;
+                }
                 // A supertype the program declares is not an *external* super,
                 // whatever the fact set says. An unresolved call on a local
                 // class records an external API effect fact for it, so without
@@ -17715,6 +18912,11 @@ impl ExternalApiFacadeSupport {
 
     fn add_declared_java_type(&mut self, java_type: &JavaType, local_types: &BTreeSet<String>) {
         match java_type {
+            JavaType::Intersection(bounds) => {
+                for bound in bounds {
+                    self.add_declared_java_type(bound, local_types);
+                }
+            }
             JavaType::Named { name, args } => {
                 if !local_types.contains(&canonical_external_receiver_type_key(name)) {
                     let rust_name = rust_name_for_java_named_type(name);
@@ -20051,6 +21253,11 @@ impl ExternalApiFacadeSupport {
 
     fn add_java_type(&mut self, java_type: &JavaType) {
         match java_type {
+            JavaType::Intersection(bounds) => {
+                for bound in bounds {
+                    self.add_java_type(bound);
+                }
+            }
             JavaType::Named { name, args } => {
                 let canonical = canonical_external_receiver_type_key(name);
                 let rendered = rust_name_for_java_named_type(name);
@@ -20642,6 +21849,18 @@ impl ExternalApiFacadeSupport {
         arg_count: usize,
         return_type: String,
     ) {
+        // `Object.clone()` is protected in Java. Public source overrides are
+        // resolved on their declaring type, while an unresolved erased call
+        // cannot be represented by one universal concrete return type. Adding
+        // it to this blanket facade is actively unsound: the facade is
+        // implemented for `[T]`, so its arbitrary `clone` return shadows
+        // `std::clone::Clone` on every slice (and, through deref, every Vec).
+        // Keep erased clone recovery on the existing
+        // `java_clone_erased_object_ref` path instead of inventing a global
+        // receiver method.
+        if crate::parser::to_snake_case(&name) == "clone" && arg_count == 0 {
+            return;
+        }
         let key = (name.clone(), arg_count);
         if self.erased_object_method_conflicts.contains(&key) {
             return;
@@ -20652,6 +21871,10 @@ impl ExternalApiFacadeSupport {
             &normalize_external_facade_return_type_text(&return_type),
         );
         let return_type = erased_object_method_return_type_for_name(&name, &return_type);
+        let return_type = erase_unbound_source_generic_dyn_returns(
+            &return_type,
+            &self.source_generic_type_arities,
+        );
         match self.erased_object_methods.get(&key) {
             Some(existing)
                 if existing.arg_count == arg_count && existing.return_type == return_type => {}
@@ -21072,6 +22295,7 @@ impl ExternalApiFacadeSupport {
     }
 
     fn into_items(mut self, facts: &FactSet) -> Vec<crate::rust_ir::RustItem> {
+        let source_generic_type_arities = self.source_generic_type_arities.clone();
         self.add_javalibs_static_owner_aliases();
         let alias_names = self.aliases.keys().cloned().collect::<BTreeSet<_>>();
         let aliases = self.aliases.clone();
@@ -21094,7 +22318,8 @@ impl ExternalApiFacadeSupport {
                 && !self.trait_type_names.contains(name)
                 && (!is_builtin_external_facade_type(name)
                     || name == "Level"
-                    || self.source_declared_facade_shadows.contains(name))
+                    || (self.source_declared_facade_shadows.contains(name)
+                        && !matches!(name.as_str(), "Reader" | "StringReader" | "StreamTokenizer")))
         });
 
         // A declaration-only summary class still inherits Object.toString.
@@ -21272,7 +22497,14 @@ impl ExternalApiFacadeSupport {
             let source_summary_upcast = self
                 .source_summary_from_impls
                 .contains(&(from.clone(), to.clone()));
-            if alias_names.contains(&from)
+            if source_summary_upcast
+                // A context-only source subclass has no embedded superclass
+                // state or dispatch carrier in this facade. Emitting a
+                // panic-only `From` makes invalid Rust compile and defers the
+                // representation gap to runtime. Leave the impl absent so
+                // lowering can report the unsupported hierarchy boundary at
+                // the actual use site.
+                || alias_names.contains(&from)
                 || alias_names.contains(&to)
                 || (!is_builtin_external_facade_type(&from)
                     && !external_from_impl_source_is_emitted(&from, &emitted_support_type_names))
@@ -21324,9 +22556,14 @@ impl ExternalApiFacadeSupport {
                     {
                         method.return_type = return_type.clone();
                     }
+                    method.return_type = erase_unbound_source_generic_dyn_returns(
+                        &method.return_type,
+                        &source_generic_type_arities,
+                    );
                     method
                 })
                 .collect::<Vec<_>>();
+            let methods = disambiguate_erased_object_method_names(methods);
             let trait_methods = methods
                 .iter()
                 .map(external_erased_object_trait_method)
@@ -21398,6 +22635,16 @@ impl ExternalApiFacadeSupport {
     }
 }
 
+fn external_object_method_uses_interface_trait_default(
+    java_name: &str,
+    rust_name: &str,
+    arg_count: usize,
+) -> bool {
+    arg_count == 0
+        && (matches!(java_name, "toString" | "to_string")
+            || matches!(rust_name, "toString" | "to_string"))
+}
+
 fn erased_object_method_return_type_for_name(name: &str, return_type: &str) -> String {
     if (name == "sortByKey" || name.starts_with("sort_by_key"))
         && return_type
@@ -21408,6 +22655,55 @@ fn erased_object_method_return_type_for_name(name: &str, return_type: &str) -> S
     } else {
         return_type.to_string()
     }
+}
+
+fn source_generic_type_arities<'a>(
+    programs: impl IntoIterator<Item = &'a Program>,
+) -> BTreeMap<String, usize> {
+    fn collect(ty: &TypeDecl, arities: &mut BTreeMap<String, usize>) {
+        if !ty.type_params.is_empty() {
+            let rust_name = rust_name_for_java_named_type(&ty.name);
+            arities
+                .entry(rust_name)
+                .and_modify(|arity| {
+                    if *arity != ty.type_params.len() {
+                        *arity = usize::MAX;
+                    }
+                })
+                .or_insert(ty.type_params.len());
+        }
+        for nested in ty.members.iter().filter_map(|member| match member {
+            Member::Type(nested) => Some(nested),
+            _ => None,
+        }) {
+            collect(nested, arities);
+        }
+    }
+
+    let mut arities = BTreeMap::new();
+    for program in programs {
+        for ty in &program.types {
+            collect(ty, &mut arities);
+        }
+    }
+    arities.retain(|_, arity| *arity != usize::MAX);
+    arities
+}
+
+/// An erased facade has no type parameter with which to instantiate a generic
+/// source trait. Preserve surrounding carriers while erasing only the invalid
+/// existential payload (`Option<Box<dyn Factory>>` becomes
+/// `Option<Box<dyn Any>>`).
+fn erase_unbound_source_generic_dyn_returns(
+    return_type: &str,
+    source_generic_type_arities: &BTreeMap<String, usize>,
+) -> String {
+    source_generic_type_arities
+        .iter()
+        .filter(|(_, arity)| **arity > 0)
+        .fold(return_type.to_string(), |rendered, (name, _)| {
+            rendered.replace(&format!("Box<dyn {name}>"), "Box<dyn std::any::Any>")
+        })
 }
 
 fn is_known_value_object_static_constant(receiver_key: &str, field_name: &str) -> bool {
@@ -23230,7 +24526,11 @@ mod stdlib_support_item_tests {
         assert!(support.contains("impl From<&Path> for std::path::PathBuf"));
         assert!(support.contains("pub enum PrintStream"));
         assert!(support.contains("pub trait JavaPrintValue"));
-        assert!(support.contains("impl JavaPrintValue for JavaString"));
+        assert!(!support.contains("impl JavaPrintValue for JavaString"));
+        assert!(
+            raw_support_item_text(java_string_path_arg_support_item())
+                .contains("impl JavaPrintValue for JavaString")
+        );
         assert!(support.contains("impl<T: JavaPrintValue> JavaPrintValue for Option<T>"));
         assert!(support.contains("pub fn println_1<T: JavaPrintValue>"));
     }
@@ -24639,6 +25939,12 @@ fn collect_expr_call_arities(expr: &Expr, calls: &mut BTreeMap<String, BTreeSet<
 }
 
 fn external_facade_return_type_with_facts(java_type: &JavaType, facts: &FactSet) -> String {
+    if let JavaType::Intersection(bounds) = java_type {
+        return bounds
+            .first()
+            .map(|bound| external_facade_return_type_with_facts(bound, facts))
+            .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string());
+    }
     match java_type {
         JavaType::Named { name, args } => {
             if let Some(rust_type) = external_facade_crate_mapped_return_type(name, args, facts) {
@@ -24721,6 +26027,7 @@ fn external_facade_return_type_with_facts(java_type: &JavaType, facts: &FactSet)
         JavaType::Unknown(name) => external_facade_crate_mapped_return_type(name, &[], facts)
             .unwrap_or_else(|| "Box<dyn std::any::Any>".to_string()),
         JavaType::Wildcard(_) => "Box<dyn std::any::Any>".to_string(),
+        JavaType::Intersection(_) => unreachable!("handled above"),
     }
 }
 
@@ -25843,6 +27150,9 @@ fn java_constructor_fact_arg_type_is_precise(java_type: &JavaType) -> bool {
     match java_type {
         JavaType::Unknown(_) | JavaType::Wildcard(_) | JavaType::Void => false,
         JavaType::Array(element) => java_constructor_fact_arg_type_is_precise(element),
+        JavaType::Intersection(bounds) => {
+            bounds.iter().all(java_constructor_fact_arg_type_is_precise)
+        }
         JavaType::Primitive(_) | JavaType::String | JavaType::Named { .. } => true,
     }
 }
@@ -27211,6 +28521,8 @@ fn is_known_java_platform_stream_type_name(name: &str) -> bool {
             | "Reader"
             | "InputStreamReader"
             | "BufferedReader"
+            | "StringReader"
+            | "StreamTokenizer"
             | "PrintStream"
     ) || matches!(
         simple,
@@ -27827,6 +29139,73 @@ mod erased_object_unsized_facade_tests {
     use super::*;
 
     #[test]
+    fn erased_object_facade_does_not_shadow_standard_clone_on_slices() {
+        let mut support = ExternalApiFacadeSupport::default();
+        support.add_erased_object_method(
+            &FactSet::default(),
+            Some("java.lang.Object"),
+            "clone".to_string(),
+            0,
+            "OpdfGaussian".to_string(),
+        );
+        support.add_erased_object_method(
+            &FactSet::default(),
+            Some("java.lang.Object"),
+            "values".to_string(),
+            0,
+            "Vec<f64>".to_string(),
+        );
+
+        assert!(
+            !support
+                .erased_object_methods
+                .contains_key(&("clone".to_string(), 0))
+        );
+        assert!(
+            support
+                .erased_object_methods
+                .contains_key(&("values".to_string(), 0))
+        );
+    }
+
+    #[test]
+    fn erased_object_facade_erases_unbound_generic_source_trait_returns() {
+        let parsed = crate::parser::parse_java_source("interface Factory<T> {}");
+        let arities = source_generic_type_arities([&parsed.program]);
+        assert_eq!(arities.get("Factory"), Some(&1));
+        assert_eq!(
+            erase_unbound_source_generic_dyn_returns("Box<dyn Factory>", &arities),
+            "Box<dyn std::any::Any>"
+        );
+        assert_eq!(
+            erase_unbound_source_generic_dyn_returns(
+                "Result<Option<Box<dyn Factory>>, JavaException>",
+                &arities,
+            ),
+            "Result<Option<Box<dyn std::any::Any>>, JavaException>"
+        );
+
+        let mut support = ExternalApiFacadeSupport {
+            source_generic_type_arities: arities,
+            ..ExternalApiFacadeSupport::default()
+        };
+        support.add_erased_object_method(
+            &FactSet::default(),
+            Some("java.lang.Object"),
+            "factor".to_string(),
+            0,
+            "Box<dyn Factory>".to_string(),
+        );
+        assert_eq!(
+            support
+                .erased_object_methods
+                .get(&("factor".to_string(), 0))
+                .map(|method| method.return_type.as_str()),
+            Some("Box<dyn std::any::Any>")
+        );
+    }
+
+    #[test]
     fn methods_returning_self_are_sized_for_slice_facades() {
         let method = ExternalErasedObjectMethod {
             name: "setLevel".to_string(),
@@ -27848,6 +29227,35 @@ mod erased_object_unsized_facade_tests {
 
         assert!(!external_erased_object_trait_method(&method).contains("Self: Sized"));
         assert!(!external_erased_object_slice_impl_method(&method).contains("Self: Sized"));
+    }
+
+    #[test]
+    fn cross_capability_overloads_receive_arity_names() {
+        let methods = disambiguate_erased_object_method_names(vec![
+            ExternalErasedObjectMethod {
+                name: "remove".to_string(),
+                arg_count: 0,
+                return_type: "Result<(), JavaException>".to_string(),
+            },
+            ExternalErasedObjectMethod {
+                name: "remove".to_string(),
+                arg_count: 1,
+                return_type: "()".to_string(),
+            },
+            ExternalErasedObjectMethod {
+                name: "length".to_string(),
+                arg_count: 0,
+                return_type: "i32".to_string(),
+            },
+        ]);
+
+        assert_eq!(
+            methods
+                .iter()
+                .map(|method| method.name.as_str())
+                .collect::<Vec<_>>(),
+            vec!["remove_0", "remove_1", "length"]
+        );
     }
 }
 
@@ -28684,6 +30092,8 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "Collectors"
             | "HashMap"
             | "HashSet"
+            | "EnumSet"
+            | "JavaUtilEnumSet"
             | "Iterator"
             | "ListIterator"
             | "JavaIterator"
@@ -28739,12 +30149,16 @@ fn is_builtin_external_facade_type(name: &str) -> bool {
             | "BufferedInputStream"
             | "InputStreamReader"
             | "BufferedReader"
+            | "Reader"
+            | "StringReader"
+            | "StreamTokenizer"
             | "OutputStream"
             | "JavaIoOutputStream"
             | "FileOutputStream"
             | "ByteArrayOutputStream"
             | "OutputStreamWriter"
             | "BufferedWriter"
+            | "Writer"
             | "PrintStream"
             | "logger"
             | "bool"
@@ -29076,6 +30490,16 @@ fn collect_static_constant_java_type_support(
     support_type_names: &mut BTreeSet<String>,
 ) {
     match java_ty {
+        JavaType::Intersection(bounds) => {
+            for bound in bounds {
+                collect_static_constant_java_type_support(
+                    bound,
+                    local_types,
+                    declared_owners,
+                    support_type_names,
+                );
+            }
+        }
         JavaType::Named { name, args } => {
             let key = canonical_external_receiver_type_key(name);
             let rust_name = rust_name_for_java_named_type(&key);
@@ -29965,6 +31389,12 @@ fn external_static_string_constant_support_item(
     if is_awt_platform_facade_rust_ident(owner) {
         return None;
     }
+    // The stateful runtime carrier owns these constants together with its
+    // behavior. Emitting a second inherent impl is just as invalid as
+    // emitting a second struct, even when both values happen to agree.
+    if owner == "StreamTokenizer" {
+        return None;
+    }
     let alias_owners = fields
         .values()
         .filter_map(|constant| constant.alias_owner.as_deref())
@@ -30013,7 +31443,7 @@ fn external_static_string_constant_support_item(
         .join("\n\n");
     let external_trait_impls =
         external_static_enum_constant_trait_impls(facts, owner, &fields, declared_owners);
-    let raw = if declared_owners.contains(owner) {
+    let raw = if declared_owners.contains(owner) || is_builtin_external_facade_type(owner) {
         [aliases, impl_block, alias_impls, external_trait_impls]
             .into_iter()
             .filter(|part| !part.is_empty())
@@ -30325,6 +31755,10 @@ fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static 
         ("System", "ERR") => Some("PrintStream::Stderr"),
         ("System", "IN") => Some("InputStream::empty()"),
         ("GZIPInputStream" | "JavaUtilZipGZIPInputStream", "GZIP_MAGIC") => Some("0x8b1f"),
+        ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_EOF") => Some("-1"),
+        ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_EOL") => Some("10"),
+        ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_NUMBER") => Some("-2"),
+        ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_WORD") => Some("-3"),
         ("TimeUnit" | "JavaUtilConcurrentTimeUnit", "NANOSECONDS") => {
             Some("TimeUnit::new(1, \"NANOSECONDS\")")
         }
@@ -30561,6 +31995,9 @@ pub(crate) fn program_uses_java_platform_facades(program: &Program) -> bool {
                 | "java.lang.StringBuffer"
                 | "java.lang.StringBuilder"
                 | "java.util.StringTokenizer"
+                | "java.io.Reader"
+                | "java.io.StringReader"
+                | "java.io.StreamTokenizer"
                 | "java.util.regex.Pattern"
                 | "java.util.regex.Matcher"
                 | "java.util.concurrent.atomic.AtomicBoolean"
@@ -30630,6 +32067,9 @@ fn program_declares_java_platform_facade_support_type(program: &Program) -> bool
                 | "StringBuffer"
                 | "StringBuilder"
                 | "StringTokenizer"
+                | "Reader"
+                | "StringReader"
+                | "StreamTokenizer"
                 | "Pattern"
                 | "Matcher"
                 | "JavaUtilRegexPattern"
@@ -30977,6 +32417,7 @@ fn java_type_uses_java_platform_facade(ty: &JavaType) -> bool {
                 || args.iter().any(java_type_uses_java_platform_facade)
         }
         JavaType::Array(inner) => java_type_uses_java_platform_facade(inner),
+        JavaType::Intersection(bounds) => bounds.iter().any(java_type_uses_java_platform_facade),
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
             java_type_uses_java_platform_facade(bound)
@@ -31565,6 +33006,9 @@ fn java_type_uses_java_erased_object_runtime_support(ty: &JavaType) -> bool {
                     .any(java_type_uses_java_erased_object_runtime_support)
         }
         JavaType::Array(inner) => java_type_uses_java_erased_object_runtime_support(inner),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(java_type_uses_java_erased_object_runtime_support),
         JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
             java_type_uses_java_erased_object_runtime_support(bound)
@@ -32075,6 +33519,7 @@ fn java_type_is_boxed_primitive_name(ty: &JavaType) -> bool {
         | JavaType::Primitive(_)
         | JavaType::Void
         | JavaType::Array(_)
+        | JavaType::Intersection(_)
         | JavaType::Wildcard(_) => false,
     }
 }

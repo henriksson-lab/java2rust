@@ -537,6 +537,18 @@ impl UsageFacts {
         self.source_method_usage_for_owner(JavaOwnerKey::source_type(ty), method)
     }
 
+    /// Whether any source implementation of this Java method family mutates
+    /// its receiver. Generic and wildcard receivers can erase the concrete
+    /// declaring owner, so signature and expression lowering share this
+    /// conservative capability query.
+    pub(crate) fn source_method_name_anywhere_mutates(&self, method_name: &str) -> bool {
+        let canonical_method = crate::parser::to_snake_case(method_name);
+        self.method_entries().any(|(key, method_usage)| {
+            (key.method_name() == method_name || key.method_name() == canonical_method)
+                && method_usage.mutates_self()
+        })
+    }
+
     fn source_method_usage_for_owner(
         &self,
         owner: JavaOwnerKey,
@@ -1081,6 +1093,7 @@ pub enum FieldUse {
         receiver_type: Option<JavaType>,
         name: String,
         arg_count: usize,
+        literal_null_arg_indices: Vec<usize>,
         argument_bindings: Vec<(usize, BindingId)>,
     },
     Returned {
@@ -1106,6 +1119,7 @@ pub struct CallSiteUse {
     null_arg_indices: Vec<usize>,
     nullable_source_call_arg_indices: Vec<usize>,
     argument_bindings: Vec<(usize, BindingId)>,
+    argument_self_fields: Vec<(usize, String)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedCall>,
 }
@@ -1147,6 +1161,10 @@ impl CallSiteUse {
         &self.argument_bindings
     }
 
+    pub fn argument_self_fields(&self) -> &[(usize, String)] {
+        &self.argument_self_fields
+    }
+
     pub fn boundary(&self) -> CallArgumentBoundary {
         self.boundary
     }
@@ -1163,6 +1181,7 @@ pub struct ConstructorCallSiteUse {
     null_arg_indices: Vec<usize>,
     nullable_source_call_arg_indices: Vec<usize>,
     argument_bindings: Vec<(usize, BindingId)>,
+    argument_self_fields: Vec<(usize, String)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedConstructor>,
 }
@@ -1186,6 +1205,10 @@ impl ConstructorCallSiteUse {
 
     pub fn argument_bindings(&self) -> &[(usize, BindingId)] {
         &self.argument_bindings
+    }
+
+    pub fn argument_self_fields(&self) -> &[(usize, String)] {
+        &self.argument_self_fields
     }
 
     pub fn boundary(&self) -> CallArgumentBoundary {
@@ -2731,6 +2754,7 @@ fn thrown_expr_type_name(expr: &Expr) -> Option<String> {
 fn java_type_name_for_usage(java_ty: &JavaType) -> Option<&str> {
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+        JavaType::Intersection(bounds) => bounds.iter().find_map(java_type_name_for_usage),
         JavaType::String => Some("String"),
         JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_) | JavaType::Wildcard(_) => {
             None
@@ -2755,6 +2779,11 @@ fn java_type_call_graph_name(ty: &JavaType) -> String {
         JavaType::String => "String".to_string(),
         JavaType::Array(element) => format!("{}[]", java_type_call_graph_name(element)),
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name.clone(),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .map(java_type_call_graph_name)
+            .collect::<Vec<_>>()
+            .join(" & "),
         JavaType::Wildcard(_) => "?".to_string(),
     }
 }
@@ -3516,6 +3545,7 @@ fn analyze_stmt(
                     source_return_nullability,
                 ),
                 argument_bindings: call_argument_bindings(args, facts),
+                argument_self_fields: call_argument_self_fields(args, facts, field_names),
                 boundary: policy.boundary,
                 resolved: resolved.clone(),
             });
@@ -3859,6 +3889,19 @@ fn call_argument_bindings(args: &[Expr], facts: &MethodUsageFacts) -> Vec<(usize
         .collect()
 }
 
+fn call_argument_self_fields(
+    args: &[Expr],
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+) -> Vec<(usize, String)> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            self_field_name(arg, facts, field_names).map(|field| (index, field.to_string()))
+        })
+        .collect()
+}
+
 fn expr_is_null_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(crate::java_ir::Literal::Null))
 }
@@ -4055,6 +4098,7 @@ fn analyze_expr_with_context(
                     source_return_nullability,
                 ),
                 argument_bindings: argument_bindings.clone(),
+                argument_self_fields: call_argument_self_fields(args, facts, field_names),
                 boundary: call_boundary,
                 resolved: usage_resolved.clone(),
             });
@@ -4073,6 +4117,7 @@ fn analyze_expr_with_context(
                     receiver_type: receiver_type.clone(),
                     name: name.clone(),
                     arg_count: args.len(),
+                    literal_null_arg_indices: null_argument_indices(args),
                     argument_bindings: argument_bindings.clone(),
                 });
             }
@@ -4459,6 +4504,7 @@ fn analyze_expr_with_context(
                     source_return_nullability,
                 ),
                 argument_bindings: call_argument_bindings(args, facts),
+                argument_self_fields: call_argument_self_fields(args, facts, field_names),
                 boundary: constructor_invocation_boundary_policy_for_expr(resolved.as_ref()),
                 resolved: resolved.clone(),
             });
@@ -5152,6 +5198,14 @@ fn expr_targets_self_field(
         Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
         Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This),
         Expr::ArrayAccess(array, _) => expr_targets_self_field(array, facts, field_names),
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if name == "get" && args.len() == 1 => {
+            expr_targets_self_field(receiver, facts, field_names)
+        }
         _ => false,
     }
 }
@@ -5562,6 +5616,15 @@ fn expr_mutates_self_field(
             receiver: Some(receiver),
             name,
             ..
+        } if crate::stdlib::native_collection_method_name_mutates_receiver(name)
+            && matches!(receiver.as_ref(), Expr::Call { name, args, .. } if name == "get" && args.len() == 1) =>
+        {
+            expr_targets_self_field(receiver, facts, field_names)
+        }
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            ..
         } if call_receiver_java_type_with_context(
             Some(receiver.as_ref()),
             facts,
@@ -5575,7 +5638,10 @@ fn expr_mutates_self_field(
         {
             match receiver.as_ref() {
                 Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
-                target => target_is_this_field(target),
+                target => {
+                    target_is_this_field(target)
+                        || expr_targets_self_field(target, facts, field_names)
+                }
             }
         }
         Expr::Call {

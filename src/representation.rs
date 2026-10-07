@@ -29,6 +29,22 @@ use crate::slot_shape::DispatchShape;
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepresentationPlan {
     types: HashMap<String, TypeRepresentation>,
+    /// Finite carriers for source-interface existentials such as
+    /// `Factory<?>`. Rust trait objects cannot leave a generic argument
+    /// unspecified, so a closed set of concrete source implementations is
+    /// represented as an enum whose variants retain each implementation's
+    /// exact interface arguments.
+    existential_interface_carriers: HashMap<String, ExistentialInterfaceCarrier>,
+    /// Java permits a generic source type to be used raw. Rust carriers do
+    /// not: every generic argument must still be written. Preserve the Java
+    /// declaration's erased upper bounds so representation-aware rendering
+    /// can spell a raw source carrier without inventing `Any` independently
+    /// at each use site.
+    raw_generic_arguments: HashMap<String, Vec<JavaType>>,
+    /// Object-safe source-class upper-bound traits used to retain a raw or
+    /// unbounded wildcard's runtime value without pretending it is `Any`.
+    /// Entries align with the generic declaration's type parameters.
+    erased_wildcard_bound_carriers: HashMap<String, Vec<Option<String>>>,
     /// A source `java.util.Map.Entry` implementation needs a virtual value
     /// carrier; tuple snapshots cannot retain its override or shared state.
     source_map_entry_value_carrier: bool,
@@ -42,6 +58,9 @@ pub struct RepresentationPlan {
     nullable_live_static_native_map_field_keys: HashSet<(String, String)>,
     nullable_live_static_native_map_field_values: HashSet<(String, String)>,
     hierarchy_edges_by_subtype: HashMap<String, Vec<ObjectHierarchyEdge>>,
+    /// Declared class inheritance independent of whether the object-model
+    /// planner needed a polymorphic representation for the edge.
+    declared_supertype_by_subtype: HashMap<String, String>,
     /// Concrete inheritance edges proven safe by the existing source-member
     /// flattening path. Keep this separate from polymorphic hierarchy
     /// representations: these edges are represented only for the concrete,
@@ -63,6 +82,19 @@ pub struct RepresentationPlan {
     /// moving it in front of representation planning is the step that makes it
     /// readable at all.
     storage: crate::storage_strategy::StoragePlan,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExistentialInterfaceCarrier {
+    pub(crate) interface_name: String,
+    pub(crate) enum_name: String,
+    pub(crate) variants: Vec<ExistentialInterfaceVariant>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ExistentialInterfaceVariant {
+    pub(crate) implementor_name: String,
+    pub(crate) interface_args: Vec<JavaType>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -189,6 +221,9 @@ impl SourceSummarySuperclassBoundaryPolicy {
 
 pub fn plan_representations(program: &Program, facts: &FactSet) -> RepresentationPlan {
     let mut plan = RepresentationPlan::default();
+    collect_declared_supertype_names(program, &mut plan.declared_supertype_by_subtype);
+    collect_raw_generic_arguments(program, &mut plan.raw_generic_arguments);
+    collect_erased_wildcard_bound_carriers(program, &mut plan.erased_wildcard_bound_carriers);
     plan.live_native_map_fields = live_native_map_fields(program, false);
     plan.live_static_native_map_fields = live_native_map_fields(program, true);
     let (nullable_keys, nullable_values) =
@@ -259,7 +294,232 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     promote_anonymous_class_bases_to_source_hierarchy_carriers(&mut plan);
     record_statically_constructed_concrete_leaf_hierarchy_edges(program, &mut plan);
     record_simple_super_copyback_hierarchy_edges(program, &mut plan);
+    plan_existential_interface_carriers(program, &mut plan);
     plan
+}
+
+fn plan_existential_interface_carriers(program: &Program, plan: &mut RepresentationPlan) {
+    for interface in all_types(program) {
+        if interface.kind != TypeKind::Interface
+            || interface.type_params.is_empty()
+            || ((interface.modifiers.contains(&Modifier::Public)
+                || interface.modifiers.contains(&Modifier::Protected))
+                && interface.permits.is_empty())
+            || !program_declares_unbounded_wildcard_use(program, &interface.name)
+        {
+            continue;
+        }
+        let variants = all_types(program)
+            .into_iter()
+            .filter(|candidate| {
+                candidate.kind == TypeKind::Class
+                    && !candidate.modifiers.contains(&Modifier::Abstract)
+                    && candidate.type_params.is_empty()
+            })
+            .filter_map(|candidate| {
+                let args = crate::representation_lowering::interface_type_arguments_in_target(
+                    program, candidate, interface,
+                )?;
+                (args.len() == interface.type_params.len()
+                    && args.iter().all(|arg| !java_type_contains_open_generic(arg)))
+                .then(|| ExistentialInterfaceVariant {
+                    implementor_name: candidate.name.clone(),
+                    interface_args: args,
+                })
+            })
+            .collect::<Vec<_>>();
+        if variants.is_empty() {
+            continue;
+        }
+        plan.existential_interface_carriers.insert(
+            interface.name.clone(),
+            ExistentialInterfaceCarrier {
+                interface_name: interface.name.clone(),
+                enum_name: format!(
+                    "{}WildcardValue",
+                    crate::java_naming::rust_name_for_java_named_type(&interface.name)
+                ),
+                variants,
+            },
+        );
+    }
+}
+
+fn java_type_contains_open_generic(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Unknown(_) | JavaType::Wildcard(_) => true,
+        JavaType::Named { args, .. } => args.iter().any(java_type_contains_open_generic),
+        JavaType::Array(element) => java_type_contains_open_generic(element),
+        JavaType::Intersection(bounds) => bounds.iter().any(java_type_contains_open_generic),
+        JavaType::Primitive(_) | JavaType::String | JavaType::Void => false,
+    }
+}
+
+pub(crate) fn program_declares_unbounded_wildcard_use(
+    program: &Program,
+    interface_name: &str,
+) -> bool {
+    fn matches(ty: &JavaType, interface_name: &str) -> bool {
+        match ty {
+            JavaType::Named { name, args } => {
+                (crate::facts::external_type_name_matches(name, interface_name)
+                    && !args.is_empty()
+                    && args
+                        .iter()
+                        .all(|arg| matches!(arg, JavaType::Wildcard(None))))
+                    || args.iter().any(|arg| matches(arg, interface_name))
+            }
+            JavaType::Array(element) => matches(element, interface_name),
+            JavaType::Intersection(bounds) => {
+                bounds.iter().any(|bound| matches(bound, interface_name))
+            }
+            JavaType::Wildcard(Some(bound)) => match bound {
+                crate::java_ir::WildcardBound::Extends(inner)
+                | crate::java_ir::WildcardBound::Super(inner) => matches(inner, interface_name),
+            },
+            JavaType::Primitive(_)
+            | JavaType::String
+            | JavaType::Void
+            | JavaType::Unknown(_)
+            | JavaType::Wildcard(None) => false,
+        }
+    }
+    fn decl_matches(ty: &TypeDecl, interface_name: &str) -> bool {
+        ty.type_param_bounds
+            .iter()
+            .flatten()
+            .any(|bound| matches(bound, interface_name))
+            || ty.members.iter().any(|member| match member {
+                Member::Field(field) => matches(&field.ty, interface_name),
+                Member::Method(method) => {
+                    matches(&method.return_type, interface_name)
+                        || method
+                            .params
+                            .iter()
+                            .any(|param| matches(&param.ty, interface_name))
+                        || method
+                            .type_param_bounds
+                            .iter()
+                            .flatten()
+                            .any(|bound| matches(bound, interface_name))
+                }
+                Member::Constructor(constructor) => {
+                    constructor
+                        .params
+                        .iter()
+                        .any(|param| matches(&param.ty, interface_name))
+                        || constructor
+                            .type_param_bounds
+                            .iter()
+                            .flatten()
+                            .any(|bound| matches(bound, interface_name))
+                }
+                Member::Type(nested) => decl_matches(nested, interface_name),
+                Member::Unsupported { .. } => false,
+            })
+    }
+    program
+        .types
+        .iter()
+        .any(|ty| decl_matches(ty, interface_name))
+}
+
+fn collect_declared_supertype_names(program: &Program, out: &mut HashMap<String, String>) {
+    fn collect(ty: &TypeDecl, out: &mut HashMap<String, String>) {
+        if let Some(super_type) = ty.extends.as_deref() {
+            let parsed = crate::parser::parse_hierarchy_type(super_type);
+            if let JavaType::Named { name, .. } | JavaType::Unknown(name) = parsed {
+                out.insert(ty.name.clone(), name);
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect(nested, out);
+            }
+        }
+    }
+    for ty in &program.types {
+        collect(ty, out);
+    }
+}
+
+fn collect_raw_generic_arguments(
+    program: &Program,
+    raw_generic_arguments: &mut HashMap<String, Vec<JavaType>>,
+) {
+    fn visit(ty: &TypeDecl, out: &mut HashMap<String, Vec<JavaType>>) {
+        if !ty.type_params.is_empty() {
+            let erased = ty
+                .type_params
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    ty.type_param_bounds
+                        .get(index)
+                        .and_then(Clone::clone)
+                        .unwrap_or_else(|| JavaType::Unknown("Object".to_string()))
+                })
+                .collect::<Vec<_>>();
+            out.insert(ty.name.clone(), erased);
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, out);
+            }
+        }
+    }
+
+    for ty in &program.types {
+        visit(ty, raw_generic_arguments);
+    }
+}
+
+fn collect_erased_wildcard_bound_carriers(
+    program: &Program,
+    out: &mut HashMap<String, Vec<Option<String>>>,
+) {
+    fn source_class_bound<'a>(program: &'a Program, bound: &'a JavaType) -> Option<&'a TypeDecl> {
+        match bound {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                find_type_by_erased_name(program, name)
+                    .filter(|ty| matches!(ty.kind, TypeKind::Class))
+            }
+            JavaType::Intersection(bounds) => bounds
+                .iter()
+                .find_map(|bound| source_class_bound(program, bound)),
+            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+            | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+                source_class_bound(program, bound)
+            }
+            _ => None,
+        }
+    }
+    fn visit(program: &Program, ty: &TypeDecl, out: &mut HashMap<String, Vec<Option<String>>>) {
+        if !ty.type_params.is_empty() {
+            let carriers = ty
+                .type_params
+                .iter()
+                .enumerate()
+                .map(|(index, _)| {
+                    let bound = ty.type_param_bounds.get(index)?.as_ref()?;
+                    source_class_bound(program, bound).map(|bound| {
+                        crate::representation_lowering::source_class_bound_trait_name(&bound.name)
+                    })
+                })
+                .collect::<Vec<_>>();
+            if carriers.iter().any(Option::is_some) {
+                out.insert(ty.name.clone(), carriers);
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(program, nested, out);
+            }
+        }
+    }
+    for ty in &program.types {
+        visit(program, ty, out);
+    }
 }
 
 /// Record the deliberately small concrete `super.m()` subset whose lowering
@@ -1692,6 +1952,55 @@ fn external_final_facade_should_keep_concrete_dispatch(
 }
 
 impl RepresentationPlan {
+    #[cfg(test)]
+    pub(crate) fn insert_test_type_representation(&mut self, entry: TypeRepresentation) {
+        self.types.insert(entry.java_name.clone(), entry);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn insert_test_storage_facts(
+        &mut self,
+        type_name: impl Into<String>,
+        facts: crate::storage_strategy::TypeStorageFacts,
+    ) {
+        self.storage.insert(type_name.into(), facts);
+    }
+
+    pub(crate) fn raw_generic_arguments_for(&self, type_name: &str) -> Option<&[JavaType]> {
+        self.raw_generic_arguments
+            .get(type_name)
+            .or_else(|| {
+                let simple = type_name.rsplit('.').next().unwrap_or(type_name);
+                let mut matches = self
+                    .raw_generic_arguments
+                    .iter()
+                    .filter(|(name, _)| name.rsplit('.').next() == Some(simple));
+                let (_, args) = matches.next()?;
+                matches.next().is_none().then_some(args)
+            })
+            .map(Vec::as_slice)
+    }
+
+    pub(crate) fn erased_wildcard_bound_carrier_for(
+        &self,
+        type_name: &str,
+        index: usize,
+    ) -> Option<&str> {
+        let carriers = self
+            .erased_wildcard_bound_carriers
+            .get(type_name)
+            .or_else(|| {
+                let simple = type_name.rsplit('.').next().unwrap_or(type_name);
+                let mut matches = self
+                    .erased_wildcard_bound_carriers
+                    .iter()
+                    .filter(|(name, _)| name.rsplit('.').next() == Some(simple));
+                let (_, carriers) = matches.next()?;
+                matches.next().is_none().then_some(carriers)
+            })?;
+        carriers.get(index)?.as_deref()
+    }
+
     pub fn source_map_entry_uses_value_carrier(&self) -> bool {
         self.source_map_entry_value_carrier
     }
@@ -1774,10 +2083,87 @@ impl RepresentationPlan {
             .then_some((carrier_name.as_str(), variant))
     }
 
+    pub(crate) fn source_hierarchy_carrier_parts_for_variant(
+        &self,
+        type_name: &str,
+    ) -> Option<(&str, String)> {
+        let variant = crate::java_naming::rust_name_for_java_named_type(type_name);
+        let mut matches = self.types.values().filter_map(|representation| {
+            let ObjectRepresentation::SourceHierarchyCarrier {
+                carrier_name,
+                variants,
+            } = representation.representation()
+            else {
+                return None;
+            };
+            variants
+                .iter()
+                .any(|candidate| candidate == &variant)
+                .then_some(carrier_name.as_str())
+        });
+        let first = matches.next()?;
+        matches
+            .all(|candidate| candidate == first)
+            .then_some((first, variant))
+    }
+
     pub fn representation_for(&self, java_ty: &JavaType) -> ObjectRepresentation {
+        if let Some(carrier) = self.existential_interface_carrier_for(java_ty) {
+            return ObjectRepresentation::ClosedEnum {
+                enum_name: carrier.enum_name.clone(),
+                variants: carrier
+                    .variants
+                    .iter()
+                    .map(|variant| {
+                        crate::java_naming::rust_name_for_java_named_type(&variant.implementor_name)
+                    })
+                    .collect(),
+            };
+        }
         self.representation_lookup_policy(java_ty)
             .representation()
             .clone()
+    }
+
+    pub(crate) fn existential_interface_carrier_for(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<&ExistentialInterfaceCarrier> {
+        let JavaType::Named { name, args } = java_ty else {
+            return None;
+        };
+        (!args.is_empty()
+            && args
+                .iter()
+                .all(|arg| matches!(arg, JavaType::Wildcard(None))))
+        .then(|| {
+            self.existential_interface_carriers.get(name).or_else(|| {
+                let simple = name.rsplit('.').next().unwrap_or(name);
+                let mut matches = self
+                    .existential_interface_carriers
+                    .iter()
+                    .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(simple));
+                let (_, carrier) = matches.next()?;
+                matches.next().is_none().then_some(carrier)
+            })
+        })?
+    }
+
+    pub(crate) fn existential_interface_carrier_for_interface(
+        &self,
+        interface_name: &str,
+    ) -> Option<&ExistentialInterfaceCarrier> {
+        self.existential_interface_carriers
+            .get(interface_name)
+            .or_else(|| {
+                let simple = interface_name.rsplit('.').next().unwrap_or(interface_name);
+                let mut matches = self
+                    .existential_interface_carriers
+                    .iter()
+                    .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(simple));
+                let (_, carrier) = matches.next()?;
+                matches.next().is_none().then_some(carrier)
+            })
     }
 
     pub fn storage_placement_for(
@@ -1824,7 +2210,15 @@ impl RepresentationPlan {
         type_name: &str,
         label_name: &str,
     ) -> Option<JavaEnumVariantPath> {
-        let representation = self.type_representation(type_name)?;
+        let representation = self
+            .type_representation(type_name)
+            .filter(|representation| {
+                matches!(
+                    representation.representation,
+                    ObjectRepresentation::JavaEnum { .. }
+                )
+            })
+            .or_else(|| self.inherited_nested_java_enum_representation(type_name))?;
         let ObjectRepresentation::JavaEnum {
             enum_name,
             variants,
@@ -1838,6 +2232,61 @@ impl RepresentationPlan {
             .iter()
             .any(|known| known == &variant)
             .then(|| JavaEnumVariantPath::new(rust_enum_name, variant))
+    }
+
+    fn inherited_nested_java_enum_representation(
+        &self,
+        type_name: &str,
+    ) -> Option<&TypeRepresentation> {
+        let (owner, nested) = type_name.rsplit_once('.')?;
+        let mut pending = vec![owner.to_string()];
+        let mut seen = HashSet::new();
+        while let Some(current) = pending.pop() {
+            if !seen.insert(current.clone()) {
+                continue;
+            }
+            let mut supertypes = self
+                .hierarchy_edges_for_subtype(&current)
+                .into_iter()
+                .map(|edge| edge.super_name().to_string())
+                .collect::<Vec<_>>();
+            if let Some(declared) = self.declared_supertype_for(&current)
+                && !supertypes.iter().any(|candidate| candidate == declared)
+            {
+                supertypes.push(declared.to_string());
+            }
+            for super_name in supertypes {
+                let candidate = format!("{super_name}.{nested}");
+                if let Some(representation) =
+                    self.type_representation(&candidate)
+                        .filter(|representation| {
+                            matches!(
+                                representation.representation,
+                                ObjectRepresentation::JavaEnum { .. }
+                            )
+                        })
+                {
+                    return Some(representation);
+                }
+                pending.push(super_name);
+            }
+        }
+        None
+    }
+
+    fn declared_supertype_for(&self, type_name: &str) -> Option<&str> {
+        self.declared_supertype_by_subtype
+            .get(type_name)
+            .or_else(|| {
+                let simple = type_name.rsplit('.').next().unwrap_or(type_name);
+                let mut matches = self
+                    .declared_supertype_by_subtype
+                    .iter()
+                    .filter(|(candidate, _)| candidate.rsplit('.').next() == Some(simple));
+                let (_, super_name) = matches.next()?;
+                matches.next().is_none().then_some(super_name)
+            })
+            .map(String::as_str)
     }
 
     fn unique_type_representation_by_simple_name(
@@ -5109,6 +5558,35 @@ mod tests {
     use super::*;
     use crate::diagnostics::Span;
     use crate::java_ir::{MethodDecl, PrimitiveType, TypeKind};
+
+    #[test]
+    fn inherited_nested_enum_path_ignores_child_facade_shadow() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Base {
+    static enum Mode { FAST, SAFE }
+}
+class Child extends Base {}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut plan = plan_representations(&resolved.program, &FactSet::default());
+        plan.types.insert(
+            "Child.Mode".to_string(),
+            TypeRepresentation {
+                java_name: "Child.Mode".to_string(),
+                representation: ObjectRepresentation::ErasedObject,
+                provenance: RepresentationProvenance::ConservativeFallback,
+                direct_subtypes: Vec::new(),
+            },
+        );
+
+        let path = plan
+            .java_enum_variant_path_for_label("Child.Mode", "FAST")
+            .expect("inherited enum variant");
+        assert_eq!(path.enum_name(), "Base_Mode");
+        assert_eq!(path.variant_name(), "FAST");
+    }
 
     #[test]
     fn map_field_entry_escape_requires_live_native_map_storage() {

@@ -130,6 +130,33 @@ pub(crate) fn source_static_field_rust_names(ty: &TypeDecl) -> HashMap<String, S
     source_field_rust_names(ty, |field| field.modifiers.contains(&Modifier::Static))
 }
 
+/// Resolve a static source field by its Java spelling or by the parser's
+/// canonical alias.  Declaration emission and every reference-lowering path
+/// must go through the same declaration before allocating a Rust identifier;
+/// independently snake-casing a reference (for example `INST`) can otherwise
+/// disagree with the spelling emitted for its storage accessor.
+///
+/// An alias is accepted only when it identifies exactly one declaration.  An
+/// exact Java spelling always wins, while ambiguous canonical aliases remain
+/// unresolved rather than depending on declaration order.
+pub(crate) fn source_static_field_decl<'a>(ty: &'a TypeDecl, query: &str) -> Option<&'a FieldDecl> {
+    let static_fields = || {
+        ty.members.iter().filter_map(|member| match member {
+            Member::Field(field) if field.modifiers.contains(&Modifier::Static) => Some(field),
+            _ => None,
+        })
+    };
+    if let Some(field) = static_fields().find(|field| field.name == query) {
+        return Some(field);
+    }
+
+    let canonical = crate::parser::to_snake_case(query);
+    let mut matches =
+        static_fields().filter(|field| crate::parser::to_snake_case(&field.name) == canonical);
+    let field = matches.next()?;
+    matches.next().is_none().then_some(field)
+}
+
 fn source_field_rust_names(
     ty: &TypeDecl,
     include_field: impl Fn(&FieldDecl) -> bool,
@@ -161,6 +188,9 @@ fn source_field_rust_names(
 }
 
 pub(crate) fn source_static_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {
+    let field_name = source_static_field_decl(ty, field_name)
+        .map(|field| field.name.as_str())
+        .unwrap_or(field_name);
     source_static_field_rust_names(ty)
         .remove(field_name)
         .unwrap_or_else(|| allocate_rust_ident(field_name, &HashSet::new()))
@@ -379,5 +409,28 @@ mod tests {
         assert_eq!(source_instance_field_rust_name(&ty, "self__"), "self__");
         assert_eq!(source_static_field_rust_name(&ty, "crate"), "crate___");
         assert_eq!(source_static_field_rust_name(&ty, "crate__"), "crate__");
+    }
+
+    #[test]
+    fn static_reference_alias_reuses_the_declared_field_name_mapping() {
+        let ty = test_type(vec![test_field("INST", vec![Modifier::Static])]);
+
+        let declaration = source_static_field_decl(&ty, "i_n_s_t").expect("canonical alias");
+        assert_eq!(declaration.name, "INST");
+        assert_eq!(source_static_field_rust_name(&ty, "INST"), "INST");
+        assert_eq!(source_static_field_rust_name(&ty, "i_n_s_t"), "INST");
+    }
+
+    #[test]
+    fn ambiguous_static_reference_alias_does_not_depend_on_declaration_order() {
+        let ty = test_type(vec![
+            test_field("FOO", vec![Modifier::Static]),
+            test_field("fOO", vec![Modifier::Static]),
+        ]);
+
+        assert!(source_static_field_decl(&ty, "f_o_o").is_none());
+        assert_eq!(source_static_field_rust_name(&ty, "f_o_o"), "f_o_o");
+        assert_eq!(source_static_field_rust_name(&ty, "FOO"), "FOO");
+        assert_eq!(source_static_field_rust_name(&ty, "fOO"), "fOO");
     }
 }

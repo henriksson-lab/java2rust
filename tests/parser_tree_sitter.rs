@@ -1291,7 +1291,7 @@ class Holder {
 }
 
 #[test]
-fn parses_multi_bound_type_parameter_primary_bound_only_for_now() {
+fn parses_all_intersection_type_parameter_bounds() {
     let parsed = parse_java_source(
         r#"
 class Holder {
@@ -1305,10 +1305,19 @@ class Holder {
 
     let method = first_method(&parsed.program.types[0]);
     assert_eq!(method.type_params, vec!["T"]);
-    assert!(matches!(
-        method.type_param_bounds.as_slice(),
-        [Some(JavaType::Named { name, args })] if name == "First" && args.is_empty()
-    ));
+    assert_eq!(
+        method.type_param_bounds,
+        vec![Some(JavaType::Intersection(vec![
+            JavaType::Named {
+                name: "First".to_string(),
+                args: Vec::new(),
+            },
+            JavaType::Named {
+                name: "Second".to_string(),
+                args: Vec::new(),
+            },
+        ]))]
+    );
 }
 
 #[test]

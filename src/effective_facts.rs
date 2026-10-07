@@ -141,6 +141,11 @@ impl<'a> EffectiveFacts<'a> {
         Self { facts }
     }
 
+    pub fn generic_parameter_is_input_only(&self, type_name: &str, parameter_index: usize) -> bool {
+        self.facts
+            .generic_parameter_is_input_only(type_name, parameter_index)
+    }
+
     pub fn uses_java_string_identity_representation(&self) -> bool {
         self.facts.java_string_identity_representation
     }

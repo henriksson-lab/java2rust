@@ -146,7 +146,17 @@ pub enum JavaType {
     Primitive(PrimitiveType),
     String,
     Array(Box<JavaType>),
-    Named { name: String, args: Vec<JavaType> },
+    Named {
+        name: String,
+        args: Vec<JavaType>,
+    },
+    /// A Java type-parameter intersection bound such as
+    /// `T extends Observation & CentroidFactory<T>`.
+    ///
+    /// Java permits this form only in bounds, but keeping it in the type IR
+    /// prevents later analysis and Rust signature emission from silently
+    /// discarding every capability after the first one.
+    Intersection(Vec<JavaType>),
     Wildcard(Option<WildcardBound>),
     Unknown(String),
 }

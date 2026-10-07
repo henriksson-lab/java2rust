@@ -19987,10 +19987,9 @@ class StaticInitAudit {
 ///
 /// The weaker-but-useful check
 /// [0030](../claude_audits/done/0030-java-statics-are-thread-local.md) asks for
-/// while the harness has no threaded fixture: no `thread_local!` may appear for
-/// a `static` field, and the storage must be a process-wide `Mutex`. The
-/// differential fixture `StaticSharing.java` pins the observable behaviour;
-/// this pins the storage *identity*, which a single-threaded run cannot see.
+/// no `thread_local!` storage may back a Java field. A per-class thread-local
+/// boolean is permitted only as the Java class-initializer's same-thread
+/// reentrancy marker; the fields and once barrier remain process-wide.
 #[test]
 fn static_storage_is_shared_across_threads_not_per_thread() {
     let translation = translate_source(
@@ -20000,17 +19999,27 @@ public class SharedStatics {
     static String name = "abc";
     static int initRuns = 0;
 
-    static { initRuns = initRuns + 1; }
+    static {
+        int delay = 0;
+        while (delay < 1000000) delay++;
+        initRuns = initRuns + 1;
+    }
 
     static void bump() { counter = counter + 1; }
     public static int read() { bump(); return counter + initRuns; }
+    public static int initCount() { return initRuns; }
 }
 "#,
     );
 
     assert!(
-        !translation.rust.contains("thread_local!"),
-        "static storage must not be per-thread:\n{}",
+        !translation
+            .rust
+            .contains("SHARED_STATICS_COUNTER: std::cell")
+            && !translation
+                .rust
+                .contains("SHARED_STATICS_INIT_RUNS: std::cell"),
+        "Java static fields must not be per-thread:\n{}",
         translation.rust
     );
     assert!(
@@ -20018,25 +20027,34 @@ public class SharedStatics {
         "static storage must be process-wide:\n{}",
         translation.rust
     );
-    // The class-initialisation guard is shared too, or a `static { .. }` block
-    // runs once per class *per thread* rather than once per class.
     assert!(
-        !translation.rust.contains("Cell<bool>") && !translation.rust.contains("RefCell<bool>"),
-        "the class-init guard must not be per-thread:\n{}",
-        translation.rust
-    );
-    assert!(
-        translation.rust.contains("AtomicBool"),
-        "the class-init guard must be an atomic:\n{}",
+        translation.rust.contains("std::sync::Once")
+            && translation.rust.contains("__JAVA_CLASS_INIT_REENTRANT"),
+        "class initialization needs a shared barrier and same-thread reentrancy marker:\n{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "static_storage_is_shared_across_threads_not_per_thread",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust.clone(),
-            tests: "",
+            tests: r#"
+#[test]
+fn competing_threads_wait_for_one_complete_class_initialization() {
+    let barrier = std::sync::Arc::new(std::sync::Barrier::new(8));
+    let threads = (0..8).map(|_| {
+        let barrier = barrier.clone();
+        std::thread::spawn(move || {
+            barrier.wait();
+            SharedStatics::init_count()
+        })
+    }).collect::<Vec<_>>();
+    for thread in threads {
+        assert_eq!(thread.join().unwrap(), 1);
+    }
+}
+"#,
         }],
     );
 }
