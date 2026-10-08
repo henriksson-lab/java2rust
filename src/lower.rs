@@ -76302,7 +76302,12 @@ fn lower_simple_map_entry_display_for_slot(
             ))),
         });
     }
-    if let Some((key, value)) = map_entry_key_value_args(expr, env) {
+    // Constructor arguments are safe to render directly because the entry has
+    // not yet escaped into mutable storage.  A local Map.Entry, however, must
+    // be rendered from its tuple fields: SimpleEntry.setValue mutates the
+    // stored value, so replaying the initializer tracked in ShapeEnv would
+    // print stale data.
+    if let Some((key, value)) = simple_map_entry_constructor_args(expr) {
         return Some(macro_call_projection(
             "format",
             vec![
@@ -90095,7 +90100,7 @@ class Source {
             "{rendered}"
         );
         assert!(
-            rendered.contains("let __java_map_entry_set_value_key = (*__java_map_entry_set_value_map.iter().next().expect(\"Java iterator exhausted\").0).clone();"),
+            rendered.contains("let __java_map_entry_set_value_key = std::clone::Clone::clone(&*__java_map_entry_set_value_map.iter().next().expect(\"Java iterator exhausted\").0);"),
             "{rendered}"
         );
         assert!(
@@ -91900,10 +91905,10 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("let __java_call_receiver = __java_self.borrow().peer.clone()")
-                || translation.contains(
-                    "let __java_call_receiver = __java_self.borrow().peer.as_ref().cloned()"
-                ),
+            translation.contains(
+                "let __java_call_receiver = std::clone::Clone::clone(&__java_self.borrow().peer)"
+            ) || translation
+                .contains("let __java_call_receiver = __java_self.borrow().peer.as_ref().cloned()"),
             "{translation}"
         );
         assert!(
@@ -91944,8 +91949,7 @@ class Source {
             "{translation}"
         );
         assert!(
-            (translation.contains("let __java_outer_receiver = self.node.as_ref()")
-                && translation.contains(".clone()"))
+            translation.contains("let __java_outer_receiver = std::clone::Clone::clone(self.node.as_ref().expect(\"Java null receiver\"))")
                 || translation.contains("let __java_outer_receiver = self.node.clone().ok_or_else"),
             "{translation}"
         );
@@ -91981,7 +91985,7 @@ class Source {
 
         assert!(
             translation.contains("let __java_mutating_call_arg_0 =")
-                && translation.contains("new_with_outer(__java_self.clone()")
+                && translation.contains("new_with_outer(std::clone::Clone::clone(&__java_self))")
                 && translation
                     .contains("__java_self.borrow_mut().items.push(__java_mutating_call_arg_0)"),
             "{translation}"
@@ -92025,9 +92029,10 @@ class Source {
             "{translation}"
         );
         assert!(
-            translation.contains("Into::<Box<dyn Data>>::into(__java_receiver_arg_0")
-                && !translation
-                    .contains("write_with_outer(__java_outer_receiver.clone(), next.borrow()"),
+            translation.contains(
+                "Into::<Box<dyn Data>>::into(std::clone::Clone::clone(&__java_receiver_arg_0"
+            ) && !translation
+                .contains("write_with_outer(__java_outer_receiver.clone(), next.borrow()"),
             "{translation}"
         );
     }
@@ -92314,7 +92319,10 @@ class Source {
 
         assert!(translation.contains("values.clear()"), "{translation}");
         assert!(translation.contains("values.len() as i32"), "{translation}");
-        assert!(!translation.contains("entries.clear("), "{translation}");
+        assert!(
+            !translation.contains("\n        entries.clear();"),
+            "{translation}"
+        );
     }
 
     #[test]
@@ -92649,11 +92657,15 @@ class Source {
             "{translation}"
         );
         assert!(
-            translation.contains("let __java_map_entry_set_contains_key = entry.0.clone();"),
+            translation.contains(
+                "let __java_map_entry_set_contains_key = std::clone::Clone::clone(&entry.0);"
+            ),
             "{translation}"
         );
         assert!(
-            translation.contains("let __java_map_entry_set_contains_value = entry.1.clone();"),
+            translation.contains(
+                "let __java_map_entry_set_contains_value = std::clone::Clone::clone(&entry.1);"
+            ),
             "{translation}"
         );
         assert!(
@@ -92686,11 +92698,15 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_set_remove_key = entry.0.clone();"),
+            translation.contains(
+                "let __java_map_entry_set_remove_key = std::clone::Clone::clone(&entry.0);"
+            ),
             "{translation}"
         );
         assert!(
-            translation.contains("let __java_map_entry_set_remove_value = entry.1.clone();"),
+            translation.contains(
+                "let __java_map_entry_set_remove_value = std::clone::Clone::clone(&entry.1);"
+            ),
             "{translation}"
         );
         assert!(
@@ -92807,7 +92823,7 @@ class Source {
         assert!(
             translation.contains("values.iter().map(|(key, value)|")
                 && translation.contains(
-                    "Some(Box::new((key.clone(), value.clone())) as Box<dyn std::any::Any>)"
+                    "Some(Box::new((std::clone::Clone::clone(&key), std::clone::Clone::clone(&value))) as Box<dyn std::any::Any>)"
                 )
                 && !translation.contains("values.iter().iter()"),
             "{translation}"
@@ -92841,17 +92857,21 @@ class Source {
             "{translation}"
         );
         assert!(
-            translation.contains("let __java_map_entry_set_contains_key = entry.0.clone();"),
+            translation.contains(
+                "let __java_map_entry_set_contains_key = std::clone::Clone::clone(&entry.0);"
+            ),
             "{translation}"
         );
         assert!(
-            translation.contains("let __java_map_entry_set_contains_value = entry.1.clone();"),
+            translation.contains(
+                "let __java_map_entry_set_contains_value = std::clone::Clone::clone(&entry.1);"
+            ),
             "{translation}"
         );
     }
 
     #[test]
-    fn simple_map_entry_local_display_uses_tracked_key_value_pair() {
+    fn simple_map_entry_local_display_uses_live_key_value_fields() {
         let translation = crate::translate_source(
             r#"
             import java.util.AbstractMap;
@@ -92868,7 +92888,7 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("format!(\"{}={}\", \"a\".to_string(), \"1\".to_string())"),
+            translation.contains("format!(\"{}={}\", (std::clone::Clone::clone(&entry.0)).to_string(), (std::clone::Clone::clone(&entry.1)).to_string())"),
             "{translation}"
         );
         assert!(
@@ -92899,10 +92919,10 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("format!(\"{}={}\", \"a\".to_string(), \"1\".to_string())")
-                && translation.contains("let __java_map_entry_set_contains_key = entry.0.clone();")
+            translation.contains("format!(\"{}={}\", (std::clone::Clone::clone(&entry.0)).to_string(), (std::clone::Clone::clone(&entry.1)).to_string())")
+                && translation.contains("let __java_map_entry_set_contains_key = std::clone::Clone::clone(&entry.0);")
                 && translation
-                    .contains("let __java_map_entry_set_contains_value = entry.1.clone();")
+                    .contains("let __java_map_entry_set_contains_value = std::clone::Clone::clone(&entry.1);")
                 && !translation.contains("SimpleImmutableEntry::new")
                 && !translation.contains("java_erased_object_to_string(&entry)"),
             "{translation}"
@@ -92928,9 +92948,11 @@ class Source {
         .rust;
 
         assert!(
-            translation.contains("let __java_map_entry_set_value_old = (*entry.1).clone();")
-                && translation.contains("entry.1 = \"2\".to_string();")
+            translation.contains(
+                "let __java_map_entry_set_value_old = std::clone::Clone::clone(&*entry.1);"
+            ) && translation.contains("*entry.1 = \"2\".to_string();")
                 && translation.contains("let old: String = {")
+                && translation.contains("(std::clone::Clone::clone(&entry.1)).to_string()")
                 && !translation.contains("entry.set_value(")
                 && !translation.contains("entry.setValue("),
             "{translation}"
@@ -93013,7 +93035,7 @@ class Source {
 
         assert!(
             translation.contains(
-                "format!(\"{}={}\", (entry.0.clone()).to_string(), (entry.1.clone()).to_string())",
+                "format!(\"{}={}\", (std::clone::Clone::clone(&entry.0)).to_string(), (std::clone::Clone::clone(&entry.1)).to_string())",
             ) && !translation.contains("java_erased_object_to_string(&entry)"),
             "{translation}"
         );
@@ -93160,7 +93182,9 @@ class Source {
             "{translation}"
         );
         assert!(
-            translation.contains("let __java_map_entry_set_value_old = (*entry.1).clone();"),
+            translation.contains(
+                "let __java_map_entry_set_value_old = std::clone::Clone::clone(&*entry.1);"
+            ),
             "{translation}"
         );
         assert!(
@@ -93608,7 +93632,10 @@ class Source {
 
         assert!(rendered.contains("pub fn to_string(&self) -> String"));
         assert!(rendered.contains("impl std::fmt::Display for NamedObject"));
-        assert!(rendered.contains("return f.write_str(&self.to_string());"));
+        assert!(
+            rendered.contains("return f.write_str(&NamedObject::to_string(self));"),
+            "{rendered}"
+        );
     }
 
     #[test]

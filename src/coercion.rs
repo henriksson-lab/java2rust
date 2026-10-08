@@ -24107,7 +24107,10 @@ mod tests {
             emit::emit_expr(&dyn_downcast),
             "animal.as_any().downcast_ref::<Dog>()"
         );
-        assert!(matches!(dyn_downcast, RustExpr::MethodCall { .. }));
+        assert!(matches!(
+            dyn_downcast.unshaped(),
+            RustExpr::MethodCall { .. }
+        ));
 
         let boxed_check = InstanceOfCheck::BoxedDynTraitType {
             target_type: "Dog".to_string(),
@@ -24128,7 +24131,10 @@ mod tests {
             emit::emit_expr(&boxed_downcast),
             "animal.as_ref().as_any().downcast_ref::<Dog>()"
         );
-        assert!(matches!(boxed_downcast, RustExpr::MethodCall { .. }));
+        assert!(matches!(
+            boxed_downcast.unshaped(),
+            RustExpr::MethodCall { .. }
+        ));
 
         let erased_check = InstanceOfCheck::ErasedObjectType {
             target_type: "Dog".to_string(),
