@@ -4907,7 +4907,11 @@ fn source_static_type_receiver(
     let Expr::Var(name) = receiver else {
         return None;
     };
-    if env.local_type(name).is_some() {
+    // Java value bindings shadow type names at an expression receiver.  A
+    // field such as `Parser.parser` is still an instance value even when its
+    // normalized spelling collides with the source type `Parser`; treating it
+    // as a type qualifier fabricates a static call on the enclosing class.
+    if env.local_type(name).is_some() || env.field_type(name).is_some() {
         return None;
     }
     let source_name = symbols.source_type_name(name);
@@ -6735,6 +6739,15 @@ fn named_reference_match_score(
     if crate::stdlib::is_known_single_arg_generic_supertype(actual, target) {
         return generic_supertype_match_score(actual_args, target_args, symbols, external_facts)
             .map(|score| 10 + score);
+    }
+
+    if external_facts
+        .external_conversion_adapter_for(actual, target)
+        .is_some()
+        || crate::external_packs::external_conversion_adapter_for(actual, target).is_some()
+    {
+        return generic_arguments_match_score(actual_args, target_args, symbols, external_facts)
+            .map(|score| 20 + score);
     }
 
     if let Some(distance) = symbols.source_subtype_distance(actual, target, external_facts) {

@@ -4674,6 +4674,7 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
         plan_shape_coercion_with_facts(&erased_actual, &downcast_target, &FactSet::default()),
         vec![Coercion::DowncastErasedObject {
             target_type: "Dog".to_string(),
+            borrowed: false,
             invalid_cast: InvalidCastPolicy::Panic,
         }]
     );
@@ -5133,6 +5134,7 @@ fn erased_object_runtime_contract_covers_carrier_downcast_instanceof_and_recover
         plan_shape_coercion_with_facts(&erased, &concrete, &FactSet::default()),
         vec![Coercion::DowncastErasedObject {
             target_type: "Dog".to_string(),
+            borrowed: false,
             invalid_cast: InvalidCastPolicy::Panic,
         }]
     );

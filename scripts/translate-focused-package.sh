@@ -3216,21 +3216,23 @@ pub fn java_value_hash_code<T: std::hash::Hash + ?Sized>(value: &T) -> i32 {
     hasher.finish() as i32
 }
 
-pub fn java_string_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+pub fn java_string_index_of<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> i32 {
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
     value
         .as_ref()
-        .find(needle.as_ref())
+        .find(needle.as_str())
         .map(|index| index as i32)
         .unwrap_or(-1)
 }
 
-pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+pub fn java_string_index_of_from<V: AsRef<str>, N: JavaStringSearchNeedle>(
     value: V,
     needle: N,
     from_index: i32,
 ) -> i32 {
     let value = value.as_ref();
-    let needle = needle.as_ref();
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
+    let needle = needle.as_str();
     let from_index = from_index.max(0) as usize;
     if from_index >= value.len() {
         return if needle.is_empty() { value.len() as i32 } else { -1 };
@@ -3241,21 +3243,23 @@ pub fn java_string_index_of_from<V: AsRef<str>, N: AsRef<str>>(
         .unwrap_or(-1)
 }
 
-pub fn java_string_last_index_of<V: AsRef<str>, N: AsRef<str>>(value: V, needle: N) -> i32 {
+pub fn java_string_last_index_of<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> i32 {
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
     value
         .as_ref()
-        .rfind(needle.as_ref())
+        .rfind(needle.as_str())
         .map(|index| index as i32)
         .unwrap_or(-1)
 }
 
-pub fn java_string_last_index_of_from<V: AsRef<str>, N: AsRef<str>>(
+pub fn java_string_last_index_of_from<V: AsRef<str>, N: JavaStringSearchNeedle>(
     value: V,
     needle: N,
     from_index: i32,
 ) -> i32 {
     let value = value.as_ref();
-    let needle = needle.as_ref();
+    let Some(needle) = needle.java_string_search_needle() else { return -1; };
+    let needle = needle.as_str();
     if from_index < 0 {
         return -1;
     }

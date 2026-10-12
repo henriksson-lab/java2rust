@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
@@ -139,7 +140,24 @@ struct ExternalApiParameterMatch {
 #[derive(Debug, Clone)]
 pub struct HierarchyFactLookupIndex<'a> {
     facts: &'a FactSet,
-    reachable_by_sub_name: HashMap<String, HierarchyReachabilityResult>,
+    reachable_by_sub_name: RefCell<HashMap<String, HierarchyReachabilityResult>>,
+}
+
+#[cfg(test)]
+thread_local! {
+    static HIERARCHY_LOOKUP_INDEX_BUILD_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_hierarchy_lookup_index_build_count() {
+    HIERARCHY_LOOKUP_INDEX_BUILD_COUNT.with(|count| count.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn hierarchy_lookup_index_build_count() -> usize {
+    HIERARCHY_LOOKUP_INDEX_BUILD_COUNT.with(std::cell::Cell::get)
 }
 
 impl<'a> ExternalFactLookupIndex<'a> {
@@ -940,20 +958,16 @@ impl<'a> ExternalFactLookupIndex<'a> {
 
 impl<'a> HierarchyFactLookupIndex<'a> {
     pub fn new(facts: &'a FactSet) -> Self {
-        let mut reachable_by_sub_name = HashMap::new();
-        for type_name in facts.hierarchy_fact_type_names() {
-            let java_ty = JavaType::Named {
-                name: type_name.clone(),
-                args: Vec::new(),
-            };
-            reachable_by_sub_name.insert(
-                type_name,
-                facts.reachable_hierarchy_edges_for_type_with_stats(&java_ty),
-            );
-        }
+        #[cfg(test)]
+        HIERARCHY_LOOKUP_INDEX_BUILD_COUNT.with(|count| count.set(count.get() + 1));
         Self {
             facts,
-            reachable_by_sub_name,
+            // Exception and subtype analysis normally queries only a small
+            // fraction of the modeled type universe. Saturating every JDK and
+            // source hierarchy eagerly makes index construction quadratic in
+            // the corpus size. Keep the exact legacy worklist semantics, but
+            // run them on demand and memoize each queried subtype.
+            reachable_by_sub_name: RefCell::new(HashMap::new()),
         }
     }
 
@@ -968,13 +982,16 @@ impl<'a> HierarchyFactLookupIndex<'a> {
                 diagnostics: Vec::new(),
             };
         };
+        if let Some(reachable) = self.reachable_by_sub_name.borrow().get(sub_name).cloned() {
+            return reachable;
+        }
+        let reachable = self
+            .facts
+            .reachable_hierarchy_edges_for_type_with_stats(java_ty);
         self.reachable_by_sub_name
-            .get(sub_name)
-            .cloned()
-            .unwrap_or_else(|| {
-                self.facts
-                    .reachable_hierarchy_edges_for_type_with_stats(java_ty)
-            })
+            .borrow_mut()
+            .insert(sub_name.to_string(), reachable.clone());
+        reachable
     }
 
     pub fn reachable_hierarchy_edges_for_type(&self, java_ty: &JavaType) -> Vec<HierarchyEdgeFact> {
@@ -5311,6 +5328,40 @@ fn push_java_type_conflict(
 mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
+
+    #[test]
+    fn hierarchy_lookup_index_saturates_only_queried_types_and_memoizes_them() {
+        let mut facts = FactSet::default();
+        facts
+            .type_capability_overrides
+            .push(TypeCapabilityOverride {
+                type_name: "pkg.Child".to_string(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: Some(JavaType::Named {
+                    name: "pkg.Parent".to_string(),
+                    args: Vec::new(),
+                }),
+                final_type: None,
+                object_safe_trait: None,
+                provenance: FactProvenance::ParsedSource,
+            });
+        let child = JavaType::Named {
+            name: "pkg.Child".to_string(),
+            args: Vec::new(),
+        };
+        let index = facts.hierarchy_lookup_index();
+
+        assert!(index.reachable_by_sub_name.borrow().is_empty());
+        let first = index.reachable_hierarchy_edges_for_type_with_stats(&child);
+        assert_eq!(index.reachable_by_sub_name.borrow().len(), 1);
+        let second = index.reachable_hierarchy_edges_for_type_with_stats(&child);
+        assert_eq!(index.reachable_by_sub_name.borrow().len(), 1);
+        assert_eq!(first, second);
+    }
 
     #[test]
     fn receiver_mutability_join_does_not_let_unknown_summary_hide_mutating_body() {

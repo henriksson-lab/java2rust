@@ -198,6 +198,33 @@ fn each_fixture_moves_its_counter() {
 }
 
 #[test]
+fn source_methods_named_like_java_collections_are_not_invalid_patterns() {
+    let rust = translate_source(
+        r#"
+class SourceQueue {
+    void put(String value) {}
+    void addAll(SourceQueue other) {}
+
+    void forward(SourceQueue other, String value) {
+        put(value);
+        this.addAll(other);
+        other.put(value);
+        other.addAll(this);
+    }
+}
+"#,
+    )
+    .rust;
+
+    assert_eq!(count_invalid_patterns(&rust), 0, "{rust}");
+    assert!(
+        !rust.contains(output_markers::UNTRANSLATED_JAVA_PUT_CALL)
+            && !rust.contains(output_markers::UNTRANSLATED_JAVA_ADD_ALL_CALL),
+        "source dispatch must not carry external collection fallback markers\n{rust}"
+    );
+}
+
+#[test]
 fn source_summary_method_marker_uses_source_summary_emitter() {
     let rust = translate_source_with_context_summary_sources(
         "public class MarkerSummaryUser { int m(MarkerSummaryDep dep) { return dep.value(); } }",

@@ -50,6 +50,7 @@ pub struct ShapeEnv {
     binding_access_names: HashMap<String, String>,
     binding_ids: HashMap<String, BindingId>,
     binding_occurrences: HashMap<(BindingKind, String), usize>,
+    proven_non_null_locals: HashSet<BindingId>,
     map_key_set_view_receivers: HashMap<String, Expr>,
     map_key_set_view_receivers_by_binding: HashMap<BindingId, Expr>,
     map_values_view_receivers: HashMap<String, Expr>,
@@ -314,6 +315,7 @@ impl ShapeEnv {
 
     fn clear_local_side_facts(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
+            self.proven_non_null_locals.remove(binding);
             self.map_key_set_view_receivers_by_binding.remove(binding);
             self.map_values_view_receivers_by_binding.remove(binding);
             self.map_entry_set_view_receivers_by_binding.remove(binding);
@@ -1087,6 +1089,11 @@ impl ShapeEnv {
         self.current_type = Some(name.into());
     }
 
+    /// The source type whose lexical member scope this environment models.
+    pub(crate) fn current_type(&self) -> Option<&str> {
+        self.current_type.as_deref()
+    }
+
     /// The Rust type to qualify an unqualified static-storage read with, or
     /// `None` when `Self` is right.
     ///
@@ -1127,6 +1134,23 @@ impl ShapeEnv {
 
     pub fn binding_id(&self, name: &str) -> Option<&BindingId> {
         self.binding_ids.get(name)
+    }
+
+    pub(crate) fn set_local_proven_non_null(&mut self, name: &str, proven_non_null: bool) {
+        let Some(binding) = self.binding_ids.get(name) else {
+            return;
+        };
+        if proven_non_null {
+            self.proven_non_null_locals.insert(binding.clone());
+        } else {
+            self.proven_non_null_locals.remove(binding);
+        }
+    }
+
+    pub(crate) fn local_is_proven_non_null(&self, name: &str) -> bool {
+        self.binding_ids
+            .get(name)
+            .is_some_and(|binding| self.proven_non_null_locals.contains(binding))
     }
 
     fn bind_name(&mut self, kind: BindingKind, name: String) -> BindingId {
@@ -1195,8 +1219,9 @@ impl ShapeEnv {
     }
 
     pub fn is_static_field(&self, name: &str) -> bool {
-        self.static_field_names.contains_key(name)
-            || self.static_storage_field_names.contains_key(name)
+        !self.bare_name_is_local(name)
+            && (self.static_field_names.contains_key(name)
+                || self.static_storage_field_names.contains_key(name))
     }
 
     pub fn is_instance_field(&self, name: &str) -> bool {
@@ -1210,6 +1235,9 @@ impl ShapeEnv {
     }
 
     pub fn static_field_access_name(&self, name: &str) -> Option<&str> {
+        if self.bare_name_is_local(name) {
+            return None;
+        }
         self.static_field_access_names.get(name).map(String::as_str)
     }
 
@@ -1218,9 +1246,26 @@ impl ShapeEnv {
     }
 
     pub fn static_storage_field_access_name(&self, name: &str) -> Option<&str> {
+        if self.bare_name_is_local(name) {
+            return None;
+        }
         self.static_storage_field_access_names
             .get(name)
             .map(String::as_str)
+    }
+
+    /// Whether an unqualified Java name resolves to a local or parameter.
+    ///
+    /// Context programs index package fields under both their source spelling
+    /// and their Rust access spelling so qualified and inherited lookup can
+    /// reuse one environment.  Those indexes must not outrank a lexical local:
+    /// Java resolves a bare `g` to the local even when a package sibling has a
+    /// static field or enum constant `G` whose Rust alias is also `g`.
+    fn bare_name_is_local(&self, name: &str) -> bool {
+        self.local_type(name).is_some() || {
+            let alias = crate::parser::to_snake_case(name);
+            alias != name && self.local_type(&alias).is_some()
+        }
     }
 
     pub fn static_storage_field_semantic_name(&self, name: &str) -> Option<&str> {
@@ -1465,7 +1510,10 @@ pub fn infer_expr_shape_with_context(
             name,
             args,
             resolved: None,
-        } => native_java_call_expr_shape(receiver.as_deref(), name, args, None, env, ctx)
+        } => unresolved_source_call_expr_shape(receiver.as_deref(), name, args, env, ctx)
+            .or_else(|| {
+                native_java_call_expr_shape(receiver.as_deref(), name, args, None, env, ctx)
+            })
             .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
             .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
             .or_else(|| {
@@ -1492,6 +1540,52 @@ pub fn infer_expr_shape_with_context(
         Expr::Cast { ty, .. } => value_shape_or_conservative(ctx, ty.clone()),
         _ => value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env())),
     }
+}
+
+fn unresolved_source_call_expr_shape(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let signatures = ctx.signatures?;
+    let owner = match receiver {
+        Some(receiver) => {
+            let shape = infer_expr_shape_with_context(receiver, env, ctx);
+            let ty = crate::types::optional_element_type(&shape.java_ty)
+                .unwrap_or_else(|| shape.java_ty.clone());
+            match ty {
+                JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+                _ => return None,
+            }
+        }
+        None => env.current_type()?.to_string(),
+    };
+    let arg_types = args
+        .iter()
+        .map(|arg| infer_expr_type(arg, env.type_env()))
+        .collect::<Vec<_>>();
+    let qualified_owner = if !owner.contains('.') && !owner.contains('$') {
+        env.current_type()
+            .map(|current| format!("{current}.{owner}"))
+    } else {
+        None
+    };
+    std::iter::once(owner.as_str())
+        .chain(qualified_owner.as_deref())
+        .find_map(|owner| {
+            signatures
+                .method_signature_by_base_name_and_arg_types(owner, name, &arg_types)
+                .or_else(|| {
+                    signatures.method_signature_by_base_name_accepting_arity(
+                        owner,
+                        name,
+                        args.len(),
+                    )
+                })
+                .and_then(|(_, signature)| signature.return_shape().cloned())
+        })
 }
 
 fn resolved_external_call_expr_shape(
@@ -1578,6 +1672,23 @@ fn native_java_call_expr_shape(
         return Some(RustSlotShape::for_storage(
             crate::types::optional_java_type(JavaType::String),
         ));
+    }
+    if matches!(
+        target,
+        crate::call_plan::CallTargetPlan::NativeJavaStatic {
+            method: crate::call_plan::NativeJavaStaticMethod::ObjectsRequireNonNull,
+        }
+    ) && let Some(value) = args.first()
+    {
+        let value_shape = infer_expr_shape_with_context(value, env, ctx);
+        if let Some(element_ty) = value_shape.optional_element_type() {
+            // `requireNonNull` is Java's generic identity boundary with the
+            // additional postcondition that its result is non-null.  Project
+            // the element as a value because lowering unwraps the optional
+            // carrier before an enclosing call consumes it.
+            return Some(value_shape_or_conservative(ctx, element_ty));
+        }
+        return Some(value_shape);
     }
     if let crate::call_plan::CallTargetPlan::NativeCollectionMethod {
         receiver, method, ..

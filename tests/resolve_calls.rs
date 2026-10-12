@@ -6940,6 +6940,57 @@ class UsesShadowedStaticFieldName {
 }
 
 #[test]
+fn resolver_instance_field_shadows_normalized_source_type_name_for_calls() {
+    let parsed = parse_java_source(
+        r#"
+class RecordSource {
+    String next() { return "record"; }
+}
+
+class Parser {
+    RecordSource parser;
+
+    String read() {
+        return parser.next();
+    }
+}
+"#,
+    );
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+
+    let parser = resolved
+        .program
+        .types
+        .iter()
+        .find(|ty| ty.name == "Parser")
+        .unwrap();
+    let body = parser
+        .members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if method.name == "read" => method.body.as_ref(),
+            _ => None,
+        })
+        .unwrap();
+    let Stmt::Return(Some(Expr::Call {
+        resolved: Some(call),
+        ..
+    })) = &body.statements[0]
+    else {
+        panic!("expected resolved field receiver call");
+    };
+
+    assert_eq!(call.declaring_type, "RecordSource");
+    assert_eq!(call.kind, CallKind::Instance);
+    assert_eq!(call.rust_name, "next");
+}
+
+#[test]
 fn resolver_prefers_nested_type_static_member_over_same_named_instance_field() {
     let parsed = parse_java_source(
         r#"

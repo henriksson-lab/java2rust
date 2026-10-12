@@ -981,6 +981,14 @@ fn numeric_binary_type(left: &JavaType, right: &JavaType) -> JavaType {
 fn common_type(left: &JavaType, right: &JavaType) -> JavaType {
     if left == right {
         left.clone()
+    } else if matches!(left, JavaType::Unknown(name) if name == "null")
+        && !matches!(right, JavaType::Primitive(_) | JavaType::Void)
+    {
+        right.clone()
+    } else if matches!(right, JavaType::Unknown(name) if name == "null")
+        && !matches!(left, JavaType::Primitive(_) | JavaType::Void)
+    {
+        left.clone()
     } else if matches!(left, JavaType::Primitive(_)) && matches!(right, JavaType::Primitive(_)) {
         numeric_binary_type(left, right)
     } else {

@@ -143,7 +143,7 @@ fn type_emission_for_with_facts_and_exceptions(
                 "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\npub enum {rust_enum_name} {{\n{variant_items}\n}}\n{default_impl}\n\nimpl {rust_enum_name} {{\n    pub fn values() -> Vec<Self> {{ vec![{values}] }}\n\n    pub fn value_of<T: AsRef<str>>(name: T) -> Self {{\n        match name.as_ref() {{\n{value_of_arms}\n            other => panic!(\"unknown Java enum constant {{}}.{{}}\", {enum_name:?}, other),\n        }}\n    }}\n\n    #[allow(non_snake_case)]\n    pub fn valueOf<T: AsRef<str>>(name: T) -> Self {{ Self::value_of(name) }}\n\n    pub fn name(&self) -> &'static str {{\n        match self {{\n{name_arms}\n        }}\n    }}\n\n    pub fn ordinal(&self) -> i32 {{\n        match self {{\n{ordinal_arms}\n        }}\n    }}\n\n    pub fn compare_to<B: std::borrow::Borrow<Self>>(&self, other: B) -> i32 {{\n        let other = other.borrow();\n        if self.ordinal() < other.ordinal() {{ -1 }} else if self.ordinal() > other.ordinal() {{ 1 }} else {{ 0 }}\n    }}\n{payload_accessors}\n}}\n\nimpl std::fmt::Display for {rust_enum_name} {{\n    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{\n        write!(f, \"{{}}\", self.name())\n    }}\n}}"
             );
             RepresentationTypeEmission::RawRustItem(format!(
-                "{enum_item}\n\nimpl JavaEnum for {rust_enum_name} {{\n    fn values() -> Vec<Self> {{ {rust_enum_name}::values() }}\n    fn ordinal(&self) -> i32 {{ {rust_enum_name}::ordinal(self) }}\n    fn name(&self) -> &'static str {{ {rust_enum_name}::name(self) }}\n}}"
+                "{enum_item}\n\nimpl JavaAppendValue for {rust_enum_name} {{\n    fn into_java_append_string(self) -> String {{ self.name().to_string() }}\n}}\n\nimpl JavaAppendValue for &{rust_enum_name} {{\n    fn into_java_append_string(self) -> String {{ self.name().to_string() }}\n}}\n\nimpl JavaEnum for {rust_enum_name} {{\n    fn values() -> Vec<Self> {{ {rust_enum_name}::values() }}\n    fn ordinal(&self) -> i32 {{ {rust_enum_name}::ordinal(self) }}\n    fn name(&self) -> &'static str {{ {rust_enum_name}::name(self) }}\n}}"
             ))
         }
         ObjectRepresentation::ClosedEnum {
@@ -1778,12 +1778,13 @@ fn source_hierarchy_carrier_field_accessor(
         .map(|variant| {
             let receiver =
                 source_hierarchy_carrier_payload_receiver("value", variant, representations, false);
-            let storage_name = source_hierarchy_carrier_variant_field_storage_name(
-                variant,
-                ty,
-                field,
-                support_program,
-            );
+            let storage_name =
+                rust_identifier_token(&source_hierarchy_carrier_variant_field_storage_name(
+                    variant,
+                    ty,
+                    field,
+                    support_program,
+                ));
             let projection = if source_hierarchy_carrier_field_accessor_returns_copy(&field.ty) {
                 format!("{receiver}.{storage_name}")
             } else {
@@ -1834,11 +1835,13 @@ fn source_hierarchy_carrier_field_accessor(
     let mutable_arms = variants
         .iter()
         .map(|variant| {
-            let storage_name = source_hierarchy_carrier_variant_field_storage_name(
-                variant,
-                ty,
-                field,
-                support_program,
+            let storage_name = rust_identifier_token(
+                &source_hierarchy_carrier_variant_field_storage_name(
+                    variant,
+                    ty,
+                    field,
+                    support_program,
+                ),
             );
             format!(
                 "            Self::{variant}(value) => std::cell::RefMut::map(value.borrow_mut(), |value| &mut value.{storage_name}),"
@@ -1991,12 +1994,16 @@ fn java_enum_payload_accessor_methods(
         .filter(|(field_name, _)| !source_java_enum_field_uses_state(ty, field_name))
         .filter_map(|(field_name, initializer)| {
             let field_ty = field_types.get(&field_name)?;
-            let rust_return_ty = java_enum_payload_accessor_return_type(field_ty, facts)?;
+            let rust_return_ty = java_enum_payload_accessor_return_type_with_representations(
+                field_ty,
+                facts,
+                representations,
+            )?;
             let accessor_name = rust_identifier_token(&crate::parser::to_snake_case(&field_name));
             let arms = variants
                 .iter()
                 .map(|variant| {
-                    let value = constants
+                    let rendered = constants
                         .get(variant)
                         .and_then(|args| {
                             java_enum_payload_initializer_value(
@@ -2005,11 +2012,19 @@ fn java_enum_payload_accessor_methods(
                                 field_ty,
                                 facts,
                             )
-                        })
-                        .unwrap_or_else(|| java_enum_payload_default_value(field_ty));
-                    format!("            Self::{variant} => {value},")
+                        });
+                    // Source-object payloads represent Java reference identity;
+                    // silently substituting `Default::default()` would create a
+                    // different object. Emit this accessor only when every
+                    // enum constant has a statically representable initializer.
+                    let value = if java_enum_payload_is_general_named_source_reference(field_ty) {
+                        rendered?
+                    } else {
+                        rendered.unwrap_or_else(|| java_enum_payload_default_value(field_ty))
+                    };
+                    Some(format!("            Self::{variant} => {value},"))
                 })
-                .collect::<Vec<_>>()
+                .collect::<Option<Vec<_>>>()?
                 .join("\n");
             Some(format!(
                 "\n\n    pub fn {accessor_name}(&self) -> {rust_return_ty} {{\n        match self {{\n{arms}\n        }}\n    }}"
@@ -2115,9 +2130,11 @@ pub(crate) fn source_java_enum_payload_field_emits_accessor(
     }) else {
         return false;
     };
-    let has_initializer = java_enum_constructor_field_initializers(constructor)
+    let field_initializers = java_enum_constructor_field_initializers(constructor);
+    let initializer = field_initializers
         .iter()
-        .any(|(name, _)| name == field_name);
+        .find_map(|(name, initializer)| (name == field_name).then_some(initializer));
+    let has_initializer = initializer.is_some();
     let constants = java_enum_constant_args(ty);
     let evaluated = java_enum_constructor_constant_field_values(ty, constructor);
     let has_evaluated_initializer = !constants.is_empty()
@@ -2127,10 +2144,28 @@ pub(crate) fn source_java_enum_payload_field_emits_accessor(
             .all(|fields| fields.contains_key(field_name));
     (has_initializer || has_evaluated_initializer)
         && ty.members.iter().any(|member| {
-            matches!(member, Member::Field(field)
-                if !field.modifiers.contains(&Modifier::Static)
-                    && crate::parser::to_snake_case(&field.name) == field_name
-                    && java_enum_payload_accessor_return_type(&field.ty, &FactSet::default()).is_some())
+            let Member::Field(field) = member else {
+                return false;
+            };
+            if field.modifiers.contains(&Modifier::Static)
+                || crate::parser::to_snake_case(&field.name) != field_name
+                || java_enum_payload_accessor_return_type(&field.ty, &FactSet::default()).is_none()
+            {
+                return false;
+            }
+            !java_enum_payload_is_general_named_source_reference(&field.ty)
+                || initializer.is_some_and(|initializer| {
+                    !constants.is_empty()
+                        && constants.values().all(|args| {
+                            java_enum_payload_initializer_value(
+                                initializer,
+                                args,
+                                &field.ty,
+                                &FactSet::default(),
+                            )
+                            .is_some()
+                        })
+                })
         })
 }
 
@@ -2637,8 +2672,41 @@ fn java_enum_payload_accessor_return_type(field_ty: &JavaType, facts: &FactSet) 
                 &crate::slot_render::rust_type_for_java_type_with_facts(field_ty, facts),
             ))
         }
+        // A Java enum commonly stores one of a source class's singleton
+        // instances (for example `Mode(CONFIG_A)`).  The source object's
+        // storage placement is already authoritative in the fact set, so use
+        // that same carrier for the match-backed payload accessor.
+        JavaType::Named { .. } => Some(crate::emit::emit_type(
+            &crate::slot_render::rust_type_for_java_type_with_facts(field_ty, facts),
+        )),
         _ => None,
     }
+}
+
+fn java_enum_payload_is_general_named_source_reference(field_ty: &JavaType) -> bool {
+    matches!(
+        field_ty,
+        JavaType::Named { name, .. }
+            if !matches!(
+                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                "Pattern" | "Class"
+            )
+    )
+}
+
+fn java_enum_payload_accessor_return_type_with_representations(
+    field_ty: &JavaType,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<String> {
+    if java_enum_payload_is_general_named_source_reference(field_ty) {
+        let shape =
+            crate::shape_projection::value_shape_for_java_type(representations, field_ty.clone());
+        return Some(crate::emit::emit_type(
+            &rust_type_for_slot_with_facts_and_representations(&shape, facts, representations),
+        ));
+    }
+    java_enum_payload_accessor_return_type(field_ty, facts)
 }
 
 fn java_enum_payload_initializer_value(
@@ -2711,6 +2779,18 @@ fn java_enum_payload_arg_value(arg: &Expr, field_ty: &JavaType, facts: &FactSet)
             let token_ty = java_enum_class_payload_token_type(field_ty, facts);
             Some(crate::emit::emit_expr(
                 &crate::call_lowering::apply_class_literal_token_with_rust_type(class_ty, token_ty),
+            ))
+        }
+        (JavaType::Named { .. }, Expr::FieldAccess(receiver, field))
+            if matches!(receiver.as_ref(), Expr::Var(_)) =>
+        {
+            let Expr::Var(owner) = receiver.as_ref() else {
+                unreachable!("guarded source static owner")
+            };
+            Some(format!(
+                "{}::__static_{}()",
+                rust_name_for_java_named_type(owner),
+                rust_identifier_token(field)
             ))
         }
         _ => None,
@@ -5663,6 +5743,7 @@ fn trait_impl_method(
             interface_exceptions,
             facts,
             representations,
+            program,
         )
     } else {
         call
@@ -5838,6 +5919,7 @@ fn adapt_covariant_trait_impl_return(
     interface_exceptions: MethodExceptionPlan,
     facts: &FactSet,
     representations: &RepresentationPlan,
+    program: &Program,
 ) -> String {
     let Some(trait_shape) = trait_return_shape else {
         return call;
@@ -5883,12 +5965,24 @@ fn adapt_covariant_trait_impl_return(
         });
     let conversion = |value: &str| match trait_dispatch {
         DispatchShape::BoxedDynTrait { trait_name } | DispatchShape::DynTrait { trait_name } => {
-            let trait_path = crate::slot_render::parameterized_dyn_trait_path(
-                trait_name,
-                &trait_shape.java_ty,
-                &crate::effective_facts::EffectiveFacts::new(facts),
-                representations,
-            );
+            // The dispatch name identifies the declaration that owns the
+            // trait object.  Do not copy accidental arguments from a solved
+            // use-site shape onto a declaration which is not generic (for
+            // example `BlockData<Box<dyn BlockData>>`).  Source declaration
+            // arity is authoritative; external traits without a declaration
+            // retain the representation-aware fallback.
+            let declared_trait_is_non_generic =
+                source_declared_type_arity_by_emitted_name(program, trait_name) == Some(0);
+            let trait_path = if declared_trait_is_non_generic {
+                trait_name.clone()
+            } else {
+                crate::slot_render::parameterized_dyn_trait_path(
+                    trait_name,
+                    &trait_shape.java_ty,
+                    &crate::effective_facts::EffectiveFacts::new(facts),
+                    representations,
+                )
+            };
             if implementation_shared_adapter {
                 // Shared source implementors expose a nominal adapter and a
                 // matching `From<Handle>` implementation.  Reuse that
@@ -5932,6 +6026,32 @@ fn adapt_covariant_trait_impl_return(
     } else {
         adapt_value(&call)
     }
+}
+
+/// Return a source declaration's generic arity even when focused-package
+/// analysis carries multiple equivalent declaration copies. A uniqueness-only
+/// lookup rejects those copies as ambiguous, but their common arity is still
+/// authoritative for emitted Rust trait syntax.
+fn source_declared_type_arity_by_emitted_name(
+    program: &Program,
+    emitted_name: &str,
+) -> Option<usize> {
+    fn collect(ty: &TypeDecl, emitted_name: &str, arities: &mut HashSet<usize>) {
+        if crate::item_assembly::rust_use_name_for_source_type(ty) == emitted_name {
+            arities.insert(ty.type_params.len());
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect(nested, emitted_name, arities);
+            }
+        }
+    }
+
+    let mut arities = HashSet::new();
+    for ty in &program.types {
+        collect(ty, emitted_name, &mut arities);
+    }
+    (arities.len() == 1).then(|| *arities.iter().next().expect("one source type arity"))
 }
 
 fn trait_impl_forwarding_owner_for_inherited_source_method<'a>(
@@ -7120,9 +7240,9 @@ mod type_emission_tests {
     use super::{
         RepresentationTypeEmission, TraitImplMethodCompatibilityError,
         TraitImplMethodFallbackPolicy, TraitImplMethodMessagePolicy,
-        interface_ancestor_instantiations, raw_type_item_for_with_facts,
-        source_hierarchy_carrier_forwarding_method, source_hierarchy_carrier_item_for_type,
-        source_hierarchy_carrier_receiver_plan,
+        adapt_covariant_trait_impl_return, interface_ancestor_instantiations,
+        raw_type_item_for_with_facts, source_hierarchy_carrier_forwarding_method,
+        source_hierarchy_carrier_item_for_type, source_hierarchy_carrier_receiver_plan,
         source_hierarchy_virtual_dispatch_trait_item_for_type,
         specialized_interface_abstract_contracts, trait_impl_emissions_for_type_with_facts,
         trait_impl_method_message_policy, trait_item_for_type_with_program,
@@ -7141,8 +7261,45 @@ mod type_emission_tests {
     use crate::resolve::resolve_program;
     use crate::semantic_analysis::analyze_program;
     use crate::signature::{ReceiverPlan, SignaturePlan, solve_signatures_with_facts};
+    use crate::slot_shape::{DispatchShape, RustSlotShape};
     use crate::storage_strategy::TypeStorageFacts;
     use crate::usage::{analyze_usage, analyze_usage_with_facts};
+
+    #[test]
+    fn covariant_return_does_not_parameterize_a_non_generic_trait_declaration() {
+        let parsed = parse_java_source(
+            "interface BlockData {} class ConcreteBlockData implements BlockData {}",
+        );
+        let mut trait_shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "BlockData".to_string(),
+            // Model a polluted solved use-site shape: declaration arity must
+            // still decide whether the emitted trait path is parameterized.
+            args: vec![JavaType::Named {
+                name: "BlockData".to_string(),
+                args: Vec::new(),
+            }],
+        });
+        trait_shape.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "BlockData".to_string(),
+        };
+        let implementation_shape = Some(RustSlotShape::for_storage(JavaType::Named {
+            name: "ConcreteBlockData".to_string(),
+            args: Vec::new(),
+        }));
+
+        let rendered = adapt_covariant_trait_impl_return(
+            "Self::make()".to_string(),
+            Some(&trait_shape),
+            &implementation_shape,
+            MethodExceptionPlan::new(false),
+            &FactSet::default(),
+            &RepresentationPlan::default(),
+            &parsed.program,
+        );
+
+        assert!(rendered.contains("Box<dyn BlockData>"), "{rendered}");
+        assert!(!rendered.contains("BlockData<BlockData>"), "{rendered}");
+    }
 
     #[test]
     fn hierarchy_carrier_field_accessor_uses_nested_carrier_representation() {
@@ -7208,6 +7365,62 @@ class Use {
             !rendered.contains("std::rc::Rc<BlockOutputStreamValue>"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn hierarchy_carrier_field_accessor_escapes_keyword_storage_names() {
+        let parsed = parse_java_source(
+            r#"
+class Base {
+    String type;
+}
+class Child extends Base {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let mut representations = RepresentationPlan::default();
+        representations.insert_test_type_representation(TypeRepresentation::new(
+            "Base",
+            ObjectRepresentation::SourceHierarchyCarrier {
+                carrier_name: "BaseValue".to_string(),
+                variants: vec!["Base".to_string(), "Child".to_string()],
+            },
+            RepresentationProvenance::ParsedSource,
+            vec!["Child".to_string()],
+        ));
+        representations.insert_test_type_representation(TypeRepresentation::new(
+            "Child",
+            ObjectRepresentation::ConcreteStruct,
+            RepresentationProvenance::ParsedSource,
+            Vec::new(),
+        ));
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let base = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Base")
+            .expect("base type");
+        let rendered = source_hierarchy_carrier_item_for_type(
+            &representations,
+            base,
+            &signatures,
+            &semantic.facts,
+            &ProgramExceptionPlan::default(),
+            &resolved.program,
+        )
+        .expect("base hierarchy carrier");
+
+        assert!(rendered.contains("pub fn r#type(&self)"), "{rendered}");
+        assert!(rendered.contains("value.r#type"), "{rendered}");
+        assert!(!rendered.contains("value.type"), "{rendered}");
     }
 
     #[test]
@@ -8230,6 +8443,8 @@ class Holder {
         assert!(enum_item.contains("pub fn value_of<T: AsRef<str>>(name: T) -> Self"));
         assert!(enum_item.contains("pub fn ordinal(&self) -> i32"));
         assert!(enum_item.contains("impl std::fmt::Display for Holder_Type"));
+        assert!(enum_item.contains("impl JavaAppendValue for Holder_Type"));
+        assert!(enum_item.contains("impl JavaAppendValue for &Holder_Type"));
     }
 
     #[test]

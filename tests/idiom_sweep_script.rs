@@ -1539,6 +1539,78 @@ pub struct UseColorTarget;
 }
 
 #[test]
+fn shared_support_merger_deduplicates_multiline_where_trait_impls() {
+    let dir = unique_temp_dir("shared_support_multiline_impl");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    let module = |primary: &str| {
+        format!(
+            r#"
+pub trait Deep {{
+    fn deep(&self) -> usize;
+}}
+
+pub struct SharedMap<K, V> {{
+    entries: Vec<(K, V)>,
+}}
+
+impl<K, V> Deep for SharedMap<K, V>
+where
+    K: Clone,
+    V: Clone,
+{{
+    fn deep(&self) -> usize {{ self.entries.len() }}
+}}
+
+pub struct {primary};
+"#
+        )
+    };
+    fs::write(generated_dir.join("00001_UseA.rs"), module("UseA")).unwrap();
+    fs::write(generated_dir.join("00002_UseB.rs"), module("UseB")).unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert_eq!(
+        shared
+            .matches("impl<K, V> Deep for SharedMap<K, V>")
+            .count(),
+        1,
+        "{shared}"
+    );
+    for name in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let source = fs::read_to_string(generated_dir.join(name)).unwrap();
+        assert!(
+            !source.contains("impl<K, V> Deep for SharedMap<K, V>"),
+            "{name}: {source}"
+        );
+    }
+}
+
+#[test]
 fn shared_support_merger_selects_constructor_arity_used_by_generated_calls() {
     let dir = unique_temp_dir("shared_support_constructor_arity");
     let generated_dir = dir.join("generated");
@@ -3942,6 +4014,71 @@ impl State {
     assert!(shared.contains("State { value }"), "{shared}");
     assert!(!shared.contains("let _ = value"), "{shared}");
     assert!(shared.contains("pub fn value(&self)"), "{shared}");
+}
+
+#[test]
+fn shared_support_merger_removes_facade_shadowed_by_primary_source_type() {
+    let dir = unique_temp_dir("shared_support_primary_source_shadow");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_IOUtils.rs"),
+        r#"
+pub struct IOUtils;
+
+impl IOUtils {
+    pub const DEFAULT_BUFFER_SIZE: i32 = 4096;
+    pub fn copy() -> i64 { 1 }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(generated_dir.join("00002_UseIO.rs"), "pub struct UseIO;\n").unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(
+        &shared_support,
+        r#"
+pub struct IOUtils;
+
+impl IOUtils {
+    pub fn get_path<T>(_path: T) {}
+}
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "IOUtils\n").unwrap();
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(shared_support).unwrap();
+    let shared_types = fs::read_to_string(shared_types).unwrap();
+    assert!(!shared.contains("struct IOUtils"), "{shared}");
+    assert!(!shared.contains("impl IOUtils"), "{shared}");
+    assert!(!shared_types.lines().any(|line| line == "IOUtils"));
+    let source = fs::read_to_string(generated_dir.join("00001_IOUtils.rs")).unwrap();
+    assert!(source.contains("DEFAULT_BUFFER_SIZE"), "{source}");
 }
 
 #[test]

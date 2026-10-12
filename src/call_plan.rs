@@ -764,6 +764,7 @@ pub enum NativeJavaStaticMethod {
         source: PrimitiveType,
     },
     FloatingIsNaN,
+    CharacterValueOf,
     CharacterPredicate {
         java_name: &'static str,
         rust_method: &'static str,
@@ -783,6 +784,7 @@ pub enum NativeJavaStaticMethod {
     OptionalOfNullable,
     ObjectsEquals,
     ObjectsToString,
+    ObjectsRequireNonNull,
     ObjectsNonNull,
     ObjectsIsNull,
     PatternCompile,
@@ -1136,7 +1138,7 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             method: NativeJavaInstanceMethod::StringSplit,
             ..
         } => Some(LoweredType::Slot(Box::new(
-            crate::shape_projection::string_list_value_shape(),
+            crate::shape_projection::string_split_array_value_shape(),
         ))),
         CallTargetPlan::NativeJavaInstance {
             method: NativeJavaInstanceMethod::StringToCharArray,
@@ -2194,6 +2196,8 @@ pub enum NativeStringNewTarget {
     FromString,
     FromBytes,
     FromByteRange,
+    FromChars,
+    FromCharRange,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2255,6 +2259,10 @@ pub enum CallStatementPlan<'a> {
         to: Option<&'a Expr>,
         value: &'a Expr,
     },
+    NativeArraysSetAll {
+        target: &'a Expr,
+        generator: &'a Expr,
+    },
     NativeSystemPrintStream {
         stream: NativeSystemStream,
         method: NativePrintStreamMethod,
@@ -2290,6 +2298,21 @@ pub(crate) fn plan_trivial_accessor_call<'a>(
 ) -> Option<TrivialAccessorCallPlan<'a>> {
     let resolved = resolved?;
     if resolved.kind != CallKind::Instance {
+        return None;
+    }
+    // Source-summary stubs exist so external declarations participate in
+    // resolution, but their synthetic bodies are not source implementations
+    // that may be inlined.  Let the external facade planner retain ownership
+    // of its ABI (notably checked exceptions) whenever a pack models the call.
+    if facts
+        .external_api_effect_for_receiver_with_arity(
+            Some(&resolved.declaring_type),
+            name,
+            Some(args.len()),
+        )
+        .is_some()
+        || crate::external_packs::builtin_external_pack_models_api(&resolved.declaring_type, name)
+    {
         return None;
     }
     let accessor = facts.trivial_accessor_for(&resolved.declaring_type, name)?;
@@ -2990,6 +3013,9 @@ fn plan_native_arrays_statement<'a>(
             to: Some(to),
             value,
         }),
+        ("setAll" | "set_all", [target, generator]) => {
+            Some(CallStatementPlan::NativeArraysSetAll { target, generator })
+        }
         _ => None,
     }
 }
@@ -3202,6 +3228,25 @@ fn plan_call_target_with_external_index_impl<'a>(
         )
     {
         return target;
+    }
+
+    // Java keeps imported type names case-sensitive. Rust-name normalization
+    // can otherwise make `Logger.getLogger(...)` look like an instance call on
+    // a source field named `logger`, even though the imported type alias is the
+    // syntactic receiver. Locals still shadow imports; a normalized field name
+    // does not shadow the exact imported type spelling.
+    if let Some(Expr::Var(receiver_name)) = receiver
+        && types.local_type(receiver_name).is_none()
+        && receiver_name
+            .chars()
+            .next()
+            .is_some_and(|ch| ch.is_ascii_uppercase())
+        && let Some(owner) = types.static_type_alias(receiver_name)
+    {
+        return CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(owner, facts),
+            rust_name: external_method_rust_name(owner, name, arg_count, facts),
+        };
     }
 
     if let Some(receiver) = receiver
@@ -3754,7 +3799,10 @@ fn static_utility_owner_call_target<'a>(
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
-    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+    if types.local_type(receiver_name).is_some()
+        || (types.static_type_alias(receiver_name).is_none()
+            && types.field_type(receiver_name).is_some())
+    {
         return None;
     }
     if crate::stdlib::is_known_object_inherited_method(name, arg_count) {
@@ -4223,7 +4271,17 @@ fn plan_native_collection_receiver_call<'a>(
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
     let receiver_ty = infer_expr_type(receiver, types);
-    let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
+    plan_native_collection_receiver_call_for_type(receiver, name, args, &receiver_ty, types)
+}
+
+pub(crate) fn plan_native_collection_receiver_call_for_type<'a>(
+    receiver: &'a Expr,
+    name: &str,
+    args: Option<&'a [Expr]>,
+    receiver_ty: &JavaType,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    let receiver_ty = effective_native_collection_receiver_type(receiver_ty);
     let kind = crate::stdlib::native_collection_receiver_kind_for_type(&receiver_ty)?;
     let method = match (kind, name) {
         (_, "size") => NativeCollectionMethod::Len,
@@ -4536,6 +4594,12 @@ fn plan_native_java_receiver_call<'a>(
                 target: PrimitiveType::Short,
             }
         }
+        (JavaType::Primitive(source), "charValue" | "char_value") if arg_count == 0 => {
+            NativeJavaInstanceMethod::PrimitiveNumberValue {
+                source: Some(*source),
+                target: PrimitiveType::Char,
+            }
+        }
         (JavaType::Primitive(source), "intValue" | "int_value") if arg_count == 0 => {
             NativeJavaInstanceMethod::PrimitiveNumberValue {
                 source: Some(*source),
@@ -4731,6 +4795,7 @@ fn primitive_value_method_target(method: &str) -> Option<PrimitiveType> {
     match method {
         "byteValue" | "byte_value" => Some(PrimitiveType::Byte),
         "shortValue" | "short_value" => Some(PrimitiveType::Short),
+        "charValue" | "char_value" => Some(PrimitiveType::Char),
         "intValue" | "int_value" => Some(PrimitiveType::Int),
         "longValue" | "long_value" => Some(PrimitiveType::Long),
         "floatValue" | "float_value" => Some(PrimitiveType::Float),
@@ -5127,6 +5192,7 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         ("Double", "toString" | "to_string") => NativeJavaStaticMethod::FloatingToString {
             source: PrimitiveType::Double,
         },
+        ("Character", "valueOf" | "value_of") => NativeJavaStaticMethod::CharacterValueOf,
         ("Double" | "Float", "isNaN" | "is_na_n") => NativeJavaStaticMethod::FloatingIsNaN,
         ("Character", "isDigit" | "is_digit") => character_predicate("isDigit", "is_ascii_digit"),
         ("Character", "isLetter" | "is_letter") => character_predicate("isLetter", "is_alphabetic"),
@@ -5152,6 +5218,9 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
         }
         ("Objects", "equals") => NativeJavaStaticMethod::ObjectsEquals,
         ("Objects", "toString" | "to_string") => NativeJavaStaticMethod::ObjectsToString,
+        ("Objects", "requireNonNull" | "require_non_null") => {
+            NativeJavaStaticMethod::ObjectsRequireNonNull
+        }
         ("Objects", "nonNull" | "non_null") => NativeJavaStaticMethod::ObjectsNonNull,
         ("Objects", "isNull" | "is_null") => NativeJavaStaticMethod::ObjectsIsNull,
         ("Pattern" | "JavaUtilRegexPattern", "compile") => NativeJavaStaticMethod::PatternCompile,
@@ -5380,7 +5449,10 @@ fn plan_external_crate_static_call(
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
-    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+    if types.local_type(receiver_name).is_some()
+        || (types.static_type_alias(receiver_name).is_none()
+            && types.field_type(receiver_name).is_some())
+    {
         return None;
     }
     if crate::stdlib::is_known_object_inherited_method(name, arg_count) {
@@ -5561,6 +5633,7 @@ fn builtin_facade_constructor_uses_arity_name(type_name: &str) -> bool {
                 | "BitSet"
                 | "JarEntry"
                 | "ZipEntry"
+                | "OutputStreamWriter"
         )
 }
 
@@ -5575,9 +5648,23 @@ fn plan_native_string_constructor(
     }
     if let Some((args, types)) = args_and_types
         && let [arg] = args
-        && infer_expr_type(arg, types) == JavaType::String
     {
-        return Some(NativeStringNewTarget::FromString);
+        let arg_ty = infer_expr_type(arg, types);
+        if arg_ty == JavaType::String {
+            return Some(NativeStringNewTarget::FromString);
+        }
+        if matches!(arg_ty, JavaType::Array(element)
+            if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Char)))
+        {
+            return Some(NativeStringNewTarget::FromChars);
+        }
+    }
+    if let Some((args, types)) = args_and_types
+        && let [array, _, _] = args
+        && matches!(infer_expr_type(array, types), JavaType::Array(element)
+            if matches!(element.as_ref(), JavaType::Primitive(PrimitiveType::Char)))
+    {
+        return Some(NativeStringNewTarget::FromCharRange);
     }
     match arg_count {
         1 | 2 => Some(NativeStringNewTarget::FromBytes),
@@ -7403,6 +7490,30 @@ pub fn external_constructor_arg_shapes(
             {
                 saw_fact = true;
                 argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
+            } else if rust_name != "new"
+                && let Some(effect) = facts.external_api_argument_effect_for_receiver_with_arity(
+                    Some(receiver_name),
+                    "new",
+                    Some(arg_count),
+                    index,
+                )
+            {
+                // External manifests describe constructor arguments under the
+                // Java member name `new`; emitted facade constructors may be
+                // arity-disambiguated as `new_N`.
+                saw_fact = true;
+                argument_shape_from_external_effect(effect, Some(ty), &effective_facts)
+            } else if rust_name != "new"
+                && let Some(effect) =
+                    crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                        Some(receiver_name),
+                        "new",
+                        Some(arg_count),
+                        index,
+                    )
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
             } else {
                 RustSlotShape::conservative(JavaType::Unknown(format!("{rust_name}:arg{index}")))
             }
@@ -7492,6 +7603,27 @@ pub fn external_constructor_arg_shapes_with_args(
             {
                 saw_fact = true;
                 argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
+            } else if rust_name != "new"
+                && let Some(effect) = facts.external_api_argument_effect_for_receiver_with_arity(
+                    Some(receiver_name),
+                    "new",
+                    Some(arg_count),
+                    index,
+                )
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(effect, Some(ty), &effective_facts)
+            } else if rust_name != "new"
+                && let Some(effect) =
+                    crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                        Some(receiver_name),
+                        "new",
+                        Some(arg_count),
+                        index,
+                    )
+            {
+                saw_fact = true;
+                argument_shape_from_external_effect(&effect, Some(ty), &effective_facts)
             } else if let Some(parameter_type) = modeled_constructor
                 .as_ref()
                 .and_then(|constructor| constructor.arg_types.get(index))
@@ -7567,7 +7699,10 @@ fn static_utility_argument_owner_key(
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
-    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+    if types.local_type(receiver_name).is_some()
+        || (types.static_type_alias(receiver_name).is_none()
+            && types.field_type(receiver_name).is_some())
+    {
         return None;
     }
     let query_owner = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
@@ -7610,7 +7745,10 @@ fn imported_static_owner_for_call<'a>(receiver: &Expr, types: &'a TypeEnv) -> Op
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
-    if types.local_type(receiver_name).is_some() || types.field_type(receiver_name).is_some() {
+    if types.local_type(receiver_name).is_some()
+        || (types.static_type_alias(receiver_name).is_none()
+            && types.field_type(receiver_name).is_some())
+    {
         return None;
     }
     types.static_type_alias(receiver_name)
@@ -8808,5 +8946,36 @@ mod tests {
             Some(JavaType::String)
         );
         assert_eq!(native_java_instance_receiver_type_hint("trim", 1), None);
+    }
+
+    #[test]
+    fn boxed_character_char_value_uses_primitive_unboxing_plan() {
+        let receiver = Expr::Var("value".to_string());
+        let mut types = TypeEnv::new();
+        types.insert_local(
+            "value",
+            JavaType::Named {
+                name: "Character".to_string(),
+                args: Vec::new(),
+            },
+        );
+
+        assert!(matches!(
+            plan_call_target_with_facts_and_arity(
+                Some(&receiver),
+                "charValue",
+                0,
+                None,
+                &FactSet::default(),
+                &types,
+            ),
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::PrimitiveNumberValue {
+                    source: Some(PrimitiveType::Char),
+                    target: PrimitiveType::Char,
+                },
+                ..
+            }
+        ));
     }
 }

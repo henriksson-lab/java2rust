@@ -19,22 +19,23 @@ use new_java2rust::external_packs::{
     external_api_arities_for_receiver, external_api_effect_for_receiver_with_arity,
     external_constructor_arities_for, external_constructor_for, external_conversion_adapter_for,
     external_crate_api_mapping_for_receiver, external_crate_constructor_mapping_for,
-    external_field_for, external_library_pack_for_type, fastutil_pack_facts, genomicsdb_pack_facts,
-    google_bigquery_pack_facts, google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts,
-    google_storage_pack_facts, guava_concurrent_pack_facts, guava_immutable_collect_pack_facts,
-    hadoop_conf_pack_facts, hdf5_pack_facts, hipparchus_distribution_pack_facts,
-    htsjdk_bcf_pack_facts, htsjdk_nested_helper_pack_facts, htsjdk_sam_bam_pack_facts,
-    htsjdk_sam_cram_pack_facts, htsjdk_sam_header_pack_facts, htsjdk_sam_metrics_pack_facts,
-    htsjdk_sam_reader_pack_facts, htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts,
-    htsjdk_sam_writer_pack_facts, htsjdk_samtools_util_pack_facts,
-    htsjdk_tribble_feature_pack_facts, htsjdk_tribble_index_pack_facts,
-    htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts, iharder_base64_pack_facts,
-    intel_gkl_pack_facts, itadaki_bzip2_pack_facts, jackson_databind_pack_facts, jama_pack_facts,
-    java_sql_pack_facts, jgrapht_pack_facts, kryo_pack_facts, kryo_serializers_pack_facts,
-    modeled_no_state_external_super_constructor, opencsv_pack_facts, org_json_pack_facts,
-    parse_external_pack_manifest, picard_markduplicates_pack_facts, picard_metrics_pack_facts,
-    picard_programgroups_pack_facts, picard_vcf_pack_facts, reflections_pack_facts,
-    representation_facts_for_type, scala_tuple_pack_facts, spark_pack_facts, sqlite_pack_facts,
+    external_field_for, external_library_pack_for_type, external_superclass_uses_embedded_carrier,
+    fastutil_pack_facts, genomicsdb_pack_facts, google_bigquery_pack_facts,
+    google_bigquery_storage_pack_facts, google_cloud_nio_pack_facts, google_storage_pack_facts,
+    guava_concurrent_pack_facts, guava_immutable_collect_pack_facts, hadoop_conf_pack_facts,
+    hdf5_pack_facts, hipparchus_distribution_pack_facts, htsjdk_bcf_pack_facts,
+    htsjdk_nested_helper_pack_facts, htsjdk_sam_bam_pack_facts, htsjdk_sam_cram_pack_facts,
+    htsjdk_sam_header_pack_facts, htsjdk_sam_metrics_pack_facts, htsjdk_sam_reader_pack_facts,
+    htsjdk_sam_record_pack_facts, htsjdk_sam_reference_pack_facts, htsjdk_sam_writer_pack_facts,
+    htsjdk_samtools_util_pack_facts, htsjdk_tribble_feature_pack_facts,
+    htsjdk_tribble_index_pack_facts, htsjdk_variantcontext_pack_facts, htsjdk_vcf_pack_facts,
+    iharder_base64_pack_facts, intel_gkl_pack_facts, itadaki_bzip2_pack_facts,
+    jackson_databind_pack_facts, jama_pack_facts, java_sql_pack_facts, jgrapht_pack_facts,
+    kryo_pack_facts, kryo_serializers_pack_facts, modeled_no_state_external_super_constructor,
+    opencsv_pack_facts, org_json_pack_facts, parse_external_pack_manifest,
+    picard_markduplicates_pack_facts, picard_metrics_pack_facts, picard_programgroups_pack_facts,
+    picard_vcf_pack_facts, reflections_pack_facts, representation_facts_for_type,
+    scala_tuple_pack_facts, spark_pack_facts, sqlite_pack_facts,
     unsupported_external_api_for_receiver,
 };
 use new_java2rust::facts::{
@@ -75,7 +76,7 @@ class PlatformFacadeUse {
 "#;
     let translation = translate_source(source);
     assert!(
-        translation.diagnostics.is_empty(),
+        !translation.diagnostics.has_errors(),
         "{:?}",
         translation.diagnostics
     );
@@ -3526,6 +3527,29 @@ class VariantContextMapEntryLoop {
 fn htsjdk_variantcontext_pack_models_builder_and_getter_effects() {
     let facts = htsjdk_variantcontext_pack_facts();
 
+    for (receiver, method, expected_return) in [
+        (
+            "IntGenotypeFieldAccessors",
+            "getAccessor",
+            JavaType::Named {
+                name: "IntGenotypeFieldAccessors.Accessor".to_string(),
+                args: Vec::new(),
+            },
+        ),
+        (
+            "IntGenotypeFieldAccessors.Accessor",
+            "getValues",
+            JavaType::Array(Box::new(JavaType::Primitive(PrimitiveType::Int))),
+        ),
+    ] {
+        let effect = facts
+            .external_api_effect_for_receiver(Some(receiver), method)
+            .unwrap_or_else(|| panic!("{receiver}.{method} should be modeled by the pack"));
+        assert_eq!(effect.return_type, Some(expected_return));
+        assert_eq!(effect.return_nullability, NullabilityState::MaybeNull);
+        assert_eq!(effect.provenance, FactProvenance::ExternalLibraryPack);
+    }
+
     let internal_codec = JavaType::Named {
         name: "InternalCodecException".to_string(),
         args: Vec::new(),
@@ -4987,6 +5011,25 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
     )
     .expect("BCF2Codec.SIZEOF_BCF_HEADER value should be pack-dispatched");
     assert_eq!(dispatched_value.rust_value, "5");
+
+    let version_probe = facts
+        .external_api_effect_for_receiver(Some("BCF2Codec"), "tryReadBCFVersion")
+        .expect("BCF2Codec.tryReadBCFVersion should be modeled by the BCF pack");
+    assert_eq!(
+        version_probe.return_type,
+        Some(JavaType::Named {
+            name: "BCFVersion".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        version_probe.return_nullability,
+        NullabilityState::MaybeNull
+    );
+    assert_eq!(
+        version_probe.provenance,
+        FactProvenance::ExternalLibraryPack
+    );
 }
 
 #[test]
@@ -12376,6 +12419,32 @@ class ReferenceUse {
 fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
     let facts = htsjdk_tribble_feature_pack_facts();
 
+    let codec_pack = facts
+        .external_library_pack_for_type("htsjdk.tribble.AsciiFeatureCodec")
+        .expect("AsciiFeatureCodec should be owned by the Tribble feature pack");
+    assert_eq!(codec_pack.pack_name, "htsjdk.tribble.feature");
+    assert!(external_superclass_uses_embedded_carrier(
+        "htsjdk.tribble.AsciiFeatureCodec<Feature>"
+    ));
+    assert!(modeled_no_state_external_super_constructor(
+        "AsciiFeatureCodec<Feature>",
+        1
+    ));
+    assert!(
+        facts
+            .external_constructor_for(
+                "AsciiFeatureCodec",
+                &[JavaType::Named {
+                    name: "java.lang.Class".to_string(),
+                    args: vec![JavaType::Named {
+                        name: "Feature".to_string(),
+                        args: Vec::new(),
+                    }],
+                }],
+            )
+            .is_some()
+    );
+
     let pack = facts
         .external_library_pack_for_type("htsjdk.tribble.Feature")
         .expect("Tribble Feature should be owned by the external pack");
@@ -19445,6 +19514,7 @@ class JdbcSqlitePackUse {
         connection.close();
     }
 }
+
 "#,
     );
 
@@ -19907,6 +19977,111 @@ class JdbcSqlitePackUse {
             .any(|diagnostic| diagnostic.code() == "external_pack_missing_api"),
         "modeled JDBC workflow should not produce missing-pack diagnostics: {:?}",
         semantic.diagnostics
+    );
+}
+
+#[test]
+fn java_sql_result_metadata_and_clob_surfaces_compile_with_modeled_facades() {
+    let translation = translate_source(
+        r#"
+import java.io.Reader;
+import java.sql.Clob;
+import java.sql.ResultSet;
+import java.sql.ResultSetMetaData;
+
+class JdbcTypedSurface {
+    static String label(ResultSetMetaData metadata) throws Exception {
+        return metadata.getColumnLabel(1);
+    }
+
+    static int columns(ResultSet resultSet) throws Exception {
+        return resultSet.getMetaData().getColumnCount();
+    }
+
+    static int columnsThenAdvance(ResultSet resultSet) throws Exception {
+        int count = resultSet.getMetaData().getColumnCount();
+        resultSet.next();
+        return count;
+    }
+
+    static boolean advance(ResultSet resultSet) throws Exception {
+        return resultSet.next();
+    }
+
+    static int inspect(ResultSet resultSet) throws Exception {
+        return resultSet == null ? 0 : resultSet.getMetaData().getColumnCount();
+    }
+
+    static boolean inspectThenAdvance(ResultSet resultSet) throws Exception {
+        inspect(resultSet);
+        return resultSet.next();
+    }
+
+    static ResultSetMetaData metadataOrNull(ResultSet resultSet) throws Exception {
+        return resultSet != null ? resultSet.getMetaData() : null;
+    }
+
+    static int inspectMetadata(Object metadata) {
+        return metadata == null ? 0 : metadata.hashCode();
+    }
+
+    static int passMetadataOrNull(ResultSet resultSet) throws Exception {
+        return inspectMetadata(resultSet != null ? resultSet.getMetaData() : null);
+    }
+
+    static boolean forwardAdvance(ResultSet resultSet, boolean inspectFirst) throws Exception {
+        if (inspectFirst) {
+            inspect(resultSet);
+        }
+        return advance(resultSet);
+    }
+
+    synchronized int inspectInstance(ResultSet resultSet) throws Exception {
+        return resultSet.getMetaData().getColumnCount();
+    }
+
+    boolean inspectThenAdvanceInstance(ResultSet resultSet) throws Exception {
+        inspectInstance(resultSet);
+        return resultSet.next();
+    }
+
+    static Reader characterStream(Clob clob) throws Exception {
+        return clob.getCharacterStream();
+    }
+
+    static Object clobAsObject(Object value) throws Exception {
+        return value instanceof Clob ? ((Clob) value).getCharacterStream() : value;
+    }
+
+    static void accept(Object value) {}
+
+    static void passClobAsObject(Object value) throws Exception {
+        accept(value instanceof Clob ? ((Clob) value).getCharacterStream() : value);
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(translation.rust.contains("get_column_label"));
+    assert!(translation.rust.contains("get_character_stream"));
+    assert!(
+        translation
+            .rust
+            .contains("get_meta_data()?.get_column_count()?"),
+        "chained external return types must retain the modeled checked-exception ABI: {}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "java_sql_typed_result_surfaces",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 

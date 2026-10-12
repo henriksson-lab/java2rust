@@ -9,6 +9,43 @@ use std::process::Command;
 use std::os::unix::fs::PermissionsExt;
 
 #[test]
+fn batch_field_receiver_shadows_same_normalized_source_type_name() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "Parser.java".to_string(),
+        r#"
+class RecordSource {
+    String next() { return "record"; }
+}
+
+class Parser {
+    RecordSource parser;
+
+    String read() {
+        return parser.next();
+    }
+}
+"#
+        .to_string(),
+    )];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+
+    assert!(
+        rust.contains(".next()")
+            && !rust.contains("Parser::next")
+            && !rust.contains("unresolved Java static call"),
+        "field receiver must retain instance-call identity even when `parser` collides with `Parser`\n{rust}"
+    );
+}
+
+#[test]
 fn batch_inherited_wildcard_method_keeps_source_hierarchy_carrier_argument() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new(
@@ -1577,8 +1614,16 @@ public class Second {
             &new_java2rust::BatchTranslationOptions::new(2, None),
         );
     for (path, owner, other) in [
-        ("a/First.java", "First::logger.log_3(", "Second::logger"),
-        ("b/Second.java", "Second::logger.log_3(", "First::logger"),
+        (
+            "a/First.java",
+            "Self::__static_logger().log_3(",
+            "SECOND_LOGGER",
+        ),
+        (
+            "b/Second.java",
+            "Self::__static_logger().log_3(",
+            "FIRST_LOGGER",
+        ),
     ] {
         let translation = report
             .translations()
@@ -2231,6 +2276,49 @@ public class PairingValidator {
 }
 
 #[test]
+fn late_mutable_nested_override_propagates_to_same_receiver_caller() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "example/Owner.java".to_string(),
+        r#"
+package example;
+
+import java.util.zip.Deflater;
+
+class Owner {
+    class Base {
+        void deflate(int mode) {}
+        void write() { deflate(Deflater.NO_FLUSH); }
+    }
+
+    class Child extends Base {
+        int count;
+        @Override void deflate(int mode) { count += mode; }
+    }
+}
+"#
+        .to_string(),
+    )];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let owner = translations
+        .iter()
+        .find(|translation| translation.path() == "example/Owner.java")
+        .expect("translated owner");
+
+    assert!(
+        owner.rust().contains("pub fn write(&mut self)"),
+        "{}",
+        owner.rust()
+    );
+}
+
+#[test]
 fn batch_static_object_calls_reuse_declared_storage_accessor_in_every_method() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new(
@@ -2419,7 +2507,8 @@ public class Sink {
         owner.rust()
     );
     assert!(
-        owner.rust().contains("__java_call_receiver") && owner.rust().contains(".report("),
+        owner.rust().contains("__java_call_receiver")
+            && (owner.rust().contains(".report(") || owner.rust().contains("Sink::report(")),
         "{}",
         owner.rust()
     );
@@ -2747,6 +2836,7 @@ public class Main {
                 "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
                  impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
                  pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display {{ fn values() -> Vec<Self> where Self: Sized; fn ordinal(&self) -> i32; fn name(&self) -> &'static str; }}\n\
+                 pub trait JavaAppendValue {{ fn into_java_append_string(self) -> String; }}\n\
                  pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ panic!(\"unsupported Java erased object display: runtime target is erased\") }}\n\
                  {}\n{}\n{}",
                 format!(

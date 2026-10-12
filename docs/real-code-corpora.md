@@ -30,7 +30,8 @@ Tier 0 is always local and small:
 
 Tier 1 should be the first real-code gate:
 
-- `trimmomatic`
+- `commons-csv-1.10.0`
+- `trimmomatic-0.40`
 - `jaligner`
 - `jahmm`
 - `varscan`
@@ -66,7 +67,8 @@ Tier 4 is the stress corpus:
 |---|---:|---:|---|
 | `old-golden-snippets` | 42 | 0 | `/home/mahogny/github/claude/java2rust/tests/corpus` |
 | `current-fixtures` | 38 | 0 | `examples/java` |
-| `trimmomatic` | 65 production + 3 test | 1 | `/home/mahogny/github/claude/java2rust/testdata/trimmomatic` |
+| `commons-csv-1.10.0` | 12 production | 1 | `.tmp/commons-csv-1.10.0-src/src/main/java` |
+| `trimmomatic-0.40` | 65 production + 3 test | 1 | `/home/mahogny/github/claude/java2rust/testdata/trimmomatic` |
 | `jaligner` | 29 | 1 | `/home/mahogny/github/claude/java2rust/testdata/jaligner` |
 | `jahmm` | 102 | 1 | `/home/mahogny/github/claude/java2rust/testdata/jahmm` |
 | `varscan` | 18 | 1 | `/home/mahogny/github/claude/java2rust/testdata/varscan` |
@@ -85,3 +87,39 @@ Tier 4 is the stress corpus:
 | `htsjdk` | 1222 | 3 | `/home/mahogny/github/claude/java2rust/testdata/htsjdk` |
 | `jts` | 1435 | 3 | `/home/mahogny/github/claude/java2rust/testdata/jts` |
 | `gatk` | 2500 | 4 | `/home/mahogny/github/claude/java2rust/testdata/gatk` |
+
+## Apache Commons CSV differential gate
+
+The Commons CSV checkout is pinned in `docs/corpora.tsv`. With that checkout at
+the recorded local path, run:
+
+```sh
+scripts/verify-commons-csv-1.10.0.sh
+```
+
+The gate translates all 12 untouched production files, rejects translation and
+idiom diagnostics, compiles the generated crate, and compares a Java oracle
+with a Rust program linked only against the freshly generated output. It covers
+quoting and escaped quotes, embedded newlines, alternate delimiters, empty and
+null fields, headers, comments, named access, malformed input, and a print/parse
+round trip. Pass a different checkout path as the first argument when needed;
+the script still verifies the exact upstream commit.
+
+## Trimmomatic differential gate
+
+The Trimmomatic checkout is pinned in `docs/corpora.tsv`. Run:
+
+```sh
+scripts/verify-trimmomatic-0.40.sh
+```
+
+The gate translates all 65 untouched production files, rejects translation and
+idiom diagnostics, compiles the disposable generated crate, and compares Java
+and generated-Rust behaviour for core single-record trimming plus an
+uncompressed, multi-record FASTQ parse/trim/serialize round trip. It covers
+`LEADING`, `TRAILING`, `CROP`, `MINLEN`, and `SLIDINGWINDOW`, a chained trim,
+empty/short/drop boundaries, mismatched sequence/quality rejection, paired
+keep/unpaired/drop routing, independent mate trimming, and a malformed FASTQ
+name line. The Java harness substitutes only the optional
+compression dispatcher with an identity implementation; for the plain
+`.fastq` fixture this is the same upstream behaviour.

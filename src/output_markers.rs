@@ -127,11 +127,28 @@ pub const UNSUPPORTED_INNER_CLASS_OUTER_CAPTURE: &str =
 /// whose only Java API use was `StringBuilder`.
 pub const UNMODELLED_JAVA_UPCAST_PREFIX: &str = "Unmodelled Java upcast: ";
 
-/// A `Collection.addAll` that kept its Java name instead of becoming `extend`.
-pub const UNTRANSLATED_JAVA_ADD_ALL_CALL: &str = ".add_all(";
+/// Marks an unresolved external `Collection.addAll` call that kept its Java
+/// API shape instead of becoming a native Rust collection operation.
+///
+/// This must describe the lowering decision, not merely the emitted method
+/// spelling: source programs are allowed to declare their own `addAll` method.
+pub const UNTRANSLATED_JAVA_ADD_ALL_CALL: &str = "untranslated Java Collection.addAll call";
 
-/// A `Map.put` that kept its Java name instead of becoming `insert`.
-pub const UNTRANSLATED_JAVA_PUT_CALL: &str = ".put(";
+/// Marks an unresolved external `Map.put` call that kept its Java API shape
+/// instead of becoming a native Rust map operation.
+///
+/// Source programs commonly have unrelated methods named `put`, so scanning
+/// for `.put(` would turn valid source dispatch into a false audit failure.
+pub const UNTRANSLATED_JAVA_PUT_CALL: &str = "untranslated Java Map.put call";
+
+pub fn untranslated_java_collection_call_marker(java_method: &str) -> Option<String> {
+    let marker = match java_method {
+        "addAll" | "add_all" => UNTRANSLATED_JAVA_ADD_ALL_CALL,
+        "put" => UNTRANSLATED_JAVA_PUT_CALL,
+        _ => return None,
+    };
+    Some(format!("/* {marker} */"))
+}
 
 /// Emitted at a call site whose facade target returns a default or cloned
 /// receiver value instead of modelling Java behaviour.

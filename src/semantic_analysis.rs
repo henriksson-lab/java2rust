@@ -3314,9 +3314,15 @@ fn collect_recursion_facts(program: &Program, facts: &mut FactSet) {
 }
 
 fn collect_method_effect_facts(program: &Program, usage: &UsageFacts, facts: &mut FactSet) {
+    // Catch filtering asks the same transitive hierarchy questions throughout
+    // every method body. Build that immutable lookup once, collect effects
+    // separately, and append them only after the lookup borrow ends.
+    let hierarchy_index = facts.hierarchy_lookup_index();
+    let mut method_effects = Vec::new();
     for ty in &program.types {
-        collect_type_method_effect_facts(ty, usage, facts);
+        collect_type_method_effect_facts(ty, usage, facts, &hierarchy_index, &mut method_effects);
     }
+    facts.method_effect_facts.extend(method_effects);
 }
 
 fn collect_source_equals_override_facts(program: &Program, facts: &mut FactSet) {
@@ -3433,12 +3439,20 @@ fn source_method_effect_key_matches(key: &MethodKey, type_name: &str, method_nam
             || key.method_name() == crate::parser::to_snake_case(method_name))
 }
 
-fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &mut FactSet) {
+fn collect_type_method_effect_facts(
+    ty: &TypeDecl,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex<'_>,
+    method_effects: &mut Vec<MethodEffectFact>,
+) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                let mut thrown = method_thrown_exception_types(method, facts);
-                for external_throw in external_api_thrown_exception_types(ty, method, facts) {
+                let mut thrown = method_thrown_exception_types(method, facts, hierarchy_index);
+                for external_throw in
+                    external_api_thrown_exception_types(ty, method, facts, hierarchy_index)
+                {
                     push_unique_java_type(&mut thrown, external_throw);
                 }
                 let receiver_mutability = method_receiver_mutability_effect(ty, method, usage);
@@ -3460,7 +3474,7 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
                         thrown: thrown.clone(),
                         provenance: FactProvenance::ParsedSource,
                     };
-                    facts.method_effect_facts.push(effect.clone());
+                    method_effects.push(effect.clone());
                     if let Some(rust_name) = method.rust_name.as_deref()
                         && rust_name != method.name
                         && rust_name != crate::parser::to_snake_case(&method.name)
@@ -3468,11 +3482,17 @@ fn collect_type_method_effect_facts(ty: &TypeDecl, usage: &UsageFacts, facts: &m
                         let mut rust_name_effect = effect;
                         rust_name_effect.method =
                             rust_name_effect.method.with_method_name(rust_name);
-                        facts.method_effect_facts.push(rust_name_effect);
+                        method_effects.push(rust_name_effect);
                     }
                 }
             }
-            Member::Type(nested) => collect_type_method_effect_facts(nested, usage, facts),
+            Member::Type(nested) => collect_type_method_effect_facts(
+                nested,
+                usage,
+                facts,
+                hierarchy_index,
+                method_effects,
+            ),
             _ => {}
         }
     }
@@ -3482,6 +3502,7 @@ fn external_api_thrown_exception_types(
     ty: &TypeDecl,
     method: &MethodDecl,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex<'_>,
 ) -> Vec<JavaType> {
     let Some(body) = &method.body else {
         return Vec::new();
@@ -3497,6 +3518,7 @@ fn external_api_thrown_exception_types(
         &body.statements,
         &ty.name,
         facts,
+        hierarchy_index,
         &mut env,
         &mut thrown,
     );
@@ -3507,6 +3529,7 @@ fn collect_external_api_thrown_exception_types_from_stmts(
     statements: &[Stmt],
     current_type: &str,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex<'_>,
     env: &mut TypeEnv,
     thrown: &mut Vec<JavaType>,
 ) {
@@ -3515,6 +3538,7 @@ fn collect_external_api_thrown_exception_types_from_stmts(
             stmt,
             current_type,
             facts,
+            hierarchy_index,
             env,
             thrown,
         );
@@ -3526,6 +3550,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
     stmt: &Stmt,
     current_type: &str,
     facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex<'_>,
     env: &mut TypeEnv,
     thrown: &mut Vec<JavaType>,
 ) {
@@ -3542,6 +3567,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                 resources,
                 current_type,
                 facts,
+                hierarchy_index,
                 &mut try_env,
                 &mut try_thrown,
             );
@@ -3549,16 +3575,18 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                 &body.statements,
                 current_type,
                 facts,
+                hierarchy_index,
                 &mut try_env,
                 &mut try_thrown,
             );
-            push_uncaught_after_catches(&mut try_thrown, catches, facts, thrown);
+            push_uncaught_after_catches(&mut try_thrown, catches, hierarchy_index, thrown);
             for catch in catches {
                 let mut catch_env = env.clone();
                 collect_external_api_thrown_exception_types_from_stmts(
                     &catch.body.statements,
                     current_type,
                     facts,
+                    hierarchy_index,
                     &mut catch_env,
                     thrown,
                 );
@@ -3568,6 +3596,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                     &finally_block.statements,
                     current_type,
                     facts,
+                    hierarchy_index,
                     env,
                     thrown,
                 );
@@ -3583,6 +3612,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                 &then_block.statements,
                 current_type,
                 facts,
+                hierarchy_index,
                 &mut then_env,
                 thrown,
             );
@@ -3592,6 +3622,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                     &else_block.statements,
                     current_type,
                     facts,
+                    hierarchy_index,
                     &mut else_env,
                     thrown,
                 );
@@ -3608,6 +3639,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                 &body.statements,
                 current_type,
                 facts,
+                hierarchy_index,
                 &mut block_env,
                 thrown,
             );
@@ -3619,6 +3651,7 @@ fn collect_external_api_thrown_exception_types_from_stmt(
                     &case.statements,
                     current_type,
                     facts,
+                    hierarchy_index,
                     &mut case_env,
                     thrown,
                 );
@@ -3685,10 +3718,13 @@ fn method_receiver_mutability_effect(
     if method.modifiers.contains(&Modifier::Static) {
         return ReceiverMutabilityFact::Unknown;
     }
+    if usage.source_method_or_alias_mutates(ty, method) {
+        return ReceiverMutabilityFact::MutatesReceiver;
+    }
     usage
         .source_method_usage(ty, method)
-        .map(|usage| {
-            if usage.mutates_self() {
+        .map(|method_usage| {
+            if method_usage.mutates_self() {
                 ReceiverMutabilityFact::MutatesReceiver
             } else {
                 ReceiverMutabilityFact::ReadOnly
@@ -3824,14 +3860,32 @@ fn merge_return_nullability_states(states: &[NullabilityState]) -> NullabilitySt
     }
 }
 
-fn method_thrown_exception_types(method: &MethodDecl, facts: &FactSet) -> Vec<JavaType> {
+#[derive(Clone, Copy)]
+struct ThrownExceptionScanContext<'a> {
+    facts: &'a FactSet,
+    hierarchy_index: &'a HierarchyFactLookupIndex<'a>,
+}
+
+fn method_thrown_exception_types(
+    method: &MethodDecl,
+    facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex<'_>,
+) -> Vec<JavaType> {
     let mut thrown = Vec::new();
     for ty in &method.throws {
         push_unique_java_type(&mut thrown, ty.clone());
     }
     if let Some(body) = &method.body {
         let mut exception_env = HashMap::new();
-        collect_thrown_exception_types_from_block(body, &mut exception_env, facts, &mut thrown);
+        collect_thrown_exception_types_from_block(
+            body,
+            &mut exception_env,
+            ThrownExceptionScanContext {
+                facts,
+                hierarchy_index,
+            },
+            &mut thrown,
+        );
     }
     thrown
 }
@@ -3839,7 +3893,7 @@ fn method_thrown_exception_types(method: &MethodDecl, facts: &FactSet) -> Vec<Ja
 fn collect_thrown_exception_types_from_block(
     block: &Block,
     exception_env: &mut HashMap<String, JavaType>,
-    facts: &FactSet,
+    facts: ThrownExceptionScanContext<'_>,
     thrown: &mut Vec<JavaType>,
 ) {
     for stmt in &block.statements {
@@ -3850,7 +3904,7 @@ fn collect_thrown_exception_types_from_block(
 fn collect_thrown_exception_types_from_stmt(
     stmt: &Stmt,
     exception_env: &mut HashMap<String, JavaType>,
-    facts: &FactSet,
+    facts: ThrownExceptionScanContext<'_>,
     thrown: &mut Vec<JavaType>,
 ) {
     match stmt {
@@ -3901,7 +3955,7 @@ fn collect_thrown_exception_types_from_stmt(
                 );
             }
             collect_thrown_exception_types_from_block(body, exception_env, facts, &mut try_thrown);
-            push_uncaught_after_catches(&mut try_thrown, catches, facts, thrown);
+            push_uncaught_after_catches(&mut try_thrown, catches, facts.hierarchy_index, thrown);
             for catch in catches {
                 let previous = catch
                     .types
@@ -3932,7 +3986,9 @@ fn collect_thrown_exception_types_from_stmt(
         Stmt::LocalType(ty) => {
             for member in &ty.members {
                 if let Member::Method(method) = member {
-                    for ty in method_thrown_exception_types(method, facts) {
+                    for ty in
+                        method_thrown_exception_types(method, facts.facts, facts.hierarchy_index)
+                    {
                         push_unique_java_type(thrown, ty);
                     }
                 }
@@ -3961,7 +4017,7 @@ fn collect_thrown_exception_types_from_stmt(
 fn collect_thrown_exception_types_from_expr(
     expr: &Expr,
     exception_env: &mut HashMap<String, JavaType>,
-    facts: &FactSet,
+    facts: ThrownExceptionScanContext<'_>,
     thrown: &mut Vec<JavaType>,
 ) {
     match expr {
@@ -4091,7 +4147,7 @@ fn collect_thrown_exception_types_from_expr(
 fn collect_thrown_exception_types_from_lambda_body(
     body: &LambdaBody,
     exception_env: &mut HashMap<String, JavaType>,
-    facts: &FactSet,
+    facts: ThrownExceptionScanContext<'_>,
     thrown: &mut Vec<JavaType>,
 ) {
     match body {
@@ -4111,15 +4167,14 @@ fn call_captures_lambda_for_deferred_throw_projection(name: &str) -> bool {
 fn push_uncaught_after_catches(
     try_thrown: &mut Vec<JavaType>,
     catches: &[CatchClause],
-    facts: &FactSet,
+    hierarchy_index: &HierarchyFactLookupIndex<'_>,
     out: &mut Vec<JavaType>,
 ) {
-    let hierarchy_index = facts.hierarchy_lookup_index();
     for thrown_ty in try_thrown.drain(..) {
         let caught = java_type_name(&thrown_ty).is_some_and(|thrown_name| {
             catches.iter().any(|catch| {
                 catch.types.iter().any(|catch_ty| {
-                    exception_assignable_to_catch(thrown_name, catch_ty, &hierarchy_index)
+                    exception_assignable_to_catch(thrown_name, catch_ty, hierarchy_index)
                 })
             })
         });
@@ -7079,11 +7134,16 @@ mod tests {
             Vec::new(),
         );
         let mut thrown = Vec::new();
+        let facts = FactSet::default();
+        let hierarchy_index = facts.hierarchy_lookup_index();
 
         collect_thrown_exception_types_from_expr(
             &expr,
             &mut HashMap::new(),
-            &FactSet::default(),
+            ThrownExceptionScanContext {
+                facts: &facts,
+                hierarchy_index: &hierarchy_index,
+            },
             &mut thrown,
         );
 
@@ -7091,6 +7151,30 @@ mod tests {
             ty,
             JavaType::Named { name, .. } if name == "URISyntaxException"
         )));
+    }
+
+    #[test]
+    fn method_effect_collection_reuses_one_hierarchy_lookup_index() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class CatchHeavy {
+                void first() {
+                    try { throw new Exception(); } catch (Exception ignored) {}
+                }
+
+                void second() {
+                    try { throw new RuntimeException(); } catch (RuntimeException ignored) {}
+                }
+            }
+            "#,
+        );
+        let mut facts = FactSet::default();
+        let usage = usage::analyze_usage_with_facts(&parsed.program, &facts);
+        crate::facts::reset_hierarchy_lookup_index_build_count();
+
+        collect_method_effect_facts(&parsed.program, &usage, &mut facts);
+
+        assert_eq!(crate::facts::hierarchy_lookup_index_build_count(), 1);
     }
 
     #[test]

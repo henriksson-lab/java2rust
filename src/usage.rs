@@ -8,6 +8,7 @@ use crate::java_ir::{
     TypeDecl, UnaryOp,
 };
 use crate::java_signature::{JavaCallableKey, JavaOwnerKey, source_method_rust_name};
+use crate::nullability_plan::{TernaryNullRefinementPlan, plan_ternary_null_refinement};
 use crate::stdlib::is_content_read_method;
 use crate::types::TypeEnv;
 
@@ -443,6 +444,8 @@ pub struct MethodUsageFacts {
     field_uses: Vec<FieldUse>,
     self_argument_uses: Vec<SelfArgumentUse>,
     mutates_self: bool,
+    active_non_null_bindings: HashSet<BindingId>,
+    active_non_null_idless_names: HashSet<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -535,6 +538,34 @@ impl UsageFacts {
         method: &crate::java_ir::MethodDecl,
     ) -> Option<&MethodUsageFacts> {
         self.source_method_usage_for_owner(JavaOwnerKey::source_type(ty), method)
+    }
+
+    /// Whether this exact Java callable slot mutates its receiver in any
+    /// equivalent package-summary copy of the declaring source type.
+    pub(crate) fn source_method_or_alias_mutates(
+        &self,
+        ty: &TypeDecl,
+        method: &crate::java_ir::MethodDecl,
+    ) -> bool {
+        let query = JavaCallableKey::source_method_for_type(ty, method);
+        if self
+            .methods_by_java_key
+            .get(&query)
+            .is_some_and(MethodUsageFacts::mutates_self)
+        {
+            return true;
+        }
+        let candidates = self
+            .methods_by_java_key
+            .iter()
+            .filter(|(candidate, usage)| usage.mutates_self() && candidate.slot() == query.slot());
+        let owner_query_ambiguous = legacy_usage_owner_query_is_ambiguous(
+            candidates.clone().map(|(candidate, _)| candidate.owner()),
+            query.owner(),
+        );
+        candidates.into_iter().any(|(candidate, _)| {
+            legacy_usage_owner_fact_matches(candidate.owner(), query.owner(), owner_query_ambiguous)
+        })
     }
 
     /// Whether any source implementation of this Java method family mutates
@@ -630,6 +661,29 @@ fn contains_resolved_source_method_key(
     source_name: &str,
 ) -> bool {
     methods.contains(&resolved_source_method_key(resolved, source_name))
+}
+
+fn contains_aliased_resolved_source_method_key(
+    methods: &HashSet<JavaCallableKey>,
+    resolved: &ResolvedCall,
+    source_name: &str,
+) -> bool {
+    let query = resolved_source_method_key(resolved, source_name);
+    let owner_query_ambiguous = legacy_usage_owner_query_is_ambiguous(
+        methods
+            .iter()
+            .filter(|candidate| candidate.slot() == query.slot())
+            .map(JavaCallableKey::owner),
+        query.owner(),
+    );
+    methods.iter().any(|candidate| {
+        candidate.slot() == query.slot()
+            && legacy_usage_owner_fact_matches(
+                candidate.owner(),
+                query.owner(),
+                owner_query_ambiguous,
+            )
+    })
 }
 
 impl MethodUsageFacts {
@@ -1035,11 +1089,14 @@ pub enum BindingUse {
         has_literal_null_arg: bool,
         literal_null_arg_indices: Vec<usize>,
         argument_bindings: Vec<(usize, BindingId)>,
+        non_null_arg_indices: Vec<usize>,
+        nullable_source_call_arg_indices: Vec<usize>,
     },
     StoredInField {
         field_name: String,
     },
     Returned,
+    ReturnedNullableSequenceElements,
     CastTarget {
         target_ty: JavaType,
     },
@@ -1095,8 +1152,13 @@ pub enum FieldUse {
         arg_count: usize,
         literal_null_arg_indices: Vec<usize>,
         argument_bindings: Vec<(usize, BindingId)>,
+        non_null_arg_indices: Vec<usize>,
+        nullable_source_call_arg_indices: Vec<usize>,
     },
     Returned {
+        field_name: String,
+    },
+    ReturnedNullableSequenceElements {
         field_name: String,
     },
 }
@@ -1636,6 +1698,21 @@ fn propagate_self_mutability_through_self_calls(facts: &mut UsageFacts) {
                     ) {
                         return true;
                     }
+                    // Focused-package analysis can retain both an emitted
+                    // declaration owner and its package-qualified summary
+                    // owner. Resolution may point at the bodyless/read-only
+                    // copy while the equivalent callable slot on the emitted
+                    // owner contains the mutating body. Match that exact Java
+                    // slot across owner aliases before concluding that a
+                    // resolved source target is read-only; retaining the slot
+                    // comparison preserves overload separation.
+                    if contains_aliased_resolved_source_method_key(
+                        &mutating_source_methods,
+                        resolved,
+                        &call_site.name,
+                    ) {
+                        return true;
+                    }
                     if source_methods
                         .contains(&resolved_source_method_key(resolved, &call_site.name))
                     {
@@ -1753,6 +1830,16 @@ fn usage_type_name_simple_segment(type_name: &str) -> &str {
 }
 
 fn usage_distinct_qualified_type_owners(left: &str, right: &str) -> bool {
+    let package_summary_alias = |qualified: &str, emitted: &str| {
+        let qualified = qualified.replace(['.', '$'], "_");
+        let emitted = emitted.replace(['.', '$'], "_");
+        qualified.len() > emitted.len()
+            && qualified.ends_with(&emitted)
+            && qualified.as_bytes()[qualified.len() - emitted.len() - 1] == b'_'
+    };
+    if package_summary_alias(left, right) || package_summary_alias(right, left) {
+        return false;
+    }
     (left.contains('.') || left.contains('$'))
         && (right.contains('.') || right.contains('$'))
         && left != right
@@ -2944,7 +3031,7 @@ fn analyze_stmt(
                             boundary: policy.boundary,
                         });
                     }
-                    if let Some(field_ty) = field_types.get(name)
+                    if let Some(field_ty) = declared_field_type(field_types, name)
                         && let Some(actual_type) = assigned_subtype_local_actual_type(
                             value,
                             field_ty,
@@ -3042,7 +3129,7 @@ fn analyze_stmt(
                         boundary: policy.boundary,
                     });
                 }
-                if let Some(field_ty) = field_types.get(field_name)
+                if let Some(field_ty) = declared_field_type(field_types, field_name)
                     && let Some(actual_type) = assigned_subtype_local_actual_type(
                         value,
                         field_ty,
@@ -3087,13 +3174,39 @@ fn analyze_stmt(
             );
         }
         Stmt::Return(Some(expr)) => {
-            if let Expr::Var(name) = expr {
+            let forwarded_array =
+                stream_of_forwarded_array_source(expr, facts, field_names, field_types, type_env);
+            let returned_storage = forwarded_array.unwrap_or(expr);
+            let forwards_nullable_sequence_elements = forwarded_array.is_some_and(|source| {
+                returned_expr_type(source, facts, field_names, field_types, type_env).is_some_and(
+                    |ty| {
+                    matches!(
+                        ty,
+                        JavaType::Array(element)
+                            if !matches!(element.as_ref(), JavaType::Primitive(_) | JavaType::Void)
+                    )
+                    },
+                )
+            });
+            if let Expr::Var(name) = returned_storage {
                 if is_unshadowed_field_name(facts, field_names, name) {
-                    facts.field_uses.push(FieldUse::Returned {
-                        field_name: name.clone(),
-                    });
+                    if forwards_nullable_sequence_elements {
+                        facts
+                            .field_uses
+                            .push(FieldUse::ReturnedNullableSequenceElements {
+                                field_name: name.clone(),
+                            });
+                    } else {
+                        facts.field_uses.push(FieldUse::Returned {
+                            field_name: name.clone(),
+                        });
+                    }
                 } else {
-                    record_use(facts, name, BindingUse::Returned);
+                    if forwards_nullable_sequence_elements {
+                        record_use(facts, name, BindingUse::ReturnedNullableSequenceElements);
+                    } else {
+                        record_use(facts, name, BindingUse::Returned);
+                    }
                 }
             }
             record_returned_subtype_use(
@@ -3114,12 +3227,33 @@ fn analyze_stmt(
                 semantic_facts,
                 type_env,
             );
-            if let Expr::FieldAccess(receiver, field_name) = expr
+            if let Some(source) = sequence_element_preserving_return_source(expr) {
+                record_returned_call_result_use(
+                    source,
+                    facts,
+                    internal_methods,
+                    current_type,
+                    current_super_type,
+                    field_names,
+                    field_types,
+                    semantic_facts,
+                    type_env,
+                );
+            }
+            if let Expr::FieldAccess(receiver, field_name) = returned_storage
                 && matches!(receiver.as_ref(), Expr::This)
             {
-                facts.field_uses.push(FieldUse::Returned {
-                    field_name: field_name.clone(),
-                });
+                if forwards_nullable_sequence_elements {
+                    facts
+                        .field_uses
+                        .push(FieldUse::ReturnedNullableSequenceElements {
+                            field_name: field_name.clone(),
+                        });
+                } else {
+                    facts.field_uses.push(FieldUse::Returned {
+                        field_name: field_name.clone(),
+                    });
+                }
             }
             analyze_return_expr(
                 expr,
@@ -3179,6 +3313,7 @@ fn analyze_stmt(
                 source_return_nullability,
             );
             let then_pattern_bindings = save_true_pattern_bindings(facts, condition);
+            let then_non_null = activate_branch_non_null_binding(facts, condition, true);
             analyze_scoped_statements(
                 &then_block.statements,
                 facts,
@@ -3192,9 +3327,11 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            restore_branch_non_null_binding(facts, then_non_null);
             restore_scoped_binding_uses(facts, then_pattern_bindings);
             if let Some(else_block) = else_block {
                 let else_pattern_bindings = save_false_pattern_bindings(facts, condition);
+                let else_non_null = activate_branch_non_null_binding(facts, condition, false);
                 analyze_scoped_statements(
                     &else_block.statements,
                     facts,
@@ -3208,6 +3345,7 @@ fn analyze_stmt(
                     type_env,
                     source_return_nullability,
                 );
+                restore_branch_non_null_binding(facts, else_non_null);
                 restore_scoped_binding_uses(facts, else_pattern_bindings);
             }
         }
@@ -3227,6 +3365,7 @@ fn analyze_stmt(
                 source_return_nullability,
             );
             let body_pattern_bindings = save_true_pattern_bindings(facts, condition);
+            let body_non_null = activate_branch_non_null_binding(facts, condition, true);
             analyze_scoped_statements(
                 &body.statements,
                 facts,
@@ -3240,6 +3379,7 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            restore_branch_non_null_binding(facts, body_non_null);
             restore_scoped_binding_uses(facts, body_pattern_bindings);
         }
         Stmt::DoWhile {
@@ -3326,6 +3466,9 @@ fn analyze_stmt(
                 .as_ref()
                 .map(|condition| save_true_pattern_bindings(facts, condition))
                 .unwrap_or_default();
+            let body_non_null = condition
+                .as_ref()
+                .and_then(|condition| activate_branch_non_null_binding(facts, condition, true));
             analyze_scoped_statements(
                 &body.statements,
                 facts,
@@ -3339,6 +3482,7 @@ fn analyze_stmt(
                 type_env,
                 source_return_nullability,
             );
+            restore_branch_non_null_binding(facts, body_non_null);
             restore_scoped_binding_uses(facts, body_pattern_bindings);
             restore_scoped_binding_uses(facts, saved_init_bindings);
         }
@@ -3889,6 +4033,23 @@ fn call_argument_bindings(args: &[Expr], facts: &MethodUsageFacts) -> Vec<(usize
         .collect()
 }
 
+fn non_null_argument_indices(args: &[Expr], facts: &MethodUsageFacts) -> Vec<usize> {
+    args.iter()
+        .enumerate()
+        .filter_map(|(index, arg)| {
+            let Expr::Var(name) = arg else {
+                return None;
+            };
+            let refined = facts
+                .visible_binding_id_for_name(name)
+                .is_some_and(|binding| facts.active_non_null_bindings.contains(&binding))
+                || (facts.visible_binding_id_for_name(name).is_none()
+                    && facts.active_non_null_idless_names.contains(name));
+            refined.then_some(index)
+        })
+        .collect()
+}
+
 fn call_argument_self_fields(
     args: &[Expr],
     facts: &MethodUsageFacts,
@@ -3929,6 +4090,26 @@ fn source_call_arg_nullability(
     arg: &Expr,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) -> Option<NullabilityState> {
+    if matches!(arg, Expr::Literal(crate::java_ir::Literal::Null)) {
+        return Some(NullabilityState::DefinitelyNull);
+    }
+    if let Expr::Ternary {
+        then_expr,
+        else_expr,
+        ..
+    } = arg
+    {
+        let then_state = source_call_arg_nullability(then_expr, source_return_nullability)
+            .unwrap_or(NullabilityState::DefinitelyNonNull);
+        let else_state = source_call_arg_nullability(else_expr, source_return_nullability)
+            .unwrap_or(NullabilityState::DefinitelyNonNull);
+        return Some(crate::lattice::field_nullability_join(
+            then_state, else_state,
+        ));
+    }
+    if let Expr::Cast { expr, .. } = arg {
+        return source_call_arg_nullability(expr, source_return_nullability);
+    }
     let Expr::Call {
         receiver,
         name,
@@ -3965,12 +4146,13 @@ fn source_return_nullability_by_call_name(
                 crate::signature::source_method_return_nullability_constraints(method);
             let state = constraints
                 .into_iter()
-                .find_map(|constraint| match constraint {
+                .filter_map(|constraint| match constraint {
                     crate::signature::SignatureConstraint::RequiredStorageNullability(state) => {
                         Some(state)
                     }
                     _ => None,
-                })?;
+                })
+                .reduce(crate::lattice::field_nullability_join)?;
             Some((source_method_rust_name(method), method.params.len(), state))
         })
         .flat_map(|(rust_name, arity, state)| {
@@ -4083,6 +4265,9 @@ fn analyze_expr_with_context(
                 result_returned,
             );
             let argument_bindings = call_argument_bindings(args, facts);
+            let non_null_arg_indices = non_null_argument_indices(args, facts);
+            let nullable_source_call_arg_indices =
+                nullable_source_call_arg_indices(args, source_return_nullability);
             facts.call_sites.push(CallSiteUse {
                 name: name.clone(),
                 arg_count: args.len(),
@@ -4093,10 +4278,7 @@ fn analyze_expr_with_context(
                     .is_some_and(|receiver| expr_targets_self_field(receiver, facts, field_names)),
                 receiver_type: receiver_type.clone(),
                 null_arg_indices: null_argument_indices(args),
-                nullable_source_call_arg_indices: nullable_source_call_arg_indices(
-                    args,
-                    source_return_nullability,
-                ),
+                nullable_source_call_arg_indices: nullable_source_call_arg_indices.clone(),
                 argument_bindings: argument_bindings.clone(),
                 argument_self_fields: call_argument_self_fields(args, facts, field_names),
                 boundary: call_boundary,
@@ -4119,6 +4301,8 @@ fn analyze_expr_with_context(
                     arg_count: args.len(),
                     literal_null_arg_indices: null_argument_indices(args),
                     argument_bindings: argument_bindings.clone(),
+                    non_null_arg_indices: non_null_arg_indices.clone(),
+                    nullable_source_call_arg_indices: nullable_source_call_arg_indices.clone(),
                 });
             }
             if let Some(receiver) = receiver
@@ -4134,6 +4318,8 @@ fn analyze_expr_with_context(
                         has_literal_null_arg: args.iter().any(expr_is_null_literal),
                         literal_null_arg_indices: null_argument_indices(args),
                         argument_bindings,
+                        non_null_arg_indices,
+                        nullable_source_call_arg_indices,
                     },
                 );
             }
@@ -5278,16 +5464,117 @@ fn call_receiver_java_type_with_context(
     }
 }
 
+fn stream_of_forwarded_array_source<'a>(
+    expr: &'a Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    type_env: &TypeEnv,
+) -> Option<&'a Expr> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let [source] = args.as_slice() else {
+        return None;
+    };
+    if !matches!(receiver.as_ref(), Expr::Var(owner)
+        if crate::stdlib::canonical_external_receiver_type_key(owner) == "Stream")
+        || name != "of"
+        || !matches!(
+            returned_expr_type(source, facts, field_names, field_types, type_env),
+            Some(JavaType::Array(_))
+        )
+    {
+        return None;
+    }
+    Some(source)
+}
+
+fn sequence_element_preserving_return_source(expr: &Expr) -> Option<&Expr> {
+    let Expr::Call {
+        receiver: Some(source),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if matches!(name.as_str(), "iterator" | "spliterator") && args.is_empty() {
+        return Some(source);
+    }
+    if name != "collect" || args.len() != 1 {
+        return None;
+    }
+    let Expr::Call {
+        receiver: Some(collector_owner),
+        name: collector_name,
+        args: collector_args,
+        ..
+    } = &args[0]
+    else {
+        return None;
+    };
+    (collector_args.is_empty()
+        && matches!(
+            collector_name.as_str(),
+            "toList" | "to_list" | "toSet" | "to_set"
+        )
+        && matches!(collector_owner.as_ref(), Expr::Var(owner)
+            if crate::stdlib::canonical_external_receiver_type_key(owner) == "Collectors"))
+    .then_some(source)
+}
+
+fn returned_expr_type(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    type_env: &TypeEnv,
+) -> Option<JavaType> {
+    match expr {
+        Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
+            declared_field_type(field_types, name).cloned()
+        }
+        Expr::FieldAccess(receiver, field_name) if matches!(receiver.as_ref(), Expr::This) => {
+            declared_field_type(field_types, field_name).cloned()
+        }
+        _ => Some(crate::types::infer_expr_type(expr, type_env)),
+    }
+}
+
 fn source_field_type(
     current_type: &str,
     field_name: &str,
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &FactSet,
 ) -> Option<JavaType> {
-    field_types.get(field_name).cloned().or_else(|| {
-        semantic_facts
-            .external_field_for(current_type, field_name)
-            .and_then(|field| field.field_type.clone())
+    declared_field_type(field_types, field_name)
+        .cloned()
+        .or_else(|| {
+            semantic_facts
+                .external_field_for(current_type, field_name)
+                .or_else(|| {
+                    semantic_facts
+                        .external_field_for(current_type, &crate::parser::to_snake_case(field_name))
+                })
+                .and_then(|field| field.field_type.clone())
+        })
+}
+
+fn declared_field_type<'a>(
+    field_types: &'a HashMap<String, JavaType>,
+    source_name: &str,
+) -> Option<&'a JavaType> {
+    field_types.get(source_name).or_else(|| {
+        let rust_name = crate::parser::to_snake_case(source_name);
+        field_types.get(&rust_name)
     })
 }
 
@@ -5467,6 +5754,59 @@ fn restore_scoped_binding_uses(
 ) {
     for (name, saved) in saved_bindings.into_iter().rev() {
         restore_binding_use_facts(facts, name, saved);
+    }
+}
+
+#[derive(Debug)]
+enum ActiveNonNullBinding {
+    Binding(BindingId),
+    IdlessName(String),
+}
+
+fn activate_branch_non_null_binding(
+    facts: &mut MethodUsageFacts,
+    condition: &Expr,
+    true_branch: bool,
+) -> Option<ActiveNonNullBinding> {
+    let TernaryNullRefinementPlan::LocalNullTest {
+        local_name,
+        then_non_null,
+        else_non_null,
+    } = plan_ternary_null_refinement(condition)
+    else {
+        return None;
+    };
+    if !(if true_branch {
+        then_non_null
+    } else {
+        else_non_null
+    }) {
+        return None;
+    }
+    if let Some(binding) = facts.visible_binding_id_for_name(local_name) {
+        return facts
+            .active_non_null_bindings
+            .insert(binding.clone())
+            .then_some(ActiveNonNullBinding::Binding(binding));
+    }
+    facts
+        .active_non_null_idless_names
+        .insert(local_name.to_string())
+        .then_some(ActiveNonNullBinding::IdlessName(local_name.to_string()))
+}
+
+fn restore_branch_non_null_binding(
+    facts: &mut MethodUsageFacts,
+    activated: Option<ActiveNonNullBinding>,
+) {
+    match activated {
+        Some(ActiveNonNullBinding::Binding(binding)) => {
+            facts.active_non_null_bindings.remove(&binding);
+        }
+        Some(ActiveNonNullBinding::IdlessName(name)) => {
+            facts.active_non_null_idless_names.remove(&name);
+        }
+        None => {}
     }
 }
 
@@ -5862,6 +6202,60 @@ mod tests {
         FacadeSlot, FactProvenance, ReceiverAbi, ResultAbi, Staticness,
     };
     use crate::java_ir::{PrimitiveType, TypeKind};
+
+    #[test]
+    fn package_prefixed_summary_owner_matches_emitted_owner_but_peer_packages_do_not() {
+        assert!(!usage_distinct_qualified_type_owners(
+            "org.example.Outer.Inner",
+            "Outer.Inner"
+        ));
+        assert!(usage_distinct_qualified_type_owners("a.Item", "b.Item"));
+    }
+
+    #[test]
+    fn exact_callable_mutability_crosses_only_package_prefix_owner_aliases() {
+        let parsed = crate::parser::parse_java_source(
+            "class Outer { class Inner { void touch(int value) {} } }",
+        );
+        let outer = &parsed.program.types[0];
+        let inner = outer
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Type(inner) => Some(inner),
+                _ => None,
+            })
+            .expect("nested type");
+        let method = inner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("nested method");
+
+        let mut usage = UsageFacts::default();
+        let mut mutating = MethodUsageFacts::default();
+        mutating.mutates_self = true;
+        usage.methods_by_java_key.insert(
+            JavaCallableKey::source_method_for_owner(
+                JavaOwnerKey::resolved_source("org.example.Outer.Inner"),
+                method,
+            ),
+            mutating,
+        );
+
+        assert!(usage.source_method_or_alias_mutates(inner, method));
+
+        let mut flattened = inner.clone();
+        flattened.name = "Outer_Inner".to_string();
+        assert!(usage.source_method_or_alias_mutates(&flattened, method));
+
+        let mut peer = inner.clone();
+        peer.name = "other.Outer.Inner".to_string();
+        assert!(!usage.source_method_or_alias_mutates(&peer, method));
+    }
 
     fn binding_fact(name: &str, binding: Option<BindingId>) -> BindingUseFacts {
         BindingUseFacts {
@@ -7806,6 +8200,51 @@ class LambdaKeywordParamScope {
                 &usage,
             ),
             "explicit static-owner pseudo receivers remain valid id-less compatibility input"
+        );
+    }
+
+    #[test]
+    fn resolved_camel_case_field_receiver_retains_declared_collection_type() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.ArrayList;
+            import java.util.List;
+            class Values {
+                private final List<String> recordList = new ArrayList<>();
+                String maybeValue(String input) { return input.isEmpty() ? null : input; }
+                void addValue(String input) { this.recordList.add(maybeValue(input)); }
+            }
+            "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "addValue" => Some(method),
+                _ => None,
+            })
+            .expect("addValue");
+        let usage = analyze_usage(&resolved.program);
+        let method_usage = usage.source_method_usage(ty, method).expect("method usage");
+        assert!(
+            method_usage.field_uses().iter().any(|usage| matches!(
+                usage,
+                FieldUse::ReceiverForCall {
+                    field_name,
+                    receiver_type: Some(JavaType::Named { name, args }),
+                    name: method_name,
+                    nullable_source_call_arg_indices,
+                    ..
+                } if field_name == "recordList"
+                    && name == "List"
+                    && args == &[JavaType::String]
+                    && method_name == "add"
+                    && nullable_source_call_arg_indices == &[0]
+            )),
+            "{:#?}",
+            method_usage.field_uses()
         );
     }
 }

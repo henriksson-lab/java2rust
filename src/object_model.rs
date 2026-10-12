@@ -698,7 +698,9 @@ fn dispatch_requirements_for_binding_use(
         }
         BindingUse::AssignedSubtypeToCollectionElement { .. }
         | BindingUse::AssignedSubtypeToCallArgument { .. } => Vec::new(),
-        BindingUse::StoredInField { .. } | BindingUse::Returned => {
+        BindingUse::StoredInField { .. }
+        | BindingUse::Returned
+        | BindingUse::ReturnedNullableSequenceElements => {
             vec![DispatchRequirementKind::NeedsOwnedPolymorphicStorage]
         }
         BindingUse::InstanceOfTarget { .. } => vec![DispatchRequirementKind::NeedsInstanceof],

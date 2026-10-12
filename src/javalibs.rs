@@ -133,7 +133,8 @@ pub(crate) fn is_static_facade_method(receiver_type: &str, method: &str, arg_cou
     }
     matches!(
         (receiver.as_str(), method, arg_count),
-        ("IOUtils", "getPath", 1)
+        ("CharBuffer", "allocate", 1)
+            | ("IOUtils", "getPath", 1)
             | (
                 "org.broadinstitute.hellbender.utils.io.IOUtils",
                 "getPath",

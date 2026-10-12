@@ -470,8 +470,13 @@ pub fn owned_string_value_shape() -> RustSlotShape {
     RustSlotShape::conservative(JavaType::String)
 }
 
-pub fn string_list_value_shape() -> RustSlotShape {
-    RustSlotShape::conservative(crate::types::list_java_type(JavaType::String))
+pub fn string_split_array_value_shape() -> RustSlotShape {
+    // String.split returns a Java reference array, not a List.  Use the
+    // storage shape so its already-nullable element carrier agrees with the
+    // `java_string_split` runtime ABI (`Vec<Option<String>>`).  Describing the
+    // result as `List<String>` makes destination-slot lowering widen every
+    // element a second time into `Option<Option<String>>`.
+    RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::String)))
 }
 
 pub(crate) fn apply_borrowed_string_content_projection(shape: &mut RustSlotShape) {

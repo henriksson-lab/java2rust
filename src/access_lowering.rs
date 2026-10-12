@@ -27,7 +27,7 @@ pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
             static_member_import_owner(name, env).or_else(|| env.static_field_access_owner(name))
         {
             owner_associated_path_projection(
-                &crate::java_naming::rust_name_for_java_named_type(owner),
+                &rust_name_for_static_member_owner(owner, env),
                 static_name,
             )
         } else {
@@ -37,6 +37,18 @@ pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
         RustExpr::Var(access_name.to_string())
     } else {
         RustExpr::Var(crate::parser::to_snake_case(name))
+    }
+}
+
+fn rust_name_for_static_member_owner(owner: &str, env: &ShapeEnv) -> String {
+    let simple = owner
+        .rsplit(['.', '$'])
+        .find(|segment| !segment.is_empty())
+        .unwrap_or(owner);
+    if env.type_env().static_type_alias(simple) == Some(owner) {
+        crate::java_naming::rust_name_for_java_named_type(simple)
+    } else {
+        crate::java_naming::rust_name_for_java_named_type(owner)
     }
 }
 
@@ -287,6 +299,17 @@ mod tests {
             lower_bare_name("KIND", &env),
             RustExpr::Path(vec!["AItem".to_string(), "KIND".to_string()])
         );
+
+        let mut imported_env = ShapeEnv::new();
+        imported_env.insert_static_field_shape_for_owner_with_access_name(
+            "org.example.Constants",
+            "LIMIT",
+            "LIMIT",
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+        );
+        imported_env.insert_static_member_import("LIMIT", "org.example.Constants");
+        imported_env.insert_static_type_alias("Constants", "org.example.Constants");
+        assert_eq!(render_bare_name("LIMIT", &imported_env), "Constants::LIMIT");
     }
 
     #[test]

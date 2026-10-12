@@ -187,3 +187,129 @@ impl Trimmer for std::sync::Arc<LeadingTrimmer> {{
         "{module}"
     );
 }
+
+#[test]
+fn shared_merger_preserves_macros_that_generate_promoted_trait_impls() {
+    let dir = temp_dir("macro_generated_trait_impls");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    let support = r#"
+pub trait JavaDisplayElement {
+    fn java_display(&self) -> String;
+}
+
+macro_rules! impl_java_display_element {
+    ($($ty:ty),* $(,)?) => {
+        $(
+            impl JavaDisplayElement for $ty {
+                fn java_display(&self) -> String { self.to_string() }
+            }
+        )*
+    };
+}
+
+impl_java_display_element!(i32, String);
+"#;
+    fs::write(
+        generated.join("00001_UseA.rs"),
+        format!("{support}\npub struct UseA;\n"),
+    )
+    .unwrap();
+    fs::write(
+        generated.join("00002_UseB.rs"),
+        format!("{support}\npub struct UseB;\n"),
+    )
+    .unwrap();
+
+    let (shared, _) = run_merger(&dir);
+    let shared = fs::read_to_string(shared).unwrap();
+    assert_eq!(
+        shared.matches("pub trait JavaDisplayElement").count(),
+        1,
+        "{shared}"
+    );
+    assert_eq!(
+        shared
+            .matches("macro_rules! impl_java_display_element")
+            .count(),
+        1,
+        "{shared}"
+    );
+    assert_eq!(
+        shared
+            .matches("impl_java_display_element!(i32, String);")
+            .count(),
+        1,
+        "{shared}"
+    );
+    for module in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let module = fs::read_to_string(generated.join(module)).unwrap();
+        assert!(
+            !module.contains("macro_rules! impl_java_display_element"),
+            "{module}"
+        );
+        assert!(!module.contains("impl_java_display_element!("), "{module}");
+    }
+}
+
+#[test]
+fn shared_merger_does_not_duplicate_impls_supplied_by_an_existing_macro_family() {
+    let dir = temp_dir("existing_macro_impl_family");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    let support = r#"
+pub trait JavaDisplayElement {
+    fn java_display(&self) -> String;
+}
+
+macro_rules! local_display_impls {
+    ($($ty:ty),* $(,)?) => {
+        $(impl JavaDisplayElement for $ty {
+            fn java_display(&self) -> String { self.to_string() }
+        })*
+    };
+}
+local_display_impls!(i32, String);
+"#;
+    for module in ["00001_UseA.rs", "00002_UseB.rs"] {
+        fs::write(
+            generated.join(module),
+            format!("{support}\npub struct Use;\n"),
+        )
+        .unwrap();
+    }
+    fs::write(
+        dir.join("shared.rs"),
+        r#"pub trait JavaDisplayElement {
+    fn java_display(&self) -> String;
+}
+macro_rules! shared_display_impls {
+    ($trait_name:ident) => {
+        impl $trait_name for i32 {
+            fn java_display(&self) -> String { self.to_string() }
+        }
+        impl $trait_name for String {
+            fn java_display(&self) -> String { self.to_string() }
+        }
+    };
+}
+shared_display_impls!(JavaDisplayElement);
+"#,
+    )
+    .unwrap();
+
+    let (shared, _) = run_merger(&dir);
+    let shared = fs::read_to_string(shared).unwrap();
+    assert_eq!(
+        shared
+            .matches("shared_display_impls!(JavaDisplayElement)")
+            .count(),
+        1,
+        "{shared}"
+    );
+    assert!(
+        !shared.contains("macro_rules! local_display_impls"),
+        "{shared}"
+    );
+    assert!(!shared.contains("local_display_impls!("), "{shared}");
+}

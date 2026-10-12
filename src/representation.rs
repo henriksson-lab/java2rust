@@ -48,6 +48,11 @@ pub struct RepresentationPlan {
     /// A source `java.util.Map.Entry` implementation needs a virtual value
     /// carrier; tuple snapshots cannot retain its override or shared state.
     source_map_entry_value_carrier: bool,
+    /// Java map interfaces can hold implementations with incompatible native
+    /// Rust layouts. A comparator-backed TreeMap makes that distinction
+    /// observable, so the whole program must use one semantic map carrier at
+    /// Map boundaries instead of independently choosing HashMap/BTreeMap.
+    comparator_backed_native_map_carrier: bool,
     /// Concrete native-map fields whose entries escape as Java `Map.Entry`
     /// values. These fields need a shared tracked-map handle so an entry and
     /// subsequent field accesses observe the same map node.
@@ -224,6 +229,7 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     collect_declared_supertype_names(program, &mut plan.declared_supertype_by_subtype);
     collect_raw_generic_arguments(program, &mut plan.raw_generic_arguments);
     collect_erased_wildcard_bound_carriers(program, &mut plan.erased_wildcard_bound_carriers);
+    plan.comparator_backed_native_map_carrier = program_uses_comparator_backed_tree_map(program);
     plan.live_native_map_fields = live_native_map_fields(program, false);
     plan.live_static_native_map_fields = live_native_map_fields(program, true);
     let (nullable_keys, nullable_values) =
@@ -296,6 +302,27 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     record_simple_super_copyback_hierarchy_edges(program, &mut plan);
     plan_existential_interface_carriers(program, &mut plan);
     plan
+}
+
+fn program_uses_comparator_backed_tree_map(program: &Program) -> bool {
+    let mut found = false;
+    crate::semantic_analysis::walk_program_exprs(program, &mut |expr| {
+        let Expr::New { ty, args, .. } = expr else {
+            return;
+        };
+        let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = ty else {
+            return;
+        };
+        if name.rsplit('.').next() != Some("TreeMap") || args.len() != 1 {
+            return;
+        }
+        let Expr::FieldAccess(receiver, field) = &args[0] else {
+            return;
+        };
+        found = field == "CASE_INSENSITIVE_ORDER"
+            && matches!(receiver.as_ref(), Expr::Var(owner) if owner.rsplit('.').next() == Some("String"));
+    });
+    found
 }
 
 fn plan_existential_interface_carriers(program: &Program, plan: &mut RepresentationPlan) {
@@ -2003,6 +2030,10 @@ impl RepresentationPlan {
 
     pub fn source_map_entry_uses_value_carrier(&self) -> bool {
         self.source_map_entry_value_carrier
+    }
+
+    pub(crate) fn uses_comparator_backed_native_map_carrier(&self) -> bool {
+        self.comparator_backed_native_map_carrier
     }
 
     pub(crate) fn field_needs_live_native_map(&self, owner: &str, field: &str) -> bool {

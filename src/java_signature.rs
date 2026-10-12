@@ -131,6 +131,10 @@ impl JavaCallableKey {
     pub(crate) fn java_name(&self) -> &str {
         &self.java_name
     }
+
+    pub(crate) fn is_instance(&self) -> bool {
+        matches!(self.staticness, JavaCallableStaticness::Instance)
+    }
 }
 
 impl JavaCallableSlotKey {

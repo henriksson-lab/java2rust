@@ -1243,6 +1243,34 @@ class SelfMutabilityPropagation {
 }
 
 #[test]
+fn usage_propagates_self_mutability_through_nested_type_calls() {
+    let translation = translate_source(
+        r#"
+class Outer {
+    class Helper {
+        int count;
+
+        void write() {
+            increment();
+            this.increment();
+        }
+
+        void increment() {
+            count++;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("pub fn write(&mut self)"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn usage_self_mutability_propagation_uses_resolved_overload_identity() {
     let parsed = parse_java_source(
         r#"
@@ -8911,6 +8939,8 @@ class ReadOnlyExternalReceiverParam {
                 has_literal_null_arg: false,
                 literal_null_arg_indices: Vec::new(),
                 argument_bindings: Vec::new(),
+                non_null_arg_indices: Vec::new(),
+                nullable_source_call_arg_indices: Vec::new(),
             },
             BindingUse::ContentRead,
         ]

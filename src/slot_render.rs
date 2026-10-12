@@ -46,6 +46,7 @@ pub enum SlotDefaultValuePolicy {
     EmptyStringView,
     EmptySliceView,
     PrimitiveBooleanZero,
+    PrimitiveCharZero,
     PrimitiveNumericZero,
     PrimitiveFloatZero,
     PrimitiveDoubleZero,
@@ -178,11 +179,43 @@ pub fn rust_type_for_slot_with_facts_and_representations(
     facts: &FactSet,
     representations: &RepresentationPlan,
 ) -> RustType {
-    let rendered =
-        rust_type_for_slot_with_facts_and_representations_unwrapped(shape, facts, representations);
+    rust_type_for_slot_with_effective_facts_and_representations(
+        shape,
+        facts,
+        EffectiveFacts::new(facts),
+        representations,
+    )
+}
+
+pub fn rust_type_for_slot_with_facts_representations_and_external_index(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    external_index: &crate::facts::ExternalFactLookupIndex<'_>,
+) -> RustType {
+    rust_type_for_slot_with_effective_facts_and_representations(
+        shape,
+        facts,
+        EffectiveFacts::with_external_index(facts, external_index),
+        representations,
+    )
+}
+
+fn rust_type_for_slot_with_effective_facts_and_representations(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+    effective_facts: EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> RustType {
+    let rendered = rust_type_for_slot_with_facts_and_representations_unwrapped(
+        shape,
+        facts,
+        effective_facts,
+        representations,
+    );
     let rendered = shared_handle_slot_rust_type_with_representations(
         shape,
-        &EffectiveFacts::new(facts),
+        &effective_facts,
         representations,
         rendered,
     );
@@ -204,9 +237,9 @@ pub fn rust_type_for_slot_with_facts_and_representations(
 fn rust_type_for_slot_with_facts_and_representations_unwrapped(
     shape: &RustSlotShape,
     facts: &FactSet,
+    effective_facts: EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
-    let effective_facts = EffectiveFacts::new(facts);
     if let Some(element_ty) = shape.optional_element_type() {
         if let JavaType::Named { name, args } = &element_ty
             && args.is_empty()
@@ -245,11 +278,14 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
         }
         // Through the wrapping entry point: the element is where the handle
         // belongs, giving `Option<Rc<T>>`.
-        return RustType::Option(Box::new(rust_type_for_slot_with_facts_and_representations(
-            &element_shape,
-            facts,
-            representations,
-        )));
+        return RustType::Option(Box::new(
+            rust_type_for_slot_with_effective_facts_and_representations(
+                &element_shape,
+                facts,
+                effective_facts,
+                representations,
+            ),
+        ));
     }
 
     let viewed = match (&shape.view, &shape.dispatch) {
@@ -272,9 +308,9 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
             // is the single place that wraps it in `&`/`&mut`. Calling the
             // slot renderer recursively would apply ownership twice and emit
             // `&&Array2<T>` or `&mut &mut Array2<T>`.
-            rust_type_for_java_type_with_facts_and_representations(
+            rust_type_for_java_type_with_effective_facts_and_representations(
                 &shape.java_ty,
-                facts,
+                effective_facts,
                 representations,
             )
         }
@@ -313,9 +349,9 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
             // type as erased, but erasing here would discard the facade's
             // payload parameter (for example `Future<T>`) and make its methods
             // disagree with collection storage using the same Java type.
-            rust_type_for_java_type_with_facts_and_representations(
+            rust_type_for_java_type_with_effective_facts_and_representations(
                 &shape.java_ty,
-                facts,
+                effective_facts,
                 representations,
             )
         }
@@ -340,9 +376,9 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
             } else if crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some()
                 || matches!(shape.java_ty, JavaType::Array(_))
             {
-                rust_type_for_java_type_with_facts_and_representations(
+                rust_type_for_java_type_with_effective_facts_and_representations(
                     &shape.java_ty,
-                    facts,
+                    effective_facts,
                     representations,
                 )
             } else {
@@ -350,9 +386,9 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 // carrier can still arrive here as a concrete slot.  Render
                 // through the representation map rather than leaking its
                 // nominal Java payload type into a carrier-typed signature.
-                rust_type_for_java_type_with_facts_and_representations(
+                rust_type_for_java_type_with_effective_facts_and_representations(
                     &shape.java_ty,
-                    facts,
+                    effective_facts,
                     representations,
                 )
             }
@@ -1037,6 +1073,9 @@ pub fn slot_default_value_policy_with_effective_facts(
         (_, _, JavaType::Primitive(PrimitiveType::Boolean)) => {
             SlotDefaultValuePolicy::PrimitiveBooleanZero
         }
+        (_, _, JavaType::Primitive(PrimitiveType::Char)) => {
+            SlotDefaultValuePolicy::PrimitiveCharZero
+        }
         (_, _, JavaType::Primitive(PrimitiveType::Float)) => {
             SlotDefaultValuePolicy::PrimitiveFloatZero
         }
@@ -1137,6 +1176,7 @@ fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
             expr: Box::new(RustExpr::ArrayLiteral(Vec::new())),
         },
         SlotDefaultValuePolicy::PrimitiveBooleanZero => RustExpr::Literal("false".to_string()),
+        SlotDefaultValuePolicy::PrimitiveCharZero => RustExpr::Literal("'\\0'".to_string()),
         SlotDefaultValuePolicy::PrimitiveNumericZero => RustExpr::Literal("0".to_string()),
         SlotDefaultValuePolicy::PrimitiveFloatZero => RustExpr::Literal("0f32".to_string()),
         SlotDefaultValuePolicy::PrimitiveDoubleZero => RustExpr::Literal("0f64".to_string()),
@@ -1186,6 +1226,31 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
     representations: &RepresentationPlan,
 ) -> RustType {
     let effective_facts = EffectiveFacts::new(facts);
+    rust_type_for_java_type_with_effective_facts_and_representations(
+        ty,
+        effective_facts,
+        representations,
+    )
+}
+
+pub fn rust_type_for_java_type_with_facts_representations_and_external_index(
+    ty: &JavaType,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    external_index: &crate::facts::ExternalFactLookupIndex<'_>,
+) -> RustType {
+    rust_type_for_java_type_with_effective_facts_and_representations(
+        ty,
+        EffectiveFacts::with_external_index(facts, external_index),
+        representations,
+    )
+}
+
+fn rust_type_for_java_type_with_effective_facts_and_representations(
+    ty: &JavaType,
+    effective_facts: EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> RustType {
     if java_array_rank(ty) >= 3 {
         // `Array2` is an exact rank-two carrier.  If its rank-two suffix is
         // rendered recursively as a generic argument of a higher-rank array,
@@ -1208,12 +1273,12 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
         // erasure explicit before choosing the concrete/trait/closed carrier.
         // Doing this at the canonical renderer keeps declarations, locals,
         // arguments, and hierarchy carriers on the same ABI.
-        return rust_type_for_java_type_with_facts_and_representations(
+        return rust_type_for_java_type_with_effective_facts_and_representations(
             &JavaType::Named {
                 name: name.clone(),
                 args: erased_args.to_vec(),
             },
-            facts,
+            effective_facts,
             representations,
         );
     }
@@ -1374,6 +1439,28 @@ pub fn rust_type_for_java_type_with_facts_and_representations(
             kind if kind.is_map_like() => {}
             _ => {}
         }
+    }
+
+    if representations.uses_comparator_backed_native_map_carrier()
+        && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
+        && kind.is_map_like()
+        && let Some((key, value)) = crate::stdlib::java_map_type_args(ty)
+    {
+        return rust_generic_type(
+            "JavaSemanticHashMap",
+            vec![
+                rust_type_for_java_generic_arg_with_representations(
+                    key,
+                    &effective_facts,
+                    representations,
+                ),
+                rust_type_for_java_generic_arg_with_representations(
+                    value,
+                    &effective_facts,
+                    representations,
+                ),
+            ],
+        );
     }
 
     if let Some(ty) = rust_type_for_external_generic_facade_with_representations(
@@ -2775,6 +2862,27 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shared_external_index_preserves_representation_aware_slot_rendering() {
+        let facts = FactSet::default();
+        let external_index = facts.external_lookup_index();
+        let representations = RepresentationPlan::default();
+        let shape = RustSlotShape::for_storage(JavaType::Named {
+            name: "Example".to_string(),
+            args: Vec::new(),
+        });
+
+        assert_eq!(
+            rust_type_for_slot_with_facts_representations_and_external_index(
+                &shape,
+                &facts,
+                &representations,
+                &external_index,
+            ),
+            rust_type_for_slot_with_facts_and_representations(&shape, &facts, &representations,)
+        );
+    }
+
+    #[test]
     fn rectangular_primitive_array_default_uses_array2_carrier_default() {
         let shape = RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::Array(
             Box::new(JavaType::Primitive(PrimitiveType::Double)),
@@ -3337,6 +3445,19 @@ class ConcreteReader extends Reader<Item> {}
                 &facts,
             )),
             "Vec<JavaString>"
+        );
+    }
+
+    #[test]
+    fn char_slot_default_is_java_nul_character() {
+        let shape = RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Char));
+
+        assert_eq!(
+            crate::emit::emit_expr(&default_expr_for_slot_with_facts(
+                &shape,
+                &FactSet::default(),
+            )),
+            "'\\0'"
         );
     }
 }

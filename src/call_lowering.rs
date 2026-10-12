@@ -35,7 +35,7 @@ use crate::coercion::{
     native_collection_default_constructor_projection, native_collection_empty_new_projection,
     native_collection_from_source_projection, native_collection_from_typed_source_projection,
     native_collection_with_capacity_projection, objects_equals_projection,
-    objects_is_null_projection, objects_non_null_projection,
+    objects_is_null_projection, objects_non_null_projection, objects_require_non_null_projection,
     optional_get_owned_value_result_projection, optional_of_projection,
     optional_or_else_owned_value_projection, owned_collection_to_vec_projection_for_receiver_type,
     owned_map_keys_vec_projection, owned_map_values_vec_projection,
@@ -48,7 +48,8 @@ use crate::coercion::{
     sequence_index_of_projection, string_char_at_result_projection,
     string_compare_to_ignore_case_projection, string_compare_to_projection,
     string_equals_ignore_case_projection, string_format_projection,
-    string_from_byte_range_projection, string_from_bytes_projection, string_get_bytes_projection,
+    string_from_byte_range_projection, string_from_bytes_projection,
+    string_from_char_range_projection, string_from_chars_projection, string_get_bytes_projection,
     string_get_bytes_result_projection, string_hash_code_projection, string_index_of_projection,
     string_join_collection_projection, string_join_varargs_projection,
     string_last_index_of_projection, string_literal_from_rust_char_literal_expr,
@@ -855,6 +856,14 @@ fn apply_native_java_static_method(
             };
             primitive_is_nan_projection(arg)
         }
+        NativeJavaStaticMethod::CharacterValueOf => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Character.valueOf requires one argument");
+            };
+            // Boxed `Character` uses the same direct `char` representation as
+            // primitive `char`; Java boxing therefore needs no runtime call.
+            arg
+        }
         NativeJavaStaticMethod::CharacterPredicate {
             java_name,
             rust_method,
@@ -935,6 +944,45 @@ fn apply_native_java_static_method(
                 );
             }
             string_value_of_lowered_arg_to_string(value)
+        }
+        NativeJavaStaticMethod::ObjectsRequireNonNull => {
+            let mut args = args.into_iter();
+            let Some(value) = args.next() else {
+                return compile_error_call("Objects.requireNonNull requires one or two arguments");
+            };
+            match args.next() {
+                None => objects_require_non_null_projection(value),
+                Some(message) if args.next().is_none() => {
+                    let nullable = crate::coercion::rust_expr_may_be_java_null_value(&value);
+                    let value_name = "_java_require_non_null_value";
+                    let tail = RustExpr::Var(value_name.to_string());
+                    let tail = if nullable {
+                        crate::coercion::unwrap_java_null_receiver_projection(tail)
+                    } else {
+                        tail
+                    };
+                    RustExpr::Block {
+                        stmts: vec![
+                            RustStmt::Let {
+                                mutable: false,
+                                name: value_name.to_string(),
+                                ty: None,
+                                value: Some(value),
+                            },
+                            RustStmt::Let {
+                                mutable: false,
+                                name: "_java_require_non_null_message".to_string(),
+                                ty: None,
+                                value: Some(message),
+                            },
+                        ],
+                        tail: Some(Box::new(tail)),
+                    }
+                }
+                Some(_) => {
+                    compile_error_call("Objects.requireNonNull requires one or two arguments")
+                }
+            }
         }
         NativeJavaStaticMethod::ObjectsNonNull => {
             let Some(arg) = args.into_iter().next() else {
@@ -3228,6 +3276,8 @@ fn apply_native_string_new_target(target: NativeStringNewTarget, args: Vec<RustE
         NativeStringNewTarget::FromString => string_from_string_constructor_expr(args),
         NativeStringNewTarget::FromBytes => string_from_bytes_constructor_expr(args),
         NativeStringNewTarget::FromByteRange => string_from_byte_range_constructor_expr(args),
+        NativeStringNewTarget::FromChars => string_from_chars_constructor_expr(args),
+        NativeStringNewTarget::FromCharRange => string_from_char_range_constructor_expr(args),
     }
 }
 
@@ -3255,6 +3305,22 @@ fn string_from_bytes_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
     string_from_bytes_projection(bytes)
 }
 
+fn string_from_chars_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
+    let chars = args
+        .into_iter()
+        .next()
+        .expect("checked Java String constructor arity");
+    string_from_chars_projection(chars)
+}
+
+fn string_from_char_range_constructor_expr(args: Vec<RustExpr>) -> RustExpr {
+    let mut args = args.into_iter();
+    let chars = args.next().expect("checked Java String constructor arity");
+    let offset = args.next().expect("checked Java String constructor arity");
+    let len = args.next().expect("checked Java String constructor arity");
+    string_from_char_range_projection(chars, offset, len)
+}
+
 fn apply_native_collection_new_target(
     target: &NewTargetPlan,
     native_collection: NativeCollectionNewTarget,
@@ -3262,6 +3328,63 @@ fn apply_native_collection_new_target(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
+    if representations
+        .is_some_and(|representations| representations.uses_comparator_backed_native_map_carrier())
+        && native_collection_new_target_kind(native_collection).is_map_like()
+    {
+        let kind = native_collection_new_target_kind(native_collection);
+        return match native_collection {
+            NativeCollectionNewTarget::Empty { .. } => function_call_projection(
+                RustExpr::path(
+                    if matches!(kind, crate::stdlib::JavaCollectionKind::SortedMap) {
+                        vec!["JavaSemanticHashMap", "new_naturally_ordered"]
+                    } else {
+                        vec!["JavaSemanticHashMap", "new"]
+                    },
+                ),
+                Vec::new(),
+            ),
+            NativeCollectionNewTarget::WithCapacity { .. } => {
+                let capacity = args
+                    .pop()
+                    .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+                function_call_projection(
+                    RustExpr::path(["JavaSemanticHashMap", "with_capacity"]),
+                    vec![index_to_usize_projection(
+                        capacity,
+                        IndexToUsizeProjection::StreamLambdaArgument,
+                    )],
+                )
+            }
+            NativeCollectionNewTarget::FromSource { .. } => args
+                .pop()
+                .map(|source| {
+                    receiver_method_call_projection_exact(
+                        receiver_method_call_projection_exact(source, "into_iter", Vec::new()),
+                        "collect",
+                        Vec::new(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    function_call_projection(
+                        RustExpr::path(["JavaSemanticHashMap", "new"]),
+                        Vec::new(),
+                    )
+                }),
+            NativeCollectionNewTarget::FromSingleArg { .. }
+                if matches!(kind, crate::stdlib::JavaCollectionKind::SortedMap) =>
+            {
+                function_call_projection(
+                    RustExpr::path(["JavaSemanticHashMap", "new_case_insensitive_strings"]),
+                    Vec::new(),
+                )
+            }
+            NativeCollectionNewTarget::FromSingleArg { .. } => args.pop().unwrap_or_else(|| {
+                function_call_projection(RustExpr::path(["JavaSemanticHashMap", "new"]), Vec::new())
+            }),
+            _ => compile_error_call("unsupported comparator-backed Java map constructor"),
+        };
+    }
     let is_priority_queue =
         crate::stdlib::java_type_is_priority_queue(&target.owner_shape().java_ty);
     let is_array_blocking_queue =

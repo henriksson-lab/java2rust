@@ -313,7 +313,7 @@ pub(crate) fn rust_bounds_for_java_type_param(
     // The bound names a library type rather than a source one. Dropping it left
     // the parameter with no capability at all, so `T extends Comparable<T>`
     // lost `compareTo`.
-    jdk_type_param_bound_rust_bounds(bound_name)
+    jdk_type_param_bound_rust_bounds(bound_name, args)
 }
 
 fn primary_named_type_param_bound(bound: &JavaType) -> Option<&str> {
@@ -420,10 +420,15 @@ pub(crate) fn program_projects_java_enum_bound(
 
 /// `Comparable` maps to `Ord`; the generated support library blanket-implements
 /// `JavaComparable` (and therefore `compare_to`) for every `T: Ord`.
-fn jdk_type_param_bound_rust_bounds(bound: &str) -> Vec<String> {
+fn jdk_type_param_bound_rust_bounds(bound: &str, args: &[JavaType]) -> Vec<String> {
     match bound.rsplit('.').next().unwrap_or(bound) {
         "Comparable" => vec!["Ord".to_string()],
         "Cloneable" => vec!["Clone".to_string()],
+        "Map" if args.len() == 2 => vec![format!(
+            "JavaMapInsert<{}, {}>",
+            rust_type_for_java_type_param_bound_arg(&args[0]),
+            rust_type_for_java_type_param_bound_arg(&args[1])
+        )],
         // Every Java enum has stable identity/value semantics and exposes its
         // declaration ordinal. One capability trait carries all of those
         // guarantees instead of rediscovering Clone/Eq/Hash at each use.
@@ -4729,6 +4734,29 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
     representations: Option<&RepresentationPlan>,
 ) -> RustFunction {
     let needs_lifetime = method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
+    let retained_type_param_indices = method
+        .type_params
+        .iter()
+        .enumerate()
+        .filter_map(|(index, type_param)| {
+            (!method_type_param_is_checked_exception_only(method, index, type_param))
+                .then_some(index)
+        })
+        .collect::<Vec<_>>();
+    let retained_type_params = retained_type_param_indices
+        .iter()
+        .map(|index| method.type_params[*index].clone())
+        .collect::<Vec<_>>();
+    let retained_type_param_bounds = retained_type_param_indices
+        .iter()
+        .map(|index| {
+            method
+                .type_param_bounds
+                .get(*index)
+                .cloned()
+                .unwrap_or(None)
+        })
+        .collect::<Vec<_>>();
     let name = method
         .rust_name
         .clone()
@@ -4737,8 +4765,8 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
         name,
         type_params: function_type_params_with_optional_lifetime_and_support_contexts(
             Some(&method.name),
-            &method.type_params,
-            &method.type_param_bounds,
+            &retained_type_params,
+            &retained_type_param_bounds,
             needs_lifetime,
             support_programs,
             &method.params,
@@ -4771,6 +4799,33 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
         is_pub: true,
         receiver: lower_receiver(method_receiver(ty, method, signatures)),
     }
+}
+
+fn method_type_param_is_checked_exception_only(
+    method: &MethodDecl,
+    index: usize,
+    type_param: &str,
+) -> bool {
+    let bound_is_throwable = method
+        .type_param_bounds
+        .get(index)
+        .and_then(|bound| bound.as_ref())
+        .is_some_and(|bound| {
+            matches!(
+                bound,
+                JavaType::Named { name, .. }
+                    if crate::stdlib::canonical_external_receiver_type_key(name)
+                        .rsplit('.')
+                        .next()
+                        == Some("Throwable")
+            )
+        });
+    bound_is_throwable
+        && !java_type_contains_type_param(&method.return_type, type_param)
+        && method
+            .params
+            .iter()
+            .all(|param| !java_type_contains_type_param(&param.ty, type_param))
 }
 
 pub(crate) fn source_method_class_type_param_where_bounds(
@@ -5366,6 +5421,15 @@ fn struct_fields_for_type(
             )
         })
     });
+    // Java nested classes are nestmates: they may access private fields of
+    // their enclosing class. Flattening nested declarations into sibling Rust
+    // structs therefore needs crate visibility for the enclosing storage.
+    // `pub(crate)` preserves external encapsulation while allowing the access
+    // Java's type checker already validated inside this generated crate.
+    let nestmate_visible_fields = ty
+        .members
+        .iter()
+        .any(|member| matches!(member, Member::Type(_)));
     let source_field_rust_names = crate::java_naming::source_instance_field_rust_names(ty);
     fields.extend(ty.members.iter().filter_map(|member| {
         match member {
@@ -5385,7 +5449,8 @@ fn struct_fields_for_type(
                 is_pub_crate: !source_field_is_public(field)
                     && (!source_field_is_private(field)
                         || upcast_visible_fields
-                        || carrier_visible_fields),
+                        || carrier_visible_fields
+                        || nestmate_visible_fields),
             }),
             _ => None,
         }
@@ -6765,7 +6830,10 @@ fn non_literal_static_final_const_type_and_value(
             ),
         ));
     }
-    Some((RustType::Named(rust_name.clone()), RustExpr::Var(rust_name)))
+    // An arbitrary Java object initializer is not a Rust const expression.
+    // It must use the static-storage path so construction happens once and
+    // subsequent reads preserve Java object identity.
+    None
 }
 
 fn static_final_pattern_compile_literal(initializer: &Expr) -> Option<String> {
@@ -6993,6 +7061,12 @@ fn expected_array_element_type(expected_ty: Option<&JavaType>) -> Option<&JavaTy
 fn const_literal_expr_value(literal: &Literal, expected_ty: Option<&JavaType>) -> Option<RustExpr> {
     match (literal, expected_ty) {
         (Literal::String(value), _) => Some(rust_string_literal_projection(value)),
+        (Literal::Int(value), Some(JavaType::Primitive(PrimitiveType::Char))) => {
+            u32::try_from(*value)
+                .ok()
+                .and_then(char::from_u32)
+                .map(|value| RustExpr::Literal(format!("{value:?}")))
+        }
         (Literal::Int(value), Some(JavaType::Primitive(PrimitiveType::Long))) => {
             Some(RustExpr::Literal(format!("{value}i64")))
         }
@@ -7191,7 +7265,11 @@ fn method_params_with_optional_lifetime(
                         .params
                         .get(index)
                         .and_then(|source_param| {
-                            source_java_class_token_param_type(&source_param.ty, facts)
+                            source_java_class_token_param_type(
+                                &source_param.ty,
+                                &param.shape(),
+                                facts,
+                            )
                         })
                         .unwrap_or_else(|| {
                             rust_type_for_slot_with_optional_representations(
@@ -7207,12 +7285,23 @@ fn method_params_with_optional_lifetime(
         .collect()
 }
 
-fn source_java_class_token_param_type(ty: &JavaType, facts: &FactSet) -> Option<RustType> {
+fn source_java_class_token_param_type(
+    ty: &JavaType,
+    solved_shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<RustType> {
     let JavaType::Named { name, .. } = ty else {
         return None;
     };
-    (crate::stdlib::canonical_external_receiver_type_key(name) == "Class")
-        .then(|| rust_type_for_java_type_with_facts(ty, facts))
+    if crate::stdlib::canonical_external_receiver_type_key(name) != "Class" {
+        return None;
+    }
+    let token = rust_type_for_java_type_with_facts(ty, facts);
+    Some(if solved_shape.optional_element_type().is_some() {
+        RustType::Option(Box::new(token))
+    } else {
+        token
+    })
 }
 
 fn optional_sequence_slot(shape: &RustSlotShape) -> bool {

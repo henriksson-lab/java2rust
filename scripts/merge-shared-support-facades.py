@@ -5,7 +5,7 @@ from collections import defaultdict
 from functools import cache
 from pathlib import Path
 
-from rust_item_utils import impl_target_name
+from rust_item_utils import impl_target_name, top_level_macro_items
 
 
 # Private helper types can be representation dependencies of a public support
@@ -157,14 +157,42 @@ def source_owned_nested_type_name(source_type: str, name: str) -> bool:
 
 
 def item_end(lines: list[str], start: int) -> int:
-    if "{" not in lines[start]:
-        return start + 1
     depth = 0
+    saw_body = False
     for index in range(start, len(lines)):
+        if "{" in lines[index]:
+            saw_body = True
         depth += brace_delta(lines[index])
-        if depth <= 0:
+        if saw_body and depth <= 0:
+            return index + 1
+        if not saw_body and ";" in lines[index]:
             return index + 1
     return len(lines)
+
+
+def impl_header_text(lines: list[str], start: int) -> str:
+    """Join a top-level impl header that rustfmt split before its body.
+
+    Generated support contains both ``impl Trait for Type`` followed by a
+    multiline ``where`` clause and trait/target splits where ``for Type`` is
+    on the next line.  Reconciliation must classify the whole header before
+    deciding ownership; treating only its first line silently drops coherent
+    implementations from the assembled crate.
+    """
+    first = lines[start]
+    if not first.lstrip().startswith("impl"):
+        return first
+    fragments = []
+    for index in range(start, min(len(lines), start + 32)):
+        fragment = lines[index].strip()
+        if fragment:
+            fragments.append(fragment)
+        joined = " ".join(fragments)
+        if "{" in fragment or ";" in fragment:
+            return joined
+        if re.search(r"\bwhere\b", fragment):
+            return joined
+    return " ".join(fragments)
 
 
 def attached_start(lines: list[str], start: int) -> int:
@@ -181,7 +209,7 @@ def prelude_support_types(path: Path) -> set[str]:
     lines = path.read_text().splitlines(keepends=True)
     names = set()
     depth = 0
-    for line in lines:
+    for index, line in enumerate(lines):
         if depth == 0:
             match = TYPE_RE.match(line)
             if match:
@@ -205,7 +233,7 @@ def prelude_aliases(path: Path) -> list[tuple[str, str]]:
     lines = path.read_text().splitlines(keepends=True)
     aliases = []
     depth = 0
-    for line in lines:
+    for index, line in enumerate(lines):
         if depth == 0:
             type_match = TYPE_RE.match(line)
             if type_match and type_match.group(2) == source_type:
@@ -264,12 +292,12 @@ def prelude_from_impls(path: Path) -> list[tuple[str, str]]:
     lines = path.read_text().splitlines(keepends=True)
     impls = []
     depth = 0
-    for line in lines:
+    for index, line in enumerate(lines):
         if depth == 0:
             type_match = TYPE_RE.match(line)
             if type_match and type_match.group(2) == source_type:
                 break
-            trait_match = TRAIT_IMPL_RE.match(line)
+            trait_match = TRAIT_IMPL_RE.match(impl_header_text(lines, index))
             if trait_match:
                 from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
                 if from_match:
@@ -291,7 +319,7 @@ def prelude_trait_impls(path: Path) -> list[tuple[str, str]]:
     impls = []
     declared_traits = set()
     depth = 0
-    for line in lines:
+    for index, line in enumerate(lines):
         if depth == 0:
             type_match = TYPE_RE.match(line)
             if type_match and type_match.group(2) == source_type:
@@ -299,7 +327,7 @@ def prelude_trait_impls(path: Path) -> list[tuple[str, str]]:
             trait_decl_match = TRAIT_DECL_RE.match(line)
             if trait_decl_match:
                 declared_traits.add(trait_decl_match.group(1))
-            trait_match = TRAIT_IMPL_RE.match(line)
+            trait_match = TRAIT_IMPL_RE.match(impl_header_text(lines, index))
             if trait_match and trait_impl_name(trait_match.group(1)) in declared_traits:
                 impls.append(
                     (
@@ -460,7 +488,8 @@ def parse_items(
                 index += 1
                 continue
 
-            trait_match = TRAIT_IMPL_RE.match(line)
+            header = impl_header_text(lines, index)
+            trait_match = TRAIT_IMPL_RE.match(header)
             if trait_match and (
                 impl_target_name(trait_match.group(2)) in selected
                 or trait_impl_name(trait_match.group(1)) in selected
@@ -511,7 +540,7 @@ def parse_items(
                 index = end
                 continue
 
-            inherent_match = INHERENT_IMPL_RE.match(line)
+            inherent_match = INHERENT_IMPL_RE.match(header)
             if inherent_match and inherent_match.group(1) in selected:
                 name = inherent_match.group(1)
                 end = item_end(lines, index)
@@ -617,7 +646,8 @@ def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
                 index += 1
                 continue
 
-            trait_match = TRAIT_IMPL_RE.match(line)
+            header = impl_header_text(lines, index)
+            trait_match = TRAIT_IMPL_RE.match(header)
             if trait_match and (
                 impl_target_name(trait_match.group(2)) in selected
                 or trait_impl_name(trait_match.group(1)) in selected
@@ -646,7 +676,7 @@ def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
                 index = end
                 continue
 
-            inherent_match = INHERENT_IMPL_RE.match(line)
+            inherent_match = INHERENT_IMPL_RE.match(header)
             if inherent_match and inherent_match.group(1) in selected:
                 name = inherent_match.group(1)
                 end = item_end(lines, index)
@@ -933,7 +963,7 @@ def remove_duplicate_source_owned_nested_stubs(path: Path) -> None:
                 name = type_match.group(2)
                 start = attached_start(lines, index)
             else:
-                inherent_match = INHERENT_IMPL_RE.match(line)
+                inherent_match = INHERENT_IMPL_RE.match(impl_header_text(lines, index))
                 if inherent_match:
                     name = inherent_match.group(1)
             if name in last_decl_start_by_name and start < last_decl_start_by_name[name]:
@@ -955,7 +985,9 @@ def remove_duplicate_inherent_methods(path: Path) -> None:
     index = 0
     while index < len(lines):
         line = lines[index]
-        if depth == 0 and (impl_match := INHERENT_IMPL_RE.match(line)):
+        if depth == 0 and (
+            impl_match := INHERENT_IMPL_RE.match(impl_header_text(lines, index))
+        ):
             impl_end = item_end(lines, index)
             methods_by_name = defaultdict(list)
             inner = index + 1
@@ -1678,8 +1710,9 @@ def declared_type_names_from_text(text: str) -> set[str]:
 
 def from_impl_keys_from_text(text: str) -> set[tuple[str, str]]:
     keys = set()
-    for line in text.splitlines():
-        trait_match = TRAIT_IMPL_RE.match(line)
+    lines = text.splitlines(keepends=True)
+    for index, line in enumerate(lines):
+        trait_match = TRAIT_IMPL_RE.match(impl_header_text(lines, index))
         if not trait_match:
             continue
         from_match = FROM_TRAIT_RE.match(trait_match.group(1).strip())
@@ -1713,8 +1746,9 @@ def remove_protected_names_from_shared_support(path: Path, names: set[str]) -> N
         end = None
         type_match = TYPE_RE.match(line)
         trait_match = TRAIT_DECL_RE.match(line)
-        inherent_match = INHERENT_IMPL_RE.match(line)
-        impl_match = TRAIT_IMPL_RE.match(line)
+        header = impl_header_text(lines, index)
+        inherent_match = INHERENT_IMPL_RE.match(header)
+        impl_match = TRAIT_IMPL_RE.match(header)
         alias_match = ALIAS_RE.match(line)
         if type_match and type_match.group(2) in names:
             end = item_end(lines, index)
@@ -1812,10 +1846,15 @@ def main() -> int:
     removal_only_names = set(existing_shared_alias_names)
     primary_output_types = {source_type_for(path) for path in rust_paths}
     source_shadowing_aliases = set(existing_shared_alias_names) & primary_output_types
+    source_shadowing_declared_types = (
+        existing_shared_declared_type_names & primary_output_types
+    )
     candidates_by_type = defaultdict(list)
     alias_candidates_by_name = defaultdict(list)
     top_level_functions_by_name = defaultdict(list)
     top_level_values_by_name = defaultdict(list)
+    macro_definitions_by_name = defaultdict(list)
+    macro_invocations_by_name = defaultdict(list)
     for path in merge_input_paths:
         for name in prelude_support_types(path):
             candidates_by_type[name].append(path)
@@ -1834,6 +1873,15 @@ def main() -> int:
             item_with_path = dict(item)
             item_with_path["path"] = path
             top_level_values_by_name[item["name"]].append(item_with_path)
+        for item in top_level_macro_items(path.read_text()):
+            item_with_path = dict(item)
+            item_with_path["path"] = path
+            destination = (
+                macro_definitions_by_name
+                if item["kind"] == "macro_definition"
+                else macro_invocations_by_name
+            )
+            destination[item["name"]].append(item_with_path)
 
     initially_selected_functions = top_level_function_dependency_closure(
         [existing_shared_text]
@@ -2054,10 +2102,12 @@ def main() -> int:
     # in the shared-type manifest. Remove those stale crate-wide identities
     # before the empty-selection fast path as well as before normal merging.
     remove_protected_names_from_shared_support(
-        shared_support_path, protected_source_owned_nested_names
+        shared_support_path,
+        protected_source_owned_nested_names | source_shadowing_declared_types,
     )
     remove_protected_names_from_shared_types(
-        Path(args.shared_types), protected_source_owned_nested_names
+        Path(args.shared_types),
+        protected_source_owned_nested_names | source_shadowing_declared_types,
     )
 
     conflict_lines = ["type\tkind\tdetail\n"]
@@ -2243,10 +2293,12 @@ def main() -> int:
         | source_owned_nested_alias_names,
     )
     remove_protected_names_from_shared_support(
-        shared_support_path, protected_source_owned_nested_names
+        shared_support_path,
+        protected_source_owned_nested_names | source_shadowing_declared_types,
     )
     remove_protected_names_from_shared_types(
-        Path(args.shared_types), protected_source_owned_nested_names
+        Path(args.shared_types),
+        protected_source_owned_nested_names | source_shadowing_declared_types,
     )
     remove_protected_names_from_shared_types(
         Path(args.shared_types), source_shadowing_aliases
@@ -2553,6 +2605,82 @@ def main() -> int:
             "\n" + crate_visible_top_level_value(variants[0]).rstrip() + "\n"
         )
 
+    # Macro-generated impls are coherence-bearing support just like explicit
+    # impl blocks. If a repeated prelude macro defines implementations for a
+    # promoted trait, move one definition and its unique invocations alongside
+    # that trait. Dropping these items leaves the trait visible but silently
+    # removes implementations (for example String support for Arrays helpers).
+    shared_dependency_names = (
+        selected
+        | existing_shared_types
+        | selected_functions
+        | selected_values
+    )
+    selected_macro_names = set()
+    for name, definitions in macro_definitions_by_name.items():
+        definition_paths = {item["path"] for item in definitions}
+        if not macro_invocations_by_name.get(name):
+            continue
+        if len(definition_paths) <= 1 and name not in existing_shared_text:
+            continue
+        if any(
+            referenced_nominal_names([item["text"]], shared_dependency_names)
+            for item in definitions
+        ):
+            selected_macro_names.add(name)
+
+    existing_shared_macro_items = top_level_macro_items(existing_shared_text)
+    existing_shared_macros = {
+        item["name"]
+        for item in existing_shared_macro_items
+        if item["kind"] == "macro_definition"
+    }
+    existing_macro_invocation_identifiers = set()
+    for item in existing_shared_macro_items:
+        if item["kind"] == "macro_invocation":
+            existing_macro_invocation_identifiers.update(
+                IDENTIFIER_RE.findall(item["text"])
+            )
+    for name in sorted(selected_macro_names):
+        definitions = []
+        seen_definitions = set()
+        for item in macro_definitions_by_name[name]:
+            if item["text"] in seen_definitions:
+                continue
+            definitions.append(item["text"])
+            seen_definitions.add(item["text"])
+        if len(definitions) > 1:
+            conflict_lines.append(
+                f"{name}\tmacro_definition\tkept first of {len(definitions)} variants\n"
+            )
+        # The package assembler may already provide the same coherence family
+        # through a differently named shared macro. Its invocation names the
+        # generated trait even when the macro body accepts that trait as a
+        # metavariable. Do not invoke a second prelude macro whose body names
+        # that already-covered trait; Rust would see duplicate impls after
+        # expansion. Other macro families (whose generated traits are absent)
+        # still move normally.
+        generated_shared_names = (
+            referenced_nominal_names(definitions, shared_dependency_names)
+            if definitions
+            else set()
+        )
+        if generated_shared_names & existing_macro_invocation_identifiers:
+            continue
+        if definitions and name not in existing_shared_macros:
+            shared_chunks.append("\n" + definitions[0].rstrip() + "\n")
+
+        invocations = []
+        seen_invocations = set()
+        for item in macro_invocations_by_name[name]:
+            if item["text"] in seen_invocations:
+                continue
+            invocations.append(item["text"])
+            seen_invocations.add(item["text"])
+        for invocation in invocations:
+            if invocation.strip() not in existing_shared_text:
+                shared_chunks.append("\n" + invocation.rstrip() + "\n")
+
     for alias_name, variants in sorted(aliases.items()):
         if alias_name in protected_shared_aliases or alias_name in source_shadowing_aliases:
             continue
@@ -2598,6 +2726,12 @@ def main() -> int:
                 item
                 for item in parse_top_level_values(path)
                 if item["name"] in selected_values
+            ]
+        if selected_macro_names:
+            items = items + [
+                item
+                for item in top_level_macro_items(path.read_text())
+                if item["name"] in selected_macro_names
             ]
         remove_items(
             path,

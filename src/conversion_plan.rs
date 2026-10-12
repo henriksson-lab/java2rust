@@ -412,6 +412,17 @@ pub enum DispatchCoercionPolicy {
     BorrowDynTrait {
         trait_name: String,
     },
+    BorrowClosedEnumAsDynTrait {
+        enum_name: String,
+        trait_name: String,
+        variants: Vec<String>,
+    },
+    RewrapClosedEnum {
+        actual_enum_name: String,
+        target_enum_name: String,
+        variants: Vec<String>,
+        clone_payload: bool,
+    },
     BorrowBoxedDynTrait {
         trait_name: String,
     },
@@ -444,6 +455,7 @@ pub enum DispatchCoercionPolicy {
     },
     DowncastErasedObject {
         target_type: String,
+        borrowed: bool,
         invalid_cast: InvalidCastPolicy,
     },
     DowncastErasedObjectToClosedEnum {
@@ -2557,8 +2569,24 @@ pub fn dispatch_coercion_policy_with_facts(
                 ),
             }
         }
-        (DispatchShape::ClosedEnum { .. }, DispatchShape::DynTrait { trait_name }) => {
-            if actual.java_ty != target.java_ty
+        (DispatchShape::ClosedEnum { enum_name }, DispatchShape::DynTrait { trait_name }) => {
+            let variants = closed_enum_variants_reaching_target(actual, target, facts);
+            if !variants.is_empty()
+                && matches!(
+                    actual.ownership,
+                    OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+                )
+            {
+                DispatchCoercionPolicy::BorrowClosedEnumAsDynTrait {
+                    enum_name: enum_name.clone(),
+                    trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
+                        trait_name,
+                        &target.java_ty,
+                        facts,
+                    ),
+                    variants,
+                }
+            } else if actual.java_ty != target.java_ty
                 && facts
                     .hierarchy_subtype_policy(&actual.java_ty, &target.java_ty)
                     .reaches()
@@ -2569,6 +2597,26 @@ pub fn dispatch_coercion_policy_with_facts(
                         &target.java_ty,
                         facts,
                     ),
+                }
+            } else {
+                unsupported_dispatch_coercion_policy(actual, target)
+            }
+        }
+        (
+            DispatchShape::ClosedEnum {
+                enum_name: actual_enum_name,
+            },
+            DispatchShape::ClosedEnum {
+                enum_name: target_enum_name,
+            },
+        ) => {
+            let variants = closed_enum_variants_reaching_target(actual, target, facts);
+            if actual_enum_name != target_enum_name && !variants.is_empty() {
+                DispatchCoercionPolicy::RewrapClosedEnum {
+                    actual_enum_name: actual_enum_name.clone(),
+                    target_enum_name: target_enum_name.clone(),
+                    variants,
+                    clone_payload: actual.ownership != OwnershipShape::Owned,
                 }
             } else {
                 unsupported_dispatch_coercion_policy(actual, target)
@@ -2726,6 +2774,10 @@ pub fn dispatch_coercion_policy_with_facts(
                     };
                     DispatchCoercionPolicy::DowncastErasedObject {
                         target_type,
+                        borrowed: matches!(
+                            actual.ownership,
+                            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+                        ),
                         invalid_cast: InvalidCastPolicy::Panic,
                     }
                 }
@@ -2849,6 +2901,51 @@ fn erased_object_closed_enum_variants_for_target(
         .collect()
 }
 
+/// Rust variants in `actual`'s closed hierarchy whose Java classes also
+/// inhabit `target`'s hierarchy/interface.  This is the common runtime subset
+/// needed by both Java `instanceof` and carrier-to-carrier/trait projections.
+fn closed_enum_variants_reaching_target(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> Vec<String> {
+    let Some(actual_name) = java_type_name_for_dispatch(&actual.java_ty) else {
+        return Vec::new();
+    };
+    let Some(target_name) = java_type_name_for_dispatch(&target.java_ty) else {
+        return Vec::new();
+    };
+    let actual_ty = JavaType::Named {
+        name: actual_name.to_string(),
+        args: Vec::new(),
+    };
+    let target_ty = JavaType::Named {
+        name: target_name.to_string(),
+        args: Vec::new(),
+    };
+    let mut variants = std::collections::BTreeSet::new();
+    for fact in &facts.type_capability_overrides {
+        if fact.provenance != crate::facts::FactProvenance::ParsedSource {
+            continue;
+        }
+        let candidate = JavaType::Named {
+            name: fact.type_name.clone(),
+            args: Vec::new(),
+        };
+        if facts
+            .hierarchy_subtype_policy(&candidate, &actual_ty)
+            .reaches()
+            && facts
+                .hierarchy_subtype_policy(&candidate, &target_ty)
+                .reaches()
+            && let Some(variant) = rust_nominal_type_name_policy(&candidate).into_target_type()
+        {
+            variants.insert(variant);
+        }
+    }
+    variants.into_iter().collect()
+}
+
 fn java_type_name_for_dispatch(java_ty: &JavaType) -> Option<&str> {
     match java_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
@@ -2914,6 +3011,7 @@ fn external_conversion_adapter_policy(
 
 fn external_conversion_adapter_type_name(java_ty: &JavaType) -> Option<&str> {
     match java_ty {
+        JavaType::String => Some("String"),
         JavaType::Named { name, .. } => Some(name),
         JavaType::Unknown(name) => Some(name),
         _ => None,
@@ -3269,9 +3367,21 @@ fn syntax_slot_coercion_policy_from_content(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InstanceOfCheck {
     JavaSerializableMarker,
+    /// `java.lang.Number` is an abstract supertype whose translated boxed
+    /// values use their native Rust scalar carriers.  A nominal
+    /// `Any::is::<Number>()` check can therefore never be correct.
+    JavaNumberMarker,
+    ExternalCapabilityMethod {
+        method: String,
+        optional: bool,
+    },
     ClosedEnumVariant {
         enum_name: String,
         variant_name: String,
+    },
+    ClosedEnumVariants {
+        enum_name: String,
+        variant_names: Vec<String>,
     },
     DynTraitType {
         target_type: String,
@@ -3432,6 +3542,26 @@ pub fn plan_instanceof_check_with_facts(
     if is_java_serializable_marker_type(&target.java_ty) {
         return InstanceOfCheck::JavaSerializableMarker;
     }
+    if is_java_number_marker_type(&target.java_ty) {
+        return InstanceOfCheck::JavaNumberMarker;
+    }
+    if let Some(method) = external_capability_instanceof_method(&actual.java_ty, &target.java_ty) {
+        return InstanceOfCheck::ExternalCapabilityMethod {
+            method: method.to_string(),
+            optional: actual.optional_element_type().is_some(),
+        };
+    }
+    if let Some(target_type) = reifiable_raw_collection_runtime_target(&target.java_ty) {
+        if matches!(actual.dispatch, DispatchShape::ErasedObject) {
+            return InstanceOfCheck::ErasedObjectType { target_type };
+        }
+        if let Some(element_ty) = actual.optional_element_type() {
+            let element_shape = optional_element_slot_shape(actual, element_ty);
+            if matches!(element_shape.dispatch, DispatchShape::ErasedObject) {
+                return InstanceOfCheck::OptionalErasedObjectType { target_type };
+            }
+        }
+    }
     match instanceof_target_policy(target, facts) {
         InstanceOfTargetPolicy::PrimitiveTarget { java_ty } => {
             return unsupported_instanceof_check(
@@ -3487,6 +3617,16 @@ pub fn plan_instanceof_check_with_facts(
         }
     }
     match (&actual.dispatch, &target.dispatch) {
+        (DispatchShape::ClosedEnum { enum_name }, DispatchShape::DynTrait { .. })
+        | (DispatchShape::ClosedEnum { enum_name }, DispatchShape::ClosedEnum { .. }) => {
+            let variant_names = closed_enum_variants_reaching_target(actual, target, facts);
+            if !variant_names.is_empty() {
+                return InstanceOfCheck::ClosedEnumVariants {
+                    enum_name: enum_name.clone(),
+                    variant_names,
+                };
+            }
+        }
         (DispatchShape::ClosedEnum { .. }, DispatchShape::Concrete) => {
             match runtime_type_target_policy(&target.java_ty) {
                 RuntimeTypeTargetPolicy::Nominal { target_type } => {
@@ -3606,12 +3746,48 @@ pub fn plan_instanceof_check_with_facts(
     unsupported_instanceof_check(actual, target, InstanceOfFallbackPolicy::CompileError)
 }
 
+fn external_capability_instanceof_method(
+    actual: &JavaType,
+    target: &JavaType,
+) -> Option<&'static str> {
+    let actual_element = crate::types::optional_element_type(actual);
+    let actual_name = match actual_element.as_ref().unwrap_or(actual) {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        JavaType::String => "String",
+        _ => return None,
+    };
+    let target_element = crate::types::optional_element_type(target);
+    let target_name = match target_element.as_ref().unwrap_or(target) {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+        JavaType::String => "String",
+        _ => return None,
+    };
+    let actual = crate::stdlib::canonical_external_receiver_type_key(actual_name);
+    let target = crate::stdlib::canonical_external_receiver_type_key(target_name);
+    match (actual.as_str(), target.as_str()) {
+        ("Appendable", "Closeable") => Some("is_closeable"),
+        ("Appendable", "Flushable") => Some("is_flushable"),
+        ("Appendable", "Writer") => Some("is_writer"),
+        ("CharSequence", "String") => Some("is_string"),
+        _ => None,
+    }
+}
+
 fn is_java_serializable_marker_type(ty: &JavaType) -> bool {
     matches!(
         ty,
         JavaType::Named { name, args }
             if args.is_empty()
                 && crate::stdlib::canonical_external_receiver_type_key(name) == "Serializable"
+    )
+}
+
+fn is_java_number_marker_type(ty: &JavaType) -> bool {
+    matches!(
+        ty,
+        JavaType::Named { name, args }
+            if args.is_empty()
+                && crate::stdlib::canonical_external_receiver_type_key(name) == "Number"
     )
 }
 
@@ -4034,6 +4210,30 @@ pub fn plan_cast_conversion_from_actual(
     ctx: ExprShapeContext<'_>,
 ) -> CastConversionPlan {
     let mut target = project_java_value_shape(ctx.representations(), target_ty.clone());
+    let default_facts = FactSet::default();
+    let facts = ctx.facts().unwrap_or(&default_facts);
+    if reifiable_raw_collection_runtime_target(target_ty).is_some() {
+        target.dispatch = DispatchShape::Concrete;
+        target.view = ViewShape::Native;
+        target.ownership = OwnershipShape::Owned;
+    }
+    if external_capability_instanceof_method(&actual.java_ty, target_ty).is_some() {
+        // The runtime carrier owns the capability dispatch.  A guarded Java
+        // interface cast must therefore preserve that carrier instead of
+        // erasing it into `Box<dyn Any>` and losing close/flush behavior.
+        target = actual
+            .optional_element_type()
+            .map(|element_ty| {
+                let mut element =
+                    optional_element_slot_shape_with_facts(&actual, element_ty, facts);
+                // A Java reference cast copies the reference.  Borrow the
+                // nullable carrier's payload so a cast of a field through
+                // `&self` cannot move its `Option<T>` out of the receiver.
+                element.ownership = OwnershipShape::SharedBorrow;
+                element
+            })
+            .unwrap_or_else(|| actual.clone());
+    }
     if java_type_is_erased_object_like(target_ty)
         && matches!(actual.dispatch, DispatchShape::ErasedObject)
     {
@@ -4042,8 +4242,6 @@ pub fn plan_cast_conversion_from_actual(
     if same_java_type_cast_should_preserve_actual_shape(&actual, &target) {
         target = actual.clone();
     }
-    let default_facts = FactSet::default();
-    let facts = ctx.facts().unwrap_or(&default_facts);
     let coercion = shape_coercion_plan_with_facts(&actual, &target, facts);
     let semantics = java_cast_semantics_policy_with_facts(&actual, &target, &coercion, facts);
 

@@ -1,7 +1,8 @@
 use crate::facts::{
-    DispatchRequirementKind, ExternalLibraryPackFact, FactProvenance, FactSet, HierarchyEdgeFact,
-    HierarchyOverride, HierarchyStrategy, ObjectSafetyFact, ObjectSafetyViolation,
-    OwnedRecoveryCapability, OwnedRecoveryCapabilityFact, TypeCapabilityOverride,
+    DispatchRequirementKind, ExternalFactLookupIndex, ExternalLibraryPackFact, FactProvenance,
+    FactSet, HierarchyEdgeFact, HierarchyOverride, HierarchyStrategy, ObjectSafetyFact,
+    ObjectSafetyViolation, OwnedRecoveryCapability, OwnedRecoveryCapabilityFact,
+    TypeCapabilityOverride,
 };
 use crate::java_ir::JavaType;
 use crate::slot_shape::TypeCapabilities;
@@ -13,6 +14,7 @@ use crate::types::{
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveFacts<'a> {
     facts: &'a FactSet,
+    external_index: Option<&'a ExternalFactLookupIndex<'a>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -138,7 +140,20 @@ impl<'a> EffectiveFacts<'a> {
     }
 
     pub fn new(facts: &'a FactSet) -> Self {
-        Self { facts }
+        Self {
+            facts,
+            external_index: None,
+        }
+    }
+
+    pub fn with_external_index(
+        facts: &'a FactSet,
+        external_index: &'a ExternalFactLookupIndex<'a>,
+    ) -> Self {
+        Self {
+            facts,
+            external_index: Some(external_index),
+        }
     }
 
     pub fn generic_parameter_is_input_only(&self, type_name: &str, parameter_index: usize) -> bool {
@@ -158,15 +173,22 @@ impl<'a> EffectiveFacts<'a> {
         &self,
         type_name: &str,
     ) -> Option<&'a ExternalLibraryPackFact> {
-        self.facts.external_library_pack_for_type(type_name)
+        match self.external_index {
+            Some(index) => index.external_library_pack_for_type(type_name),
+            None => self.facts.external_library_pack_for_type(type_name),
+        }
     }
 
     pub fn external_rust_crate_mapping_pack_for_type(
         &self,
         type_name: &str,
     ) -> Option<&'a ExternalLibraryPackFact> {
-        self.facts
-            .external_rust_crate_mapping_pack_for_type(type_name)
+        match self.external_index {
+            Some(index) => index.external_rust_crate_mapping_pack_for_type(type_name),
+            None => self
+                .facts
+                .external_rust_crate_mapping_pack_for_type(type_name),
+        }
     }
 
     pub fn external_crate_rust_type_name_for(&self, type_name: &str) -> Option<&'a str> {

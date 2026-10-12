@@ -471,6 +471,10 @@ pub fn external_superclass_uses_embedded_carrier(type_name: &str) -> bool {
     let erased = erased_external_type_name(type_name);
     external_type_name_matches(erased, "org.itadaki.bzip2.BitOutputStream")
         || external_type_name_matches(erased, "BitOutputStream")
+        || external_type_name_matches(erased, "java.io.BufferedReader")
+        || external_type_name_matches(erased, "BufferedReader")
+        || external_type_name_matches(erased, "htsjdk.tribble.AsciiFeatureCodec")
+        || external_type_name_matches(erased, "AsciiFeatureCodec")
 }
 
 pub fn modeled_external_super_constructor_state_field(
@@ -499,6 +503,11 @@ pub fn modeled_external_super_constructor_state_field(
         || external_type_name_matches(erased, "FileReader")
     {
         return Some("reader");
+    }
+    if external_type_name_matches(erased, "java.io.BufferedReader")
+        || external_type_name_matches(erased, "BufferedReader")
+    {
+        return Some("__java_super");
     }
     if external_superclass_uses_embedded_carrier(erased) {
         return Some("__java_super");
@@ -4469,6 +4478,8 @@ const JAVA_SQL_OWNED_TYPES: &[&str] = &[
     "java.sql.PreparedStatement",
     "java.sql.ResultSet",
     "java.sql.ResultSetMetaData",
+    "java.sql.Clob",
+    "Clob",
     "java.sql.DatabaseMetaData",
     "java.sql.Date",
     "java.sql.Timestamp",
@@ -4539,6 +4550,8 @@ const SAMTOOLS_UTIL_OWNED_TYPES: &[&str] = &[
     "PairOrientation",
 ];
 const TRIBBLE_FEATURE_OWNED_TYPES: &[&str] = &[
+    "htsjdk.tribble.AsciiFeatureCodec",
+    "AsciiFeatureCodec",
     "htsjdk.tribble.Feature",
     "htsjdk.tribble.SimpleFeature",
     "htsjdk.tribble.NamedFeature",
@@ -6576,7 +6589,28 @@ const SAMTOOLS_UTIL_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     samtools_util_interval_list_add_argument("IntervalList"),
     samtools_util_log_string_argument("htsjdk.samtools.util.Log", "warn"),
     samtools_util_log_string_argument("Log", "warn"),
+    samtools_seekable_path_stream_nullable_wrapper_argument(
+        "htsjdk.samtools.seekablestream.SeekablePathStream",
+    ),
+    samtools_seekable_path_stream_nullable_wrapper_argument("SeekablePathStream"),
 ];
+
+const fn samtools_seekable_path_stream_nullable_wrapper_argument(
+    receiver_type: &'static str,
+) -> ExternalPackArgumentEffect {
+    ExternalPackArgumentEffect {
+        receiver_type,
+        method_name: "new",
+        arg_count: Some(2),
+        parameter_index: 1,
+        parameter_type: Some(
+            "java.util.function.Function<java.nio.channels.SeekableByteChannel,java.nio.channels.SeekableByteChannel>",
+        ),
+        parameter_nullability: NullabilityState::MaybeNull,
+        argument_mutability: ReceiverMutabilityFact::ReadOnly,
+        alias_policy: ExternalArgumentAliasPolicy::NoAlias,
+    }
+}
 
 const fn samtools_util_interval_list_add_argument(
     receiver_type: &'static str,
@@ -10940,6 +10974,33 @@ const JAVA_SQL_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     api_effect(
         "java.sql.ResultSetMetaData",
+        "getColumnLabel",
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        Some("String"),
+        NullabilityState::DefinitelyNonNull,
+        JAVA_SQL_THROWN,
+    ),
+    api_effect(
+        "java.sql.Clob",
+        "getCharacterStream",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        Some("java.io.Reader"),
+        NullabilityState::DefinitelyNonNull,
+        JAVA_SQL_THROWN,
+    ),
+    api_effect(
+        "Clob",
+        "getCharacterStream",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        Some("java.io.Reader"),
+        NullabilityState::DefinitelyNonNull,
+        JAVA_SQL_THROWN,
+    ),
+    api_effect(
+        "java.sql.ResultSetMetaData",
         "getColumnType",
         ExternalApiRole::IndexedGetter,
         ReceiverMutabilityFact::ReadOnly,
@@ -11049,6 +11110,24 @@ const JAVA_SQL_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.util.ParsingUtils",
+        "openInputStream",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "java.io.InputStream",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ParsingUtils",
+        "openInputStream",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "InputStream",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_getter_effect(
         "htsjdk.tribble.Feature",
         "getContig",
@@ -16014,6 +16093,42 @@ const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "htsjdk.variant.variantcontext.writer.IntGenotypeFieldAccessors",
+        "getAccessor",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "IntGenotypeFieldAccessors.Accessor",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "IntGenotypeFieldAccessors",
+        "getAccessor",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "IntGenotypeFieldAccessors.Accessor",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.variant.variantcontext.writer.IntGenotypeFieldAccessors.Accessor",
+        "getValues",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int[]",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "IntGenotypeFieldAccessors.Accessor",
+        "getValues",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int[]",
+        NullabilityState::MaybeNull,
+    ),
     semantic_typed_effect(
         "htsjdk.variant.variantcontext.Allele",
         "create",
@@ -19437,6 +19552,8 @@ const JAVA_SQL_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
     erased_object_strategy("java.sql.PreparedStatement"),
     erased_object_strategy("java.sql.ResultSet"),
     erased_object_strategy("java.sql.ResultSetMetaData"),
+    concrete_object_strategy("java.sql.Clob"),
+    concrete_object_strategy("Clob"),
     erased_object_strategy("java.sql.DatabaseMetaData"),
     erased_object_strategy("java.sql.Date"),
     erased_object_strategy("java.sql.Timestamp"),
@@ -19512,6 +19629,7 @@ const JAVA_SQL_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
     readonly_borrowed_argument("java.sql.ResultSet", "getTimestamp", 0, "int"),
     readonly_borrowed_argument("java.sql.ResultSet", "getTimestamp", 0, "String"),
     readonly_borrowed_argument("java.sql.ResultSetMetaData", "getColumnName", 0, "int"),
+    readonly_borrowed_argument("java.sql.ResultSetMetaData", "getColumnLabel", 0, "int"),
     readonly_borrowed_argument("java.sql.ResultSetMetaData", "getColumnType", 0, "int"),
     readonly_borrowed_argument("java.sql.ResultSetMetaData", "getColumnTypeName", 0, "int"),
     readonly_borrowed_argument("java.sql.ResultSetMetaData", "getColumnClassName", 0, "int"),
@@ -20266,6 +20384,8 @@ const HTSJDK_NESTED_HELPER_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] =
     &[erased_object_strategy("ComponentMethods")];
 
 const TRIBBLE_FEATURE_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
+    concrete_object_strategy("htsjdk.tribble.AsciiFeatureCodec"),
+    concrete_object_strategy("AsciiFeatureCodec"),
     erased_object_strategy("htsjdk.tribble.Feature"),
     erased_object_strategy("Feature"),
     erased_object_strategy("htsjdk.tribble.SimpleFeature"),
@@ -20446,6 +20566,27 @@ const BCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
         "5",
     ),
     modeled_semantic_field_typed_value("BCF2Codec", "SIZEOF_BCF_HEADER", "int", "5"),
+];
+
+const BCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "tryReadBCFVersion",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "BCFVersion",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "BCF2Codec",
+        "tryReadBCFVersion",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "BCFVersion",
+        NullabilityState::MaybeNull,
+    ),
 ];
 
 const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
@@ -21114,6 +21255,8 @@ const SAM_REFERENCE_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
 ];
 
 const TRIBBLE_FEATURE_MODELED_CONSTRUCTORS: &[ExternalPackModeledConstructor] = &[
+    modeled_semantic_constructor("htsjdk.tribble.AsciiFeatureCodec", 1),
+    modeled_semantic_constructor("AsciiFeatureCodec", 1),
     modeled_semantic_constructor("htsjdk.tribble.SimpleFeature", 3),
     modeled_semantic_constructor("SimpleFeature", 3),
     modeled_semantic_constructor("htsjdk.tribble.FeatureCodecHeader", 2),
@@ -26921,6 +27064,7 @@ const JAVA_SQL_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("java.sql.ResultSet", "close"),
     modeled_semantic("java.sql.ResultSetMetaData", "getColumnCount"),
     modeled_semantic("java.sql.ResultSetMetaData", "getColumnName"),
+    modeled_semantic("java.sql.ResultSetMetaData", "getColumnLabel"),
     modeled_semantic("java.sql.ResultSetMetaData", "getColumnType"),
     modeled_semantic("java.sql.ResultSetMetaData", "getColumnTypeName"),
     modeled_semantic("java.sql.ResultSetMetaData", "getColumnClassName"),
@@ -26930,6 +27074,8 @@ const JAVA_SQL_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("java.sql.ResultSetMetaData", "getPrecision"),
     modeled_semantic("java.sql.ResultSetMetaData", "getScale"),
     modeled_semantic("java.sql.ResultSetMetaData", "getColumnDisplaySize"),
+    modeled_semantic("java.sql.Clob", "getCharacterStream"),
+    modeled_semantic("Clob", "getCharacterStream"),
     modeled_semantic("java.sql.DatabaseMetaData", "getDatabaseProductName"),
     modeled_semantic("java.sql.DatabaseMetaData", "getTables"),
     modeled_semantic("java.sql.DatabaseMetaData", "getColumns"),
@@ -27560,6 +27706,8 @@ const SAM_REFERENCE_MODELED_APIS: &[ExternalPackModeledApi] = &[
 ];
 
 const TRIBBLE_FEATURE_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("htsjdk.tribble.util.ParsingUtils", "openInputStream"),
+    modeled_semantic("ParsingUtils", "openInputStream"),
     modeled_semantic("htsjdk.tribble.Feature", "getContig"),
     modeled_semantic("Feature", "getContig"),
     modeled_semantic("htsjdk.tribble.SimpleFeature", "getContig"),
@@ -28121,7 +28269,7 @@ fn build_builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             field_nullability: NO_FIELD_NULLABILITY,
             argument_effects: NO_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
-            api_effects: &[],
+            api_effects: BCF_API_EFFECTS,
             modeled_apis: &[],
             modeled_constructors: BCF_MODELED_CONSTRUCTORS,
             modeled_fields: BCF_MODELED_FIELDS,
@@ -29540,6 +29688,24 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         }
     }
     for receiver_type in [
+        "Reader",
+        "java.io.Reader",
+        "BufferedReader",
+        "java.io.BufferedReader",
+    ] {
+        facts.push(ExternalApiArgumentEffectFact {
+            method_name: "read".to_string(),
+            receiver_type: Some(receiver_type.to_string()),
+            arg_count: Some(1),
+            parameter_index: 0,
+            parameter_type: None,
+            parameter_nullability: NullabilityState::DefinitelyNonNull,
+            argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+            alias_policy: ExternalArgumentAliasPolicy::Borrowed,
+            provenance: FactProvenance::BuiltinExternalModel,
+        });
+    }
+    for receiver_type in [
         "OutputStream",
         "java.io.OutputStream",
         "FileOutputStream",
@@ -29881,12 +30047,51 @@ struct BuiltinExternalPackLookupIndex {
     crate_api_mappings: HashMap<(String, String, Option<usize>), ExternalCrateApiMappingFact>,
     crate_constructor_mappings: HashMap<(String, usize), ExternalCrateConstructorMappingFact>,
     representation_facts: HashMap<String, FactSet>,
+    /// Qualified receiver recovered from an unqualified Java type only when
+    /// that simple name denotes exactly one receiver across the built-in API
+    /// models.  Chained calls can carry `ResultSetMetaData` after the return
+    /// type has crossed the Java parser, while the authoritative model is
+    /// keyed by `java.sql.ResultSetMetaData`; ambiguous names must not guess.
+    unique_qualified_api_receiver_by_simple: HashMap<String, String>,
 }
 
 fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupIndex {
     static INDEX: OnceLock<BuiltinExternalPackLookupIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
         let mut index = BuiltinExternalPackLookupIndex::default();
+        let mut qualified_receivers_by_simple = HashMap::<String, Option<String>>::new();
+        let mut record_qualified_receiver = |receiver_type: &str| {
+            let receiver_type = receiver_type.trim();
+            let Some((_, simple)) = receiver_type.rsplit_once('.') else {
+                return;
+            };
+            match qualified_receivers_by_simple.entry(simple.to_string()) {
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    entry.insert(Some(receiver_type.to_string()));
+                }
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if entry.get().as_deref() != Some(receiver_type) {
+                        entry.insert(None);
+                    }
+                }
+            }
+        };
+        for manifest in builtin_external_pack_manifest_slice() {
+            for api in manifest.modeled_apis {
+                record_qualified_receiver(api.receiver_type);
+            }
+        }
+        for (_, facts) in builtin_external_pack_fact_sets() {
+            for fact in &facts.external_api_effect_facts {
+                if let Some(receiver_type) = fact.receiver_type.as_deref() {
+                    record_qualified_receiver(receiver_type);
+                }
+            }
+        }
+        index.unique_qualified_api_receiver_by_simple = qualified_receivers_by_simple
+            .into_iter()
+            .filter_map(|(simple, qualified)| qualified.map(|qualified| (simple, qualified)))
+            .collect();
         for manifest in builtin_external_pack_manifest_slice() {
             for api in manifest.modeled_apis {
                 for receiver_alias in external_receiver_lookup_aliases(api.receiver_type) {
@@ -30111,6 +30316,23 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
     })
 }
 
+fn builtin_external_api_receiver_lookup_aliases(
+    index: &BuiltinExternalPackLookupIndex,
+    receiver_type: &str,
+) -> Vec<String> {
+    let mut aliases = external_receiver_lookup_aliases(receiver_type);
+    if !receiver_type.contains('.')
+        && let Some(qualified) = index
+            .unique_qualified_api_receiver_by_simple
+            .get(receiver_type)
+    {
+        aliases.extend(external_receiver_lookup_aliases(qualified));
+    }
+    aliases.sort();
+    aliases.dedup();
+    aliases
+}
+
 fn external_field_fact_key_shape(
     fact: &ExternalFieldFact,
 ) -> (CallableKind, crate::facts::Staticness) {
@@ -30134,7 +30356,19 @@ fn external_field_fact_key_shape(
 fn external_receiver_lookup_aliases(receiver_type: &str) -> Vec<String> {
     let canonical = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     let snake = crate::parser::to_snake_case(receiver_type);
-    let mut aliases = vec![receiver_type.to_string(), canonical.clone(), snake];
+    // Lowered facade return slots carry the collision-safe Rust spelling of a
+    // qualified Java type (for example `JavaSqlResultSetMetaData`).  Keep that
+    // spelling in the same alias family as the Java declaration so chained
+    // calls can recover pack effects without a corpus-specific reverse map.
+    let rust_name = crate::java_naming::rust_name_for_java_named_type(receiver_type);
+    let canonical_rust_name = crate::java_naming::rust_name_for_java_named_type(&canonical);
+    let mut aliases = vec![
+        receiver_type.to_string(),
+        canonical.clone(),
+        snake,
+        rust_name,
+        canonical_rust_name,
+    ];
     aliases.sort();
     aliases.dedup();
     aliases
@@ -30197,7 +30431,7 @@ pub fn external_api_effect_for_receiver(
 
 pub fn builtin_external_pack_models_api(receiver_type: &str, method_name: &str) -> bool {
     let index = builtin_external_pack_lookup_index();
-    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+    for receiver_alias in builtin_external_api_receiver_lookup_aliases(index, receiver_type) {
         for method_alias in external_method_name_lookup_aliases(method_name) {
             if index
                 .modeled_apis
@@ -30216,7 +30450,7 @@ pub fn external_api_arities_for_receiver(
 ) -> BTreeSet<usize> {
     let index = builtin_external_pack_lookup_index();
     let mut arities = BTreeSet::new();
-    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+    for receiver_alias in builtin_external_api_receiver_lookup_aliases(index, receiver_type) {
         for method_alias in external_method_name_lookup_aliases(method_name) {
             if let Some(indexed) = index
                 .api_effect_arities
@@ -30237,6 +30471,15 @@ pub fn external_constructor_arities_for(type_name: &str) -> BTreeSet<usize> {
             arities.extend(indexed.iter().copied());
         }
     }
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
+    if matches!(
+        canonical.as_str(),
+        "InputStreamReader" | "OutputStreamWriter"
+    ) {
+        arities.extend([1, 2]);
+    } else if canonical == "StringWriter" {
+        arities.insert(0);
+    }
     arities
 }
 
@@ -30252,7 +30495,7 @@ pub fn external_api_effect_for_receiver_with_arity(
         return Some(effect);
     }
     let index = builtin_external_pack_lookup_index();
-    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+    for receiver_alias in builtin_external_api_receiver_lookup_aliases(index, receiver_type) {
         for method_alias in external_method_name_lookup_aliases(method_name) {
             if let Some(effect) = arg_count.and_then(|arg_count| {
                 index.api_effects.get(&(
@@ -30273,6 +30516,35 @@ pub fn external_api_effect_for_receiver_with_arity(
         }
     }
     None
+}
+
+/// Returns a nullability fact only when every built-in external API candidate
+/// with the requested method, arity, and return type agrees. This is useful at
+/// erased generic boundaries where Java resolution has retained the result
+/// type but not the receiver type. Ambiguity is deliberately answered with
+/// `None` rather than selecting whichever pack happened to be indexed last.
+pub fn external_api_return_nullability_consensus(
+    method_name: &str,
+    arg_count: usize,
+    return_type: &JavaType,
+) -> Option<NullabilityState> {
+    let method_aliases = external_method_name_lookup_aliases(method_name);
+    let index = builtin_external_pack_lookup_index();
+    let mut consensus = None;
+    for ((_, indexed_method, indexed_arity), effect) in &index.api_effects {
+        if !method_aliases.iter().any(|alias| alias == indexed_method)
+            || indexed_arity.is_some_and(|arity| arity != arg_count)
+            || effect.return_type.as_ref() != Some(return_type)
+        {
+            continue;
+        }
+        match consensus {
+            None => consensus = Some(effect.return_nullability),
+            Some(state) if state == effect.return_nullability => {}
+            Some(_) => return None,
+        }
+    }
+    consensus
 }
 
 pub fn external_api_effect_for_call(
@@ -30324,7 +30596,7 @@ pub fn external_api_effect_for_call(
     if let Some((effect, _)) = best {
         return Some(effect);
     }
-    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+    for receiver_alias in builtin_external_api_receiver_lookup_aliases(index, receiver_type) {
         for method_alias in external_method_name_lookup_aliases(method_name) {
             let Some(effect) = index.api_effects.get(&(
                 receiver_alias.clone(),
@@ -30436,7 +30708,7 @@ pub fn external_api_argument_effect_for_receiver_with_arity(
 ) -> Option<ExternalApiArgumentEffectFact> {
     let receiver_type = receiver_type?;
     let index = builtin_external_pack_lookup_index();
-    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+    for receiver_alias in builtin_external_api_receiver_lookup_aliases(index, receiver_type) {
         for method_alias in external_method_name_lookup_aliases(method_name) {
             if let Some(effect) = arg_count.and_then(|arg_count| {
                 index.api_argument_effects.get(&(
@@ -30534,6 +30806,8 @@ fn java_platform_api_effects_for_method_arity(
         "BufferedReader",
         "java.io.Closeable",
         "Closeable",
+        "java.io.Flushable",
+        "Flushable",
         "java.util.Enumeration",
         "Enumeration",
         "java.util.concurrent.ExecutorService",
@@ -31096,7 +31370,11 @@ pub fn java_platform_api_effect_for_receiver_with_arity(
             role: ExternalApiRole::Getter,
             receiver_mutability: ReceiverMutabilityFact::ReadOnly,
             return_type: Some(return_type),
-            return_nullability: NullabilityState::DefinitelyNonNull,
+            return_nullability: if method_name == "group" {
+                NullabilityState::MaybeNull
+            } else {
+                NullabilityState::DefinitelyNonNull
+            },
             thrown: Vec::new(),
             provenance: FactProvenance::BuiltinExternalModel,
         });
@@ -31442,6 +31720,14 @@ fn java_platform_io_api_effect(
 ) -> Option<ExternalApiEffectFact> {
     let simple_receiver = receiver_type.rsplit('.').next().unwrap_or(receiver_type);
     let (expected_args, role, return_type) = match (simple_receiver, method_name) {
+        ("CharBuffer", "allocate") if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::Getter,
+            JavaType::Named {
+                name: "CharBuffer".to_string(),
+                args: Vec::new(),
+            },
+        ),
         ("Files" | "JavaNioFileFiles", "newInputStream" | "new_input_stream")
             if matches_arg_count(1) =>
         {
@@ -31503,6 +31789,27 @@ fn java_platform_io_api_effect(
                 ExternalApiRole::Getter,
                 JavaType::Primitive(PrimitiveType::Int),
             )
+        }
+        ("Reader" | "BufferedReader", "read" | "read_0") if matches_arg_count(0) => (
+            0,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("Reader" | "BufferedReader", "read") if matches_arg_count(1) => (
+            1,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("Reader" | "BufferedReader", "read" | "read_3") if matches_arg_count(3) => (
+            3,
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        ("Reader" | "BufferedReader", "mark") if matches_arg_count(1) => {
+            (1, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        ("Reader" | "BufferedReader", "reset") if matches_arg_count(0) => {
+            (0, ExternalApiRole::SideEffect, JavaType::Void)
         }
         (receiver, "read")
             if is_java_platform_input_stream_receiver(receiver) && matches_arg_count(1) =>
@@ -31592,6 +31899,9 @@ fn java_platform_io_api_effect(
         ("ByteArrayOutputStream", "toString" | "to_string") if matches_arg_count(1) => {
             (1, ExternalApiRole::Getter, JavaType::String)
         }
+        ("StringWriter", "toString" | "to_string") if matches_arg_count(0) => {
+            (0, ExternalApiRole::Getter, JavaType::String)
+        }
         ("ByteArrayOutputStream", "toByteArray" | "to_byte_array") if matches_arg_count(0) => (
             0,
             ExternalApiRole::Getter,
@@ -31671,7 +31981,17 @@ fn java_platform_io_api_effect(
         (receiver, "close")
             if (is_java_platform_input_stream_receiver(receiver)
                 || is_java_platform_output_stream_receiver(receiver)
-                || matches!(receiver, "Reader" | "BufferedReader" | "Closeable"))
+                || is_java_platform_reader_receiver(receiver)
+                || is_java_platform_writer_receiver(receiver)
+                || matches!(receiver, "Closeable"))
+                && matches_arg_count(0) =>
+        {
+            (0, ExternalApiRole::SideEffect, JavaType::Void)
+        }
+        (receiver, "flush")
+            if (is_java_platform_output_stream_receiver(receiver)
+                || is_java_platform_writer_receiver(receiver)
+                || matches!(receiver, "Flushable"))
                 && matches_arg_count(0) =>
         {
             (0, ExternalApiRole::SideEffect, JavaType::Void)
@@ -31698,6 +32018,11 @@ fn java_platform_io_api_effect(
                 args: Vec::new(),
             },
         ),
+        (receiver, "write" | "write_1")
+            if is_java_platform_writer_receiver(receiver) && matches_arg_count(1) =>
+        {
+            (1, ExternalApiRole::SideEffect, JavaType::Void)
+        }
         _ => return None,
     };
     let thrown = if (matches!(simple_receiver, "Files" | "JavaNioFileFiles")
@@ -31705,6 +32030,8 @@ fn java_platform_io_api_effect(
         || matches!(simple_receiver, "Inflater" | "PrintStream")
         || (matches!(simple_receiver, "ByteArrayOutputStream")
             && matches!(method_name, "toByteArray" | "to_byte_array"))
+        || (matches!(simple_receiver, "StringWriter")
+            && matches!(method_name, "toString" | "to_string"))
     {
         Vec::new()
     } else {
@@ -31771,6 +32098,20 @@ fn is_java_platform_output_stream_receiver(receiver: &str) -> bool {
             | "ObjectOutputStream"
             | "FilterOutputStream"
             | "PrintStream"
+    )
+}
+
+fn is_java_platform_reader_receiver(receiver: &str) -> bool {
+    matches!(
+        receiver,
+        "Reader" | "InputStreamReader" | "BufferedReader" | "StringReader"
+    )
+}
+
+fn is_java_platform_writer_receiver(receiver: &str) -> bool {
+    matches!(
+        receiver,
+        "Writer" | "OutputStreamWriter" | "BufferedWriter" | "StringWriter"
     )
 }
 
@@ -32420,6 +32761,12 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
         "StringBuffer",
         "java.io.PrintStream",
         "PrintStream",
+        "java.io.Writer",
+        "Writer",
+        "java.io.OutputStreamWriter",
+        "OutputStreamWriter",
+        "java.io.StringWriter",
+        "StringWriter",
     ]
     .into_iter()
     .map(|from_type| ExternalConversionAdapterFact {
@@ -32429,6 +32776,38 @@ fn java_platform_conversion_adapters() -> Vec<ExternalConversionAdapterFact> {
         provenance: FactProvenance::BuiltinExternalModel,
     })
     .collect::<Vec<_>>();
+    adapters.extend(
+        [
+            "java.io.OutputStreamWriter",
+            "OutputStreamWriter",
+            "java.io.StringWriter",
+            "StringWriter",
+        ]
+        .into_iter()
+        .map(|from_type| ExternalConversionAdapterFact {
+            from_type: from_type.to_string(),
+            to_type: "Writer".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        }),
+    );
+    adapters.extend(
+        [
+            "String",
+            "java.lang.String",
+            "StringBuilder",
+            "java.lang.StringBuilder",
+            "StringBuffer",
+            "java.lang.StringBuffer",
+        ]
+        .into_iter()
+        .map(|from_type| ExternalConversionAdapterFact {
+            from_type: from_type.to_string(),
+            to_type: "CharSequence".to_string(),
+            kind: ExternalConversionAdapterKind::Into,
+            provenance: FactProvenance::BuiltinExternalModel,
+        }),
+    );
     adapters.extend(
         ["java.util.zip.ZipOutputStream", "ZipOutputStream"]
             .into_iter()

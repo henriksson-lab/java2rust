@@ -550,7 +550,24 @@ pub struct StoragePlan {
 
 impl StoragePlan {
     pub fn facts(&self, type_name: &str) -> Option<&TypeStorageFacts> {
-        self.types.get(type_name)
+        self.types.get(type_name).or_else(|| {
+            let emitted = crate::java_naming::rust_name_for_java_named_type(type_name);
+            if let Some(facts) = self.types.get(&emitted) {
+                return Some(facts);
+            }
+            if type_name.contains(['.', '$']) {
+                return None;
+            }
+            let nested_suffix = format!("_{emitted}");
+            let mut matches = self.types.iter().filter_map(|(candidate, facts)| {
+                let candidate_emitted =
+                    crate::java_naming::rust_name_for_java_named_type(candidate);
+                (candidate_emitted == emitted || candidate_emitted.ends_with(&nested_suffix))
+                    .then_some(facts)
+            });
+            let first = matches.next()?;
+            matches.next().is_none().then_some(first)
+        })
     }
 
     pub fn type_names(&self) -> impl Iterator<Item = &str> {
@@ -574,8 +591,7 @@ impl StoragePlan {
     /// anything unknown, which is only ever consulted for a type the plan
     /// already says is shared.
     pub fn handle(&self, type_name: &str) -> SharedHandle {
-        self.types
-            .get(type_name)
+        self.facts(type_name)
             .map(TypeStorageFacts::handle)
             .unwrap_or_default()
     }
@@ -583,15 +599,13 @@ impl StoragePlan {
     /// Where values of `type_name` live. `Value` (all axes false) for a type
     /// the plan has never heard of, so "unknown" can never read as "shared".
     pub fn placement(&self, type_name: &str) -> StoragePlacement {
-        self.types
-            .get(type_name)
+        self.facts(type_name)
             .map(TypeStorageFacts::placement)
             .unwrap_or_default()
     }
 
     pub fn strategy(&self, type_name: &str) -> StorageStrategy {
-        self.types
-            .get(type_name)
+        self.facts(type_name)
             .map(TypeStorageFacts::strategy)
             .unwrap_or(StorageStrategy::Value)
     }
@@ -1479,12 +1493,12 @@ fn collect_type_facts(
                 // mutated. This is `mutates_self` from `usage`, already a
                 // fixpoint over self-calls, so a method that mutates only by
                 // delegating counts.
+                if usage.source_method_or_alias_mutates(ty, method)
+                    && let Some(facts) = into.get_mut(&ty.name)
+                {
+                    facts.mutated = true;
+                }
                 if let Some(method_usage) = usage.source_method_usage(ty, method) {
-                    if method_usage.mutates_self()
-                        && let Some(facts) = into.get_mut(&ty.name)
-                    {
-                        facts.mutated = true;
-                    }
                     collect_unknown_boundary_escapes(method_usage, ty, declared, into);
                     collect_erased_cast_identity_aliases(method_usage, ty, program, declared, into);
                 }
@@ -2891,6 +2905,36 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(threaded.strategy(), StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn unique_nested_emitted_name_resolves_simple_storage_alias() {
+        let mut plan = StoragePlan::default();
+        plan.insert(
+            "CSVFormat_Builder".to_string(),
+            TypeStorageFacts {
+                locally_aliased: true,
+                mutated: true,
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(plan.strategy("Builder"), StorageStrategy::SharedLocal);
+        assert!(plan.placement("Builder").interior_mutable());
+
+        plan.insert(
+            "Other_Builder".to_string(),
+            TypeStorageFacts {
+                locally_aliased: true,
+                mutated: true,
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            plan.strategy("Builder"),
+            StorageStrategy::Value,
+            "ambiguous simple nested aliases must not guess"
+        );
     }
 
     /// `Returned` alone is not sharing: the value moves out, it does not become
