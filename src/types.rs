@@ -153,6 +153,11 @@ impl TypeEnv {
                     self.fields.get(&format!("r#{name}"))
                 }
             })
+            .or_else(|| {
+                let plain = name.strip_prefix("r#").unwrap_or(name);
+                let alias = crate::parser::to_snake_case(plain);
+                (alias != plain).then(|| self.fields.get(&alias)).flatten()
+            })
     }
 
     pub fn type_field_type(&self, type_name: &str, field_name: &str) -> Option<&JavaType> {
@@ -1071,6 +1076,14 @@ pub fn primitive_widening_steps(from: PrimitiveType, to: PrimitiveType) -> Optio
 #[cfg(test)]
 mod raw_rust_type_tests {
     use super::*;
+
+    #[test]
+    fn field_type_accepts_java_spelling_for_normalized_field_binding() {
+        let mut env = TypeEnv::new();
+        env.insert_field("generic_fields", JavaType::String);
+
+        assert_eq!(env.field_type("genericFields"), Some(&JavaType::String));
+    }
 
     #[test]
     fn raw_rust_type_args_ignore_nested_rust_delimiters_and_comments() {

@@ -57,6 +57,10 @@ pub enum DelegatedConstructorTrailingStmt<'a> {
     },
     OwnedStatement {
         stmt: Stmt,
+        /// Lexical class whose constructor body supplied this copied
+        /// statement. Calls to private methods and `super` remain statically
+        /// bound to that class after constructor flattening.
+        lexical_declaring_type: Option<&'a TypeDecl>,
     },
     ExprStatement {
         expr: &'a Expr,

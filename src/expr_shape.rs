@@ -1212,9 +1212,12 @@ impl ShapeEnv {
     }
 
     pub fn field_shape(&self, name: &str) -> Option<&RustSlotShape> {
-        self.field_shapes.get(name).or_else(|| {
-            name.strip_prefix("this.")
-                .and_then(|name| self.field_shapes.get(name))
+        let plain = name.strip_prefix("this.").unwrap_or(name);
+        self.field_shapes.get(plain).or_else(|| {
+            let alias = crate::parser::to_snake_case(plain);
+            (alias != plain)
+                .then(|| self.field_shapes.get(&alias))
+                .flatten()
         })
     }
 

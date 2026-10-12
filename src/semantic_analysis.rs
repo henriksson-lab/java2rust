@@ -6974,7 +6974,7 @@ pub(crate) fn walk_block_exprs(block: &Block, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
-fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+pub(crate) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
         Expr::FieldAccess(receiver, _) => walk_expr(receiver, visit),

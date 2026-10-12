@@ -9930,8 +9930,10 @@ impl SignaturePlan {
         type_name: &str,
         rust_name: &str,
     ) -> Option<&ConstructorSignaturePlan> {
+        let key = ConstructorKey::rust_identity(type_name, rust_name);
         self.constructors
-            .get(&ConstructorKey::rust_identity(type_name, rust_name))
+            .get(&key)
+            .or_else(|| self.unique_constructor_signature_for_simple_owner(&key))
     }
 
     pub(crate) fn method_arg_shape_by_rust_name(
@@ -10054,6 +10056,34 @@ impl SignaturePlan {
                     && key.type_name() != missing.type_name()
                     && !distinct_qualified_type_owners(missing.type_name(), key.type_name())
                     && type_name_simple_segment(&key.type_name()) == missing_simple
+            })
+            .map(|(_, signature)| signature)
+            .collect::<Vec<_>>();
+        matches.dedup_by(|left, right| std::ptr::eq(*left, *right));
+        match matches.as_slice() {
+            [signature] => Some(*signature),
+            _ => None,
+        }
+    }
+
+    /// Reconcile resolver-qualified constructor owners with source declarations
+    /// that were indexed under their simple owner spelling. This deliberately
+    /// mirrors method lookup: a single simple/full-name alias is safe, while
+    /// two distinct qualified owners remain ambiguous and therefore fall back
+    /// to the conservative boundary ABI.
+    fn unique_constructor_signature_for_simple_owner(
+        &self,
+        missing: &ConstructorKey,
+    ) -> Option<&ConstructorSignaturePlan> {
+        let missing_simple = type_name_simple_segment(missing.type_name());
+        let mut matches = self
+            .constructors
+            .iter()
+            .filter(|(key, _)| {
+                key.rust_name == missing.rust_name
+                    && key.type_name() != missing.type_name()
+                    && !distinct_qualified_type_owners(missing.type_name(), key.type_name())
+                    && type_name_simple_segment(key.type_name()) == missing_simple
             })
             .map(|(_, signature)| signature)
             .collect::<Vec<_>>();

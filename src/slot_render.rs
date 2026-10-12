@@ -288,6 +288,22 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
         ));
     }
 
+    if shape.view == ViewShape::Native
+        && matches!(shape.dispatch, DispatchShape::Concrete)
+        && crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some()
+    {
+        // A collection's outer slot can remain concrete while its generic
+        // arguments require a source hierarchy carrier, trait object, or
+        // erased representation. Route the whole type through the canonical
+        // representation-aware collection renderer before the facts-only slot
+        // fallback can freeze those arguments as nominal Java classes.
+        return rust_type_for_java_type_with_effective_facts_and_representations(
+            &shape.java_ty,
+            effective_facts,
+            representations,
+        );
+    }
+
     let viewed = match (&shape.view, &shape.dispatch) {
         (ViewShape::Str, _) => return rust_type_for_slot_with_facts(shape, facts),
         (ViewShape::Slice, _) if java_array_rank(&shape.java_ty) >= 3 => {
@@ -355,8 +371,28 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 representations,
             )
         }
+        (_, _) if crate::javalibs::facade_sequence_element_type(&shape.java_ty).is_some() => {
+            // A typed external iterator is a native sequence carrier even if
+            // its underlying external object policy is erased.  Keeping the
+            // nominal facade here would lose both iteration and its generic
+            // element contract.
+            let rendered = rust_type_for_java_type_with_effective_facts_and_representations(
+                &shape.java_ty,
+                effective_facts,
+                representations,
+            );
+            if matches!(&shape.java_ty, JavaType::Named { name, .. } if name == "CloseableIterator") {
+                eprintln!("DEBUG SLOT SEQUENCE {:?} -> {:?}", shape, rendered);
+            }
+            rendered
+        }
         (_, DispatchShape::Concrete) => {
-            if external_final_facade_should_keep_named_type(&shape.java_ty, &effective_facts)
+            if (external_final_facade_should_keep_named_type(&shape.java_ty, &effective_facts)
+                || external_model_concrete_dispatch_should_keep_named_type(
+                    &shape.java_ty,
+                    &effective_facts,
+                    representations,
+                ))
                 && let JavaType::Named { name, .. } = &shape.java_ty
             {
                 RustType::Named(rust_name_for_java_named_type(name))
@@ -622,7 +658,8 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
             }
         }
         (_, DispatchShape::ErasedObject, java_ty)
-            if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(java_ty) =>
+            if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(java_ty)
+                || crate::javalibs::facade_sequence_element_type(java_ty).is_some() =>
         {
             SlotValueRustTypePolicy::ConcreteDispatch {
                 java_ty: java_ty.clone(),
@@ -688,7 +725,9 @@ pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
             RustType::DynTrait(dyn_trait_rust_path_with_effective_facts(trait_name, facts))
         }
         SlotValueRustTypePolicy::ConcreteDispatch { java_ty } => {
-            if let JavaType::Named { name, args } = java_ty
+            if crate::javalibs::facade_sequence_element_type(java_ty).is_some() {
+                rust_type_for_java_type_with_effective_facts(java_ty, facts)
+            } else if let JavaType::Named { name, args } = java_ty
                 && let Some(ty) = external_crate_mapped_named_rust_type(name, args, facts)
             {
                 ty
@@ -1308,7 +1347,12 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
     if let JavaType::Named { name, args } = ty
         && matches!(
             crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
-            "Iterator" | "java.util.Iterator" | "ListIterator" | "java.util.ListIterator"
+            "Iterator"
+                | "java.util.Iterator"
+                | "CloseableIterator"
+                | "htsjdk.samtools.util.CloseableIterator"
+                | "ListIterator"
+                | "java.util.ListIterator"
         )
     {
         let element_ty = args
@@ -1421,7 +1465,19 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
                     &effective_facts,
                     representations,
                 ) {
-                    return RustType::Vec(Box::new(element_rust));
+                    // Source hierarchy/erased carriers generally cannot
+                    // implement Rust `Hash` or `Ord`, but Java Set semantics
+                    // still require equality-based de-duplication.  Keep the
+                    // set contract in the runtime carrier instead of silently
+                    // degrading it to a Vec.
+                    return if java_set_element_uses_semantic_equality_carrier(
+                        &element_ty,
+                        representations,
+                    ) {
+                        rust_generic_type("JavaSemanticHashSet", vec![element_rust])
+                    } else {
+                        RustType::Vec(Box::new(element_rust))
+                    };
                 }
                 return rust_generic_type(
                     match kind {
@@ -1814,7 +1870,10 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         JavaType::Named { name, args }
             if matches!(
                 crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
-                "Iterator" | "java.util.Iterator"
+                "Iterator"
+                    | "java.util.Iterator"
+                    | "CloseableIterator"
+                    | "htsjdk.samtools.util.CloseableIterator"
             ) =>
         {
             let element_ty = args
@@ -2037,6 +2096,32 @@ fn external_final_facade_should_keep_named_type(ty: &JavaType, facts: &Effective
     ) && facts.is_final_type(ty)
         || java_type_name_for_builtin_final_erased_lookup(ty)
             .is_some_and(crate::external_packs::builtin_external_final_erased_object_type)
+}
+
+/// A generated external-model facade is the executable carrier for an exact
+/// concrete dispatch constraint, even when the external Java class is not
+/// final. Re-projecting that constraint through a conservative hierarchy plan
+/// would erase the value to `Any` and make modeled instance calls impossible.
+///
+/// Representation provenance is the authoritative distinction here. Pack
+/// ownership is intentionally sparse for types discovered through modeled
+/// members, while parsed/corpus source representations may legitimately need
+/// hierarchy or shared-storage carriers instead of a generated facade.
+fn external_model_concrete_dispatch_should_keep_named_type(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> bool {
+    let Some(name) = java_type_name_for_builtin_final_erased_lookup(ty) else {
+        return false;
+    };
+    crate::stdlib::java_collection_kind_for_type(ty).is_none()
+        && erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
+        && representations
+            .type_representation(name)
+            .is_some_and(|entry| {
+                entry.provenance() == RepresentationProvenance::BuiltinExternalModel
+            })
 }
 
 fn java_type_name_for_builtin_final_erased_lookup(ty: &JavaType) -> Option<&str> {
@@ -2408,6 +2493,19 @@ fn rust_type_for_optional_element_arg_with_representations(
     {
         return RustType::Named(rust_name_for_java_named_type(name));
     }
+    // Nullability wraps the Java reference representation selected for the
+    // payload. A closed/source hierarchy therefore stores
+    // `Option<HierarchyValue>`, not `Option<Arc<Base>>` (or another concrete
+    // root payload handle). Storage placement remains authoritative for
+    // concrete classes, but hierarchy dispatch must be consulted first.
+    if matches!(
+        representations.dispatch_for(ty),
+        DispatchShape::ClosedEnum { .. }
+    ) && let Some(dispatch_ty) =
+        rust_type_for_facade_aware_representation_dispatch(ty, facts, representations)
+    {
+        return dispatch_ty;
+    }
     if let Some(storage_ty) =
         rust_type_for_representation_storage_placement(ty, facts, representations)
     {
@@ -2773,6 +2871,27 @@ pub(crate) fn java_set_uses_hash_free_carrier_with_representations(
         )
 }
 
+pub(crate) fn java_set_uses_semantic_equality_carrier_with_representations(
+    ty: &JavaType,
+    representations: &RepresentationPlan,
+) -> bool {
+    java_set_element_type_or_erased(ty).is_some_and(|element_ty| {
+        java_set_element_uses_semantic_equality_carrier(&element_ty, representations)
+    })
+}
+
+fn java_set_element_uses_semantic_equality_carrier(
+    element_ty: &JavaType,
+    representations: &RepresentationPlan,
+) -> bool {
+    let optional_element = optional_element_type(element_ty);
+    let element_ty = optional_element.as_ref().unwrap_or(element_ty);
+    matches!(
+        representations.dispatch_for(element_ty),
+        DispatchShape::ClosedEnum { .. }
+    )
+}
+
 pub(crate) fn java_set_uses_hash_free_carrier_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -2782,7 +2901,10 @@ pub(crate) fn java_set_uses_hash_free_carrier_with_effective_facts(
     };
     if !matches!(
         crate::stdlib::java_collection_kind_for_type(ty),
-        Some(crate::stdlib::JavaCollectionKind::Set)
+        Some(
+            crate::stdlib::JavaCollectionKind::Set
+                | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+        )
     ) {
         return false;
     }
@@ -2798,7 +2920,10 @@ fn java_set_element_type_or_erased(ty: &JavaType) -> Option<JavaType> {
     };
     if !matches!(
         crate::stdlib::java_collection_kind_for_type(ty),
-        Some(crate::stdlib::JavaCollectionKind::Set)
+        Some(
+            crate::stdlib::JavaCollectionKind::Set
+                | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+        )
     ) {
         return None;
     }
@@ -2829,6 +2954,8 @@ fn java_set_element_uses_hash_free_carrier_with_representations(
     let Some(element_ty) = element_ty else {
         return false;
     };
+    let optional_element = optional_element_type(element_ty);
+    let element_ty = optional_element.as_ref().unwrap_or(element_ty);
     if builtin_or_conservative_erased_external_representation(element_ty, representations) {
         return false;
     }

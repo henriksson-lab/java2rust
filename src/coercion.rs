@@ -358,6 +358,9 @@ pub enum Coercion {
         sequence: bool,
         optional_sequence: bool,
     },
+    CloneErasedObjectMap {
+        sorted: bool,
+    },
     ToOwnedSequence {
         policy: CloneRecoveryPolicy,
     },
@@ -3718,6 +3721,61 @@ pub(crate) fn clone_optional_erased_object_vec_ref_once(expr: RustExpr) -> RustE
     clone_erased_object_helper_once(expr, "java_clone_optional_erased_object_vec_ref")
 }
 
+pub(crate) fn replace_direct_clone_with_erased_object_map_clone(
+    expr: RustExpr,
+    sorted: bool,
+) -> RustExpr {
+    let helper = if sorted {
+        "java_clone_erased_object_btree_map_ref"
+    } else {
+        "java_clone_erased_object_hash_map_ref"
+    };
+    replace_direct_clone_with_erased_object_map_clone_inner(expr, helper)
+}
+
+fn replace_direct_clone_with_erased_object_map_clone_inner(
+    expr: RustExpr,
+    helper: &str,
+) -> RustExpr {
+    match expr {
+        RustExpr::Shaped { expr, .. } => {
+            replace_direct_clone_with_erased_object_map_clone_inner(*expr, helper)
+        }
+        RustExpr::PostfixComment { expr, .. } => {
+            replace_direct_clone_with_erased_object_map_clone_inner(*expr, helper)
+        }
+        RustExpr::Call { function, mut args }
+            if args.len() == 1
+                && matches!(function.unshaped(), RustExpr::Path(path)
+                    if path == &["Some".to_string()]) =>
+        {
+            let value = args.pop().expect("one optional payload");
+            RustExpr::Call {
+                function,
+                args: vec![replace_direct_clone_with_erased_object_map_clone_inner(
+                    value, helper,
+                )],
+            }
+        }
+        RustExpr::Call { function, mut args }
+            if args.len() == 1
+                && matches!(
+                    function.unshaped(),
+                    RustExpr::Path(path)
+                        if path == &["std".to_string(), "clone".to_string(), "Clone".to_string(), "clone".to_string()]
+                ) =>
+        {
+            let operand = args.pop().expect("one clone operand");
+            let operand = match operand {
+                RustExpr::Unary { op, expr } if op == "&" => *expr,
+                other => other,
+            };
+            clone_erased_object_helper_once(operand, helper)
+        }
+        other => other,
+    }
+}
+
 fn clone_erased_object_helper_once(expr: RustExpr, helper: &str) -> RustExpr {
     if rust_expr_is_erased_object_clone_helper_call(&expr) {
         return RustExpr::shaped(RustExprShape::OwnedRecovery, expr);
@@ -3761,6 +3819,8 @@ fn rust_expr_is_erased_object_clone_helper(expr: &RustExpr) -> bool {
                 "java_clone_erased_object_ref"
                     | "java_clone_erased_object_vec_ref"
                     | "java_clone_optional_erased_object_vec_ref"
+                    | "java_clone_erased_object_hash_map_ref"
+                    | "java_clone_erased_object_btree_map_ref"
             )
         }
         RustExpr::Path(segments) if segments.len() == 1 => {
@@ -3769,12 +3829,16 @@ fn rust_expr_is_erased_object_clone_helper(expr: &RustExpr) -> bool {
                 "java_clone_erased_object_ref"
                     | "java_clone_erased_object_vec_ref"
                     | "java_clone_optional_erased_object_vec_ref"
+                    | "java_clone_erased_object_hash_map_ref"
+                    | "java_clone_erased_object_btree_map_ref"
             )
         }
         RustExpr::Raw(raw) => {
             raw == "java_clone_erased_object_ref"
                 || raw == "java_clone_erased_object_vec_ref"
                 || raw == "java_clone_optional_erased_object_vec_ref"
+                || raw == "java_clone_erased_object_hash_map_ref"
+                || raw == "java_clone_erased_object_btree_map_ref"
         }
         _ => false,
     }
@@ -11788,6 +11852,7 @@ pub(crate) fn rust_expr_has_clone_recovery(expr: &RustExpr) -> bool {
 fn clone_recovery_projection(expr: RustExpr) -> Option<RustExpr> {
     if expr.recorded_shape() == Some(RustExprShape::OwnedRecovery)
         || rust_expr_has_clone_recovery_projection(&expr)
+        || rust_expr_constructs_owned_erased_object(&expr)
     {
         return Some(expr);
     }
@@ -11797,6 +11862,60 @@ fn clone_recovery_projection(expr: RustExpr) -> Option<RustExpr> {
         }
     }
     None
+}
+
+/// Whether this expression creates a fresh erased-object owner rather than
+/// reading an existing `Box<dyn Any>`.
+///
+/// This distinction matters after optional slot conversion: a nullable source
+/// value becomes `option.map(|value| Box::new(value.clone()) as Box<dyn Any>)`
+/// and is commonly unwrapped immediately for a Java non-null parameter. The
+/// outer projection metadata can be consumed by later slot adapters, but the
+/// structured expression still proves that the resulting box is fresh. A
+/// liveness clone on top of it would require `dyn Any: Clone` and would clone
+/// something that has already been recovered into owned storage.
+fn rust_expr_constructs_owned_erased_object(expr: &RustExpr) -> bool {
+    if erased_object_box_constructor(expr) {
+        return true;
+    }
+    let RustExpr::MethodCall {
+        receiver,
+        method,
+        args,
+    } = expr.unshaped()
+    else {
+        return false;
+    };
+    if !matches!(method.as_str(), "expect" | "unwrap") || (method == "unwrap" && !args.is_empty()) {
+        return false;
+    }
+    let RustExpr::MethodCall {
+        method: map_method,
+        args: map_args,
+        ..
+    } = receiver.unshaped()
+    else {
+        return false;
+    };
+    map_method == "map"
+        && matches!(map_args.as_slice(), [closure]
+            if closure_boxes_cloned_param_as_erased_object(closure, "value"))
+}
+
+fn erased_object_box_constructor(expr: &RustExpr) -> bool {
+    let RustExpr::Cast { expr, ty } = expr.unshaped() else {
+        return false;
+    };
+    if ty != "Box<dyn std::any::Any>" {
+        return false;
+    }
+    matches!(
+        expr.as_ref().unshaped(),
+        RustExpr::Call { function, args }
+            if !args.is_empty()
+                && matches!(function.unshaped(), RustExpr::Path(path)
+                    if path == &["Box".to_string(), "new".to_string()])
+    )
 }
 
 fn recover_rendered_clone_recovery_projection(rendered: &str) -> Option<RustExpr> {
@@ -15622,6 +15741,14 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             };
             clone_erased_object_helper_once(expr, helper)
         }
+        Coercion::CloneErasedObjectMap { sorted } => clone_erased_object_helper_once(
+            expr,
+            if *sorted {
+                "java_clone_erased_object_btree_map_ref"
+            } else {
+                "java_clone_erased_object_hash_map_ref"
+            },
+        ),
         Coercion::ToOwnedSequence { policy } => apply_to_owned_sequence(expr, policy),
         Coercion::CloneRecovery { policy } | Coercion::RustCloneRecovery { policy } => {
             if rust_expr_has_clone_recovery(&expr) {
@@ -15648,9 +15775,24 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
 
 fn option_unwrap_projection_for_coercion(expr: RustExpr) -> RustExpr {
     let propagated = expr_is_result_propagated(&expr);
+    // Mapping an optional payload through an owned element conversion creates
+    // a fresh owned value.  Keep that fact when the optional carrier is then
+    // unwrapped.  Otherwise the liveness pass sees only `.expect(...)` and
+    // may add a second Rust `Clone`; that is both unnecessary and invalid for
+    // object-safe carriers such as `Box<dyn Any>`.
+    let unwrap_recovers_owned_payload = expr.recorded_shape()
+        == Some(RustExprShape::OptionalProjected)
+        && expr.recorded_slot_shape().is_some_and(|element| {
+            matches!(
+                element.ownership,
+                OwnershipShape::Owned | OwnershipShape::CopyValue
+            )
+        });
     let unwrapped = method_expect_projection(expr, "Java null receiver");
     if propagated {
         RustExpr::shaped(RustExprShape::ResultPropagated, unwrapped)
+    } else if unwrap_recovers_owned_payload {
+        RustExpr::shaped(RustExprShape::OwnedRecovery, unwrapped)
     } else {
         unwrapped
     }
@@ -28526,6 +28668,34 @@ mod tests {
         );
         assert_eq!(seq.recorded_shape(), Some(RustExprShape::OwnedRecovery));
         assert!(rust_expr_has_clone_recovery(&seq));
+    }
+
+    #[test]
+    fn unwrapping_fresh_owned_optional_payload_does_not_clone_it_again() {
+        let mut erased_element = RustSlotShape::conservative(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        });
+        erased_element.ownership = OwnershipShape::Owned;
+        erased_element.dispatch = DispatchShape::ErasedObject;
+        let projected = optional_projected_structured_expr(
+            RustExpr::Raw(
+                "value.as_ref().map(|item| Box::new(item.clone()) as Box<dyn std::any::Any>)"
+                    .to_string(),
+            ),
+            &erased_element,
+        );
+
+        let unwrapped = apply_one(projected, &Coercion::UnwrapOption);
+        assert_eq!(
+            unwrapped.recorded_shape(),
+            Some(RustExprShape::OwnedRecovery)
+        );
+
+        let recovered = apply_clone_recovery(unwrapped, &CloneRecoveryPolicy::AuditRequired);
+        let rendered = emit::emit_expr(&recovered);
+        assert!(rendered.contains(".expect(\"Java null receiver\")"));
+        assert!(!rendered.contains("std::clone::Clone::clone"));
     }
 
     #[test]

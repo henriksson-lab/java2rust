@@ -12653,7 +12653,10 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
         factory.return_type,
         Some(JavaType::Named {
             name: "FeatureReader".to_string(),
-            args: Vec::new(),
+            args: vec![JavaType::Named {
+                name: "T3".to_string(),
+                args: Vec::new(),
+            }],
         })
     );
     assert_eq!(
@@ -12671,7 +12674,10 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
         indexed_factory.return_type,
         Some(JavaType::Named {
             name: "FeatureReader".to_string(),
-            args: Vec::new(),
+            args: vec![JavaType::Named {
+                name: "T4".to_string(),
+                args: Vec::new(),
+            }],
         })
     );
     let factory_index_argument = facts
@@ -12711,7 +12717,7 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
         Some(JavaType::Named {
             name: "CloseableIterator".to_string(),
             args: vec![JavaType::Named {
-                name: "Object".to_string(),
+                name: "T".to_string(),
                 args: Vec::new(),
             }],
         })
@@ -12723,8 +12729,11 @@ fn htsjdk_tribble_feature_pack_models_coordinate_getters() {
     assert_eq!(
         query_three.return_type,
         Some(JavaType::Named {
-            name: "CloseableTribbleIterator".to_string(),
-            args: Vec::new(),
+            name: "CloseableIterator".to_string(),
+            args: vec![JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            }],
         })
     );
 

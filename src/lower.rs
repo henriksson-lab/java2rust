@@ -106,14 +106,15 @@ use crate::coercion::{
     qualified_static_storage_accessor_projection, qualified_static_storage_setter_path_projection,
     reborrow_optional_mut_projection, receiver_method_call_projection,
     receiver_method_call_projection_exact, recover_operator_expr_or_raw_leaf,
-    rewrite_downcast_expect_message, rust_expr_has_direct_clone_recovery,
-    rust_expr_is_constructed_optional_value, rust_expr_may_be_java_null_value,
-    rust_expr_mentions_constructor_self_temporary, rust_string_literal_projection,
-    rust_type_associated_path_projection, self_associated_path_projection,
-    sequence_get_expect_projection, sequence_get_mut_expect_projection,
-    sequence_iter_cloned_projection, sequence_iter_copied_projection,
-    sequence_iteration_source_projection, sequence_iteration_source_projection_with_result_context,
-    shared_borrow_expr, snapshot_shared_borrow_argument, static_storage_accessor_projection,
+    replace_direct_clone_with_erased_object_map_clone, rewrite_downcast_expect_message,
+    rust_expr_has_direct_clone_recovery, rust_expr_is_constructed_optional_value,
+    rust_expr_may_be_java_null_value, rust_expr_mentions_constructor_self_temporary,
+    rust_string_literal_projection, rust_type_associated_path_projection,
+    self_associated_path_projection, sequence_get_expect_projection,
+    sequence_get_mut_expect_projection, sequence_iter_cloned_projection,
+    sequence_iter_copied_projection, sequence_iteration_source_projection,
+    sequence_iteration_source_projection_with_result_context, shared_borrow_expr,
+    snapshot_shared_borrow_argument, static_storage_accessor_projection,
     static_storage_assignment_value_projection, static_storage_getter_body_projection,
     static_storage_setter_body_projection, static_storage_setter_path_projection,
     string_char_at_result_projection, string_from_byte_range_result_projection,
@@ -170,8 +171,8 @@ use crate::exception_lowering::{
 use crate::exception_plan::{
     MethodExceptionPlan, ProgramExceptionPlan, ThrowExprPlan, TryBlockCompletion, TryStmtPlan,
     catch_match_class_names, plan_block_exception_completion,
-    plan_program_exceptions_with_fallibility, plan_program_fallibility, plan_throw_expr,
-    plan_try_stmt, try_resource_names, try_resources_are_declarations,
+    plan_program_exceptions_with_fallibility, plan_program_fallibility_with_signatures,
+    plan_throw_expr, plan_try_stmt, try_resource_names, try_resources_are_declarations,
 };
 use crate::expr_render::{
     binary_expr, indexed_expr, literal_expr, named_constructor_expr, super_expr, ternary_expr,
@@ -257,11 +258,12 @@ use crate::stdlib::{
     java_string_format_support_item, java_string_identity_support_item,
     java_string_path_arg_support_item, java_string_split_support_item,
     program_external_api_facts_use_java_platform_facades,
-    program_mentions_java_array_blocking_queue, program_mentions_java_priority_queue,
-    program_uses_java_class_tokens, program_uses_java_erased_object_runtime_support,
-    program_uses_java_platform_facades, program_uses_java_string_format,
-    program_uses_java_string_runtime_helpers, program_uses_source_map_entry_values,
-    programs_declare_java_platform_facade_support_type, support_item_declared_type_names,
+    program_external_api_facts_use_java_stream, program_mentions_java_array_blocking_queue,
+    program_mentions_java_priority_queue, program_uses_java_class_tokens,
+    program_uses_java_erased_object_runtime_support, program_uses_java_platform_facades,
+    program_uses_java_string_format, program_uses_java_string_runtime_helpers,
+    program_uses_source_map_entry_values, programs_declare_java_platform_facade_support_type,
+    support_item_declared_type_names,
 };
 use crate::stream::{StreamPlan, build_stream_plan, build_stream_plan_for_slot};
 use crate::stream_lowering::{
@@ -481,7 +483,12 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         context_sources_are_emitted,
     );
     let call_graph = crate::usage::build_call_graph_with_facts(&context_analysis_program, facts);
-    let fallibility = plan_program_fallibility(&context_analysis_program, &call_graph, facts);
+    let fallibility = plan_program_fallibility_with_signatures(
+        &context_analysis_program,
+        &call_graph,
+        facts,
+        Some(signatures),
+    );
     let exceptions =
         plan_program_exceptions_with_fallibility(&context_analysis_program, facts, &fallibility);
     let callable_analysis = CallableAnalysis::new(usage, &exceptions, &fallibility);
@@ -620,7 +627,28 @@ pub fn lower_program_with_semantic_plans_and_support_context(
             file.items.push(java_string_path_arg_support_item());
         }
     }
-    if crate::stdlib::program_mentions_java_type(program, "Stream") {
+    let facade_support_items = external_api_facade_support_items_with_semantic_plans(
+        program,
+        facts,
+        support_local_type_program,
+        source_summary_type_program,
+        context_sources_are_emitted,
+        representations,
+        Some(SourceBoundaryTraitPlans {
+            program: &context_analysis_program,
+            signatures,
+            exceptions: &exceptions,
+        }),
+    );
+    let uses_java_stream = programs_use_java_stream_support(
+        &[
+            program,
+            support_local_type_program,
+            source_summary_type_program,
+        ],
+        facts,
+    ) || support_items_reference_java_stream(&facade_support_items);
+    if uses_java_stream {
         file.items.push(java_stream_support_item());
     }
     if uses_java_platform_facades || uses_map_entry_value_carrier {
@@ -643,19 +671,6 @@ pub fn lower_program_with_semantic_plans_and_support_context(
     if program_uses_java_string_format(program) {
         file.items.push(java_string_format_support_item());
     }
-    let facade_support_items = external_api_facade_support_items_with_semantic_plans(
-        program,
-        facts,
-        support_local_type_program,
-        source_summary_type_program,
-        context_sources_are_emitted,
-        representations,
-        Some(SourceBoundaryTraitPlans {
-            program: &context_analysis_program,
-            signatures,
-            exceptions: &exceptions,
-        }),
-    );
     // Static-constant support is emitted after all runtime support.  Treat
     // types declared by those earlier runtime items as existing owners too;
     // otherwise using a constant on a modeled JDK carrier synthesizes a
@@ -705,6 +720,23 @@ pub fn lower_program_with_semantic_plans_and_support_context(
         ctx,
     ));
     LoweredProgram::new(file, diagnostics)
+}
+
+fn programs_use_java_stream_support(programs: &[&Program], facts: &FactSet) -> bool {
+    programs.iter().any(|program| {
+        crate::stdlib::program_mentions_java_type(program, "Stream")
+            || program_external_api_facts_use_java_stream(program, facts)
+    })
+}
+
+/// Runtime support follows the ABI that support synthesis actually emitted.
+/// A facade can acquire a `JavaStream<T>` return through an external model even
+/// when no source AST spells `Stream`; scanning the generated support surface
+/// closes that dependency without making corpus-specific assumptions.
+fn support_items_reference_java_stream(items: &[RustItem]) -> bool {
+    items
+        .iter()
+        .any(|item| matches!(item, RustItem::Raw(raw) if raw.contains("JavaStream<")))
 }
 
 fn emittable_local_capture_types(program: &Program, facts: &FactSet) -> Vec<TypeDecl> {
@@ -3407,6 +3439,7 @@ fn raw_interface_trait_item_with_default_methods(
                     crate::representation_lowering::zero_arg_functional_method(ty)
                         .map(|method| ctx.exceptions.method_plan(ty, method))
                         .unwrap_or_else(|| MethodExceptionPlan::new(false)),
+                    Some(ctx.representations),
                 )
             })
             .flatten();
@@ -4101,7 +4134,15 @@ fn static_storage_rust_type_for_field(
     {
         return rust_ty;
     }
-    let base = crate::slot_render::rust_type_for_slot_with_facts(shape, ctx.facts);
+    // Static storage owns its payload. In particular, a source interface must
+    // retain the sized `Box<dyn Trait>` carrier selected by the representation
+    // plan; the fact-only renderer cannot distinguish that from a borrowed
+    // bare `dyn Trait` surface.
+    let base = crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+        shape,
+        ctx.facts,
+        ctx.representations,
+    );
     if ctx
         .representations
         .static_field_needs_live_native_map(&ty.name, &field.name)
@@ -4798,19 +4839,27 @@ fn source_supertype_conversion_target_key(
     representations: &RepresentationPlan,
     facts: &FactSet,
 ) -> String {
+    let super_ty_java = JavaType::Named {
+        name: super_ty.name.clone(),
+        args: Vec::new(),
+    };
+    let dispatch = representations.dispatch_for(&super_ty_java);
+    if let DispatchShape::ClosedEnum { enum_name } = &dispatch {
+        // The finalized source carrier is authoritative. Raw external or
+        // conservative dispatch facts may still say that the Java type can
+        // hold an unknown runtime object, but collapsing two distinct emitted
+        // carrier enums under that preliminary fact drops required `From`
+        // implementations for transitive subclasses.
+        return format!("closed-enum:{enum_name}");
+    }
     if facts
         .dispatch_requirements_for(&super_ty.name)
         .contains(&crate::facts::DispatchRequirementKind::NeedsUnknownRuntimeObject)
     {
         return emit::emit_type(&erased_object_rust_type());
     }
-    let super_ty_java = JavaType::Named {
-        name: super_ty.name.clone(),
-        args: Vec::new(),
-    };
-    match representations.dispatch_for(&super_ty_java) {
+    match dispatch {
         DispatchShape::ErasedObject => emit::emit_type(&erased_object_rust_type()),
-        DispatchShape::ClosedEnum { enum_name } => format!("closed-enum:{enum_name}"),
         _ if representations
             .type_representation(&super_ty.name)
             .is_some_and(|entry| {
@@ -9889,6 +9938,13 @@ fn source_super_constructor_fields_and_trailing<'a>(
         } else {
             ctx.result_propagation_mode
         },
+        // Statements replayed from the superclass constructor keep the
+        // superclass's lexical method-binding context. In particular, a
+        // receiverless call to a private helper is statically bound to that
+        // declaration and must target the flattened private implementation
+        // emitted on the child, not a virtual child method of the same name.
+        lowering_inherited_method_body: true,
+        inherited_method_declaring_type: Some(super_ty),
         ..ctx
     };
     let (super_body, super_bindings) =
@@ -10170,6 +10226,7 @@ fn source_super_constructor_fields_and_trailing<'a>(
                     stmt,
                     &super_bindings,
                 ),
+                lexical_declaring_type: Some(super_ty),
             })
             .chain(trailing.into_iter().skip(child_prefix_len))
             .collect::<Vec<_>>()
@@ -10824,7 +10881,7 @@ fn delegated_constructor_trailing_read_names(
             DelegatedConstructorTrailingStmt::Statement { stmt } => {
                 collect_stmt_read_names(std::slice::from_ref(stmt), &mut names);
             }
-            DelegatedConstructorTrailingStmt::OwnedStatement { stmt } => {
+            DelegatedConstructorTrailingStmt::OwnedStatement { stmt, .. } => {
                 collect_stmt_read_names(std::slice::from_ref(stmt), &mut names);
             }
         }
@@ -10978,12 +11035,16 @@ fn select_unique_source_constructor_by_arity(
 }
 
 /// Recover the emitted identity of a source constructor when Java overload
-/// resolution could not attach a `ResolvedConstructor` to the allocation.
+/// resolution could not attach an exact `ResolvedConstructor` to the
+/// allocation.
 ///
 /// This is deliberately driven by the same declaration and argument-shape
 /// matching used for source `super(...)` calls. A unique compatible overload
-/// is safe to name; an ambiguous set remains `new` so that we do not silently
-/// choose a different Java constructor merely to make generated Rust compile.
+/// is safe to name; an ambiguous set retains the preliminary target so that we
+/// do not silently choose a different Java constructor merely to make
+/// generated Rust compile. The preliminary target may already be an external
+/// arity fallback such as `new_4`; an emitted source declaration is still
+/// authoritative over that dependency-model guess.
 fn refine_source_constructor_target(
     target: &mut NewTargetPlan,
     ty: &JavaType,
@@ -10992,9 +11053,6 @@ fn refine_source_constructor_target(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) {
-    if target.rust_name() != "new" {
-        return;
-    }
     let Some(type_name) = concrete_java_type_name(ty) else {
         return;
     };
@@ -11005,9 +11063,7 @@ fn refine_source_constructor_target(
         return;
     };
     let rust_name = ctor.rust_name.as_deref().unwrap_or("new");
-    if rust_name != "new" {
-        target.rename_constructor(rust_name.to_string());
-    }
+    target.rename_constructor(rust_name.to_string());
 }
 
 fn select_source_super_constructor_by_arg_shapes<'a>(
@@ -11653,8 +11709,16 @@ fn delegated_constructor_trailing_can_throw(
         DelegatedConstructorTrailingStmt::Statement { stmt } => {
             delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx)
         }
-        DelegatedConstructorTrailingStmt::OwnedStatement { stmt } => {
-            delegated_constructor_trailing_stmt_can_throw(stmt, env, ctx)
+        DelegatedConstructorTrailingStmt::OwnedStatement {
+            stmt,
+            lexical_declaring_type,
+        } => {
+            let lexical_ctx = LowerCtx {
+                lowering_inherited_method_body: lexical_declaring_type.is_some(),
+                inherited_method_declaring_type: *lexical_declaring_type,
+                ..ctx
+            };
+            delegated_constructor_trailing_stmt_can_throw(stmt, env, lexical_ctx)
         }
     })
 }
@@ -11732,7 +11796,7 @@ fn lower_delegated_constructor_trailing_stmts(
     for (index, stmt) in trailing.iter().enumerate() {
         let source_stmt = match stmt {
             DelegatedConstructorTrailingStmt::Statement { stmt } => Some(*stmt),
-            DelegatedConstructorTrailingStmt::OwnedStatement { stmt } => Some(stmt),
+            DelegatedConstructorTrailingStmt::OwnedStatement { stmt, .. } => Some(stmt),
             _ => None,
         };
         if let Some(source_stmt) = source_stmt {
@@ -11767,7 +11831,7 @@ fn learn_delegated_constructor_trailing_stmt_shapes(
 ) {
     let stmt = match stmt {
         DelegatedConstructorTrailingStmt::Statement { stmt } => *stmt,
-        DelegatedConstructorTrailingStmt::OwnedStatement { stmt } => stmt,
+        DelegatedConstructorTrailingStmt::OwnedStatement { stmt, .. } => stmt,
         _ => return,
     };
     if let Stmt::VarDecl {
@@ -11982,14 +12046,22 @@ fn lower_delegated_constructor_trailing_stmt(
                 returns_result,
             )
         }
-        DelegatedConstructorTrailingStmt::OwnedStatement { stmt } => {
+        DelegatedConstructorTrailingStmt::OwnedStatement {
+            stmt,
+            lexical_declaring_type,
+        } => {
             let mut local_env = env.clone();
+            let lexical_ctx = LowerCtx {
+                lowering_inherited_method_body: lexical_declaring_type.is_some(),
+                inherited_method_declaring_type: *lexical_declaring_type,
+                ..ctx
+            };
             lower_delegated_constructor_trailing_plain_stmt(
                 ty,
                 stmt,
                 future_reads,
                 &mut local_env,
-                ctx,
+                lexical_ctx,
                 returns_result,
             )
         }
@@ -15082,7 +15154,7 @@ fn lower_stmt(
                 local_plan.set_shape(declared_generic_local_slot_shape(ty, &local_plan.shape()));
             }
             if let Some(shape) = initializer.as_ref().and_then(|initializer| {
-                external_crate_constructor_initializer_shape(ty, initializer, env, ctx)
+                exact_modeled_external_constructor_initializer_shape(ty, initializer, env, ctx)
             }) {
                 local_plan.set_shape(shape);
             }
@@ -15212,6 +15284,12 @@ fn lower_stmt(
                     } else {
                         assignment_value_plan_for_shape(&local_plan.shape()).into_slot()
                     };
+                    let solved_cast_refinements = refinements_with_solved_exact_cast_slot(
+                        expr,
+                        &local_plan.shape(),
+                        ctx,
+                        refinements,
+                    );
                     let lowered = if let JavaType::Primitive(primitive) = ty
                         && let Some((entry_value, return_ty)) =
                             lower_source_map_entry_value_method_call(expr, env, ctx, refinements)
@@ -15224,7 +15302,7 @@ fn lower_stmt(
                             env,
                             initializer_slot.clone(),
                             ctx,
-                            refinements,
+                            &solved_cast_refinements,
                         )
                     };
                     let lowered = if expr_is_object_input_stream_read_object_call(expr) {
@@ -17109,7 +17187,25 @@ fn lower_equality_operand_with_erased_class_context(
             refinements,
         );
     }
-    lower_expr_with_refinements(expr, env, ctx, refinements)
+    let lowered = lower_expr_with_refinements(expr, env, ctx, refinements);
+    if let Expr::Var(name) = expr
+        && refinements.non_null_locals.contains(name)
+        && env.local_shape(name).is_some_and(|shape| {
+            shape.optional_element_type().is_some()
+                && shape.ownership == OwnershipShape::SharedBorrow
+        })
+    {
+        // A borrowed nullable parameter is represented as `Option<&T>`.
+        // Generic flow refinement uses `as_ref().unwrap()` so it can also
+        // handle `&Option<T>`, yielding `&&T` here. Equality consumes neither
+        // side, so remove that carrier-only reference and compare `&T` to
+        // `&T`.
+        return RustExpr::Unary {
+            op: "*".to_string(),
+            expr: Box::new(lowered),
+        };
+    }
+    lowered
 }
 
 fn lower_class_literal_for_erased_class_shape(expr: &Expr) -> Option<RustExpr> {
@@ -18280,6 +18376,16 @@ fn erased_object_source_hierarchy_cast_expr_for_plan(
     let object_value_name = "__java_erased_object_value".to_string();
     let object_name = "__java_erased_object".to_string();
     let object = RustExpr::Var(object_name.clone());
+    let borrowed_object =
+        erased_object_borrow_for_recovery(RustExpr::Var(object_value_name.clone()));
+    let borrowed_object = if plan.actual().optional_element_type().is_some() {
+        make_java_null_expect_catchable_in_propagating_ctx(
+            unwrap_java_null_receiver_projection(borrowed_object),
+            ctx,
+        )
+    } else {
+        borrowed_object
+    };
     let parameterized_carrier_name =
         crate::slot_render::parameterized_closed_enum_type_name_with_representations(
             carrier_name,
@@ -18335,9 +18441,7 @@ fn erased_object_source_hierarchy_cast_expr_for_plan(
                 mutable: false,
                 name: object_name,
                 ty: None,
-                value: Some(erased_object_borrow_for_recovery(RustExpr::Var(
-                    object_value_name,
-                ))),
+                value: Some(borrowed_object),
             },
         ],
         tail: Some(Box::new(carrier)),
@@ -19215,7 +19319,7 @@ fn refine_local_plan_from_initializer(
         return local_plan;
     }
     if let Some(constructor_shape) =
-        external_crate_constructor_initializer_shape(declared_ty, initializer, env, ctx)
+        exact_modeled_external_constructor_initializer_shape(declared_ty, initializer, env, ctx)
     {
         local_plan.set_shape(constructor_shape);
         return local_plan;
@@ -19629,19 +19733,30 @@ fn typed_static_constant_initializer_shape(
     Some(plan.shape().clone())
 }
 
-fn external_crate_constructor_initializer_shape(
+fn exact_modeled_external_constructor_initializer_shape(
     declared_ty: &JavaType,
     initializer: &Expr,
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> Option<RustSlotShape> {
     let Expr::New {
-        ty, args, resolved, ..
+        ty,
+        args,
+        body,
+        resolved,
+        ..
     } = initializer
     else {
         return None;
     };
-    let constructed_name = concrete_java_type_name(ty)?;
+    if body.is_some() {
+        return None;
+    }
+    let constructed_ty = resolved
+        .as_ref()
+        .map(|resolved| &resolved.constructed_type)
+        .unwrap_or(ty);
+    let constructed_name = concrete_java_type_name(constructed_ty)?;
     if !same_concrete_java_type_name(declared_ty, constructed_name) {
         return None;
     }
@@ -19653,7 +19768,29 @@ fn external_crate_constructor_initializer_shape(
         args,
         env.type_env(),
     );
-    target.external_crate()?;
+    // `new ConcreteType(...)` is exact nominal evidence even when the
+    // external pack has not modeled that particular overload.  The generated
+    // facade constructor itself returns `ConcreteType`; erasing an exactly
+    // matching declared local to Object loses all subsequently modeled
+    // instance methods. Source constructors are excluded because their
+    // whole-program representation may legitimately be a shared handle or a
+    // hierarchy carrier rather than the bare struct.
+    let target_is_emitted_source = resolved
+        .as_ref()
+        .map(|resolved| resolved.declaring_type.as_str())
+        .or_else(|| concrete_java_type_name(ty))
+        .is_some_and(|name| {
+            find_emitted_context_type_and_program_by_key(ctx.program, name).is_some()
+                || (ctx.context_sources_are_emitted
+                    && find_emitted_context_type_and_program_by_key(
+                        ctx.support_local_type_program,
+                        name,
+                    )
+                    .is_some())
+        });
+    if target.native_collection().is_some() || target_is_emitted_source {
+        return None;
+    }
     let mut shape = RustSlotShape::for_storage(declared_ty.clone());
     crate::shape_projection::apply_required_dispatch(&mut shape, DispatchShape::Concrete);
     Some(shape)
@@ -22336,6 +22473,18 @@ fn own_nullable_string_return_value(
     // `None` has no payload from which Rust can infer the closure parameter.
     // It already satisfies the declared `Option<String>` return type.
     if matches!(value.unshaped(), RustExpr::Var(name) if name == "None") {
+        return value;
+    }
+    if value.recorded_shape() == Some(RustExprShape::OptionalProjected)
+        && value.recorded_slot_shape().is_some_and(|element| {
+            matches!(element.java_ty, JavaType::String)
+                && matches!(element.ownership, OwnershipShape::Owned)
+        })
+    {
+        // Slot-aware producers can prove that they already recovered an
+        // owned String payload, for example `Map::get(...).cloned()`.
+        // Preserve that proof rather than cloning every payload again merely
+        // because the carrier is nullable.
         return value;
     }
     RustExpr::MethodCall {
@@ -25244,6 +25393,29 @@ fn lower_native_collection_remove_all_expr_stmt(
     }
     let lowered_arg = lower_expr_for_slot(&args[0], env, argument_slot(arg_shape), ctx);
     let temp_name = "__java_remove_all_values";
+    let contains_item =
+        if crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+            &receiver_ty,
+            ctx.representations,
+        ) {
+            function_call_projection(
+                RustExpr::path(["java_iter_contains_by_map_key"]),
+                vec![
+                    receiver_method_call_projection_exact(
+                        RustExpr::Var(temp_name.to_string()),
+                        "iter",
+                        Vec::new(),
+                    ),
+                    RustExpr::Var("item".to_string()),
+                ],
+            )
+        } else {
+            receiver_method_call_projection_exact(
+                RustExpr::Var(temp_name.to_string()),
+                "contains",
+                vec![RustExpr::Var("item".to_string())],
+            )
+        };
     Some(RustStmt::Expr(RustExpr::Block {
         stmts: vec![
             RustStmt::Let {
@@ -25262,13 +25434,7 @@ fn lower_native_collection_remove_all_expr_stmt(
                         pattern: "item".to_string(),
                         ty: None,
                     }],
-                    body: RustClosureBody::Expr(Box::new(logical_not_projection(
-                        receiver_method_call_projection_exact(
-                            RustExpr::Var(temp_name.to_string()),
-                            "contains",
-                            vec![RustExpr::Var("item".to_string())],
-                        ),
-                    ))),
+                    body: RustClosureBody::Expr(Box::new(logical_not_projection(contains_item))),
                 }],
             )),
         ],
@@ -26355,7 +26521,7 @@ fn lower_planned_call_expr_stmt(
             let expr = if let Some(comparator) = comparator {
                 let comparator_element_param_ty =
                     native_collections_sort_element_callback_param_type(target, env, ctx);
-                let target = lower_expr(target, env, ctx);
+                let target = lower_mutable_array_call_target(target, env, ctx);
                 let comparator_expr = lower_expr(comparator, env, ctx);
                 let comparator_throws =
                     native_collections_sort_comparator_compare_needs_result_unwrap(
@@ -26392,7 +26558,7 @@ fn lower_planned_call_expr_stmt(
                     collection_sort_by_comparator_projection(target, comparator_expr)
                 }
             } else {
-                collection_sort_projection(lower_expr(target, env, ctx))
+                collection_sort_projection(lower_mutable_array_call_target(target, env, ctx))
             };
             Some(RustStmt::Expr(expr))
         }
@@ -26472,9 +26638,10 @@ fn lower_planned_call_expr_stmt(
     }
 }
 
-/// Lower an array passed to a Java mutating helper (`Arrays.fill/sort`) as a
-/// mutable place. A row of an ndarray-backed two-dimensional primitive array
-/// is a live Java row, not the owned `to_vec()` snapshot used for reads.
+/// Lower a sequence passed to a Java mutating helper (`Arrays.fill/sort` or
+/// `Collections.sort`) as a mutable place. A row of an ndarray-backed
+/// two-dimensional primitive array is a live Java row, not the owned
+/// `to_vec()` snapshot used for reads.
 fn lower_mutable_array_call_target(target: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     if let Expr::ArrayAccess(array, index) = target
         && ndarray_element_type_after_optional(&crate::types::infer_expr_type(
@@ -28565,7 +28732,7 @@ fn lower_expr(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> RustExpr {
     lower_expr_with_refinements(expr, env, ctx, &ExprRefinements::default())
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 struct ExprRefinements {
     non_null_locals: HashSet<String>,
     exact_erased_object_locals: HashMap<String, JavaType>,
@@ -29861,6 +30028,7 @@ fn lower_expr_with_refinements(
             let target = retarget_static_owner_native_java_static_call(
                 target,
                 receiver.as_deref(),
+                name,
                 args,
                 env,
                 ctx,
@@ -30194,7 +30362,13 @@ fn lower_expr_with_refinements(
             {
                 let mut lowered =
                     wrap_call_expr_with_argument_temporaries(super_call, lowered_args.temporaries);
-                lowered = apply_result_propagation_policy_from_ctx(lowered, expr, env, ctx);
+                let exact_result_abi =
+                    source_call_target_result_abi(&target, receiver.as_deref(), env, None, ctx);
+                lowered = match exact_result_abi {
+                    Some(true) => apply_result_value_policy_from_ctx(lowered, ctx),
+                    Some(false) => lowered,
+                    None => apply_result_propagation_policy_from_ctx(lowered, expr, env, ctx),
+                };
                 return lowered;
             }
             // Once planning selected an external facade, its pack/runtime ABI
@@ -30274,9 +30448,11 @@ fn lower_expr_with_refinements(
             lowered = wrap_call_expr_with_argument_temporaries(lowered, lowered_args.temporaries);
             lowered =
                 rewrite_optional_erased_borrowed_string_view_call_args(lowered, args, env, ctx);
-            if target_source_result_abi != Some(false) {
-                lowered = apply_result_propagation_policy_from_ctx(lowered, expr, env, ctx);
-            }
+            lowered = match target_source_result_abi {
+                Some(true) => apply_result_value_policy_from_ctx(lowered, ctx),
+                Some(false) => lowered,
+                None => apply_result_propagation_policy_from_ctx(lowered, expr, env, ctx),
+            };
             if target_result_fallback && !crate::coercion::expr_is_result_propagated(&lowered) {
                 lowered = apply_result_value_policy_from_ctx(lowered, ctx);
             }
@@ -34407,12 +34583,14 @@ fn lower_write_sequence_receiver(
         }
         return lowered;
     }
-    let lowered = if let Expr::FieldAccess(receiver, field) = expr {
-        lower_source_hierarchy_carrier_field_mut_access(receiver, field, env, ctx, refinements)
-            .unwrap_or_else(|| lower_expr_with_refinements(expr, env, ctx, refinements))
-    } else {
-        lower_expr_with_refinements(expr, env, ctx, refinements)
-    };
+    let lowered = lower_current_self_field_assignment_target(expr, env, ctx)
+        .or_else(|| {
+            let Expr::FieldAccess(receiver, field) = expr else {
+                return None;
+            };
+            lower_source_hierarchy_carrier_field_mut_access(receiver, field, env, ctx, refinements)
+        })
+        .unwrap_or_else(|| lower_expr_with_refinements(expr, env, ctx, refinements));
     let shape_ctx = ExprShapeContext::new(
         Some(ctx.signatures),
         Some(ctx.representations),
@@ -34422,6 +34600,7 @@ fn lower_write_sequence_receiver(
     // the original Java reference field was conservatively nullable.  Use
     // that representation-aware shape before deciding to unwrap a sequence.
     let shape = source_java_enum_field_accessor_shape_for_expr(expr, env, ctx)
+        .or_else(|| current_instance_field_shape_with_env(expr, env, ctx))
         .unwrap_or_else(|| infer_expr_shape_with_context(expr, env, shape_ctx));
     let Some(inner_ty) = shape.optional_element_type() else {
         return lowered;
@@ -35520,6 +35699,10 @@ fn lower_assignment_value_for_slot(
     .unwrap_or_else(|| {
         lower_expr_for_slot_with_refinements(value, env, assignment_slot.clone(), ctx, refinements)
     });
+    let lowered = slot_target_shape(assignment_slot)
+        .and_then(|shape| erased_object_native_map_clone_kind(shape, ctx))
+        .map(|sorted| replace_direct_clone_with_erased_object_map_clone(lowered.clone(), sorted))
+        .unwrap_or(lowered);
     slot_target_shape(assignment_slot)
         .map(|shape| wrap_bare_shared_constructor_for_assignment_slot(lowered.clone(), shape, ctx))
         .unwrap_or(lowered)
@@ -37812,13 +37995,34 @@ fn java_type_can_hold_null(java_ty: &JavaType) -> bool {
 }
 
 fn static_storage_value_shape(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Option<RustSlotShape> {
-    let Expr::Var(name) = expr else {
-        return None;
+    let (owner_name, field_name) = match expr {
+        Expr::Var(name) => {
+            // Package/context seeding indexes every visible static by its bare
+            // source name.  That index is deliberately broader than Java's
+            // lexical lookup and may therefore also contain a package
+            // sibling's field named like this local.  Keep the same
+            // local-before-field rule used by the actual static accessors;
+            // otherwise a local `Map mapping` can inherit the nullable shape
+            // of an unrelated `static Map mapping` and gain a spurious
+            // `.as_ref()` receiver projection.
+            if env.local_type(name).is_some() || env.is_instance_field(name) {
+                return None;
+            }
+            let semantic = env.static_storage_field_semantic_name(name)?;
+            let owner = env
+                .static_storage_field_owner(semantic)
+                .or_else(|| env.static_storage_field_owner(name))
+                .or(ctx.current_type)?;
+            (owner.to_string(), semantic.to_string())
+        }
+        Expr::FieldAccess(owner, field) => (
+            static_storage_owner_type_name(owner, env, ctx)?,
+            field.clone(),
+        ),
+        _ => return None,
     };
-    if env.static_storage_field_access_name(name).is_none() {
-        return None;
-    }
-    static_storage_field_shape(name, env, ctx)
+    let (owner, field) = find_static_storage_owner_field(&owner_name, &field_name, ctx)?;
+    Some(ctx.signatures.required_declared_field_shape(owner, field))
 }
 
 fn is_ordered_comparison(op: BinaryOp) -> bool {
@@ -39714,6 +39918,18 @@ fn introduce_same_receiver_argument_temporaries(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> LoweredCallArgs {
+    if call_receiver.is_some_and(|receiver| {
+        type_param_bound_method_call_return_shape(receiver, resolved, env, ctx).is_some()
+    }) {
+        // A receiver whose static type is a bounded Java type parameter
+        // dispatches through the generated bound trait.  It is not a concrete
+        // shared-object handle, even when the declaration that supplies the
+        // bound method uses a handle-aware companion internally.
+        return LoweredCallArgs {
+            args: rust_args,
+            temporaries: Vec::new(),
+        };
+    }
     let Some(Expr::Var(receiver_name)) = call_receiver else {
         return LoweredCallArgs {
             args: rust_args,
@@ -41217,6 +41433,38 @@ fn exact_erased_object_cast_initializer_local_shape(
     Some(shape)
 }
 
+fn refinements_with_solved_exact_cast_slot(
+    initializer: &Expr,
+    slot_shape: &RustSlotShape,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> ExprRefinements {
+    let mut solved = refinements.clone();
+    let Some((cast_ty, local_name)) = exact_erased_object_cast_parts(initializer) else {
+        return solved;
+    };
+    if solved.exact_erased_object_locals.contains_key(local_name) {
+        return solved;
+    }
+    let slot_ty = slot_shape
+        .optional_element_type()
+        .unwrap_or_else(|| slot_shape.java_ty.clone());
+    let Some(slot_name) = concrete_java_type_name(&slot_ty) else {
+        return solved;
+    };
+    let Some(cast_name) = concrete_java_type_name(cast_ty) else {
+        return solved;
+    };
+    if !same_concrete_java_type(&slot_ty, cast_ty)
+        && source_or_jdk_subtype_reaches_in_lower_ctx(slot_name, cast_name, ctx)
+    {
+        solved
+            .exact_erased_object_locals
+            .insert(local_name.to_string(), slot_ty);
+    }
+    solved
+}
+
 fn lower_exact_erased_object_cast_for_slot(
     expr: &Expr,
     env: &ShapeEnv,
@@ -41225,17 +41473,56 @@ fn lower_exact_erased_object_cast_for_slot(
     refinements: &ExprRefinements,
 ) -> Option<RustExpr> {
     let (cast_ty, local_name) = exact_erased_object_cast_parts(expr)?;
-    let exact_ty = refinements.exact_erased_object_locals.get(local_name)?;
-    if !cast_type_accepts_exact_refined_type(cast_ty, exact_ty, ctx) {
+    if env
+        .local_shape(local_name)
+        .is_some_and(|shape| !matches!(shape.dispatch, DispatchShape::ErasedObject))
+    {
+        // Flow refinement records the exact Java runtime subtype for every
+        // successful `instanceof`, not only for `Object`-erased locals. A
+        // source-hierarchy carrier already has a typed enum discriminator;
+        // treating it as `dyn Any` here emits `.downcast_ref()` on the enum
+        // instead of the normal closed-carrier match.
         return None;
     }
     let target = slot_target_shape(slot)?;
-    if !same_concrete_java_type(exact_ty, &target.java_ty) {
+    let slot_exact_ty = || {
+        let target_ty = target
+            .optional_element_type()
+            .unwrap_or_else(|| target.java_ty.clone());
+        let target_name = concrete_java_type_name(&target_ty)?;
+        let cast_name = concrete_java_type_name(cast_ty)?;
+        // Signature solving may already have materialized a proven flow
+        // refinement in the local slot even when block lowering cannot
+        // reconstruct the same guard (notably a superclass body flattened
+        // onto a child).  A *strict* subtype slot is itself sufficient proof:
+        // it can only be initialized by downcasting the erased source to that
+        // runtime subtype.  Do not use an equal superclass slot here, because
+        // a source hierarchy carrier must continue to accept every subtype.
+        (!same_concrete_java_type(&target_ty, cast_ty)
+            && source_or_jdk_subtype_reaches_in_lower_ctx(target_name, cast_name, ctx))
+        .then_some(target_ty)
+    };
+    let exact_ty = refinements
+        .exact_erased_object_locals
+        .get(local_name)
+        .cloned()
+        .or_else(slot_exact_ty)?;
+    if !cast_type_accepts_exact_refined_type(cast_ty, &exact_ty, ctx) {
+        return None;
+    }
+    if same_concrete_java_type(&exact_ty, cast_ty)
+        && slot_shape_is_source_hierarchy_carrier(target, ctx.representations)
+    {
+        // A cast to the hierarchy root is not an exact payload cast: every
+        // subtype is valid and must remain represented by the closed carrier.
+        return None;
+    }
+    if !same_concrete_java_type(&exact_ty, &target.java_ty) {
         return None;
     }
     let rust_type =
-        crate::java_naming::rust_name_for_java_named_type(concrete_java_type_name(exact_ty)?);
-    let runtime_type = match exact_ty {
+        crate::java_naming::rust_name_for_java_named_type(concrete_java_type_name(&exact_ty)?);
+    let runtime_type = match &exact_ty {
         JavaType::Named { name, .. } => {
             let placement = crate::storage_strategy::effective_storage_placement(
                 ctx.facts.storage_placement_for(name),
@@ -41912,7 +42199,7 @@ fn normalize_native_collection_carrier_args(
             let Some(shape) = shapes.get(index) else {
                 return arg;
             };
-            if !source_subtype_target_uses_closed_enum_carrier(shape) {
+            if !source_subtype_target_uses_closed_enum_carrier(shape, ctx.representations) {
                 return arg;
             }
             let JavaType::Named { name, .. } = &shape.java_ty else {
@@ -45189,6 +45476,27 @@ fn apply_call_target_with_lower_context(
             args,
         ));
     }
+    if let CallTargetPlan::NativeCollectionMethod {
+        method: NativeCollectionMethod::SetInsert,
+        receiver_ty: Some(receiver_ty),
+        ..
+    } = target
+        && crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
+            receiver_ty,
+            ctx.facts,
+            ctx.representations,
+        )
+        && !crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+            receiver_ty,
+            ctx.representations,
+        )
+    {
+        return receiver_method_call_projection_exact(
+            lowered_receiver.expect("native collection target must provide receiver"),
+            "push",
+            args,
+        );
+    }
     if ctx.result_propagation_mode == ResultPropagationMode::Propagate
         && let CallTargetPlan::StaticOwner { owner, rust_name } = target
         && owner.rsplit('.').next().unwrap_or(owner) == "System"
@@ -45599,23 +45907,6 @@ fn apply_call_target_with_lower_context(
         && let (Some(receiver), Some(charset)) = (lowered_receiver.clone(), args.first().cloned())
     {
         return propagate_result_projection(string_get_bytes_result_projection(receiver, charset));
-    }
-    if let CallTargetPlan::NativeCollectionMethod {
-        method: NativeCollectionMethod::SetInsert,
-        receiver_ty: Some(receiver_ty),
-        ..
-    } = target
-        && crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
-            receiver_ty,
-            ctx.facts,
-            ctx.representations,
-        )
-    {
-        return receiver_method_call_projection_exact(
-            lowered_receiver.expect("native collection target must provide receiver"),
-            "push",
-            args,
-        );
     }
     if let CallTargetPlan::NativeCollectionMethod {
         method: NativeCollectionMethod::ListRemoveObject,
@@ -46120,14 +46411,15 @@ fn lower_current_self_handle_companion_call(
         resolved,
         args.len(),
     )?;
+    // Use the same exact declaration-level exception plan that lowers the
+    // method and its handle companion.  The method-family query deliberately
+    // merges overloads and inherited implementations for graph propagation;
+    // using it as an emitted ABI query can therefore attach Result handling
+    // to an infallible companion whose real return type is plain `T`.
     let returns_result = ctx
         .callable_analysis
-        .source_method_identity_returns_result(&owner_ty.name, rust_name)
-        || ctx
-            .callable_analysis
-            .source_method_identity_returns_result(&owner_ty.name, &method.name)
-        || !method.throws.is_empty()
-        || crate::stdlib::source_summary_method_body_calls_fallible_external(ctx.facts, method);
+        .method_exception_plan(owner_ty, method)
+        .wrap_returns_in_result();
     if !source_receiver_is_implemented_shared_local_handle(
         &JavaType::Named {
             name: owner_ty.name.clone(),
@@ -46221,6 +46513,12 @@ fn shared_outer_handle_companion_argument_plan(
     ctx: LowerCtx,
 ) -> Option<ArgumentLoweringPlan> {
     let receiver = receiver?;
+    if type_param_bound_method_call_return_shape(receiver, resolved, env, ctx).is_some() {
+        // The generated source-class bound trait owns this call ABI.  Looking
+        // through the bound to the concrete declaration would incorrectly
+        // plan arguments for its implementation-only `*_with_outer` helper.
+        return None;
+    }
     if matches!(receiver, Expr::This | Expr::Super)
         || expr_receiver_uses_closed_enum_dispatch(receiver, env, ctx)
     {
@@ -46294,6 +46592,12 @@ fn lower_shared_outer_handle_companion_receiver_call(
         return None;
     }
     let receiver = receiver?;
+    if type_param_bound_method_call_return_shape(receiver, resolved, env, ctx).is_some() {
+        // Preserve virtual dispatch through the generated bound trait.  The
+        // concrete bound declaration may use shared storage, but a generic T
+        // is not its Rc/Arc carrier and cannot be passed to `*_with_outer`.
+        return None;
+    }
     // An explicit/synthesized `this` inside an ordinary `&self`/`&mut self`
     // body is a Rust borrow, not the owned shared handle accepted by the
     // companion ABI.  When a companion body is being lowered,
@@ -48738,7 +49042,10 @@ fn adapt_source_subtype_to_supertype_argument(
             // proof plus the destination carrier is sufficient here; this is
             // the exact nominal conversion represented by that generated impl.
             || (actual_name.contains('.')
-                && source_subtype_target_uses_closed_enum_carrier(target_shape)
+                && source_subtype_target_uses_hierarchy_carrier(
+                    target_shape,
+                    ctx.representations,
+                )
                 && source_class_upcast_hierarchy_names(actual_name, target_name, ctx).is_some());
     if !subtype_conversion_available {
         if let Some((loud_actual, loud_target)) =
@@ -48784,7 +49091,7 @@ fn adapt_source_subtype_to_supertype_argument(
         find_source_conversion_context_type_by_key(ctx, actual_name, false, true).is_some_and(
             |actual_ty| source_external_super_conversion_available(actual_ty, target_name, ctx),
         );
-    if !source_subtype_target_uses_closed_enum_carrier(target_shape)
+    if !source_subtype_target_uses_hierarchy_carrier(target_shape, ctx.representations)
         && !source_external_super_adapter_available
         && let Some((loud_actual, loud_target)) =
             source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
@@ -48828,6 +49135,18 @@ fn adapt_source_subtype_to_supertype_argument(
     } else {
         lowered
     };
+    // Nullable collection/reference slots render as `Option<Carrier>`, but
+    // Rust's `Into` does not compose `Sub -> Carrier` with the blanket
+    // `Carrier -> Option<Carrier>` conversion.  Convert the payload at the
+    // nominal hierarchy boundary first, then construct Java's nullable
+    // storage carrier explicitly.  Asking for `Into<Option<Carrier>>` both
+    // misses the generated `From<Sub> for Carrier` impl and obscures which
+    // conversion preserves dynamic dispatch.
+    if let Some(converted) =
+        optional_hierarchy_carrier_subtype_conversion(lowered.clone(), target_shape, ctx)
+    {
+        return converted;
+    }
     // A concrete source implementor already implements its generated interface
     // trait. Borrow it directly at a borrowed interface boundary instead of
     // first converting through an owned carrier and then rediscovering the
@@ -48889,11 +49208,16 @@ fn adapt_source_subtype_to_supertype_argument(
         let needs_handle_wrap = placement.shared()
             && placement.is_implemented()
             && target_shape.optional_element_type().is_none()
-            && !source_subtype_target_uses_closed_enum_carrier(target_shape);
-        let converted = if needs_handle_wrap {
+            && !source_subtype_target_uses_hierarchy_carrier(target_shape, ctx.representations);
+        let borrowed_hierarchy_carrier = target_shape.ownership == OwnershipShape::SharedBorrow
+            && source_subtype_target_uses_hierarchy_carrier(target_shape, ctx.representations);
+        let converted = if needs_handle_wrap || borrowed_hierarchy_carrier {
             // The destination slot renders as the handle, but `Into` produces
             // its bare payload before the wrapper below, so inference remains
-            // intentional in this branch.
+            // intentional in this branch. A borrowed hierarchy carrier also
+            // lets the following borrow projection infer the owned carrier;
+            // spelling `Into<&Carrier>` would ask for a conversion that Rust
+            // (correctly) cannot implement.
             into_projection(expr)
         } else {
             target_typed_source_into_projection(expr, target_shape, ctx)
@@ -49310,6 +49634,9 @@ fn audited_argument_clone_recovery_coercion(
     ctx: LowerCtx,
 ) -> Coercion {
     let shape = actual_shape.unwrap_or(target_shape);
+    if let Some(sorted) = erased_object_native_map_clone_kind(shape, ctx) {
+        return Coercion::CloneErasedObjectMap { sorted };
+    }
     let source_declares_clone = concrete_java_type_name(&shape.java_ty)
         .and_then(|name| {
             find_preferred_emitted_context_type_by_key(ctx, name)
@@ -49334,6 +49661,39 @@ fn audited_argument_clone_recovery_coercion(
         Coercion::CloneRecovery {
             policy: CloneRecoveryPolicy::AuditRequired,
         }
+    }
+}
+
+fn erased_object_native_map_clone_kind(shape: &RustSlotShape, ctx: LowerCtx) -> Option<bool> {
+    let carrier_shape = shape
+        .optional_element_type()
+        .map(|element_ty| optional_element_slot_shape_with_facts(shape, element_ty, ctx.facts))
+        .unwrap_or_else(|| shape.clone());
+    let (_, value_ty) = crate::stdlib::java_map_type_args(&carrier_shape.java_ty)?;
+    let value_is_erased = java_type_is_erased_object_name(value_ty)
+        || crate::types::optional_element_type(value_ty)
+            .as_ref()
+            .is_some_and(java_type_is_erased_object_name);
+    if !value_is_erased {
+        return None;
+    }
+    // Select from the actual solved Rust carrier, not merely the declared Java
+    // map family: comparator-backed maps deliberately render through
+    // `JavaSemanticHashMap`, while ordinary and sorted maps use native
+    // HashMap/BTreeMap carriers with different reconstruction requirements.
+    let rendered = crate::emit::emit_type(
+        &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            &carrier_shape,
+            ctx.facts,
+            ctx.representations,
+        ),
+    );
+    if rendered.contains("std::collections::HashMap<") {
+        Some(false)
+    } else if rendered.contains("std::collections::BTreeMap<") {
+        Some(true)
+    } else {
+        None
     }
 }
 
@@ -49531,17 +49891,35 @@ fn direct_optional_clone_recovery_unwrap_leaf(
     else {
         return None;
     };
-    if method != "unwrap" || !args.is_empty() {
-        return None;
+    if method == "unwrap" && args.is_empty() {
+        return (rust_expr_path_matches(receiver, &[name])
+            || direct_optional_clone_receiver(receiver, name))
+        .then(|| {
+            optional_clone_recovery_owned_element_projection(
+                RustExpr::Var(name.to_string()),
+                erased_object,
+            )
+        });
     }
-    if rust_expr_path_matches(receiver, &[name]) || direct_optional_clone_receiver(receiver, name) {
-        Some(optional_clone_recovery_owned_element_projection(
-            RustExpr::Var(name.to_string()),
-            erased_object,
-        ))
-    } else {
-        None
+    if matches!(method.as_str(), "expect" | "ok_or_else")
+        && rust_expr_path_matches(receiver, &[name])
+    {
+        // Java-null lowering uses `expect` outside propagating methods and
+        // `ok_or_else` inside them. Both consume the Option exactly like
+        // `unwrap`; when the Java local remains live, recover its owned
+        // payload from a borrowed carrier before replaying the same null
+        // policy. Appending recovery after this method would call `as_ref`
+        // on the already-unwrapped T.
+        return Some(receiver_method_call_projection_exact(
+            optional_clone_recovery_preserved_carrier_projection(
+                RustExpr::Var(name.to_string()),
+                erased_object,
+            ),
+            method,
+            args.clone(),
+        ));
     }
+    None
 }
 
 fn direct_optional_clone_recovery_unwrap_nested(
@@ -50389,9 +50767,11 @@ fn clone_recovery_decision_for_value(
 ) -> CloneRecoveryDecision {
     if reused_owned_value_needs_clone(source, target_shape, env, slot, ctx) {
         CloneRecoveryDecision::ApplyRecoveryCoercion {
-            coercion: Coercion::CloneRecovery {
-                policy: CloneRecoveryPolicy::AuditRequired,
-            },
+            coercion: erased_object_native_map_clone_kind(target_shape, ctx)
+                .map(|sorted| Coercion::CloneErasedObjectMap { sorted })
+                .unwrap_or_else(|| Coercion::CloneRecovery {
+                    policy: CloneRecoveryPolicy::AuditRequired,
+                }),
             idempotence: CloneRecoveryIdempotence::AnyCloneRecovery,
         }
     } else {
@@ -52494,6 +52874,7 @@ fn retarget_java_logging_facade_call<'a>(
 fn retarget_static_owner_native_java_static_call<'a>(
     target: CallTargetPlan<'a>,
     receiver: Option<&'a Expr>,
+    java_method_name: &str,
     args: &'a [Expr],
     env: &ShapeEnv,
     ctx: LowerCtx,
@@ -52517,9 +52898,17 @@ fn retarget_static_owner_native_java_static_call<'a>(
             } else {
                 receiver_name.to_string()
             };
+            let base_rust_name = crate::parser::to_snake_case(java_method_name);
+            let native_method_name = if rust_name == &base_rust_name
+                || resolved_overload_rust_name_extends_current(rust_name, &base_rust_name)
+            {
+                java_method_name
+            } else {
+                rust_name
+            };
             if let Some(native_target) = plan_native_java_static_owner_call(
                 &native_receiver_name,
-                rust_name,
+                native_method_name,
                 Some(args),
                 env.type_env(),
             ) && matches!(
@@ -52542,8 +52931,13 @@ fn retarget_static_owner_native_java_static_call<'a>(
             {
                 return target;
             }
-            plan_native_java_static_owner_call(receiver_name, rust_name, Some(args), env.type_env())
-                .unwrap_or(target)
+            plan_native_java_static_owner_call(
+                receiver_name,
+                native_method_name,
+                Some(args),
+                env.type_env(),
+            )
+            .unwrap_or(target)
         }
         CallTargetPlan::ExternalFacadeReceiver {
             receiver_abi: crate::facts::ReceiverAbi::AssociatedFunction,
@@ -53165,6 +53559,24 @@ fn adapt_optional_instance_receiver_with_slot_plan(
                 .is_some_and(|ty| ty == receiver_ty)
         })
         .expect("receiver type was selected from receiver_shapes");
+    apply_known_optional_receiver_with_slot_plan(
+        lowered,
+        option_shape,
+        receiver_ty,
+        mutable,
+        legacy_unchecked,
+        ctx,
+    )
+}
+
+fn apply_known_optional_receiver_with_slot_plan(
+    lowered: RustExpr,
+    option_shape: RustSlotShape,
+    receiver_ty: JavaType,
+    mutable: bool,
+    legacy_unchecked: bool,
+    ctx: LowerCtx,
+) -> RustExpr {
     let plan = optional_receiver_slot_plan(receiver_ty, mutable, legacy_unchecked, ctx.facts);
     let projection_plan = plan.projection_plan_for_option_shape(option_shape, ctx.facts);
     if context_allows_fallible_receiver_projection(ctx) {
@@ -53938,19 +54350,32 @@ fn adapt_native_collection_receiver(
     env: &ShapeEnv,
     ctx: LowerCtx,
 ) -> RustExpr {
-    let shape_ctx = ExprShapeContext::new(
-        Some(ctx.signatures),
-        Some(ctx.representations),
-        Some(ctx.facts),
-    );
-    let receiver_shape = infer_expr_shape_with_context(receiver, env, shape_ctx);
-    let Some(element_ty) = receiver_shape.optional_element_type() else {
-        return lowered;
-    };
-    if crate::stdlib::java_collection_kind_for_type(&element_ty).is_none() {
-        return lowered;
-    }
+    // A blank or otherwise nullable Java static keeps Option<T> in its getter
+    // ABI. Generic expression inference sees only the declared `Map`/`List`
+    // type and can lose that storage nullability, so prefer the authoritative
+    // static-field slot before deciding whether instance dispatch needs Java's
+    // null-receiver check.
+    let static_shape = static_storage_value_shape(receiver, env, ctx);
     let mutable = method.mutates_receiver();
+    if let Some(option_shape) = static_shape {
+        if let Some(element_ty) = option_shape.optional_element_type()
+            && crate::stdlib::java_collection_kind_for_type(&element_ty).is_some()
+        {
+            return apply_known_optional_receiver_with_slot_plan(
+                lowered,
+                option_shape,
+                element_ty,
+                mutable,
+                true,
+                ctx,
+            );
+        }
+    }
+    // Instance fields need the richer fallback in this helper: expression
+    // inference intentionally sees their declared Java collection type, while
+    // `current_instance_field_shape_with_env` recovers the nullable Rust slot.
+    // Pre-filtering only on the inferred shape would skip that recovery and
+    // call `get`/`add` directly on `Option<Map/List>`.
     adapt_optional_instance_receiver_with_slot_plan(receiver, lowered, env, ctx, mutable, true)
 }
 
@@ -54584,8 +55009,10 @@ fn lower_java_equality_operands_for_op(
         Some(ctx.representations),
         Some(ctx.facts),
     );
-    let left_shape = equality_operand_shape(left, env, ctx, shape_ctx);
-    let right_shape = equality_operand_shape(right, env, ctx, shape_ctx);
+    let left_shape =
+        equality_operand_shape_with_refinements(left, env, ctx, shape_ctx, refinements);
+    let right_shape =
+        equality_operand_shape_with_refinements(right, env, ctx, shape_ctx, refinements);
     let plan = crate::operator_lowering::plan_equality_comparison_for_source(
         &left_shape,
         &right_shape,
@@ -54637,6 +55064,30 @@ fn lower_java_equality_operands_for_op(
         lowered_right,
         env,
     )
+}
+
+fn equality_operand_shape_with_refinements(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    shape_ctx: ExprShapeContext<'_>,
+    refinements: &ExprRefinements,
+) -> RustSlotShape {
+    let shape = equality_operand_shape(expr, env, ctx, shape_ctx);
+    let Expr::Var(name) = expr else {
+        return shape;
+    };
+    if !refinements.non_null_locals.contains(name) {
+        return shape;
+    }
+    let Some(element_ty) = shape.optional_element_type() else {
+        return shape;
+    };
+    // Flow lowering has already projected the guarded `Option<T>` to its `T`
+    // (or `&T`) value. Equality planning must use that same refined carrier;
+    // otherwise it wraps the other operand in `Some` and calls `as_ref()` on
+    // the value after the null-check has consumed the optional layer.
+    optional_element_slot_shape_with_facts(&shape, element_ty, ctx.facts)
 }
 
 fn lower_java_objects_null_predicate_call_expr(
@@ -55050,7 +55501,14 @@ fn lower_anonymous_class_new_for_boxed_dyn_slot(
                 ty: format!("&dyn {trait_name}"),
             }
         }
-        DispatchShape::BoxedDynTrait { .. } => boxed,
+        DispatchShape::BoxedDynTrait { .. } | DispatchShape::DynTrait { .. }
+            if matches!(
+                target.ownership,
+                OwnershipShape::Owned | OwnershipShape::CopyValue
+            ) =>
+        {
+            boxed
+        }
         DispatchShape::DynTrait { trait_name } => RustExpr::Cast {
             expr: Box::new(receiver_method_call_projection(boxed, "as_ref", Vec::new())),
             ty: format!("&dyn {trait_name}"),
@@ -61645,6 +62103,36 @@ fn lower_expr_for_slot_with_refinements(
             refinements,
         );
     }
+    if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment) {
+        let actual = actual_shape_for_slot_expr_with_slot(
+            expr,
+            env,
+            ExprShapeContext::new(
+                Some(ctx.signatures),
+                Some(ctx.representations),
+                Some(ctx.facts),
+            ),
+            &slot,
+        );
+        if actual
+            .optional_element_type()
+            .as_ref()
+            .and_then(concrete_java_type_name)
+            .and_then(|name| find_context_type_decl_by_erased_name(ctx, name))
+            .is_some_and(|ty| ty.kind == TypeKind::Enum)
+        {
+            // Java enum fields are references and therefore retain a nullable
+            // `Option<Enum>` carrier. Both string concatenation and `%s`
+            // formatting spell null as `"null"`; feeding that carrier
+            // directly to Rust's `ToString`/`format!` instead requires an
+            // impossible `Display for Option<_>` implementation. Project the
+            // optional carrier at the shared display slot boundary.
+            return apply_java_display_plan(
+                lower_expr_with_refinements(expr, env, ctx, refinements),
+                JavaDisplayPlan::OptionalDisplayValue,
+            );
+        }
+    }
     if ctx
         .representations
         .uses_comparator_backed_native_map_carrier()
@@ -61881,6 +62369,15 @@ fn lower_expr_for_slot_with_refinements(
         // carrier-slot shortcuts have an opportunity to discard the cast.
         return downcast;
     }
+    if let Some(exact_erased_object) =
+        lower_exact_erased_object_cast_for_slot(expr, env, &slot, ctx, refinements)
+    {
+        // A flow-proven exact runtime subtype is more precise than the cast's
+        // declared source-hierarchy target. Recover that subtype before the
+        // general hierarchy-cast path constructs the closed superclass
+        // carrier; the destination slot was solved for the exact handle.
+        return exact_erased_object;
+    }
     if let Expr::Cast { ty, expr: inner } = expr {
         let actual = infer_expr_shape_with_context(
             inner,
@@ -61908,7 +62405,7 @@ fn lower_expr_for_slot_with_refinements(
             // shortcuts can reinterpret the erased operand as though it were
             // already the hierarchy carrier. The declared target supplies the
             // generic arguments needed by each runtime variant downcast.
-            return recovered;
+            return apply_expr_to_slot_via_plan(recovered, plan.target().clone(), &slot, ctx.facts);
         }
     }
     if let Some(retargeted) =
@@ -62224,11 +62721,6 @@ fn lower_expr_for_slot_with_refinements(
     }
     if let Some(current_self) = lower_current_self_cast_for_slot(expr, &slot, ctx) {
         return current_self;
-    }
-    if let Some(exact_erased_object) =
-        lower_exact_erased_object_cast_for_slot(expr, env, &slot, ctx, refinements)
-    {
-        return exact_erased_object;
     }
     if let Some(future) =
         lower_source_future_implementor_for_slot(expr, env, &slot, ctx, refinements)
@@ -64828,7 +65320,7 @@ fn lower_source_subtype_to_supertype_slot(
     }
     if let Some((loud_actual, loud_target)) =
         source_class_upcast_hierarchy_names(actual_name, target_name, ctx)
-        && !source_subtype_target_uses_closed_enum_carrier(&target)
+        && !source_subtype_target_uses_closed_enum_carrier(&target, ctx.representations)
     {
         return Some(crate::unsupported::compile_error_expr_consuming(
             lowered_expr,
@@ -64860,7 +65352,7 @@ fn lower_source_subtype_to_supertype_slot(
             ty: target_ty,
         });
     }
-    if !source_subtype_target_uses_closed_enum_carrier(&target)
+    if !source_subtype_target_uses_closed_enum_carrier(&target, ctx.representations)
         && let Some((loud_actual, loud_target)) =
             source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
     {
@@ -64878,7 +65370,7 @@ fn lower_source_subtype_to_supertype_slot(
         if placement.shared()
             && placement.is_implemented()
             && target.optional_element_type().is_none()
-            && !source_subtype_target_uses_closed_enum_carrier(&target)
+            && !source_subtype_target_uses_closed_enum_carrier(&target, ctx.representations)
         {
             return Some(crate::slot_render::storage_placement_construction_expr(
                 placement, converted,
@@ -64889,7 +65381,7 @@ fn lower_source_subtype_to_supertype_slot(
     if !source_subtype_conversion_available(actual_name, target_name, ctx) {
         return None;
     }
-    if !source_subtype_target_uses_closed_enum_carrier(&target)
+    if !source_subtype_target_uses_closed_enum_carrier(&target, ctx.representations)
         && let Some((loud_actual, loud_target)) =
             source_class_upcast_hierarchy_names(actual_name, target_name, ctx)
     {
@@ -64936,7 +65428,7 @@ fn lower_source_subtype_to_supertype_slot(
     if placement.shared()
         && placement.is_implemented()
         && target.optional_element_type().is_none()
-        && !source_subtype_target_uses_closed_enum_carrier(&target)
+        && !source_subtype_target_uses_closed_enum_carrier(&target, ctx.representations)
     {
         return Some(crate::slot_render::storage_placement_construction_expr(
             placement, converted,
@@ -65370,6 +65862,25 @@ fn target_typed_source_into_projection(
     }
 }
 
+fn optional_hierarchy_carrier_subtype_conversion(
+    expr: RustExpr,
+    target: &RustSlotShape,
+    ctx: LowerCtx,
+) -> Option<RustExpr> {
+    let target_element_ty = target.optional_element_type()?;
+    if !source_subtype_target_uses_hierarchy_carrier(target, ctx.representations) {
+        return None;
+    }
+    let mut target_element =
+        optional_element_slot_shape_with_facts(target, target_element_ty, ctx.facts);
+    target_element.ownership = OwnershipShape::Owned;
+    Some(option_some_projection(target_typed_source_into_projection(
+        expr,
+        &target_element,
+        ctx,
+    )))
+}
+
 fn box_source_implementor_for_trait_object_projection(
     expr: RustExpr,
     target: &RustSlotShape,
@@ -65397,8 +65908,19 @@ fn box_source_implementor_for_trait_object_projection(
     }
 }
 
-fn source_subtype_target_uses_closed_enum_carrier(target: &RustSlotShape) -> bool {
+fn source_subtype_target_uses_closed_enum_carrier(
+    target: &RustSlotShape,
+    _representations: &RepresentationPlan,
+) -> bool {
     matches!(target.dispatch, DispatchShape::ClosedEnum { .. })
+}
+
+fn source_subtype_target_uses_hierarchy_carrier(
+    target: &RustSlotShape,
+    representations: &RepresentationPlan,
+) -> bool {
+    source_subtype_target_uses_closed_enum_carrier(target, representations)
+        || slot_shape_is_source_hierarchy_carrier(target, representations)
 }
 
 fn source_class_upcast_hierarchy_loud_names(
@@ -71716,12 +72238,22 @@ fn source_call_target_result_abi(
     lowered_receiver: Option<&RustExpr>,
     ctx: LowerCtx,
 ) -> Option<bool> {
-    let rust_name = target.rust_method_name()?;
+    let rust_name = match target {
+        // A source receiver's Java `toString()` is represented with the
+        // native display target so call emission can share formatting logic.
+        // It is still a source method for ABI purposes: an override (including
+        // an inherited one) may return `Result<String, JavaException>`.
+        CallTargetPlan::NativeJavaInstance {
+            method: crate::call_plan::NativeJavaInstanceMethod::SourceObjectToString,
+            ..
+        } => "to_string",
+        _ => target.rust_method_name()?,
+    };
     let mut found = false;
     let mut returns_result = false;
-    for owner in
-        source_call_target_owner_candidates(target, source_receiver, env, lowered_receiver, ctx)
-    {
+    let owners =
+        source_call_target_owner_candidates(target, source_receiver, env, lowered_receiver, ctx);
+    for owner in owners {
         let Some(owner_ty) = find_context_type_decl_by_erased_name(ctx, owner.as_str())
             .or_else(|| SourceContextOwnerKey::new(owner.as_str()).find_context_type(ctx))
         else {
@@ -71749,15 +72281,7 @@ fn source_call_target_result_abi(
             found = true;
             returns_result |= ctx
                 .callable_analysis
-                .source_method_identity_returns_result(&owner_ty.name, rust_name)
-                || declarations.iter().any(|method| {
-                    ctx.callable_analysis
-                        .source_method_identity_returns_result(&owner_ty.name, &method.name)
-                        || !method.throws.is_empty()
-                        || crate::stdlib::source_summary_method_body_calls_fallible_external(
-                            ctx.facts, method,
-                        )
-                });
+                .source_method_identity_returns_result(&owner_ty.name, rust_name);
         }
     }
     found.then_some(returns_result)
@@ -71821,9 +72345,72 @@ fn source_call_target_owner_candidates(
                     }
                 }
             }
+            // Inherited bodies are emitted on the concrete child, but an
+            // unqualified Java call inside that body is resolved from the
+            // class that lexically declared it.  Starting only at the emitted
+            // child can lose the inherited source declaration and fall back
+            // to a same-named Object facade (`toString`, `equals`, ...), whose
+            // Result ABI may differ.
+            if let Some(lexical_ty) = ctx.inherited_method_declaring_type {
+                push(lexical_ty.name.clone());
+                let support_program = context_analysis_program(
+                    ctx.support_local_type_program,
+                    ctx.source_summary_type_program,
+                    ctx.context_sources_are_emitted,
+                );
+                for inherited in crate::inherited_members::inherited_instance_method_refs_for_type(
+                    lexical_ty,
+                    &support_program,
+                ) {
+                    if target
+                        .rust_method_name()
+                        .is_some_and(|rust_name| inherited.rust_name() == rust_name)
+                    {
+                        push(inherited.declaring_type().to_string());
+                    }
+                }
+            }
         }
         CallTargetPlan::InstanceReceiver { .. } | CallTargetPlan::FallbackReceiver { .. } => {
             if let Some(receiver) = source_receiver
+                && is_this_receiver_expr(receiver)
+            {
+                let support_program = context_analysis_program(
+                    ctx.support_local_type_program,
+                    ctx.source_summary_type_program,
+                    ctx.context_sources_are_emitted,
+                );
+                let mut roots = Vec::new();
+                if let Some(current_type) = ctx.current_type
+                    && let Some(current_ty) =
+                        find_context_type_decl_by_erased_name(ctx, current_type).or_else(|| {
+                            SourceContextOwnerKey::new(current_type).find_context_type(ctx)
+                        })
+                {
+                    roots.push(current_ty);
+                }
+                if let Some(lexical_ty) = ctx.inherited_method_declaring_type
+                    && !roots.iter().any(|ty| ty.name == lexical_ty.name)
+                {
+                    roots.push(lexical_ty);
+                }
+                for root in roots {
+                    push(root.name.clone());
+                    for inherited in
+                        crate::inherited_members::inherited_instance_method_refs_for_type(
+                            root,
+                            &support_program,
+                        )
+                    {
+                        if target
+                            .rust_method_name()
+                            .is_some_and(|rust_name| inherited.rust_name() == rust_name)
+                        {
+                            push(inherited.declaring_type().to_string());
+                        }
+                    }
+                }
+            } else if let Some(receiver) = source_receiver
                 && let Some(receiver_ty) = receiver_shape_java_type(receiver, env)
                 && let Some(type_name) = concrete_java_type_name(
                     optional_element_type_ref(receiver_ty).unwrap_or(receiver_ty),
@@ -71835,6 +72422,69 @@ fn source_call_target_owner_candidates(
                 && let Some(type_name) = lowered_source_receiver_type_name(receiver, ctx)
             {
                 push(type_name);
+            }
+        }
+        CallTargetPlan::SuperBoundary { declaring_type, .. } => {
+            let owner_key = SourceContextOwnerKey::new(declaring_type.as_str());
+            if let Some(ty) = owner_key.find_context_type(ctx).or_else(|| {
+                owner_key
+                    .find_emitted_context_type_and_program(ctx)
+                    .map(|(ty, _)| ty)
+            }) {
+                push(ty.name.clone());
+            }
+        }
+        CallTargetPlan::NativeJavaInstance {
+            receiver,
+            method: crate::call_plan::NativeJavaInstanceMethod::SourceObjectToString,
+        } => {
+            if is_this_receiver_expr(receiver) {
+                if let Some(current_type) = ctx.current_type {
+                    push(current_type.to_string());
+                }
+                if let Some(lexical_ty) = ctx.inherited_method_declaring_type {
+                    push(lexical_ty.name.clone());
+                    let support_program = context_analysis_program(
+                        ctx.support_local_type_program,
+                        ctx.source_summary_type_program,
+                        ctx.context_sources_are_emitted,
+                    );
+                    for inherited in
+                        crate::inherited_members::inherited_instance_method_refs_for_type(
+                            lexical_ty,
+                            &support_program,
+                        )
+                    {
+                        if inherited.rust_name() == "to_string" {
+                            push(inherited.declaring_type().to_string());
+                        }
+                    }
+                }
+            } else if let Some(receiver_ty) = source_receiver_declared_java_type(receiver, env, ctx)
+                && let Some(type_name) = concrete_java_type_name(
+                    optional_element_type_ref(&receiver_ty).unwrap_or(&receiver_ty),
+                )
+            {
+                push(type_name.to_string());
+                if let Some(receiver_decl) = find_context_type_decl_by_erased_name(ctx, type_name)
+                    .or_else(|| SourceContextOwnerKey::new(type_name).find_context_type(ctx))
+                {
+                    let support_program = context_analysis_program(
+                        ctx.support_local_type_program,
+                        ctx.source_summary_type_program,
+                        ctx.context_sources_are_emitted,
+                    );
+                    for inherited in
+                        crate::inherited_members::inherited_instance_method_refs_for_type(
+                            receiver_decl,
+                            &support_program,
+                        )
+                    {
+                        if inherited.rust_name() == "to_string" {
+                            push(inherited.declaring_type().to_string());
+                        }
+                    }
+                }
             }
         }
         _ => {}
@@ -72022,7 +72672,7 @@ fn lower_source_type_param_optional_unwrap_result_upcast(
     {
         return None;
     }
-    if !source_subtype_target_uses_closed_enum_carrier(target) {
+    if !source_subtype_target_uses_closed_enum_carrier(target, ctx.representations) {
         return None;
     }
     Some(into_projection(unwrapped))
@@ -72055,7 +72705,7 @@ fn apply_source_type_param_optional_unwrap_result_upcast(
     {
         return converted;
     }
-    if !source_subtype_target_uses_closed_enum_carrier(&target)
+    if !source_subtype_target_uses_closed_enum_carrier(&target, ctx.representations)
         && let Some((loud_actual, loud_target)) =
             source_class_upcast_hierarchy_loud_names(actual_name, target_name, env, ctx)
     {
@@ -74364,7 +75014,23 @@ fn retarget_inherited_private_implementation_call<'a>(
     resolved: Option<&ResolvedCall>,
     ctx: LowerCtx,
 ) -> CallTargetPlan<'a> {
-    let Some(declaring_ty) = ctx.inherited_method_declaring_type else {
+    // Constructor flattening and copied inherited bodies retain the resolver's
+    // original declaring owner even if an intermediate lowering path has no
+    // explicit lexical-owner marker. That exact owner recovers private static
+    // binding only when lowering onto a different emitted type; a private
+    // method in its own class keeps its ordinary unqualified Rust name.
+    let resolved_copied_declaring_ty = resolved.and_then(|resolved| {
+        (resolved.kind == CallKind::Instance
+            && ctx.current_type.is_some_and(|current| {
+                !crate::facts::external_type_name_matches(current, &resolved.declaring_type)
+            }))
+        .then(|| SourceContextOwnerKey::new(&resolved.declaring_type).find_context_type(ctx))
+        .flatten()
+    });
+    let Some(declaring_ty) = ctx
+        .inherited_method_declaring_type
+        .or(resolved_copied_declaring_ty)
+    else {
         return target;
     };
     if receiver.is_some_and(|receiver| !is_this_receiver_expr(receiver)) {
@@ -77421,6 +78087,7 @@ fn lower_map_get_call_expr_for_slot(
             &actual,
             slot_target_shape(slot),
             get_expr.clone(),
+            ctx.facts,
         ) {
             return Some(projected);
         }
@@ -77428,6 +78095,7 @@ fn lower_map_get_call_expr_for_slot(
             &actual,
             slot_target_shape(slot),
             get_expr.clone(),
+            ctx.facts,
         ) {
             return Some(projected);
         }
@@ -77491,6 +78159,7 @@ fn map_get_optional_borrowed_element_owned_projection(
     actual: &LoweredType,
     target: Option<&RustSlotShape>,
     get_expr: RustExpr,
+    facts: &FactSet,
 ) -> Option<RustExpr> {
     let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
         return None;
@@ -77507,9 +78176,10 @@ fn map_get_optional_borrowed_element_owned_projection(
     } else {
         return None;
     };
+    let target_element = optional_element_slot_shape_with_facts(target, target_element_ty, facts);
     Some(RustExpr::shaped_as(
         RustExprShape::OptionalProjected,
-        Some(target.clone()),
+        Some(target_element),
         receiver_method_call_projection_exact(get_expr, method, Vec::new()),
     ))
 }
@@ -77518,6 +78188,7 @@ fn map_get_erased_object_optional_clone_projection(
     actual: &LoweredType,
     target: Option<&RustSlotShape>,
     get_expr: RustExpr,
+    facts: &FactSet,
 ) -> Option<RustExpr> {
     let LoweredType::OptionalElementBorrow { element_shape, .. } = actual else {
         return None;
@@ -77529,9 +78200,10 @@ fn map_get_erased_object_optional_clone_projection(
     {
         return None;
     }
+    let target_element = optional_element_slot_shape_with_facts(target, target_element_ty, facts);
     Some(RustExpr::shaped_as(
         RustExprShape::OptionalProjected,
-        Some(target.clone()),
+        Some(target_element),
         RustExpr::MethodCall {
             receiver: Box::new(get_expr),
             method: "map".to_string(),
@@ -82923,8 +83595,14 @@ fn lower_external_call_expr_for_slot(
         resolved.as_ref(),
         ctx,
     );
-    let target =
-        retarget_static_owner_native_java_static_call(target, receiver.as_deref(), args, env, ctx);
+    let target = retarget_static_owner_native_java_static_call(
+        target,
+        receiver.as_deref(),
+        name,
+        args,
+        env,
+        ctx,
+    );
     let target =
         retarget_emitted_source_static_owner_identity(target, receiver.as_deref(), env, ctx);
     if imported_static_first_arg_passthrough_owner_method(&target, receiver.as_deref(), args, env)
@@ -83105,15 +83783,19 @@ fn lower_external_call_expr_for_slot(
     {
         let mut lowered_expr =
             wrap_call_expr_with_argument_temporaries(super_call, lowered_args.temporaries);
-        if external_call_returns_rust_result_with_lower_context(
-            receiver.as_deref(),
-            name,
-            args.len(),
-            ctx,
-            env,
-            ctx.current_type,
-        ) || slot_expr_needs_result_propagation(expr, env, ctx)
-        {
+        let exact_result_abi =
+            source_call_target_result_abi(&target, receiver.as_deref(), env, None, ctx);
+        let needs_result = exact_result_abi.unwrap_or_else(|| {
+            external_call_returns_rust_result_with_lower_context(
+                receiver.as_deref(),
+                name,
+                args.len(),
+                ctx,
+                env,
+                ctx.current_type,
+            ) || slot_expr_needs_result_propagation(expr, env, ctx)
+        });
+        if needs_result {
             lowered_expr = apply_result_value_policy_from_ctx(lowered_expr, ctx);
         }
         actual = external_call_actual_for_matching_generic_slot(actual, slot);
@@ -84691,6 +85373,9 @@ fn lower_string_concat_part_with_refinements(
     {
         return lowered;
     }
+    if let Some(lowered) = lower_fallible_source_to_string_display(part, env, ctx, refinements) {
+        return lowered;
+    }
     // Source `toString()` methods retain Java's nullable String contract as
     // `Option<String>`.  Calling `.to_string()` on a source value lets Rust's
     // inherent-method lookup select that Java method instead of the generated
@@ -84886,6 +85571,98 @@ fn lower_string_concat_part_with_refinements(
         return apply_slot_expr_conversion(lowered, &plan);
     }
     lower_expr_for_slot_with_refinements(part, env, Slot::StringConcatSegment, ctx, refinements)
+}
+
+fn lower_fallible_source_to_string_display(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+    refinements: &ExprRefinements,
+) -> Option<RustExpr> {
+    let target = CallTargetPlan::NativeJavaInstance {
+        receiver: expr,
+        method: crate::call_plan::NativeJavaInstanceMethod::SourceObjectToString,
+    };
+    if source_call_target_result_abi(&target, Some(expr), env, None, ctx) != Some(true) {
+        return None;
+    }
+
+    let actual = actual_shape_for_slot_expr_with_slot(
+        expr,
+        env,
+        ExprShapeContext::new(
+            Some(ctx.signatures),
+            Some(ctx.representations),
+            Some(ctx.facts),
+        ),
+        &Slot::Value,
+    );
+    let receiver_optional = actual.optional_element_type().is_some();
+    let receiver_ty = actual
+        .optional_element_type()
+        .unwrap_or_else(|| actual.java_ty.clone());
+    let type_name = concrete_java_type_name(&receiver_ty)?;
+    let emitted =
+        rust_type_for_slot_with_facts_and_representations(&actual, ctx.facts, ctx.representations);
+    let uses_handle_companion = rust_type_is_top_level_shared_handle(&emitted)
+        && source_receiver_is_implemented_shared_local_handle(&receiver_ty, ctx);
+    let nullable_result = source_value_has_nullable_to_string_contract(expr, env, ctx);
+
+    let make_call = |receiver: RustExpr, borrowed_optional_payload: bool| {
+        if uses_handle_companion {
+            let receiver = if borrowed_optional_payload {
+                apply_clone_projection(receiver)
+            } else {
+                receiver
+            };
+            function_call_projection(
+                owner_associated_path_projection(
+                    &crate::java_naming::rust_name_for_java_named_type(type_name),
+                    "to_string_with_outer",
+                ),
+                vec![receiver],
+            )
+        } else {
+            receiver_method_call_projection_exact(receiver, "to_string", Vec::new())
+        }
+    };
+
+    let lowered = lower_expr_for_slot_with_refinements(expr, env, Slot::Value, ctx, refinements);
+    if !receiver_optional {
+        let value = apply_result_value_policy_from_ctx(make_call(lowered, false), ctx);
+        return Some(if nullable_result {
+            apply_java_display_plan(value, JavaDisplayPlan::OptionalString)
+        } else {
+            value
+        });
+    }
+
+    let mapped = receiver_method_call_projection_exact(
+        receiver_method_call_projection_exact(lowered, "as_ref", Vec::new()),
+        "map",
+        vec![RustExpr::Closure {
+            is_move: false,
+            return_type: None,
+            params: vec![RustClosureParam {
+                pattern: "value".to_string(),
+                ty: None,
+            }],
+            body: RustClosureBody::Expr(Box::new(make_call(
+                RustExpr::Var("value".to_string()),
+                true,
+            ))),
+        }],
+    );
+    let transposed = receiver_method_call_projection_exact(mapped, "transpose", Vec::new());
+    let mut optional_string = apply_result_value_policy_from_ctx(transposed, ctx);
+    if nullable_result {
+        optional_string =
+            receiver_method_call_projection_exact(optional_string, "flatten", Vec::new());
+    }
+    Some(apply_java_display_plan(
+        optional_string,
+        JavaDisplayPlan::OptionalString,
+    ))
 }
 
 fn source_value_has_nullable_to_string_contract(
@@ -96763,6 +97540,85 @@ class Source {
     }
 
     #[test]
+    fn current_self_handle_companion_uses_declaration_exception_plan_for_abi() {
+        let source = include_str!("lower.rs");
+        let helper = source
+            .split("fn lower_current_self_handle_companion_call")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn source_outer_instance_method_for_captured_receiverless_call")
+                    .next()
+            })
+            .expect("current-self companion helper should be discoverable");
+
+        assert!(
+            helper.contains(".method_exception_plan(owner_ty, method)")
+                && helper.contains(".wrap_returns_in_result()"),
+            "companion call ABI must use the exact plan used to lower its declaration"
+        );
+        assert!(
+            !helper.contains("source_method_identity_returns_result"),
+            "a merged method-family key is not an exact emitted ABI"
+        );
+    }
+
+    #[test]
+    fn modeled_external_constructor_local_keeps_concrete_facade_dispatch() {
+        let generated = crate::translate_source(
+            r#"
+            import htsjdk.variant.variantcontext.Genotype;
+            import htsjdk.variant.variantcontext.GenotypeBuilder;
+            class BuildGenotype {
+                Genotype build(String sample) {
+                    GenotypeBuilder builder = new GenotypeBuilder(sample);
+                    builder.DP(12);
+                    builder.GQ(30);
+                    return builder.make();
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            generated.contains("let mut builder: GenotypeBuilder = GenotypeBuilder::new_1("),
+            "an exact modeled external constructor must preserve its concrete facade carrier: {generated}"
+        );
+        assert!(
+            !generated.contains("builder: Box<dyn std::any::Any>"),
+            "the initializer's exact modeled type must not be erased: {generated}"
+        );
+        assert!(
+            generated.contains("builder.d_p(12)")
+                && generated.contains("builder.g_q(30)")
+                && generated.contains("builder.make()"),
+            "subsequent calls must reuse the concrete local dispatch: {generated}"
+        );
+    }
+
+    #[test]
+    fn source_constructor_refinement_overrides_preliminary_external_arity_name() {
+        let source = include_str!("lower.rs");
+        let helper = source
+            .split("fn refine_source_constructor_target")
+            .nth(1)
+            .and_then(|tail| {
+                tail.split("fn select_source_super_constructor_by_arg_shapes")
+                    .next()
+            })
+            .expect("source constructor refinement helper should be discoverable");
+
+        assert!(
+            !helper.contains("target.rust_name() != \"new\""),
+            "an external arity fallback must not prevent exact emitted-source refinement"
+        );
+        assert!(
+            helper.contains("target.rename_constructor(rust_name.to_string())"),
+            "the selected source declaration must replace every preliminary constructor name"
+        );
+    }
+
+    #[test]
     fn map_entry_set_remove_next_local_translation_mutates_backing_map() {
         let translation = crate::translate_source(
             r#"
@@ -98052,6 +98908,50 @@ class Source {
     }
 
     #[test]
+    fn source_summary_stream_return_pulls_in_shared_stream_runtime() {
+        let primary = parse_java_source("class UseSummaryStream { ExternalRecords records; }");
+        let summary = parse_java_source(
+            r#"
+            import java.util.stream.Stream;
+            class ExternalRecords {
+                Stream<String> stream() { return null; }
+            }
+            "#,
+        );
+
+        assert!(programs_use_java_stream_support(
+            &[&primary.program, &summary.program],
+            &FactSet::default(),
+        ));
+    }
+
+    #[test]
+    fn resolved_external_overload_suffix_still_selects_native_static_lowering() {
+        let receiver = Expr::Var("Integer".to_string());
+        let args = vec![Expr::Literal(Literal::String("12".to_string()))];
+        let target = CallTargetPlan::StaticOwner {
+            owner: "Integer".to_string(),
+            rust_name: "parse_int_1".to_string(),
+        };
+
+        let retargeted = retarget_static_owner_native_java_static_call(
+            target,
+            Some(&receiver),
+            "parseInt",
+            &args,
+            &ShapeEnv::default(),
+            lower_test_ctx(),
+        );
+
+        assert!(matches!(
+            retargeted,
+            CallTargetPlan::NativeJavaStatic {
+                method: crate::call_plan::NativeJavaStaticMethod::IntegerParseInt
+            }
+        ));
+    }
+
+    #[test]
     fn non_null_guarded_map_put_keeps_non_null_key_carrier() {
         let parsed = parse_java_source(
             r#"
@@ -98422,6 +99322,19 @@ class NumericBox {
             Some(RustExprShape::OwnedRecovery)
         );
         assert!(!recovered.is_raw_leaf());
+
+        let catchable_unwrap = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("value".to_string())),
+            method: "ok_or_else".to_string(),
+            args: vec![RustExpr::Raw("make_null_exception".to_string())],
+        };
+        let catchable_recovered =
+            direct_optional_clone_recovery_unwrap_expr(&catchable_unwrap, "value", false).unwrap();
+        assert_eq!(
+            emit_expr(&catchable_recovered),
+            "value.as_ref().cloned()/* TODO(translation): validate added clone */.ok_or_else(make_null_exception)"
+        );
+        assert!(!catchable_recovered.is_raw_leaf());
 
         let cloned = RustExpr::MethodCall {
             receiver: Box::new(RustExpr::MethodCall {
@@ -100442,6 +101355,81 @@ let e = OuterB::new_with_outer::<T>(__outer.clone());
         assert!(
             !translation.contains("unsupported Java class upcast: OptionalSourceSupertypeField.Child to OptionalSourceSupertypeField.Base requires class hierarchy lowering"),
             "{translation}"
+        );
+    }
+
+    #[test]
+    fn optional_hierarchy_subtype_conversion_wraps_after_inner_carrier_conversion() {
+        let target = RustSlotShape {
+            java_ty: crate::types::optional_java_type(JavaType::Named {
+                name: "Base".to_string(),
+                args: Vec::new(),
+            }),
+            ownership: OwnershipShape::Owned,
+            view: ViewShape::EnumView,
+            dispatch: DispatchShape::ClosedEnum {
+                enum_name: "BaseValue".to_string(),
+            },
+            mutability: MutabilityShape::Immutable,
+        };
+        let converted = optional_hierarchy_carrier_subtype_conversion(
+            RustExpr::Var("child".to_string()),
+            &target,
+            lower_test_ctx(),
+        )
+        .expect("optional hierarchy carrier conversion");
+
+        assert_eq!(
+            emit::emit_expr(&converted),
+            "Some(std::convert::Into::<BaseValue>::into(child))"
+        );
+    }
+
+    #[test]
+    fn source_supertype_conversion_dedupe_uses_finalized_carrier_identity() {
+        let mut representations = RepresentationPlan::default();
+        representations.insert_test_type_representation(
+            crate::representation::TypeRepresentation::new(
+                "Root",
+                crate::representation::ObjectRepresentation::ClosedEnum {
+                    enum_name: "RootValue".to_string(),
+                    variants: vec!["Leaf".to_string()],
+                },
+                crate::representation::RepresentationProvenance::ParsedSource,
+                vec!["Middle".to_string()],
+            ),
+        );
+        representations.insert_test_type_representation(
+            crate::representation::TypeRepresentation::new(
+                "Middle",
+                crate::representation::ObjectRepresentation::ClosedEnum {
+                    enum_name: "MiddleValue".to_string(),
+                    variants: vec!["Leaf".to_string()],
+                },
+                crate::representation::RepresentationProvenance::ParsedSource,
+                vec!["Leaf".to_string()],
+            ),
+        );
+
+        let mut facts = FactSet::default();
+        for type_name in ["Root", "Middle"] {
+            facts
+                .dispatch_requirement_facts
+                .push(crate::facts::DispatchRequirementFact {
+                    type_name: type_name.to_string(),
+                    requirement: crate::facts::DispatchRequirementKind::NeedsUnknownRuntimeObject,
+                    provenance: crate::facts::FactProvenance::UserOverride,
+                });
+        }
+        let root = empty_type_decl("Root");
+        let middle = empty_type_decl("Middle");
+        assert_eq!(
+            source_supertype_conversion_target_key(&root, &representations, &facts),
+            "closed-enum:RootValue"
+        );
+        assert_eq!(
+            source_supertype_conversion_target_key(&middle, &representations, &facts),
+            "closed-enum:MiddleValue"
         );
     }
 

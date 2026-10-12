@@ -595,12 +595,20 @@ fn is_known_iterable_type(name: &str) -> bool {
     is_known_collection_type(name)
         || matches!(
             name,
-            "Iterable" | "Iterator" | "Spliterator" | "Enumeration" | "DirectoryStream"
+            "Iterable"
+                | "Iterator"
+                | "CloseableIterator"
+                | "Spliterator"
+                | "Enumeration"
+                | "DirectoryStream"
         )
 }
 
 fn is_known_iterator_type(name: &str) -> bool {
-    matches!(name, "Iterator" | "ListIterator" | "Enumeration")
+    matches!(
+        name,
+        "Iterator" | "CloseableIterator" | "ListIterator" | "Enumeration"
+    )
 }
 
 fn is_known_collection_type(name: &str) -> bool {
@@ -5548,12 +5556,11 @@ fn is_self_typed_external_enum_constant_field(
     field_name: &str,
     field_type: &JavaType,
 ) -> bool {
-    let JavaType::Named { name, args } = field_type else {
+    let JavaType::Named { args, .. } = field_type else {
         return false;
     };
     args.is_empty()
-        && canonical_external_receiver_type_key(name)
-            == canonical_external_receiver_type_key(receiver)
+        && external_enum_constant_field_type_matches_owner(receiver, field_type)
         && is_enum_constant_name(&canonical_external_field_name(field_name))
 }
 
@@ -5568,6 +5575,14 @@ fn external_enum_constant_field_type_matches_owner(receiver: &str, field_type: &
     let receiver_key = canonical_external_receiver_type_key(receiver);
     field_type_key == receiver_key
         || field_type_key.rsplit('.').next() == receiver_key.rsplit('.').next()
+        || {
+            // Support generation may already have converted a qualified Java
+            // owner to its collision-safe Rust facade name while the modeled
+            // field type retains its imported simple spelling.
+            let field_rust = rust_name_for_java_named_type(&field_type_key);
+            let receiver_rust = rust_name_for_java_named_type(&receiver_key);
+            receiver_rust != field_rust && receiver_rust.ends_with(&field_rust)
+        }
 }
 
 fn conservative_external_enum_receiver_type_name(
@@ -5973,6 +5988,8 @@ pub fn canonical_external_receiver_type_key(name: &str) -> String {
         | "JavaUtilConcurrentTimeUnit"
         | "java_util_concurrent_time_unit"
         | "time_unit" => "TimeUnit",
+        "java.util.regex.Pattern" | "JavaUtilRegexPattern" | "java_util_regex_pattern" => "Pattern",
+        "java.util.regex.Matcher" | "JavaUtilRegexMatcher" | "java_util_regex_matcher" => "Matcher",
         "java.nio.CharBuffer" | "JavaNioCharBuffer" | "java_nio_char_buffer" => "CharBuffer",
         "java.util.stream.Collectors"
         | "JavaUtilStreamCollectors"
@@ -6504,11 +6521,19 @@ impl ClassLoader {
     } else {
         ""
     };
-    let mut support = r#"#[derive(Debug, Clone, PartialEq, Eq)]
+    let mut support = r#"#[derive(Debug, Clone)]
 pub struct JavaClass<T> {
     name: String,
     _marker: std::marker::PhantomData<T>,
 }
+
+impl<T, U> PartialEq<JavaClass<U>> for JavaClass<T> {
+    fn eq(&self, other: &JavaClass<U>) -> bool {
+        self.name == other.name
+    }
+}
+
+impl<T> Eq for JavaClass<T> {}
 
 impl<T> Default for JavaClass<T> {
     fn default() -> Self {
@@ -7009,6 +7034,9 @@ impl<T: JavaMapKey> JavaSemanticHashSet<T> {
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
     pub fn clear(&mut self) { self.entries.clear(); }
     pub fn iter(&self) -> std::slice::Iter<'_, T> { self.entries.iter() }
+    pub fn retain<F: FnMut(&T) -> bool>(&mut self, predicate: F) {
+        self.entries.retain(predicate);
+    }
     pub fn extend<I: IntoIterator<Item = T>>(&mut self, values: I) {
         for value in values { self.insert(value); }
     }
@@ -7056,6 +7084,19 @@ pub fn java_list_remove_by_map_key<T: JavaMapKey>(values: &mut Vec<T>, needle: &
     };
     values.remove(index);
     true
+}
+
+/// Membership over a Java collection whose element carrier cannot implement
+/// Rust structural equality. This is used by bulk operations such as
+/// `removeAll`, which must apply Java `equals` to each candidate.
+pub fn java_iter_contains_by_map_key<'a, T, I>(values: I, needle: &T) -> bool
+where
+    T: JavaMapKey + 'a,
+    I: IntoIterator<Item = &'a T>,
+{
+    values
+        .into_iter()
+        .any(|stored| stored.java_map_key_eq(needle))
 }"#
         .to_string(),
     )
@@ -8489,13 +8530,22 @@ fn java_string_buffer_replace_result(
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Pattern {
     pattern: &'static str,
+    flags: i32,
 }
 
 impl Pattern {
-    pub const CASE_INSENSITIVE: i32 = 2;
+    pub const UNIX_LINES: i32 = 0x01;
+    pub const CASE_INSENSITIVE: i32 = 0x02;
+    pub const COMMENTS: i32 = 0x04;
+    pub const MULTILINE: i32 = 0x08;
+    pub const LITERAL: i32 = 0x10;
+    pub const DOTALL: i32 = 0x20;
+    pub const UNICODE_CASE: i32 = 0x40;
+    pub const CANON_EQ: i32 = 0x80;
+    pub const UNICODE_CHARACTER_CLASS: i32 = 0x100;
 
     pub const fn compile_static(pattern: &'static str) -> Pattern {
-        Pattern { pattern }
+        Pattern { pattern, flags: 0 }
     }
 
     pub fn compile<S: AsRef<str>>(pattern: S) -> Pattern {
@@ -8507,12 +8557,31 @@ impl Pattern {
         java_pattern_validate_syntax(pattern)?;
         Ok(Pattern {
             pattern: Box::leak(pattern.to_string().into_boxed_str()),
+            flags: 0,
+        })
+    }
+
+    pub fn compile_2<S: AsRef<str>>(pattern: S, flags: i32) -> Pattern {
+        Self::compile_result_2(pattern, flags)
+            .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
+    }
+
+    pub fn compile_result_2<S: AsRef<str>>(
+        pattern: S,
+        flags: i32,
+    ) -> Result<Pattern, JavaException> {
+        let pattern = pattern.as_ref();
+        java_pattern_validate_syntax(pattern)?;
+        Ok(Pattern {
+            pattern: Box::leak(pattern.to_string().into_boxed_str()),
+            flags,
         })
     }
 
     pub fn compile_unchecked<S: AsRef<str>>(pattern: S) -> Pattern {
         Pattern {
             pattern: Box::leak(pattern.as_ref().to_string().into_boxed_str()),
+            flags: 0,
         }
     }
 
@@ -8522,8 +8591,13 @@ impl Pattern {
 
     pub fn matcher<S: AsRef<str>>(&self, input: S) -> Matcher {
         let input = input.as_ref().to_string();
-        let full_match = java_regex_first_match(self.pattern, &input, true);
-        let found_match = java_regex_first_match(self.pattern, &input, false);
+        let (match_pattern, match_input) = if self.flags & Self::CASE_INSENSITIVE != 0 {
+            (self.pattern.to_ascii_lowercase(), input.to_ascii_lowercase())
+        } else {
+            (self.pattern.to_string(), input.clone())
+        };
+        let full_match = java_regex_first_match(&match_pattern, &match_input, true);
+        let found_match = java_regex_first_match(&match_pattern, &match_input, false);
         let matched = full_match.is_some();
         let found = found_match.is_some();
         let selected = found_match.or(full_match);
@@ -9337,6 +9411,20 @@ impl<T> Drop for JavaIterator<T> {
     }
 }
 
+impl<T: Clone> Iterator for JavaIterator<T> {
+    type Item = T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if !self.has_next() {
+            return None;
+        }
+        Some(
+            self.next_result()
+                .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex)),
+        )
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JavaListIterator<T> {
     items: Vec<T>,
@@ -9472,6 +9560,10 @@ impl<T: PartialEq> JavaLinkedHashSet<T> {
 
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.entries.clear();
     }
 
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
@@ -13799,6 +13891,30 @@ pub fn java_clone_optional_erased_object_vec_ref(
         .collect()
 }}
 
+pub fn java_clone_erased_object_hash_map_ref<K>(
+    value: &std::collections::HashMap<K, std::boxed::Box<dyn std::any::Any>>,
+) -> std::collections::HashMap<K, std::boxed::Box<dyn std::any::Any>>
+where
+    K: Clone + Eq + std::hash::Hash,
+{{
+    value
+        .iter()
+        .map(|(key, value)| (key.clone(), java_clone_erased_object_ref(value)))
+        .collect()
+}}
+
+pub fn java_clone_erased_object_btree_map_ref<K>(
+    value: &std::collections::BTreeMap<K, std::boxed::Box<dyn std::any::Any>>,
+) -> std::collections::BTreeMap<K, std::boxed::Box<dyn std::any::Any>>
+where
+    K: Clone + Ord,
+{{
+    value
+        .iter()
+        .map(|(key, value)| (key.clone(), java_clone_erased_object_ref(value)))
+        .collect()
+}}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JavaPlainObject;
 
@@ -16753,19 +16869,11 @@ impl JavaStringSearchNeedle for String {
     fn java_string_search_needle(&self) -> Option<String> { Some(self.clone()) }
 }
 
-impl JavaStringSearchNeedle for &String {
-    fn java_string_search_needle(&self) -> Option<String> { Some((*self).clone()) }
-}
-
-impl JavaStringSearchNeedle for &str {
-    fn java_string_search_needle(&self) -> Option<String> { Some((*self).to_string()) }
-}
-
-impl JavaStringSearchNeedle for char {
+impl JavaStringSearchNeedle for str {
     fn java_string_search_needle(&self) -> Option<String> { Some(self.to_string()) }
 }
 
-impl JavaStringSearchNeedle for &char {
+impl JavaStringSearchNeedle for char {
     fn java_string_search_needle(&self) -> Option<String> { Some(self.to_string()) }
 }
 
@@ -16775,10 +16883,28 @@ impl JavaStringSearchNeedle for i32 {
     }
 }
 
-impl JavaStringSearchNeedle for &i32 {
+impl<T: JavaStringSearchNeedle + ?Sized> JavaStringSearchNeedle for &T {
     fn java_string_search_needle(&self) -> Option<String> {
-        (*self).java_string_search_needle()
+        (**self).java_string_search_needle()
     }
+}
+
+pub fn java_string_contains<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> bool {
+    needle
+        .java_string_search_needle()
+        .is_some_and(|needle| value.as_ref().contains(needle.as_str()))
+}
+
+pub fn java_string_starts_with<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> bool {
+    needle
+        .java_string_search_needle()
+        .is_some_and(|needle| value.as_ref().starts_with(needle.as_str()))
+}
+
+pub fn java_string_ends_with<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> bool {
+    needle
+        .java_string_search_needle()
+        .is_some_and(|needle| value.as_ref().ends_with(needle.as_str()))
 }
 
 pub fn java_string_index_of<V: AsRef<str>, N: JavaStringSearchNeedle>(value: V, needle: N) -> i32 {
@@ -19479,9 +19605,10 @@ impl ExternalApiFacadeSupport {
                     continue;
                 };
                 if valid_rust_const_ident(&field.name) {
+                    let rust_name = rust_raw_ident_if_needed(&field.name);
                     self.add_method(
                         owner.clone(),
-                        format!("    pub const {}: {rust_type} = {value};", field.name),
+                        format!("    pub const {rust_name}: {rust_type} = {value};"),
                     );
                 }
             }
@@ -19524,9 +19651,10 @@ impl ExternalApiFacadeSupport {
                         continue;
                     };
                     if valid_rust_const_ident(&field.name) {
+                        let rust_name = rust_raw_ident_if_needed(&field.name);
                         self.add_method(
                             owner.clone(),
-                            format!("    pub const {}: {rust_type} = {value};", field.name),
+                            format!("    pub const {rust_name}: {rust_type} = {value};"),
                         );
                     }
                 }
@@ -20130,9 +20258,10 @@ impl ExternalApiFacadeSupport {
                     continue;
                 };
                 if valid_rust_const_ident(field_name) {
+                    let rust_name = rust_raw_ident_if_needed(field_name);
                     self.add_method(
                         owner.clone(),
-                        format!("    pub const {field_name}: {rust_type} = {value};"),
+                        format!("    pub const {rust_name}: {rust_type} = {value};"),
                     );
                 }
             }
@@ -22188,6 +22317,7 @@ impl ExternalApiFacadeSupport {
             }
             for rust_name in rust_names {
                 if valid_rust_const_ident(&rust_name) {
+                    let rust_name = rust_raw_ident_if_needed(&rust_name);
                     self.add_method(
                         owner.clone(),
                         format!("    pub const {rust_name}: {rust_type} = {rust_type};"),
@@ -22987,6 +23117,18 @@ impl ExternalApiFacadeSupport {
         arg_count: usize,
         return_type: String,
     ) {
+        if receiver_type.is_some_and(|receiver| {
+            let receiver = canonical_external_receiver_type_key(receiver);
+            external_facade_generic_carrier(&receiver).is_some()
+        }) {
+            // A generic facade owns its receiver-specific type parameters.
+            // Copying such a method into the process-wide erased-object trait
+            // either leaks an unbound `T` or conflates unrelated methods with
+            // the same name. Calls on this receiver are kept on its named
+            // carrier, so the blanket erased surface is neither needed nor
+            // type-correct.
+            return;
+        }
         // `Object.clone()` is protected in Java. Public source overrides are
         // resolved on their declaring type, while an unresolved erased call
         // cannot be represented by one universal concrete return type. Adding
@@ -23697,11 +23839,11 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             let impl_header = external_facade_impl_header(&owner);
-            let methods = dedup_facade_methods_by_signature(methods);
-            lines.push(format!(
-                "{impl_header} {{\n{}\n}}",
-                methods.into_iter().collect::<Vec<_>>().join("\n")
-            ));
+            let methods = dedup_facade_methods_by_signature(methods)
+                .into_iter()
+                .map(|method| avoid_external_facade_method_generic_collisions(&owner, method))
+                .collect::<Vec<_>>();
+            lines.push(format!("{impl_header} {{\n{}\n}}", methods.join("\n")));
         }
         if !self.erased_object_methods.is_empty() {
             let methods = self
@@ -23792,6 +23934,69 @@ impl ExternalApiFacadeSupport {
             }
         }
     }
+}
+
+fn avoid_external_facade_method_generic_collisions(owner: &str, mut method: String) -> String {
+    let Some(carrier) = external_facade_generic_carrier(owner) else {
+        return method;
+    };
+    let Some(fn_offset) = method.find("pub fn ") else {
+        return method;
+    };
+    let signature = &method[fn_offset..];
+    let Some(generic_start_rel) = signature.find('<') else {
+        return method;
+    };
+    let Some(args_start_rel) = signature.find('(') else {
+        return method;
+    };
+    if generic_start_rel > args_start_rel {
+        return method;
+    }
+    let generic_start = fn_offset + generic_start_rel;
+    let Some(generic_end_rel) = method[generic_start..].find('>') else {
+        return method;
+    };
+    let generic_end = generic_start + generic_end_rel;
+    let declared = method[generic_start + 1..generic_end]
+        .split(',')
+        .filter_map(|parameter| parameter.trim().split([':', '=']).next())
+        .map(str::trim)
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
+    for index in 0..carrier.arity {
+        let name = format!("T{index}");
+        if declared.contains(name.as_str()) {
+            method = replace_rust_identifier(&method, &name, &format!("A{index}"));
+        }
+    }
+    method
+}
+
+fn replace_rust_identifier(source: &str, from: &str, to: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut rest = source;
+    while let Some(offset) = rest.find(from) {
+        let before = &rest[..offset];
+        let after = &rest[offset + from.len()..];
+        let left_boundary = before
+            .chars()
+            .next_back()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
+        let right_boundary = after
+            .chars()
+            .next()
+            .is_none_or(|ch| !(ch.is_ascii_alphanumeric() || ch == '_'));
+        out.push_str(before);
+        if left_boundary && right_boundary {
+            out.push_str(to);
+        } else {
+            out.push_str(from);
+        }
+        rest = after;
+    }
+    out.push_str(rest);
+    out
 }
 
 fn external_object_method_uses_interface_trait_default(
@@ -28632,7 +28837,7 @@ struct ExternalFacadeGenericCarrier {
 }
 
 fn external_facade_generic_carrier(ty: &str) -> Option<ExternalFacadeGenericCarrier> {
-    if matches!(ty, "Enum" | "AsciiFeatureCodec") {
+    if matches!(ty, "Enum" | "AsciiFeatureCodec" | "FeatureReader") {
         // `java.lang.Enum<E>` is self-bounded, but an opaque external facade
         // only needs to preserve its single erased type argument. Emitting a
         // monomorphic unit facade makes valid signatures such as `Enum<?>` or
@@ -32973,15 +33178,25 @@ fn static_constant_impl_lines(
 }
 
 fn runtime_modelled_static_constant(owner: &str, field: &str) -> bool {
-    owner
-        .rsplit('.')
-        .next()
-        .unwrap_or(owner)
-        .ends_with("StandardCharsets")
+    let owner = owner.rsplit('.').next().unwrap_or(owner);
+    (owner.ends_with("StandardCharsets")
         && matches!(
             canonical_external_field_name(field).as_str(),
             "US_ASCII" | "ISO_8859_1" | "UTF_8" | "UTF_16BE" | "UTF_16LE" | "UTF_16"
-        )
+        ))
+        || (matches!(owner, "Pattern" | "JavaUtilRegexPattern")
+            && matches!(
+                canonical_external_field_name(field).as_str(),
+                "UNIX_LINES"
+                    | "CASE_INSENSITIVE"
+                    | "COMMENTS"
+                    | "MULTILINE"
+                    | "LITERAL"
+                    | "DOTALL"
+                    | "UNICODE_CASE"
+                    | "CANON_EQ"
+                    | "UNICODE_CHARACTER_CLASS"
+            ))
 }
 
 fn static_constant_surface_already_emits_self_typed_value(
@@ -33074,6 +33289,12 @@ fn static_constant_default_value(
                 rust_name_for_java_named_type(&canonical_external_receiver_type_key(name));
             if constant.is_some_and(|constant| {
                 constant.field_kind == ExternalFieldKind::StaticFinal
+                    && is_self_typed_external_enum_constant_field(owner, field, java_ty)
+            }) {
+                return valid_rust_type_ident(&rust_type).then_some(rust_type);
+            }
+            if constant.is_some_and(|constant| {
+                constant.field_kind == ExternalFieldKind::StaticFinal
                     && constant.provenance == FactProvenance::ConservativeFallback
             }) {
                 return valid_rust_type_ident(&rust_type).then_some(rust_type);
@@ -33147,6 +33368,15 @@ fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static 
         ("System", "ERR") => Some("PrintStream::Stderr"),
         ("System", "IN") => Some("InputStream::empty()"),
         ("GZIPInputStream" | "JavaUtilZipGZIPInputStream", "GZIP_MAGIC") => Some("0x8b1f"),
+        ("Pattern" | "JavaUtilRegexPattern", "UNIX_LINES") => Some("0x01"),
+        ("Pattern" | "JavaUtilRegexPattern", "CASE_INSENSITIVE") => Some("0x02"),
+        ("Pattern" | "JavaUtilRegexPattern", "COMMENTS") => Some("0x04"),
+        ("Pattern" | "JavaUtilRegexPattern", "MULTILINE") => Some("0x08"),
+        ("Pattern" | "JavaUtilRegexPattern", "LITERAL") => Some("0x10"),
+        ("Pattern" | "JavaUtilRegexPattern", "DOTALL") => Some("0x20"),
+        ("Pattern" | "JavaUtilRegexPattern", "UNICODE_CASE") => Some("0x40"),
+        ("Pattern" | "JavaUtilRegexPattern", "CANON_EQ") => Some("0x80"),
+        ("Pattern" | "JavaUtilRegexPattern", "UNICODE_CHARACTER_CLASS") => Some("0x100"),
         ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_EOF") => Some("-1"),
         ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_EOL") => Some("10"),
         ("StreamTokenizer" | "JavaIoStreamTokenizer", "TT_NUMBER") => Some("-2"),
@@ -33443,6 +33673,41 @@ pub(crate) fn program_external_api_facts_use_java_platform_facades(
                 .as_ref()
                 .is_some_and(java_type_uses_java_platform_facade)
                 || fact.thrown.iter().any(java_type_uses_java_platform_facade))
+    })
+}
+
+pub(crate) fn program_external_api_facts_use_java_stream(
+    program: &Program,
+    facts: &FactSet,
+) -> bool {
+    fn name_uses_stream(name: &str) -> bool {
+        let raw = raw_generic_type_head(name).unwrap_or(name).trim();
+        matches!(
+            canonical_external_receiver_type_key(raw).as_str(),
+            "Stream" | "JavaStream" | "java.util.stream.Stream"
+        )
+    }
+
+    fn uses_stream(ty: &JavaType) -> bool {
+        match ty {
+            JavaType::Named { name, args } => {
+                name_uses_stream(name) || args.iter().any(uses_stream)
+            }
+            JavaType::Array(inner) => uses_stream(inner),
+            JavaType::Intersection(bounds) => bounds.iter().any(uses_stream),
+            JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+            | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => uses_stream(bound),
+            JavaType::Unknown(name) => name_uses_stream(name),
+            JavaType::Primitive(_)
+            | JavaType::String
+            | JavaType::Void
+            | JavaType::Wildcard(None) => false,
+        }
+    }
+
+    facts.external_api_effect_facts.iter().any(|fact| {
+        external_api_effect_fact_mentions_program_type(program, fact)
+            && fact.return_type.as_ref().is_some_and(uses_stream)
     })
 }
 
@@ -37587,6 +37852,42 @@ mod external_facade_generic_carrier_tests {
             external_facade_eq_impl("Enum")
         );
     }
+
+    #[test]
+    fn method_generics_do_not_shadow_carrier_generics() {
+        let rendered = avoid_external_facade_method_generic_collisions(
+            "Function",
+            "    pub fn equals<T0>(&self, _arg0: T0) -> bool { Default::default() }".to_string(),
+        );
+
+        assert_eq!(
+            rendered,
+            "    pub fn equals<A0>(&self, _arg0: A0) -> bool { Default::default() }"
+        );
+    }
+
+    #[test]
+    fn external_constant_declarations_escape_rawable_rust_keywords() {
+        let mut support = ExternalApiFacadeSupport::default();
+        support.opaque_types.insert("ExternalToken".to_string());
+        let fact = ExternalFieldFact {
+            field: crate::facts::FieldKey::named("ExternalToken", "in"),
+            field_type: Some(JavaType::Named {
+                name: "ExternalToken".to_string(),
+                args: Vec::new(),
+            }),
+            field_kind: ExternalFieldKind::StaticFinal,
+            provenance: FactProvenance::CorpusAnalysis,
+        };
+
+        support.add_external_field_surface_fact(&FactSet::default(), &fact, &BTreeSet::new());
+
+        assert!(support.impls.get("ExternalToken").is_some_and(|items| {
+            items
+                .iter()
+                .any(|item| item.contains("pub const r#in: ExternalToken"))
+        }));
+    }
 }
 
 #[cfg(test)]
@@ -37760,5 +38061,29 @@ mod qualified_new_support_detection_tests {
         );
 
         assert!(expr_uses_java_string_runtime_helpers(&expr));
+    }
+
+    #[test]
+    fn linked_hash_set_runtime_supports_clear() {
+        let translated = crate::translate_source(
+            r#"
+            import java.util.LinkedHashSet;
+            class ClearInsertionOrderedSet {
+                int run() {
+                    LinkedHashSet<String> values = new LinkedHashSet<>();
+                    values.add("x");
+                    values.clear();
+                    return values.size();
+                }
+            }
+            "#,
+        )
+        .rust;
+
+        assert!(
+            translated.contains("pub fn clear(&mut self)"),
+            "{translated}"
+        );
+        assert!(translated.contains("values.clear()"), "{translated}");
     }
 }

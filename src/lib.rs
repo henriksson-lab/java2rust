@@ -3049,4 +3049,111 @@ class SourceHeaderReader {
             Some(facts::NullabilityState::MaybeNull)
         );
     }
+
+    #[test]
+    fn batch_global_representation_renders_hierarchy_carrier_inside_collection() {
+        let mut program = Program::default();
+        for source in [
+            "public class HeaderLine { String key; }",
+            "public final class FormatLine extends HeaderLine {}",
+            "public final class InfoLine extends HeaderLine {}",
+            r#"import java.util.Set;
+import java.util.LinkedHashSet;
+public class HeaderUse {
+    Set<HeaderLine> scan() {
+        Set<HeaderLine> lines = new LinkedHashSet<HeaderLine>();
+        lines.add(new FormatLine());
+        lines.add(new InfoLine());
+        return lines;
+    }
+}"#,
+        ] {
+            let mut parsed = parser::parse_java_source(source);
+            prepare_program_after_parse(&mut parsed.program);
+            merge_program_context(&mut program, parsed.program);
+        }
+        let built = build_batch_translation_context(
+            program,
+            Program::default(),
+            true,
+            &FactSet::default(),
+            None,
+            std::time::Instant::now(),
+        );
+        let header = JavaType::Named {
+            name: "HeaderLine".to_string(),
+            args: Vec::new(),
+        };
+        assert_eq!(
+            built.context.representations.dispatch_for(&header),
+            crate::slot_shape::DispatchShape::ClosedEnum {
+                enum_name: "HeaderLineValue".to_string(),
+            }
+        );
+        let set = JavaType::Named {
+            name: "Set".to_string(),
+            args: vec![header],
+        };
+        assert_eq!(
+            crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_java_type_with_facts_and_representations(
+                    &set,
+                    &built.context.semantic.facts,
+                    &built.context.representations,
+                )
+            ),
+            "JavaSemanticHashSet<HeaderLineValue>"
+        );
+        let nullable_set = JavaType::Named {
+            name: "LinkedHashSet".to_string(),
+            args: vec![crate::types::optional_java_type(JavaType::Named {
+                name: "HeaderLine".to_string(),
+                args: Vec::new(),
+            })],
+        };
+        assert_eq!(
+            crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_java_type_with_facts_and_representations(
+                    &nullable_set,
+                    &built.context.semantic.facts,
+                    &built.context.representations,
+                )
+            ),
+            "JavaSemanticHashSet<Option<HeaderLineValue>>"
+        );
+        let header_use = built
+            .context
+            .support_program
+            .types
+            .iter()
+            .find(|ty| ty.name == "HeaderUse")
+            .expect("header user type");
+        let scan = header_use
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "scan" => Some(method),
+                _ => None,
+            })
+            .expect("scan method");
+        let lines = built
+            .context
+            .signatures
+            .method_local_shapes_or_empty(header_use, scan)
+            .iter()
+            .find(|local| local.name() == "lines")
+            .expect("lines local");
+        assert_eq!(
+            crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                    lines.shape(),
+                    &built.context.semantic.facts,
+                    &built.context.representations,
+                )
+            ),
+            "JavaSemanticHashSet<HeaderLineValue>",
+            "{:?}",
+            lines.shape()
+        );
+    }
 }

@@ -2329,7 +2329,7 @@ fi
 
 if grep -R -q -E '^pub struct JavaClass|JavaClass(::|<)' "$generated_dir"; then
   cat >> "$shared_support_path" <<'RUST'
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct JavaClass<T> {
     name: String,
     _marker: std::marker::PhantomData<T>,

@@ -1401,7 +1401,17 @@ fn collect_static_reachability_edges(
     for member in &ty.members {
         match member {
             Member::Field(field) => {
-                let field_types = declared_storage_type_names(&field.ty, &ty.name, declared);
+                let mut field_types = declared_storage_type_names(&field.ty, &ty.name, declared);
+                if let Some(initializer) = &field.initializer {
+                    collect_allocated_source_type_names(
+                        initializer,
+                        &ty.name,
+                        declared,
+                        &mut field_types,
+                    );
+                    field_types.sort();
+                    field_types.dedup();
+                }
                 if field_types.is_empty() {
                     continue;
                 }
@@ -1420,6 +1430,49 @@ fn collect_static_reachability_edges(
             _ => {}
         }
     }
+    // A static initializer can construct a concrete implementation through an
+    // interface-typed local or collection before storing it in a static.  The
+    // declared-field graph cannot see through that erasure. Conservatively
+    // promote every source allocation performed during class initialization:
+    // even a temporary may be retained by a call whose body is unavailable,
+    // while an unnecessary Arc is semantics-preserving.
+    for static_init in &ty.static_init_blocks {
+        crate::semantic_analysis::walk_block_exprs(&static_init.block, &mut |expr| {
+            if let Expr::New {
+                ty: allocated,
+                resolved,
+                ..
+            } = expr
+            {
+                let allocated = resolved
+                    .as_ref()
+                    .map(|resolved| &resolved.constructed_type)
+                    .unwrap_or(allocated);
+                if let Some(name) = declared_type_name(allocated, &ty.name, declared) {
+                    reachable.insert(name);
+                }
+            }
+        });
+    }
+}
+
+fn collect_allocated_source_type_names(
+    expr: &Expr,
+    owner_name: &str,
+    declared: &BTreeSet<String>,
+    into: &mut Vec<String>,
+) {
+    crate::semantic_analysis::walk_expr(expr, &mut |expr| {
+        if let Expr::New { ty, resolved, .. } = expr {
+            let allocated = resolved
+                .as_ref()
+                .map(|resolved| &resolved.constructed_type)
+                .unwrap_or(ty);
+            if let Some(name) = declared_type_name(allocated, owner_name, declared) {
+                into.push(name);
+            }
+        }
+    });
 }
 
 /// Types reachable from a thread entry point.
@@ -3422,6 +3475,61 @@ class Root { static Holder holder = new Holder(); }
             "Holder",
         );
         assert_eq!(strategy, StorageStrategy::SharedSync);
+    }
+
+    #[test]
+    fn named_implementor_allocated_into_static_interface_field_is_sync() {
+        let source = r#"
+interface Worker { int read(); }
+class NamedWorker implements Worker {
+    public int read() { return 7; }
+}
+class Root {
+    static Worker worker = new NamedWorker();
+}
+"#;
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let reachable = statically_reachable_source_type_names(&resolved.program);
+        assert!(reachable.contains("NamedWorker"), "{reachable:?}");
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let plan = plan_storage_strategies(&resolved.program, &usage);
+        assert_eq!(
+            plan.strategy("NamedWorker"),
+            StorageStrategy::SharedImmutable
+        );
+        assert!(plan.placement("NamedWorker").sync());
+    }
+
+    #[test]
+    fn named_implementor_allocated_in_static_block_is_sync() {
+        let source = r#"
+import java.util.Map;
+import java.util.HashMap;
+interface Worker { int read(); }
+class NamedWorker implements Worker {
+    public int read() { return 7; }
+}
+class Root {
+    static Map<String, Worker> workers;
+    static {
+        Map<String, Worker> local = new HashMap<>();
+        local.put("worker", new NamedWorker());
+        workers = local;
+    }
+}
+"#;
+        let parsed = parse_java_source(source);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let reachable = statically_reachable_source_type_names(&resolved.program);
+        assert!(reachable.contains("NamedWorker"), "{reachable:?}");
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let plan = plan_storage_strategies(&resolved.program, &usage);
+        assert_eq!(
+            plan.strategy("NamedWorker"),
+            StorageStrategy::SharedImmutable
+        );
+        assert!(plan.placement("NamedWorker").sync());
     }
 
     #[test]

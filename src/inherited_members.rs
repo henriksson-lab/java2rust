@@ -318,12 +318,37 @@ pub(crate) fn inherited_private_implementation_method_refs_for_type<'a>(
     ty: &TypeDecl,
     support_program: &'a Program,
 ) -> Vec<InheritedInstanceMethodRef<'a>> {
-    let inherited = inherited_instance_method_refs_for_type(ty, support_program);
+    let mut owners = Vec::new();
+    let mut current = ty.extends.as_deref();
+    let mut owner_context = ty.name.clone();
+    let mut visited_classes = HashSet::new();
+    while let Some(type_name) = current {
+        let Some(super_ty) =
+            find_type_decl_for_owner_context(support_program, &owner_context, type_name)
+        else {
+            break;
+        };
+        if !visited_classes.insert(super_ty.name.clone()) {
+            break;
+        }
+        owners.push(super_ty);
+        owner_context = super_ty.name.clone();
+        current = super_ty.extends.as_deref();
+    }
+
+    // Interface default methods can call private interface helpers too. Add
+    // their declaring interfaces to the same owner set while retaining the
+    // explicit class walk above for constructor-only superclasses.
+    owners.extend(
+        inherited_instance_method_refs_for_type(ty, support_program)
+            .into_iter()
+            .map(|inherited| inherited.declaring_ty()),
+    );
+
     let mut declaring_types = HashSet::new();
     let mut helpers = Vec::new();
 
-    for inherited_method in inherited {
-        let declaring_ty = inherited_method.declaring_ty();
+    for declaring_ty in owners {
         if !declaring_types.insert(declaring_ty.name.clone()) {
             continue;
         }

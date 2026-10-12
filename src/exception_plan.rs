@@ -660,6 +660,24 @@ pub fn plan_program_fallibility(
     call_graph: &CallGraph,
     facts: &FactSet,
 ) -> ProgramFallibilityPlan {
+    plan_program_fallibility_with_signatures(program, call_graph, facts, None)
+}
+
+/// Solve fallibility against the same parameter carriers that lowering emits.
+///
+/// Java reference parameters can receive `null`, but the signature solver only
+/// uses an `Option` carrier when the translated program actually preserves that
+/// part of the value domain.  Treating every declared reference as nullable
+/// here made a method return `Result<T, JavaException>` even when its Rust ABI
+/// accepted a non-null value and all of its callers therefore expected `T`.
+/// Supplying the solved signatures keeps null-receiver exception planning and
+/// the emitted ABI on one representation decision.
+pub fn plan_program_fallibility_with_signatures(
+    program: &Program,
+    call_graph: &CallGraph,
+    facts: &FactSet,
+    signatures: Option<&crate::signature::SignaturePlan>,
+) -> ProgramFallibilityPlan {
     let mut callables = call_graph
         .nodes()
         .iter()
@@ -697,7 +715,7 @@ pub fn plan_program_fallibility(
             entry.reasons.push(FallibilityReason::MathToIntExactThrow);
         }
     }
-    for key in nullable_receiver_throw_callables(program) {
+    for key in nullable_receiver_throw_callables(program, signatures) {
         let entry = callables.entry(key).or_default();
         if !entry.returns_result {
             entry.returns_result = true;
@@ -1361,7 +1379,10 @@ fn expr_is_math_static_owner(expr: &Expr) -> bool {
     }
 }
 
-fn nullable_receiver_throw_callables(program: &Program) -> Vec<CallableKey> {
+fn nullable_receiver_throw_callables(
+    program: &Program,
+    signatures: Option<&crate::signature::SignaturePlan>,
+) -> Vec<CallableKey> {
     let mut types = Vec::new();
     for ty in &program.types {
         collect_type_decls(ty, &mut types);
@@ -1371,7 +1392,15 @@ fn nullable_receiver_throw_callables(program: &Program) -> Vec<CallableKey> {
         for member in &ty.members {
             match member {
                 Member::Method(method) => {
-                    let nullable_params = nullable_reference_param_names(&method.params);
+                    let nullable_params = signatures
+                        .and_then(|signatures| signatures.method_signature(ty, method))
+                        .map(|signature| {
+                            nullable_reference_param_names_with_shapes(
+                                &method.params,
+                                signature.params().iter().map(|param| param.shape()),
+                            )
+                        })
+                        .unwrap_or_else(|| nullable_reference_param_names(&method.params));
                     if !nullable_params.is_empty()
                         && method.body.as_ref().is_some_and(|body| {
                             block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
@@ -1381,7 +1410,15 @@ fn nullable_receiver_throw_callables(program: &Program) -> Vec<CallableKey> {
                     }
                 }
                 Member::Constructor(constructor) => {
-                    let nullable_params = nullable_reference_param_names(&constructor.params);
+                    let nullable_params = signatures
+                        .and_then(|signatures| signatures.constructor_signature(ty, constructor))
+                        .map(|signature| {
+                            nullable_reference_param_names_with_shapes(
+                                &constructor.params,
+                                signature.params().iter().map(|param| param.shape()),
+                            )
+                        })
+                        .unwrap_or_else(|| nullable_reference_param_names(&constructor.params));
                     if !nullable_params.is_empty()
                         && constructor.body.as_ref().is_some_and(|body| {
                             block_has_unhandled_nullable_receiver_deref(body, &nullable_params)
@@ -1657,6 +1694,20 @@ fn nullable_reference_param_names(params: &[crate::java_ir::Param]) -> HashSet<S
     let mut names = HashSet::new();
     for param in params {
         if java_type_can_be_null(&param.ty) {
+            names.insert(param.name.clone());
+            names.insert(param.source_name.clone());
+        }
+    }
+    names
+}
+
+fn nullable_reference_param_names_with_shapes<'a>(
+    params: &[crate::java_ir::Param],
+    shapes: impl IntoIterator<Item = &'a crate::slot_shape::RustSlotShape>,
+) -> HashSet<String> {
+    let mut names = HashSet::new();
+    for (param, shape) in params.iter().zip(shapes) {
+        if java_type_can_be_null(&param.ty) && shape.optional_element_type().is_some() {
             names.insert(param.name.clone());
             names.insert(param.source_name.clone());
         }

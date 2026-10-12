@@ -14,7 +14,16 @@ pub(crate) fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaTyp
     };
     let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
     let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
+    if name == "CloseableIterator" {
+        eprintln!("DEBUG FACADE SEQ name={name} canonical={canonical} simple={simple} args={args:?}");
+    }
     match simple {
+        // Iterator subinterfaces keep the same element contract as
+        // java.util.Iterator even when their runtime object is supplied by an
+        // external library.  Preserve that generic type before representation
+        // lowering so stream/iteration planning never has to recover it from
+        // an erased facade method name.
+        "CloseableIterator" if args.len() == 1 => Some(args[0].clone()),
         "JavaRDD" if args.len() == 1 => Some(args[0].clone()),
         "JavaPairRDD" if args.len() == 2 => Some(JavaType::Named {
             name: "Tuple2".to_string(),

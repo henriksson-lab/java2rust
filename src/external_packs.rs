@@ -11298,7 +11298,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "FeatureReader",
+        "FeatureReader<T3>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11307,7 +11307,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "FeatureReader",
+        "FeatureReader<T3>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11316,7 +11316,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         4,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "FeatureReader",
+        "FeatureReader<T4>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11325,7 +11325,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         4,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "FeatureReader",
+        "FeatureReader<T4>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11334,7 +11334,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "CloseableIterator<Object>",
+        "CloseableIterator<T>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11343,7 +11343,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         1,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "CloseableIterator<Object>",
+        "CloseableIterator<T>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11352,7 +11352,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "CloseableTribbleIterator",
+        "CloseableIterator<T>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect_with_arity(
@@ -11361,7 +11361,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         3,
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "CloseableTribbleIterator",
+        "CloseableIterator<T>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -11369,7 +11369,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "iterator",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "CloseableIterator<Object>",
+        "CloseableIterator<T>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -11377,7 +11377,7 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "iterator",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "CloseableIterator<Object>",
+        "CloseableIterator<T>",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(

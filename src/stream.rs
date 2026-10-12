@@ -111,6 +111,8 @@ pub enum FilterPlan<'a> {
 
 pub enum StreamTerminal<'a> {
     Sum,
+    Count,
+    Iterator,
     Reduce(ReducePlan<'a>),
     Collect(JavaCollectionKind),
     CollectToMap {
@@ -328,6 +330,8 @@ fn build_stream_plan_core<'a>(
 
     let terminal = match name.as_str() {
         "sum" if args.is_empty() => StreamTerminal::Sum,
+        "count" if args.is_empty() => StreamTerminal::Count,
+        "iterator" if args.is_empty() => StreamTerminal::Iterator,
         "reduce" if args.len() == 2 => StreamTerminal::Reduce(ReducePlan {
             identity: &args[0],
             accumulator: reduce_lambda_plan(&args[1])?,
@@ -1044,6 +1048,11 @@ pub fn stream_terminal_actual(
 ) -> LoweredType {
     match terminal {
         StreamTerminal::Sum => LoweredType::from_java(JavaType::Primitive(PrimitiveType::Int)),
+        StreamTerminal::Count => LoweredType::from_java(JavaType::Primitive(PrimitiveType::Long)),
+        StreamTerminal::Iterator => LoweredType::from_java(JavaType::Named {
+            name: "Iterator".to_string(),
+            args: vec![element_shape.java_ty.clone()],
+        }),
         StreamTerminal::Reduce(reduce) => {
             LoweredType::from_java(crate::types::infer_expr_type(reduce.identity, env))
         }

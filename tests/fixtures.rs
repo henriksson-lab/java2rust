@@ -5906,6 +5906,179 @@ fn static_field_keeps_interface_mutation() {
 }
 
 #[test]
+fn static_named_interface_implementor_uses_sized_send_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+interface StaticNamedWorker { int read(); }
+class StaticNamedWorkerImpl implements StaticNamedWorker {
+    public int read() { return 7; }
+}
+class StaticNamedWorkerRoot {
+    static final StaticNamedWorker WORKER = new StaticNamedWorkerImpl();
+    static final Map<String, StaticNamedWorker> WORKERS;
+    static {
+        Map<String, StaticNamedWorker> workers = new HashMap<>();
+        workers.put("second", new StaticNamedWorkerImpl());
+        WORKERS = workers;
+    }
+    static int run() { return WORKER.read() + WORKERS.get("second").read(); }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("std::sync::Mutex<Option<Box<dyn StaticNamedWorker>>>")
+            && translation.rust.contains(
+                "Box::new(std::sync::Arc::new(StaticNamedWorkerImpl::new())) as Box<dyn StaticNamedWorker>"
+            ),
+        "{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "static_named_interface_implementor",
+        translation.rust,
+        r#"
+#[test]
+fn static_named_implementation_dispatches() {
+    assert_eq!(StaticNamedWorkerRoot::run(), 14);
+}
+"#,
+    );
+}
+
+#[test]
+fn local_collection_shadows_same_named_context_static_storage() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class StaticMappingOwner {
+    static Map<String, String> mapping;
+}
+
+class LocalMappingUser {
+    static int run() {
+        Map<String, String> mapping = new HashMap<>();
+        mapping.put("key", "value");
+        return mapping.size();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.rust.contains("mapping.as_ref().ok_or_else"),
+        "a lexical local must not inherit a context static's nullable storage shape:\n{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "local_collection_shadows_context_static_storage",
+        translation.rust,
+        r#"
+#[test]
+fn local_map_dispatches_without_a_static_null_projection() {
+    assert_eq!(LocalMappingUser::run(), 1);
+}
+"#,
+    );
+}
+
+#[test]
+fn nullable_instance_collection_receiver_uses_field_slot_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class NullableInstanceCollectionReceiver {
+    Map<String, String> values = new HashMap<>();
+
+    NullableInstanceCollectionReceiver() {
+        values.put("key", "value");
+    }
+
+    String read(String key) {
+        return this.values.get(key);
+    }
+
+    static String run() {
+        return new NullableInstanceCollectionReceiver().read("key");
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("values.as_ref().unwrap().get"),
+        "an instance collection call must project through its nullable field slot:\n{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "nullable_instance_collection_receiver",
+        translation.rust,
+        r#"
+#[test]
+fn initialized_nullable_map_field_dispatches() {
+    assert_eq!(NullableInstanceCollectionReceiver::run(), Some("value".to_string()));
+}
+"#,
+    );
+}
+
+#[test]
+fn collections_sort_projects_nullable_instance_field_as_mutable_sequence() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+
+class NullableListSortReceiver {
+    List<String> values = null;
+
+    NullableListSortReceiver() {
+        values = new ArrayList<String>();
+        values.add("z");
+        values.add("a");
+    }
+
+    void order() {
+        Collections.sort(this.values);
+    }
+
+    static String run() {
+        NullableListSortReceiver holder = new NullableListSortReceiver();
+        holder.order();
+        return holder.values.get(0);
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("values.as_mut()") && translation.rust.contains(".sort()"),
+        "Collections.sort must mutate through the nullable field slot:\n{}",
+        translation.rust
+    );
+    cargo_test_translation(
+        "collections_sort_nullable_instance_field",
+        translation.rust,
+        r#"
+#[test]
+fn sort_mutates_the_original_list_field() {
+    assert_eq!(NullableListSortReceiver::run(), "a".to_string());
+}
+"#,
+    );
+}
+
+#[test]
 fn static_reachable_single_method_anonymous_interface_uses_send_object() {
     let translation = translate_source(
         r#"

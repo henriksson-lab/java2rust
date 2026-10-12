@@ -369,13 +369,13 @@ fn apply_native_java_instance_method(
         }
         NativeJavaInstanceMethod::SourceHashCode => java_value_hash_code_projection(receiver),
         NativeJavaInstanceMethod::StringContains => {
-            receiver_method_call_projection(receiver, "contains", args)
+            apply_string_search_helper(receiver, args, "java_string_contains", "contains")
         }
         NativeJavaInstanceMethod::StringStartsWith => {
-            receiver_method_call_projection(receiver, "starts_with", args)
+            apply_string_search_helper(receiver, args, "java_string_starts_with", "startsWith")
         }
         NativeJavaInstanceMethod::StringEndsWith => {
-            receiver_method_call_projection(receiver, "ends_with", args)
+            apply_string_search_helper(receiver, args, "java_string_ends_with", "endsWith")
         }
         NativeJavaInstanceMethod::BitSetGet => {
             receiver_method_call_projection(receiver, "get", args)
@@ -551,6 +551,21 @@ fn apply_string_matches_helper(receiver: RustExpr, args: Vec<RustExpr>) -> RustE
         return compile_error_call("Java String.matches requires one argument");
     }
     string_matches_projection(receiver, args.into_iter().next().unwrap())
+}
+
+fn apply_string_search_helper(
+    receiver: RustExpr,
+    args: Vec<RustExpr>,
+    helper: &str,
+    java_method: &str,
+) -> RustExpr {
+    let [needle] = args.as_slice() else {
+        return compile_error_call(&format!("Java String.{java_method} requires one argument"));
+    };
+    function_call_projection(
+        free_function_path_projection(helper),
+        vec![receiver, needle.clone()],
+    )
 }
 
 fn apply_string_substring(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
@@ -3392,6 +3407,7 @@ fn apply_native_collection_new_target(
     if matches!(
         native_collection_new_target_kind(native_collection),
         crate::stdlib::JavaCollectionKind::Set
+            | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
     ) && representations
         .map(|representations| {
             crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
@@ -3407,29 +3423,98 @@ fn apply_native_collection_new_target(
             )
         })
     {
+        let semantic_set = representations.is_some_and(|representations| {
+            crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+                &target.owner_shape().java_ty,
+                representations,
+            )
+        });
+        if !semantic_set {
+            return match native_collection {
+                NativeCollectionNewTarget::Empty { .. } => {
+                    native_collection_empty_new_projection(crate::stdlib::JavaCollectionKind::List)
+                }
+                NativeCollectionNewTarget::WithCapacity { .. } => {
+                    let capacity = args
+                        .pop()
+                        .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
+                    native_collection_with_capacity_projection(
+                        crate::stdlib::JavaCollectionKind::List,
+                        capacity,
+                    )
+                }
+                NativeCollectionNewTarget::FromSource { .. }
+                | NativeCollectionNewTarget::FromSingleArg { .. } => {
+                    args.pop().unwrap_or_else(|| {
+                        native_collection_default_constructor_projection(
+                            crate::stdlib::JavaCollectionKind::List,
+                        )
+                    })
+                }
+                NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
+                    priority_queue_comparator_constructor_unsupported_projection()
+                }
+                NativeCollectionNewTarget::PriorityQueueComparatorCallback { .. } => args
+                    .pop()
+                    .map(|comparator| {
+                        priority_queue_with_callback_comparator_projection(
+                            comparator,
+                            priority_queue_element_rust_type(target, facts),
+                        )
+                    })
+                    .unwrap_or_else(priority_queue_empty_new_projection),
+                NativeCollectionNewTarget::PriorityQueueComparatorFacade { .. } => args
+                    .pop()
+                    .map(|comparator| {
+                        priority_queue_with_comparator_facade_projection(
+                            comparator,
+                            priority_queue_element_rust_type(target, facts),
+                        )
+                    })
+                    .unwrap_or_else(priority_queue_empty_new_projection),
+                NativeCollectionNewTarget::PriorityQueueComparator { .. } => args
+                    .pop()
+                    .map(|comparator| {
+                        priority_queue_with_comparator_projection(
+                            comparator,
+                            priority_queue_element_rust_type(target, facts),
+                        )
+                    })
+                    .unwrap_or_else(priority_queue_empty_new_projection),
+            };
+        }
         return match native_collection {
             NativeCollectionNewTarget::Empty { .. } => {
-                native_collection_empty_new_projection(crate::stdlib::JavaCollectionKind::List)
+                function_call_projection(RustExpr::path(["JavaSemanticHashSet", "new"]), Vec::new())
             }
             NativeCollectionNewTarget::WithCapacity { .. } => {
                 let capacity = args
                     .pop()
                     .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
-                native_collection_with_capacity_projection(
-                    crate::stdlib::JavaCollectionKind::List,
-                    capacity,
+                function_call_projection(
+                    RustExpr::path(["JavaSemanticHashSet", "with_capacity"]),
+                    vec![capacity],
                 )
             }
-            NativeCollectionNewTarget::FromSource { .. } => args.pop().unwrap_or_else(|| {
-                native_collection_default_constructor_projection(
-                    crate::stdlib::JavaCollectionKind::List,
-                )
-            }),
-            NativeCollectionNewTarget::FromSingleArg { .. } => args.pop().unwrap_or_else(|| {
-                native_collection_default_constructor_projection(
-                    crate::stdlib::JavaCollectionKind::List,
-                )
-            }),
+            NativeCollectionNewTarget::FromSource { .. }
+            | NativeCollectionNewTarget::FromSingleArg { .. } => args
+                .pop()
+                .map(|source| {
+                    receiver_method_call_projection_exact(source, "into_iter", Vec::new())
+                })
+                .map(|iter| {
+                    receiver_method_call_projection_exact(
+                        iter,
+                        "collect::<JavaSemanticHashSet<_>>",
+                        Vec::new(),
+                    )
+                })
+                .unwrap_or_else(|| {
+                    function_call_projection(
+                        RustExpr::path(["JavaSemanticHashSet", "new"]),
+                        Vec::new(),
+                    )
+                }),
             NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
                 priority_queue_comparator_constructor_unsupported_projection()
             }
@@ -3840,6 +3925,40 @@ mod tests {
             emit::emit_expr(&lowered),
             "value.chars().nth((index) as usize).ok_or_else(|| JavaException::new(\"StringIndexOutOfBoundsException\", \"Java string index out of bounds\".to_string())).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
         );
+    }
+
+    #[test]
+    fn string_search_methods_use_owned_or_borrowed_needle_adapter() {
+        let receiver = Expr::Var("value".to_string());
+        for (method, helper) in [
+            (
+                NativeJavaInstanceMethod::StringContains,
+                "java_string_contains",
+            ),
+            (
+                NativeJavaInstanceMethod::StringStartsWith,
+                "java_string_starts_with",
+            ),
+            (
+                NativeJavaInstanceMethod::StringEndsWith,
+                "java_string_ends_with",
+            ),
+        ] {
+            let target = CallTargetPlan::NativeJavaInstance {
+                receiver: &receiver,
+                method,
+            };
+            let lowered = apply_call_target(
+                &target,
+                Some(RustExpr::Var("value".to_string())),
+                vec![RustExpr::Var("needle".to_string())],
+            );
+
+            assert_eq!(
+                emit::emit_expr(&lowered),
+                format!("{helper}(value, needle)")
+            );
+        }
     }
 
     #[test]
