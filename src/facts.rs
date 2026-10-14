@@ -127,7 +127,6 @@ pub struct ExternalFactLookupIndex<'a> {
     external_api_by_method_alias: HashMap<String, Vec<usize>>,
     external_field_by_name_alias: HashMap<String, Vec<usize>>,
     external_field_value_by_name_alias: HashMap<String, Vec<usize>>,
-    external_pack_member_by_type_alias: HashMap<String, Vec<usize>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,87 +190,11 @@ impl<'a> ExternalFactLookupIndex<'a> {
             }
         }
 
-        let mut external_pack_member_by_type_alias = HashMap::<String, Vec<usize>>::new();
-        let pack_index_for_type = |type_name: &str| -> Option<usize> {
-            facts
-                .external_library_packs
-                .iter()
-                .rposition(|pack| external_pack_owns_type(pack, type_name))
-        };
-        let pack_index_for_name = |pack_name: &str| -> Option<usize> {
-            facts
-                .external_library_packs
-                .iter()
-                .rposition(|pack| pack.pack_name == pack_name)
-        };
-        for fact in &facts.external_api_effect_facts {
-            if let Some(receiver_type) = fact.receiver_type.as_deref()
-                && let Some(pack_index) = pack_index_for_type(receiver_type)
-            {
-                index_external_pack_member_type(
-                    &mut external_pack_member_by_type_alias,
-                    receiver_type,
-                    pack_index,
-                );
-            }
-        }
-        for fact in &facts.external_constructor_facts {
-            if let Some(pack_index) = pack_index_for_type(&fact.type_name) {
-                index_external_pack_member_type(
-                    &mut external_pack_member_by_type_alias,
-                    &fact.type_name,
-                    pack_index,
-                );
-            }
-        }
-        for fact in &facts.external_field_facts {
-            if let Some(pack_index) = pack_index_for_type(&fact.field.type_name) {
-                index_external_pack_member_type(
-                    &mut external_pack_member_by_type_alias,
-                    &fact.field.type_name,
-                    pack_index,
-                );
-            }
-        }
-        for fact in &facts.external_crate_api_mapping_facts {
-            if let Some(pack_index) = pack_index_for_type(&fact.receiver_type) {
-                index_external_pack_member_type(
-                    &mut external_pack_member_by_type_alias,
-                    &fact.receiver_type,
-                    pack_index,
-                );
-            }
-        }
-        for fact in &facts.external_crate_type_mapping_facts {
-            if let Some(pack_index) = pack_index_for_type(&fact.type_name) {
-                index_external_pack_member_type(
-                    &mut external_pack_member_by_type_alias,
-                    &fact.type_name,
-                    pack_index,
-                );
-            }
-        }
-        for fact in &facts.external_crate_constructor_mapping_facts {
-            if let Some(pack_index) = fact
-                .pack_name
-                .as_deref()
-                .and_then(pack_index_for_name)
-                .or_else(|| pack_index_for_type(&fact.type_name))
-            {
-                index_external_pack_member_type(
-                    &mut external_pack_member_by_type_alias,
-                    &fact.type_name,
-                    pack_index,
-                );
-            }
-        }
-
         Self {
             facts,
             external_api_by_method_alias,
             external_field_by_name_alias,
             external_field_value_by_name_alias,
-            external_pack_member_by_type_alias,
         }
     }
 
@@ -876,28 +799,26 @@ impl<'a> ExternalFactLookupIndex<'a> {
         &self,
         type_name: &str,
     ) -> Option<&'a ExternalLibraryPackFact> {
-        let mut seen = HashSet::new();
-        let mut indices = Vec::new();
-        for alias in external_type_name_aliases(type_name).iter() {
-            if let Some(alias_indices) = self.external_pack_member_by_type_alias.get(alias) {
-                for index in alias_indices {
-                    if seen.insert(*index) {
-                        indices.push(*index);
-                    }
-                }
-            }
-        }
+        // This fallback is rare: direct pack ownership is checked first.
+        // Building a complete member-to-pack cross-index in `new` made every
+        // ordinary API lookup pay for it, even when no pack lookup followed.
+        let indices = self
+            .facts
+            .external_library_packs
+            .iter()
+            .enumerate()
+            .filter_map(|(index, pack)| {
+                self.external_pack_has_member_for_type(pack, type_name)
+                    .then_some(index)
+            })
+            .collect::<Vec<_>>();
         if !type_name.contains('.') && indices.len() != 1 {
             return None;
         }
-        indices.sort_by(|left, right| right.cmp(left));
-        for index in indices {
-            let pack = &self.facts.external_library_packs[index];
-            if self.external_pack_has_member_for_type(pack, type_name) {
-                return Some(pack);
-            }
-        }
-        None
+        indices
+            .into_iter()
+            .next_back()
+            .map(|index| &self.facts.external_library_packs[index])
     }
 
     fn external_pack_has_member_for_type(
@@ -1040,16 +961,6 @@ fn external_method_name_aliases_uncached(method_name: &str) -> Vec<String> {
     aliases.sort();
     aliases.dedup();
     aliases
-}
-
-fn index_external_pack_member_type(
-    index: &mut HashMap<String, Vec<usize>>,
-    type_name: &str,
-    pack_index: usize,
-) {
-    for alias in external_type_name_aliases(type_name).iter() {
-        index.entry(alias.clone()).or_default().push(pack_index);
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

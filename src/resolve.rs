@@ -5,10 +5,10 @@ use crate::binding_id::{BindingId, BindingKind};
 use crate::diagnostics::DiagnosticBag;
 use crate::facts::{
     Capture, CaptureFacts, CaptureOrigin, CaptureOwner, CaptureOwnerKind, CaptureSource,
-    ClosedHierarchyFact, ExternalFieldFact, ExternalFieldKind, FactProvenance, FactSet, FieldKey,
-    MethodEffectFact, MethodKey, NodeId, NullabilityState, ObjectSafetyFact, ObjectSafetyViolation,
-    ReceiverMutabilityFact, SealedPermitsFact, TypeCapabilityOverride, UnresolvedTargetFact,
-    UnresolvedTargetKind,
+    ClosedHierarchyFact, ExternalFactLookupIndex, ExternalFieldFact, ExternalFieldKind,
+    FactProvenance, FactSet, FieldKey, MethodEffectFact, MethodKey, NodeId, NullabilityState,
+    ObjectSafetyFact, ObjectSafetyViolation, ReceiverMutabilityFact, SealedPermitsFact,
+    TypeCapabilityOverride, UnresolvedTargetFact, UnresolvedTargetKind,
 };
 use crate::java_ir::{
     Block, CallKind, ConstructorDecl, ConstructorInvocationKind, Expr, JavaCoercionEvidence,
@@ -29,6 +29,33 @@ pub struct ResolvedProgram {
 #[derive(Debug, Clone)]
 pub struct SourceSymbols {
     symbols: ProgramSymbols,
+}
+
+/// Immutable external facts plus the lookup index shared by one resolver run.
+///
+/// Building `ExternalFactLookupIndex` is proportional to the complete external
+/// surface. Rebuilding it for every nested expression made resolution
+/// effectively quadratic for large dependency packs such as HTSJDK.
+struct ResolverExternalFacts<'a> {
+    facts: &'a FactSet,
+    lookup: ExternalFactLookupIndex<'a>,
+}
+
+impl<'a> ResolverExternalFacts<'a> {
+    fn new(facts: &'a FactSet) -> Self {
+        Self {
+            facts,
+            lookup: facts.external_lookup_index(),
+        }
+    }
+}
+
+impl std::ops::Deref for ResolverExternalFacts<'_> {
+    type Target = FactSet;
+
+    fn deref(&self) -> &Self::Target {
+        self.facts
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -250,6 +277,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
     for ty in &mut program.types {
         assign_type_rust_names_with_source_symbols(ty, &mut diagnostics, &program_counts, symbols);
     }
+    let external_facts = ResolverExternalFacts::new(external_facts);
     let mut resolver_facts = FactSet::default();
     for ty in &mut program.types {
         resolve_type_calls(
@@ -257,7 +285,7 @@ pub fn resolve_program_with_source_symbols_and_facts(
             symbols,
             &mut diagnostics,
             &mut resolver_facts,
-            external_facts,
+            &external_facts,
         );
     }
     let mut facts = collect_resolved_facts(&program);
@@ -1356,7 +1384,7 @@ fn resolve_type_calls(
     symbols: &ProgramSymbols,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) {
     let methods = symbols.methods_for_hierarchy(&ty.name);
     let constructors = symbols.constructors_for(&ty.name);
@@ -1530,17 +1558,8 @@ fn source_method_overrides_jdk_input_stream_read_3(
 }
 
 fn resolve_constructor(ctor: &mut ConstructorDecl, ctor_count: usize) {
-    if ctor.params.is_empty() || ctor_count == 1 {
-        ctor.rust_name = Some("new".to_string());
-    } else {
-        let suffix = ctor
-            .params
-            .iter()
-            .map(|p| crate::parser::type_suffix(&p.ty, p.is_varargs))
-            .collect::<Vec<_>>()
-            .join("_");
-        ctor.rust_name = Some(format!("new_{suffix}"));
-    }
+    ctor.rust_name =
+        Some(crate::java_signature::source_constructor_rust_name_with_count(ctor, ctor_count));
 }
 
 fn insert_scoped_type_param_bounds(
@@ -2764,7 +2783,7 @@ fn resolve_block_calls(
     env: &mut TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     for stmt in &mut block.statements {
@@ -2793,7 +2812,7 @@ fn resolve_stmt_calls(
     env: &mut TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     match stmt {
@@ -3408,7 +3427,7 @@ fn resolve_expr_calls(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     match expr {
@@ -4015,7 +4034,7 @@ fn resolve_stream_map_lambda_arg(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     if !is_stream_lambda_arg_name(name) || args.len() != 1 {
@@ -4066,7 +4085,7 @@ fn resolve_target_typed_lambda_args(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     for (arg, param) in args.iter_mut().zip(params) {
@@ -4095,7 +4114,7 @@ fn resolve_lambda_with_single_param_type(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     let Expr::Lambda { params, body } = expr else {
@@ -4148,7 +4167,7 @@ fn resolve_lambda_with_expected_type(
     env: &TypeEnv,
     diagnostics: &mut DiagnosticBag,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     let Expr::Lambda { params, body } = expr else {
@@ -4199,7 +4218,7 @@ fn record_unresolved_field_access(
     symbols: &ProgramSymbols,
     env: &TypeEnv,
     facts: &mut FactSet,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
 ) {
     let Expr::FieldAccess(receiver, field) = expr else {
@@ -4472,7 +4491,9 @@ fn infer_resolver_expr_type(
     symbols: &ProgramSymbols,
     env: &TypeEnv,
 ) -> JavaType {
-    infer_resolver_expr_type_with_facts(expr, current_type, symbols, env, &FactSet::default())
+    let facts = FactSet::default();
+    let external_facts = ResolverExternalFacts::new(&facts);
+    infer_resolver_expr_type_with_facts(expr, current_type, symbols, env, &external_facts)
 }
 
 fn infer_resolver_expr_type_with_facts(
@@ -4480,7 +4501,7 @@ fn infer_resolver_expr_type_with_facts(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) -> JavaType {
     match expr {
         Expr::Call {
@@ -4775,7 +4796,7 @@ fn external_enum_synthetic_call(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) -> Option<ResolvedCall> {
     let receiver_ty =
         infer_resolver_expr_type_with_facts(receiver, current_type, symbols, env, external_facts);
@@ -4954,7 +4975,7 @@ fn infer_stream_map_return_type(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) -> Option<JavaType> {
     if !is_stream_lambda_mapper_name(name) || args.len() != 1 {
         return None;
@@ -5071,7 +5092,7 @@ fn infer_stream_lambda_flat_map_return_type(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) -> Option<JavaType> {
     if name != "flatMap" || args.len() != 1 {
         return None;
@@ -5395,7 +5416,7 @@ fn infer_resolver_member_access_type_with_facts(
     current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) -> Option<JavaType> {
     if let Some(java_ty) = crate::types::infer_member_access_type(receiver, member, env) {
         return Some(java_ty);
@@ -5482,10 +5503,11 @@ fn external_fact_method_return_type_for_call(
     receiver_type: Option<&JavaType>,
     name: &str,
     arg_types: &[JavaType],
-    external_facts: &FactSet,
+    external_facts: &ResolverExternalFacts<'_>,
 ) -> Option<JavaType> {
     let receiver_name = receiver_type.and_then(crate::stdlib::external_named_receiver_owner_key);
     external_facts
+        .lookup
         .external_api_effect_for_receiver_with_arity(
             receiver_name.as_deref(),
             name,

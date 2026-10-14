@@ -744,6 +744,21 @@ fn java_text_block_escapes_are_processed_after_whitespace_stripping() {
 }
 
 #[test]
+fn java_string_literal_keeps_escaped_quotes_at_its_edges() {
+    let quote = new_java2rust::parser::parse_expr(r#""\"""#);
+    assert!(matches!(
+        quote,
+        Expr::Literal(Literal::String(value)) if value == "\""
+    ));
+
+    let quoted = new_java2rust::parser::parse_expr(r#""\"value\"""#);
+    assert!(matches!(
+        quoted,
+        Expr::Literal(Literal::String(value)) if value == "\"value\""
+    ));
+}
+
+#[test]
 fn parses_parenthesized_condition_after_block_comment() {
     let parsed = parse_java_source(
         r#"

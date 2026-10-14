@@ -3793,6 +3793,7 @@ fn shape_coercion_owns_closed_enum_upcast_and_downcast_adapters() {
         vec![Coercion::DowncastClosedEnum {
             enum_name: "AnimalValue".to_string(),
             variant_name: "Dog".to_string(),
+            borrowed_payload: false,
             invalid_cast: InvalidCastPolicy::Panic,
         }]
     );

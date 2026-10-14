@@ -27364,6 +27364,80 @@ class BuiltinNamedConstant {
 }
 
 #[test]
+fn external_instance_field_with_suffix_related_type_is_not_an_enum_constant() {
+    let source = r#"
+class UsesCompressedInput {
+    GZIPInputStream stream;
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FactFieldKey::named("GZIPInputStream".to_string(), "in".to_string()),
+        field_type: Some(JavaType::Named {
+            name: "InputStream".to_string(),
+            args: Vec::new(),
+        }),
+        field_kind: ExternalFieldKind::InstanceField,
+        provenance: FactProvenance::BuiltinExternalModel,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation.rust.contains("pub r#in: InputStream")
+            || translation.rust.contains("pub in_: InputStream"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub const r#in"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn qualified_self_typed_constant_constructs_through_concrete_facade_owner() {
+    let source = r#"
+import example.writer.Options;
+
+class UsesOptionConstant {
+    Object option() {
+        return Options.INDEX_ON_THE_FLY;
+    }
+}
+"#;
+    let mut facts = FactSet::default();
+    facts.external_field_facts.push(ExternalFieldFact {
+        field: FactFieldKey::named(
+            "example.writer.Options".to_string(),
+            "INDEX_ON_THE_FLY".to_string(),
+        ),
+        field_type: Some(JavaType::Named {
+            name: "Options".to_string(),
+            args: Vec::new(),
+        }),
+        field_kind: ExternalFieldKind::StaticFinal,
+        provenance: FactProvenance::ExternalLibraryPack,
+    });
+
+    let translation = translate_source_with_facts(source, &facts);
+    assert!(
+        translation
+            .rust
+            .contains("pub const INDEX_ON_THE_FLY: Options = ExampleWriterOptions;"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("pub const INDEX_ON_THE_FLY: Options = Options;"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
 fn static_string_constant_support_extends_existing_opaque_facade_owner() {
     let source = r#"
 class ExternalConstantFacadeCollision {

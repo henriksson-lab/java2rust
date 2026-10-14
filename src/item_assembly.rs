@@ -2721,9 +2721,14 @@ fn source_method_needs_class_type_param_clone_bound(
         matches!(stmt,
             Stmt::VarDecl { ty, initializer: Some(initializer), .. }
                 if java_type_contains_type_param(ty, type_param)
-                    && expr_java_type(initializer, fields).is_some_and(|field_ty| {
-                        java_type_contains_type_param(&field_ty, type_param)
-                    })
+                    && (expr_java_type(initializer, fields).is_some_and(|field_ty| {
+                            java_type_contains_type_param(&field_ty, type_param)
+                        })
+                        || expr_recovers_owned_class_type_param_from_field(
+                            initializer,
+                            type_param,
+                            fields,
+                        ))
         )
     }) {
         // Reading a generic field into an owned local cannot move the field;
@@ -3010,6 +3015,7 @@ pub(crate) fn constructor_function_shell_with_facts_and_support_contexts(
         where_bounds: source_constructor_class_type_param_where_bounds(ty, ctor, support_programs),
         body,
         is_pub: true,
+        is_pub_crate: false,
         receiver: None,
     }
 }
@@ -4797,6 +4803,7 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
         ),
         body,
         is_pub: true,
+        is_pub_crate: false,
         receiver: lower_receiver(method_receiver(ty, method, signatures)),
     }
 }
@@ -5383,24 +5390,54 @@ fn struct_fields_for_type(
         });
     }
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
-        let outer_rust_name = rust_name_for_java_named_type(outer_type);
-        let outer_rust_type = find_type_decl_by_rust_name(support_program, &outer_rust_name)
-            .filter(|outer| !outer.type_params.is_empty())
-            .map(|outer| {
-                crate::slot_render::rust_generic_type(
-                    outer_rust_name.clone(),
-                    outer
-                        .type_params
-                        .iter()
-                        .cloned()
-                        .map(RustType::Named)
-                        .collect(),
+        let outer_carrier = representations.and_then(|representations| {
+            representations
+                .type_representation(outer_type)
+                .and_then(|representation| match representation.representation() {
+                    crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+                        carrier_name,
+                        ..
+                    } if carrier_name != &rust_name_for_java_named_type(outer_type) => {
+                        Some(RustType::Named(carrier_name.clone()))
+                    }
+                    _ => None,
+                })
+        });
+        let outer_rust_type = outer_carrier.unwrap_or_else(|| {
+            let outer_rust_name = rust_name_for_java_named_type(outer_type);
+            find_type_decl_by_rust_name(support_program, &outer_rust_name)
+                .filter(|outer| !outer.type_params.is_empty())
+                .map(|outer| {
+                    crate::slot_render::rust_generic_type(
+                        outer_rust_name.clone(),
+                        outer
+                            .type_params
+                            .iter()
+                            .cloned()
+                            .map(RustType::Named)
+                            .collect(),
+                    )
+                })
+                .unwrap_or_else(|| RustType::Named(outer_rust_name))
+        });
+        let outer_rust_type = if representations
+            .and_then(|representations| representations.type_representation(outer_type))
+            .is_some_and(|representation| {
+                matches!(
+                    representation.representation(),
+                    crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+                        carrier_name,
+                        ..
+                    } if carrier_name != &rust_name_for_java_named_type(outer_type)
                 )
-            })
-            .unwrap_or_else(|| RustType::Named(outer_rust_name));
+            }) {
+            outer_rust_type
+        } else {
+            shared_outer_handle_type(facts.storage_placement_for(outer_type), outer_rust_type)
+        };
         fields.push(RustField {
             name: "__outer".to_string(),
-            ty: shared_outer_handle_type(facts.storage_placement_for(outer_type), outer_rust_type),
+            ty: outer_rust_type,
             is_pub: false,
             is_pub_crate: false,
         });
@@ -6820,13 +6857,25 @@ fn non_literal_static_final_const_type_and_value(
     };
     let rust_name = rust_name_for_java_named_type(name);
     if matches!(rust_name.as_str(), "Pattern" | "JavaUtilRegexPattern")
-        && let Some(value) = static_final_pattern_compile_literal(field.initializer.as_ref()?)
+        && let Some((value, flags)) =
+            static_final_pattern_compile_literal(field.initializer.as_ref()?)
     {
+        let (constructor, args) = if let Some(flags) = flags {
+            (
+                "compile_static_with_flags",
+                vec![rust_string_literal_projection(&value), flags],
+            )
+        } else {
+            (
+                "compile_static",
+                vec![rust_string_literal_projection(&value)],
+            )
+        };
         return Some((
             RustType::Named(rust_name),
             function_call_projection(
-                owner_associated_path_projection("Pattern", "compile_static"),
-                vec![rust_string_literal_projection(&value)],
+                owner_associated_path_projection("Pattern", constructor),
+                args,
             ),
         ));
     }
@@ -6836,7 +6885,7 @@ fn non_literal_static_final_const_type_and_value(
     None
 }
 
-fn static_final_pattern_compile_literal(initializer: &Expr) -> Option<String> {
+fn static_final_pattern_compile_literal(initializer: &Expr) -> Option<(String, Option<RustExpr>)> {
     let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -6862,10 +6911,22 @@ fn static_final_pattern_compile_literal(initializer: &Expr) -> Option<String> {
     ) {
         return None;
     }
-    let [Expr::Literal(Literal::String(value))] = args.as_slice() else {
+    let (pattern, flags) = match args.as_slice() {
+        [pattern] => (pattern, None),
+        [pattern, flags] => (
+            pattern,
+            Some(const_expr_value(
+                flags,
+                &[],
+                Some(&JavaType::Primitive(PrimitiveType::Int)),
+            )?),
+        ),
+        _ => return None,
+    };
+    let Expr::Literal(Literal::String(value)) = pattern else {
         return None;
     };
-    Some(value.clone())
+    Some((value.clone(), flags))
 }
 
 fn const_type_and_value(

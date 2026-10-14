@@ -1253,12 +1253,24 @@ fn collect_inner_outer_capture_storage_requirements(
     declared: &BTreeSet<String>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
-    for inner in crate::inner_class_capture::constructed_outer_this_inner_classes(program, facts) {
-        if let Some(outer_type) = declared_type_name_from_name(inner.outer_type(), declared)
-            && let Some(storage) = into.get_mut(&outer_type)
-        {
-            storage.escape = storage.escape.max(Escape::Stored);
-            storage.mutated = true;
+    let outer_types: BTreeSet<String> = declared
+        .iter()
+        .filter_map(|inner_type| facts.captures.outer_this_type_for_type(inner_type))
+        .filter_map(|outer_type| declared_type_name_from_name(outer_type, declared))
+        .collect();
+    for outer_type in outer_types {
+        // A member class stores its enclosing instance even when no allocation
+        // happens in the currently translated sources: construction can occur
+        // through the public source surface. A member class is also inherited,
+        // so a method declared on `Base` can execute as
+        // `Child.this.new Inner()` and capture the actual child allocation.
+        // Every source subtype in that family therefore needs the same
+        // identity-preserving storage tier as the lexical outer declaration.
+        for captured_type in source_hierarchy_family_names(program, &outer_type, declared) {
+            if let Some(storage) = into.get_mut(&captured_type) {
+                storage.escape = storage.escape.max(Escape::Stored);
+                storage.mutated = true;
+            }
         }
     }
 }
@@ -3207,6 +3219,23 @@ mod constructor_mutation_tests {
             .facts(type_name)
             .unwrap_or_else(|| panic!("missing storage facts for {type_name}"))
             .clone()
+    }
+
+    #[test]
+    fn declared_non_static_inner_requires_shared_mutable_outer_storage() {
+        let parsed = parse_java_source(
+            r#"
+class Outer {
+    int value;
+    class Inner { int get() { return value; } }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let plan = plan_storage_strategies_from_facts(&resolved.program, &usage, &resolved.facts);
+
+        assert_eq!(plan.strategy("Outer"), StorageStrategy::SharedLocal);
     }
 
     #[test]

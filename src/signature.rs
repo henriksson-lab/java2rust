@@ -4823,11 +4823,14 @@ fn propagate_call_site_constraints(
     changed
 }
 
-fn resolved_source_call_propagates_signature_constraints(boundary: CallArgumentBoundary) -> bool {
-    matches!(
-        boundary,
-        CallArgumentBoundary::InternalSameType | CallArgumentBoundary::Unknown
-    )
+fn resolved_source_call_propagates_signature_constraints(_boundary: CallArgumentBoundary) -> bool {
+    // Once resolution identifies an emitted source declaration, that
+    // declaration's solved Rust ABI is authoritative in both directions.
+    // `KnownContentRead` is an ownership-optimization classification used for
+    // unresolved/external calls; it must not suppress an owned/storage
+    // requirement from an exact source callee (notably `T` stored through a
+    // generic receiver).
+    true
 }
 
 fn resolved_source_summary_arg_constraints(
@@ -5459,9 +5462,12 @@ fn propagate_call_argument_collection_carrier_java_types_to_callees(
             let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
                 continue;
             };
-            if callee_constraints.public_api {
-                continue;
-            }
+            // Collection implementations are runtime value properties in
+            // Java. Preserve a unique whole-program carrier even for a
+            // publicly declared source method: otherwise a LinkedHashMap
+            // passed through `Map` is eagerly collected into HashMap and its
+            // observable iteration order is destroyed. Ambiguous call sites
+            // remain on the declared interface carrier below.
             for binding in method_usage.all_binding_facts() {
                 for binding_use in binding.uses() {
                     let BindingUse::PassedToCall {
@@ -6342,6 +6348,40 @@ fn nullable_collection_element_argument_index(
     }
 }
 
+fn bulk_collection_argument_index(
+    kind: crate::stdlib::JavaCollectionKind,
+    method_name: &str,
+    arg_count: usize,
+) -> Option<usize> {
+    use crate::stdlib::JavaCollectionKind;
+
+    match kind {
+        JavaCollectionKind::List => match (method_name, arg_count) {
+            ("addAll" | "add_all", 1) => Some(0),
+            ("addAll" | "add_all", 2) => Some(1),
+            _ => None,
+        },
+        JavaCollectionKind::Set | JavaCollectionKind::InsertionOrderedSet => {
+            matches!((method_name, arg_count), ("addAll" | "add_all", 1)).then_some(0)
+        }
+        JavaCollectionKind::Map
+        | JavaCollectionKind::SortedMap
+        | JavaCollectionKind::InsertionOrderedMap
+        | JavaCollectionKind::SortedSet => None,
+    }
+}
+
+fn bulk_collection_element_constraint(
+    constraint: &SignatureConstraint,
+) -> Option<SignatureConstraint> {
+    matches!(
+        constraint,
+        SignatureConstraint::NullableSequenceElement
+            | SignatureConstraint::NullableSequenceElementAtDepth(_)
+    )
+    .then(|| constraint.clone())
+}
+
 fn binding_stores_nullable_collection_element(
     collection: &BindingUseFacts,
     usage: &MethodUsageFacts,
@@ -6466,6 +6506,41 @@ fn propagate_nullable_collection_element_carriers(
                 )
             {
                 method_bindings.push((caller_key.clone(), binding.clone()));
+            }
+            let Some(kind) = crate::stdlib::java_collection_kind_for_type(binding.java_ty()) else {
+                continue;
+            };
+            for binding_use in binding.uses() {
+                let BindingUse::ReceiverForCall {
+                    name,
+                    arg_count,
+                    argument_bindings,
+                    ..
+                } = binding_use
+                else {
+                    continue;
+                };
+                let Some(element_index) = bulk_collection_argument_index(kind, name, *arg_count)
+                else {
+                    continue;
+                };
+                let Some((_, source_binding_id)) = argument_bindings
+                    .iter()
+                    .find(|(index, _)| *index == element_index)
+                else {
+                    continue;
+                };
+                let Some(source_binding) =
+                    method_usage.binding_facts_for_declaration_id(source_binding_id)
+                else {
+                    continue;
+                };
+                if method_binding_fact_slot_requirements(caller_constraints, source_binding)
+                    .into_iter()
+                    .any(|constraint| bulk_collection_element_constraint(constraint).is_some())
+                {
+                    method_bindings.push((caller_key.clone(), binding.clone()));
+                }
             }
         }
         let nullable_iterator_created =
@@ -6608,6 +6683,41 @@ fn propagate_nullable_collection_element_carriers(
                 )
             {
                 constructor_bindings.push((caller_key.clone(), binding.clone()));
+            }
+            let Some(kind) = crate::stdlib::java_collection_kind_for_type(binding.java_ty()) else {
+                continue;
+            };
+            for binding_use in binding.uses() {
+                let BindingUse::ReceiverForCall {
+                    name,
+                    arg_count,
+                    argument_bindings,
+                    ..
+                } = binding_use
+                else {
+                    continue;
+                };
+                let Some(element_index) = bulk_collection_argument_index(kind, name, *arg_count)
+                else {
+                    continue;
+                };
+                let Some((_, source_binding_id)) = argument_bindings
+                    .iter()
+                    .find(|(index, _)| *index == element_index)
+                else {
+                    continue;
+                };
+                let Some(source_binding) =
+                    constructor_usage.binding_facts_for_declaration_id(source_binding_id)
+                else {
+                    continue;
+                };
+                if constructor_binding_fact_slot_requirements(caller_constraints, source_binding)
+                    .into_iter()
+                    .any(|constraint| bulk_collection_element_constraint(constraint).is_some())
+                {
+                    constructor_bindings.push((caller_key.clone(), binding.clone()));
+                }
             }
         }
         let nullable_iterator_created =
@@ -6873,6 +6983,25 @@ fn propagate_nested_nullable_collection_element_carriers(
             let Some(kind) = crate::stdlib::java_collection_kind_for_type(receiver_type) else {
                 continue;
             };
+            if let Some(element_index) = bulk_collection_argument_index(kind, name, *arg_count)
+                && let Some((_, argument_binding)) = argument_bindings
+                    .iter()
+                    .find(|(index, _)| *index == element_index)
+                && let Some(binding) =
+                    method_usage.binding_facts_for_declaration_id(argument_binding)
+            {
+                for constraint in method_binding_fact_slot_requirements(method_constraints, binding)
+                {
+                    if let Some(element_constraint) = bulk_collection_element_constraint(constraint)
+                    {
+                        pending.push((
+                            method_key.type_name().to_string(),
+                            field_name.clone(),
+                            element_constraint,
+                        ));
+                    }
+                }
+            }
             let Some(element_index) =
                 nullable_collection_element_argument_index(kind, name, *arg_count)
             else {
@@ -6933,6 +7062,26 @@ fn propagate_nested_nullable_collection_element_carriers(
             let Some(kind) = crate::stdlib::java_collection_kind_for_type(receiver_type) else {
                 continue;
             };
+            if let Some(element_index) = bulk_collection_argument_index(kind, name, *arg_count)
+                && let Some((_, argument_binding)) = argument_bindings
+                    .iter()
+                    .find(|(index, _)| *index == element_index)
+                && let Some(binding) =
+                    constructor_usage.binding_facts_for_declaration_id(argument_binding)
+            {
+                for constraint in
+                    constructor_binding_fact_slot_requirements(constructor_constraints, binding)
+                {
+                    if let Some(element_constraint) = bulk_collection_element_constraint(constraint)
+                    {
+                        pending.push((
+                            key.type_name().to_string(),
+                            field_name.clone(),
+                            element_constraint,
+                        ));
+                    }
+                }
+            }
             let Some(element_index) =
                 nullable_collection_element_argument_index(kind, name, *arg_count)
             else {
@@ -13762,18 +13911,37 @@ fn constrained_field_shape(
             &[SignatureConstraint::RequiredDispatch(declared_dispatch)],
         );
     }
-    let constrained_java_ty = local_java_type_with_signature_constraints(java_ty, &constraints);
-    let mut shape = solve_signature_shape_with_facts(
-        representations,
-        SignatureShapeRequest::new(
-            constrained_java_ty,
-            SignatureSlotRole::Storage,
-            constraints,
-            type_param_scope.to_vec(),
-        ),
-        facts,
-    )
-    .expect("field signature shape is always present");
+    let builtin_boxed_primitive = java_type_boxed_primitive_storage(java_ty).is_some()
+        && !facts
+            .type_capability_overrides_for(java_ty)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource);
+    let mut constrained_java_ty = local_java_type_with_signature_constraints(java_ty, &constraints);
+    if builtin_boxed_primitive
+        && constraints_require_nullable_storage(&constraints)
+        && java_type_boxed_primitive_storage(&constrained_java_ty).is_some()
+        && crate::types::optional_element_type(&constrained_java_ty).is_none()
+    {
+        // Fields use the same authoritative scalar carrier as boxed-primitive
+        // parameters and locals. Retain Java's reference null state outside
+        // that scalar rather than allowing usage constraints to erase a
+        // `Double`/`Integer` field to `Box<dyn Any>`.
+        constrained_java_ty = crate::types::optional_java_type(constrained_java_ty);
+    }
+    let mut shape = if builtin_boxed_primitive {
+        RustSlotShape::for_storage(constrained_java_ty)
+    } else {
+        solve_signature_shape_with_facts(
+            representations,
+            SignatureShapeRequest::new(
+                constrained_java_ty,
+                SignatureSlotRole::Storage,
+                constraints,
+                type_param_scope.to_vec(),
+            ),
+            facts,
+        )
+        .expect("field signature shape is always present")
+    };
     if !matches!(java_ty, JavaType::Primitive(_) | JavaType::Void) {
         if source_java_enum_storage_is_copy(representations, java_ty) {
             apply_required_ownership(&mut shape, OwnershipShape::CopyValue);
@@ -15109,6 +15277,12 @@ impl<'a> SourceReturnNullabilityContext<'a> {
         if expr_is_java_map_get_call(expr, &self.binding_types) {
             return Some(NullabilityState::MaybeNull);
         }
+        if expr_is_java_list_get_call(expr, &self.binding_types) {
+            // Java generic element types do not express nullability. Even a
+            // `List<T>` read may therefore produce null, and callers which
+            // store that result directly need a nullable element carrier.
+            return Some(NullabilityState::MaybeNull);
+        }
         source_expr_nullability_state(expr)
     }
 
@@ -15670,6 +15844,24 @@ fn expr_is_java_map_get_call(expr: &Expr, binding_types: &HashMap<String, JavaTy
         .is_some()
 }
 
+fn expr_is_java_list_get_call(expr: &Expr, binding_types: &HashMap<String, JavaType>) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    if name != "get" || args.len() != 1 {
+        return false;
+    }
+    receiver_expr_java_type(receiver, binding_types)
+        .and_then(|ty| crate::stdlib::java_collection_kind_for_type(&ty))
+        == Some(crate::stdlib::JavaCollectionKind::List)
+}
+
 fn receiver_expr_java_type(
     expr: &Expr,
     binding_types: &HashMap<String, JavaType>,
@@ -16162,7 +16354,29 @@ fn collect_binding_nullability_states_from_expr(
                 collect_binding_nullability_states_from_expr(element, states, scopes);
             }
         }
-        Expr::Lambda { .. } => {}
+        Expr::Lambda { params, body } => {
+            let mut lambda_scope = SourceScope::default();
+            for param in params {
+                lambda_scope
+                    .idless_shadows
+                    .insert(param.source_name.clone());
+                lambda_scope.idless_shadows.insert(param.name.clone());
+            }
+            scopes.push(lambda_scope);
+            match body {
+                LambdaBody::Expr(expr) => {
+                    collect_binding_nullability_states_from_expr(expr, states, scopes);
+                }
+                LambdaBody::Block(block) => {
+                    collect_binding_nullability_states_from_stmts_with_scopes(
+                        &block.statements,
+                        states,
+                        scopes,
+                    );
+                }
+            }
+            scopes.pop();
+        }
         Expr::Literal(_)
         | Expr::Var(_)
         | Expr::This
@@ -17001,6 +17215,36 @@ fn collect_binding_nullability_states_by_binding_from_expr(
                     }
                 }
             }
+        }
+        Expr::Lambda { params, body } => {
+            let mut lambda_scope = SourceScope::default();
+            for param in params {
+                lambda_scope
+                    .idless_shadows
+                    .insert(param.source_name.clone());
+                lambda_scope.idless_shadows.insert(param.name.clone());
+            }
+            scopes.push(lambda_scope);
+            match body {
+                LambdaBody::Expr(expr) => {
+                    collect_binding_nullability_states_by_binding_from_expr(
+                        expr,
+                        scopes,
+                        states,
+                        return_states,
+                    );
+                }
+                LambdaBody::Block(block) => {
+                    collect_binding_nullability_states_by_binding_from_stmts(
+                        &block.statements,
+                        scopes,
+                        states,
+                        return_states,
+                        None,
+                    );
+                }
+            }
+            scopes.pop();
         }
         _ => {}
     }
@@ -18377,6 +18621,83 @@ mod tests {
     use crate::usage::UsageMethodKey;
 
     #[test]
+    fn block_lambda_local_null_comparison_is_recorded() {
+        let parsed = crate::parser::parse_java_source(
+            r#"class LambdaNullability {
+                static java.util.List<String> normalize(java.util.List<String> values) {
+                    return values.stream().map(item -> {
+                        String name = item;
+                        if (name == null) name = "fallback";
+                        return name;
+                    }).toList();
+                }
+            }"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let method = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .expect("normalize method");
+        let nullability = collect_binding_nullability_state_map_with_params(
+            method.body.as_ref().expect("method body"),
+            &method.params,
+        );
+        assert!(
+            nullability.by_name.get("name") == Some(&NullabilityState::MaybeNull)
+                || nullability
+                    .by_binding
+                    .values()
+                    .any(|state| *state == NullabilityState::MaybeNull),
+            "lambda local nullability was not recorded: {nullability:?}\n{method:#?}"
+        );
+        let constraints = collect_local_constraint_sets(
+            method.body.as_ref().expect("method body"),
+            &method.params,
+            None,
+            &FactSet::default(),
+            &HashSet::new(),
+            &HashSet::new(),
+        );
+        let local = constraints
+            .iter()
+            .find(|local| local.name == "name")
+            .expect("lambda local constraints");
+        assert!(
+            local
+                .constraints
+                .contains(&SignatureConstraint::RequiredStorageNullability(
+                    NullabilityState::MaybeNull
+                )),
+            "lambda local nullable constraint was not applied: {local:#?}"
+        );
+        let facts = FactSet::default();
+        let semantic =
+            crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &facts);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let planned = signatures.required_method_signature(&resolved.program.types[0], method);
+        let local = planned
+            .locals()
+            .iter()
+            .find(|local| local.name() == "name")
+            .expect("planned lambda local");
+        assert!(
+            local.shape().optional_element_type().is_some(),
+            "lambda local nullable shape was lost: {local:#?}"
+        );
+    }
+
+    #[test]
     fn qualified_jdk_map_entry_implementation_survives_resolution() {
         let source = "class Holder { static class Entry implements java.util.Map.Entry<String, Integer> { public String getKey() { return null; } public Integer getValue() { return null; } public Integer setValue(Integer value) { return value; } } }";
         let parsed = crate::parser::parse_java_source(source);
@@ -18521,6 +18842,80 @@ mod tests {
             .unwrap();
         let local = signatures
             .required_method_signature(use_type, run)
+            .locals()
+            .iter()
+            .find(|local| local.name() == "values")
+            .unwrap();
+        assert!(local.binding_mutable(), "{local:?}");
+    }
+
+    #[test]
+    fn external_mutable_array_argument_marks_caller_local_binding_mutable() {
+        let parsed = crate::parser::parse_java_source(
+            "import htsjdk.tribble.util.ParsingUtils; class ExternalArrayWrite { static int run() { String[] values = new String[3]; return ParsingUtils.split(\"a:b\", values, ':', true); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let semantic =
+            crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &facts);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let owner = &resolved.program.types[0];
+        let run = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) if method.name == "run" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let split_effects = semantic
+            .facts
+            .external_api_argument_effect_facts
+            .iter()
+            .filter(|effect| effect.method_name == "split")
+            .collect::<Vec<_>>();
+        assert!(
+            semantic
+                .facts
+                .external_api_argument_effect_for_receiver_with_arity(
+                    Some("ParsingUtils"),
+                    "split",
+                    Some(4),
+                    1,
+                )
+                .is_some(),
+            "four-argument external effect was lost: {:#?}",
+            split_effects
+        );
+        let usage = semantic.usage.source_method_usage(owner, run).unwrap();
+        assert!(
+            usage
+                .binding_facts_for_declaration_id(
+                    run.body
+                        .as_ref()
+                        .and_then(|body| {
+                            body.statements.first().and_then(|stmt| match stmt {
+                                Stmt::VarDecl { binding, .. } => binding.as_ref(),
+                                _ => None,
+                            })
+                        })
+                        .unwrap()
+                )
+                .unwrap()
+                .uses()
+                .iter()
+                .any(|use_site| matches!(use_site, BindingUse::Mutated)),
+            "external mutable argument was not recorded: {usage:#?}"
+        );
+        let local = signatures
+            .required_method_signature(owner, run)
             .locals()
             .iter()
             .find(|local| local.name() == "values")
@@ -23620,6 +24015,16 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     );
     let binding_usage = binding_usage_for_optional_local(usage, binding_id);
     if let Some(binding) = binding_usage {
+        if binding
+            .uses()
+            .iter()
+            .any(|use_site| matches!(use_site, BindingUse::Mutated))
+        {
+            push_unique_signature_constraints(
+                &mut constraints,
+                &[SignatureConstraint::MutableBinding],
+            );
+        }
         push_unique_signature_constraints(
             &mut constraints,
             &constructor_assigned_local_storage_constraints(binding),
@@ -24498,7 +24903,7 @@ fn external_call_argument_is_readonly_borrow_safe(
     facts: &FactSet,
 ) -> bool {
     if let Some(effect) =
-        external_api_argument_effect_for_call_arg(receiver_type, name, arg_index, facts)
+        external_api_argument_effect_for_call_arg(receiver_type, name, arg_count, arg_index, facts)
     {
         return effect.argument_mutability != ReceiverMutabilityFact::MutatesReceiver
             && effect.alias_policy != ExternalArgumentAliasPolicy::Escapes;
@@ -24571,6 +24976,7 @@ pub(crate) fn external_argument_binding_constraints(
         let effect = external_api_argument_effect_for_call_arg(
             receiver_type.as_ref(),
             name,
+            *arg_count,
             *arg_index,
             facts,
         );
@@ -24903,6 +25309,7 @@ fn unknown_boundary_is_fully_modeled_by_external_argument_effects(
                 if external_api_argument_effect_for_call_arg(
                     receiver_type.as_ref(),
                     name,
+                    *arg_count,
                     *arg_index,
                     facts,
                 )
@@ -25063,15 +25470,28 @@ fn external_constructor_argument_effect_constraints_for_binding(
 fn external_api_argument_effect_for_call_arg<'a>(
     receiver_type: Option<&JavaType>,
     name: &str,
+    arg_count: usize,
     arg_index: usize,
     facts: &'a FactSet,
 ) -> Option<&'a ExternalApiArgumentEffectFact> {
     receiver_type
         .and_then(external_api_receiver_type_key_without_type_env)
         .and_then(|receiver_type| {
-            facts.external_api_argument_effect_for_receiver(Some(&receiver_type), name, arg_index)
+            facts.external_api_argument_effect_for_receiver_with_arity(
+                Some(&receiver_type),
+                name,
+                Some(arg_count),
+                arg_index,
+            )
         })
-        .or_else(|| facts.external_api_argument_effect_for_receiver(None, name, arg_index))
+        .or_else(|| {
+            facts.external_api_argument_effect_for_receiver_with_arity(
+                None,
+                name,
+                Some(arg_count),
+                arg_index,
+            )
+        })
 }
 
 fn external_argument_effect_constraints_for_binding(

@@ -323,6 +323,7 @@ pub enum Coercion {
     DowncastClosedEnum {
         enum_name: String,
         variant_name: String,
+        borrowed_payload: bool,
         invalid_cast: InvalidCastPolicy,
     },
     DowncastDynTrait {
@@ -766,10 +767,12 @@ impl DispatchCoercionPolicy {
             DispatchCoercionPolicy::DowncastClosedEnum {
                 enum_name,
                 variant_name,
+                borrowed_payload,
                 invalid_cast,
             } => vec![Coercion::DowncastClosedEnum {
                 enum_name: enum_name.clone(),
                 variant_name: variant_name.clone(),
+                borrowed_payload: *borrowed_payload,
                 invalid_cast: invalid_cast.clone(),
             }],
             DispatchCoercionPolicy::DowncastDynTrait {
@@ -1575,6 +1578,8 @@ fn optional_map_projection_expr(
     receiver_projection: OptionalMapReceiverProjection,
     mapped_value: RustExpr,
 ) -> RustExpr {
+    let receiver_was_result_propagated =
+        expr_is_result_propagated(&expr) || matches!(expr.unshaped(), RustExpr::Try(_));
     let mapped_value = if (receiver_projection == OptionalMapReceiverProjection::AsRef
         || rust_expr_ends_with_zero_arg_method_call(&expr, "as_ref"))
         && rust_expr_is_java_clone_erased_object_ref_call(&mapped_value)
@@ -1595,10 +1600,19 @@ fn optional_map_projection_expr(
         OptionalMapReceiverProjection::AsRef => zero_arg_method_projection(expr, "as_ref"),
         OptionalMapReceiverProjection::AsMut => zero_arg_method_projection(expr, "as_mut"),
     };
-    RustExpr::MethodCall {
+    let mapped = RustExpr::MethodCall {
         receiver: Box::new(receiver),
         method: "map".to_string(),
         args: vec![single_value_closure_projection(mapped_value)],
+    };
+    if receiver_was_result_propagated {
+        // The receiver is already the successful payload of a fallible call.
+        // Mapping its Option changes that payload but does not restore a
+        // Result. Preserve the marker immediately around the map so an outer
+        // OptionalProjected marker can retain both facts.
+        RustExpr::shaped(RustExprShape::ResultPropagated, mapped)
+    } else {
+        mapped
     }
 }
 
@@ -2192,6 +2206,14 @@ pub(crate) fn expr_is_result_propagated(expr: &RustExpr) -> bool {
         RustExpr::Block {
             tail: Some(tail), ..
         } => expr_is_result_propagated(tail),
+        // Optional element coercion is a payload-only transform. Recognize
+        // only that generated `map` shape here: arbitrary method calls may
+        // themselves return a new Result and still require another `?`.
+        RustExpr::MethodCall {
+            receiver, method, ..
+        } if method == "map" => {
+            expr_is_result_propagated(receiver) || matches!(receiver.unshaped(), RustExpr::Try(_))
+        }
         _ => false,
     }
 }
@@ -2703,7 +2725,13 @@ fn borrow_closed_enum_as_dyn_trait(
     RustExpr::shaped(
         RustExprShape::Borrowed,
         RustExpr::Match {
-            expr: Box::new(expr),
+            // The result of this match is a view into a carrier payload.  Match
+            // the carrier by reference so each `value` binding is itself a
+            // stable borrow of the Rc/Arc (or direct payload) that implements
+            // the interface.  Destructuring the owned carrier would both move
+            // its payload and leave no storage from which the returned trait
+            // reference could borrow.
+            expr: Box::new(borrowed_raw_safe_expr(expr)),
             arms,
         },
     )
@@ -2722,7 +2750,13 @@ fn rewrap_closed_enum_projection(
             let payload = if clone_payload {
                 function_call_projection(
                     RustExpr::path(["std", "clone", "Clone", "clone"]),
-                    vec![RustExpr::Var("value".to_string())],
+                    // A rewrap from a borrowed carrier must clone the payload,
+                    // not consume it.  The conversion pipeline may already
+                    // have recovered an owned carrier before this structural
+                    // match; explicitly borrowing the arm binding is correct
+                    // in that case too and avoids relying on method-call
+                    // autoref at a fully-qualified Clone call.
+                    vec![borrowed_raw_safe_expr(RustExpr::Var("value".to_string()))],
                 )
             } else {
                 RustExpr::Var("value".to_string())
@@ -4151,6 +4185,22 @@ fn java_float_parse_null_argument_as_null_pointer(
 pub(crate) fn java_integral_parse_null_argument_as_number_format(arg: RustExpr) -> RustExpr {
     if integral_parse_arg_is_optional_string_carrier(&arg) {
         return nullable_string_parse_display_projection(arg);
+    }
+    if !matches!(
+        arg,
+        RustExpr::Shaped {
+            shape: RustExprShape::OptionalProjected,
+            ..
+        }
+    ) && arg.recorded_slot_shape().is_some_and(|shape| {
+        shape.java_ty == JavaType::String && shape.optional_element_type().is_none()
+    }) {
+        // A checked native List.get is tagged with the materialized storage
+        // element shape.  Once `?` has discharged the bounds failure, a
+        // required String carrier is already the parse input; the syntactic
+        // `.cloned().ok_or_else(...)` inside that projection is not evidence
+        // of a remaining Java-null carrier.
+        return arg;
     }
     match arg {
         RustExpr::MethodCall {
@@ -5930,6 +5980,19 @@ pub(crate) fn owned_map_values_set_projection(receiver: RustExpr) -> RustExpr {
     )
 }
 
+pub(crate) fn owned_map_values_set_projection_for_target(
+    receiver: RustExpr,
+    target: &RustType,
+) -> RustExpr {
+    RustExpr::shaped(
+        RustExprShape::OwnedRecovery,
+        typed_collect_projection(
+            zero_arg_method_projection(zero_arg_method_projection(receiver, "values"), "cloned"),
+            &crate::emit::emit_type(target),
+        ),
+    )
+}
+
 pub(crate) fn owned_map_entries_set_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
@@ -6048,6 +6111,13 @@ pub(crate) fn owned_collection_to_vec_projection_for_receiver_type(
 }
 
 pub(crate) fn owned_sequence_elements_to_optional_vec_projection(receiver: RustExpr) -> RustExpr {
+    owned_sequence_elements_to_optional_collection_projection(receiver, "Vec<_>")
+}
+
+pub(crate) fn owned_sequence_elements_to_optional_collection_projection(
+    receiver: RustExpr,
+    collect_type: &str,
+) -> RustExpr {
     let result_already_propagated = expr_is_result_propagated(&receiver);
     let projected = RustExpr::shaped(
         RustExprShape::OwnedRecovery,
@@ -6057,7 +6127,7 @@ pub(crate) fn owned_sequence_elements_to_optional_vec_projection(receiver: RustE
                 "map",
                 vec![RustExpr::Var("Some".to_string())],
             ),
-            "Vec<_>",
+            collect_type,
         ),
     );
     if result_already_propagated {
@@ -6118,6 +6188,17 @@ pub(crate) fn owned_sequence_elements_via_shape_plan_projection(
 pub(crate) fn owned_optional_sequence_elements_to_non_null_vec_projection(
     receiver: RustExpr,
 ) -> RustExpr {
+    owned_optional_sequence_elements_to_non_null_collection_projection(receiver, "Vec<_>")
+}
+
+/// Apply the checked nullable-element narrowing used by sequence ABI
+/// boundaries while retaining the destination collection carrier. Sets whose
+/// equality is represented by `JavaSemanticHashSet`, for example, must collect
+/// back into that carrier rather than being flattened through a `Vec`.
+pub(crate) fn owned_optional_sequence_elements_to_non_null_collection_projection(
+    receiver: RustExpr,
+    collect_type: &str,
+) -> RustExpr {
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
         typed_collect_projection(
@@ -6138,7 +6219,7 @@ pub(crate) fn owned_optional_sequence_elements_to_non_null_vec_projection(
                     ))),
                 }],
             ),
-            "Vec<_>",
+            collect_type,
         ),
     )
 }
@@ -6256,7 +6337,7 @@ fn optional_erased_object_vec_clone_projection(receiver: RustExpr) -> RustExpr {
     )
 }
 
-fn typed_collect_projection(receiver: RustExpr, ty: &str) -> RustExpr {
+pub(crate) fn typed_collect_projection(receiver: RustExpr, ty: &str) -> RustExpr {
     typed_zero_arg_method_projection(receiver, "collect", ty)
 }
 
@@ -13094,6 +13175,18 @@ pub(crate) fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfChec
                 right: Box::new(right),
             })
             .unwrap_or_else(|| RustExpr::Literal("false".to_string())),
+        InstanceOfCheck::OptionalClosedEnumVariant {
+            enum_name,
+            variant_name,
+        } => optional_closed_enum_instanceof_projection(
+            expr,
+            enum_name,
+            std::slice::from_ref(variant_name),
+        ),
+        InstanceOfCheck::OptionalClosedEnumVariants {
+            enum_name,
+            variant_names,
+        } => optional_closed_enum_instanceof_projection(expr, enum_name, variant_names),
         InstanceOfCheck::DynTraitType { target_type } => typed_zero_arg_method_projection(
             zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_any"),
             "is",
@@ -13127,6 +13220,33 @@ pub(crate) fn instanceof_check_projection(expr: RustExpr, check: &InstanceOfChec
             policy,
         } => render_instanceof_fallback_policy(policy, actual_dispatch, target_dispatch),
     }
+}
+
+fn optional_closed_enum_instanceof_projection(
+    expr: RustExpr,
+    enum_name: &str,
+    variant_names: &[String],
+) -> RustExpr {
+    let predicate = variant_names
+        .iter()
+        .map(|variant_name| RustExpr::MacroCall {
+            macro_name: "matches".to_string(),
+            args: vec![
+                RustExpr::Var("value".to_string()),
+                closed_enum_variant_pattern_leaf(enum_name, variant_name),
+            ],
+        })
+        .reduce(|left, right| RustExpr::Binary {
+            op: "||".to_string(),
+            left: Box::new(left),
+            right: Box::new(right),
+        })
+        .unwrap_or_else(|| RustExpr::Literal("false".to_string()));
+    method_call_projection(
+        zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
+        "is_some_and",
+        vec![single_param_closure_expr("value", predicate)],
+    )
 }
 
 fn closed_enum_variant_pattern_leaf(enum_name: &str, variant_name: &str) -> RustExpr {
@@ -15572,9 +15692,20 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             if java_type_param_variant_name(variant_name) {
                 into_projection(expr)
             } else {
-                RustExpr::Call {
+                let result_propagated = expr_is_result_propagated(&expr);
+                let wrapped = RustExpr::Call {
                     function: Box::new(RustExpr::path([enum_name.as_str(), variant_name.as_str()])),
                     args: vec![expr],
+                };
+                if result_propagated {
+                    // The carrier constructor is infallible; a `?` on its
+                    // payload has already discharged the source operation's
+                    // Result. Preserve that fact across the representation
+                    // wrapper so statement/return lowering does not append a
+                    // second `?` to the enum value itself.
+                    RustExpr::shaped(RustExprShape::ResultPropagated, wrapped)
+                } else {
+                    wrapped
                 }
             }
         }
@@ -15644,6 +15775,7 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::DowncastClosedEnum {
             enum_name,
             variant_name,
+            borrowed_payload,
             invalid_cast,
         } => {
             if java_type_param_variant_name(variant_name) {
@@ -15654,7 +15786,23 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 // name a variant that cannot exist.
                 expr
             } else {
-                closed_enum_downcast_projection(expr, enum_name, variant_name, invalid_cast)
+                let expr = if *borrowed_payload {
+                    // The variant payload is a Java reference carrier. Match
+                    // through a borrow so the downcast result is `&Payload`;
+                    // the following ownership coercion can then clone Rc/Arc
+                    // identity instead of trying to clone an owned match arm
+                    // with a missing reference.
+                    borrowed_raw_safe_expr(expr)
+                } else {
+                    expr
+                };
+                let downcast =
+                    closed_enum_downcast_projection(expr, enum_name, variant_name, invalid_cast);
+                if *borrowed_payload {
+                    RustExpr::shaped(RustExprShape::Borrowed, downcast)
+                } else {
+                    downcast
+                }
             }
         }
         Coercion::DowncastDynTrait {
@@ -19894,6 +20042,28 @@ mod tests {
             Some(RustExprShape::ResultPropagated)
         );
         assert!(expr_is_result_propagated(&wrapped));
+    }
+
+    #[test]
+    fn closed_hierarchy_wrap_preserves_result_propagation_marker() {
+        let propagated = propagate_result_projection(RustExpr::Raw("repair(line)".to_string()));
+        let wrapped = apply_one(
+            propagated,
+            &Coercion::WrapClosedEnum {
+                enum_name: "HeaderLineValue".to_string(),
+                variant_name: "FormatLine".to_string(),
+            },
+        );
+
+        assert_eq!(
+            emit::emit_expr(&wrapped),
+            "HeaderLineValue::FormatLine(repair(line)?)"
+        );
+        assert!(expr_is_result_propagated(&wrapped));
+        assert_eq!(
+            emit::emit_expr(&propagate_result_projection(wrapped)),
+            "HeaderLineValue::FormatLine(repair(line)?)"
+        );
     }
 
     #[test]
@@ -24866,6 +25036,7 @@ mod tests {
             &[Coercion::DowncastClosedEnum {
                 enum_name: "HmmValue".to_string(),
                 variant_name: "H".to_string(),
+                borrowed_payload: false,
                 invalid_cast: InvalidCastPolicy::Panic,
             }],
         );
@@ -29476,6 +29647,41 @@ mod tests {
     }
 
     #[test]
+    fn optional_map_preserves_but_arbitrary_method_calls_do_not_inherit_result_marker() {
+        let propagated = propagate_result_projection(RustExpr::Raw("call()".to_string()));
+        let mapped = optional_map_projection_expr(
+            propagated.clone(),
+            OptionalMapReceiverProjection::Direct,
+            RustExpr::Var("value".to_string()),
+        );
+        assert_eq!(emit::emit_expr(&mapped), "call()?.map(|value| value)");
+        assert!(expr_is_result_propagated(&mapped));
+
+        let bare_try = RustExpr::Try(Box::new(RustExpr::Raw("call()".to_string())));
+        let mapped_bare_try = optional_map_projection_expr(
+            bare_try,
+            OptionalMapReceiverProjection::Direct,
+            RustExpr::Var("value".to_string()),
+        );
+        assert_eq!(
+            emit::emit_expr(&mapped_bare_try),
+            "call()?.map(|value| value)"
+        );
+        assert!(expr_is_result_propagated(&mapped_bare_try));
+
+        let another_fallible_call = RustExpr::MethodCall {
+            receiver: Box::new(propagated),
+            method: "another_fallible_call".to_string(),
+            args: Vec::new(),
+        };
+        assert!(!expr_is_result_propagated(&another_fallible_call));
+        assert_eq!(
+            emit::emit_expr(&propagate_result_projection(another_fallible_call)),
+            "call()?.another_fallible_call()?"
+        );
+    }
+
+    #[test]
     fn boxed_trait_borrow_recovers_success_shape_through_result_propagation() {
         let mut boxed_shape = RustSlotShape::for_storage(JavaType::Named {
             name: "Readable".to_string(),
@@ -29540,5 +29746,61 @@ mod tests {
             "{rendered}"
         );
         assert!(!rendered.contains("HmmValue::std::rc::Rc"), "{rendered}");
+    }
+
+    #[test]
+    fn borrowed_closed_carrier_trait_view_matches_without_moving_payload() {
+        let lowered = borrow_closed_enum_as_dyn_trait(
+            RustExpr::Var("line".to_string()),
+            "HeaderLineValue",
+            "IdHeaderLine",
+            &["InfoHeaderLine".to_string()],
+        );
+        assert_eq!(
+            emit::emit_expr(&lowered),
+            "match &line { HeaderLineValue::InfoHeaderLine(value) => value as &dyn IdHeaderLine, _ => panic!(\"invalid Java cast\") }"
+        );
+    }
+
+    #[test]
+    fn borrowed_closed_carrier_rewrap_clones_payload_through_a_borrow() {
+        let lowered = rewrap_closed_enum_projection(
+            RustExpr::Var("line".to_string()),
+            "HeaderLineValue",
+            "CompoundHeaderLineValue",
+            &["InfoHeaderLine".to_string()],
+            true,
+        );
+        assert_eq!(
+            emit::emit_expr(&lowered),
+            "match line { HeaderLineValue::InfoHeaderLine(value) => CompoundHeaderLineValue::InfoHeaderLine(std::clone::Clone::clone(&value)), _ => panic!(\"invalid Java cast\") }"
+        );
+    }
+
+    #[test]
+    fn borrowed_closed_carrier_downcast_matches_through_carrier_reference() {
+        let lowered = apply_coercions(
+            RustExpr::Var("line".to_string()),
+            &[
+                Coercion::DowncastClosedEnum {
+                    enum_name: "HeaderLineValue".to_string(),
+                    variant_name: "FilterHeaderLine".to_string(),
+                    borrowed_payload: true,
+                    invalid_cast: InvalidCastPolicy::Panic,
+                },
+                Coercion::CloneRecovery {
+                    policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                        java_ty: JavaType::Named {
+                            name: "FilterHeaderLine".to_string(),
+                            args: Vec::new(),
+                        },
+                    },
+                },
+            ],
+        );
+        assert_eq!(
+            emit::emit_expr(&lowered),
+            "std::clone::Clone::clone(match &line { HeaderLineValue::FilterHeaderLine(value) => value, _ => panic!(\"invalid Java cast\") })"
+        );
     }
 }

@@ -3,6 +3,7 @@ use crate::call_plan::{
     NativeCollectionStaticMethod, NativeJavaInstanceMethod, NativeJavaStaticMethod,
     NativeStringNewTarget, NewTargetPlan,
 };
+use crate::coercion::deref_borrowed_projection;
 use crate::coercion::{
     IndexToUsizeProjection, JavaDisplayPlan, apply_java_display_plan,
     array_blocking_queue_empty_new_projection, array_blocking_queue_from_source_projection,
@@ -72,6 +73,7 @@ use crate::slot_render::{
     rust_type_for_java_type_with_facts, rust_type_for_slot_with_facts,
     rust_type_for_slot_with_facts_and_representations,
 };
+use crate::slot_shape::OwnershipShape;
 use crate::stream_lowering::{StreamLambdaValue, emit_stream_lambda_body_expr};
 
 pub fn apply_call_target(
@@ -435,7 +437,7 @@ fn apply_native_java_instance_method(
             apply_primitive_number_value(receiver, source, target)
         }
         NativeJavaInstanceMethod::PrimitiveHashCode { source } => {
-            primitive_hash_code_projection(receiver, source)
+            primitive_hash_code_projection(owned_primitive_receiver(receiver), source)
         }
         NativeJavaInstanceMethod::PrimitiveCompareTo { source } => {
             apply_primitive_compare_to(receiver, args, source)
@@ -480,7 +482,20 @@ fn apply_primitive_compare_to(
     let Some(other) = args.into_iter().next() else {
         return compile_error_call("Java boxed primitive compareTo requires one argument");
     };
-    primitive_compare_to_projection(receiver, other)
+    primitive_compare_to_projection(owned_primitive_receiver(receiver), other)
+}
+
+fn owned_primitive_receiver(receiver: RustExpr) -> RustExpr {
+    if receiver.recorded_slot_shape().is_some_and(|shape| {
+        matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    }) {
+        deref_borrowed_projection(receiver)
+    } else {
+        receiver
+    }
 }
 
 fn apply_string_char_at(receiver: RustExpr, args: Vec<RustExpr>) -> RustExpr {
@@ -878,6 +893,15 @@ fn apply_native_java_static_method(
             // Boxed `Character` uses the same direct `char` representation as
             // primitive `char`; Java boxing therefore needs no runtime call.
             arg
+        }
+        NativeJavaStaticMethod::CharacterToChars => {
+            let Some(arg) = args.into_iter().next() else {
+                return compile_error_call("Character.toChars requires one argument");
+            };
+            function_call_projection(
+                RustExpr::Var("java_character_to_chars".to_string()),
+                vec![arg],
+            )
         }
         NativeJavaStaticMethod::CharacterPredicate {
             java_name,
@@ -1310,6 +1334,7 @@ fn apply_native_collection_method(
     let rust_name = match method {
         NativeCollectionMethod::Len => "len",
         NativeCollectionMethod::IsEmpty => "is_empty",
+        NativeCollectionMethod::Clear => "clear",
         NativeCollectionMethod::ListHashCode => {
             return java_list_hash_code_projection(receiver);
         }
@@ -3235,8 +3260,9 @@ pub(crate) fn wrap_source_hierarchy_carrier_handle_value(
     owner_name: &str,
     representations: &RepresentationPlan,
 ) -> RustExpr {
-    let Some((carrier_name, owner_variant)) =
-        representations.source_hierarchy_carrier_parts_for_variant(owner_name)
+    let Some((carrier_name, owner_variant)) = representations
+        .source_hierarchy_carrier_constructor_parts(owner_name)
+        .or_else(|| representations.source_hierarchy_carrier_parts_for_variant(owner_name))
     else {
         return handle;
     };
@@ -3407,6 +3433,7 @@ fn apply_native_collection_new_target(
     if matches!(
         native_collection_new_target_kind(native_collection),
         crate::stdlib::JavaCollectionKind::Set
+            | crate::stdlib::JavaCollectionKind::SortedSet
             | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
     ) && representations
         .map(|representations| {
@@ -3483,17 +3510,28 @@ fn apply_native_collection_new_target(
                     .unwrap_or_else(priority_queue_empty_new_projection),
             };
         }
+        let semantic_set_name = if matches!(
+            native_collection_new_target_kind(native_collection),
+            crate::stdlib::JavaCollectionKind::SortedSet
+        ) {
+            "JavaSemanticTreeSet"
+        } else {
+            "JavaSemanticHashSet"
+        };
         return match native_collection {
             NativeCollectionNewTarget::Empty { .. } => {
-                function_call_projection(RustExpr::path(["JavaSemanticHashSet", "new"]), Vec::new())
+                function_call_projection(RustExpr::path([semantic_set_name, "new"]), Vec::new())
             }
             NativeCollectionNewTarget::WithCapacity { .. } => {
                 let capacity = args
                     .pop()
                     .unwrap_or_else(|| RustExpr::Literal("0".to_string()));
                 function_call_projection(
-                    RustExpr::path(["JavaSemanticHashSet", "with_capacity"]),
-                    vec![capacity],
+                    RustExpr::path([semantic_set_name, "with_capacity"]),
+                    vec![index_to_usize_projection(
+                        capacity,
+                        IndexToUsizeProjection::StreamLambdaArgument,
+                    )],
                 )
             }
             NativeCollectionNewTarget::FromSource { .. }
@@ -3505,15 +3543,12 @@ fn apply_native_collection_new_target(
                 .map(|iter| {
                     receiver_method_call_projection_exact(
                         iter,
-                        "collect::<JavaSemanticHashSet<_>>",
+                        &format!("collect::<{semantic_set_name}<_>>"),
                         Vec::new(),
                     )
                 })
                 .unwrap_or_else(|| {
-                    function_call_projection(
-                        RustExpr::path(["JavaSemanticHashSet", "new"]),
-                        Vec::new(),
-                    )
+                    function_call_projection(RustExpr::path([semantic_set_name, "new"]), Vec::new())
                 }),
             NativeCollectionNewTarget::PriorityQueueComparatorUnsupported { .. } => {
                 priority_queue_comparator_constructor_unsupported_projection()

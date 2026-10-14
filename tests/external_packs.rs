@@ -1,6 +1,9 @@
 mod common;
 
 use common::{GeneratedCrateModule, cargo_check_generated_modules};
+use new_java2rust::conversion_plan::{
+    DispatchCoercionPolicy, OptionalShapeCoercionPolicy, optional_shape_coercion_policy_with_facts,
+};
 use new_java2rust::external_facts::parse_external_facts;
 use new_java2rust::external_packs::{
     ExternalPackApiEffect, ExternalPackClosedHierarchy, ExternalPackManifest,
@@ -51,7 +54,545 @@ use new_java2rust::facts::{
     UnsupportedExternalFieldFact,
 };
 use new_java2rust::java_ir::{JavaType, PrimitiveType};
+use new_java2rust::slot_shape::RustSlotShape;
+use new_java2rust::types::optional_java_type;
 use new_java2rust::{parser, resolve, semantic_analysis, translate_source};
+
+#[test]
+fn tribble_line_iterator_preserves_its_string_element_abi() {
+    let next = external_api_effect_for_receiver_with_arity(
+        Some("htsjdk.tribble.readers.LineIterator"),
+        "next",
+        Some(0),
+    )
+    .expect("LineIterator.next should be owned by the tribble pack");
+    assert_eq!(next.return_type, Some(JavaType::String));
+    assert_eq!(next.return_nullability, NullabilityState::DefinitelyNonNull);
+
+    let translation = translate_source(
+        r#"
+import htsjdk.tribble.readers.LineIterator;
+
+class LineIteratorStringElement {
+    String take(LineIterator lines) {
+        return lines.next();
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("pub fn next(&self) -> String"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "tribble_line_iterator_string_element",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_erased_external_getter_has_one_consistent_facade_abi() {
+    let translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.Genotype;
+
+class NullableExternalGetter {
+    Object read(Genotype genotype, String key) {
+        return genotype.getExtendedAttribute(key);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains(
+            "pub fn get_extended_attribute<T0>(&self, _arg0: T0) -> Option<Box<dyn std::any::Any>>"
+        ),
+        "a maybe-null external getter and the call sites that consume it must share the same Option ABI:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_erased_external_getter_facade_abi",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_external_erased_result_projects_for_instanceof_and_dereference() {
+    let translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.Genotype;
+import htsjdk.variant.variantcontext.GenotypesContext;
+import htsjdk.variant.variantcontext.LazyGenotypesContext;
+import htsjdk.variant.variantcontext.VariantContext;
+
+class NullableExternalErasedUse {
+    boolean isText(VariantContext vc, Genotype unused) {
+        GenotypesContext genotypes = vc.getGenotypes();
+        return ((LazyGenotypesContext) genotypes).getUnparsedGenotypeData() instanceof String;
+    }
+
+    String display(VariantContext vc, Genotype unused) {
+        GenotypesContext genotypes = vc.getGenotypes();
+        return ((LazyGenotypesContext) genotypes).getUnparsedGenotypeData().toString();
+    }
+
+    void decode(LazyGenotypesContext genotypes) {
+        genotypes.decode();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains(".as_ref().is_some_and(|value| value.is::<String>())"),
+        "instanceof must test the payload of a nullable erased external return:\n{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("get_unparsed_genotype_data().to_string()"),
+        "dereferencing a nullable external return must project its payload first:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_external_erased_result_use",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn variant_context_writer_add_keeps_its_declared_argument() {
+    let translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.VariantContext;
+import htsjdk.variant.variantcontext.writer.VariantContextWriter;
+
+class ExternalVariantWriterUse {
+    void write(VariantContextWriter writer, VariantContext value) {
+        writer.add(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn add<T0>(&self, _arg0: T0) -> ()"),
+        "the external facade must preserve VariantContextWriter.add's one-argument ABI:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "variant_context_writer_add_abi",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sam_sequence_dictionary_exposes_typed_sequence_elements() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.SAMSequenceRecord;
+
+class DictionarySequenceIteration {
+    int totalLength(SAMSequenceDictionary dictionary) {
+        int total = 0;
+        for (SAMSequenceRecord record : dictionary.getSequences()) {
+            total += record.getSequenceLength();
+            total += record.getSequenceLength();
+        }
+        return total;
+    }
+
+    int dictionarySummary(SAMSequenceDictionary dictionary) {
+        return dictionary.getSequenceIndex("chr1")
+            + dictionary.size()
+            + (dictionary.isEmpty() ? 1 : 0);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_sequences(&self) -> Vec<SAMSequenceRecord>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("SAMSequenceDictionaryGetSequencesResult"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("for record in dictionary.get_sequences().iter()")
+            && translation.rust.contains("record.get_sequence_length()")
+            && !translation.rust.contains(
+                "get_sequences().iter().map(|value| java_clone_erased_object_ref(value))"
+            )
+            && !translation
+                .rust
+                .contains("record.downcast::<SAMSequenceRecord>"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("pub fn get_sequence_index<T0>(&self, _arg0: T0) -> i32")
+            && translation.rust.contains("pub fn size(&self) -> i32")
+            && translation.rust.contains("pub fn is_empty(&self) -> bool")
+            && !translation.rust.contains("SAMSequenceDictionarySizeResult"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "sam_sequence_dictionary_typed_sequence_elements",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn sam_sequence_dictionary_list_constructor_keeps_concrete_facade_value() {
+    let translation = translate_source(
+        r#"
+import htsjdk.samtools.SAMSequenceDictionary;
+import htsjdk.samtools.SAMSequenceRecord;
+import java.util.ArrayList;
+import java.util.List;
+
+class DictionaryConstruction {
+    SAMSequenceDictionary dictionary(boolean empty) {
+        if (empty) return null;
+        List<SAMSequenceRecord> records = new ArrayList<SAMSequenceRecord>();
+        return new SAMSequenceDictionary(records);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return Some(SAMSequenceDictionary::new_1(records));")
+            && !translation
+                .rust
+                .contains("downcast::<SAMSequenceDictionary>().expect(\"invalid Java cast\")"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "sam_sequence_dictionary_list_constructor",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn variant_context_upcasts_through_feature_return_slots() {
+    let facts = htsjdk_variantcontext_pack_facts();
+    let variant_context = JavaType::Named {
+        name: "VariantContext".to_string(),
+        args: Vec::new(),
+    };
+    assert!(
+        facts
+            .reachable_hierarchy_edges_for_type(&variant_context)
+            .iter()
+            .any(|edge| edge.sub_name == "VariantContext" && edge.super_name == "Feature"),
+        "the external pack should preserve VariantContext's Feature contract"
+    );
+    let all_facts = builtin_external_library_pack_facts();
+    let actual = RustSlotShape::conservative(optional_java_type(variant_context.clone()));
+    let target = RustSlotShape::conservative(optional_java_type(JavaType::Named {
+        name: "Feature".to_string(),
+        args: Vec::new(),
+    }));
+    let optional_plan = optional_shape_coercion_policy_with_facts(&actual, &target, all_facts);
+    assert!(
+        matches!(
+            optional_plan,
+            OptionalShapeCoercionPolicy::MapElement { ref element_plan, .. }
+                if matches!(element_plan.dispatch(), DispatchCoercionPolicy::ExternalInto { .. })
+        ),
+        "{optional_plan:?}"
+    );
+
+    let translation = translate_source(
+        r#"
+import htsjdk.tribble.Feature;
+import htsjdk.variant.variantcontext.VariantContext;
+
+class FeatureReturnBoundary {
+    Feature direct(VariantContext value) {
+        return value;
+    }
+
+    Feature nullable(boolean absent, VariantContext value) {
+        if (absent) return null;
+        return value;
+    }
+
+    VariantContext fallibleValue() throws Exception {
+        return null;
+    }
+
+    Feature fallibleNullable() throws Exception {
+        return fallibleValue();
+    }
+}
+"#,
+    );
+    assert!(
+        translation
+            .rust
+            .contains("impl From<VariantContext> for Feature"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("value.map(|value| std::convert::Into::<Feature>::into(value))"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains(
+            "fallible_value()?\n            .map(|value| std::convert::Into::<Feature>::into(value))"
+        ) || translation.rust.contains(
+            "fallible_value()?.map(|value| std::convert::Into::<Feature>::into(value))"
+        ),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("fallible_value()?.map(|value| std::convert::Into::<Feature>::into(value))?"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "variant_context_feature_return_slots",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn external_pack_static_methods_and_boxed_math_overloads_share_declared_metadata() {
+    let translation = translate_source(
+        r#"
+import htsjdk.variant.variantcontext.Allele;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.StringTokenizer;
+
+class ExternalStaticBoundary {
+    Allele createReference(String bases) {
+        return Allele.create(bases, true);
+    }
+
+    boolean valid(byte[] allele) {
+        return Allele.wouldBeSymbolicAllele(allele)
+            || Allele.acceptableAlleleBases(allele, true);
+    }
+
+    double magnitude(double input) {
+        Double boxed = input;
+        return Math.abs(boxed - 1.0);
+    }
+
+    List<String> tokens(String input) {
+        StringTokenizer tokenizer = new StringTokenizer(input, ",");
+        return new ArrayList<String>(tokenizer.countTokens());
+    }
+
+    Allele first(List<Allele> values) {
+        return values.get(0);
+    }
+
+    List<Allele> copyFirst(List<Allele> values) {
+        List<Allele> copied = new ArrayList<Allele>();
+        copied.add(first(values));
+        return copied;
+    }
+}
+
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Allele::create(")
+            && translation
+                .rust
+                .contains("Allele::would_be_symbolic_allele(")
+            && translation
+                .rust
+                .contains("Allele::acceptable_allele_bases("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation
+            .rust
+            .contains("HtsjdkVariantVariantcontextAllele::create")
+            && !translation.rust.contains(".would_be_symbolic_allele(")
+            && !translation.rust.contains(".acceptable_allele_bases("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("(boxed - 1f64).abs()")
+            && !translation.rust.contains("wrapping_abs()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Vec::with_capacity(tokenizer.count_tokens() as usize)"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation.rust.contains("Vec<Option<Allele>>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "external_pack_static_methods_and_boxed_math_overloads",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nullable_collection_local_keeps_solved_nullable_element_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+
+class NullableCachedList {
+    String first(List<String> values) {
+        return values.get(0);
+    }
+
+    List<String> collect(String key, List<String> values, Map<String, List<String>> cache) {
+        List<String> copied = cache.get(key);
+        if (copied == null) {
+            copied = new ArrayList<String>(1);
+            copied.add(first(values));
+            cache.put(key, copied);
+        }
+        return copied;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Option<Vec<Option<String>>>")
+            && translation.rust.contains("push(self.first(values))"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_cached_list_element_carrier",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn ternary_call_result_keeps_nullable_collection_element_carrier() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class TernaryNullableListResult {
+    String first(List<String> values) {
+        return values.get(0);
+    }
+
+    List<String> collect(List<String> values) {
+        List<String> copied = new ArrayList<String>();
+        copied.add(first(values));
+        return copied;
+    }
+
+    int size(boolean empty, List<String> values) {
+        List<String> selected = empty
+                ? new ArrayList<String>(0)
+                : collect(values);
+        return selected.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Vec<Option<String>>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "ternary_nullable_list_result",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
 
 #[test]
 fn java_platform_properties_runtime_and_resource_stream_facades_compile() {
@@ -3484,6 +4025,7 @@ fn htsjdk_variantcontext_pack_does_not_claim_map_entry_methods_in_enhanced_for()
     let parsed = parser::parse_java_source(
         r#"
 import htsjdk.variant.variantcontext.Allele;
+import htsjdk.variant.variantcontext.CommonInfo;
 import java.util.List;
 import java.util.Map;
 
@@ -4972,6 +5514,15 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
     assert_eq!(pack.coverage, ExternalApiCoverage::Semantic);
     assert_eq!(pack.provenance, FactProvenance::ExternalLibraryPack);
 
+    for type_name in ["htsjdk.variant.bcf2.BCF2Codec", "BCF2Codec"] {
+        let strategy = facts
+            .hierarchy_overrides
+            .iter()
+            .find(|fact| fact.type_name == type_name)
+            .unwrap_or_else(|| panic!("{type_name} should have a pack-owned object strategy"));
+        assert_eq!(strategy.strategy, HierarchyStrategy::ConcreteStruct);
+    }
+
     let constructor = facts
         .external_constructor_for("BCF2Codec", &[])
         .expect("BCF2Codec/0 constructor should be pack-owned");
@@ -5030,6 +5581,49 @@ fn htsjdk_bcf_pack_declares_codec_boundary() {
         version_probe.provenance,
         FactProvenance::ExternalLibraryPack
     );
+
+    for (method, return_type, nullability, mutability) in [
+        (
+            "makeSourceFromStream",
+            JavaType::Named {
+                name: "PositionalBufferedStream".to_string(),
+                args: Vec::new(),
+            },
+            NullabilityState::DefinitelyNonNull,
+            ReceiverMutabilityFact::ReadOnly,
+        ),
+        (
+            "readHeader",
+            JavaType::Named {
+                name: "FeatureCodecHeader".to_string(),
+                args: Vec::new(),
+            },
+            NullabilityState::DefinitelyNonNull,
+            ReceiverMutabilityFact::MutatesReceiver,
+        ),
+        (
+            "isDone",
+            JavaType::Primitive(PrimitiveType::Boolean),
+            NullabilityState::DefinitelyNonNull,
+            ReceiverMutabilityFact::ReadOnly,
+        ),
+        (
+            "decode",
+            JavaType::Named {
+                name: "VariantContext".to_string(),
+                args: Vec::new(),
+            },
+            NullabilityState::MaybeNull,
+            ReceiverMutabilityFact::MutatesReceiver,
+        ),
+    ] {
+        let effect = facts
+            .external_api_effect_for_receiver(Some("BCF2Codec"), method)
+            .unwrap_or_else(|| panic!("BCF2Codec.{method} should be modeled by the BCF pack"));
+        assert_eq!(effect.return_type, Some(return_type));
+        assert_eq!(effect.return_nullability, nullability);
+        assert_eq!(effect.receiver_mutability, mutability);
+    }
 }
 
 #[test]
@@ -10496,6 +11090,59 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
     );
     assert_eq!(sequence.provenance, FactProvenance::ExternalLibraryPack);
 
+    let sequences = facts
+        .external_api_effect_for_receiver(Some("SAMSequenceDictionary"), "getSequences")
+        .expect("dictionary sequence list getter should be modeled by the pack");
+    assert_eq!(
+        sequences.return_type,
+        Some(JavaType::Named {
+            name: "List".to_string(),
+            args: vec![JavaType::Named {
+                name: "SAMSequenceRecord".to_string(),
+                args: Vec::new(),
+            }],
+        })
+    );
+    assert_eq!(
+        sequences.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
+    assert_eq!(sequences.provenance, FactProvenance::ExternalLibraryPack);
+
+    for (method, expected_role, expected_return) in [
+        (
+            "getSequenceIndex",
+            ExternalApiRole::IndexedGetter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "size",
+            ExternalApiRole::Getter,
+            JavaType::Primitive(PrimitiveType::Int),
+        ),
+        (
+            "isEmpty",
+            ExternalApiRole::BooleanGetter,
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+    ] {
+        let effect = facts
+            .external_api_effect_for_receiver(Some("SAMSequenceDictionary"), method)
+            .unwrap_or_else(|| panic!("dictionary {method} should be modeled by the pack"));
+        assert_eq!(effect.role, expected_role, "{method}");
+        assert_eq!(effect.return_type, Some(expected_return), "{method}");
+        assert_eq!(
+            effect.return_nullability,
+            NullabilityState::DefinitelyNonNull,
+            "{method}"
+        );
+        assert_eq!(
+            effect.provenance,
+            FactProvenance::ExternalLibraryPack,
+            "{method}"
+        );
+    }
+
     let same_dictionary = facts
         .external_api_effect_for_receiver(Some("SAMSequenceDictionary"), "isSameDictionary")
         .expect("dictionary equivalence predicate should be modeled by the pack");
@@ -10723,6 +11370,19 @@ fn htsjdk_sam_header_pack_models_dictionary_header_and_read_group_effects() {
         .expect("sequence assembly getter should be modeled by the pack");
     assert_eq!(assembly.return_type, Some(JavaType::String));
     assert_eq!(assembly.return_nullability, NullabilityState::MaybeNull);
+
+    for method_name in ["setSequenceIndex", "setAssembly"] {
+        let effect = facts
+            .external_api_effect_for_receiver(Some("SAMSequenceRecord"), method_name)
+            .unwrap_or_else(|| {
+                panic!("SAMSequenceRecord.{method_name} should be modeled by the pack")
+            });
+        assert_eq!(effect.role, ExternalApiRole::Setter);
+        assert_eq!(
+            effect.receiver_mutability,
+            ReceiverMutabilityFact::MutatesReceiver
+        );
+    }
 
     let truncated_name = facts
         .external_api_effect_for_receiver(Some("SAMSequenceRecord"), "truncateSequenceName")
@@ -12587,6 +13247,27 @@ fn htsjdk_tribble_feature_pack_declares_feature_boundary() {
         FactProvenance::ExternalLibraryPack,
         "FeatureCodecHeader.NO_HEADER_END precision should come from the tribble feature pack, not stdlib"
     );
+
+    let header_strategy = facts
+        .hierarchy_overrides
+        .iter()
+        .find(|fact| fact.type_name == "FeatureCodecHeader")
+        .expect("FeatureCodecHeader should retain a typed facade");
+    assert_eq!(header_strategy.strategy, HierarchyStrategy::ConcreteStruct);
+    let header_value = facts
+        .external_api_effect_for_receiver(Some("FeatureCodecHeader"), "getHeaderValue")
+        .expect("FeatureCodecHeader.getHeaderValue should be modeled by the pack");
+    assert_eq!(
+        header_value.return_type,
+        Some(JavaType::Named {
+            name: "Object".to_string(),
+            args: Vec::new(),
+        })
+    );
+    assert_eq!(
+        header_value.return_nullability,
+        NullabilityState::DefinitelyNonNull
+    );
 }
 
 #[test]
@@ -14297,7 +14978,6 @@ fn google_bigquery_pack_declares_nested_enum_qualifiers() {
             "{type_name}.{field_name} precision should come from the BigQuery pack, not stdlib"
         );
     }
-
     for (type_name, field_name, expected_type) in [
         ("FieldValue.Attribute", "PRIMITIVE", "Attribute"),
         ("QueryJobConfiguration.Priority", "BATCH", "Priority"),
@@ -15355,6 +16035,11 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
             JavaType::Primitive(PrimitiveType::Boolean),
         ),
         (
+            "Defaults",
+            "OPTIMISTIC_VCF_4_4",
+            JavaType::Primitive(PrimitiveType::Boolean),
+        ),
+        (
             "SAMUtils",
             "MAX_PHRED_SCORE",
             JavaType::Primitive(PrimitiveType::Int),
@@ -15415,6 +16100,14 @@ fn htsjdk_samtools_util_pack_declares_interval_and_iterator_boundary() {
             FactProvenance::ExternalLibraryPack,
             "{type_name}.{field_name} precision should come from the samtools-util pack, not stdlib"
         );
+    }
+    for type_name in ["Defaults", "htsjdk.samtools.Defaults"] {
+        let value = new_java2rust::external_packs::external_field_value_for(
+            type_name,
+            "OPTIMISTIC_VCF_4_4",
+        )
+        .unwrap_or_else(|| panic!("{type_name}.OPTIMISTIC_VCF_4_4 should have a modeled value"));
+        assert_eq!(value.rust_value, "false");
     }
 
     for (type_name, field_name, expected_type) in [
@@ -17101,6 +17794,28 @@ class VariantPackUse {
         return info.getAttributeAsList("ANN");
     }
 
+    int commonInfoInt(CommonInfo info) {
+        return info.getAttributeAsInt("END", 0);
+    }
+
+    boolean externalPredicates(Genotype genotype, byte[] bases) {
+        return genotype.isAvailable()
+            || Allele.wouldBeSymbolicAllele(bases)
+            || Allele.acceptableAlleleBases(bases, true);
+    }
+
+    VariantContext uncheckedGenotypes(VariantContextBuilder builder, GenotypesContext genotypes) {
+        return builder.genotypesNoValidation(genotypes).make();
+    }
+
+    Genotype boundedAttributes(GenotypeBuilder builder) {
+        return builder.maxAttributes(4).make();
+    }
+
+    Object lazyGenotypeData(GenotypesContext genotypes) {
+        return genotypes.isLazyWithData() ? genotypes.getUnparsedGenotypeData() : null;
+    }
+
     Object structuralType(VariantContext vc) {
         return vc.getStructuralVariantType();
     }
@@ -17331,6 +18046,23 @@ class VariantPackUse {
             new_java2rust::java_ir::PrimitiveType::Int
         ))
     );
+
+    for (receiver, method) in [
+        ("CommonInfo", "getAttributeAsInt"),
+        ("Genotype", "isAvailable"),
+        ("Allele", "wouldBeSymbolicAllele"),
+        ("Allele", "acceptableAlleleBases"),
+        ("VariantContextBuilder", "genotypesNoValidation"),
+        ("GenotypeBuilder", "maxAttributes"),
+        ("GenotypesContext", "getUnparsedGenotypeData"),
+        ("GenotypesContext", "isLazyWithData"),
+    ] {
+        let effect = semantic
+            .facts
+            .external_api_effect_for_receiver(Some(receiver), method)
+            .unwrap_or_else(|| panic!("{receiver}.{method} should be modeled by its pack"));
+        assert_eq!(effect.provenance, FactProvenance::ExternalLibraryPack);
+    }
 
     let attribute_as_boolean = semantic
         .facts
@@ -17974,13 +18706,7 @@ class VariantPackUse {
         .facts
         .external_api_effect_for_receiver(Some("Genotype"), "getFilters")
         .expect("genotype filter getter should be modeled by the pack");
-    assert_eq!(
-        genotype_filters.return_type,
-        Some(JavaType::Named {
-            name: "Set".to_string(),
-            args: vec![JavaType::String],
-        })
-    );
+    assert_eq!(genotype_filters.return_type, Some(JavaType::String));
 
     let count_allele = semantic
         .facts

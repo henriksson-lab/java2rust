@@ -163,7 +163,13 @@ fn emit_function(function: &RustFunction, indent: usize) -> String {
             .iter()
             .map(|p| format!("{}: {}", rust_param_ident(&p.name), emit_type(&p.ty))),
     );
-    let vis = if function.is_pub { "pub " } else { "" };
+    let vis = if function.is_pub {
+        "pub "
+    } else if function.is_pub_crate {
+        "pub(crate) "
+    } else {
+        ""
+    };
     let ret = function
         .return_type
         .as_ref()

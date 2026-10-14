@@ -24,7 +24,10 @@ use crate::shape_projection::{
     value_shape_for_java_type,
 };
 use crate::signature::SignaturePlan;
-use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
+use crate::slot_shape::{
+    DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape,
+    java_types_have_same_erased_identity,
+};
 use crate::types::{TypeEnv, infer_expr_type};
 
 #[derive(Debug, Clone, PartialEq)]
@@ -508,6 +511,7 @@ pub(crate) fn optional_borrowed_receiver_slot_plan(
 pub enum NativeCollectionMethod {
     Len,
     IsEmpty,
+    Clear,
     ListHashCode,
     ListAdd,
     PriorityQueueAdd,
@@ -566,6 +570,7 @@ impl NativeCollectionMethod {
     pub(crate) fn mutates_receiver(self) -> bool {
         match self {
             NativeCollectionMethod::ListAdd
+            | NativeCollectionMethod::Clear
             | NativeCollectionMethod::PriorityQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueOffer
@@ -765,6 +770,7 @@ pub enum NativeJavaStaticMethod {
     },
     FloatingIsNaN,
     CharacterValueOf,
+    CharacterToChars,
     CharacterPredicate {
         java_name: &'static str,
         rust_method: &'static str,
@@ -804,6 +810,7 @@ pub fn native_collection_lowered_type(
         NativeCollectionMethod::IsEmpty => Some(LoweredType::from_java(JavaType::Primitive(
             PrimitiveType::Boolean,
         ))),
+        NativeCollectionMethod::Clear => Some(LoweredType::from_java(JavaType::Void)),
         NativeCollectionMethod::ListGet => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::optional_element_borrow_shape(
@@ -1134,6 +1141,11 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             name: "Pattern".to_string(),
             args: Vec::new(),
         })),
+        CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::CharacterToChars,
+        } => Some(LoweredType::from_java(JavaType::Array(Box::new(
+            JavaType::Primitive(PrimitiveType::Char),
+        )))),
         CallTargetPlan::NativeJavaInstance {
             method: NativeJavaInstanceMethod::StringSplit,
             ..
@@ -3191,6 +3203,18 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
+    if let Some(target) = plan_declared_external_static_call(
+        receiver,
+        name,
+        arg_count,
+        resolved,
+        facts,
+        external_index,
+        types,
+    ) {
+        return target;
+    }
+
     if receiver.is_none()
         && let Some(owner) = static_member_import_owner_for_call(name, types)
         && let Some(target) = plan_native_java_static_owner_call(owner, name, args, types)
@@ -3198,23 +3222,21 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
-    if let Some(call) = resolved
-        && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
-        && let Some(external_rust_name) =
-            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
-    {
-        return CallTargetPlan::FallbackReceiver {
-            receiver,
-            rust_name: external_rust_name,
-        };
-    }
-
+    // A value receiver with a declared collection type outranks a colliding
+    // imported or nested type alias. Java permits a field such as
+    // `Map<K,V> standards` alongside a nested `Standards` type; after Rust
+    // name normalization both spellings can share the same identifier. The
+    // receiver's value type is authoritative for instance dispatch.
     if let Some(receiver) = receiver
         && let Some(target) = plan_native_collection_receiver_call(receiver, name, args, types)
     {
         return target;
     }
 
+    // Syntactic type owners and declared static facade metadata outrank a
+    // conservative external-instance resolution. This matters when Java's
+    // case-sensitive `TypeName.method()` receiver normalizes near a local
+    // named `typeName`.
     if let Some(receiver) = receiver
         && let Some(target) = static_utility_owner_call_target(
             receiver,
@@ -3228,6 +3250,17 @@ fn plan_call_target_with_external_index_impl<'a>(
         )
     {
         return target;
+    }
+
+    if let Some(call) = resolved
+        && let (CallKind::Instance, Some(receiver)) = (&call.kind, receiver)
+        && let Some(external_rust_name) =
+            resolved_external_instance_call_rust_name(call, name, arg_count, facts)
+    {
+        return CallTargetPlan::FallbackReceiver {
+            receiver,
+            rust_name: external_rust_name,
+        };
     }
 
     // Java keeps imported type names case-sensitive. Rust-name normalization
@@ -3682,6 +3715,84 @@ fn plan_resolved_static_call<'a>(
     })
 }
 
+/// Recover static dispatch from the external contract when identifier
+/// normalization made an imported type owner collide with a local variable.
+///
+/// Java identifiers are case-sensitive, so `Allele.method(...)` remains a
+/// type-qualified call even inside a method with a local named `allele`.
+/// Resolution can conservatively classify that normalized receiver as an
+/// instance; declared pack staticness is the stronger ABI fact.
+fn plan_declared_external_static_call<'a>(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    resolved: Option<&ResolvedCall>,
+    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
+    types: &TypeEnv,
+) -> Option<CallTargetPlan<'a>> {
+    let receiver = receiver?;
+    let call = resolved?;
+    let imported_owner = match receiver {
+        Expr::Var(receiver_name) => types.static_type_alias(receiver_name),
+        _ => None,
+    }
+    .filter(|owner| crate::external_packs::external_pack_api_is_static(owner, name, arg_count));
+    let declared_owner = imported_owner.unwrap_or(&call.declaring_type);
+    if !crate::javalibs::is_static_facade_method(declared_owner, name, arg_count)
+        && !crate::external_packs::external_pack_api_is_static(declared_owner, name, arg_count)
+    {
+        return None;
+    }
+    let effect = if imported_owner.is_some() {
+        // The exact imported Java owner is stronger than a conservative
+        // resolved placeholder created after identifier normalization. Ask
+        // the declaring external pack first so a synthesized lookup entry for
+        // that placeholder cannot redirect a static call to the wrong facade.
+        crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(declared_owner),
+            name,
+            Some(arg_count),
+        )
+        .or_else(|| {
+            external_index
+                .external_api_effect_for_receiver_with_arity(
+                    Some(declared_owner),
+                    name,
+                    Some(arg_count),
+                )
+                .cloned()
+        })
+    } else {
+        external_index
+            .external_api_effect_for_receiver_with_arity(
+                Some(declared_owner),
+                name,
+                Some(arg_count),
+            )
+            .cloned()
+            .or_else(|| {
+                crate::external_packs::external_api_effect_for_receiver_with_arity(
+                    Some(declared_owner),
+                    name,
+                    Some(arg_count),
+                )
+            })
+    }?;
+    if effect.provenance != FactProvenance::ExternalLibraryPack {
+        return None;
+    }
+    let owner_key = effect.receiver_type.as_deref().unwrap_or(declared_owner);
+    let owner_key = crate::javalibs::preferred_static_owner_alias(owner_key, name, arg_count)
+        .unwrap_or(owner_key);
+    let owner_key =
+        shared_external_pack_static_facade_owner(owner_key, name, arg_count).unwrap_or(owner_key);
+    Some(CallTargetPlan::StaticOwner {
+        owner: rust_static_owner_type_name_with_facts(owner_key, facts),
+        rust_name: external_method_rust_name(owner_key, name, arg_count, facts),
+    })
+}
+
 fn resolved_static_owner_type_name(
     owner: &str,
     method: &str,
@@ -3799,9 +3910,13 @@ fn static_utility_owner_call_target<'a>(
     let Expr::Var(receiver_name) = receiver else {
         return None;
     };
-    if types.local_type(receiver_name).is_some()
-        || (types.static_type_alias(receiver_name).is_none()
-            && types.field_type(receiver_name).is_some())
+    let imported_static_owner = types.static_type_alias(receiver_name);
+    let declared_static_alias = imported_static_owner.is_some_and(|owner| {
+        crate::javalibs::is_static_facade_method(owner, name, arg_count)
+            || crate::external_packs::external_pack_api_is_static(owner, name, arg_count)
+    });
+    if (types.local_type(receiver_name).is_some() && !declared_static_alias)
+        || (imported_static_owner.is_none() && types.field_type(receiver_name).is_some())
     {
         return None;
     }
@@ -3847,7 +3962,26 @@ fn static_utility_owner_call_target<'a>(
     {
         return Some(target);
     }
-    if let Some(owner) = types.static_type_alias(receiver_name) {
+    // An exact Java import is stronger owner evidence than a synthesized
+    // external fact keyed by the parser-normalized receiver identifier.  In
+    // particular, `SomeType.method()` is represented as `some_type` in the
+    // expression IR; allowing a fallback fact for `some_type` to win here
+    // emits a Rust module path instead of the imported facade type.
+    if let Some(owner) = imported_static_owner {
+        // Query the pack with the exact imported owner first. A pack may map
+        // that Java class onto a deliberately shared facade owner (or an
+        // external crate path), which is stronger ABI evidence than spelling
+        // the imported type directly. If no such contract exists, the import
+        // itself remains the authoritative fallback below.
+        if crate::external_packs::external_pack_api_is_static(owner, name, arg_count)
+            && let Some((owner_key, owner)) =
+                external_fact_proven_static_owner(owner, name, arg_count, facts, external_index)
+        {
+            return Some(CallTargetPlan::StaticOwner {
+                rust_name: external_method_rust_name(&owner_key, name, arg_count, facts),
+                owner,
+            });
+        }
         let owner =
             crate::javalibs::preferred_static_owner_alias(owner, name, arg_count).unwrap_or(owner);
         return Some(CallTargetPlan::StaticOwner {
@@ -3956,6 +4090,15 @@ fn external_fact_proven_static_owner(
                     rust_static_owner_type_name_with_facts(alias, facts),
                 ));
             }
+            if effect.provenance == FactProvenance::ExternalLibraryPack
+                && let Some(simple_owner) =
+                    shared_external_pack_static_facade_owner(owner, name, arg_count)
+            {
+                return Some((
+                    simple_owner.to_string(),
+                    rust_static_owner_type_name_with_facts(simple_owner, facts),
+                ));
+            }
             return Some((
                 owner.to_string(),
                 rust_static_owner_type_name_with_facts(owner, facts),
@@ -3964,6 +4107,31 @@ fn external_fact_proven_static_owner(
     }
 
     None
+}
+
+/// Built-in packs sometimes publish both a qualified Java owner and a simple
+/// facade alias. Calls and crate assembly must choose the same Rust owner; the
+/// simple entry is an explicit pack declaration that those surfaces are one
+/// facade, not a heuristic based on the class spelling.
+fn shared_external_pack_static_facade_owner<'a>(
+    owner: &'a str,
+    method: &str,
+    arg_count: usize,
+) -> Option<&'a str> {
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+    let simple = owner
+        .split('.')
+        .filter(|segment| !segment.is_empty())
+        .next_back()?;
+    (simple != canonical
+        && crate::external_packs::external_pack_api_is_static(simple, method, arg_count)
+        && crate::external_packs::external_api_effect_for_receiver_with_arity(
+            Some(simple),
+            method,
+            Some(arg_count),
+        )
+        .is_some())
+    .then_some(simple)
 }
 
 fn unproven_simple_receiver_can_be_static_owner(receiver_name: &str) -> bool {
@@ -4286,6 +4454,7 @@ pub(crate) fn plan_native_collection_receiver_call_for_type<'a>(
     let method = match (kind, name) {
         (_, "size") => NativeCollectionMethod::Len,
         (_, "isEmpty") => NativeCollectionMethod::IsEmpty,
+        (_, "clear") => NativeCollectionMethod::Clear,
         (_, "toArray" | "to_array") => NativeCollectionMethod::ToArray,
         (crate::stdlib::JavaCollectionKind::List, "hashCode" | "hash_code") => {
             NativeCollectionMethod::ListHashCode
@@ -5193,6 +5362,7 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
             source: PrimitiveType::Double,
         },
         ("Character", "valueOf" | "value_of") => NativeJavaStaticMethod::CharacterValueOf,
+        ("Character", "toChars" | "to_chars") => NativeJavaStaticMethod::CharacterToChars,
         ("Double" | "Float", "isNaN" | "is_na_n") => NativeJavaStaticMethod::FloatingIsNaN,
         ("Character", "isDigit" | "is_digit") => character_predicate("isDigit", "is_ascii_digit"),
         ("Character", "isLetter" | "is_letter") => character_predicate("isLetter", "is_alphabetic"),
@@ -5313,10 +5483,13 @@ fn math_unary_overload_primitive(
 }
 
 fn expr_numeric_primitive(expr: &Expr, types: &TypeEnv) -> Option<PrimitiveType> {
-    let JavaType::Primitive(primitive) = infer_expr_type(expr, types) else {
-        return None;
-    };
-    Some(primitive)
+    match infer_expr_type(expr, types) {
+        JavaType::Primitive(primitive) => Some(primitive),
+        JavaType::Named { name, args } if args.is_empty() => {
+            crate::stdlib::boxed_primitive_type(&name)
+        }
+        _ => None,
+    }
 }
 
 fn numeric_binary_overload_primitive(
@@ -5952,7 +6125,10 @@ pub(crate) fn plan_native_collection_constructor_for_args(
         [arg] if enum_map_constructor_class_token(ty, arg, types) => {
             Some(NativeCollectionNewTarget::Empty { kind })
         }
-        [arg] if kind.supports_capacity_constructor() && is_integral_capacity_arg(arg, types) => {
+        [arg]
+            if kind.supports_capacity_constructor()
+                && is_integral_capacity_arg(arg, types, facts) =>
+        {
             Some(NativeCollectionNewTarget::WithCapacity { kind })
         }
         [arg] if is_collection_source_arg(arg, types) => {
@@ -6010,7 +6186,7 @@ fn native_collection_constructor_kind_with_facts(
     crate::stdlib::native_collection_constructor_kind_for_type(ty)
 }
 
-fn is_integral_capacity_arg(arg: &Expr, types: &TypeEnv) -> bool {
+fn is_integral_capacity_arg(arg: &Expr, types: &TypeEnv, facts: &FactSet) -> bool {
     if let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -6028,16 +6204,43 @@ fn is_integral_capacity_arg(arg: &Expr, types: &TypeEnv) -> bool {
     {
         return true;
     }
-    match infer_expr_type(arg, types) {
+    let inferred = infer_expr_type(arg, types);
+    let inferred = if matches!(inferred, JavaType::Unknown(_))
+        && let Expr::Call {
+            receiver,
+            name,
+            args,
+            ..
+        } = arg
+    {
+        let external_index = facts.external_lookup_index();
+        external_call_effect_with_external_index(
+            receiver.as_deref(),
+            name,
+            args,
+            facts,
+            &external_index,
+            types,
+            None,
+        )
+        .and_then(|effect| effect.return_type.clone())
+        .unwrap_or(inferred)
+    } else {
+        inferred
+    };
+    match inferred {
         JavaType::Primitive(
             crate::java_ir::PrimitiveType::Byte
             | crate::java_ir::PrimitiveType::Short
             | crate::java_ir::PrimitiveType::Int
             | crate::java_ir::PrimitiveType::Long,
         ) => true,
-        JavaType::Named { name, .. } => {
-            matches!(name.as_str(), "Byte" | "Short" | "Integer" | "Long")
-        }
+        JavaType::Named { name, .. } => matches!(
+            crate::stdlib::canonical_external_receiver_type_key(&name)
+                .rsplit('.')
+                .next(),
+            Some("Byte" | "Short" | "Integer" | "Long")
+        ),
         _ => false,
     }
 }
@@ -6331,6 +6534,20 @@ pub(crate) fn resolved_signature_arg_shape(
         return solved.clone();
     }
     resolved_call_arg_target_type(call, index)
+        .filter(|specialized| {
+            // The emitted signature may have selected a more concrete native
+            // carrier than the Java declaration (for example `Map<K,V>`
+            // consistently backed by `TreeMap`, rendered as `BTreeMap`).  A
+            // resolver `TreeMap -> Map` widening describes Java assignability,
+            // not permission to replace that emitted ABI with `HashMap`.
+            // Overlay only a true same-constructor generic specialization, or
+            // a resolver-proven generic inference such as `T -> String`.
+            java_types_have_same_erased_identity(&solved.java_ty, specialized)
+                || call.arg_coercions.iter().any(|coercion| {
+                    coercion.arg_index == index
+                        && coercion.kind == crate::java_ir::JavaCoercionKind::GenericInference
+                })
+        })
         .map(|specialized| {
             crate::shape_projection::specialize_slot_shape_java_type(solved, specialized)
         })
@@ -6403,11 +6620,27 @@ pub fn plan_call_arguments_with_facts(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> ArgumentLoweringPlan {
+    if let Some(shapes) = native_boxed_primitive_arg_shapes(receiver, name, arg_count, types) {
+        return ArgumentLoweringPlan::Shaped(shapes);
+    }
     if let Some(call) = resolved {
         if let Some(shapes) =
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
         {
             return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        // The facade ABI describes the concrete Rust boundary.  Java source
+        // signatures only establish language-level parameter types and can
+        // therefore be less specific about Rust borrowing (for example a
+        // mutable byte buffer is merely `byte[]` in Java).
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, None, facts, types)
+        {
+            return plan;
+        }
+        if let Some(plan) = facade_abi_call_arg_plan(receiver, name, arg_count, None, facts, types)
+        {
+            return plan;
         }
         if let Some(shapes) =
             resolved_call_signature_arg_shapes_by_java_key(call, name, arg_count, signatures)
@@ -6416,11 +6649,6 @@ pub fn plan_call_arguments_with_facts(
         }
         if let Some(shapes) = resolved_call_signature_arg_shapes(call, arg_count, signatures) {
             return ArgumentLoweringPlan::Shaped(shapes);
-        }
-        if let Some(plan) =
-            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, None, facts, types)
-        {
-            return plan;
         }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
@@ -6431,9 +6659,16 @@ pub fn plan_call_arguments_with_facts(
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    external_call_arg_shapes(receiver, name, arg_count, facts, types)
-        .map(ArgumentLoweringPlan::Shaped)
-        .or_else(|| facade_abi_call_arg_plan(receiver, name, arg_count, None, facts, types))
+    // A facade ABI is a complete Rust boundary. Prefer it over a set of
+    // per-argument effects, which may intentionally describe only selected
+    // parameters; letting a partial effect set win fills the remaining slots
+    // conservatively and can erase ABI facts such as `InputStream.read`'s
+    // mutable byte buffer.
+    facade_abi_call_arg_plan(receiver, name, arg_count, None, facts, types)
+        .or_else(|| {
+            external_call_arg_shapes(receiver, name, arg_count, facts, types)
+                .map(ArgumentLoweringPlan::Shaped)
+        })
         .or_else(|| {
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
                 .map(ArgumentLoweringPlan::Shaped)
@@ -6451,12 +6686,33 @@ pub fn plan_call_arguments_with_facts_and_args(
     types: &TypeEnv,
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
+    if let Some(shapes) = native_boxed_primitive_arg_shapes(receiver, name, arg_count, types) {
+        return ArgumentLoweringPlan::Shaped(shapes);
+    }
     if let Some(shapes) = native_string_search_arg_shapes(receiver, name, args, types) {
         return ArgumentLoweringPlan::Shaped(shapes);
     }
     if let Some(call) = resolved {
         if let Some(shapes) =
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
+        {
+            return ArgumentLoweringPlan::Shaped(shapes);
+        }
+        if let Some(plan) =
+            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
+        {
+            return plan;
+        }
+        // Resolution may retain a synthetic or hierarchy declaring owner;
+        // the receiver's declared type can still name the concrete facade.
+        if let Some(plan) =
+            facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types)
+        {
+            return plan;
+        }
+        if call.rust_name == crate::parser::to_snake_case(name)
+            && let Some(shapes) =
+                inherited_external_call_arg_shapes(receiver, name, arg_count, facts, types)
         {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
@@ -6473,11 +6729,6 @@ pub fn plan_call_arguments_with_facts_and_args(
         {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
-        if let Some(plan) =
-            facade_abi_call_arg_plan_for_resolved(call, name, arg_count, Some(args), facts, types)
-        {
-            return plan;
-        }
         if let Some(shapes) = external_call_arg_shapes_for_resolved(call, name, arg_count, facts) {
             return ArgumentLoweringPlan::Shaped(shapes);
         }
@@ -6487,9 +6738,11 @@ pub fn plan_call_arguments_with_facts_and_args(
         return ArgumentLoweringPlan::Shaped(resolved_call_arg_shapes(call, arg_count, signatures));
     }
 
-    external_call_arg_shapes_with_args(receiver, name, args, facts, types)
-        .map(ArgumentLoweringPlan::Shaped)
-        .or_else(|| facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types))
+    facade_abi_call_arg_plan(receiver, name, arg_count, Some(args), facts, types)
+        .or_else(|| {
+            external_call_arg_shapes_with_args(receiver, name, args, facts, types)
+                .map(ArgumentLoweringPlan::Shaped)
+        })
         .or_else(|| {
             native_collection_arg_shapes_with_facts(receiver, name, arg_count, types, facts)
                 .map(ArgumentLoweringPlan::Shaped)
@@ -6499,6 +6752,83 @@ pub fn plan_call_arguments_with_facts_and_args(
                 .map(ArgumentLoweringPlan::Shaped)
         })
         .unwrap_or(ArgumentLoweringPlan::Unshaped { arg_count })
+}
+
+fn inherited_external_call_arg_shapes(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types))?;
+    let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    let direct_owner = java_type_name(&receiver_ty)?;
+    let inherited_owner =
+        external_argument_owner_from_reachable_hierarchy(direct_owner, name, arg_count, facts)?;
+    let effective_facts = EffectiveFacts::new(facts);
+    let inherited_receiver_ty = JavaType::Named {
+        name: inherited_owner.clone(),
+        args: Vec::new(),
+    };
+    (0..arg_count)
+        .map(|index| {
+            facts
+                .external_api_argument_effect_for_receiver_with_arity(
+                    Some(&inherited_owner),
+                    name,
+                    Some(arg_count),
+                    index,
+                )
+                .cloned()
+                .or_else(|| {
+                    (!facts.disable_builtin_external_packs)
+                        .then(|| {
+                            crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                                Some(&inherited_owner),
+                                name,
+                                Some(arg_count),
+                                index,
+                            )
+                        })
+                        .flatten()
+                })
+                .map(|effect| {
+                    argument_shape_from_external_effect(
+                        &effect,
+                        Some(&inherited_receiver_ty),
+                        &effective_facts,
+                    )
+                })
+        })
+        .collect()
+}
+
+/// Boxed Java primitives use value carriers in Rust.  Their instance-method
+/// arguments therefore cross an unboxing boundary even though resolution
+/// still records the source-level wrapper type (`Integer`, `Long`, ...).
+/// Plan that boundary explicitly so nullable fields and borrowed projections
+/// become copy values before native primitive lowering consumes them.
+fn native_boxed_primitive_arg_shapes(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_count: usize,
+    types: &TypeEnv,
+) -> Option<Vec<RustSlotShape>> {
+    if !matches!(name, "compareTo" | "compare_to") || arg_count != 1 {
+        return None;
+    }
+    let receiver_ty = receiver.map(|receiver| infer_expr_type(receiver, types))?;
+    let source = match receiver_ty {
+        JavaType::Primitive(source) => source,
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+            crate::stdlib::boxed_primitive_type(name.rsplit('.').next().unwrap_or(&name))?
+        }
+        _ => return None,
+    };
+    Some(vec![RustSlotShape::conservative(JavaType::Primitive(
+        source,
+    ))])
 }
 
 fn native_string_search_arg_shapes(
@@ -7680,13 +8010,63 @@ fn external_call_argument_receiver_key(
                 }
                 let receiver_ty =
                     crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
-                java_type_name(&receiver_ty).map(str::to_string)
+                let direct_receiver = java_type_name(&receiver_ty).map(str::to_string)?;
+                external_argument_owner_from_reachable_hierarchy(
+                    &direct_receiver,
+                    name,
+                    arg_count,
+                    facts,
+                )
+                .or(Some(direct_receiver))
             })
         })
         .or_else(|| {
             static_member_import_owner_for_call(name, types)
                 .map(crate::stdlib::canonical_external_receiver_type_key)
         })
+}
+
+fn external_argument_owner_from_reachable_hierarchy(
+    receiver: &str,
+    name: &str,
+    arg_count: usize,
+    facts: &FactSet,
+) -> Option<String> {
+    let receiver_ty = JavaType::Named {
+        name: receiver.to_string(),
+        args: Vec::new(),
+    };
+    let mut candidates = facts
+        .reachable_hierarchy_edges_for_type(&receiver_ty)
+        .into_iter()
+        .map(|edge| edge.super_name)
+        .filter(|owner| {
+            (0..arg_count).any(|index| {
+                facts
+                    .external_api_argument_effect_for_receiver_with_arity(
+                        Some(owner),
+                        name,
+                        Some(arg_count),
+                        index,
+                    )
+                    .is_some()
+                    || (!facts.disable_builtin_external_packs
+                        && crate::external_packs::external_api_argument_effect_for_receiver_with_arity(
+                            Some(owner),
+                            name,
+                            Some(arg_count),
+                            index,
+                        )
+                        .is_some())
+            })
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        crate::stdlib::canonical_external_receiver_type_key(left)
+            .cmp(&crate::stdlib::canonical_external_receiver_type_key(right))
+    });
+    candidates.dedup_by(|left, right| crate::facts::external_type_name_matches(left, right));
+    (candidates.len() == 1).then(|| candidates.remove(0))
 }
 
 fn static_utility_argument_owner_key(
@@ -8065,6 +8445,70 @@ mod tests {
     use crate::facts::ExternalApiEffectFact;
     use crate::java_ir::Literal;
     use crate::types::optional_java_type;
+
+    #[test]
+    fn qualified_pack_static_owner_reuses_declared_simple_facade() {
+        let facts = FactSet::default();
+        let external_index = facts.external_lookup_index();
+        let owner = external_fact_proven_static_owner(
+            "htsjdk.variant.variantcontext.Allele",
+            "wouldBeSymbolicAllele",
+            1,
+            &facts,
+            &external_index,
+        );
+
+        assert_eq!(owner, Some(("Allele".to_string(), "Allele".to_string())));
+    }
+
+    #[test]
+    fn declared_pack_static_recovery_targets_the_shared_facade_owner() {
+        let receiver = Expr::Var("allele".to_string());
+        let mut types = TypeEnv::default();
+        types.insert_static_type_alias("allele", "htsjdk.variant.variantcontext.Allele");
+        let resolved = resolved_instance_call("Array", "would_be_symbolic_allele");
+
+        assert!(matches!(
+            plan_call_target_with_facts_and_arity(
+                Some(&receiver),
+                "wouldBeSymbolicAllele",
+                1,
+                Some(&resolved),
+                &FactSet::default(),
+                &types,
+            ),
+            CallTargetPlan::StaticOwner { owner, rust_name }
+                if owner == "Allele" && rust_name == "would_be_symbolic_allele"
+        ));
+    }
+
+    #[test]
+    fn imported_pack_static_owner_outranks_same_normalized_field_name() {
+        let receiver = Expr::Var("log".to_string());
+        let mut types = TypeEnv::default();
+        types.insert_static_type_alias("log", "htsjdk.samtools.util.Log");
+        types.insert_field(
+            "log",
+            JavaType::Named {
+                name: "htsjdk.samtools.util.Log".to_string(),
+                args: Vec::new(),
+            },
+        );
+        let facts = crate::external_packs::htsjdk_vcf_pack_facts();
+
+        assert!(matches!(
+            plan_call_target_with_facts_and_arity(
+                Some(&receiver),
+                "getInstance",
+                1,
+                None,
+                &facts,
+                &types,
+            ),
+            CallTargetPlan::StaticOwner { owner, rust_name }
+                if owner == "Log" && rust_name == "get_instance"
+        ));
+    }
 
     #[test]
     fn lowercase_string_format_owner_requires_an_unbound_name() {

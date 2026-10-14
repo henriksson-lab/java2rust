@@ -51,6 +51,11 @@ pub struct ShapeEnv {
     binding_ids: HashMap<String, BindingId>,
     binding_occurrences: HashMap<(BindingKind, String), usize>,
     proven_non_null_locals: HashSet<BindingId>,
+    /// Synthetic locals that preserve a Java constructor argument evaluated
+    /// once and then read more than once by a flattened constructor body.
+    /// Ordinary callable liveness cannot mention these post-analysis names,
+    /// so owned slot lowering must conservatively retain the staged value.
+    repeated_materialized_argument_locals: HashSet<BindingId>,
     map_key_set_view_receivers: HashMap<String, Expr>,
     map_key_set_view_receivers_by_binding: HashMap<BindingId, Expr>,
     map_values_view_receivers: HashMap<String, Expr>,
@@ -316,6 +321,7 @@ impl ShapeEnv {
     fn clear_local_side_facts(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.proven_non_null_locals.remove(binding);
+            self.repeated_materialized_argument_locals.remove(binding);
             self.map_key_set_view_receivers_by_binding.remove(binding);
             self.map_values_view_receivers_by_binding.remove(binding);
             self.map_entry_set_view_receivers_by_binding.remove(binding);
@@ -969,6 +975,17 @@ impl ShapeEnv {
         let alias = crate::parser::to_snake_case(&name);
         self.insert_static_field_shape_with_access_name(name.clone(), access_name.clone(), shape);
         for key in [name, access_name, alias] {
+            // A source-summary copy can omit the initializer that proves a
+            // `static final` field is emitted as an associated const. In that
+            // case contextual seeding tentatively indexes the same bare name
+            // as lazy static storage. The primary declaration is
+            // authoritative: remove that stale bare storage route so slot
+            // planning agrees with `lower_bare_name` and the emitted `&str`
+            // constant ABI.
+            self.static_storage_field_names.remove(&key);
+            self.static_storage_field_access_names.remove(&key);
+            self.static_storage_field_owners.remove(&key);
+            self.ambiguous_static_storage_field_owners.remove(&key);
             self.ambiguous_static_field_owners.remove(&key);
             self.static_field_owners.insert(key, owner.clone());
         }
@@ -1151,6 +1168,19 @@ impl ShapeEnv {
         self.binding_ids
             .get(name)
             .is_some_and(|binding| self.proven_non_null_locals.contains(binding))
+    }
+
+    pub(crate) fn mark_repeated_materialized_argument_local(&mut self, name: &str) {
+        if let Some(binding) = self.binding_ids.get(name) {
+            self.repeated_materialized_argument_locals
+                .insert(binding.clone());
+        }
+    }
+
+    pub(crate) fn is_repeated_materialized_argument_local(&self, name: &str) -> bool {
+        self.binding_ids
+            .get(name)
+            .is_some_and(|binding| self.repeated_materialized_argument_locals.contains(binding))
     }
 
     fn bind_name(&mut self, kind: BindingKind, name: String) -> BindingId {

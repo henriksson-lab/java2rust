@@ -5,8 +5,164 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[test]
+fn batch_generic_map_capacity_hierarchy_and_static_storage_reuse_shared_plans() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "HeaderRepair.java".to_string(),
+        r#"
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Collection;
+import java.util.Map;
+import java.util.Set;
+
+class BaseLine {}
+final class FormatLine extends BaseLine {}
+
+public class HeaderRepair {
+    private static class Standards<T extends BaseLine> {
+        private final Map<String, T> values = new HashMap<String, T>();
+
+        public void add(String key, T value) { values.put(key, value); }
+
+        public T get(String key) {
+            key = key.trim();
+            final T value = values.get(key);
+            return value;
+        }
+
+        public Set<String> missing(Collection<String> IDs) {
+            Set<String> missing = new HashSet<String>();
+            for (final String ID : IDs) {
+                final T value = get(ID);
+                if (value == null) missing.add(ID);
+            }
+            return missing;
+        }
+    }
+
+    private static Standards<FormatLine> standards = new Standards<FormatLine>();
+
+    static FormatLine getLine(String ID, boolean fail) {
+        return standards.get(ID);
+    }
+
+    static FormatLine getLine(String ID) {
+        return standards.get(ID);
+    }
+
+    static { standards.add("F", new FormatLine()); }
+
+    private static FormatLine repairFormat(FormatLine line) throws Exception {
+        if (line == null) throw new Exception("missing");
+        return line;
+    }
+
+    public static Set<BaseLine> repair(Set<BaseLine> oldLines) throws Exception {
+        Set<BaseLine> newLines = new LinkedHashSet<BaseLine>(oldLines.size());
+        for (BaseLine line : oldLines) {
+            if (line instanceof FormatLine) line = repairFormat((FormatLine) line);
+            newLines.add(line);
+        }
+        return newLines;
+    }
+}
+"#
+        .to_string(),
+    )];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    for translation in &translations {
+        assert!(
+            !translation.diagnostics().has_errors(),
+            "{}: {:?}\n{}",
+            translation.path(),
+            translation.diagnostics(),
+            translation.rust()
+        );
+    }
+    let standards = translations[0].rust();
+    assert!(
+        standards.contains("where T: Clone")
+            && standards.contains(".get(&key).cloned()")
+            && !standards.contains("i_d.ok_or_else(")
+            && !standards.contains("Some(self.values.get("),
+        "{standards}"
+    );
+    let repair = translations[0].rust();
+    assert!(
+        repair.contains("with_capacity")
+            && repair.contains("as usize")
+            && !repair.contains("FormatLine(value))?")
+            && repair.contains("__set_static_standards(std::sync::Arc::new"),
+        "{repair}"
+    );
+}
+
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+
+#[test]
+fn batch_inherited_body_reuses_declaring_static_method_argument_abi() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/BaseDecoder.java".to_string(),
+            r#"
+package example;
+import java.util.List;
+
+public class BaseDecoder {
+    private static int decode(String value) {
+        String[] fields = value.split(",");
+        return Integer.parseInt(fields[0]);
+    }
+
+    public int read(List<String> values, int index) throws Exception {
+        return decode(values.get(index));
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/ChildDecoder.java".to_string(),
+            r#"
+package example;
+public class ChildDecoder extends BaseDecoder {}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let child = translations
+        .iter()
+        .find(|translation| translation.path() == "example/ChildDecoder.java")
+        .expect("translated inherited body")
+        .rust();
+
+    assert!(
+        child.contains("BaseDecoder::decode({ let __java_list_get_index = index;")
+            && child.contains("}?.as_str())")
+            && !child.contains("} }?));"),
+        "an inherited method body must call its declaring static helper with the emitted borrowed-string ABI:\n{child}"
+    );
+}
 
 #[test]
 fn batch_source_hierarchy_collection_local_uses_global_carrier_shape() {
@@ -77,6 +233,122 @@ public class HeaderUse {
 }
 
 #[test]
+fn batch_source_hierarchy_map_local_uses_global_carrier_shape() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "HeaderUse.java".to_string(),
+        r#"
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.TreeSet;
+
+class HeaderLine implements Comparable {
+    String key;
+    String getKey() { return key; }
+    public String toString() { return key; }
+    public int compareTo(Object other) { return toString().compareTo(other.toString()); }
+}
+
+final class FormatLine extends HeaderLine {}
+final class InfoLine extends HeaderLine {}
+
+public class HeaderUse {
+    Map<String, HeaderLine> other = new LinkedHashMap<String, HeaderLine>();
+
+    private <T extends HeaderLine> boolean add(Map<String, T> target, T line) {
+        target.put(line.getKey(), line);
+        return true;
+    }
+
+    boolean addOther(HeaderLine line) {
+        return add(other, line);
+    }
+
+    String render(Set<HeaderLine> lines) {
+        StringBuilder result = new StringBuilder();
+        for (HeaderLine line : lines) {
+            result.append(line);
+        }
+        return result.toString();
+    }
+
+    List<FormatLine> formats(Set<HeaderLine> lines) {
+        List<FormatLine> result = new ArrayList<FormatLine>();
+        for (HeaderLine line : lines) {
+            if (line instanceof FormatLine) {
+                result.add((FormatLine) line);
+            }
+        }
+        return result;
+    }
+
+    Set<HeaderLine> index(Set<HeaderLine> source) {
+        Map<String, HeaderLine> indexed = new LinkedHashMap<String, HeaderLine>();
+        for (HeaderLine line : source) {
+            if (line instanceof FormatLine || line instanceof InfoLine) {
+                line.getKey();
+            }
+            indexed.put(line.getKey(), line);
+        }
+        return new LinkedHashSet<HeaderLine>(indexed.values());
+    }
+
+    Set<HeaderLine> preserve(Set<HeaderLine> lines) { return lines; }
+
+    Set<HeaderLine> sorted(Set<HeaderLine> source) {
+        return preserve(new TreeSet<HeaderLine>(source));
+    }
+}
+"#
+        .to_string(),
+    )];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations
+        .iter()
+        .find(|translation| translation.path() == "HeaderUse.java")
+        .expect("translated hierarchy map user")
+        .rust();
+
+    assert!(
+        rust.contains("JavaLinkedHashMap<String, HeaderLineValue>")
+            && !rust.contains("JavaLinkedHashMap<String, std::sync::Arc<HeaderLine>>"),
+        "{rust}"
+    );
+    assert!(
+        rust.contains("impl HeaderLineBound for HeaderLineValue")
+            && rust.contains("impl JavaAppendValue for &HeaderLineValue")
+            && rust.contains("impl JavaTreeKey for HeaderLineValue")
+            && rust.contains("collect::<JavaSemanticTreeSet<_>>")
+            && rust.contains("collect::<JavaSemanticHashSet<HeaderLineValue>>")
+            && rust.contains("pub fn add<T: HeaderLineBound + Clone>(target:"),
+        "{rust}"
+    );
+    cargo_check_generated_modules(
+        "batch_source_hierarchy_map_carrier",
+        translations
+            .iter()
+            .zip(["header_use"])
+            .map(|(translation, name)| GeneratedCrateModule {
+                name,
+                rust: translation.rust().to_string(),
+                tests: "",
+            })
+            .collect(),
+    );
+}
+
+#[test]
 fn batch_source_hierarchy_semantic_set_uses_java_equals_contract() {
     let sources = vec![new_java2rust::BatchSource::new(
         "SemanticSet.java".to_string(),
@@ -89,6 +361,7 @@ class SemanticBase {
         return other instanceof SemanticBase;
     }
 }
+
 final class SemanticLeft extends SemanticBase {}
 final class SemanticRight extends SemanticBase {}
 class SemanticSet {
@@ -159,6 +432,237 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn batch_bulk_collection_mutation_propagates_nullable_element_shape_to_field() {
+    let sources = vec![new_java2rust::BatchSource::new(
+        "NullableBulkSet.java".to_string(),
+        r#"
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+class BulkEntry {
+    public boolean equals(Object other) { return other instanceof BulkEntry; }
+}
+
+final class BulkChild extends BulkEntry {}
+
+class NullableBulkSet {
+    final Set<BulkEntry> values = new LinkedHashSet<BulkEntry>();
+
+    NullableBulkSet(Set<BulkEntry> incoming) {
+        values.addAll(incoming);
+    }
+
+    static NullableBulkSet make() {
+        Set<BulkEntry> incoming = new LinkedHashSet<BulkEntry>();
+        incoming.add(null);
+        incoming.add(new BulkChild());
+        return new NullableBulkSet(incoming);
+    }
+}
+"#
+        .to_string(),
+    )];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("values: JavaSemanticHashSet<Option<BulkEntryValue>>")
+            && rust.contains("incoming: JavaSemanticHashSet<Option<BulkEntryValue>>")
+            && rust.contains("values.extend(incoming)"),
+        "bulk mutation must give the receiver field and source parameter one element shape:\n{rust}"
+    );
+    cargo_check_generated_modules(
+        "batch_bulk_collection_nullable_element_shape",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn batch_bulk_collection_mutation_propagates_nullable_element_shape_to_local_and_return() {
+    let sources = vec![new_java2rust::BatchSource::new(
+        "BulkLocalCopy.java".to_string(),
+        r#"
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+class BulkLocalEntry {
+    public boolean equals(Object other) { return other instanceof BulkLocalEntry; }
+}
+
+final class BulkLocalChild extends BulkLocalEntry {}
+
+class BulkLocalCopy {
+    static Set<BulkLocalEntry> copy() {
+        Set<BulkLocalEntry> source = new LinkedHashSet<BulkLocalEntry>();
+        source.add(null);
+        Set<BulkLocalEntry> target = new LinkedHashSet<BulkLocalEntry>();
+        target.addAll(source);
+        return target;
+    }
+}
+"#
+        .to_string(),
+    )];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("JavaSemanticHashSet<Option<BulkLocalEntryValue>>"),
+        "{}",
+        rust
+    );
+    cargo_check_generated_modules(
+        "batch_bulk_collection_local_return_nullability",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn batch_private_receiver_free_instance_call_uses_associated_syntax() {
+    let sources = vec![new_java2rust::BatchSource::new(
+        "ReceiverFreeCall.java".to_string(),
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class ReceiverFreeCall {
+    final List<String> values = new ArrayList<String>();
+
+    ReceiverFreeCall() {
+        removeEmpty(values);
+    }
+
+    private void removeEmpty(List<String> input) {
+        input.clear();
+    }
+}
+"#
+        .to_string(),
+    )];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("Self::remove_empty(&mut __java_self.values)")
+            && !rust.contains("__java_self.remove_empty("),
+        "{rust}"
+    );
+    cargo_check_generated_modules(
+        "batch-private-receiver-free-call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn batch_collection_boundaries_reuse_solved_carriers() {
+    let sources = vec![new_java2rust::BatchSource::new(
+        "CollectionBoundaries.java".to_string(),
+        r#"
+import java.util.Collections;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.Set;
+
+class BoundaryLine {
+    public boolean equals(Object other) { return other instanceof BoundaryLine; }
+}
+
+final class BoundaryChild extends BoundaryLine {}
+
+class MutableBoundaryLine {
+    String value;
+    void setValue(String next) { value = next; }
+}
+
+class CollectionBoundaries {
+    final Set<BoundaryLine> values = new LinkedHashSet<BoundaryLine>();
+    final Map<String, MutableBoundaryLine> indexed = new LinkedHashMap<>();
+
+    CollectionBoundaries() {
+        this(Collections.<BoundaryLine>emptySet());
+    }
+
+    CollectionBoundaries(Set<BoundaryLine> incoming) {
+        values.addAll(incoming);
+    }
+
+    Set<BoundaryLine> nullableView() {
+        Set<BoundaryLine> lines = new LinkedHashSet<BoundaryLine>();
+        lines.add(null);
+        lines.add(new BoundaryChild());
+        return Collections.unmodifiableSet(lines);
+    }
+
+    static CollectionBoundaries withNull() {
+        Set<BoundaryLine> incoming = new LinkedHashSet<BoundaryLine>();
+        incoming.add(null);
+        incoming.add(new BoundaryChild());
+        return new CollectionBoundaries(incoming);
+    }
+}
+"#
+        .to_string(),
+    )];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("Self::new_set(JavaSemanticHashSet::new())")
+            && rust.contains("indexed: std::collections::HashMap::new()")
+            && rust
+                .contains("pub fn nullable_view(&self) -> JavaSemanticHashSet<BoundaryLineValue>")
+            && rust.contains("collect::<JavaSemanticHashSet<BoundaryLineValue>>()"),
+        "collection boundaries must use the solved destination carrier:\n{rust}"
+    );
+    cargo_check_generated_modules(
+        "batch_collection_boundaries_solved_carriers",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
         }],
     );
 }
@@ -1795,6 +2299,65 @@ public class Second {
 }
 
 #[test]
+fn inherited_method_body_can_reach_private_static_storage_across_modules() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Base.java".to_string(),
+            r#"
+package example;
+
+public class Base {
+    private static String value = "base";
+
+    public String read() {
+        return value;
+    }
+}
+"#
+            .to_string(),
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Child.java".to_string(),
+            r#"
+package example;
+
+public class Child extends Base {
+}
+"#
+            .to_string(),
+        ),
+    ];
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(2, None),
+        );
+    let base = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "example/Base.java")
+        .expect("translated declaring class")
+        .rust();
+    let child = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "example/Child.java")
+        .expect("translated inheriting class")
+        .rust();
+
+    assert!(
+        base.contains("pub(crate) fn __static_value() -> String"),
+        "{base}"
+    );
+    assert!(child.contains("Base::__static_value()"), "{child}");
+}
+
+#[test]
 fn throwing_argument_does_not_make_infallible_cross_file_constructor_fallible() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new(
@@ -2596,7 +3159,9 @@ public class ContextGetterConsumer {
 
     assert!(
         consumer.rust().contains("::pack(source")
-            && consumer.rust().contains("get_value().as_ref().ok_or_else")
+            && consumer
+                .rust()
+                .contains("get_value().as_ref().expect(\"Java null receiver\")")
             && !consumer
                 .rust()
                 .contains("&source.borrow().get_value().as_ref()"),
@@ -2651,7 +3216,7 @@ public class Sink {
 
     assert!(
         owner.rust().contains(
-            "let __java_call_receiver = std::clone::Clone::clone(&__java_self.borrow().sink)"
+            "let __java_outer_receiver = std::clone::Clone::clone(__java_self.borrow().sink.as_ref().expect(\"Java null receiver\"))"
         ) || owner
             .rust()
             .contains("let __java_call_receiver = __java_self.borrow().sink.clone()")
@@ -2662,8 +3227,9 @@ public class Sink {
         owner.rust()
     );
     assert!(
-        owner.rust().contains("__java_call_receiver")
-            && (owner.rust().contains(".report(") || owner.rust().contains("Sink::report(")),
+        (owner.rust().contains("__java_call_receiver")
+            || owner.rust().contains("__java_outer_receiver"))
+            && (owner.rust().contains(".report(") || owner.rust().contains("Sink::report")),
         "{}",
         owner.rust()
     );
@@ -2719,9 +3285,9 @@ public class Sorter {
         .find(|translation| translation.path() == "Sorter.java")
         .expect("translated sorter source");
     assert!(
-        comparator.rust().contains(
-            "pub fn compare(&self, left: &str, right: &str) -> Result<i32, JavaException>"
-        ),
+        comparator
+            .rust()
+            .contains("pub fn compare(&self, left: &str, right: &str) -> i32"),
         "{}",
         comparator.rust()
     );
@@ -4507,15 +5073,17 @@ public class Consumer extends Base {
         "{}",
         consumer.rust()
     );
-    assert!(consumer.rust().contains(", 33)?"), "{}", consumer.rust());
+    assert!(
+        consumer.rust().contains(", 33))") && !consumer.rust().contains(", 33)?"),
+        "{}",
+        consumer.rust()
+    );
     assert!(
         record_translation
             .rust()
             .contains("pub fn new_record_string_string_int(")
-            && record_translation
-                .rust()
-                .contains(") -> Result<Record, JavaException>")
-            && record_translation.rust().contains("return Ok(Record"),
+            && record_translation.rust().contains(") -> Record")
+            && record_translation.rust().contains("return Record"),
         "the solved constructor fallibility must control both its signature and body:\n{}",
         record_translation.rust()
     );
@@ -4882,7 +5450,8 @@ public class SequenceReader {
             && sequence_reader
                 .rust()
                 .contains("read_observation_reader_token(std::clone::Clone::clone(&reader)")
-            && sequence_reader.rust().contains(", &mut token)?"),
+            && sequence_reader.rust().contains(", &mut token);")
+            && !sequence_reader.rust().contains(", &mut token)?"),
         "{}",
         sequence_reader.rust()
     );
@@ -4963,7 +5532,7 @@ public class SequenceReader {
     assert!(
         sequence_reader
             .rust()
-            .contains("read_observation_reader_token(reader, &mut token)?"),
+            .contains("read_observation_reader_token(reader, &mut token)"),
         "{}",
         sequence_reader.rust()
     );
@@ -5017,7 +5586,7 @@ public class Use {
         assert!(
             use_translation
                 .rust()
-                .contains(&format!("Self::{method}(&mut value)?")),
+                .contains(&format!("Self::{method}(&mut value);")),
             "{}",
             use_translation.rust()
         );
@@ -5101,12 +5670,14 @@ public class LineUse {
         .find(|translation| translation.path() == "example/GrandChildLine.java")
         .expect("translated grandchild");
     assert!(
-        child.rust().contains("BaseLine::equals")
-            && child.rust().contains(", other)?)")
+        child
+            .rust()
+            .contains("self.__java_super_base_line_equals(other)?")
             && !child
                 .rust()
                 .contains("java_string_compare_to(&self.to_string(),"),
-        "inherited source calls must propagate the solved Result ABI"
+        "inherited source calls must propagate the solved Result ABI: {}",
+        child.rust()
     );
     let line_use = translations
         .iter()
@@ -5128,7 +5699,8 @@ public class LineUse {
         .and_then(|tail| tail.split("\n    }").next())
         .expect("rendered showChild body");
     assert!(
-        show_child.contains("line.to_string().unwrap_or_else(|ex|"),
+        (show_child.contains("line.to_string().unwrap_or_else(|ex|")
+            || show_child.contains("ChildLine::to_string_with_outer(line).unwrap_or_else(|ex|")),
         "an inherited fallible toString must retain its Result ABI in Java concatenation: {}",
         line_use.rust()
     );

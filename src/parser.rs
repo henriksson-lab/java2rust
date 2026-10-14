@@ -3359,7 +3359,15 @@ fn parse_string_literal(src: &str) -> String {
     if src.starts_with("\"\"\"") && src.ends_with("\"\"\"") && src.len() >= 6 {
         parse_text_block_literal(src)
     } else {
-        parse_java_string_escapes(src.trim_start_matches('"').trim_end_matches('"'))
+        // Remove exactly the lexical delimiters. `trim_*_matches` also strips
+        // an escaped quote at either edge: Java `"\\\""` became a single
+        // trailing backslash before escape decoding, which in turn made
+        // ordinary quote-building code emit `\\` instead of `\"`.
+        let inner = src
+            .strip_prefix('"')
+            .and_then(|src| src.strip_suffix('"'))
+            .unwrap_or(src);
+        parse_java_string_escapes(inner)
     }
 }
 

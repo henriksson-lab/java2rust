@@ -973,6 +973,15 @@ fn numeric_binary_type(left: &JavaType, right: &JavaType) -> JavaType {
         JavaType::Primitive(Float) => 4,
         JavaType::Primitive(Long) => 3,
         JavaType::Primitive(Int | Short | Byte | Char) => 2,
+        JavaType::Named { name, args } if args.is_empty() => {
+            match crate::stdlib::boxed_primitive_type(name) {
+                Some(Double) => 5,
+                Some(Float) => 4,
+                Some(Long) => 3,
+                Some(Int | Short | Byte | Char) => 2,
+                _ => 0,
+            }
+        }
         _ => 0,
     };
     match rank(left).max(rank(right)) {

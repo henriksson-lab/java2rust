@@ -443,6 +443,7 @@ pub enum DispatchCoercionPolicy {
     DowncastClosedEnum {
         enum_name: String,
         variant_name: String,
+        borrowed_payload: bool,
         invalid_cast: InvalidCastPolicy,
     },
     DowncastDynTrait {
@@ -1733,6 +1734,24 @@ pub fn ownership_coercion_policy_with_effective_facts(
         let capability =
             coercion_owned_recovery_capability_policy_with_effective_facts(&actual.java_ty, facts);
         ownership_recovery_policy_from_capability(capability.recovery(), actual, target)
+    } else if matches!(actual.dispatch, DispatchShape::ClosedEnum { .. })
+        && target.dispatch == DispatchShape::Concrete
+        && matches!(
+            actual.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+        && target.ownership == OwnershipShape::Owned
+        && matches!(actual.view, ViewShape::Native | ViewShape::EnumView)
+        && target.view == ViewShape::Native
+    {
+        // Matching a borrowed hierarchy carrier yields a borrowed variant
+        // payload. A Java cast used in an owned destination (for example
+        // `list.add((Child) base)` inside enhanced-for) copies the object
+        // reference/value into that destination, so recover the owned payload
+        // after the discriminant check.
+        let capability =
+            coercion_owned_recovery_capability_policy_with_effective_facts(&target.java_ty, facts);
+        ownership_recovery_policy_from_capability(capability.recovery(), actual, target)
     } else if matches!(
         actual.ownership,
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
@@ -1928,6 +1947,13 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         // erases that distinction and leaves the outer `Option` to be cast as
         // though it were itself a trait object.
         element_shape.java_ty = element_ty;
+        if matches!(element_shape.dispatch, DispatchShape::BoxedDynTrait { .. }) {
+            // `Box<dyn Trait>` is itself the owned payload. The outer Option's
+            // access ownership may be borrowed while planning a field write,
+            // but that must not turn `Option<Box<dyn Trait>>` into a request
+            // for `&dyn Trait` immediately before constructing `Some`.
+            element_shape.ownership = OwnershipShape::Owned;
+        }
     } else if let JavaType::Named { name, .. } = &element_ty
         && facts.object_safe_trait_fact_for_name(name) == Some(true)
     {
@@ -2507,6 +2533,31 @@ pub fn dispatch_coercion_policy_with_facts(
     if let Some(adapter) = external_conversion_adapter_policy(actual, target, facts) {
         return adapter;
     }
+    let effective_facts = EffectiveFacts::new(facts);
+    let nominal_erased_external_upcast = actual.ownership == OwnershipShape::Owned
+        && target.ownership == OwnershipShape::Owned
+        && actual.java_ty != target.java_ty
+        && facts
+            .hierarchy_subtype_policy(&actual.java_ty, &target.java_ty)
+            .reaches()
+        && matches!(
+            effective_facts.object_representation_override_strategy_for(&actual.java_ty),
+            Some(HierarchyStrategy::ErasedObject)
+        )
+        && matches!(
+            effective_facts.object_representation_override_strategy_for(&target.java_ty),
+            Some(HierarchyStrategy::ErasedObject)
+        );
+    if nominal_erased_external_upcast {
+        // Erased external-library declarations still render as distinct
+        // nominal facade structs. Their shared dispatch strategy therefore
+        // does not make the Rust values interchangeable. Reuse the
+        // hierarchy-backed `From` surface, including inside `Option::map`.
+        return DispatchCoercionPolicy::ExternalInto {
+            from_type: actual.java_ty.clone(),
+            to_type: target.java_ty.clone(),
+        };
+    }
     match (&actual.dispatch, &target.dispatch) {
         (DispatchShape::Concrete, DispatchShape::Concrete) => {
             if let Some(adapter) = java_collection_conversion_policy(actual, target) {
@@ -2700,6 +2751,10 @@ pub fn dispatch_coercion_policy_with_facts(
                     DispatchCoercionPolicy::DowncastClosedEnum {
                         enum_name: enum_name.clone(),
                         variant_name: target_type,
+                        borrowed_payload: matches!(
+                            actual.ownership,
+                            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+                        ),
                         invalid_cast: InvalidCastPolicy::Panic,
                     }
                 }
@@ -3383,6 +3438,14 @@ pub enum InstanceOfCheck {
         enum_name: String,
         variant_names: Vec<String>,
     },
+    OptionalClosedEnumVariant {
+        enum_name: String,
+        variant_name: String,
+    },
+    OptionalClosedEnumVariants {
+        enum_name: String,
+        variant_names: Vec<String>,
+    },
     DynTraitType {
         target_type: String,
     },
@@ -3597,6 +3660,37 @@ pub fn plan_instanceof_check_with_facts(
     }
     if let Some(element_ty) = actual.optional_element_type() {
         let element_shape = optional_element_slot_shape(actual, element_ty);
+        match (&element_shape.dispatch, &target.dispatch) {
+            (DispatchShape::ClosedEnum { enum_name }, DispatchShape::DynTrait { .. })
+            | (DispatchShape::ClosedEnum { enum_name }, DispatchShape::ClosedEnum { .. }) => {
+                let variant_names =
+                    closed_enum_variants_reaching_target(&element_shape, target, facts);
+                if !variant_names.is_empty() {
+                    return InstanceOfCheck::OptionalClosedEnumVariants {
+                        enum_name: enum_name.clone(),
+                        variant_names,
+                    };
+                }
+            }
+            (DispatchShape::ClosedEnum { enum_name }, DispatchShape::Concrete) => {
+                match runtime_type_target_policy(&target.java_ty) {
+                    RuntimeTypeTargetPolicy::Nominal { target_type } => {
+                        return InstanceOfCheck::OptionalClosedEnumVariant {
+                            enum_name: enum_name.clone(),
+                            variant_name: target_type,
+                        };
+                    }
+                    RuntimeTypeTargetPolicy::MissingNominalTarget { java_ty } => {
+                        return unsupported_instanceof_check(
+                            actual,
+                            target,
+                            InstanceOfFallbackPolicy::MissingRuntimeTarget { java_ty },
+                        );
+                    }
+                }
+            }
+            _ => {}
+        }
         if matches!(element_shape.dispatch, DispatchShape::ErasedObject)
             && matches!(target.dispatch, DispatchShape::Concrete)
         {
@@ -5186,6 +5280,30 @@ mod tests {
 
         assert!(matches!(
             ownership_coercion_policy_with_effective_facts(&actual, &target, &effective_facts),
+            OwnershipCoercionPolicy::RecoverOwnedWithClone { .. }
+        ));
+    }
+
+    #[test]
+    fn borrowed_hierarchy_carrier_downcast_recovers_owned_variant_payload() {
+        let mut actual = RustSlotShape::for_storage(JavaType::Named {
+            name: "Base".to_string(),
+            args: Vec::new(),
+        });
+        actual.dispatch = DispatchShape::ClosedEnum {
+            enum_name: "BaseValue".to_string(),
+        };
+        actual.ownership = OwnershipShape::SharedBorrow;
+        actual.view = ViewShape::EnumView;
+        let target = RustSlotShape::for_storage(JavaType::Named {
+            name: "Child".to_string(),
+            args: Vec::new(),
+        });
+
+        let policy = ownership_coercion_policy(&actual, &target, &FactSet::default());
+
+        assert!(matches!(
+            policy,
             OwnershipCoercionPolicy::RecoverOwnedWithClone { .. }
         ));
     }

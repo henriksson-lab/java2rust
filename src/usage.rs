@@ -1,7 +1,9 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::binding_id::BindingId;
-use crate::facts::{ExceptionKind, FactSet, NullabilityState, TrivialAccessorKind};
+use crate::facts::{
+    ExceptionKind, ExternalFactLookupIndex, FactSet, NullabilityState, TrivialAccessorKind,
+};
 use crate::java_ir::{
     BinaryOp, Block, ConstructorInvocationKind, Expr, JavaType, LambdaBody, Literal, Member,
     Modifier, Param, PrimitiveType, Program, ResolvedCall, ResolvedConstructor, Stmt, SwitchLabel,
@@ -18,6 +20,31 @@ pub struct UsageFacts {
     methods_by_rust_name: HashMap<UsageMethodKey, MethodUsageFacts>,
     methods_by_java_key: HashMap<JavaCallableKey, MethodUsageFacts>,
     constructors: HashMap<UsageConstructorKey, MethodUsageFacts>,
+}
+
+/// Immutable semantic facts and their shared external-member index for one
+/// usage-analysis pass. Large external packs make rebuilding the index at each
+/// expression an accidental quadratic operation.
+struct UsageAnalysisContext<'a> {
+    facts: &'a FactSet,
+    external_lookup: ExternalFactLookupIndex<'a>,
+}
+
+impl<'a> UsageAnalysisContext<'a> {
+    fn new(facts: &'a FactSet) -> Self {
+        Self {
+            facts,
+            external_lookup: facts.external_lookup_index(),
+        }
+    }
+}
+
+impl std::ops::Deref for UsageAnalysisContext<'_> {
+    type Target = FactSet;
+
+    fn deref(&self) -> &Self::Target {
+        self.facts
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -134,19 +161,9 @@ impl CallableKey {
         ty: &crate::java_ir::TypeDecl,
         constructor: &crate::java_ir::ConstructorDecl,
     ) -> Self {
-        Self::source_constructor(JavaOwnerKey::source_type(ty), constructor)
-    }
-
-    pub(crate) fn source_constructor(
-        type_name: JavaOwnerKey,
-        constructor: &crate::java_ir::ConstructorDecl,
-    ) -> Self {
         CallableKey::Constructor {
-            type_name,
-            rust_name: constructor
-                .rust_name
-                .clone()
-                .unwrap_or_else(|| "new".to_string()),
+            type_name: JavaOwnerKey::source_type(ty),
+            rust_name: crate::java_signature::source_constructor_rust_name(ty, constructor),
         }
     }
 
@@ -392,7 +409,7 @@ impl UsageConstructorKey {
     ) -> Self {
         Self {
             owner: JavaOwnerKey::source_type(ty),
-            rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
+            rust_name: crate::java_signature::source_constructor_rust_name(ty, ctor),
         }
     }
 
@@ -1392,9 +1409,10 @@ pub fn analyze_usage(program: &Program) -> UsageFacts {
 }
 
 pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> UsageFacts {
+    let semantic_facts = UsageAnalysisContext::new(semantic_facts);
     let mut facts = UsageFacts::default();
     for ty in &program.types {
-        analyze_type_usage(program, ty, &mut facts, semantic_facts);
+        analyze_type_usage(program, ty, &mut facts, &semantic_facts);
     }
     refine_source_null_assertion_call_boundaries(program, &mut facts);
     refine_source_declared_argument_call_boundaries(program, &mut facts);
@@ -1861,13 +1879,13 @@ fn analyze_type_usage(
     program: &Program,
     ty: &TypeDecl,
     facts: &mut UsageFacts,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) {
     let internal_methods = internal_method_names(ty);
     let same_type_method_arg_targets = same_type_method_arg_targets(ty);
-    let source_return_nullability = source_return_nullability_by_call_name(ty);
-    let field_names = field_names(ty);
-    let field_types = field_types(ty);
+    let source_return_nullability = source_return_nullability_by_call_name(ty, semantic_facts);
+    let field_names = field_names(ty, program);
+    let field_types = field_types(ty, program);
     let current_super_type = ty.extends.as_deref();
     for member in &ty.members {
         match member {
@@ -2266,7 +2284,7 @@ fn collect_call_graph_edges_from_stmt(
                 ConstructorInvocationKind::This => (
                     resolved
                         .as_ref()
-                        .map(CallableKey::resolved_constructor)
+                        .map(|resolved| resolved_constructor_call_graph_key(resolved, context))
                         .unwrap_or_else(|| {
                             CallableKey::constructor_identity(context.current_type.clone(), "new")
                         }),
@@ -2275,7 +2293,7 @@ fn collect_call_graph_edges_from_stmt(
                 ConstructorInvocationKind::Super => (
                     resolved
                         .as_ref()
-                        .map(CallableKey::resolved_constructor)
+                        .map(|resolved| resolved_constructor_call_graph_key(resolved, context))
                         .unwrap_or_else(|| CallableKey::external_constructor("super", args.len())),
                     CallGraphEdgeKind::ConstructorDelegationSuper,
                 ),
@@ -2327,7 +2345,7 @@ fn collect_call_graph_edges_from_expr(
             }
             let callee = resolved
                 .as_ref()
-                .map(CallableKey::resolved_constructor)
+                .map(|resolved| resolved_constructor_call_graph_key(resolved, context))
                 .unwrap_or_else(|| {
                     CallableKey::external_constructor(java_type_call_graph_name(ty), args.len())
                 });
@@ -2414,6 +2432,31 @@ fn collect_call_graph_edges_from_expr(
                 }
             }
         }
+        Expr::MethodReference { target, method } if matches!(target.as_str(), "this" | "self") => {
+            // A method reference is an implicit callback body. Model it like
+            // an explicit lambda so fallibility reaches the method which
+            // creates or passes the callback. The functional target type is
+            // not retained on this IR node, so keep every matching overload;
+            // typed overload selection happens later during lowering.
+            let callback = context.next_lambda();
+            add_call_graph_edge(
+                graph,
+                context,
+                callback.clone(),
+                CallGraphEdgeKind::LambdaBody,
+                facts,
+            );
+            let child = context.child_for(callback);
+            for callee in current_receiver_method_reference_targets(method, context) {
+                add_call_graph_edge(
+                    graph,
+                    &child,
+                    callee,
+                    CallGraphEdgeKind::DirectMethodCall,
+                    facts,
+                );
+            }
+        }
         Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
             collect_call_graph_edges_from_expr(receiver, graph, context, facts);
         }
@@ -2478,6 +2521,42 @@ fn collect_call_graph_edges_from_expr(
     }
 }
 
+fn current_receiver_method_reference_targets(
+    method_name: &str,
+    context: &CallGraphBuildContext<'_>,
+) -> Vec<CallableKey> {
+    let Some(owner) = crate::inherited_members::find_type_decl_for_owner_context(
+        context.program,
+        &context.current_type,
+        &context.current_type,
+    ) else {
+        return Vec::new();
+    };
+    let mut targets = owner
+        .members
+        .iter()
+        .filter_map(|member| match member {
+            Member::Method(method)
+                if method.name == method_name && !method.modifiers.contains(&Modifier::Static) =>
+            {
+                Some(CallableKey::source_method_for_type(owner, method))
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    targets.extend(
+        crate::inherited_members::inherited_instance_method_refs_for_type(owner, context.program)
+            .into_iter()
+            .filter(|inherited| inherited.method().name == method_name)
+            .map(|inherited| {
+                CallableKey::source_method_for_type(inherited.declaring_ty(), inherited.method())
+            }),
+    );
+    targets.sort_by_key(CallableKey::diagnostic_label);
+    targets.dedup();
+    targets
+}
+
 fn call_graph_method_target(
     receiver: Option<&Expr>,
     name: &str,
@@ -2499,7 +2578,7 @@ fn call_graph_method_target(
     }
     if let Some(resolved) = resolved {
         return (
-            CallableKey::resolved_method(resolved),
+            resolved_method_call_graph_key(resolved, context),
             CallGraphEdgeKind::DirectMethodCall,
         );
     }
@@ -2519,6 +2598,66 @@ fn call_graph_method_target(
         ),
         CallGraphEdgeKind::UnresolvedExternalMethodCall,
     )
+}
+
+/// Translate a resolver identity back to the declaration identity used by
+/// call-graph nodes. A packaged compilation unit stores its package on
+/// `Program`, not on each `TypeDecl`, while a resolved call necessarily uses
+/// the qualified Java owner. Keeping those two spellings as separate keys
+/// disconnects cross-file fallibility propagation.
+fn resolved_method_call_graph_key(
+    resolved: &ResolvedCall,
+    context: &CallGraphBuildContext<'_>,
+) -> CallableKey {
+    let Some(owner) = crate::inherited_members::find_type_decl_for_owner_context(
+        context.program,
+        &context.current_type,
+        &resolved.declaring_type,
+    ) else {
+        return CallableKey::resolved_method(resolved);
+    };
+    let mut candidates = owner.members.iter().filter_map(|member| match member {
+        Member::Method(method) if source_method_rust_name(method) == resolved.rust_name => {
+            Some(method)
+        }
+        _ => None,
+    });
+    let Some(method) = candidates.next() else {
+        return CallableKey::resolved_method(resolved);
+    };
+    if candidates.next().is_some() {
+        return CallableKey::resolved_method(resolved);
+    }
+    CallableKey::source_method_for_type(owner, method)
+}
+
+fn resolved_constructor_call_graph_key(
+    resolved: &ResolvedConstructor,
+    context: &CallGraphBuildContext<'_>,
+) -> CallableKey {
+    let Some(owner) = crate::inherited_members::find_type_decl_for_owner_context(
+        context.program,
+        &context.current_type,
+        &resolved.declaring_type,
+    ) else {
+        return CallableKey::resolved_constructor(resolved);
+    };
+    let mut candidates = owner.members.iter().filter_map(|member| match member {
+        Member::Constructor(constructor)
+            if crate::java_signature::source_constructor_rust_name(owner, constructor)
+                == resolved.rust_name =>
+        {
+            Some(constructor)
+        }
+        _ => None,
+    });
+    let Some(constructor) = candidates.next() else {
+        return CallableKey::resolved_constructor(resolved);
+    };
+    if candidates.next().is_some() {
+        return CallableKey::resolved_constructor(resolved);
+    }
+    CallableKey::source_constructor_for_type(owner, constructor)
 }
 
 fn anonymous_override_contract_keys(
@@ -2875,24 +3014,41 @@ fn java_type_call_graph_name(ty: &JavaType) -> String {
     }
 }
 
-fn field_names(ty: &TypeDecl) -> HashSet<String> {
-    ty.members
+fn field_names(ty: &TypeDecl, program: &Program) -> HashSet<String> {
+    let mut names = ty
+        .members
         .iter()
         .filter_map(|member| match member {
             Member::Field(field) => Some(field.name.clone()),
             _ => None,
         })
-        .collect()
+        .collect::<HashSet<_>>();
+    names.extend(
+        crate::inherited_members::inherited_instance_field_refs_for_type(ty, program)
+            .into_iter()
+            .map(|inherited| inherited.field().name.clone()),
+    );
+    names
 }
 
-fn field_types(ty: &TypeDecl) -> HashMap<String, JavaType> {
-    ty.members
+fn field_types(ty: &TypeDecl, program: &Program) -> HashMap<String, JavaType> {
+    let mut types = ty
+        .members
         .iter()
         .filter_map(|member| match member {
             Member::Field(field) => Some((field.name.clone(), field.ty.clone())),
             _ => None,
         })
-        .collect()
+        .collect::<HashMap<_, _>>();
+    for inherited in crate::inherited_members::inherited_instance_field_refs_for_type(ty, program) {
+        // A field declared on the subclass hides a superclass field of the
+        // same Java name. Preserve that lookup rule while making all other
+        // inherited storage visible to mutation analysis.
+        types
+            .entry(inherited.field().name.clone())
+            .or_insert_with(|| inherited.field().ty.clone());
+    }
+    types
 }
 
 fn internal_method_names(ty: &TypeDecl) -> HashSet<String> {
@@ -2926,7 +3082,7 @@ fn analyze_stmt(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
@@ -2974,7 +3130,7 @@ fn analyze_stmt(
                         },
                     );
                 }
-                if let Some(policy) = call_result_boundary_policy_with_context(
+                for policy in call_result_boundary_policies_with_context(
                     initializer,
                     internal_methods,
                     facts,
@@ -3013,7 +3169,7 @@ fn analyze_stmt(
             if let Expr::Var(name) = target {
                 if is_unshadowed_field_name(facts, field_names, name) {
                     facts.mutates_self = true;
-                    if let Some(policy) = call_result_boundary_policy_with_context(
+                    for policy in call_result_boundary_policies_with_context(
                         value,
                         internal_methods,
                         facts,
@@ -3084,7 +3240,7 @@ fn analyze_stmt(
                             },
                         );
                     }
-                    if let Some(policy) = call_result_boundary_policy_with_context(
+                    for policy in call_result_boundary_policies_with_context(
                         value,
                         internal_methods,
                         facts,
@@ -3111,7 +3267,7 @@ fn analyze_stmt(
                 if target_is_this_field(target) {
                     facts.mutates_self = true;
                 }
-                if let Some(policy) = call_result_boundary_policy_with_context(
+                for policy in call_result_boundary_policies_with_context(
                     value,
                     internal_methods,
                     facts,
@@ -3751,7 +3907,7 @@ fn call_result_boundary_policy_with_context(
     current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
 ) -> Option<CallResultBoundaryPolicy> {
     match expr {
@@ -3805,6 +3961,74 @@ fn call_result_boundary_policy_with_context(
     }
 }
 
+fn call_result_boundary_policies_with_context(
+    expr: &Expr,
+    internal_methods: &HashSet<String>,
+    facts: &MethodUsageFacts,
+    current_type: &str,
+    current_super_type: Option<&str>,
+    field_names: &HashSet<String>,
+    field_types: &HashMap<String, JavaType>,
+    semantic_facts: &UsageAnalysisContext<'_>,
+    type_env: &TypeEnv,
+) -> Vec<CallResultBoundaryPolicy> {
+    match expr {
+        Expr::Cast { expr, .. } => call_result_boundary_policies_with_context(
+            expr,
+            internal_methods,
+            facts,
+            current_type,
+            current_super_type,
+            field_names,
+            field_types,
+            semantic_facts,
+            type_env,
+        ),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            let mut policies = call_result_boundary_policies_with_context(
+                then_expr,
+                internal_methods,
+                facts,
+                current_type,
+                current_super_type,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+            );
+            policies.extend(call_result_boundary_policies_with_context(
+                else_expr,
+                internal_methods,
+                facts,
+                current_type,
+                current_super_type,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+            ));
+            policies
+        }
+        _ => call_result_boundary_policy_with_context(
+            expr,
+            internal_methods,
+            facts,
+            current_type,
+            current_super_type,
+            field_names,
+            field_types,
+            semantic_facts,
+            type_env,
+        )
+        .into_iter()
+        .collect(),
+    }
+}
+
 fn call_result_receiver_type_with_context(
     receiver: &Expr,
     facts: &MethodUsageFacts,
@@ -3812,7 +4036,7 @@ fn call_result_receiver_type_with_context(
     current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     match receiver {
         Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
@@ -3839,7 +4063,7 @@ fn assigned_subtype_local_actual_type(
     value: &Expr,
     target_ty: &JavaType,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     let actual_ty = crate::types::infer_expr_type(value, type_env);
     assigned_subtype_actual_type(&actual_ty, target_ty, type_env, semantic_facts)
@@ -3849,7 +4073,7 @@ fn assigned_subtype_actual_type(
     actual_ty: &JavaType,
     target_ty: &JavaType,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     if actual_ty != target_ty
         && semantic_facts
@@ -3873,7 +4097,7 @@ fn assigned_subtype_actual_type_from_type_param_bound(
     actual_ty: &JavaType,
     target_ty: &JavaType,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     let actual_name = usage_java_type_name(actual_ty)?;
     let bound_ty = type_env.type_param_bound(actual_name)?;
@@ -3889,7 +4113,7 @@ fn assigned_subtype_actual_type_from_type_param_bound(
 fn assigned_subtype_actual_type_from_source_hierarchy_alias(
     actual_ty: &JavaType,
     target_ty: &JavaType,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     let actual_name = usage_java_type_name(actual_ty)?;
     let target_name = usage_java_type_name(target_ty)?;
@@ -3932,7 +4156,7 @@ fn analyze_expr(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
@@ -3960,7 +4184,7 @@ fn analyze_return_expr(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
@@ -3987,7 +4211,7 @@ fn analyze_nested_argument_expr(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
@@ -4135,6 +4359,7 @@ fn source_call_arg_nullability(
 
 fn source_return_nullability_by_call_name(
     ty: &TypeDecl,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> HashMap<(String, usize), NullabilityState> {
     ty.members
         .iter()
@@ -4142,8 +4367,16 @@ fn source_return_nullability_by_call_name(
             let Member::Method(method) = member else {
                 return None;
             };
-            let constraints =
-                crate::signature::source_method_return_nullability_constraints(method);
+            // Usage analysis needs the same body- and API-aware return
+            // nullability that signature solving will use. The syntax-only
+            // pass cannot see through returns such as `return values.get(i)`,
+            // so a direct `out.add(first(values))` would otherwise miss the
+            // nullable element carrier and emit `Vec<T>::push(Option<T>)`.
+            let constraints = crate::signature::typed_source_method_return_nullability_constraints(
+                ty,
+                method,
+                semantic_facts,
+            );
             let state = constraints
                 .into_iter()
                 .filter_map(|constraint| match constraint {
@@ -4181,7 +4414,7 @@ fn analyze_expr_with_context(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
     result_returned: bool,
@@ -4813,7 +5046,7 @@ fn analyze_lambda_body(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
@@ -4879,7 +5112,7 @@ fn record_returned_call_result_use(
     current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
 ) {
     match expr {
@@ -4960,7 +5193,7 @@ fn record_returned_subtype_use(
     declared_return_type: Option<&JavaType>,
     facts: &mut MethodUsageFacts,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) {
     let Some(declared_return_type) = declared_return_type else {
         return;
@@ -5028,7 +5261,7 @@ fn record_call_arg_use(
     current_type: &str,
     field_names: &HashSet<String>,
     _field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     arg: &Expr,
     call_name: &str,
     receiver_type: Option<JavaType>,
@@ -5118,7 +5351,7 @@ fn record_collection_element_subtype_use(
     receiver_type: Option<&JavaType>,
     field_names: &HashSet<String>,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) {
     let (collection_name, targets_field) = match receiver {
         Expr::Var(name) => (name, is_unshadowed_field_name(facts, field_names, name)),
@@ -5169,7 +5402,7 @@ fn record_call_argument_subtype_use(
     resolved: Option<&ResolvedCall>,
     arg_index: usize,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) {
     let Some(target_type) = resolved
         .and_then(|resolved| crate::call_plan::resolved_call_arg_target_type(resolved, arg_index))
@@ -5215,7 +5448,7 @@ fn record_constructor_argument_subtype_use(
     resolved: Option<&ResolvedConstructor>,
     arg_index: usize,
     type_env: &TypeEnv,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) {
     let Some(target_type) = resolved.and_then(|resolved| {
         resolved
@@ -5450,7 +5683,7 @@ fn call_receiver_java_type_with_context(
     current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     match receiver {
         Some(Expr::Var(name)) if is_unshadowed_field_name(facts, field_names, name) => {
@@ -5553,7 +5786,7 @@ fn source_field_type(
     current_type: &str,
     field_name: &str,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<JavaType> {
     declared_field_type(field_types, field_name)
         .cloned()
@@ -5598,7 +5831,7 @@ fn record_trivial_accessor_call_use(
     name: &str,
     args: &[Expr],
     resolved: Option<&ResolvedCall>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     result_returned: bool,
 ) {
     let Some(accessor) =
@@ -5623,7 +5856,7 @@ fn record_trivial_accessor_call_use(
 fn trivial_getter_self_field(
     expr: &Expr,
     current_type: &str,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<String> {
     let Expr::Call {
         receiver,
@@ -5706,7 +5939,7 @@ fn analyze_scoped_statements(
     internal_methods: &HashSet<String>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
 ) {
@@ -5931,7 +6164,7 @@ fn expr_mutates_self_field(
     current_super_type: Option<&str>,
     field_names: &HashSet<String>,
     field_types: &HashMap<String, JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> bool {
     match expr {
         Expr::Binary {
@@ -6095,7 +6328,7 @@ fn modeled_receiver_call_boundary(
     receiver_type: Option<&JavaType>,
     name: &str,
     arg_count: usize,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
     type_env: &TypeEnv,
 ) -> CallArgumentBoundary {
     if boundary != CallArgumentBoundary::Unknown {
@@ -6107,6 +6340,7 @@ fn modeled_receiver_call_boundary(
         return boundary;
     };
     if semantic_facts
+        .external_lookup
         .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(arg_count))
         .is_some_and(|effect| {
             effect.receiver_mutability == crate::facts::ReceiverMutabilityFact::ReadOnly
@@ -6139,7 +6373,7 @@ fn modeled_receiver_call_boundary(
 fn source_receiver_call_boundary(
     boundary: CallArgumentBoundary,
     receiver_type: Option<&JavaType>,
-    semantic_facts: &FactSet,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> CallArgumentBoundary {
     if boundary != CallArgumentBoundary::Unknown {
         return boundary;
@@ -6453,6 +6687,30 @@ class Standards<T extends Mid> {
                 } if field_name == "lines" && element_name == "Base" && actual_name == "Mid"
             )
         }));
+    }
+
+    #[test]
+    fn inherited_collection_field_mutation_marks_subclass_method_mutating() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class CacheBase {
+    java.util.Map<String, String> cache = new java.util.HashMap<String, String>();
+}
+class CacheChild extends CacheBase {
+    void store(String key, String value) {
+        cache.put(key, value);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method = UsageMethodKey::current_rust_method_name("CacheChild", "store");
+        let method_usage = usage
+            .method_usage_by_key(&method)
+            .expect("subclass method usage facts");
+
+        assert!(method_usage.mutates_self);
     }
 
     #[test]
@@ -7118,6 +7376,8 @@ class Use {
             Some(BindingId::new(BindingKind::Param, "input", 0)),
             JavaType::String,
         );
+        let semantic_facts = FactSet::default();
+        let semantic_context = UsageAnalysisContext::new(&semantic_facts);
 
         analyze_stmt(
             &stmt,
@@ -7128,7 +7388,7 @@ class Use {
             &HashSet::new(),
             &HashSet::new(),
             &HashMap::new(),
-            &FactSet::default(),
+            &semantic_context,
             &TypeEnv::new(),
             &HashMap::new(),
         );
@@ -8245,6 +8505,81 @@ class LambdaKeywordParamScope {
             )),
             "{:#?}",
             method_usage.field_uses()
+        );
+    }
+
+    #[test]
+    fn direct_collection_add_sees_typed_nullable_source_call_return() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.ArrayList;
+            import java.util.List;
+            class Values {
+                String first(List<String> values) { return values.get(0); }
+                void copyFirst(List<String> values) {
+                    List<String> copied = new ArrayList<String>();
+                    copied.add(first(values));
+                }
+            }
+            "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "copyFirst" => Some(method),
+                _ => None,
+            })
+            .expect("copyFirst");
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let method_usage = usage.source_method_usage(ty, method).expect("method usage");
+        let copied = method_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name() == "copied")
+            .expect("copied binding");
+        assert!(
+            copied.uses().iter().any(|usage| matches!(
+                usage,
+                BindingUse::ReceiverForCall {
+                    name,
+                    nullable_source_call_arg_indices,
+                    ..
+                } if name == "add" && nullable_source_call_arg_indices == &[0]
+            )),
+            "{:#?}",
+            copied.uses()
+        );
+
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let copied_shape = signatures
+            .method_signature(ty, method)
+            .expect("copyFirst signature")
+            .locals()
+            .iter()
+            .find(|local| local.name() == "copied")
+            .expect("copied local")
+            .shape();
+        assert!(
+            copied_shape
+                .sequence_element_type()
+                .and_then(|element| crate::types::optional_element_type(&element))
+                .is_some(),
+            "{copied_shape:#?}"
         );
     }
 }

@@ -1184,6 +1184,23 @@ fn shared_rust_item_parser_handles_nested_impl_generic_bounds() {
 }
 
 #[test]
+fn focused_package_reuses_translator_emitted_string_runtime() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(repo.join("scripts/translate-focused-package.sh")).unwrap();
+
+    assert!(
+        script.contains("scripts/merge-shared-support-facades.py"),
+        "focused assembly must retain the shared support dependency-closure merger"
+    );
+    assert!(
+        !script.contains("pub fn java_string_format")
+            && !script.contains("pub fn java_string_replace_all")
+            && !script.contains("pub fn java_string_substring"),
+        "focused assembly must not maintain divergent copies of translator string runtime functions"
+    );
+}
+
+#[test]
 fn focused_package_shared_support_stripper_keeps_from_impls_from_module_local_types() {
     let script_path =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh");

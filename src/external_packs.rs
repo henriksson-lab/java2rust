@@ -212,6 +212,51 @@ pub struct ExternalPackModeledApi {
     pub coverage: ExternalApiCoverage,
 }
 
+/// Static member metadata is separate from behavioral API effects: getter or
+/// mutator semantics do not determine whether Java dispatches through a type
+/// or an object. Keeping this in the external-pack layer lets call planning
+/// and facade assembly share one declaration instead of each maintaining a
+/// corpus-specific exception.
+const BUILTIN_EXTERNAL_STATIC_APIS: &[(&str, &str, usize)] = &[
+    ("htsjdk.samtools.util.Log", "getInstance", 1),
+    ("Log", "getInstance", 1),
+    ("htsjdk.variant.variantcontext.Allele", "create", 1),
+    ("htsjdk.variant.variantcontext.Allele", "create", 2),
+    (
+        "htsjdk.variant.variantcontext.Allele",
+        "wouldBeSymbolicAllele",
+        1,
+    ),
+    (
+        "htsjdk.variant.variantcontext.Allele",
+        "acceptableAlleleBases",
+        2,
+    ),
+    ("Allele", "create", 1),
+    ("Allele", "create", 2),
+    ("Allele", "wouldBeSymbolicAllele", 1),
+    ("Allele", "acceptableAlleleBases", 2),
+    ("htsjdk.tribble.util.ParsingUtils", "openInputStream", 2),
+    ("ParsingUtils", "openInputStream", 2),
+    ("htsjdk.variant.bcf2.BCF2Codec", "tryReadBCFVersion", 1),
+    ("BCF2Codec", "tryReadBCFVersion", 1),
+];
+
+pub(crate) fn external_pack_api_is_static(
+    receiver_type: &str,
+    method: &str,
+    arg_count: usize,
+) -> bool {
+    let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
+    BUILTIN_EXTERNAL_STATIC_APIS
+        .iter()
+        .any(|(owner, candidate, arity)| {
+            crate::stdlib::canonical_external_receiver_type_key(owner) == receiver
+                && *candidate == method
+                && *arity == arg_count
+        })
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalPackModeledConstructor {
     pub type_name: &'static str,
@@ -355,6 +400,12 @@ impl ExternalPackManifest {
         }
         if self.pack_name == SAMTOOLS_UTIL_PACK {
             push_samtools_util_conversion_facts(facts);
+        }
+        if self.pack_name == TRIBBLE_FEATURE_PACK {
+            push_tribble_feature_conversion_facts(facts);
+        }
+        if self.pack_name == BCF_PACK {
+            push_bcf_conversion_facts(facts);
         }
         for field in self.field_nullability {
             facts
@@ -723,6 +774,41 @@ fn push_samtools_util_conversion_facts(facts: &mut FactSet) {
                 kind: ExternalConversionAdapterKind::Into,
                 provenance: FactProvenance::ExternalLibraryPack,
             });
+    }
+}
+
+fn push_tribble_feature_conversion_facts(facts: &mut FactSet) {
+    push_external_interface_conversion_facts(
+        facts,
+        &["htsjdk.tribble.AsciiFeatureCodec", "AsciiFeatureCodec"],
+        &["htsjdk.tribble.FeatureCodec", "FeatureCodec"],
+    );
+}
+
+fn push_bcf_conversion_facts(facts: &mut FactSet) {
+    push_external_interface_conversion_facts(
+        facts,
+        &["htsjdk.variant.bcf2.BCF2Codec", "BCF2Codec"],
+        &["htsjdk.tribble.FeatureCodec", "FeatureCodec"],
+    );
+}
+
+fn push_external_interface_conversion_facts(
+    facts: &mut FactSet,
+    implementors: &[&str],
+    interfaces: &[&str],
+) {
+    for implementor in implementors {
+        for interface in interfaces {
+            facts
+                .external_conversion_adapter_facts
+                .push(ExternalConversionAdapterFact {
+                    from_type: (*implementor).to_string(),
+                    to_type: (*interface).to_string(),
+                    kind: ExternalConversionAdapterKind::Into,
+                    provenance: FactProvenance::ExternalLibraryPack,
+                });
+        }
     }
 }
 
@@ -4562,6 +4648,8 @@ const TRIBBLE_FEATURE_OWNED_TYPES: &[&str] = &[
     "htsjdk.tribble.bed.BEDFeature",
     "htsjdk.tribble.FeatureCodecHeader",
     "FeatureCodecHeader",
+    "htsjdk.tribble.readers.LineIterator",
+    "LineIterator",
     "htsjdk.tribble.readers.CodecLineParsingException",
     "CodecLineParsingException",
     "htsjdk.tribble.gff.Gff3BaseData",
@@ -4571,6 +4659,24 @@ const TRIBBLE_FEATURE_OWNED_TYPES: &[&str] = &[
 ];
 
 const TRIBBLE_FEATURE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    typed_argument_effect(
+        "htsjdk.tribble.AsciiFeatureCodec",
+        "makeSourceFromStream",
+        1,
+        0,
+        "InputStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Escapes,
+    ),
+    typed_argument_effect(
+        "AsciiFeatureCodec",
+        "makeSourceFromStream",
+        1,
+        0,
+        "InputStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Escapes,
+    ),
     ExternalPackArgumentEffect {
         receiver_type: "htsjdk.tribble.AbstractFeatureReader",
         method_name: "getFeatureReader",
@@ -4591,6 +4697,261 @@ const TRIBBLE_FEATURE_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
         argument_mutability: ReceiverMutabilityFact::ReadOnly,
         alias_policy: ExternalArgumentAliasPolicy::Borrowed,
     },
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "join",
+        2,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "join",
+        2,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "join",
+        2,
+        1,
+        "Collection<String>",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "join",
+        2,
+        1,
+        "Collection<String>",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "sortList",
+        1,
+        0,
+        "Collection<String>",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "sortList",
+        1,
+        0,
+        "Collection<String>",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "isSorted",
+        1,
+        0,
+        "Collection<String>",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "isSorted",
+        1,
+        0,
+        "Collection<String>",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        2,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "split",
+        2,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        3,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "split",
+        3,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        4,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "split",
+        4,
+        0,
+        "String",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        3,
+        1,
+        "String[]",
+        ReceiverMutabilityFact::MutatesReceiver,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "split",
+        3,
+        1,
+        "String[]",
+        ReceiverMutabilityFact::MutatesReceiver,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "split",
+        4,
+        1,
+        "String[]",
+        ReceiverMutabilityFact::MutatesReceiver,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "ParsingUtils",
+        "split",
+        4,
+        1,
+        "String[]",
+        ReceiverMutabilityFact::MutatesReceiver,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+];
+
+const BCF_ARGUMENT_EFFECTS: &[ExternalPackArgumentEffect] = &[
+    typed_argument_effect(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "makeSourceFromStream",
+        1,
+        0,
+        "InputStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Escapes,
+    ),
+    typed_argument_effect(
+        "BCF2Codec",
+        "makeSourceFromStream",
+        1,
+        0,
+        "InputStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Escapes,
+    ),
+    typed_argument_effect(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "readHeader",
+        1,
+        0,
+        "PositionalBufferedStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "BCF2Codec",
+        "readHeader",
+        1,
+        0,
+        "PositionalBufferedStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "isDone",
+        1,
+        0,
+        "PositionalBufferedStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "BCF2Codec",
+        "isDone",
+        1,
+        0,
+        "PositionalBufferedStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "decode",
+        1,
+        0,
+        "PositionalBufferedStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "BCF2Codec",
+        "decode",
+        1,
+        0,
+        "PositionalBufferedStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "tryReadBCFVersion",
+        1,
+        0,
+        "InputStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
+    typed_argument_effect(
+        "BCF2Codec",
+        "tryReadBCFVersion",
+        1,
+        0,
+        "InputStream",
+        ReceiverMutabilityFact::ReadOnly,
+        ExternalArgumentAliasPolicy::Borrowed,
+    ),
 ];
 
 const TRIBBLE_INDEX_OWNED_TYPES: &[&str] = &[
@@ -5603,6 +5964,27 @@ const fn readonly_borrowed_argument(
     }
 }
 
+const fn typed_argument_effect(
+    receiver_type: &'static str,
+    method_name: &'static str,
+    arg_count: usize,
+    parameter_index: usize,
+    parameter_type: &'static str,
+    argument_mutability: ReceiverMutabilityFact,
+    alias_policy: ExternalArgumentAliasPolicy,
+) -> ExternalPackArgumentEffect {
+    ExternalPackArgumentEffect {
+        receiver_type,
+        method_name,
+        arg_count: Some(arg_count),
+        parameter_index,
+        parameter_type: Some(parameter_type),
+        parameter_nullability: NullabilityState::DefinitelyNonNull,
+        argument_mutability,
+        alias_policy,
+    }
+}
+
 const fn non_null_field(
     type_name: &'static str,
     field_name: &'static str,
@@ -5701,6 +6083,29 @@ const fn semantic_typed_effect_with_arity(
     )
 }
 
+const fn semantic_typed_effect_with_params(
+    receiver_type: &'static str,
+    method_name: &'static str,
+    params: &'static [&'static str],
+    role: ExternalApiRole,
+    receiver_mutability: ReceiverMutabilityFact,
+    return_type: &'static str,
+    return_nullability: NullabilityState,
+) -> ExternalPackApiEffect {
+    ExternalPackApiEffect {
+        receiver_type,
+        method_name,
+        arg_count: Some(params.len()),
+        params,
+        rust_name: None,
+        role,
+        receiver_mutability,
+        return_type: Some(return_type),
+        return_nullability,
+        thrown: &[],
+    }
+}
+
 const fn semantic_fluent_mutator_effect(
     receiver_type: &'static str,
     method_name: &'static str,
@@ -5724,8 +6129,11 @@ const HDF5_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
 const VARIANTCONTEXT_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("htsjdk.variant.variantcontext.Allele"),
     cloneable_final_capability("Allele"),
-    cloneable_final_capability("htsjdk.variant.variantcontext.VariantContext"),
-    cloneable_final_capability("VariantContext"),
+    cloneable_final_implements_capability(
+        "htsjdk.variant.variantcontext.VariantContext",
+        FEATURE_LOCATABLE_IMPL,
+    ),
+    cloneable_final_implements_capability("VariantContext", FEATURE_LOCATABLE_IMPL),
     cloneable_final_capability("htsjdk.variant.variantcontext.VariantContext.Type"),
     cloneable_final_capability("VariantContext.Type"),
     cloneable_final_capability("Type"),
@@ -6482,6 +6890,8 @@ const TRIBBLE_FEATURE_TYPE_CAPABILITIES: &[ExternalPackTypeCapability] = &[
     cloneable_final_capability("BEDFeature"),
     cloneable_final_capability("htsjdk.tribble.FeatureCodecHeader"),
     cloneable_final_capability("FeatureCodecHeader"),
+    cloneable_final_capability("htsjdk.tribble.readers.LineIterator"),
+    cloneable_final_capability("LineIterator"),
     cloneable_final_capability("htsjdk.tribble.gff.Gff3BaseData"),
     cloneable_final_capability("Gff3BaseData"),
     extends_capability(
@@ -11110,6 +11520,88 @@ const JAVA_SQL_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_params(
+        "htsjdk.tribble.AsciiFeatureCodec",
+        "makeSourceFromStream",
+        &["InputStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "LineIterator",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "AsciiFeatureCodec",
+        "makeSourceFromStream",
+        &["InputStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "LineIterator",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.FeatureCodecHeader",
+        "getHeaderValue",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "FeatureCodecHeader",
+        "getHeaderValue",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.readers.LineIterator",
+        "next",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "LineIterator",
+        "next",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.readers.LineIterator",
+        "peek",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "LineIterator",
+        "peek",
+        0,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_boolean_getter_effect(
+        "htsjdk.tribble.readers.LineIterator",
+        "hasNext",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_boolean_getter_effect(
+        "LineIterator",
+        "hasNext",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect_with_arity(
         "htsjdk.tribble.util.ParsingUtils",
         "openInputStream",
@@ -11426,6 +11918,52 @@ const TRIBBLE_FEATURE_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect_with_arity(
         "htsjdk.tribble.util.ParsingUtils",
+        "join",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ParsingUtils",
+        "join",
+        2,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "String",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.util.ParsingUtils",
+        "sortList",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "ParsingUtils",
+        "sortList",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_boolean_getter_effect(
+        "htsjdk.tribble.util.ParsingUtils",
+        "isSorted",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_boolean_getter_effect(
+        "ParsingUtils",
+        "isSorted",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "htsjdk.tribble.util.ParsingUtils",
         "split",
         2,
         ExternalApiRole::Getter,
@@ -11730,32 +12268,60 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "VariantContextWriter",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_mutator_effect(
+    semantic_typed_effect_with_params(
         "htsjdk.variant.variantcontext.writer.VariantContextWriter",
         "setHeader",
+        &["VCFHeader"],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect(
+    semantic_typed_effect_with_params(
         "VariantContextWriter",
         "setHeader",
+        &["VCFHeader"],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect(
+    semantic_typed_effect_with_params(
         "htsjdk.variant.variantcontext.writer.VariantContextWriter",
         "writeHeader",
+        &["VCFHeader"],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect(
+    semantic_typed_effect_with_params(
         "VariantContextWriter",
         "writeHeader",
+        &["VCFHeader"],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect(
+    semantic_typed_effect_with_params(
         "htsjdk.variant.variantcontext.writer.VariantContextWriter",
         "add",
+        &["VariantContext"],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect("VariantContextWriter", "add", NullabilityState::Unknown),
+    semantic_typed_effect_with_params(
+        "VariantContextWriter",
+        "add",
+        &["VariantContext"],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
     semantic_typed_effect(
         "htsjdk.variant.variantcontext.writer.VariantContextWriter",
         "checkError",
@@ -11772,12 +12338,24 @@ const VCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "boolean",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_mutator_effect(
+    semantic_typed_effect_with_params(
         "htsjdk.variant.variantcontext.writer.VariantContextWriter",
         "close",
+        &[],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
         NullabilityState::Unknown,
     ),
-    semantic_mutator_effect("VariantContextWriter", "close", NullabilityState::Unknown),
+    semantic_typed_effect_with_params(
+        "VariantContextWriter",
+        "close",
+        &[],
+        ExternalApiRole::Mutator,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
     semantic_typed_effect(
         "htsjdk.variant.vcf.VCFHeader",
         "getMetaDataInInputOrder",
@@ -12395,14 +12973,20 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "SAMSequenceRecord",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceDictionary",
         "getSequenceIndex",
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "SAMSequenceDictionary",
         "getSequenceIndex",
+        ExternalApiRole::IndexedGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -12421,14 +13005,20 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceDictionary",
         "getSequences",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<SAMSequenceRecord>",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "SAMSequenceDictionary",
         "getSequences",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "List<SAMSequenceRecord>",
         NullabilityState::DefinitelyNonNull,
     ),
     api_effect(
@@ -12475,24 +13065,36 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "addSequence",
         NullabilityState::Unknown,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceDictionary",
         "size",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "SAMSequenceDictionary",
         "size",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceDictionary",
         "isEmpty",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
         NullabilityState::DefinitelyNonNull,
     ),
-    semantic_getter_effect(
+    semantic_typed_effect(
         "SAMSequenceDictionary",
         "isEmpty",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -12557,6 +13159,16 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getSequenceIndex",
         NullabilityState::DefinitelyNonNull,
     ),
+    semantic_setter_effect(
+        "htsjdk.samtools.SAMSequenceRecord",
+        "setSequenceIndex",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_setter_effect(
+        "SAMSequenceRecord",
+        "setSequenceIndex",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceRecord",
         "getMd5",
@@ -12608,6 +13220,16 @@ const SAM_HEADER_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ReceiverMutabilityFact::ReadOnly,
         "String",
         NullabilityState::MaybeNull,
+    ),
+    semantic_setter_effect(
+        "htsjdk.samtools.SAMSequenceRecord",
+        "setAssembly",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_setter_effect(
+        "SAMSequenceRecord",
+        "setAssembly",
+        NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
         "htsjdk.samtools.SAMSequenceRecord",
@@ -14873,6 +15495,24 @@ const SAM_REFERENCE_API_EFFECTS: &[ExternalPackApiEffect] = &[
 ];
 
 const SAMTOOLS_UTIL_API_EFFECTS: &[ExternalPackApiEffect] = &[
+    semantic_typed_effect_with_arity(
+        "htsjdk.samtools.util.Log",
+        "getInstance",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Log",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_arity(
+        "Log",
+        "getInstance",
+        1,
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Log",
+        NullabilityState::DefinitelyNonNull,
+    ),
     semantic_side_effect_with_arity(
         "htsjdk.samtools.util.AbstractAsyncWriter",
         "write",
@@ -16147,6 +16787,38 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "htsjdk.variant.variantcontext.Allele",
+        "wouldBeSymbolicAllele",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Allele",
+        "wouldBeSymbolicAllele",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.Allele",
+        "acceptableAlleleBases",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Allele",
+        "acceptableAlleleBases",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.Allele",
         "getBaseString",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -17127,6 +17799,22 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
     ),
     semantic_typed_effect(
         "VariantContext",
+        "getAttributeAsInt",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.CommonInfo",
+        "getAttributeAsInt",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "int",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "CommonInfo",
         "getAttributeAsInt",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
@@ -18007,6 +18695,16 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "VariantContextBuilder",
     ),
     semantic_fluent_mutator_effect("VariantContextBuilder", "filters", "VariantContextBuilder"),
+    semantic_fluent_mutator_effect(
+        "htsjdk.variant.variantcontext.VariantContextBuilder",
+        "genotypesNoValidation",
+        "VariantContextBuilder",
+    ),
+    semantic_fluent_mutator_effect(
+        "VariantContextBuilder",
+        "genotypesNoValidation",
+        "VariantContextBuilder",
+    ),
     semantic_typed_effect(
         "htsjdk.variant.variantcontext.VariantContextBuilder",
         "getFilters",
@@ -18167,6 +18865,12 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "GenotypeBuilder",
     ),
     semantic_fluent_mutator_effect("GenotypeBuilder", "noPL", "GenotypeBuilder"),
+    semantic_fluent_mutator_effect(
+        "htsjdk.variant.variantcontext.GenotypeBuilder",
+        "maxAttributes",
+        "GenotypeBuilder",
+    ),
+    semantic_fluent_mutator_effect("GenotypeBuilder", "maxAttributes", "GenotypeBuilder"),
     semantic_typed_effect(
         "htsjdk.variant.variantcontext.GenotypeBuilder",
         "make",
@@ -18830,7 +19534,7 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getFilters",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Set<String>",
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -18838,7 +19542,7 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
         "getFilters",
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
-        "Set<String>",
+        "String",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -18858,6 +19562,22 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
+        "htsjdk.variant.variantcontext.Genotype",
+        "isAvailable",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "Genotype",
+        "isAvailable",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
         "htsjdk.variant.variantcontext.GenotypesContext",
         "size",
         ExternalApiRole::Getter,
@@ -19079,6 +19799,70 @@ const VARIANTCONTEXT_API_EFFECTS: &[ExternalPackApiEffect] = &[
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "Set<String>",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.GenotypesContext",
+        "getUnparsedGenotypeData",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "GenotypesContext",
+        "getUnparsedGenotypeData",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.LazyGenotypesContext",
+        "getUnparsedGenotypeData",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "LazyGenotypesContext",
+        "getUnparsedGenotypeData",
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "Object",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.LazyGenotypesContext",
+        "decode",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "LazyGenotypesContext",
+        "decode",
+        ExternalApiRole::SideEffect,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "void",
+        NullabilityState::Unknown,
+    ),
+    semantic_typed_effect(
+        "htsjdk.variant.variantcontext.GenotypesContext",
+        "isLazyWithData",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect(
+        "GenotypesContext",
+        "isLazyWithData",
+        ExternalApiRole::BooleanGetter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
         NullabilityState::DefinitelyNonNull,
     ),
     semantic_typed_effect(
@@ -20270,8 +21054,8 @@ const JACKSON_DATABIND_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
 ];
 
 const BCF_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
-    erased_object_strategy("htsjdk.variant.bcf2.BCF2Codec"),
-    erased_object_strategy("BCF2Codec"),
+    concrete_object_strategy("htsjdk.variant.bcf2.BCF2Codec"),
+    concrete_object_strategy("BCF2Codec"),
 ];
 
 const SAM_HEADER_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
@@ -20396,8 +21180,8 @@ const TRIBBLE_FEATURE_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
     erased_object_strategy("FeatureReader"),
     erased_object_strategy("htsjdk.tribble.bed.BEDFeature"),
     erased_object_strategy("BEDFeature"),
-    erased_object_strategy("htsjdk.tribble.FeatureCodecHeader"),
-    erased_object_strategy("FeatureCodecHeader"),
+    concrete_object_strategy("htsjdk.tribble.FeatureCodecHeader"),
+    concrete_object_strategy("FeatureCodecHeader"),
     erased_object_strategy("htsjdk.tribble.readers.CodecLineParsingException"),
     erased_object_strategy("CodecLineParsingException"),
     erased_object_strategy("htsjdk.tribble.gff.Gff3BaseData"),
@@ -20477,8 +21261,8 @@ const SAMTOOLS_UTIL_OBJECT_STRATEGIES: &[ExternalPackObjectStrategy] = &[
     erased_object_strategy("FileTermination"),
     erased_object_strategy("htsjdk.samtools.util.BlockCompressedOutputStream"),
     erased_object_strategy("BlockCompressedOutputStream"),
-    erased_object_strategy("htsjdk.samtools.util.Log"),
-    erased_object_strategy("Log"),
+    concrete_object_strategy("htsjdk.samtools.util.Log"),
+    concrete_object_strategy("Log"),
     erased_object_strategy("htsjdk.samtools.util.Log.LogLevel"),
     erased_object_strategy("Log.LogLevel"),
     erased_object_strategy("LogLevel"),
@@ -20569,19 +21353,91 @@ const BCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
 ];
 
 const BCF_API_EFFECTS: &[ExternalPackApiEffect] = &[
-    semantic_typed_effect_with_arity(
+    semantic_typed_effect_with_params(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "makeSourceFromStream",
+        &["InputStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "PositionalBufferedStream",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "BCF2Codec",
+        "makeSourceFromStream",
+        &["InputStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "PositionalBufferedStream",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "readHeader",
+        &["PositionalBufferedStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "FeatureCodecHeader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "BCF2Codec",
+        "readHeader",
+        &["PositionalBufferedStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "FeatureCodecHeader",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "isDone",
+        &["PositionalBufferedStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "BCF2Codec",
+        "isDone",
+        &["PositionalBufferedStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::ReadOnly,
+        "boolean",
+        NullabilityState::DefinitelyNonNull,
+    ),
+    semantic_typed_effect_with_params(
+        "htsjdk.variant.bcf2.BCF2Codec",
+        "decode",
+        &["PositionalBufferedStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "VariantContext",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect_with_params(
+        "BCF2Codec",
+        "decode",
+        &["PositionalBufferedStream"],
+        ExternalApiRole::Getter,
+        ReceiverMutabilityFact::MutatesReceiver,
+        "VariantContext",
+        NullabilityState::MaybeNull,
+    ),
+    semantic_typed_effect_with_params(
         "htsjdk.variant.bcf2.BCF2Codec",
         "tryReadBCFVersion",
-        1,
+        &["InputStream"],
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "BCFVersion",
         NullabilityState::MaybeNull,
     ),
-    semantic_typed_effect_with_arity(
+    semantic_typed_effect_with_params(
         "BCF2Codec",
         "tryReadBCFVersion",
-        1,
+        &["InputStream"],
         ExternalApiRole::Getter,
         ReceiverMutabilityFact::ReadOnly,
         "BCFVersion",
@@ -20843,21 +21699,42 @@ const VCF_MODELED_FIELDS: &[ExternalPackModeledField] = &[
         "DEFAULT_OPTIONS",
     ),
     modeled_semantic_field("VariantContextWriterBuilder", "DEFAULT_OPTIONS"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.writer.Options",
         "INDEX_ON_THE_FLY",
+        "Options",
+        ExternalFieldKind::EnumVariant,
     ),
-    modeled_semantic_field("Options", "INDEX_ON_THE_FLY"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "Options",
+        "INDEX_ON_THE_FLY",
+        "Options",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.writer.Options",
         "DO_NOT_WRITE_GENOTYPES",
+        "Options",
+        ExternalFieldKind::EnumVariant,
     ),
-    modeled_semantic_field("Options", "DO_NOT_WRITE_GENOTYPES"),
-    modeled_semantic_field(
+    modeled_semantic_field_typed(
+        "Options",
+        "DO_NOT_WRITE_GENOTYPES",
+        "Options",
+        ExternalFieldKind::EnumVariant,
+    ),
+    modeled_semantic_field_typed(
         "htsjdk.variant.variantcontext.writer.Options",
         "ALLOW_MISSING_FIELDS_IN_HEADER",
+        "Options",
+        ExternalFieldKind::EnumVariant,
     ),
-    modeled_semantic_field("Options", "ALLOW_MISSING_FIELDS_IN_HEADER"),
+    modeled_semantic_field_typed(
+        "Options",
+        "ALLOW_MISSING_FIELDS_IN_HEADER",
+        "Options",
+        ExternalFieldKind::EnumVariant,
+    ),
 ];
 
 const VARIANTCONTEXT_MODELED_FIELDS: &[ExternalPackModeledField] = &[
@@ -21357,6 +22234,13 @@ const SAMTOOLS_UTIL_MODELED_FIELDS: &[ExternalPackModeledField] = &[
     modeled_semantic_field("Defaults", "USE_ASYNC_IO_WRITE_FOR_SAMTOOLS"),
     modeled_semantic_field("htsjdk.samtools.Defaults", "USE_ASYNC_IO_WRITE_FOR_TRIBBLE"),
     modeled_semantic_field("Defaults", "USE_ASYNC_IO_WRITE_FOR_TRIBBLE"),
+    modeled_semantic_field_typed_value(
+        "htsjdk.samtools.Defaults",
+        "OPTIMISTIC_VCF_4_4",
+        "boolean",
+        "false",
+    ),
+    modeled_semantic_field_typed_value("Defaults", "OPTIMISTIC_VCF_4_4", "boolean", "false"),
     modeled_semantic_field("htsjdk.samtools.SAMUtils", "MAX_PHRED_SCORE"),
     modeled_semantic_field("SAMUtils", "MAX_PHRED_SCORE"),
     modeled_semantic_field("htsjdk.samtools.ReservedTagConstants", "XT"),
@@ -26207,6 +27091,16 @@ const NO_MODELED_FIELDS: &[ExternalPackModeledField] = &[];
 const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("htsjdk.variant.variantcontext.Allele", "create"),
     modeled_semantic("Allele", "create"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.Allele",
+        "wouldBeSymbolicAllele",
+    ),
+    modeled_semantic("Allele", "wouldBeSymbolicAllele"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.Allele",
+        "acceptableAlleleBases",
+    ),
+    modeled_semantic("Allele", "acceptableAlleleBases"),
     modeled_semantic("htsjdk.variant.variantcontext.Allele", "getBaseString"),
     modeled_semantic("Allele", "getBaseString"),
     modeled_semantic("htsjdk.variant.variantcontext.Allele", "getBases"),
@@ -26417,6 +27311,11 @@ const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "getAttributeAsInt",
     ),
     modeled_semantic("VariantContext", "getAttributeAsInt"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.CommonInfo",
+        "getAttributeAsInt",
+    ),
+    modeled_semantic("CommonInfo", "getAttributeAsInt"),
     modeled_semantic(
         "htsjdk.variant.variantcontext.VariantContext",
         "getAttributeAsDouble",
@@ -26711,6 +27610,11 @@ const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("VariantContextBuilder", "filters"),
     modeled_semantic(
         "htsjdk.variant.variantcontext.VariantContextBuilder",
+        "genotypesNoValidation",
+    ),
+    modeled_semantic("VariantContextBuilder", "genotypesNoValidation"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.VariantContextBuilder",
         "getFilters",
     ),
     modeled_semantic("VariantContextBuilder", "getFilters"),
@@ -26770,6 +27674,11 @@ const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("GenotypeBuilder", "noAD"),
     modeled_semantic("htsjdk.variant.variantcontext.GenotypeBuilder", "noPL"),
     modeled_semantic("GenotypeBuilder", "noPL"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.GenotypeBuilder",
+        "maxAttributes",
+    ),
+    modeled_semantic("GenotypeBuilder", "maxAttributes"),
     modeled_semantic("htsjdk.variant.variantcontext.GenotypeBuilder", "make"),
     modeled_semantic("GenotypeBuilder", "make"),
     modeled_semantic(
@@ -26901,6 +27810,8 @@ const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("Genotype", "getFilters"),
     modeled_semantic("htsjdk.variant.variantcontext.Genotype", "countAllele"),
     modeled_semantic("Genotype", "countAllele"),
+    modeled_semantic("htsjdk.variant.variantcontext.Genotype", "isAvailable"),
+    modeled_semantic("Genotype", "isAvailable"),
     modeled_semantic("htsjdk.variant.variantcontext.GenotypesContext", "size"),
     modeled_semantic("GenotypesContext", "size"),
     modeled_semantic("htsjdk.variant.variantcontext.GenotypesContext", "iterator"),
@@ -26941,6 +27852,26 @@ const VARIANTCONTEXT_MODELED_APIS: &[ExternalPackModeledApi] = &[
         "getSampleNames",
     ),
     modeled_semantic("GenotypesContext", "getSampleNames"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.GenotypesContext",
+        "getUnparsedGenotypeData",
+    ),
+    modeled_semantic("GenotypesContext", "getUnparsedGenotypeData"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.LazyGenotypesContext",
+        "getUnparsedGenotypeData",
+    ),
+    modeled_semantic("LazyGenotypesContext", "getUnparsedGenotypeData"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.LazyGenotypesContext",
+        "decode",
+    ),
+    modeled_semantic("LazyGenotypesContext", "decode"),
+    modeled_semantic(
+        "htsjdk.variant.variantcontext.GenotypesContext",
+        "isLazyWithData",
+    ),
+    modeled_semantic("GenotypesContext", "isLazyWithData"),
     modeled_semantic("htsjdk.variant.variantcontext.GenotypeType", "values"),
     modeled_semantic("GenotypeType", "values"),
 ];
@@ -27309,6 +28240,8 @@ const SAM_HEADER_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("SAMSequenceRecord", "setSequenceLength"),
     modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "getSequenceIndex"),
     modeled_semantic("SAMSequenceRecord", "getSequenceIndex"),
+    modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "setSequenceIndex"),
+    modeled_semantic("SAMSequenceRecord", "setSequenceIndex"),
     modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "getMd5"),
     modeled_semantic("SAMSequenceRecord", "getMd5"),
     modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "getAttribute"),
@@ -27317,6 +28250,8 @@ const SAM_HEADER_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("SAMSequenceRecord", "getAttributes"),
     modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "getAssembly"),
     modeled_semantic("SAMSequenceRecord", "getAssembly"),
+    modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "setAssembly"),
+    modeled_semantic("SAMSequenceRecord", "setAssembly"),
     modeled_semantic("htsjdk.samtools.SAMSequenceRecord", "truncateSequenceName"),
     modeled_semantic("SAMSequenceRecord", "truncateSequenceName"),
     modeled_semantic("htsjdk.samtools.SAMFileHeader", "getSequenceDictionary"),
@@ -27706,6 +28641,12 @@ const SAM_REFERENCE_MODELED_APIS: &[ExternalPackModeledApi] = &[
 ];
 
 const TRIBBLE_FEATURE_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("htsjdk.tribble.readers.LineIterator", "next"),
+    modeled_semantic("LineIterator", "next"),
+    modeled_semantic("htsjdk.tribble.readers.LineIterator", "peek"),
+    modeled_semantic("LineIterator", "peek"),
+    modeled_semantic("htsjdk.tribble.readers.LineIterator", "hasNext"),
+    modeled_semantic("LineIterator", "hasNext"),
     modeled_semantic("htsjdk.tribble.util.ParsingUtils", "openInputStream"),
     modeled_semantic("ParsingUtils", "openInputStream"),
     modeled_semantic("htsjdk.tribble.Feature", "getContig"),
@@ -27758,9 +28699,17 @@ const TRIBBLE_FEATURE_MODELED_APIS: &[ExternalPackModeledApi] = &[
     modeled_semantic("FeatureReader", "close"),
     modeled_semantic("htsjdk.tribble.util.ParsingUtils", "split"),
     modeled_semantic("ParsingUtils", "split"),
+    modeled_semantic("htsjdk.tribble.util.ParsingUtils", "join"),
+    modeled_semantic("ParsingUtils", "join"),
+    modeled_semantic("htsjdk.tribble.util.ParsingUtils", "sortList"),
+    modeled_semantic("ParsingUtils", "sortList"),
+    modeled_semantic("htsjdk.tribble.util.ParsingUtils", "isSorted"),
+    modeled_semantic("ParsingUtils", "isSorted"),
 ];
 
 const SAMTOOLS_UTIL_MODELED_APIS: &[ExternalPackModeledApi] = &[
+    modeled_semantic("htsjdk.samtools.util.Log", "getInstance"),
+    modeled_semantic("Log", "getInstance"),
     modeled_semantic("htsjdk.samtools.util.AbstractAsyncWriter", "write"),
     modeled_semantic("AbstractAsyncWriter", "write"),
     modeled_semantic("htsjdk.samtools.util.AbstractAsyncWriter", "close"),
@@ -28267,7 +29216,7 @@ fn build_builtin_external_pack_manifests() -> Vec<ExternalPackManifest> {
             closed_hierarchy: NO_CLOSED_HIERARCHY,
             type_capabilities: BCF_TYPE_CAPABILITIES,
             field_nullability: NO_FIELD_NULLABILITY,
-            argument_effects: NO_ARGUMENT_EFFECTS,
+            argument_effects: BCF_ARGUMENT_EFFECTS,
             exceptions: NO_EXCEPTIONS,
             api_effects: BCF_API_EFFECTS,
             modeled_apis: &[],
@@ -32318,6 +33267,20 @@ pub fn java_platform_constructor_argument_effect_for_actual_arg(
 ) -> Option<ExternalConstructorArgumentEffectFact> {
     let actual_arg_type = crate::types::optional_element_type(actual_arg_type)
         .unwrap_or_else(|| actual_arg_type.clone());
+    if let Some(mut effect) =
+        java_platform_constructor_argument_effect_for(type_name, arg_count, parameter_index)
+        && matches!(effect.parameter_type.as_ref(), Some(JavaType::Named { name, .. })
+            if crate::facts::external_type_name_matches(name, "java.io.InputStream"))
+        && matches!(&actual_arg_type, JavaType::Named { name, .. } | JavaType::Unknown(name)
+            if external_conversion_adapter_for(name, "InputStream").is_some()
+                || crate::facts::external_type_name_matches(name, "java.io.InputStream"))
+    {
+        // The emitted constructor accepts the JavaIntoInputStream capability.
+        // Preserve the actual subtype here so call coercion does not first
+        // erase it into a collision-safe JavaIoInputStream placeholder.
+        effect.parameter_type = Some(actual_arg_type.clone());
+        return Some(effect);
+    }
     if arg_count == 1
         && parameter_index == 0
         && crate::facts::external_type_name_matches(type_name, "java.io.File")

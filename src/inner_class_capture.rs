@@ -68,6 +68,7 @@ pub(crate) fn unconstructable_inner_classes(
         .collect()
 }
 
+#[cfg(test)]
 pub(crate) fn constructed_outer_this_inner_classes(
     program: &Program,
     facts: &FactSet,
@@ -179,6 +180,7 @@ fn collect_in_type(
     }
 }
 
+#[cfg(test)]
 fn constructed_type_names(program: &Program) -> HashSet<String> {
     let mut names = HashSet::new();
     for ty in &program.types {
@@ -473,6 +475,7 @@ fn collect_unsupported_outer_this_constructed_type_names_from_expr(
     }
 }
 
+#[cfg(test)]
 fn collect_constructed_type_names_from_type(ty: &TypeDecl, names: &mut HashSet<String>) {
     for member in &ty.members {
         collect_constructed_type_names_from_member(member, names);
@@ -482,6 +485,7 @@ fn collect_constructed_type_names_from_type(ty: &TypeDecl, names: &mut HashSet<S
     }
 }
 
+#[cfg(test)]
 fn collect_constructed_type_names_from_member(member: &Member, names: &mut HashSet<String>) {
     match member {
         Member::Field(field) => {
@@ -504,12 +508,14 @@ fn collect_constructed_type_names_from_member(member: &Member, names: &mut HashS
     }
 }
 
+#[cfg(test)]
 fn collect_constructed_type_names_from_block(block: &Block, names: &mut HashSet<String>) {
     for stmt in &block.statements {
         collect_constructed_type_names_from_stmt(stmt, names);
     }
 }
 
+#[cfg(test)]
 fn collect_constructed_type_names_from_stmt(stmt: &Stmt, names: &mut HashSet<String>) {
     match stmt {
         Stmt::VarDecl { initializer, .. } | Stmt::Return(initializer) => {
@@ -609,6 +615,7 @@ fn collect_constructed_type_names_from_stmt(stmt: &Stmt, names: &mut HashSet<Str
     }
 }
 
+#[cfg(test)]
 fn collect_constructed_type_names_from_expr(expr: &Expr, names: &mut HashSet<String>) {
     match expr {
         Expr::New {

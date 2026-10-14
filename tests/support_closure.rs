@@ -17,10 +17,16 @@ fn run_merger(dir: &Path) -> (PathBuf, PathBuf) {
     let shared = dir.join("shared.rs");
     let shared_types = dir.join("shared-types.tsv");
     let conflicts = dir.join("conflicts.tsv");
-    let output = Command::new("python3")
+    let mut command = Command::new("python3");
+    command
         .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py"))
         .arg("--generated-dir")
-        .arg(&generated)
+        .arg(&generated);
+    let raw = dir.join("raw");
+    if raw.exists() {
+        command.arg("--merge-input-dir").arg(raw);
+    }
+    let output = command
         .arg("--shared-support")
         .arg(&shared)
         .arg("--shared-types")
@@ -185,6 +191,103 @@ impl Trimmer for std::sync::Arc<LeadingTrimmer> {{
     assert!(
         module.contains("impl Trimmer for std::sync::Arc<LeadingTrimmer>"),
         "{module}"
+    );
+}
+
+#[test]
+fn shared_merger_keeps_wrapper_impls_for_secondary_top_level_source_types() {
+    let dir = temp_dir("secondary_source_wrapper_impls");
+    let generated = dir.join("generated");
+    let raw = dir.join("raw");
+    fs::create_dir_all(&generated).unwrap();
+    fs::create_dir_all(&raw).unwrap();
+    let trait_decl = r#"
+pub trait Parser {
+    fn parse(&self) -> i32;
+}
+"#;
+    let owner = format!(
+        r#"{trait_decl}
+pub struct Owner;
+
+pub struct SecondaryParser;
+
+impl Parser for SecondaryParser {{
+    fn parse(&self) -> i32 {{ 1 }}
+}}
+
+impl Parser for std::sync::Arc<SecondaryParser> {{
+    fn parse(&self) -> i32 {{ self.as_ref().parse() }}
+}}
+"#
+    );
+    // The package script retains this raw snapshot before its coarse support
+    // stripping pass. Simulate that pass having removed only the wrapper impl;
+    // the semantic merger must recover it beside its secondary source owner.
+    fs::write(raw.join("00001_Owner.rs"), &owner).unwrap();
+    fs::write(
+        generated.join("00001_Owner.rs"),
+        owner.replace(
+            r#"
+impl Parser for std::sync::Arc<SecondaryParser> {
+    fn parse(&self) -> i32 { self.as_ref().parse() }
+}
+"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    let user = format!(
+        r#"{trait_decl}
+#[derive(Clone, Default)]
+pub struct SecondaryParser;
+impl SecondaryParser {{
+    pub fn new() -> SecondaryParser {{ SecondaryParser }}
+}}
+
+pub struct User;
+"#
+    );
+    fs::write(generated.join("00002_User.rs"), &user).unwrap();
+    fs::write(raw.join("00002_User.rs"), user).unwrap();
+
+    let (shared, _) = run_merger(&dir);
+    let shared = fs::read_to_string(shared).unwrap();
+    assert!(shared.contains("pub trait Parser"), "{shared}");
+    assert!(!shared.contains("pub struct SecondaryParser"), "{shared}");
+    assert!(!shared.contains("Arc<SecondaryParser>"), "{shared}");
+
+    let owner = fs::read_to_string(generated.join("00001_Owner.rs")).unwrap();
+    assert!(owner.contains("pub struct SecondaryParser"), "{owner}");
+    assert!(
+        owner.contains("impl Parser for std::sync::Arc<SecondaryParser>"),
+        "{owner}"
+    );
+    let user = fs::read_to_string(generated.join("00002_User.rs")).unwrap();
+    assert!(!user.contains("pub struct SecondaryParser"), "{user}");
+    assert!(!user.contains("impl SecondaryParser"), "{user}");
+
+    // Assembly can invoke the merger with an already-populated shared
+    // manifest after an earlier coarse stripping phase. Even when there is
+    // nothing left to promote, the raw source snapshot remains authoritative
+    // for source-owned wrapper coherence impls.
+    fs::write(
+        generated.join("00001_Owner.rs"),
+        owner.replace(
+            r#"
+impl Parser for std::sync::Arc<SecondaryParser> {
+    fn parse(&self) -> i32 { self.as_ref().parse() }
+}
+"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    run_merger(&dir);
+    let owner = fs::read_to_string(generated.join("00001_Owner.rs")).unwrap();
+    assert!(
+        owner.contains("impl Parser for std::sync::Arc<SecondaryParser>"),
+        "{owner}"
     );
 }
 

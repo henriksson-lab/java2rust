@@ -62,6 +62,16 @@ impl<'a> CallableAnalysis<'a> {
         self.usage.source_method_name_anywhere_mutates(method_name)
     }
 
+    pub(crate) fn resolved_source_method_mutates(
+        &self,
+        resolved: &crate::java_ir::ResolvedCall,
+        source_name: &str,
+    ) -> bool {
+        self.usage
+            .resolved_source_method_usage(resolved, source_name)
+            .is_some_and(crate::usage::MethodUsageFacts::mutates_self)
+    }
+
     pub(crate) fn binding_use_count_for_rust_method_family(
         &self,
         type_name: &str,

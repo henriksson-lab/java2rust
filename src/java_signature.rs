@@ -1,4 +1,44 @@
-use crate::java_ir::{CallKind, JavaType, MethodDecl, Modifier, Param, Program, TypeDecl};
+use crate::java_ir::{
+    CallKind, ConstructorDecl, JavaType, MethodDecl, Modifier, Param, Program, TypeDecl,
+};
+
+/// Return the Rust member name used to emit a source constructor.
+///
+/// Resolved primary declarations normally cache this name on the IR, while
+/// emitted context declarations may not. Derive the latter from the same
+/// overload rule instead of treating every uncached constructor as `new`.
+pub(crate) fn source_constructor_rust_name(
+    owner: &TypeDecl,
+    constructor: &ConstructorDecl,
+) -> String {
+    let constructor_count = owner
+        .members
+        .iter()
+        .filter(|member| matches!(member, crate::java_ir::Member::Constructor(_)))
+        .count();
+    source_constructor_rust_name_with_count(constructor, constructor_count)
+}
+
+pub(crate) fn source_constructor_rust_name_with_count(
+    constructor: &ConstructorDecl,
+    constructor_count: usize,
+) -> String {
+    if let Some(rust_name) = &constructor.rust_name
+        && !(rust_name == "new" && constructor_count > 1 && !constructor.params.is_empty())
+    {
+        return rust_name.clone();
+    }
+    if constructor.params.is_empty() || constructor_count == 1 {
+        return "new".to_string();
+    }
+    let suffix = constructor
+        .params
+        .iter()
+        .map(|param| crate::parser::type_suffix(&param.ty, param.is_varargs))
+        .collect::<Vec<_>>()
+        .join("_");
+    format!("new_{suffix}")
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct JavaOwnerKey(String);

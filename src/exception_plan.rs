@@ -2812,6 +2812,56 @@ class FixedMetric implements Metric {
     }
 
     #[test]
+    fn current_receiver_method_reference_propagates_overload_fallibility() {
+        let parsed = parse_java_source(
+            r#"
+import java.util.List;
+import java.util.stream.Collectors;
+
+class Decoder {
+    String decode(String value) throws DecodeException {
+        throw new DecodeException();
+    }
+
+    List<String> decode(List<String> values) {
+        return values.stream().map(this::decode).collect(Collectors.toList());
+    }
+}
+
+class DecodeException extends Exception {}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = resolved.facts.clone();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        let decoder = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Decoder")
+            .expect("Decoder type is present");
+        let methods = decoder
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Method(method) if method.name == "decode" => Some(method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(methods.len(), 2);
+        for method in methods {
+            let key = CallableKey::source_method_for_type(decoder, method);
+            assert!(
+                fallibility.returns_result(&key),
+                "method-reference overload {key:?} should share callback fallibility; reasons={:?}",
+                fallibility.callable(&key).map(CallableFallibility::reasons)
+            );
+        }
+    }
+
+    #[test]
     fn generic_interface_override_group_substitutes_type_arguments() {
         let parsed = parse_java_source(
             r#"
@@ -2889,6 +2939,70 @@ class FloatingRatio {
             !fallibility.returns_result(&key),
             "floating-point division cannot throw ArithmeticException: {:?}",
             fallibility.callable(&key).map(CallableFallibility::reasons)
+        );
+    }
+
+    #[test]
+    fn overloaded_constructor_chain_propagates_private_helper_throw() {
+        let parsed = parse_java_source(
+            r#"
+package fixture;
+
+class Registry {
+    static Store<Value> values = new Store<Value>();
+    static void register(Value value) { values.add(value); }
+    static { register(new Value(2)); }
+    static class Store<T> {
+        T value;
+        void add(T value) { this.value = value; }
+    }
+}
+
+abstract class Base {
+    Base(int divisor) { this(divisor, 0); }
+    Base(int divisor, int ignored) { validate(divisor); }
+    private void validate(int divisor) {
+        if (divisor == 0) { throw new IllegalArgumentException("bad divisor"); }
+    }
+}
+
+class Value extends Base {
+    Value(int divisor) { super(divisor); }
+    Value(String value) { super(value.length()); }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = resolved.facts.clone();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        let value = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Value")
+            .expect("Value declaration");
+        let constructor = value
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(constructor)
+                    if constructor.params.first().is_some_and(|param| {
+                        matches!(
+                            param.ty,
+                            JavaType::Primitive(crate::java_ir::PrimitiveType::Int)
+                        )
+                    }) =>
+                {
+                    Some(constructor)
+                }
+                _ => None,
+            })
+            .expect("Value(int) constructor");
+        let key = CallableKey::source_constructor_for_type(value, constructor);
+        assert!(
+            fallibility.returns_result(&key),
+            "constructor={constructor:#?}\nkey={key:?}\ngraph={call_graph:#?}\nfallibility={fallibility:#?}"
         );
     }
 

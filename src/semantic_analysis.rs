@@ -515,6 +515,7 @@ fn collect_java_platform_api_argument_effect_facts(facts: &mut FactSet) {
             .any(|existing| {
                 existing.receiver_type == fact.receiver_type
                     && existing.method_name == fact.method_name
+                    && existing.arg_count == fact.arg_count
                     && existing.parameter_index == fact.parameter_index
                     && existing.provenance == fact.provenance
             });
@@ -564,6 +565,7 @@ fn collect_builtin_external_api_argument_effect_facts(facts: &mut FactSet, enabl
             .any(|existing| {
                 existing.receiver_type == fact.receiver_type
                     && existing.method_name == fact.method_name
+                    && existing.arg_count == fact.arg_count
                     && existing.parameter_index == fact.parameter_index
                     && existing.provenance == fact.provenance
             });
@@ -4382,9 +4384,62 @@ fn same_type_constructor_call_graph_edges(
 }
 
 fn collect_dispatch_requirement_facts(program: &Program, facts: &mut FactSet) {
+    // A non-static inner object retains its enclosing reference with the
+    // enclosing declaration's Java type.  When that declaration has source
+    // subclasses, construction inherited by a subclass must preserve the
+    // child's runtime dispatch rather than capture a sliced base value.  Feed
+    // this ordinary Java polymorphism into the same hierarchy-carrier planner
+    // used by assignments and returns.
+    let captured_outer_types = facts
+        .captures
+        .owners
+        .iter()
+        .flat_map(|owner| owner.captures.iter())
+        .filter(|capture| capture.source == crate::facts::CaptureSource::OuterThis)
+        .map(|capture| capture.ty.clone())
+        .filter(|outer_type| {
+            dispatch_requirement_type_name(outer_type)
+                .is_some_and(|outer_name| program_has_source_subtype(program, outer_name))
+        })
+        .collect::<Vec<_>>();
+    for outer_type in captured_outer_types {
+        push_dispatch_requirement_fact(
+            facts,
+            &outer_type,
+            DispatchRequirementKind::NeedsSubtypeDispatch,
+        );
+    }
     for ty in &program.types {
         collect_type_dispatch_requirement_facts(ty, facts);
     }
+}
+
+fn program_has_source_subtype(program: &Program, target_name: &str) -> bool {
+    fn visit<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
+        out.push(ty);
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, out);
+            }
+        }
+    }
+
+    let mut types = Vec::new();
+    for ty in &program.types {
+        visit(ty, &mut types);
+    }
+    types.into_iter().any(|ty| {
+        ty.name != target_name
+            && ty.extends.as_deref().is_some_and(|super_name| {
+                crate::facts::external_type_name_matches(super_name, target_name)
+                    || crate::inherited_members::find_type_decl_for_owner_context(
+                        program, &ty.name, super_name,
+                    )
+                    .is_some_and(|super_ty| {
+                        crate::facts::external_type_name_matches(&super_ty.name, target_name)
+                    })
+            })
+    })
 }
 
 fn collect_type_dispatch_requirement_facts(ty: &TypeDecl, facts: &mut FactSet) {

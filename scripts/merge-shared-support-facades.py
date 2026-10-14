@@ -282,6 +282,25 @@ def prelude_source_owned_nested_types(path: Path) -> set[str]:
         for _alias, target in aliases
         if target in declared and target.startswith(f"{source_type}_")
     )
+    # Java permits additional package-private top-level declarations in the
+    # same file. The translator emits those concrete source declarations after
+    # the filename's primary type, whereas synthesized support facades live in
+    # the prelude. Treat every post-primary declaration as source-owned so a
+    # duplicate facade in another module cannot promote only the declaration
+    # while discarding wrapper coherence impls such as `Trait for Arc<Helper>`.
+    after_primary = False
+    depth = 0
+    for line in lines:
+        if depth == 0:
+            type_match = TYPE_RE.match(line)
+            trait_match = TRAIT_DECL_RE.match(line)
+            if type_match and type_match.group(2) == source_type:
+                after_primary = True
+            elif after_primary and type_match:
+                nested.add(type_match.group(2))
+            elif after_primary and trait_match:
+                nested.add(trait_match.group(1))
+        depth += brace_delta(line)
     return nested
 
 
@@ -504,6 +523,9 @@ def parse_items(
                 from_match = FROM_TRAIT_RE.match(raw_trait)
                 source_owned_wrapper = impl_target_wraps_type(
                     raw_target, source_type
+                ) or any(
+                    impl_target_wraps_type(raw_target, owned_type)
+                    for owned_type in source_owned_nested_types
                 )
                 source_owned_nested = (
                     target_name in source_owned_nested_types
@@ -976,6 +998,34 @@ def remove_duplicate_source_owned_nested_stubs(path: Path) -> None:
         index += 1
 
     path.write_text("".join(line for line_index, line in enumerate(lines) if not remove[line_index]))
+
+
+def remove_cross_module_source_owned_stubs(
+    path: Path,
+    globally_source_owned_names: set[str],
+    locally_source_owned_names: set[str],
+) -> None:
+    """Remove facade shadows of concrete source declarations owned elsewhere.
+
+    A package-private top-level Java declaration is emitted after its file's
+    primary declaration. Other translated files can still synthesize a
+    prelude facade for that same nominal type. Leaving that facade module-local
+    shadows the crate-visible concrete source type (and therefore hides its
+    constructors and real methods) even though no Rust coherence conflict is
+    reported. Source ownership is package-wide, so strip every prelude item
+    for the identity outside the module that owns the concrete declaration.
+    """
+    names = globally_source_owned_names - locally_source_owned_names
+    if not names or not path.exists():
+        return
+    lines = path.read_text().splitlines(keepends=True)
+    remove = [False] * len(lines)
+    for item in parse_items(path, names, locally_source_owned_names):
+        if item["name"] not in names or not item.get("prelude", False):
+            continue
+        for index in range(item["start"], item["end"]):
+            remove[index] = True
+    path.write_text("".join(line for index, line in enumerate(lines) if not remove[index]))
 
 
 def remove_duplicate_inherent_methods(path: Path) -> None:
@@ -1532,6 +1582,53 @@ def remove_items(
         for index in range(item["start"], item["end"]):
             remove[index] = True
     path.write_text("".join(line for index, line in enumerate(lines) if not remove[index]))
+
+
+def restore_source_owned_wrapper_impls(
+    generated_path: Path,
+    merge_input_path: Path,
+) -> None:
+    """Restore source-owned Rc/Arc trait impls removed by an earlier pass.
+
+    Package assembly deliberately keeps a raw pre-strip snapshot. An early
+    support-deduplication pass can only see the filename's primary source type
+    and may therefore remove `impl Trait for Rc<SecondarySource>` when `Trait`
+    is shared. The merger has structural ownership information for every
+    source declaration in the file, so recover those coherence impls here and
+    leave ordinary shared-facade wrappers to the normal promotion logic.
+    """
+    if not merge_input_path.exists() or not generated_path.exists():
+        return
+    source_type = source_type_for(merge_input_path)
+    source_owned = prelude_source_owned_nested_types(merge_input_path)
+    lines = merge_input_path.read_text().splitlines(keepends=True)
+    wrappers = []
+    depth = 0
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        if depth == 0:
+            trait_match = TRAIT_IMPL_RE.match(impl_header_text(lines, index))
+            if trait_match:
+                raw_target = trait_match.group(2).strip()
+                if impl_target_wraps_type(raw_target, source_type) or any(
+                    impl_target_wraps_type(raw_target, owned_type)
+                    for owned_type in source_owned
+                ):
+                    end = item_end(lines, index)
+                    wrappers.append("".join(lines[index:end]).strip())
+                    index = end
+                    continue
+        depth += brace_delta(line)
+        index += 1
+    if not wrappers:
+        return
+    rendered = generated_path.read_text()
+    missing = [wrapper for wrapper in wrappers if wrapper and wrapper not in rendered]
+    if missing:
+        generated_path.write_text(
+            rendered.rstrip() + "\n\n" + "\n\n".join(missing) + "\n"
+        )
 
 
 def box_self_recursive_fields(name: str, text: str) -> str:
@@ -2119,6 +2216,16 @@ def main() -> int:
             existing_shared_from_impl_keys,
         )
         for path in rust_paths:
+            matching_input = next(
+                (candidate for candidate in merge_input_paths if candidate.name == path.name),
+                path,
+            )
+            restore_source_owned_wrapper_impls(path, matching_input)
+            remove_cross_module_source_owned_stubs(
+                path,
+                protected_source_owned_nested_names,
+                prelude_source_owned_nested_types(matching_input),
+            )
             remove_duplicate_source_owned_nested_stubs(path)
             remove_duplicate_inherent_methods(path)
         Path(args.conflicts).write_text("".join(conflict_lines))
@@ -2715,6 +2822,11 @@ def main() -> int:
             shared_types.write(f"{name}\n")
 
     for path, items in items_by_path.items():
+        matching_input = next(
+            (candidate for candidate in merge_input_paths if candidate.name == path.name),
+            path,
+        )
+        restore_source_owned_wrapper_impls(path, matching_input)
         if selected_functions:
             items = items + [
                 item
@@ -2739,6 +2851,11 @@ def main() -> int:
             removal_only_names,
             keep_last_prelude_names,
             selected - removal_only_names,
+        )
+        remove_cross_module_source_owned_stubs(
+            path,
+            protected_source_owned_nested_names,
+            source_owned_nested_types_by_filename.get(path.name, set()),
         )
         remove_duplicate_source_owned_nested_stubs(path)
         remove_duplicate_inherent_methods(path)

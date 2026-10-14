@@ -14,9 +14,6 @@ pub(crate) fn facade_sequence_element_type(java_ty: &JavaType) -> Option<JavaTyp
     };
     let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
     let simple = canonical.rsplit('.').next().unwrap_or(&canonical);
-    if name == "CloseableIterator" {
-        eprintln!("DEBUG FACADE SEQ name={name} canonical={canonical} simple={simple} args={args:?}");
-    }
     match simple {
         // Iterator subinterfaces keep the same element contract as
         // java.util.Iterator even when their runtime object is supplied by an
@@ -86,6 +83,119 @@ impl IOUtils {
     )
 }
 
+/// Executable adapter for the small, collection-oriented part of HTSJDK's
+/// `ParsingUtils` API.
+///
+/// This is an external-library boundary rather than source-specific lowering:
+/// any caller of the same published API shares these semantics.  In
+/// particular, the array-filling split overload mutates the caller-provided
+/// storage instead of accepting the facade generator's otherwise tempting
+/// owned placeholder.
+pub(crate) fn htsjdk_parsing_utils_support_item() -> crate::rust_ir::RustItem {
+    crate::rust_ir::RustItem::Raw(
+        r#"pub struct HtsjdkTribbleUtilParsingUtils;
+
+impl HtsjdkTribbleUtilParsingUtils {
+    pub fn join<S, T>(separator: S, values: &[T]) -> String
+    where
+        S: AsRef<str>,
+        T: ToString,
+    {
+        values
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(separator.as_ref())
+    }
+
+    pub fn sort_list<'a, T, I>(values: I) -> Vec<T>
+    where
+        T: Ord + Clone + 'a,
+        I: IntoIterator<Item = &'a T>,
+    {
+        let mut sorted = values.into_iter().cloned().collect::<Vec<_>>();
+        sorted.sort();
+        sorted
+    }
+
+    pub fn is_sorted<T: Ord>(values: &[T]) -> bool {
+        values.windows(2).all(|pair| pair[0] <= pair[1])
+    }
+
+    pub fn split_2<S: AsRef<str>>(input: S, delimiter: char) -> Vec<String> {
+        input.as_ref().split(delimiter).map(str::to_string).collect()
+    }
+
+    pub fn split_3<S: AsRef<str>>(
+        input: S,
+        tokens: &mut [Option<String>],
+        delimiter: char,
+    ) -> i32 {
+        Self::split_4(input, tokens, delimiter, false)
+    }
+
+    pub fn split_4<S: AsRef<str>>(
+        input: S,
+        tokens: &mut [Option<String>],
+        delimiter: char,
+        condense_trailing_tokens: bool,
+    ) -> i32 {
+        let input = input.as_ref();
+        let max_tokens = tokens.len();
+        if max_tokens == 0 {
+            return 0;
+        }
+
+        let mut count = 0usize;
+        let mut start = 0usize;
+        let mut separators = input.match_indices(delimiter).map(|(index, _)| index).peekable();
+
+        // ParsingUtils deliberately discards one leading delimiter. A string
+        // containing only that delimiter produces no tokens.
+        if separators.peek().is_some_and(|index| *index == 0) {
+            separators.next();
+            if input.len() == delimiter.len_utf8() {
+                return 0;
+            }
+            start = delimiter.len_utf8();
+        }
+
+        while count < max_tokens {
+            let Some(end) = separators.next() else {
+                break;
+            };
+            if end <= start {
+                continue;
+            }
+            tokens[count] = Some(input[start..end].to_string());
+            count += 1;
+            start = end + delimiter.len_utf8();
+        }
+
+        if condense_trailing_tokens && count == max_tokens {
+            let suffix = &input[start..];
+            if !suffix.is_empty() {
+                let previous = tokens[count - 1].take().unwrap_or_default();
+                tokens[count - 1] = Some(format!("{previous}{delimiter}{suffix}"));
+            }
+        } else if count < max_tokens {
+            tokens[count] = Some(input[start..].to_string());
+            count += 1;
+        }
+
+        count as i32
+    }
+}"#
+        .to_string(),
+    )
+}
+
+pub(crate) fn program_uses_htsjdk_parsing_utils(program: &Program) -> bool {
+    program.imports.iter().any(|import| {
+        import.path == "htsjdk.tribble.util.ParsingUtils" || import.path == "htsjdk.tribble.util.*"
+    })
+}
+
 pub(crate) fn program_uses_broad_ioutils_facade(program: &Program) -> bool {
     program.imports.iter().any(|import| {
         matches!(
@@ -96,7 +206,10 @@ pub(crate) fn program_uses_broad_ioutils_facade(program: &Program) -> bool {
 }
 
 pub(crate) fn is_builtin_external_facade_type(name: &str) -> bool {
-    crate::stdlib::canonical_external_receiver_type_key(name) == "IOUtils"
+    matches!(
+        crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+        "IOUtils" | "htsjdk.tribble.util.ParsingUtils"
+    )
 }
 
 pub(crate) fn is_known_java_subtype(actual: &str, target: &str) -> bool {
@@ -128,7 +241,10 @@ pub(crate) fn needs_conversion_constructor_for_facade(name: &str) -> bool {
 
 pub(crate) fn is_static_facade_method(receiver_type: &str, method: &str, arg_count: usize) -> bool {
     let receiver = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
-    if imported_static_method_returns_broad_utils_first_arg(&receiver, method, arg_count) {
+    if crate::external_packs::external_pack_api_is_static(&receiver, method, arg_count) {
+        return true;
+    }
+    if imported_static_method_returns_first_arg(&receiver, method, arg_count) {
         return true;
     }
     if matches!(method, "valueOf" | "value_of") && arg_count == 1 {
@@ -237,6 +353,11 @@ pub(crate) fn is_static_facade_method(receiver_type: &str, method: &str, arg_cou
                 "htsjdk.tribble.util.ParsingUtils" | "ParsingUtils",
                 "split",
                 2..=4
+            )
+            | (
+                "htsjdk.tribble.util.ParsingUtils" | "ParsingUtils",
+                "join" | "sortList" | "sort_list" | "isSorted" | "is_sorted",
+                1..=2
             )
     )
 }
@@ -384,13 +505,14 @@ pub(crate) fn broad_static_utility_return_type(
     None
 }
 
-pub(crate) fn imported_static_method_returns_broad_utils_first_arg(
+pub(crate) fn imported_static_method_returns_first_arg(
     owner_key: &str,
     name: &str,
     arg_count: usize,
 ) -> bool {
+    let canonical_owner = crate::stdlib::canonical_external_receiver_type_key(owner_key);
     arg_count >= 1
-        && ((matches!(name, "non_null" | "nonNull") && is_broad_utils_type_name(owner_key))
+        && ((matches!(name, "non_null" | "nonNull") && canonical_owner != "Objects")
             || (matches!(name, "flatten") && is_arg_utils_type_name(owner_key)))
 }
 

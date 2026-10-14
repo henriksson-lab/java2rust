@@ -252,6 +252,23 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
         }
         let mut element_shape = shape.clone();
         element_shape.java_ty = element_ty;
+        if matches!(
+            element_shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        ) && let DispatchShape::BoxedDynTrait { trait_name } = &element_shape.dispatch
+        {
+            // `Box<dyn Trait>` is the owned storage carrier, not the borrowed
+            // method-boundary ABI.  In particular, a nullable borrowed Java
+            // interface is `Option<&dyn Trait>` rather than
+            // `Option<&Box<dyn Trait>>`.  Normalize the optional payload here
+            // so signature rendering and argument coercion consume the same
+            // trait view even when representation planning supplied the
+            // escaping/storage dispatch.
+            element_shape.dispatch = DispatchShape::DynTrait {
+                trait_name: trait_name.clone(),
+            };
+            element_shape.view = ViewShape::DynTraitView;
+        }
         // An owned Rust `Option` must store the array payload as `Vec<T>`;
         // storing the slice itself would produce the unsized `Option<[T]>`.
         // Borrowed slots are different: their payload is the sized reference,
@@ -290,18 +307,31 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
 
     if shape.view == ViewShape::Native
         && matches!(shape.dispatch, DispatchShape::Concrete)
-        && crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some()
+        && crate::stdlib::native_collection_receiver_kind_for_type(&shape.java_ty).is_some()
     {
         // A collection's outer slot can remain concrete while its generic
         // arguments require a source hierarchy carrier, trait object, or
         // erased representation. Route the whole type through the canonical
         // representation-aware collection renderer before the facts-only slot
         // fallback can freeze those arguments as nominal Java classes.
-        return rust_type_for_java_type_with_effective_facts_and_representations(
+        let viewed = rust_type_for_java_type_with_effective_facts_and_representations(
             &shape.java_ty,
             effective_facts,
             representations,
         );
+        return match shape.ownership {
+            OwnershipShape::Owned | OwnershipShape::CopyValue => viewed,
+            OwnershipShape::SharedBorrow => RustType::Ref {
+                mutable: false,
+                lifetime: None,
+                inner: Box::new(viewed),
+            },
+            OwnershipShape::MutableBorrow => RustType::Ref {
+                mutable: true,
+                lifetime: None,
+                inner: Box::new(viewed),
+            },
+        };
     }
 
     let viewed = match (&shape.view, &shape.dispatch) {
@@ -352,6 +382,17 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 rust_type_for_slot_with_facts(shape, facts)
             }
         }
+        (_, _) if crate::javalibs::facade_sequence_element_type(&shape.java_ty).is_some() => {
+            // A typed external iterator is a native sequence carrier even if
+            // its underlying external object policy is erased.  Keeping the
+            // nominal facade here would lose both iteration and its generic
+            // element contract.
+            rust_type_for_java_type_with_effective_facts_and_representations(
+                &shape.java_ty,
+                effective_facts,
+                representations,
+            )
+        }
         (_, _)
             if matches!(
                 &shape.java_ty,
@@ -370,21 +411,6 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 effective_facts,
                 representations,
             )
-        }
-        (_, _) if crate::javalibs::facade_sequence_element_type(&shape.java_ty).is_some() => {
-            // A typed external iterator is a native sequence carrier even if
-            // its underlying external object policy is erased.  Keeping the
-            // nominal facade here would lose both iteration and its generic
-            // element contract.
-            let rendered = rust_type_for_java_type_with_effective_facts_and_representations(
-                &shape.java_ty,
-                effective_facts,
-                representations,
-            );
-            if matches!(&shape.java_ty, JavaType::Named { name, .. } if name == "CloseableIterator") {
-                eprintln!("DEBUG SLOT SEQUENCE {:?} -> {:?}", shape, rendered);
-            }
-            rendered
         }
         (_, DispatchShape::Concrete) => {
             if (external_final_facade_should_keep_named_type(&shape.java_ty, &effective_facts)
@@ -409,7 +435,8 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 // plan can erase an InputStream/OutputStream slot to Any even
                 // though its generated body calls the facade's methods.
                 rust_type_for_java_type_with_effective_facts(&shape.java_ty, &effective_facts)
-            } else if crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some()
+            } else if crate::stdlib::native_collection_receiver_kind_for_type(&shape.java_ty)
+                .is_some()
                 || matches!(shape.java_ty, JavaType::Array(_))
             {
                 rust_type_for_java_type_with_effective_facts_and_representations(
@@ -497,6 +524,22 @@ pub fn rust_type_for_slot_with_effective_facts(
             &element_shape,
             facts,
         )));
+    }
+    if crate::javalibs::facade_sequence_element_type(&shape.java_ty).is_some() {
+        let rendered = rust_type_for_java_type_with_effective_facts(&shape.java_ty, facts);
+        return match shape.ownership {
+            OwnershipShape::Owned | OwnershipShape::CopyValue => rendered,
+            OwnershipShape::SharedBorrow => RustType::Ref {
+                mutable: false,
+                lifetime: None,
+                inner: Box::new(rendered),
+            },
+            OwnershipShape::MutableBorrow => RustType::Ref {
+                mutable: true,
+                lifetime: None,
+                inner: Box::new(rendered),
+            },
+        };
     }
     let rendered =
         render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts));
@@ -1392,6 +1435,38 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
             )],
         );
     }
+    if (external_final_facade_should_keep_named_type(ty, &effective_facts)
+        || external_model_concrete_dispatch_should_keep_named_type(
+            ty,
+            &effective_facts,
+            representations,
+        ))
+        && let JavaType::Named { name, args } = ty
+    {
+        // An exact modeled external facade is the executable carrier even when
+        // it also implements a collection interface. Collection membership is
+        // useful for Java subtype and method reasoning, but must not replace a
+        // facade with a native Vec/Set/Map at storage boundaries. Preserve the
+        // payload arguments of a generic facade here: this branch precedes the
+        // general external-generic renderer below, and spelling only the name
+        // would silently turn `Reader<Record>` into its erased default
+        // `Reader<Any>`.
+        if crate::stdlib::external_facade_generic_carrier_arity(name) == Some(args.len()) {
+            return rust_generic_type(
+                rust_name_for_java_named_type(name),
+                args.iter()
+                    .map(|arg| {
+                        rust_type_for_java_generic_arg_with_representations(
+                            arg,
+                            &effective_facts,
+                            representations,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+        return RustType::Named(rust_name_for_java_named_type(name));
+    }
     if let JavaType::Named { name, args } = ty
         && (!args.is_empty() || crate::stdlib::java_collection_kind_for_name(name).is_some())
         && let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
@@ -1474,7 +1549,14 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
                         &element_ty,
                         representations,
                     ) {
-                        rust_generic_type("JavaSemanticHashSet", vec![element_rust])
+                        rust_generic_type(
+                            if matches!(kind, crate::stdlib::JavaCollectionKind::SortedSet) {
+                                "JavaSemanticTreeSet"
+                            } else {
+                                "JavaSemanticHashSet"
+                            },
+                            vec![element_rust],
+                        )
                     } else {
                         RustType::Vec(Box::new(element_rust))
                     };
@@ -1517,6 +1599,36 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
                 ),
             ],
         );
+    }
+
+    if let Some(kind) = crate::stdlib::java_collection_kind_for_type(ty)
+        && kind.is_map_like()
+        && let Some((key, value)) = crate::stdlib::java_map_type_args(ty)
+    {
+        let key_rust = rust_type_for_java_generic_arg_with_representations(
+            key,
+            &effective_facts,
+            representations,
+        );
+        let value_rust = rust_type_for_java_generic_arg_with_representations(
+            value,
+            &effective_facts,
+            representations,
+        );
+        let carrier = if java_set_element_uses_hash_free_carrier_with_representations(
+            Some(key),
+            &effective_facts,
+            representations,
+        ) {
+            "JavaSemanticHashMap"
+        } else {
+            match kind {
+                crate::stdlib::JavaCollectionKind::SortedMap => "std::collections::BTreeMap",
+                crate::stdlib::JavaCollectionKind::InsertionOrderedMap => "JavaLinkedHashMap",
+                _ => "std::collections::HashMap",
+            }
+        };
+        return rust_generic_type(carrier, vec![key_rust, value_rust]);
     }
 
     if let Some(ty) = rust_type_for_external_generic_facade_with_representations(
@@ -1665,6 +1777,56 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     {
         return NativeJavaRustTypePolicy::Direct { ty };
     }
+    if let JavaType::Named { name, args } = ty
+        && matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "Iterator"
+                | "java.util.Iterator"
+                | "CloseableIterator"
+                | "htsjdk.samtools.util.CloseableIterator"
+                | "ListIterator"
+                | "java.util.ListIterator"
+        )
+    {
+        let carrier = if matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+            "ListIterator" | "java.util.ListIterator"
+        ) {
+            "JavaListIterator"
+        } else {
+            "JavaIterator"
+        };
+        return NativeJavaRustTypePolicy::Direct {
+            ty: rust_generic_type(
+                carrier,
+                vec![rust_type_for_java_generic_arg_with_effective_facts(
+                    &args
+                        .first()
+                        .cloned()
+                        .unwrap_or_else(erased_object_java_type),
+                    facts,
+                )],
+            ),
+        };
+    }
+    if let JavaType::Named { name, args } = ty
+        && crate::stdlib::external_facade_generic_carrier_arity(name) == Some(args.len())
+    {
+        // Generic facade arguments are part of the executable Rust ABI even
+        // when the Java hierarchy itself is modeled conservatively as an
+        // erased external object. This facts-only renderer is used while
+        // building facade method signatures, before a representation plan is
+        // available, so it must preserve the same arguments as the full
+        // representation-aware renderer.
+        return NativeJavaRustTypePolicy::Direct {
+            ty: rust_generic_type(
+                rust_name_for_java_named_type(name),
+                args.iter()
+                    .map(|arg| rust_type_for_java_generic_arg_with_effective_facts(arg, facts))
+                    .collect(),
+            ),
+        };
+    }
     if erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
         && let JavaType::Named { name, .. } = ty
     {
@@ -1691,10 +1853,15 @@ pub fn native_java_rust_type_policy_with_effective_facts(
         };
     }
     if crate::javalibs::generic_facade_interface_erases_to_named_rust_type(ty)
-        && let JavaType::Named { name, .. } = ty
+        && let JavaType::Named { name, args } = ty
     {
         return NativeJavaRustTypePolicy::Direct {
-            ty: RustType::Named(rust_name_for_java_named_type(name)),
+            ty: rust_generic_type(
+                rust_name_for_java_named_type(name),
+                args.iter()
+                    .map(|arg| rust_type_for_java_generic_arg_with_effective_facts(arg, facts))
+                    .collect(),
+            ),
         };
     }
     if let Some(enum_name) = closed_runtime_case_split_enum_name(ty, facts) {
@@ -1865,49 +2032,6 @@ pub fn native_java_rust_type_policy_with_effective_facts(
             );
             NativeJavaRustTypePolicy::Direct {
                 ty: rust_generic_type("JavaClass", vec![token_ty]),
-            }
-        }
-        JavaType::Named { name, args }
-            if matches!(
-                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
-                "Iterator"
-                    | "java.util.Iterator"
-                    | "CloseableIterator"
-                    | "htsjdk.samtools.util.CloseableIterator"
-            ) =>
-        {
-            let element_ty = args
-                .first()
-                .cloned()
-                .unwrap_or_else(erased_object_java_type);
-            NativeJavaRustTypePolicy::Direct {
-                ty: rust_generic_type(
-                    "JavaIterator",
-                    vec![rust_type_for_java_generic_arg_with_effective_facts(
-                        &element_ty,
-                        facts,
-                    )],
-                ),
-            }
-        }
-        JavaType::Named { name, args }
-            if matches!(
-                crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
-                "ListIterator" | "java.util.ListIterator"
-            ) =>
-        {
-            let element_ty = args
-                .first()
-                .cloned()
-                .unwrap_or_else(erased_object_java_type);
-            NativeJavaRustTypePolicy::Direct {
-                ty: rust_generic_type(
-                    "JavaListIterator",
-                    vec![rust_type_for_java_generic_arg_with_effective_facts(
-                        &element_ty,
-                        facts,
-                    )],
-                ),
             }
         }
         JavaType::Named { name, args }
@@ -2115,8 +2239,20 @@ fn external_model_concrete_dispatch_should_keep_named_type(
     let Some(name) = java_type_name_for_builtin_final_erased_lookup(ty) else {
         return false;
     };
-    crate::stdlib::java_collection_kind_for_type(ty).is_none()
-        && erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
+    if matches!(
+        facts.object_representation_override_strategy_for(ty),
+        Some(HierarchyStrategy::ConcreteStruct)
+    ) {
+        // A concrete dispatch slot plus an explicit representation fact is a
+        // complete nominal-carrier contract.  This commonly comes from an
+        // external pack whose generated facade is executable even though the
+        // conservative whole-program representation (built without source
+        // for that dependency) remained erased.  Re-projecting through that
+        // stale plan would turn `T::new()` and typed facade results back into
+        // `Box<dyn Any>` at local and signature boundaries.
+        return true;
+    }
+    erased_facade_concrete_dispatch_should_keep_named_type(ty, facts)
         && representations
             .type_representation(name)
             .is_some_and(|entry| {
@@ -2903,6 +3039,7 @@ pub(crate) fn java_set_uses_hash_free_carrier_with_effective_facts(
         crate::stdlib::java_collection_kind_for_type(ty),
         Some(
             crate::stdlib::JavaCollectionKind::Set
+                | crate::stdlib::JavaCollectionKind::SortedSet
                 | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
         )
     ) {
@@ -2922,6 +3059,7 @@ fn java_set_element_type_or_erased(ty: &JavaType) -> Option<JavaType> {
         crate::stdlib::java_collection_kind_for_type(ty),
         Some(
             crate::stdlib::JavaCollectionKind::Set
+                | crate::stdlib::JavaCollectionKind::SortedSet
                 | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
         )
     ) {
@@ -2963,7 +3101,7 @@ fn java_set_element_uses_hash_free_carrier_with_representations(
         || rust_type_for_representation_dispatch(element_ty, facts, representations).is_some()
 }
 
-fn builtin_or_conservative_erased_external_representation(
+pub(crate) fn builtin_or_conservative_erased_external_representation(
     ty: &JavaType,
     representations: &RepresentationPlan,
 ) -> bool {
@@ -3112,6 +3250,33 @@ class ConcreteReader extends Reader<Item> {}
             let mut shape = RustSlotShape::conservative(optional_array.clone());
             shape.ownership = ownership;
             shape.view = ViewShape::Slice;
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn representation_aware_collection_slots_preserve_borrow_ownership() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        let list = JavaType::Named {
+            name: "java.util.List".to_string(),
+            args: vec![JavaType::String],
+        };
+
+        for (ownership, expected) in [
+            (OwnershipShape::Owned, "Vec<String>"),
+            (OwnershipShape::SharedBorrow, "&Vec<String>"),
+            (OwnershipShape::MutableBorrow, "&mut Vec<String>"),
+        ] {
+            let mut shape = RustSlotShape::conservative(list.clone());
+            shape.ownership = ownership;
             assert_eq!(
                 crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
                     &shape,
@@ -3477,6 +3642,31 @@ class ConcreteReader extends Reader<Item> {}
                 &RepresentationPlan::default(),
             ),
             RustType::Option(Box::new(RustType::I32))
+        );
+    }
+
+    #[test]
+    fn nullable_borrowed_boxed_trait_storage_renders_as_trait_view() {
+        let shape = RustSlotShape {
+            java_ty: crate::types::optional_java_type(JavaType::Named {
+                name: "BlockData".to_string(),
+                args: Vec::new(),
+            }),
+            ownership: OwnershipShape::SharedBorrow,
+            view: ViewShape::DynTraitView,
+            dispatch: DispatchShape::BoxedDynTrait {
+                trait_name: "BlockData".to_string(),
+            },
+            mutability: crate::slot_shape::MutabilityShape::Immutable,
+        };
+
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                &shape,
+                &FactSet::default(),
+                &RepresentationPlan::default(),
+            )),
+            "Option<&dyn BlockData>"
         );
     }
 

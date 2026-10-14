@@ -573,22 +573,45 @@ pub(crate) fn external_inherited_instance_fields_for_type(
             }
         }
     }
-    if let Some(super_name) = ty.extends.as_deref()
-        && crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+    if let Some(super_name) = embedded_external_super_name_for_type(ty, facts)
         && seen_fields.insert("__java_super".to_string())
     {
         fields.push(ExternalInheritedInstanceField::new(
-            super_name.to_string(),
+            super_name.clone(),
             "__java_super".to_string(),
             "__java_super".to_string(),
             JavaType::Named {
-                name: super_name.to_string(),
+                name: super_name,
                 args: Vec::new(),
             },
             Some(NullabilityState::DefinitelyNonNull),
         ));
     }
     fields
+}
+
+/// Returns the concrete external base-class carrier that must remain embedded
+/// in a flattened source class.
+///
+/// A Java class can inherit the external base indirectly through one or more
+/// source classes. Those source layers are flattened by the Rust object model,
+/// so the external base subobject must be flattened with them as well. Prefer
+/// the direct spelling because it retains generic arguments; reachable facts
+/// provide the erased transitive fallback.
+pub(crate) fn embedded_external_super_name_for_type(
+    ty: &TypeDecl,
+    facts: &FactSet,
+) -> Option<String> {
+    if let Some(super_name) = ty.extends.as_deref()
+        && crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+    {
+        return Some(super_name.to_string());
+    }
+    external_super_names_for_type(ty, facts)
+        .into_iter()
+        .find(|super_name| {
+            crate::external_packs::external_superclass_uses_embedded_carrier(super_name)
+        })
 }
 
 fn push_external_inherited_instance_field_from_fact(

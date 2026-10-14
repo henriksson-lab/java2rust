@@ -768,7 +768,9 @@ pub fn indexed_read_shape_with_effective_facts(
     // receiver itself is non-null. Keep that carrier in the read shape so
     // argument lowering can project `Option<&T>` rather than borrow an
     // `Option<T>` container as though it were a `T`.
-    if let JavaType::Array(element_ty) = &array_shape.java_ty
+    let optional_array_ty = optional_element_type(&array_shape.java_ty);
+    let array_ty = optional_array_ty.as_ref().unwrap_or(&array_shape.java_ty);
+    if let JavaType::Array(element_ty) = array_ty
         && java_array_element_needs_nullable_access_carrier(element_ty)
     {
         element_shape.java_ty = optional_java_type(element_shape.java_ty);
@@ -876,6 +878,19 @@ mod tests {
                 })],
             }
         );
+    }
+
+    #[test]
+    fn indexed_read_preserves_nullable_elements_of_nullable_reference_array() {
+        let array = RustSlotShape::conservative(optional_java_type(JavaType::Array(Box::new(
+            JavaType::String,
+        ))));
+
+        let indexed = indexed_read_shape_for_access_with_facts(&array, &FactSet::default())
+            .expect("nullable Java array remains indexable");
+
+        assert_eq!(indexed.optional_element_type(), Some(JavaType::String));
+        assert_eq!(indexed.ownership, OwnershipShape::SharedBorrow);
     }
 
     #[test]

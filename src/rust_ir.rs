@@ -53,6 +53,7 @@ pub struct RustFunction {
     pub where_bounds: Vec<String>,
     pub body: Vec<RustStmt>,
     pub is_pub: bool,
+    pub is_pub_crate: bool,
     pub receiver: Option<RustReceiver>,
 }
 

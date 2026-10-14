@@ -8,7 +8,9 @@ use common::{
     cargo_test_generated_modules, load_java_fixtures,
 };
 use new_java2rust::diagnostics::Severity;
-use new_java2rust::{translate_source, translate_source_with_context_sources};
+use new_java2rust::{
+    translate_source, translate_source_with_context_sources, translate_source_with_facts,
+};
 
 fn fixture(path: &str) -> String {
     fs::read_to_string(Path::new("examples/java").join(path)).unwrap()
@@ -35,6 +37,7 @@ class NamedFieldObject {
         return value.read() + value.echo();
     }
 }
+
 "#,
     );
     assert!(
@@ -54,6 +57,40 @@ fn named_field_uses_shared_handle_in_object_adapter() {
     assert_eq!(NamedFieldObject::run(), 134);
 }
 "#,
+    );
+}
+
+#[test]
+fn nullable_string_builder_input_and_lambda_local_compile() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+import java.util.stream.Collectors;
+
+class NullableStringFlow {
+    static String build(boolean present) {
+        String value = present ? "x" : null;
+        return new StringBuilder(value).toString();
+    }
+
+    static List<String> normalize(List<String> values) {
+        return values.stream().map(item -> {
+            String name = item;
+            if (name == null) name = "fallback";
+            return "done";
+        }).collect(Collectors.toList());
+    }
+}
+"#,
+    );
+    assert!(
+        translation.rust.contains("let mut name: Option<String>"),
+        "block-lambda locals compared with null need nullable storage:\n{}",
+        translation.rust
+    );
+    cargo_check_translation(
+        "nullable_string_builder_and_lambda_local",
+        &translation.rust,
     );
 }
 
@@ -564,13 +601,115 @@ class UtilsNonNullUse {
         translation.rust
     );
     assert!(
-        translation
+        !translation
             .rust
-            .contains("unimplemented!(\"unresolved Java static call OrgBroadinstituteHellbenderUtilsUtils.non_null is not modelled\")"),
+            .contains("unresolved Java static call OrgBroadinstituteHellbenderUtilsUtils.non_null"),
         "{}",
         translation.rust
     );
     cargo_check_translation("imported_static_non_null", &translation.rust);
+}
+
+#[test]
+fn imported_static_non_null_contract_is_reused_across_validator_owners() {
+    let translation = translate_source_with_facts(
+        r#"
+import htsjdk.utils.ValidationUtils;
+
+class GenericNonNullUse {
+    void validate(String value) {
+        ValidationUtils.nonNull(value);
+    }
+
+    String checked(String value) {
+        return ValidationUtils.nonNull(value);
+    }
+}
+"#,
+        &new_java2rust::external_packs::htsjdk_vcf_pack_facts(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn non_null<T0>(_arg0: T0) -> T0 { _arg0 }"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn non_null<R"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("validation_utils::non_null"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("generic_imported_static_non_null", &translation.rust);
+}
+
+#[test]
+fn imported_static_first_arg_passthrough_preserves_a_reused_java_reference() {
+    let translation = translate_source_with_facts(
+        r#"
+import htsjdk.utils.ValidationUtils;
+
+class ReusedValidatedReference {
+    int value;
+
+    void setValue(int next) { value = next; }
+    int getValue() { return value; }
+}
+
+class ReusedValidatedReferenceUse {
+    int checked(ReusedValidatedReference value) {
+        ValidationUtils.nonNull(value);
+        return value.getValue();
+    }
+}
+"#,
+        &new_java2rust::external_packs::htsjdk_vcf_pack_facts(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("non_null(std::clone::Clone::clone(&value)"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("reused_imported_static_first_arg", &translation.rust);
+}
+
+#[test]
+fn imported_static_close_is_a_void_side_effect_boundary() {
+    let translation = translate_source_with_facts(
+        r#"
+import htsjdk.samtools.util.CloserUtil;
+
+class GenericCloseUse {
+    void close(Object value) {
+        htsjdk.samtools.util.CloserUtil.close(value);
+    }
+}
+"#,
+        &new_java2rust::external_packs::htsjdk_vcf_pack_facts(),
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("pub fn close<T0>(_arg0: T0) -> ()"),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        !translation.rust.contains("pub fn close<R"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("generic_imported_static_close", &translation.rust);
 }
 
 #[test]
@@ -1825,6 +1964,37 @@ mod generated_tests {
 }
 "#,
     );
+}
+
+#[test]
+fn linked_hash_set_capacity_constructor_uses_collection_size_as_capacity() {
+    let translation = translate_source(
+        r#"
+import java.util.LinkedHashSet;
+import java.util.Set;
+
+class LinkedHashSetCapacityConstructor {
+    Set<String> emptyCopy(Set<String> values) {
+        Set<String> copied = new LinkedHashSet<String>(values.size());
+        return copied;
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation.rust.contains("with_capacity")
+            && !translation
+                .rust
+                .contains("copied: std::collections::HashSet<String> = values.len()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_translation("linked_hash_set_capacity_constructor", &translation.rust);
 }
 
 #[test]

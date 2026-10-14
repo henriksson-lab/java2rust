@@ -3059,12 +3059,20 @@ class SourceHeaderReader {
             "public final class InfoLine extends HeaderLine {}",
             r#"import java.util.Set;
 import java.util.LinkedHashSet;
+import java.util.Map;
+import java.util.LinkedHashMap;
 public class HeaderUse {
     Set<HeaderLine> scan() {
         Set<HeaderLine> lines = new LinkedHashSet<HeaderLine>();
         lines.add(new FormatLine());
         lines.add(new InfoLine());
         return lines;
+    }
+
+    Map<String, HeaderLine> index(Set<HeaderLine> lines) {
+        Map<String, HeaderLine> indexed = new LinkedHashMap<String, HeaderLine>();
+        for (HeaderLine line : lines) indexed.put("key", line);
+        return indexed;
     }
 }"#,
         ] {
@@ -3154,6 +3162,33 @@ public class HeaderUse {
             "JavaSemanticHashSet<HeaderLineValue>",
             "{:?}",
             lines.shape()
+        );
+        let index = header_use
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "index" => Some(method),
+                _ => None,
+            })
+            .expect("index method");
+        let indexed = built
+            .context
+            .signatures
+            .method_local_shapes_or_empty(header_use, index)
+            .iter()
+            .find(|local| local.name() == "indexed")
+            .expect("indexed local");
+        assert_eq!(
+            crate::emit::emit_type(
+                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                    indexed.shape(),
+                    &built.context.semantic.facts,
+                    &built.context.representations,
+                )
+            ),
+            "JavaLinkedHashMap<String, HeaderLineValue>",
+            "{:?}",
+            indexed.shape()
         );
     }
 }
