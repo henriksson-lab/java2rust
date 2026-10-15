@@ -11788,6 +11788,16 @@ fn constructor_arity_matches(ctor: &crate::java_ir::ConstructorDecl, arg_count: 
         .is_some_and(|param| param.is_varargs && arg_count >= ctor.params.len().saturating_sub(1))
 }
 
+fn method_arity_matches(method: &MethodDecl, arg_count: usize) -> bool {
+    if method.params.len() == arg_count {
+        return true;
+    }
+    method
+        .params
+        .last()
+        .is_some_and(|param| param.is_varargs && arg_count >= method.params.len().saturating_sub(1))
+}
+
 fn unsupported_source_constructor_call_expr(
     ty: &JavaType,
     args: &[Expr],
@@ -75189,7 +75199,7 @@ fn source_call_target_result_abi(
             .or_else(|| SourceContextOwnerKey::new(&resolved.declaring_type).find_context_type(ctx))
         && let Some(method) = owner_ty.members.iter().find_map(|member| match member {
             Member::Method(method)
-                if method.params.len() == arg_count
+                if method_arity_matches(method, arg_count)
                     && context_method_effective_rust_name(&owner_ty.name, method, ctx)
                         == rust_name =>
             {
@@ -75223,7 +75233,7 @@ fn source_call_target_result_abi(
             .iter()
             .filter_map(|member| match member {
                 Member::Method(method)
-                    if method.params.len() == arg_count
+                    if method_arity_matches(method, arg_count)
                         && context_method_effective_rust_name(&owner_ty.name, method, ctx)
                             == rust_name =>
                 {

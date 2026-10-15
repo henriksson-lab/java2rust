@@ -24720,10 +24720,7 @@ fn indexed_null_comparison_binding_constraints(
         .uses()
         .iter()
         .filter_map(|use_site| match use_site {
-            BindingUse::IndexedElementComparedToNull { index_depth }
-                if indexed_sequence_element_type(binding.java_ty(), *index_depth)
-                    .is_some_and(|element| matches!(element, JavaType::Array(_))) =>
-            {
+            BindingUse::IndexedElementComparedToNull { index_depth } => {
                 Some(if *index_depth == 1 {
                     SignatureConstraint::NullableSequenceElement
                 } else {
@@ -24740,13 +24737,6 @@ fn indexed_null_comparison_binding_constraints(
     });
     constraints.dedup();
     constraints
-}
-
-fn indexed_sequence_element_type(java_ty: &JavaType, index_depth: usize) -> Option<JavaType> {
-    (0..index_depth).try_fold(java_ty.clone(), |container, _| {
-        let container = crate::types::optional_element_type(&container).unwrap_or(container);
-        crate::types::sequence_element_type(&container)
-    })
 }
 
 fn binding_usage_for_optional_local<'a>(

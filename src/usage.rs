@@ -2531,10 +2531,31 @@ fn record_indexed_null_comparison_use(
     facts: &mut MethodUsageFacts,
     maybe_indexed: &Expr,
     maybe_null: &Expr,
-    type_env: &TypeEnv,
 ) {
     if !matches!(maybe_null, Expr::Literal(Literal::Null)) {
         return;
+    }
+    record_indexed_expr_compared_to_null(facts, maybe_indexed);
+}
+
+fn record_indexed_expr_compared_to_null(facts: &mut MethodUsageFacts, maybe_indexed: &Expr) {
+    match maybe_indexed {
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            record_indexed_expr_compared_to_null(facts, then_expr);
+            record_indexed_expr_compared_to_null(facts, else_expr);
+            return;
+        }
+        Expr::Switch { cases, .. } => {
+            for case in cases {
+                record_indexed_expr_compared_to_null(facts, &case.value);
+            }
+            return;
+        }
+        _ => {}
     }
     let mut current = maybe_indexed;
     let mut index_depth = 0;
@@ -2544,17 +2565,6 @@ fn record_indexed_null_comparison_use(
     }
     if index_depth > 0
         && let Expr::Var(name) = current
-        && type_env.local_type(name).is_some_and(|java_ty| {
-            let mut indexed_ty = java_ty.clone();
-            for _ in 0..index_depth {
-                indexed_ty = crate::types::optional_element_type(&indexed_ty).unwrap_or(indexed_ty);
-                let Some(element) = crate::types::sequence_element_type(&indexed_ty) else {
-                    return false;
-                };
-                indexed_ty = element;
-            }
-            matches!(indexed_ty, JavaType::Array(_))
-        })
     {
         record_use(
             facts,
@@ -4748,8 +4758,8 @@ fn analyze_expr_with_context(
             left,
             right,
         } => {
-            record_indexed_null_comparison_use(facts, left, right, type_env);
-            record_indexed_null_comparison_use(facts, right, left, type_env);
+            record_indexed_null_comparison_use(facts, left, right);
+            record_indexed_null_comparison_use(facts, right, left);
             analyze_expr(
                 left,
                 facts,

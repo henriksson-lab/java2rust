@@ -10712,6 +10712,9 @@ class NestedReferenceArrayNullComparison {
     static boolean missing(NestedArrayMarker[][][] values, int x, int y, int z) {
         return values[x] == null || values[x][y] == null || values[x][y][z] == null;
     }
+    static boolean presentThroughConditional(NestedArrayMarker[][][] values, boolean absent, int x, int y, int z) {
+        return (absent ? null : values[x][y][z]) != null;
+    }
 }
 "#,
     );
@@ -10772,7 +10775,8 @@ class SharedReferenceArrayProcessorImpl implements SharedReferenceArrayProcessor
             && translation
                 .rust
                 .contains("vec![std::clone::Clone::clone(&first)")
-            && translation.rust.contains("return Ok(Some({"),
+            && (translation.rust.contains("return Ok(Some({")
+                || translation.rust.contains("return Some({")),
         "{}",
         translation.rust
     );
