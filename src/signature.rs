@@ -1937,6 +1937,7 @@ fn index_local_constraints_by_binding(locals: &[LocalConstraintSet]) -> HashMap<
 pub struct SignatureDependencyGraph {
     nodes: HashSet<SignatureDependencyNode>,
     edges: Vec<SignatureDependencyEdge>,
+    edge_membership: HashSet<SignatureDependencyEdge>,
 }
 
 impl SignatureDependencyGraph {
@@ -2149,7 +2150,7 @@ pub enum SignatureDependencyNode {
     },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct SignatureDependencyEdge {
     from: SignatureDependencyNode,
     to: SignatureDependencyNode,
@@ -2260,7 +2261,13 @@ pub fn solve_signatures_with_facts_and_support_context_profiled_with_progress(
         );
         merge_support_context_nullability_constraints(&mut constraints, support_constraints);
     }
-    equalize_source_override_nullability_constraints(&mut constraints, support_program);
+    let override_topology =
+        build_source_override_constraint_topology(&constraints, support_program);
+    equalize_source_override_nullability_constraints_with_topology(
+        &mut constraints,
+        &override_topology,
+    );
+    let owner_alias_topology = build_source_owner_alias_receiver_topology(&constraints);
     constraints.rebuild_method_lookup_index();
     let collect_constraints_ms = collect_start.elapsed().as_millis();
     emit_signature_solver_progress(
@@ -2365,9 +2372,15 @@ pub fn solve_signatures_with_facts_and_support_context_profiled_with_progress(
             // classes, so re-join them on every fixpoint iteration rather
             // than only once before propagation begins.
             let override_slots_changed =
-                equalize_source_override_nullability_constraints(constraints, support_program);
+                equalize_source_override_nullability_constraints_with_topology(
+                    constraints,
+                    &override_topology,
+                );
             let owner_alias_receivers_changed =
-                equalize_source_owner_alias_receiver_constraints(constraints);
+                equalize_source_owner_alias_receiver_constraints_with_topology(
+                    constraints,
+                    &owner_alias_topology,
+                );
             let (propagation_changed, stats) =
                 execute_global_signature_solver_sweep_with_stats(constraints, usage);
             let changed = override_slots_changed
@@ -3745,7 +3758,7 @@ fn add_signature_dependency_edge(
     add_signature_dependency_node(graph, from.clone());
     add_signature_dependency_node(graph, to.clone());
     let edge = SignatureDependencyEdge::new(from, to, kind);
-    if !graph.edges.contains(&edge) {
+    if graph.edge_membership.insert(edge.clone()) {
         graph.edges.push(edge);
     }
 }
@@ -4387,12 +4400,34 @@ fn push_unique_signature_constraints(
 /// as fallibility is equalized across the same groups. Ownership and view
 /// constraints intentionally remain local: generated trait adapters can bridge
 /// `String`/`&str` and `Vec<T>`/`&[T]`, but they cannot safely erase `null`.
-fn equalize_source_override_nullability_constraints(
-    constraints: &mut SignatureConstraintState,
+#[derive(Debug, Clone)]
+struct SourceOverrideConstraintGroup {
+    keys: Vec<MethodKey>,
+    group_has_interface: bool,
+    interface_keys: HashSet<MethodKey>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct SourceOverrideConstraintTopology {
+    groups: Vec<SourceOverrideConstraintGroup>,
+    interface_implementations: Vec<(MethodKey, Vec<MethodKey>)>,
+}
+
+/// Build the immutable relationships used while joining source override
+/// constraints. The saturation loop changes slot facts, but not method
+/// identity, hierarchy membership, or generic interface implementations.
+fn build_source_override_constraint_topology(
+    constraints: &SignatureConstraintState,
     program: &Program,
-) -> bool {
-    let mut changed = false;
+) -> SourceOverrideConstraintTopology {
+    let mut groups = Vec::new();
     for group in crate::exception_plan::override_groups_for_program(program) {
+        let group_has_interface = group.iter().any(|callable| {
+            callable
+                .method_identity_parts()
+                .and_then(|(owner, _)| find_signature_type_decl(program, owner))
+                .is_some_and(|ty| ty.kind == TypeKind::Interface)
+        });
         let keys = group
             .iter()
             .filter_map(|callable| callable.method_identity_parts())
@@ -4402,6 +4437,67 @@ fn equalize_source_override_nullability_constraints(
         if keys.len() < 2 {
             continue;
         }
+        let interface_keys = keys
+            .iter()
+            .filter(|key| {
+                find_signature_type_decl(program, key.type_name())
+                    .is_some_and(|ty| ty.kind == TypeKind::Interface)
+            })
+            .cloned()
+            .collect::<HashSet<_>>();
+        groups.push(SourceOverrideConstraintGroup {
+            keys,
+            group_has_interface,
+            interface_keys,
+        });
+    }
+
+    let interface_implementations = constraints
+        .methods
+        .keys()
+        .filter_map(|key| {
+            let interface = find_signature_type_decl(program, key.type_name())?;
+            if interface.kind != TypeKind::Interface {
+                return None;
+            }
+            let interface_method = interface.members.iter().find_map(|member| {
+                let Member::Method(method) = member else {
+                    return None;
+                };
+                (crate::java_signature::source_method_rust_name(method) == key.rust_name)
+                    .then_some(method)
+            })?;
+            let implementations =
+                crate::representation_lowering::source_interface_method_implementations(
+                    interface,
+                    interface_method,
+                    program,
+                )
+                .into_iter()
+                .map(|(owner, method)| {
+                    MethodKey::rust_identity(
+                        &owner.name,
+                        crate::java_signature::source_method_rust_name(method),
+                    )
+                })
+                .filter(|implementation_key| constraints.methods.contains_key(implementation_key))
+                .collect::<Vec<_>>();
+            Some((key.clone(), implementations))
+        })
+        .collect();
+
+    SourceOverrideConstraintTopology {
+        groups,
+        interface_implementations,
+    }
+}
+
+fn equalize_source_override_nullability_constraints_with_topology(
+    constraints: &mut SignatureConstraintState,
+    topology: &SourceOverrideConstraintTopology,
+) -> bool {
+    let mut changed = false;
+    for group in &topology.groups {
         let mut return_constraints = Vec::new();
         // Concrete class overrides share one physical receiver representation,
         // so a mutating override must widen the class hierarchy slot.  An
@@ -4409,27 +4505,22 @@ fn equalize_source_override_nullability_constraints(
         // the trait receiver to `&mut self` while a read-only concrete method
         // keeps `&self`.  Widening every concrete interface implementation made
         // otherwise read-only Java methods unusable from `toString`/Display.
-        let group_has_interface = group.iter().any(|callable| {
-            callable
-                .method_identity_parts()
-                .and_then(|(owner, _)| find_signature_type_decl(program, owner))
-                .is_some_and(|ty| ty.kind == TypeKind::Interface)
-        });
-        let mutable_receiver = keys.iter().any(|key| {
+        let mutable_receiver = group.keys.iter().any(|key| {
             constraints.methods.get(key).is_some_and(|method| {
                 method
                     .receiver
                     .contains(&ReceiverConstraint::MutableReceiver)
             })
         });
-        let max_params = keys
+        let max_params = group
+            .keys
             .iter()
             .filter_map(|key| constraints.methods.get(key))
             .map(|method| method.params.len())
             .max()
             .unwrap_or(0);
         let mut param_constraints = vec![Vec::new(); max_params];
-        for key in &keys {
+        for key in &group.keys {
             let method = constraints
                 .methods
                 .get(key)
@@ -4455,10 +4546,10 @@ fn equalize_source_override_nullability_constraints(
             }
         }
 
-        for key in keys {
+        for key in &group.keys {
             let method = constraints
                 .methods
-                .get_mut(&key)
+                .get_mut(key)
                 .expect("filtered source override method");
             let return_len = method.return_constraints.len();
             push_unique_signature_constraints(&mut method.return_constraints, &return_constraints);
@@ -4472,10 +4563,9 @@ fn equalize_source_override_nullability_constraints(
             // its implementations, while concrete implementations keep their
             // independently solved receiver. This also makes calls through an
             // interface field see the same `&mut self` ABI as trait emission.
-            let key_is_interface = find_signature_type_decl(program, key.type_name())
-                .is_some_and(|ty| ty.kind == TypeKind::Interface);
+            let key_is_interface = group.interface_keys.contains(key);
             if mutable_receiver
-                && (!group_has_interface || key_is_interface)
+                && (!group.group_has_interface || key_is_interface)
                 && !method
                     .receiver
                     .contains(&ReceiverConstraint::MutableReceiver)
@@ -4491,43 +4581,22 @@ fn equalize_source_override_nullability_constraints(
     // interface receiver through that same authoritative implementation
     // relation so callers are solved against the trait ABI, not a bodyless
     // declaration that still appears read-only.
-    let mutable_interface_keys = constraints
-        .methods
-        .keys()
-        .filter_map(|key| {
-            let interface = find_signature_type_decl(program, key.type_name())?;
-            if interface.kind != TypeKind::Interface {
-                return None;
-            }
-            let interface_method = interface.members.iter().find_map(|member| {
-                let Member::Method(method) = member else {
-                    return None;
-                };
-                (crate::java_signature::source_method_rust_name(method) == key.rust_name)
-                    .then_some(method)
-            })?;
-            crate::representation_lowering::source_interface_method_implementations(
-                interface,
-                interface_method,
-                program,
-            )
-            .into_iter()
-            .any(|(owner, method)| {
-                let implementation_key = MethodKey::rust_identity(
-                    &owner.name,
-                    crate::java_signature::source_method_rust_name(method),
-                );
+    let mutable_interface_keys = topology
+        .interface_implementations
+        .iter()
+        .filter(|(_, implementations)| {
+            implementations.iter().any(|implementation_key| {
                 constraints
                     .methods
-                    .get(&implementation_key)
+                    .get(implementation_key)
                     .is_some_and(|implementation| {
                         implementation
                             .receiver
                             .contains(&ReceiverConstraint::MutableReceiver)
                     })
             })
-            .then(|| key.clone())
         })
+        .map(|(interface_key, _)| interface_key.clone())
         .collect::<Vec<_>>();
     for key in mutable_interface_keys {
         let Some(method) = constraints.methods.get_mut(&key) else {
@@ -4551,56 +4620,83 @@ fn equalize_source_override_nullability_constraints(
 /// Java callable slot, so join a mutable receiver across those aliases before
 /// call propagation. Ambiguous bare owners shared by multiple packages remain
 /// isolated.
-fn equalize_source_owner_alias_receiver_constraints(
-    constraints: &mut SignatureConstraintState,
-) -> bool {
-    let methods = constraints
-        .methods
-        .iter()
-        .map(|(key, method)| {
-            (
-                key.clone(),
-                method.param_java_types.clone(),
-                method
+#[derive(Debug, Clone, Default)]
+struct SourceOwnerAliasReceiverTopology {
+    aliases_by_target: Vec<(MethodKey, Vec<MethodKey>)>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SourceOwnerAliasSlotKey {
+    rust_name: String,
+    param_java_types: Vec<JavaType>,
+    is_static: bool,
+}
+
+fn build_source_owner_alias_receiver_topology(
+    constraints: &SignatureConstraintState,
+) -> SourceOwnerAliasReceiverTopology {
+    let mut methods_by_slot = HashMap::<SourceOwnerAliasSlotKey, Vec<MethodKey>>::new();
+    for (key, method) in &constraints.methods {
+        methods_by_slot
+            .entry(SourceOwnerAliasSlotKey {
+                rust_name: key.rust_name.clone(),
+                param_java_types: method.param_java_types.clone(),
+                is_static: method
                     .receiver
                     .contains(&ReceiverConstraint::StaticReceiver),
-                method
-                    .receiver
-                    .contains(&ReceiverConstraint::MutableReceiver),
-            )
-        })
-        .collect::<Vec<_>>();
-    let mut pending = Vec::new();
-    for (target, target_params, target_static, target_mutable) in &methods {
-        if *target_static || *target_mutable {
+            })
+            .or_default()
+            .push(key.clone());
+    }
+    let mut aliases_by_target = Vec::new();
+    for (slot, methods) in methods_by_slot {
+        if slot.is_static {
             continue;
         }
         let slot_owners = methods
             .iter()
-            .filter(|(key, params, is_static, _)| {
-                key.rust_name == target.rust_name
-                    && params == target_params
-                    && is_static == target_static
-            })
-            .map(|(key, _, _, _)| key.type_name())
+            .map(|key| key.type_name())
             .collect::<Vec<_>>();
-        if methods
-            .iter()
-            .any(|(candidate, params, is_static, mutable)| {
-                *mutable
-                    && is_static == target_static
-                    && candidate.rust_name == target.rust_name
-                    && params == target_params
-                    && signature_owner_alias_matches(
+        for target in &methods {
+            let aliases = methods
+                .iter()
+                .filter(|candidate| {
+                    signature_owner_alias_matches(
                         target.type_name(),
                         candidate.type_name(),
                         &slot_owners,
                     )
-            })
-        {
-            pending.push(target.clone());
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            aliases_by_target.push((target.clone(), aliases));
         }
     }
+    SourceOwnerAliasReceiverTopology { aliases_by_target }
+}
+
+fn equalize_source_owner_alias_receiver_constraints_with_topology(
+    constraints: &mut SignatureConstraintState,
+    topology: &SourceOwnerAliasReceiverTopology,
+) -> bool {
+    let pending = topology
+        .aliases_by_target
+        .iter()
+        .filter(|(target, aliases)| {
+            !constraints.methods.get(target).is_some_and(|method| {
+                method
+                    .receiver
+                    .contains(&ReceiverConstraint::MutableReceiver)
+            }) && aliases.iter().any(|candidate| {
+                constraints.methods.get(candidate).is_some_and(|method| {
+                    method
+                        .receiver
+                        .contains(&ReceiverConstraint::MutableReceiver)
+                })
+            })
+        })
+        .map(|(target, _)| target.clone())
+        .collect::<Vec<_>>();
     let mut changed = false;
     for key in pending {
         let Some(method) = constraints.methods.get_mut(&key) else {
@@ -4615,6 +4711,14 @@ fn equalize_source_owner_alias_receiver_constraints(
         }
     }
     changed
+}
+
+#[cfg(test)]
+fn equalize_source_owner_alias_receiver_constraints(
+    constraints: &mut SignatureConstraintState,
+) -> bool {
+    let topology = build_source_owner_alias_receiver_topology(constraints);
+    equalize_source_owner_alias_receiver_constraints_with_topology(constraints, &topology)
 }
 
 fn signature_owner_alias_matches(left: &str, right: &str, slot_owners: &[&str]) -> bool {
@@ -24166,6 +24270,42 @@ class PublicMapLookup {
                 .receiver
                 .contains(&ReceiverConstraint::MutableReceiver)
         );
+    }
+
+    #[test]
+    fn dependency_graph_deduplicates_edges_without_reordering_first_insertions() {
+        let left = SignatureDependencyNode::MethodReturn {
+            method: MethodKey::rust_identity("Owner", "left"),
+        };
+        let right = SignatureDependencyNode::MethodReturn {
+            method: MethodKey::rust_identity("Owner", "right"),
+        };
+        let mut graph = SignatureDependencyGraph::default();
+
+        add_signature_dependency_edge(
+            &mut graph,
+            left.clone(),
+            right.clone(),
+            SignatureDependencyEdgeKind::MethodReturn,
+        );
+        add_signature_dependency_edge(
+            &mut graph,
+            left.clone(),
+            right.clone(),
+            SignatureDependencyEdgeKind::MethodReturn,
+        );
+        add_signature_dependency_edge(
+            &mut graph,
+            right.clone(),
+            left.clone(),
+            SignatureDependencyEdgeKind::Receiver,
+        );
+
+        assert_eq!(graph.edges().len(), 2);
+        assert_eq!(graph.edges()[0].from(), &left);
+        assert_eq!(graph.edges()[0].to(), &right);
+        assert_eq!(graph.edges()[1].from(), &right);
+        assert_eq!(graph.edges()[1].to(), &left);
     }
 
     #[test]

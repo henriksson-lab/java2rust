@@ -140,7 +140,7 @@ pub enum Modifier {
     Abstract,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum JavaType {
     Void,
     Primitive(PrimitiveType),
@@ -161,13 +161,13 @@ pub enum JavaType {
     Unknown(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum WildcardBound {
     Extends(Box<JavaType>),
     Super(Box<JavaType>),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrimitiveType {
     Boolean,
     Byte,

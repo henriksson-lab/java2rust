@@ -233,8 +233,8 @@ use crate::shape_projection::{
     value_shape_for_java_type,
 };
 use crate::signature::{
-    LocalPlan, ReceiverPlan, SignatureConstraint, SignaturePlan, SolvedSlotShape,
-    apply_signature_constraints,
+    LocalPlan, MethodSignaturePlan, ReceiverPlan, SignatureConstraint, SignaturePlan,
+    SolvedSlotShape, apply_signature_constraints,
 };
 use crate::slot_policy::borrowed_content_type_policy;
 use crate::slot_render::{
@@ -383,6 +383,7 @@ struct LowerCtx<'a> {
     lowering_inherited_method_body: bool,
     inherited_method_declaring_type: Option<&'a TypeDecl>,
     clone_requirement_cache: &'a CloneRequirementCache,
+    source_context_fallback_signature_cache: &'a SourceContextFallbackSignatureCache,
 }
 
 impl<'a> LowerCtx<'a> {
@@ -561,6 +562,7 @@ pub(crate) fn lower_program_with_semantic_plans_support_context_and_callable_con
     let mut profile_phase_start = std::time::Instant::now();
     let empty_liveness = crate::liveness::LivenessAnalysis::default();
     let clone_requirement_cache = CloneRequirementCache::default();
+    let source_context_fallback_signature_cache = SourceContextFallbackSignatureCache::default();
     let external_index = facts.external_lookup_index();
     push_lowering_diagnostic_plans(
         collect_lowering_diagnostic_plans(
@@ -620,6 +622,7 @@ pub(crate) fn lower_program_with_semantic_plans_support_context_and_callable_con
         lowering_inherited_method_body: false,
         inherited_method_declaring_type: None,
         clone_requirement_cache: &clone_requirement_cache,
+        source_context_fallback_signature_cache: &source_context_fallback_signature_cache,
     };
     let uses_source_map_entry_values = program_uses_source_map_entry_values(program);
     let uses_map_entry_value_carrier =
@@ -39751,6 +39754,75 @@ struct ContextFallbackMethodSignature {
     arg_shapes: Vec<RustSlotShape>,
     receiver: ReceiverPlan,
     arg_shapes_are_authoritative: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct SourceContextFallbackSignatureCacheKey {
+    declaration_identity: usize,
+    java_name: String,
+    arg_types: Vec<JavaType>,
+}
+
+#[derive(Debug, Default)]
+struct SourceContextFallbackSignatureCache {
+    isolated_plans: std::cell::RefCell<
+        HashMap<SourceContextFallbackSignatureCacheKey, Option<(String, MethodSignaturePlan)>>,
+    >,
+    #[cfg(test)]
+    isolated_solve_count: std::cell::Cell<usize>,
+}
+
+impl SourceContextFallbackSignatureCache {
+    fn isolated_plan(
+        &self,
+        ty: &TypeDecl,
+        java_name: &str,
+        arg_types: &[JavaType],
+        ctx: LowerCtx<'_>,
+    ) -> Option<(String, MethodSignaturePlan)> {
+        let key = SourceContextFallbackSignatureCacheKey {
+            declaration_identity: ty as *const TypeDecl as usize,
+            java_name: java_name.to_string(),
+            arg_types: arg_types.to_vec(),
+        };
+        if let Some(cached) = self.isolated_plans.borrow().get(&key).cloned() {
+            return cached;
+        }
+
+        #[cfg(test)]
+        self.isolated_solve_count
+            .set(self.isolated_solve_count.get() + 1);
+        let isolated_program = Program {
+            package: ctx.support_local_type_program.package.clone(),
+            imports: ctx.support_local_type_program.imports.clone(),
+            types: vec![ty.clone()],
+        };
+        let usage = crate::usage::analyze_usage(&isolated_program);
+        let signatures = crate::signature::solve_signatures_with_facts_and_support_context(
+            &isolated_program,
+            ctx.representations,
+            &usage,
+            ctx.facts,
+            ctx.support_local_type_program,
+        );
+        let plan = signatures
+            .method_signature_by_base_name_and_arg_types(&ty.name, java_name, arg_types)
+            .or_else(|| {
+                signatures.method_signature_by_base_name_and_arity(
+                    &ty.name,
+                    java_name,
+                    arg_types.len(),
+                )
+            })
+            .map(|(rust_name, signature)| (rust_name, signature.clone()));
+        self.isolated_plans.borrow_mut().insert(key, plan.clone());
+        plan
+    }
+
+    #[cfg(test)]
+    fn isolated_solve_count(&self) -> usize {
+        self.isolated_solve_count.get()
+    }
 }
 
 impl ContextFallbackMethodSignature {
@@ -79434,29 +79506,8 @@ fn source_context_receiver_method_fallback_signature(
                 // old conservative fallback for that case, but never rerun an
                 // isolated solver when the whole-program plan already has the
                 // requested owner/method.
-                let isolated_program = Program {
-                    package: ctx.support_local_type_program.package.clone(),
-                    imports: ctx.support_local_type_program.imports.clone(),
-                    types: vec![ty.clone()],
-                };
-                let usage = crate::usage::analyze_usage(&isolated_program);
-                let signatures = crate::signature::solve_signatures_with_facts_and_support_context(
-                    &isolated_program,
-                    ctx.representations,
-                    &usage,
-                    ctx.facts,
-                    ctx.support_local_type_program,
-                );
-                signatures
-                    .method_signature_by_base_name_and_arg_types(&ty.name, name, &arg_types)
-                    .or_else(|| {
-                        signatures.method_signature_by_base_name_and_arity(
-                            &ty.name,
-                            name,
-                            args.len(),
-                        )
-                    })
-                    .map(|(rust_name, signature)| (rust_name, signature.clone()))
+                ctx.source_context_fallback_signature_cache
+                    .isolated_plan(ty, name, &arg_types, ctx)
             });
         if let Some((rust_name, signature)) = planned_signature {
             let Some(method) = declared_method else {
@@ -91579,6 +91630,8 @@ class Child extends Base {}
             fallibility,
         )));
         let clone_requirement_cache = Box::leak(Box::new(CloneRequirementCache::default()));
+        let source_context_fallback_signature_cache =
+            Box::leak(Box::new(SourceContextFallbackSignatureCache::default()));
         let liveness = Box::leak(Box::new(crate::liveness::LivenessAnalysis::default()));
         LowerCtx {
             program,
@@ -91609,6 +91662,7 @@ class Child extends Base {}
             inherited_method_declaring_type: None,
             constructor_return_signal_only: false,
             clone_requirement_cache,
+            source_context_fallback_signature_cache,
         }
     }
 
@@ -96101,6 +96155,36 @@ class Source {
         assert_eq!(signature.owner.as_deref(), Some("dep.Util"));
         assert_eq!(signature.rust_name, "pick_string");
         assert_eq!(signature.arg_shapes[0].java_ty, JavaType::String);
+
+        let repeated = source_context_receiver_method_fallback_signature(
+            Some(&Expr::Var("helper".to_string())),
+            "pick",
+            &[Expr::Literal(Literal::String("cd".to_string()))],
+            &env,
+            ctx,
+        )
+        .expect("the same string overload should stay cached");
+        assert_eq!(repeated.rust_name, "pick_string");
+        assert_eq!(
+            ctx.source_context_fallback_signature_cache
+                .isolated_solve_count(),
+            1
+        );
+
+        let integer = source_context_receiver_method_fallback_signature(
+            Some(&Expr::Var("helper".to_string())),
+            "pick",
+            &[Expr::Literal(Literal::Int(7))],
+            &env,
+            ctx,
+        )
+        .expect("a distinct argument type should select its own overload");
+        assert_eq!(integer.rust_name, "pick_int");
+        assert_eq!(
+            ctx.source_context_fallback_signature_cache
+                .isolated_solve_count(),
+            2
+        );
     }
 
     #[test]
@@ -102849,6 +102933,8 @@ class NumericBox {
             fallibility,
         )));
         let clone_requirement_cache = Box::leak(Box::new(CloneRequirementCache::default()));
+        let source_context_fallback_signature_cache =
+            Box::leak(Box::new(SourceContextFallbackSignatureCache::default()));
         let liveness = Box::leak(Box::new(crate::liveness::LivenessAnalysis::default()));
         let env = ShapeEnv::default();
         let ctx = LowerCtx {
@@ -102880,6 +102966,7 @@ class NumericBox {
             inherited_method_declaring_type: None,
             constructor_return_signal_only: false,
             clone_requirement_cache,
+            source_context_fallback_signature_cache,
         };
 
         let lowered = lower_expr(&Expr::Raw("helper(value.unwrap())".to_string()), &env, ctx);
