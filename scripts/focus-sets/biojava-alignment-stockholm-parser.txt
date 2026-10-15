@@ -1,0 +1,10 @@
+# Stockholm parser and its source-owned data model. The complete Alignment
+# corpus is still analyzed as declaration-summary context; this set limits
+# expensive Rust emission and makes parser-specific translator iterations
+# repeatable.
+org/biojava/nbio/alignment/io/StockholmConsensusAnnotation.java
+org/biojava/nbio/alignment/io/StockholmFileAnnotation.java
+org/biojava/nbio/alignment/io/StockholmFileParser.java
+org/biojava/nbio/alignment/io/StockholmResidueAnnotation.java
+org/biojava/nbio/alignment/io/StockholmSequenceAnnotation.java
+org/biojava/nbio/alignment/io/StockholmStructure.java

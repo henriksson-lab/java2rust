@@ -9103,7 +9103,7 @@ fn dynamic_string_format_template_uses_runtime_helper() {
         translation.rust.contains("pub fn java_string_format")
             && translation
                 .rust
-                .contains("java_string_format(template, vec![count.to_string()])")
+                .contains("java_string_format(&template, vec![count.to_string()])")
             && !translation.rust.contains("return format(template"),
         "{}",
         translation.rust
@@ -9158,7 +9158,7 @@ class StringFormatLocaleOverload {
             .contains("return format!(\"{}:{}\", name, count);")
             && translation
                 .rust
-                .contains("java_string_format(template, vec![count.to_string()])")
+                .contains("java_string_format(&template, vec![count.to_string()])")
             && !translation.rust.contains("java_string_format(Locale::US"),
         "{}",
         translation.rust
@@ -10682,7 +10682,7 @@ class ReferenceArrayElementNullComparison {
             .contains("let mut values: Vec<Option<String>> =")
             && translation
                 .rust
-                .contains("std::iter::repeat_with(|| None).take(2 as usize)"),
+                .contains("std::iter::repeat_with(|| None).take("),
         "{}",
         translation.rust
     );
@@ -10695,6 +10695,38 @@ class ReferenceArrayElementNullComparison {
 
     cargo_check_generated_modules(
         "reference_array_element_null_comparison",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn nested_reference_array_null_comparisons_preserve_each_reference_layer() {
+    let translation = translate_source(
+        r#"
+enum NestedArrayMarker { A, B }
+class NestedReferenceArrayNullComparison {
+    static boolean missing(NestedArrayMarker[][][] values, int x, int y, int z) {
+        return values[x] == null || values[x][y] == null || values[x][y][z] == null;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java null comparison")
+            && !translation.rust.contains("compile_error!")
+            && translation.rust.matches(".is_none()").count() >= 3,
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nested_reference_array_null_comparisons",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -38866,6 +38898,318 @@ abstract class BaseSolver<FUNC extends Function> {
 }
 
 #[test]
+fn explicit_super_field_access_uses_flattened_current_object_storage() {
+    let subclass = r#"
+class SuperFieldChild extends SuperFieldBase {
+    void reset() {
+        super.values = 7;
+    }
+}
+"#;
+    let superclass = r#"
+class SuperFieldBase {
+    protected int values;
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("self.values = 7")
+            && !translation
+                .rust
+                .contains("unsupported standalone Java super expression")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "explicit_super_field_access_uses_flattened_storage",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_super_constructor_overload_accepts_source_subtype_argument() {
+    let subclass = r#"
+class DesiredArgument {}
+class OtherArgument {}
+class ConcreteArgument extends DesiredArgument {}
+
+class SubtypeSuperChild extends OverloadedSuperBase {
+    SubtypeSuperChild() {
+        super(new ConcreteArgument());
+    }
+}
+"#;
+    let superclass = r#"
+class OverloadedSuperBase {
+    int marker;
+
+    OverloadedSuperBase(DesiredArgument value) {
+        marker = 2;
+    }
+
+    OverloadedSuperBase(OtherArgument value) {
+        marker = 3;
+    }
+}
+"#;
+
+    let translation = translate_source_with_context_sources(
+        subclass,
+        &[superclass.to_string()],
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("marker: 2")
+            && !translation.rust.contains("marker: 3")
+            && !translation
+                .rust
+                .contains("super(...) requires inheritance lowering")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_super_constructor_overload_accepts_source_subtype_argument",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn summary_source_subtype_selects_overloaded_super_constructor() {
+    let parent = r#"
+package app;
+import ext.SummaryInterface;
+class SummaryOverloadedBase<S, C> {
+    int marker;
+    SummaryOverloadedBase(SummaryInterface<S, C> value) { marker = 5; }
+    SummaryOverloadedBase(SummaryOther<S, C> value) { marker = 9; }
+}
+class SummaryOther<S, C> {}
+"#;
+    let summary = r#"
+package ext;
+interface SummaryInterface<S, C> {}
+class SummaryImplementation<S, C> implements SummaryInterface<S, C> {
+    SummaryImplementation();
+}
+"#;
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        r#"
+package app;
+import ext.SummaryImplementation;
+class SummarySubtypeChild<S, C> extends SummaryOverloadedBase<S, C> {
+    SummarySubtypeChild() { super(new SummaryImplementation<S, C>()); }
+}
+"#,
+        &[parent.to_string()],
+        &[summary.to_string()],
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("marker: 5")
+            && !translation.rust.contains("marker: 9")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn summary_source_generic_implementation_selects_profile_pair_super_overload() {
+    let parent = r#"
+package alignment;
+import core.SequencePair;
+interface PairAligner<S, C> {}
+class PairScorer<S, C> {
+    int marker;
+    PairScorer(PairAligner<S, C> aligner) { marker = 1; }
+    PairScorer(SequencePair<S, C> pair) { marker = 2; }
+}
+"#;
+    let summaries = [
+        // Batch translation keeps declaration-only copies of all primary
+        // files as dependency context. The bodyful emitted declaration must
+        // remain authoritative for constructor replay.
+        parent.to_string(),
+        r#"
+package core;
+interface AlignedSequence<S, C> {}
+interface SequencePair<S, C> {}
+"#
+        .to_string(),
+        r#"
+package core;
+class SimpleSequencePair<S, C> implements SequencePair<S, C> {
+    SimpleSequencePair(AlignedSequence<S, C> query, AlignedSequence<S, C> target) {}
+}
+"#
+        .to_string(),
+    ];
+    let translation = translate_source_with_context_sources_and_summary_sources(
+        r#"
+package alignment;
+import core.AlignedSequence;
+import core.SimpleSequencePair;
+interface Profile<S, C> {
+    AlignedSequence<S, C> getAlignedSequence(int index);
+}
+class ProfilePairScorer<S, C> extends PairScorer<S, C> {
+    ProfilePairScorer(Profile<S, C> profile, int query, int target) {
+        super(new SimpleSequencePair<S, C>(profile.getAlignedSequence(query), profile.getAlignedSequence(target)));
+    }
+}
+"#,
+        &[parent.to_string()],
+        &summaries,
+        true,
+        &FactSet::default(),
+    );
+
+    assert!(
+        translation.rust.contains("marker: 2")
+            && !translation.rust.contains("marker: 1")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+}
+
+#[test]
+fn source_super_constructor_flattens_explicit_multilevel_chain() {
+    let translation = translate_source(
+        r#"
+class ConstructorRoot {
+    int root;
+    ConstructorRoot(int value) { root = value; }
+}
+
+class ConstructorMiddle extends ConstructorRoot {
+    int middle;
+    ConstructorMiddle(int value) {
+        super(value);
+        middle = value + 1;
+    }
+}
+
+class ConstructorLeaf extends ConstructorMiddle {
+    int leaf;
+    ConstructorLeaf(int value) {
+        super(value);
+        leaf = value + 2;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("root: __java_super_arg_0")
+            && translation
+                .rust
+                .contains("__java_self.middle = (__java_super_arg_0).wrapping_add(1)")
+            && translation
+                .rust
+                .contains("__java_self.leaf = (__java_super_arg_0).wrapping_add(2)")
+            && !translation.rust.contains("compile_error!"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "source_super_constructor_explicit_multilevel_chain",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn initializes_every_level_in_java_order() {
+        let value = ConstructorLeaf::new(7);
+        assert_eq!(value.root, 7);
+        assert_eq!(value.middle, 8);
+        assert_eq!(value.leaf, 9);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn multilevel_super_constructor_preserves_virtual_call_dispatch() {
+    let translation = translate_source(
+        r#"
+class VirtualConstructorRoot {
+    int state;
+    VirtualConstructorRoot() {
+        state = 1;
+        reset();
+    }
+    void reset() { state = 2; }
+}
+
+class VirtualConstructorMiddle extends VirtualConstructorRoot {
+    VirtualConstructorMiddle() { super(); }
+    void reset() { state = 3; }
+}
+
+class VirtualConstructorLeaf extends VirtualConstructorMiddle {
+    VirtualConstructorLeaf() { super(); }
+    void reset() { state = 4; }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("compile_error!")
+            && translation.rust.contains("__java_self.reset()"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules(
+        "multilevel_super_constructor_virtual_dispatch",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn dispatches_to_the_most_derived_override() {
+        assert_eq!(VirtualConstructorLeaf::new().state, 4);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn source_super_constructor_preserves_trailing_method_result_call() {
     let subclass = r#"
 class TooManyMini extends MaxExceededMini {
@@ -57314,6 +57658,363 @@ class PartialArrayStorage {
 }
 
 #[test]
+fn partially_specified_array_assignment_in_fallible_method_wraps_inner_matrix() {
+    let translation = translate_source(
+        r#"
+class PartialArrayFallibleWrite {
+    int[][][] scores;
+
+    void initialize(int rows, int columns, boolean full) throws Exception {
+        if (full) {
+            scores = new int[2][rows][columns];
+        } else {
+            scores = new int[2][][];
+            scores[0] = new int[rows][columns];
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("let __java_assignment_value = Some("),
+        "{}",
+        translation.rust
+    );
+    assert!(
+        translation
+            .rust
+            .contains("std::iter::repeat_with(|| Some(ndarray::Array2::from_elem("),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "partially_specified_array_fallible_write",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
+}
+
+#[test]
+fn nullable_rank_three_field_length_unwraps_outer_and_matrix_payloads() {
+    let translation = translate_source(
+        r#"
+class PartialArrayLengths {
+    int[][][] scores;
+
+    void initialize(int rows, int columns) {
+        scores = new int[2][][];
+        scores[0] = new int[rows][columns];
+    }
+
+    int dimensions() {
+        return scores.length + scores[0].length;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("self.scores.len()")
+            && !translation.rust.contains(".as_slice().len()")
+            && translation
+                .rust
+                .contains("self.scores.as_ref().expect(\"Java null receiver\").len()")
+            && translation.rust.contains(".nrows() as i32"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_rank_three_field_lengths",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
+}
+
+#[test]
+fn constructor_initialized_matrix_alias_reads_without_optional_projection() {
+    let translation = translate_source(
+        r#"
+class MatrixAliasRead {
+    int[][] target;
+    int[][] scratch;
+
+    MatrixAliasRead(int size) {
+        target = scratch = new int[size][size];
+    }
+
+    int get(int row, int column) {
+        return target[row][column];
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.rust.contains("self.target.as_ref()")
+            && translation
+                .rust
+                .contains("self.target[[row as usize, column as usize]]"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "constructor_initialized_matrix_alias_read",
+        vec![
+            ndarray_stub_module(),
+            GeneratedCrateModule {
+                name: "fixture",
+                rust: format!("use crate::ndarray;\n{}", translation.rust),
+                tests: "",
+            },
+        ],
+    );
+}
+
+#[test]
+fn nested_source_enum_constant_equality_keeps_concrete_copy_shape() {
+    let translation = translate_source(
+        r#"
+interface Penalty {
+    enum Type { CONSTANT, LINEAR }
+    Type getType();
+}
+
+class PenaltyUse {
+    static boolean linear(Penalty penalty) {
+        return penalty == null || penalty.getType() == Penalty.Type.LINEAR;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Penalty_Type::LINEAR")
+            && !translation.rust.contains("Penalty_Type::LINEAR.as_ref()"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nested_source_enum_constant_equality",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn borrowed_interface_parameter_forwarding_does_not_reborrow_boxed_storage() {
+    let translation = translate_source(
+        r#"
+interface ForwardPenalty {
+    int score();
+}
+
+class ForwardPenaltyUse {
+    static int consume(ForwardPenalty penalty) {
+        return penalty.score();
+    }
+
+    static int forward(ForwardPenalty penalty) {
+        return consume(penalty);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Self::consume(penalty)")
+            && !translation
+                .rust
+                .contains("penalty.as_ref() as &dyn ForwardPenalty"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "borrowed_interface_parameter_forwarding",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn generic_trait_impl_carries_clone_bounds_required_by_cloneable_struct() {
+    let translation = translate_source(
+        r#"
+interface GenericValue {
+    int size();
+}
+
+class GenericValueImpl<T> implements GenericValue {
+    java.util.List<T> values = new java.util.ArrayList<>();
+
+    public int size() {
+        return values.size();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("impl<T: std::any::Any + Clone> GenericValue for GenericValueImpl<T>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "generic_trait_impl_clone_bounds",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn inherited_generic_method_call_propagates_class_clone_bound() {
+    let translation = translate_source(
+        r#"
+import java.util.List;
+
+class CloneBoundBase<S, C> {
+    List<C> values;
+
+    void reset() {
+        C first = values.get(0);
+    }
+}
+
+class CloneBoundChild<S, C> extends CloneBoundBase<S, C> {
+    void setQuery(S query) {
+        reset();
+    }
+}
+
+class CloneBoundMiddle<S, C> extends CloneBoundBase<S, C> {
+    void setValue(S value) {
+        reset();
+    }
+}
+
+class CloneBoundLeaf<S, C> extends CloneBoundMiddle<S, C> {
+}
+
+class VirtualCloneBase<S, C> {
+    List<C> values;
+
+    void getValue() {
+        setValue(null);
+    }
+
+    void setValue(S value) {
+        reset();
+    }
+
+    void reset() {
+    }
+}
+
+class VirtualCloneMiddle<S, C> extends VirtualCloneBase<S, C> {
+    void reset() {
+        C first = values.get(0);
+    }
+}
+
+class VirtualCloneLeaf<S, C> extends VirtualCloneMiddle<S, C> {
+}
+
+abstract class AbstractVirtualCloneBase<S, C> {
+    List<C> values;
+
+    void getValue() {
+        align();
+    }
+
+    abstract void align();
+}
+
+class AbstractVirtualCloneChild<S, C> extends AbstractVirtualCloneBase<S, C> {
+    void align() {
+        C first = values.get(0);
+    }
+}
+"#,
+    );
+
+    let child = translation
+        .rust
+        .split("impl<S: std::any::Any, C: std::any::Any> CloneBoundChild<S, C>")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        child.contains("pub fn reset(&self) where C: Clone")
+            && child.contains("pub fn set_query(&self, query: S) where C: Clone"),
+        "{}",
+        translation.rust
+    );
+    let leaf = translation
+        .rust
+        .split("impl<S: std::any::Any, C: std::any::Any> CloneBoundLeaf<S, C>")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        leaf.contains("pub fn set_value(&self, value: S) where C: Clone"),
+        "{}",
+        translation.rust
+    );
+    let virtual_leaf = translation
+        .rust
+        .split("impl<S: std::any::Any, C: std::any::Any> VirtualCloneLeaf<S, C>")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        virtual_leaf.contains("pub fn set_value(&self, value: Option<S>) where C: Clone")
+            && virtual_leaf.contains("pub fn get_value(&self) where C: Clone"),
+        "{}",
+        translation.rust
+    );
+    let abstract_virtual_child = translation
+        .rust
+        .split("impl<S: std::any::Any, C: std::any::Any> AbstractVirtualCloneChild<S, C>")
+        .nth(1)
+        .unwrap_or_default();
+    assert!(
+        abstract_virtual_child.contains("pub fn get_value(&self) where C: Clone"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "inherited_generic_method_clone_bound",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn rank_three_primitive_array_write_uses_nested_mutable_carrier() {
     let translation = translate_source(
         r#"
@@ -70367,6 +71068,18 @@ class ExternalFacadeRuntimeKind {
         return value instanceof String;
     }
 
+    static boolean isStringBuffer(CharSequence value) {
+        return value instanceof StringBuffer;
+    }
+
+    static String appendThroughStringBufferCast() {
+        CharSequence value = new StringBuffer("a");
+        if (value instanceof StringBuffer) {
+            ((StringBuffer) value).append("b");
+        }
+        return value.toString();
+    }
+
     static boolean isWriter(Appendable value) {
         return value instanceof Writer;
     }
@@ -70376,6 +71089,8 @@ class ExternalFacadeRuntimeKind {
 
     assert!(
         translation.rust.contains("value.is_string()")
+            && translation.rust.contains("value.is_string_buffer()")
+            && translation.rust.contains("value.as_string_buffer()")
             && translation.rust.contains("value.is_writer()")
             && !translation
                 .rust
@@ -70383,13 +71098,15 @@ class ExternalFacadeRuntimeKind {
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules_for_translation(
         "external_facade_runtime_kind_instanceof",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: translation.rust,
-            tests: "",
-        }],
+        translation.rust,
+        r#"
+#[test]
+fn char_sequence_preserves_mutable_string_buffer_identity() {
+    assert_eq!(ExternalFacadeRuntimeKind::append_through_string_buffer_cast(), "ab");
+}
+"#,
     );
 }
 

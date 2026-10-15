@@ -1,0 +1,5 @@
+org/biojava/nbio/alignment/SmithWaterman.java
+org/biojava/nbio/alignment/routines/AlignerHelper.java
+org/biojava/nbio/alignment/template/AbstractMatrixAligner.java
+org/biojava/nbio/alignment/template/AbstractPairwiseSequenceAligner.java
+org/biojava/nbio/alignment/template/GapPenalty.java

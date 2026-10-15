@@ -3863,6 +3863,7 @@ fn external_capability_instanceof_method(
         ("Appendable", "Flushable") => Some("is_flushable"),
         ("Appendable", "Writer") => Some("is_writer"),
         ("CharSequence", "String") => Some("is_string"),
+        ("CharSequence", "StringBuffer") => Some("is_string_buffer"),
         _ => None,
     }
 }

@@ -1575,7 +1575,7 @@ fn collect_external_api_effects_from_stmt_with_env(
                     budget_exhausted,
                     env,
                     current_type,
-                    false,
+                    true,
                 );
                 seed_returned_external_call_effect(
                     expr,

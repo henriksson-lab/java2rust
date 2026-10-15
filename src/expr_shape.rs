@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 
 use crate::binding_id::{BindingId, BindingKind};
-use crate::facts::FactSet;
+use crate::facts::{ExternalFactLookupIndex, FactSet};
 use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Param, Stmt, TypeDecl};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
@@ -1412,6 +1412,7 @@ pub struct ExprShapeContext<'a> {
     signatures: Option<&'a SignaturePlan>,
     representations: Option<&'a RepresentationPlan>,
     facts: Option<&'a FactSet>,
+    external_index: Option<&'a ExternalFactLookupIndex<'a>>,
 }
 
 impl<'a> ExprShapeContext<'a> {
@@ -1424,7 +1425,17 @@ impl<'a> ExprShapeContext<'a> {
             signatures,
             representations,
             facts,
+            external_index: None,
         }
+    }
+
+    /// Reuse the batch lowerer's per-file external-fact index. Expression
+    /// shape inference is called many times while lowering one statement; an
+    /// index built independently by every call turns nested expressions into
+    /// repeated whole-fact-set work.
+    pub fn with_external_index(mut self, external_index: &'a ExternalFactLookupIndex<'a>) -> Self {
+        self.external_index = Some(external_index);
+        self
     }
 
     pub fn signatures(self) -> Option<&'a SignaturePlan> {
@@ -1471,6 +1482,24 @@ pub fn infer_expr_shape_with_context(
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
 ) -> RustSlotShape {
+    if let Some(external_index) = ctx.external_index {
+        return infer_expr_shape_with_context_and_external_index(
+            expr,
+            env,
+            ctx,
+            Some(external_index),
+        );
+    }
+    let external_index = ctx.facts.map(FactSet::external_lookup_index);
+    infer_expr_shape_with_context_and_external_index(expr, env, ctx, external_index.as_ref())
+}
+
+fn infer_expr_shape_with_context_and_external_index(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
+) -> RustSlotShape {
     match expr {
         Expr::Literal(lit) => RustSlotShape::conservative(crate::types::literal_type(lit)),
         Expr::Var(name) => env
@@ -1485,67 +1514,54 @@ pub fn infer_expr_shape_with_context(
         Expr::FieldAccess(receiver, field) => infer_field_access_shape(receiver, field, env, ctx)
             .or_else(|| planned_member_access_shape(receiver, field, env, ctx))
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
-        Expr::ArrayAccess(array, _) => infer_indexed_expr_shape(array, env, ctx),
+        Expr::ArrayAccess(array, _) => infer_indexed_expr_shape(array, env, ctx, external_index),
         Expr::Call {
             receiver,
             name,
             args,
             resolved: Some(call),
         } => {
-            resolved_external_call_expr_shape(receiver.as_deref(), name, args.len(), call, env, ctx)
-                .or_else(|| {
-                    ctx.signatures.and_then(|signatures| {
-                        // A resolved source declaration is authoritative.  Common
-                        // names such as `getName` also exist on platform/external
-                        // facades; consulting those models first can erase the
-                        // source method's nullable carrier and make the emitted call
-                        // type disagree with the slot planner. Conversely, a
-                        // positively modelled external declaration owns its ABI even
-                        // if the resolver attached a compatibility signature to it.
-                        resolved_call_return_shape_by_java_key(
-                            call,
-                            name,
-                            args.len(),
-                            signatures,
-                            ctx.representations,
-                        )
-                        .or_else(|| {
-                            signatures.method_return_shape_by_rust_name(
-                                &call.declaring_type,
-                                &call.rust_name,
-                            )
-                        })
+            resolved_external_call_expr_shape(
+                receiver.as_deref(),
+                name,
+                args.len(),
+                call,
+                env,
+                ctx,
+                external_index,
+            )
+            .or_else(|| {
+                ctx.signatures.and_then(|signatures| {
+                    // A resolved source declaration is authoritative.  Common
+                    // names such as `getName` also exist on platform/external
+                    // facades; consulting those models first can erase the
+                    // source method's nullable carrier and make the emitted call
+                    // type disagree with the slot planner. Conversely, a
+                    // positively modelled external declaration owns its ABI even
+                    // if the resolver attached a compatibility signature to it.
+                    resolved_call_return_shape_by_java_key(
+                        call,
+                        name,
+                        args.len(),
+                        signatures,
+                        ctx.representations,
+                    )
+                    .or_else(|| {
+                        signatures
+                            .method_return_shape_by_rust_name(&call.declaring_type, &call.rust_name)
                     })
                 })
-                .or_else(|| {
-                    native_java_call_expr_shape(
-                        receiver.as_deref(),
-                        name,
-                        args,
-                        Some(call),
-                        env,
-                        ctx,
-                    )
-                })
-                .or_else(|| {
-                    external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx)
-                })
-                .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
-                .or_else(|| {
-                    java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx)
-                })
-                .unwrap_or_else(|| {
-                    value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
-                })
-        }
-        Expr::Call {
-            receiver,
-            name,
-            args,
-            resolved: None,
-        } => unresolved_source_call_expr_shape(receiver.as_deref(), name, args, env, ctx)
+            })
             .or_else(|| {
-                native_java_call_expr_shape(receiver.as_deref(), name, args, None, env, ctx)
+                native_java_call_expr_shape(
+                    receiver.as_deref(),
+                    name,
+                    args,
+                    Some(call),
+                    env,
+                    ctx,
+                    external_index,
+                )
             })
             .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
             .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
@@ -1554,7 +1570,36 @@ pub fn infer_expr_shape_with_context(
             })
             .unwrap_or_else(|| {
                 value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
-            }),
+            })
+        }
+        Expr::Call {
+            receiver,
+            name,
+            args,
+            resolved: None,
+        } => unresolved_source_call_expr_shape(
+            receiver.as_deref(),
+            name,
+            args,
+            env,
+            ctx,
+            external_index,
+        )
+        .or_else(|| {
+            native_java_call_expr_shape(
+                receiver.as_deref(),
+                name,
+                args,
+                None,
+                env,
+                ctx,
+                external_index,
+            )
+        })
+        .or_else(|| external_call_expr_shape(receiver.as_deref(), name, args.len(), env, ctx))
+        .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
+        .or_else(|| java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx))
+        .unwrap_or_else(|| value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))),
         Expr::New {
             ty,
             resolved: Some(resolved),
@@ -1581,11 +1626,17 @@ fn unresolved_source_call_expr_shape(
     args: &[Expr],
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> Option<RustSlotShape> {
     let signatures = ctx.signatures?;
     let owner = match receiver {
         Some(receiver) => {
-            let shape = infer_expr_shape_with_context(receiver, env, ctx);
+            let shape = infer_expr_shape_with_context_and_external_index(
+                receiver,
+                env,
+                ctx,
+                external_index,
+            );
             let ty = crate::types::optional_element_type(&shape.java_ty)
                 .unwrap_or_else(|| shape.java_ty.clone());
             match ty {
@@ -1628,13 +1679,21 @@ fn resolved_external_call_expr_shape(
     call: &crate::java_ir::ResolvedCall,
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> Option<RustSlotShape> {
     let facts = ctx.facts?;
-    let effect = facts.external_api_effect_for_receiver_with_arity(
-        Some(&call.declaring_type),
-        name,
-        Some(arg_count),
-    )?;
+    let effect = match external_index {
+        Some(external_index) => external_index.external_api_effect_for_receiver_with_arity(
+            Some(&call.declaring_type),
+            name,
+            Some(arg_count),
+        ),
+        None => facts.external_api_effect_for_receiver_with_arity(
+            Some(&call.declaring_type),
+            name,
+            Some(arg_count),
+        ),
+    }?;
     if matches!(
         effect.provenance,
         crate::facts::FactProvenance::ParsedSource
@@ -1674,6 +1733,7 @@ fn native_java_call_expr_shape(
     resolved: Option<&crate::java_ir::ResolvedCall>,
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> Option<RustSlotShape> {
     let default_facts;
     let facts = match ctx.facts {
@@ -1683,14 +1743,25 @@ fn native_java_call_expr_shape(
             &default_facts
         }
     };
-    let target = crate::call_plan::plan_call_target_with_facts_and_arity(
-        receiver,
-        name,
-        args.len(),
-        resolved,
-        facts,
-        env.type_env(),
-    );
+    let target = match external_index {
+        Some(external_index) => crate::call_plan::plan_call_target_with_external_index_and_arity(
+            receiver,
+            name,
+            args.len(),
+            resolved,
+            facts,
+            external_index,
+            env.type_env(),
+        ),
+        None => crate::call_plan::plan_call_target_with_facts_and_arity(
+            receiver,
+            name,
+            args.len(),
+            resolved,
+            facts,
+            env.type_env(),
+        ),
+    };
     if matches!(
         target,
         crate::call_plan::CallTargetPlan::NativeJavaStatic {
@@ -1698,7 +1769,7 @@ fn native_java_call_expr_shape(
         }
     ) && let [_, default] = args
         && (matches!(default, Expr::Literal(crate::java_ir::Literal::Null))
-            || infer_expr_shape_with_context(default, env, ctx)
+            || infer_expr_shape_with_context_and_external_index(default, env, ctx, external_index)
                 .optional_element_type()
                 .is_some())
     {
@@ -1713,7 +1784,8 @@ fn native_java_call_expr_shape(
         }
     ) && let Some(value) = args.first()
     {
-        let value_shape = infer_expr_shape_with_context(value, env, ctx);
+        let value_shape =
+            infer_expr_shape_with_context_and_external_index(value, env, ctx, external_index);
         if let Some(element_ty) = value_shape.optional_element_type() {
             // `requireNonNull` is Java's generic identity boundary with the
             // additional postcondition that its result is non-null.  Project
@@ -2474,8 +2546,10 @@ fn infer_indexed_expr_shape(
     array: &Expr,
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> RustSlotShape {
-    let array_shape = infer_expr_shape_with_context(array, env, ctx);
+    let array_shape =
+        infer_expr_shape_with_context_and_external_index(array, env, ctx, external_index);
     indexed_read_shape_for_access_with_facts(&array_shape, ctx.facts.unwrap_or(&FactSet::default()))
         .unwrap_or_else(|| {
             crate::shape_projection::indexed_read_shape_with_facts(

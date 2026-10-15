@@ -12,6 +12,56 @@ fn temp_dir(label: &str) -> PathBuf {
     path
 }
 
+#[test]
+fn shared_merger_keeps_authoritative_underscored_nested_source_type() {
+    let dir = temp_dir("underscored_nested_source_type");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    fs::write(
+        generated.join("00001_Owner.rs"),
+        r#"
+#[derive(Clone, Debug, Default)]
+pub struct Owner_Nested;
+impl Owner_Nested {
+    pub const VALUE: Owner_Nested = { compile_error!("stale facade"); panic!() };
+}
+pub type Nested = Owner_Nested;
+
+#[derive(Clone, Debug, Default)]
+pub struct Owner_Nested;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Owner_Nested { VALUE }
+impl Default for Owner_Nested {
+    fn default() -> Self { Self::VALUE }
+}
+pub type Nested = Owner_Nested;
+
+pub struct Owner;
+"#,
+    )
+    .unwrap();
+
+    run_merger(&dir);
+    let module = fs::read_to_string(generated.join("00001_Owner.rs")).unwrap();
+    assert_eq!(
+        module.matches("pub enum Owner_Nested").count(),
+        1,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("pub struct Owner_Nested").count(),
+        0,
+        "{module}"
+    );
+    assert_eq!(
+        module.matches("pub type Nested = Owner_Nested;").count(),
+        1,
+        "{module}"
+    );
+    assert!(!module.contains("stale facade"), "{module}");
+}
+
 fn run_merger(dir: &Path) -> (PathBuf, PathBuf) {
     let generated = dir.join("generated");
     let shared = dir.join("shared.rs");
@@ -137,6 +187,43 @@ impl TimeUnit {
         let module = fs::read_to_string(generated.join(module)).unwrap();
         assert!(!module.contains("pub struct TimeUnit"), "{module}");
         assert!(!module.contains("impl TimeUnit"), "{module}");
+    }
+}
+
+#[test]
+fn shared_merger_prefers_source_interface_trait_over_opaque_struct_fallback() {
+    let dir = temp_dir("source_interface_over_opaque_fallback");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    fs::write(
+        generated.join("00001_UseA.rs"),
+        "pub struct Sequence;\n\nimpl Eq for Sequence {}\nimpl PartialEq for Sequence { fn eq(&self, _other: &Self) -> bool { true } }\nimpl Sequence { pub fn fallback(&self) {} }\n\npub struct UseA;\n",
+    )
+    .unwrap();
+    fs::write(
+        generated.join("00002_UseB.rs"),
+        "pub trait Sequence<C> { fn get_length(&self) -> i32; fn clone_box(&self) -> Box<dyn Sequence<C>>; }\nimpl<C> Clone for Box<dyn Sequence<C>> { fn clone(&self) -> Self { Sequence::<C>::clone_box(&**self) } }\n\npub struct UseB;\n",
+    )
+    .unwrap();
+    let raw = dir.join("raw");
+    fs::create_dir_all(&raw).unwrap();
+    fs::copy(generated.join("00001_UseA.rs"), raw.join("00001_UseA.rs")).unwrap();
+    fs::copy(generated.join("00002_UseB.rs"), raw.join("00002_UseB.rs")).unwrap();
+
+    let (shared, _) = run_merger(&dir);
+    let shared = fs::read_to_string(shared).unwrap();
+    assert!(shared.contains("pub trait Sequence<C>"), "{shared}");
+    assert!(!shared.contains("pub struct Sequence"), "{shared}");
+    assert!(
+        shared.contains("Clone for Box<dyn Sequence<C>>"),
+        "{shared}"
+    );
+    assert!(!shared.contains("impl Eq for Sequence"), "{shared}");
+    assert!(!shared.contains("pub fn fallback"), "{shared}");
+    for module in ["00001_UseA.rs", "00002_UseB.rs"] {
+        let module = fs::read_to_string(generated.join(module)).unwrap();
+        assert!(!module.contains("pub struct Sequence"), "{module}");
+        assert!(!module.contains("pub trait Sequence"), "{module}");
     }
 }
 

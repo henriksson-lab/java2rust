@@ -2368,17 +2368,8 @@ pub fn solve_signatures_with_facts_and_support_context_profiled_with_progress(
                 equalize_source_override_nullability_constraints(constraints, support_program);
             let owner_alias_receivers_changed =
                 equalize_source_owner_alias_receiver_constraints(constraints);
-            let (propagation_changed, stats) = execute_signature_solver_pass_plan_with_stats(
-                constraints,
-                usage,
-                &dependency_sccs,
-                &pass_plan,
-                Some(SignatureSolverPassProgress {
-                    progress_sink,
-                    fixpoint_start,
-                    iteration: current_iteration,
-                }),
-            );
+            let (propagation_changed, stats) =
+                execute_global_signature_solver_sweep_with_stats(constraints, usage);
             let changed = override_slots_changed
                 || owner_alias_receivers_changed
                 || propagation_changed;
@@ -3226,6 +3217,7 @@ fn add_method_binding_dependency_edges(
                 }
                 BindingUse::ReturnedNullableSequenceElements => {}
                 BindingUse::ContentRead
+                | BindingUse::IndexedElementComparedToNull { .. }
                 | BindingUse::AssignedSubtypeToLocal { .. }
                 | BindingUse::AssignedSubtypeToCollectionElement { .. }
                 | BindingUse::AssignedSubtypeToCallArgument { .. }
@@ -3337,6 +3329,7 @@ fn add_constructor_binding_dependency_edges(
                     );
                 }
                 BindingUse::ContentRead
+                | BindingUse::IndexedElementComparedToNull { .. }
                 | BindingUse::AssignedSubtypeToLocal { .. }
                 | BindingUse::AssignedSubtypeToCollectionElement { .. }
                 | BindingUse::AssignedSubtypeToCallArgument { .. }
@@ -3788,8 +3781,7 @@ pub fn solve_signature_constraints_to_fixpoint_result(
     let result = saturation_policy.saturate(
         constraints,
         |constraints| {
-            let changed =
-                execute_signature_solver_pass_plan(constraints, usage, &dependency_sccs, &pass_plan);
+            let changed = execute_global_signature_solver_sweep(constraints, usage);
             SaturationStep::from(changed)
         },
         |max_iterations| {
@@ -3898,6 +3890,7 @@ fn top_signature_report_counts(
     counts
 }
 
+#[cfg(test)]
 fn execute_signature_solver_pass_plan(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
@@ -3907,13 +3900,53 @@ fn execute_signature_solver_pass_plan(
     execute_signature_solver_pass_plan_with_stats(constraints, usage, analysis, pass_plan, None).0
 }
 
+/// Apply one monotone propagation sweep over the complete constraint state.
+///
+/// The SCC pass plan remains useful for dependency diagnostics, but its
+/// mutation scope does not currently index the usage facts consumed by each
+/// propagation arm. Running every arm once per mutable SCC therefore rescans
+/// the complete program thousands of times. The outer finite-saturation loop
+/// already repeats until the same least fixpoint is reached, so one global
+/// sweep per iteration preserves the solver semantics without those redundant
+/// scans.
+fn execute_global_signature_solver_sweep(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+) -> bool {
+    execute_global_signature_solver_sweep_with_stats(constraints, usage).0
+}
+
+fn execute_global_signature_solver_sweep_with_stats(
+    constraints: &mut SignatureConstraintState,
+    usage: &UsageFacts,
+) -> (bool, SignatureSolverExecutionStats) {
+    let before = constraints.clone();
+    let propagation_start = std::time::Instant::now();
+    let (reported_changed, propagation_arms) =
+        apply_signature_propagation_sweep_with_stats(constraints, usage, None);
+    let mut stats = SignatureSolverExecutionStats {
+        component_sweeps: 1,
+        state_clones: 1,
+        propagation_sweep_ms: propagation_start.elapsed().as_millis(),
+        propagation_arms,
+        ..SignatureSolverExecutionStats::default()
+    };
+    let changed = reported_changed && *constraints != before;
+    if changed {
+        stats.changed_component_sweeps = 1;
+    }
+    (changed, stats)
+}
+
 #[derive(Clone, Copy)]
+#[cfg(test)]
 struct SignatureSolverPassProgress<'a> {
     progress_sink: Option<SignatureSolverProgressSink<'a>>,
     fixpoint_start: std::time::Instant,
     iteration: usize,
 }
 
+#[cfg(test)]
 fn execute_signature_solver_pass_plan_with_stats(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
@@ -9651,6 +9684,7 @@ fn build_signature_plan_from_constraints(
     for ty in &program.types {
         collect_type_signatures(
             ty,
+            program,
             support_program,
             representations,
             constraints,
@@ -9663,6 +9697,7 @@ fn build_signature_plan_from_constraints(
         for ty in &support_program.types {
             collect_type_signatures(
                 ty,
+                support_program,
                 support_program,
                 representations,
                 constraints,
@@ -9685,7 +9720,96 @@ fn build_signature_plan_from_constraints(
                 .or_insert(rust_name);
         }
     }
+    reconcile_inherited_field_storage_shapes(program, support_program, &mut plan);
     plan
+}
+
+fn reconcile_inherited_field_storage_shapes(
+    program: &Program,
+    support_program: &Program,
+    plan: &mut SignaturePlan,
+) {
+    for ty in &program.types {
+        reconcile_inherited_field_storage_shapes_for_type(ty, program, support_program, plan);
+    }
+}
+
+fn reconcile_inherited_field_storage_shapes_for_type(
+    ty: &TypeDecl,
+    program: &Program,
+    support_program: &Program,
+    plan: &mut SignaturePlan,
+) {
+    for inherited in
+        crate::inherited_members::inherited_instance_fields_for_type(ty, support_program)
+    {
+        let candidates = collect_signature_type_decl_matches(program, |candidate| {
+            (signature_decl_owner_alias_matches(&candidate.name, inherited.declaring_type())
+                || crate::inherited_members::source_class_ancestor_type_arguments(
+                    support_program,
+                    ty,
+                    candidate,
+                )
+                .is_some())
+                && candidate.members.iter().any(|member| {
+                    matches!(member, Member::Field(field)
+                        if field.name == inherited.field().name && field.ty == inherited.field().ty)
+                })
+        });
+        let Some(best_score) = candidates
+            .iter()
+            .map(|candidate| signature_type_decl_source_evidence_score(candidate))
+            .max()
+        else {
+            continue;
+        };
+        let mut best = candidates
+            .into_iter()
+            .filter(|candidate| signature_type_decl_source_evidence_score(candidate) == best_score);
+        let Some(declaring_ty) = best.next() else {
+            continue;
+        };
+        if best.next().is_some() {
+            continue;
+        }
+        let Some(declaring_field) = declaring_ty.members.iter().find_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            (field.name == inherited.field().name && field.ty == inherited.field().ty)
+                .then_some(field)
+        }) else {
+            continue;
+        };
+        let Some(mut shape) = plan
+            .field_shape_for_declared_field(declaring_ty, declaring_field)
+            .cloned()
+        else {
+            continue;
+        };
+        if let Some(substitutions) = crate::inherited_members::source_class_ancestor_type_arguments(
+            support_program,
+            ty,
+            declaring_ty,
+        ) {
+            shape.java_ty =
+                crate::resolve::substitute_method_type_variables(&shape.java_ty, &substitutions);
+        }
+        plan.fields.insert(
+            FieldKey::rust_identity(&ty.name, inherited.rust_name()),
+            shape,
+        );
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            reconcile_inherited_field_storage_shapes_for_type(
+                nested,
+                program,
+                support_program,
+                plan,
+            );
+        }
+    }
 }
 
 impl SignaturePlan {
@@ -9734,15 +9858,122 @@ impl SignaturePlan {
         self.methods
             .get(&key)
             .or_else(|| self.unique_method_signature_for_simple_owner(&key))
+            .or_else(|| self.source_method_signature_with_type_aliases(ty, method))
             .unwrap_or_else(|| {
             panic!(
-                "signature solver must plan every lowered method: missing {}::{}, available for type: [{}], nearby types: [{}]",
+                "signature solver must plan every lowered method: missing {}::{}, available for type: [{}], nearby types: [{}], alias lookup: {}",
                 key.type_name(),
                 key.rust_name,
                 self.available_method_names_for_type(&key.type_name()),
-                self.nearby_method_type_names(&key.type_name())
+                self.nearby_method_type_names(&key.type_name()),
+                self.method_alias_lookup_diagnostics(ty, method),
             )
         })
+    }
+
+    fn method_alias_lookup_diagnostics(&self, ty: &TypeDecl, method: &MethodDecl) -> String {
+        let query = JavaCallableKey::source_method_for_type(ty, method);
+        let query_slot = query.slot();
+        let query_rust_name = method_rust_name(method);
+        let mut candidates = self
+            .methods_by_java_key
+            .keys()
+            .filter_map(|candidate| {
+                let owner_alias =
+                    crate::facts::external_type_name_matches(candidate.owner(), query.owner());
+                let base = crate::parser::to_snake_case(candidate.java_name());
+                let family_name = query_rust_name == base
+                    || query_rust_name
+                        .strip_prefix(&base)
+                        .is_some_and(|suffix| suffix.starts_with('_'));
+                (owner_alias || family_name).then(|| {
+                    format!(
+                        "{candidate:?} rust={:?} owner_alias={owner_alias} typed={} header={} arity={} family_name={family_name}",
+                        self.rust_method_names_by_java_key.get(candidate),
+                        candidate.slot().matches_with_type_aliases(&query_slot),
+                        candidate.slot().matches_header_and_arity(&query_slot),
+                        candidate.slot().arity() == method.params.len(),
+                    )
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        format!(
+            "query={query:?} rust={query_rust_name:?}; candidates=[{}]",
+            candidates.join("; ")
+        )
+    }
+
+    fn source_method_signature_with_type_aliases(
+        &self,
+        ty: &TypeDecl,
+        method: &MethodDecl,
+    ) -> Option<&MethodSignaturePlan> {
+        let query = JavaCallableKey::source_method_for_type(ty, method);
+        let query_slot = query.slot();
+        let owner_matches = |candidate: &JavaCallableKey| {
+            crate::facts::external_type_name_matches(candidate.owner(), query.owner())
+        };
+        let typed_matches = self
+            .methods_by_java_key
+            .iter()
+            .filter(|(candidate, _)| {
+                owner_matches(candidate) && candidate.slot().matches_with_type_aliases(&query_slot)
+            })
+            .collect::<Vec<_>>();
+        let exact_owner_matches = typed_matches
+            .iter()
+            .filter(|(candidate, _)| candidate.owner() == query.owner())
+            .map(|(_, signature)| *signature)
+            .collect::<Vec<_>>();
+        if let [signature] = exact_owner_matches.as_slice() {
+            return Some(*signature);
+        }
+        if let Some((first_key, first_signature)) = typed_matches.first().copied()
+            && typed_matches.iter().skip(1).all(|(candidate, signature)| {
+                !distinct_qualified_type_owners(candidate.owner(), first_key.owner())
+                    && *signature == first_signature
+            })
+        {
+            return Some(first_signature);
+        }
+
+        // Lowering may replace a source nested type with its flattened emitted
+        // identifier after signatures were indexed.  If this method family has
+        // exactly one overload at the requested arity, Java's overload identity
+        // makes that candidate unambiguous without guessing from Rust names.
+        let arity_matches = self
+            .methods_by_java_key
+            .iter()
+            .filter(|(candidate, _)| {
+                owner_matches(candidate) && candidate.slot().matches_header_and_arity(&query_slot)
+            })
+            .collect::<Vec<_>>();
+        if let Some(signature) = unique_duplicate_java_callable_signature(&arity_matches) {
+            return Some(signature);
+        }
+
+        // Some emission clones no longer retain every source-level slot flag.
+        // The generated overload name still records its Java family, and Java
+        // forbids two declarations with the same owner/name/parameter types.
+        // A sole family member at this arity is therefore safe to reuse; a
+        // same-arity overload set remains deliberately unresolved.
+        let query_rust_name = method_rust_name(method);
+        let family_matches = self
+            .methods_by_java_key
+            .iter()
+            .filter(|(candidate, _)| {
+                if !owner_matches(candidate) || candidate.slot().arity() != method.params.len() {
+                    return false;
+                }
+                let base = crate::parser::to_snake_case(candidate.java_name());
+                query_rust_name == base
+                    || query_rust_name
+                        .strip_prefix(&base)
+                        .is_some_and(|suffix| suffix.starts_with('_'))
+            })
+            .collect::<Vec<_>>();
+        unique_duplicate_java_callable_signature(&family_matches)
     }
 
     pub(crate) fn method_signature_by_rust_name(
@@ -10381,6 +10612,22 @@ fn distinct_qualified_type_owners(left: &str, right: &str) -> bool {
         && (right.contains('.') || right.contains('$'))
 }
 
+fn unique_duplicate_java_callable_signature<'a>(
+    matches: &[(&JavaCallableKey, &'a MethodSignaturePlan)],
+) -> Option<&'a MethodSignaturePlan> {
+    let (first_key, first_signature) = matches.first().copied()?;
+    let first_slot = first_key.slot();
+    matches
+        .iter()
+        .skip(1)
+        .all(|(candidate, signature)| {
+            candidate.slot().matches_with_type_aliases(&first_slot)
+                && !distinct_qualified_type_owners(candidate.owner(), first_key.owner())
+                && *signature == first_signature
+        })
+        .then_some(first_signature)
+}
+
 fn method_signature_base_name_matches(rust_name: &str, base_name: &str) -> bool {
     rust_name == base_name
         || rust_name
@@ -10624,8 +10871,138 @@ fn method_signature_type_name_aliases(type_name: &str) -> Vec<String> {
     aliases
 }
 
+fn canonicalize_nested_source_method_types(method: &mut MethodDecl, program: &Program) {
+    method.return_type = canonical_nested_source_java_type(&method.return_type, program);
+    for param in &mut method.params {
+        param.ty = canonical_nested_source_java_type(&param.ty, program);
+    }
+    for bound in &mut method.type_param_bounds {
+        if let Some(bound) = bound {
+            *bound = canonical_nested_source_java_type(bound, program);
+        }
+    }
+    for thrown in &mut method.throws {
+        *thrown = canonical_nested_source_java_type(thrown, program);
+    }
+}
+
+pub(crate) fn canonical_nested_source_java_type(java_ty: &JavaType, program: &Program) -> JavaType {
+    match java_ty {
+        JavaType::Named { name, args } => JavaType::Named {
+            name: canonical_nested_source_type_name(name, program).unwrap_or_else(|| name.clone()),
+            args: args
+                .iter()
+                .map(|arg| canonical_nested_source_java_type(arg, program))
+                .collect(),
+        },
+        JavaType::Unknown(name) => JavaType::Unknown(
+            canonical_nested_source_type_name(name, program).unwrap_or_else(|| name.clone()),
+        ),
+        JavaType::Array(element) => JavaType::Array(Box::new(canonical_nested_source_java_type(
+            element, program,
+        ))),
+        JavaType::Intersection(bounds) => JavaType::Intersection(
+            bounds
+                .iter()
+                .map(|bound| canonical_nested_source_java_type(bound, program))
+                .collect(),
+        ),
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound))) => {
+            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(Box::new(
+                canonical_nested_source_java_type(bound, program),
+            ))))
+        }
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(Box::new(
+                canonical_nested_source_java_type(bound, program),
+            ))))
+        }
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {
+            java_ty.clone()
+        }
+    }
+}
+
+pub(crate) fn canonical_nested_source_type_name(name: &str, program: &Program) -> Option<String> {
+    // A qualified top-level type (`org.example.Sequence`) and a nested type
+    // (`org.example.Outer.Part`) both contain dots. Only the latter has two
+    // type-like path segments. Without this guard, a same-simple-name nested
+    // declaration elsewhere in a large summary corpus can steal an ordinary
+    // top-level interface bound such as `Sequence<C>`.
+    let dotted_type_like_segments = name
+        .split(['.', '$'])
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_uppercase())
+        })
+        .count();
+    let flattened_type_like_segments = name
+        .split('_')
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|first| first.is_uppercase())
+        })
+        .count();
+    if dotted_type_like_segments < 2 && flattened_type_like_segments < 2 {
+        return None;
+    }
+    let matches = collect_signature_type_decl_matches(program, |candidate| {
+        signature_name_is_emitted_nested_source_type(&candidate.name)
+            && (crate::java_signature::erased_type_names_match_with_aliases(&candidate.name, name)
+                || flattened_rust_nested_source_suffix_matches(&candidate.name, name))
+    });
+    let best_score = matches
+        .iter()
+        .map(|candidate| signature_type_decl_source_evidence_score(candidate))
+        .max()?;
+    let mut best = matches
+        .into_iter()
+        .filter(|candidate| signature_type_decl_source_evidence_score(candidate) == best_score);
+    let selected = best.next()?;
+    best.next().is_none().then(|| selected.name.clone())
+}
+
+fn flattened_rust_nested_source_suffix_matches(candidate: &str, query: &str) -> bool {
+    let candidate_rust = crate::java_naming::rust_name_for_java_named_type(candidate);
+    let query_rust = crate::java_naming::rust_name_for_java_named_type(query);
+    // `org.example.Outer.Inner` can already have crossed a Rust-facing
+    // boundary and become `OrgExampleOuter_Inner`.  The package flattening is
+    // irreversible, but the emitted nested identity remains an exact suffix.
+    // Restrict this recovery to genuine nested names and let the caller's
+    // uniqueness/evidence selection reject collisions.
+    candidate_rust.contains('_')
+        && query_rust.len() > candidate_rust.len()
+        && query_rust.ends_with(&candidate_rust)
+}
+
+fn signature_name_is_emitted_nested_source_type(name: &str) -> bool {
+    (name.contains('.') && !signature_source_name_has_package_prefix(name))
+        || name
+            .split('_')
+            .filter(|segment| {
+                segment
+                    .chars()
+                    .next()
+                    .is_some_and(|first| first.is_uppercase())
+            })
+            .count()
+            >= 2
+}
+
+fn signature_source_name_has_package_prefix(name: &str) -> bool {
+    name.split(['.', '$'])
+        .next()
+        .and_then(|segment| segment.chars().next())
+        .is_some_and(char::is_lowercase)
+}
+
 fn collect_type_signatures(
     ty: &TypeDecl,
+    authoritative_program: &Program,
     support_program: &Program,
     representations: &RepresentationPlan,
     constraints: &SignatureConstraintState,
@@ -10658,12 +11035,17 @@ fn collect_type_signatures(
             crate::java_ir::Member::Method(method) => {
                 let method_key = MethodKey::source_method(ty, method);
                 let method_constraints = constraints.methods.get(&method_key);
-                let effective_method =
+                let mut effective_method =
                     crate::inherited_members::method_with_synthesized_source_wildcard_params(
                         method,
                         ty,
                         &[support_program],
                     );
+                canonicalize_nested_source_method_types(
+                    &mut effective_method,
+                    authoritative_program,
+                );
+                canonicalize_nested_source_method_types(&mut effective_method, support_program);
                 // In scope here: the enclosing type's parameters plus this
                 // method's own, the method's shadowing on a name clash.
                 let type_param_scope =
@@ -10741,11 +11123,18 @@ fn collect_type_signatures(
             crate::java_ir::Member::Constructor(ctor) => {
                 let constructor_key = ConstructorKey::source_constructor(ty, ctor);
                 let constructor_constraints = constraints.constructors.get(&constructor_key);
-                let type_param_scope = type_params_in_scope(&ty.type_params, &ctor.type_params);
+                let mut effective_ctor = ctor.clone();
+                for param in &mut effective_ctor.params {
+                    param.ty = canonical_nested_source_java_type(&param.ty, authoritative_program);
+                    param.ty = canonical_nested_source_java_type(&param.ty, support_program);
+                }
+                let type_param_scope =
+                    type_params_in_scope(&ty.type_params, &effective_ctor.type_params);
                 plan.constructors.insert(
                     constructor_key,
                     ConstructorSignaturePlan::new(
-                        ctor.params
+                        effective_ctor
+                            .params
                             .iter()
                             .enumerate()
                             .map(|(index, param)| {
@@ -10787,6 +11176,7 @@ fn collect_type_signatures(
             crate::java_ir::Member::Type(nested) => {
                 collect_type_signatures(
                     nested,
+                    authoritative_program,
                     support_program,
                     representations,
                     constraints,
@@ -10803,7 +11193,8 @@ fn collect_type_signatures(
         let field = inherited.field();
         let declaring_type = inherited.declaring_type();
         let field_key = FieldKey::rust_identity(&ty.name, inherited.rust_name());
-        let declaring_ty = find_signature_type_decl(support_program, declaring_type);
+        let declaring_ty = find_signature_type_decl(authoritative_program, declaring_type)
+            .or_else(|| find_signature_type_decl(support_program, declaring_type));
         let declaring_field_key =
             declaring_ty.map(|declaring_ty| FieldKey::source_field(declaring_ty, field));
         let mut field_constraints = declaring_field_key
@@ -10823,14 +11214,28 @@ fn collect_type_signatures(
                 &delegated_null_constructor_field_constraints(declaring_ty, field),
             );
         }
-        let field_storage_ty = declaring_ty
-            .and_then(|declaring_ty| comparator_object_field_storage_type(declaring_ty, field))
-            .or_else(|| {
-                declaring_ty.and_then(|declaring_ty| {
-                    partially_specified_array_field_storage_type(declaring_ty, field)
-                })
+        let field_storage_ty = inherited_field_storage_type_from_authoritative_source(
+            authoritative_program,
+            declaring_type,
+            field,
+        )
+        .or_else(|| {
+            inherited_field_storage_type_from_authoritative_source(
+                support_program,
+                declaring_type,
+                field,
+            )
+        })
+        .or_else(|| {
+            declaring_ty
+                .and_then(|declaring_ty| comparator_object_field_storage_type(declaring_ty, field))
+        })
+        .or_else(|| {
+            declaring_ty.and_then(|declaring_ty| {
+                partially_specified_array_field_storage_type(declaring_ty, field)
             })
-            .unwrap_or_else(|| field.ty.clone());
+        })
+        .unwrap_or_else(|| field.ty.clone());
         plan.fields.insert(
             field_key,
             constrained_field_shape(
@@ -10974,6 +11379,57 @@ fn partially_specified_array_field_storage_type(
     ty.static_init_blocks
         .iter()
         .find_map(|block| assigned_in(&block.block))
+}
+
+fn inherited_field_storage_type_from_authoritative_source(
+    program: &Program,
+    declaring_type: &str,
+    inherited_field: &FieldDecl,
+) -> Option<JavaType> {
+    let mut candidates = collect_signature_type_decl_matches(program, |candidate| {
+        signature_decl_owner_alias_matches(&candidate.name, declaring_type)
+    });
+    let storage_type_for = |candidate: &TypeDecl| {
+        let field = candidate.members.iter().find_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            (field.name == inherited_field.name && field.ty == inherited_field.ty).then_some(field)
+        })?;
+        comparator_object_field_storage_type(candidate, field)
+            .or_else(|| partially_specified_array_field_storage_type(candidate, field))
+    };
+    if !candidates
+        .iter()
+        .any(|candidate| storage_type_for(candidate).is_some())
+    {
+        // Some hierarchy summaries name the immediate superclass as the
+        // flattened field owner even though the declaration originated
+        // farther up the chain. Recover the unique body-bearing declaration
+        // by the exact Java field identity. We only accept agreement among
+        // every matching specialized storage result, so unrelated peers
+        // cannot silently choose one another's carrier.
+        candidates = collect_signature_type_decl_matches(program, |candidate| {
+            candidate.members.iter().any(|member| {
+                matches!(member, Member::Field(field)
+                    if field.name == inherited_field.name && field.ty == inherited_field.ty)
+            })
+        });
+    }
+    let mut storage_types = candidates.into_iter().filter_map(storage_type_for);
+    let selected = storage_types.next()?;
+    storage_types
+        .all(|storage| storage == selected)
+        .then_some(selected)
+}
+
+fn signature_decl_owner_alias_matches(candidate: &str, query: &str) -> bool {
+    if crate::facts::external_type_name_matches(candidate, query) {
+        return true;
+    }
+    let candidate_simple = candidate.rsplit(['.', '$']).next().unwrap_or(candidate);
+    let query_simple = query.rsplit(['.', '$']).next().unwrap_or(query);
+    candidate_simple == query_simple && (!candidate.contains('.') || !query.contains('.'))
 }
 
 fn partially_specified_array_assignment_to_field(
@@ -11373,6 +11829,10 @@ fn method_param_shape_constraints_with_declared_source_types(
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
     }
     if let Some(binding) = binding {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &indexed_null_comparison_binding_constraints(binding),
+        );
         if native_map_literal_null_key_type(binding).is_some() {
             push_unique_signature_constraints(
                 &mut constraints,
@@ -12597,6 +13057,10 @@ fn constructor_param_shape_constraints_with_declared_source_types(
         push_unique_signature_constraints(&mut constraints, &[SignatureConstraint::StorageSlot]);
     }
     if let Some(binding) = binding {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &indexed_null_comparison_binding_constraints(binding),
+        );
         if native_map_literal_null_key_type(binding).is_some() {
             push_unique_signature_constraints(
                 &mut constraints,
@@ -13723,14 +14187,12 @@ fn constructor_assignment_targets_field(expr: &Expr, field_name: &str) -> bool {
 }
 
 fn find_signature_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    unique_signature_type_decl_match(collect_signature_type_decl_matches(program, |ty| {
-        ty.name == type_name
-    }))
-    .or_else(|| {
-        unique_signature_type_decl_match(collect_signature_type_decl_matches(program, |ty| {
-            ty.name != type_name && crate::facts::external_type_name_matches(&ty.name, type_name)
-        }))
-    })
+    preferred_signature_type_decl_match(
+        collect_signature_type_decl_matches(program, |ty| {
+            crate::facts::external_type_name_matches(&ty.name, type_name)
+        }),
+        type_name,
+    )
 }
 
 fn collect_signature_type_decl_matches<'a>(
@@ -13759,11 +14221,51 @@ fn collect_signature_type_decl_matches_in_type<'a>(
     }
 }
 
-fn unique_signature_type_decl_match(matches: Vec<&TypeDecl>) -> Option<&TypeDecl> {
+fn preferred_signature_type_decl_match<'a>(
+    matches: Vec<&'a TypeDecl>,
+    query: &str,
+) -> Option<&'a TypeDecl> {
     match matches.as_slice() {
         [ty] => Some(*ty),
-        _ => None,
+        [] => None,
+        _ => {
+            // Focused batch translation deliberately loads emitted files a
+            // second time as bodyless source summaries.  Those declarations
+            // share the same Java identity, but only the emitted declaration
+            // contains initializer and assignment evidence needed to solve
+            // physical field storage (for example a partially allocated
+            // rank-three array).  Prefer a uniquely richer declaration while
+            // retaining ambiguity when two real definitions collide.
+            let best_score = matches
+                .iter()
+                .map(|ty| {
+                    (
+                        signature_type_decl_source_evidence_score(ty),
+                        usize::from(ty.name == query),
+                    )
+                })
+                .max()?;
+            let mut best = matches.into_iter().filter(|ty| {
+                (
+                    signature_type_decl_source_evidence_score(ty),
+                    usize::from(ty.name == query),
+                ) == best_score
+            });
+            let selected = best.next()?;
+            best.next().is_none().then_some(selected)
+        }
     }
+}
+
+fn signature_type_decl_source_evidence_score(ty: &TypeDecl) -> usize {
+    let member_evidence = ty.members.iter().map(|member| match member {
+        Member::Field(field) => usize::from(field.initializer.is_some()),
+        Member::Method(method) => usize::from(method.body.is_some()),
+        Member::Constructor(constructor) => usize::from(constructor.body.is_some()),
+        Member::Type(nested) => signature_type_decl_source_evidence_score(nested),
+        Member::Unsupported { .. } => 0,
+    });
+    member_evidence.sum::<usize>() + ty.static_init_blocks.len()
 }
 
 pub fn external_call_return_field_constraints(
@@ -18621,6 +19123,44 @@ mod tests {
     use crate::usage::UsageMethodKey;
 
     #[test]
+    fn nested_source_canonicalization_does_not_capture_qualified_top_level_peer() {
+        let parsed = crate::parser::parse_java_source(
+            r#"package example;
+                interface Sequence {}
+                class Holder { static class Sequence {} }
+            "#,
+        );
+        assert_eq!(
+            canonical_nested_source_type_name("example.Sequence", &parsed.program),
+            None,
+            "a qualified top-level type must not alias a same-simple-name nested declaration"
+        );
+    }
+
+    #[test]
+    fn nested_source_canonicalization_recovers_rust_flattened_package_alias() {
+        let mut parsed = crate::parser::parse_java_source(
+            r#"package example;
+                class AlignerHelper { static class Subproblem {} }
+            "#,
+        );
+        let crate::java_ir::Member::Type(nested) = &mut parsed.program.types[0].members[0] else {
+            panic!("nested class")
+        };
+        // Batch source normalization assigns nested declarations their
+        // emitted owner-qualified identity before signature planning.
+        nested.name = "AlignerHelper_Subproblem".to_string();
+        assert_eq!(
+            canonical_nested_source_type_name(
+                "OrgBiojavaNbioAlignmentRoutinesAlignerHelper_Subproblem",
+                &parsed.program,
+            )
+            .as_deref(),
+            Some("AlignerHelper_Subproblem")
+        );
+    }
+
+    #[test]
     fn block_lambda_local_null_comparison_is_recorded() {
         let parsed = crate::parser::parse_java_source(
             r#"class LambdaNullability {
@@ -19568,6 +20108,89 @@ class TrackingStream extends InputStream {
         assert_eq!(
             ConstructorKey::source_constructor(&ty, &constructor),
             ConstructorKey::rust_identity("Owner", "new_int")
+        );
+    }
+
+    #[test]
+    fn duplicate_owner_aliases_count_as_one_java_callable_but_overloads_do_not() {
+        let method = MethodDecl {
+            name: "setScore".to_string(),
+            rust_name: None,
+            type_params: Vec::new(),
+            type_param_bounds: Vec::new(),
+            return_type: JavaType::Void,
+            throws: Vec::new(),
+            params: vec![Param {
+                name: "value".to_string(),
+                source_name: "value".to_string(),
+                ty: JavaType::Primitive(PrimitiveType::Int),
+                is_varargs: false,
+                binding: None,
+            }],
+            modifiers: vec![Modifier::Static],
+            body: None,
+            span: Span::default(),
+        };
+        let mut flattened_method = method.clone();
+        flattened_method.params[0].ty = JavaType::Named {
+            name: "AlignerHelper_Subproblem".to_string(),
+            args: Vec::new(),
+        };
+        let simple = JavaCallableKey::source_method_for_type(
+            &named_test_type("AlignerHelper"),
+            &flattened_method,
+        );
+        let mut qualified_method = method.clone();
+        qualified_method.params[0].ty = JavaType::Named {
+            name: "org.example.AlignerHelper.Subproblem".to_string(),
+            args: Vec::new(),
+        };
+        let qualified = JavaCallableKey::source_method_for_type(
+            &named_test_type("org.example.AlignerHelper"),
+            &qualified_method,
+        );
+        let signature = MethodSignaturePlan::new(Vec::new(), None, Vec::new(), ReceiverPlan::None);
+
+        assert!(std::ptr::eq(
+            unique_duplicate_java_callable_signature(&[
+                (&simple, &signature),
+                (&qualified, &signature),
+            ])
+            .expect("simple and qualified owners describe the same callable"),
+            &signature
+        ));
+
+        let exact_owner = named_test_type("AlignerHelper");
+        let exact_key = JavaCallableKey::source_method_for_type(&exact_owner, &qualified_method);
+        let summary_key = qualified.clone();
+        let exact_signature =
+            MethodSignaturePlan::new(Vec::new(), None, Vec::new(), ReceiverPlan::None);
+        let summary_signature =
+            MethodSignaturePlan::new(Vec::new(), None, Vec::new(), ReceiverPlan::Mutable);
+        let mut plan = SignaturePlan::default();
+        plan.methods_by_java_key.insert(exact_key, exact_signature);
+        plan.methods_by_java_key
+            .insert(summary_key, summary_signature);
+        assert_eq!(
+            plan.source_method_signature_with_type_aliases(&exact_owner, &flattened_method)
+                .expect("exact emitted owner must outrank a qualified summary alias")
+                .receiver(),
+            ReceiverPlan::None
+        );
+
+        let mut other_method = method.clone();
+        other_method.params[0].ty = JavaType::String;
+        let other = JavaCallableKey::source_method_for_type(
+            &named_test_type("AlignerHelper"),
+            &other_method,
+        );
+        assert!(
+            unique_duplicate_java_callable_signature(&[
+                (&simple, &signature),
+                (&other, &signature),
+            ])
+            .is_none(),
+            "same-arity overloads must remain ambiguous"
         );
     }
 
@@ -24015,6 +24638,10 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     );
     let binding_usage = binding_usage_for_optional_local(usage, binding_id);
     if let Some(binding) = binding_usage {
+        push_unique_signature_constraints(
+            &mut constraints,
+            &indexed_null_comparison_binding_constraints(binding),
+        );
         if binding
             .uses()
             .iter()
@@ -24084,6 +24711,42 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         );
     }
     constraints
+}
+
+fn indexed_null_comparison_binding_constraints(
+    binding: &BindingUseFacts,
+) -> Vec<SignatureConstraint> {
+    let mut constraints = binding
+        .uses()
+        .iter()
+        .filter_map(|use_site| match use_site {
+            BindingUse::IndexedElementComparedToNull { index_depth }
+                if indexed_sequence_element_type(binding.java_ty(), *index_depth)
+                    .is_some_and(|element| matches!(element, JavaType::Array(_))) =>
+            {
+                Some(if *index_depth == 1 {
+                    SignatureConstraint::NullableSequenceElement
+                } else {
+                    SignatureConstraint::NullableSequenceElementAtDepth(index_depth - 1)
+                })
+            }
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    constraints.sort_by_key(|constraint| match constraint {
+        SignatureConstraint::NullableSequenceElement => 0,
+        SignatureConstraint::NullableSequenceElementAtDepth(depth) => depth + 1,
+        _ => usize::MAX,
+    });
+    constraints.dedup();
+    constraints
+}
+
+fn indexed_sequence_element_type(java_ty: &JavaType, index_depth: usize) -> Option<JavaType> {
+    (0..index_depth).try_fold(java_ty.clone(), |container, _| {
+        let container = crate::types::optional_element_type(&container).unwrap_or(container);
+        crate::types::sequence_element_type(&container)
+    })
 }
 
 fn binding_usage_for_optional_local<'a>(
@@ -24273,6 +24936,15 @@ fn nullable_reference_java_type(java_ty: JavaType) -> JavaType {
 }
 
 fn sequence_java_type_with_nullable_element_at_depth(java_ty: &JavaType, depth: usize) -> JavaType {
+    // Multiple independently observed nullable depths are folded into one
+    // carrier. A shallower observation may already have wrapped the next
+    // sequence in Optional; traverse that transparent storage wrapper without
+    // consuming a sequence depth so deeper evidence is not lost.
+    if let Some(element_ty) = crate::types::optional_element_type(java_ty) {
+        return crate::types::optional_java_type(
+            sequence_java_type_with_nullable_element_at_depth(&element_ty, depth),
+        );
+    }
     let element_ty = crate::types::sequence_element_type(java_ty).or_else(|| match java_ty {
         JavaType::Named { name, args }
             if args.len() == 1
@@ -24487,6 +25159,7 @@ fn map_get_value_binding_is_only_dereferenced_as_receiver(binding: &BindingUseFa
             | BindingUse::ReturnedNullableSequenceElements
             | BindingUse::CastTarget { .. }
             | BindingUse::InstanceOfTarget { .. }
+            | BindingUse::IndexedElementComparedToNull { .. }
             | BindingUse::Mutated => return false,
         }
     }
@@ -24878,6 +25551,7 @@ fn internal_object_binding_is_shared_borrow_safe(
             } => return false,
             BindingUse::InstanceOfTarget { .. }
             | BindingUse::CastTarget { .. }
+            | BindingUse::IndexedElementComparedToNull { .. }
             | BindingUse::AssignedFromCall { .. }
             | BindingUse::StoredInField { .. }
             | BindingUse::Mutated => return false,

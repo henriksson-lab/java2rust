@@ -1,0 +1,20 @@
+# Dynamic-programming aligners plus their emitted inheritance/contract closure.
+# Keeping these dependencies primary (rather than declaration-only summaries)
+# exercises copied superclass bodies and concrete virtual dispatch faithfully.
+org/biojava/nbio/alignment/NeedlemanWunsch.java
+org/biojava/nbio/alignment/SimpleProfileProfileAligner.java
+org/biojava/nbio/alignment/SmithWaterman.java
+org/biojava/nbio/alignment/routines/AnchoredPairwiseSequenceAligner.java
+org/biojava/nbio/alignment/routines/AlignerHelper.java
+org/biojava/nbio/alignment/template/AbstractMatrixAligner.java
+org/biojava/nbio/alignment/template/AbstractPairwiseSequenceAligner.java
+org/biojava/nbio/alignment/template/AbstractProfileProfileAligner.java
+org/biojava/nbio/alignment/template/AbstractScorer.java
+org/biojava/nbio/alignment/template/Aligner.java
+org/biojava/nbio/alignment/template/GapPenalty.java
+org/biojava/nbio/alignment/template/MatrixAligner.java
+org/biojava/nbio/alignment/template/PairwiseSequenceAligner.java
+org/biojava/nbio/alignment/template/PairwiseSequenceScorer.java
+org/biojava/nbio/alignment/template/ProfileProfileAligner.java
+org/biojava/nbio/alignment/template/ProfileProfileScorer.java
+org/biojava/nbio/alignment/template/Scorer.java

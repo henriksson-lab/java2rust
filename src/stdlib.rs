@@ -3883,11 +3883,14 @@ pub fn known_external_method_return_type(
         {
             Some(JavaType::String)
         }
-        (Some(owner), "currentTimeMillis" | "current_time_millis", 0)
-            if canonical_external_receiver_type_key(owner)
-                .rsplit('.')
-                .next()
-                .is_some_and(|simple| simple == "System") =>
+        (
+            Some(owner),
+            "currentTimeMillis" | "current_time_millis" | "nanoTime" | "nano_time",
+            0,
+        ) if canonical_external_receiver_type_key(owner)
+            .rsplit('.')
+            .next()
+            .is_some_and(|simple| simple == "System") =>
         {
             Some(JavaType::Primitive(PrimitiveType::Long))
         }
@@ -7308,24 +7311,25 @@ pub(crate) fn java_platform_facade_support_item() -> crate::rust_ir::RustItem {
         r#"#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct CharSequence {
     value: String,
-    is_string: bool,
+    string_builder: Option<StringBuilder>,
+    string_buffer: Option<StringBuffer>,
 }
 
 impl CharSequence {
     pub fn new<S: Into<String>>(value: S) -> CharSequence {
-        CharSequence { value: value.into(), is_string: true }
-    }
-
-    fn from_non_string<S: Into<String>>(value: S) -> CharSequence {
-        CharSequence { value: value.into(), is_string: false }
+        CharSequence {
+            value: value.into(),
+            string_builder: None,
+            string_buffer: None,
+        }
     }
 
     pub fn length(&self) -> i32 {
-        self.value.chars().count() as i32
+        self.to_string().chars().count() as i32
     }
 
     pub fn char_at(&self, index: i32) -> char {
-        self.value
+        self.to_string()
             .chars()
             .nth(index as usize)
             .expect("Java StringIndexOutOfBoundsException")
@@ -7333,7 +7337,7 @@ impl CharSequence {
 
     pub fn sub_sequence(&self, start: i32, end: i32) -> CharSequence {
         CharSequence::new(
-            self.value
+            self.to_string()
                 .chars()
                 .skip(start as usize)
                 .take(end.saturating_sub(start) as usize)
@@ -7341,10 +7345,24 @@ impl CharSequence {
         )
     }
 
-    pub fn trim(&self) -> String { self.value.trim().to_string() }
+    pub fn trim(&self) -> String { self.to_string().trim().to_string() }
     pub fn as_str(&self) -> &str { self.value.as_str() }
-    pub fn to_string(&self) -> String { self.value.clone() }
-    pub fn is_string(&self) -> bool { self.is_string }
+    pub fn to_string(&self) -> String {
+        if let Some(value) = &self.string_builder {
+            value.to_string()
+        } else if let Some(value) = &self.string_buffer {
+            value.to_string()
+        } else {
+            self.value.clone()
+        }
+    }
+    pub fn is_string(&self) -> bool {
+        self.string_builder.is_none() && self.string_buffer.is_none()
+    }
+    pub fn is_string_builder(&self) -> bool { self.string_builder.is_some() }
+    pub fn is_string_buffer(&self) -> bool { self.string_buffer.is_some() }
+    pub fn as_string_builder(&self) -> Option<&StringBuilder> { self.string_builder.as_ref() }
+    pub fn as_string_buffer(&self) -> Option<&StringBuffer> { self.string_buffer.as_ref() }
 }
 
 impl From<String> for CharSequence {
@@ -7360,25 +7378,37 @@ impl From<&String> for CharSequence {
 }
 
 impl From<StringBuilder> for CharSequence {
-    fn from(value: StringBuilder) -> Self { CharSequence::from_non_string(value.to_string()) }
+    fn from(value: StringBuilder) -> Self {
+        CharSequence {
+            value: value.to_string(),
+            string_builder: Some(value),
+            string_buffer: None,
+        }
+    }
 }
 
 impl From<StringBuffer> for CharSequence {
-    fn from(value: StringBuffer) -> Self { CharSequence::from_non_string(value.to_string()) }
+    fn from(value: StringBuffer) -> Self {
+        CharSequence {
+            value: value.to_string(),
+            string_builder: None,
+            string_buffer: Some(value),
+        }
+    }
 }
 
 impl std::fmt::Display for CharSequence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.value)
+        f.write_str(&self.to_string())
     }
 }
 
 impl JavaAppendValue for CharSequence {
-    fn into_java_append_string(self) -> String { self.value }
+    fn into_java_append_string(self) -> String { self.to_string() }
 }
 
 impl JavaAppendValue for &CharSequence {
-    fn into_java_append_string(self) -> String { self.value.clone() }
+    fn into_java_append_string(self) -> String { self.to_string() }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -8508,6 +8538,18 @@ impl JavaStringBufferInitialValue for &String {
 }
 
 impl JavaStringBufferInitialValue for &str {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.to_string()
+    }
+}
+
+impl JavaStringBufferInitialValue for CharSequence {
+    fn into_java_string_buffer_initial_value(self) -> String {
+        self.to_string()
+    }
+}
+
+impl JavaStringBufferInitialValue for &CharSequence {
     fn into_java_string_buffer_initial_value(self) -> String {
         self.to_string()
     }
@@ -17839,6 +17881,20 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         uses_java_platform_facades: program_uses_java_platform_facades(program),
         ..ExternalApiFacadeSupport::default()
     };
+    // Every unit in a batch must agree on the erased shape of an external
+    // declaration.  Looking only at the currently emitted file lets one unit
+    // produce `Facade` while a sibling produces `Facade<A, B>`; the shared
+    // support merger can then select the generic declaration but retain
+    // monomorphic impls.  Probe all declaration contexts once, retaining only
+    // arities, so this remains cheap and does not import unrelated facades.
+    let mut external_arity_probe = ExternalApiFacadeSupport::default();
+    external_arity_probe
+        .add_declared_external_types(local_type_program, &declared_external_type_exclusions);
+    external_arity_probe.add_declared_external_types(
+        source_summary_type_program,
+        &declared_external_type_exclusions,
+    );
+    support.external_generic_type_arities = external_arity_probe.external_generic_type_arities;
     for value_object in ["Level", "Locale", "TimeUnit"] {
         if program
             .imports
@@ -18057,6 +18113,10 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
     support.add_external_field_surfaces(facts, &local_types);
     support.add_static_external_api_facts_for_surface_types(facts, representations);
     support.add_external_dyn_trait_surfaces(facts, &declared_external_type_exclusions);
+    support.promote_external_generic_bound_traits(
+        &[program, local_type_program, source_summary_type_program],
+        &declared_external_type_exclusions,
+    );
     support.add_external_conversion_surfaces(facts, &local_types);
     support.suppress_rust_crate_mapped_external_types(facts);
     support.suppress_emitted_source_types(program);
@@ -18871,6 +18931,10 @@ fn source_static_final_field_names(ty: &TypeDecl) -> BTreeSet<String> {
 #[derive(Default)]
 struct ExternalApiFacadeSupport {
     opaque_types: BTreeSet<String>,
+    /// Generic arity observed at uses of opaque external Java declarations.
+    /// Keep this beside the facade inventory so every emitted surface uses
+    /// one carrier shape instead of relying on a name-specific allowlist.
+    external_generic_type_arities: BTreeMap<String, usize>,
     declared_external_type_exclusions: BTreeSet<String>,
     source_declared_facade_shadows: BTreeSet<String>,
     trait_type_names: BTreeSet<String>,
@@ -18957,8 +19021,334 @@ fn disambiguate_erased_object_method_names(
 #[derive(Clone)]
 struct ExternalFacadeTrait {
     trait_name: String,
+    type_params: Vec<String>,
     methods: BTreeSet<String>,
     source_interface_object_support: bool,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ExternalGenericBoundEvidence {
+    arity: usize,
+    /// Source type parameters observed in each bound argument position.  A
+    /// facade method inferred from code using `S extends Sequence<C>` is
+    /// initially rendered in that lexical vocabulary (`Vec<C>`).  Promoting
+    /// `Sequence` to a reusable trait must abstract that evidence back to the
+    /// trait's own parameter (`Vec<T0>`).
+    substitutions: BTreeMap<String, Option<usize>>,
+    /// Generic argument exposed when a value constrained by this bound is
+    /// consumed by Java's enhanced-for construct.
+    iteration_element_index: Option<usize>,
+    conflicting_iteration_element: bool,
+}
+
+fn collect_external_generic_bound_evidence(
+    program: &Program,
+    out: &mut BTreeMap<String, ExternalGenericBoundEvidence>,
+) {
+    fn collect_bound(
+        bound: &JavaType,
+        type_params: &BTreeSet<String>,
+        out: &mut BTreeMap<String, ExternalGenericBoundEvidence>,
+    ) {
+        match bound {
+            JavaType::Named { name, args } => {
+                let evidence = out.entry(name.clone()).or_default();
+                evidence.arity = evidence.arity.max(args.len());
+                for (index, arg) in args.iter().enumerate() {
+                    let arg_name = match arg {
+                        JavaType::Named { name, args } if args.is_empty() => Some(name),
+                        JavaType::Unknown(name) => Some(name),
+                        _ => None,
+                    };
+                    let Some(arg_name) = arg_name.filter(|name| type_params.contains(*name)) else {
+                        continue;
+                    };
+                    evidence
+                        .substitutions
+                        .entry(arg_name.clone())
+                        .and_modify(|slot| {
+                            if *slot != Some(index) {
+                                *slot = None;
+                            }
+                        })
+                        .or_insert(Some(index));
+                }
+            }
+            JavaType::Intersection(bounds) => {
+                for bound in bounds {
+                    collect_bound(bound, type_params, out);
+                }
+            }
+            JavaType::Unknown(name) => {
+                out.entry(name.clone()).or_default();
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_decl(
+        ty: &TypeDecl,
+        inherited_type_params: &BTreeSet<String>,
+        out: &mut BTreeMap<String, ExternalGenericBoundEvidence>,
+    ) {
+        let mut type_params = inherited_type_params.clone();
+        type_params.extend(ty.type_params.iter().cloned());
+        for bound in ty.type_param_bounds.iter().flatten() {
+            collect_bound(bound, &type_params, out);
+        }
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    let mut method_type_params = type_params.clone();
+                    method_type_params.extend(method.type_params.iter().cloned());
+                    for bound in method.type_param_bounds.iter().flatten() {
+                        collect_bound(bound, &method_type_params, out);
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    let mut constructor_type_params = type_params.clone();
+                    constructor_type_params.extend(constructor.type_params.iter().cloned());
+                    for bound in constructor.type_param_bounds.iter().flatten() {
+                        collect_bound(bound, &constructor_type_params, out);
+                    }
+                }
+                Member::Type(nested) => collect_decl(nested, &type_params, out),
+                _ => {}
+            }
+        }
+    }
+
+    for ty in &program.types {
+        collect_decl(ty, &BTreeSet::new(), out);
+    }
+    collect_external_generic_bound_iteration_evidence(program, out);
+}
+
+fn collect_external_generic_bound_iteration_evidence(
+    program: &Program,
+    out: &mut BTreeMap<String, ExternalGenericBoundEvidence>,
+) {
+    fn type_reference_name(ty: &JavaType) -> Option<&str> {
+        match ty {
+            JavaType::Named { name, args } if args.is_empty() => Some(name),
+            JavaType::Unknown(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    fn record_block(
+        block: &Block,
+        ctx: &mut DisplayHintTypeContext,
+        bounds: &BTreeMap<String, JavaType>,
+        out: &mut BTreeMap<String, ExternalGenericBoundEvidence>,
+    ) {
+        for stmt in &block.statements {
+            match stmt {
+                Stmt::VarDecl { name, ty, .. } => ctx.insert_local(name, ty),
+                Stmt::If {
+                    then_block,
+                    else_block,
+                    ..
+                } => {
+                    record_block(then_block, &mut ctx.clone(), bounds, out);
+                    if let Some(else_block) = else_block {
+                        record_block(else_block, &mut ctx.clone(), bounds, out);
+                    }
+                }
+                Stmt::While { body, .. }
+                | Stmt::DoWhile { body, .. }
+                | Stmt::Block(body)
+                | Stmt::LabeledBlock { body, .. } => {
+                    record_block(body, &mut ctx.clone(), bounds, out)
+                }
+                Stmt::For { init, body, .. } => {
+                    let mut loop_ctx = ctx.clone();
+                    for init in init {
+                        if let Stmt::VarDecl { name, ty, .. } = init {
+                            loop_ctx.insert_local(name, ty);
+                        }
+                    }
+                    record_block(body, &mut loop_ctx, bounds, out);
+                }
+                Stmt::EnhancedFor {
+                    var_type,
+                    var_name,
+                    iterable,
+                    body,
+                    ..
+                } => {
+                    if let Some(iterable_ty) = ctx.java_type_for_expr(iterable)
+                        && let Some(type_param) = type_reference_name(&iterable_ty)
+                        && let Some(JavaType::Named { name, args }) = bounds.get(type_param)
+                        && let Some(index) = args.iter().position(|arg| arg == var_type)
+                    {
+                        let evidence = out.entry(name.clone()).or_default();
+                        if evidence
+                            .iteration_element_index
+                            .is_some_and(|existing| existing != index)
+                        {
+                            evidence.conflicting_iteration_element = true;
+                            evidence.iteration_element_index = None;
+                        } else if !evidence.conflicting_iteration_element {
+                            evidence.iteration_element_index = Some(index);
+                        }
+                    }
+                    let mut loop_ctx = ctx.clone();
+                    loop_ctx.insert_local(var_name, var_type);
+                    record_block(body, &mut loop_ctx, bounds, out);
+                }
+                Stmt::Switch { cases, .. } => {
+                    for case in cases {
+                        let block = Block {
+                            statements: case.statements.clone(),
+                        };
+                        record_block(&block, &mut ctx.clone(), bounds, out);
+                    }
+                }
+                Stmt::Try {
+                    resources,
+                    body,
+                    catches,
+                    finally_block,
+                } => {
+                    let mut try_ctx = ctx.clone();
+                    for resource in resources {
+                        if let Stmt::VarDecl { name, ty, .. } = resource {
+                            try_ctx.insert_local(name, ty);
+                        }
+                    }
+                    record_block(body, &mut try_ctx, bounds, out);
+                    for catch in catches {
+                        record_block(&catch.body, &mut ctx.clone(), bounds, out);
+                    }
+                    if let Some(finally_block) = finally_block {
+                        record_block(finally_block, &mut ctx.clone(), bounds, out);
+                    }
+                }
+                Stmt::LocalType(nested) => record_type(nested, ctx, bounds, out),
+                Stmt::Assign { .. }
+                | Stmt::Expr(_)
+                | Stmt::Return(_)
+                | Stmt::Throw(_)
+                | Stmt::ConstructorInvocation { .. }
+                | Stmt::Break(_)
+                | Stmt::Continue(_)
+                | Stmt::Unsupported(_) => {}
+            }
+        }
+    }
+
+    fn record_type(
+        ty: &TypeDecl,
+        parent_ctx: &DisplayHintTypeContext,
+        inherited_bounds: &BTreeMap<String, JavaType>,
+        out: &mut BTreeMap<String, ExternalGenericBoundEvidence>,
+    ) {
+        let mut bounds = inherited_bounds.clone();
+        for (name, bound) in ty.type_params.iter().zip(&ty.type_param_bounds) {
+            if let Some(bound) = bound {
+                bounds.insert(name.clone(), bound.clone());
+            }
+        }
+        let mut type_ctx = parent_ctx.clone();
+        for member in &ty.members {
+            if let Member::Field(field) = member {
+                type_ctx.insert_local(&field.name, &field.ty);
+            }
+        }
+        for member in &ty.members {
+            match member {
+                Member::Method(method) => {
+                    if let Some(body) = &method.body {
+                        record_block(
+                            body,
+                            &mut type_ctx.with_params(&method.params),
+                            &bounds,
+                            out,
+                        );
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    if let Some(body) = &constructor.body {
+                        record_block(
+                            body,
+                            &mut type_ctx.with_params(&constructor.params),
+                            &bounds,
+                            out,
+                        );
+                    }
+                }
+                Member::Type(nested) => record_type(nested, &type_ctx, &bounds, out),
+                Member::Field(_) | Member::Unsupported { .. } => {}
+            }
+        }
+    }
+
+    let root_ctx = DisplayHintTypeContext::default();
+    for ty in &program.types {
+        record_type(ty, &root_ctx, &BTreeMap::new(), out);
+    }
+}
+
+fn collect_type_parameter_bound_names(bounds: &[Option<JavaType>], names: &mut BTreeSet<String>) {
+    for bound in bounds.iter().flatten() {
+        collect_java_type_reference_names(bound, names);
+    }
+}
+
+fn collect_java_type_reference_names(ty: &JavaType, names: &mut BTreeSet<String>) {
+    match ty {
+        JavaType::Named { name, args } => {
+            names.insert(name.clone());
+            for arg in args {
+                collect_java_type_reference_names(arg, names);
+            }
+        }
+        JavaType::Unknown(name) => {
+            names.insert(name.clone());
+        }
+        JavaType::Array(element) => collect_java_type_reference_names(element, names),
+        JavaType::Intersection(bounds) => {
+            for bound in bounds {
+                collect_java_type_reference_names(bound, names);
+            }
+        }
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            collect_java_type_reference_names(bound, names)
+        }
+        JavaType::Primitive(_) | JavaType::String | JavaType::Void | JavaType::Wildcard(None) => {}
+    }
+}
+
+fn collect_type_decl_java_type_reference_names(ty: &TypeDecl, names: &mut BTreeSet<String>) {
+    for hierarchy_type in ty.implements.iter().chain(ty.extends.iter()) {
+        collect_java_type_reference_names(
+            &crate::parser::parse_hierarchy_type(hierarchy_type),
+            names,
+        );
+    }
+    collect_type_parameter_bound_names(&ty.type_param_bounds, names);
+    for member in &ty.members {
+        match member {
+            Member::Field(field) => collect_java_type_reference_names(&field.ty, names),
+            Member::Method(method) => {
+                collect_type_parameter_bound_names(&method.type_param_bounds, names);
+                collect_java_type_reference_names(&method.return_type, names);
+                for param in &method.params {
+                    collect_java_type_reference_names(&param.ty, names);
+                }
+            }
+            Member::Constructor(constructor) => {
+                collect_type_parameter_bound_names(&constructor.type_param_bounds, names);
+                for param in &constructor.params {
+                    collect_java_type_reference_names(&param.ty, names);
+                }
+            }
+            Member::Type(nested) => collect_type_decl_java_type_reference_names(nested, names),
+            Member::Unsupported { .. } => {}
+        }
+    }
 }
 
 fn external_from_impl_source_is_emitted(
@@ -19079,6 +19469,80 @@ fn unique_source_type_decl_match<'a>(matches: Vec<&'a TypeDecl>) -> Option<&'a T
 }
 
 impl ExternalApiFacadeSupport {
+    fn promote_external_generic_bound_traits(
+        &mut self,
+        programs: &[&Program],
+        local_types: &BTreeSet<String>,
+    ) {
+        let mut bounds = BTreeMap::<String, ExternalGenericBoundEvidence>::new();
+        for program in programs {
+            collect_external_generic_bound_evidence(program, &mut bounds);
+        }
+        for (bound_name, evidence) in bounds {
+            let arity = evidence.arity;
+            let type_key = canonical_external_receiver_type_key(&bound_name);
+            let trait_name = rust_name_for_java_named_type(&type_key);
+            if local_type_set_matches_external_name(local_types, &bound_name)
+                || is_builtin_external_facade_type(&trait_name)
+                || !valid_external_facade_type_ident(&trait_name)
+            {
+                continue;
+            }
+            let type_params = (0..arity)
+                .map(|index| format!("T{index}"))
+                .collect::<Vec<_>>();
+            let methods = self
+                .impls
+                .remove(&trait_name)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|method| method.contains("(&self") || method.contains("(&mut self"))
+                .map(|method| {
+                    let mut method = avoid_external_facade_method_generic_collisions_with_arities(
+                        &trait_name,
+                        method,
+                        &self.external_generic_type_arities,
+                    );
+                    for (source_param, index) in &evidence.substitutions {
+                        if let Some(index) = index {
+                            method = replace_rust_identifier(
+                                &method,
+                                source_param,
+                                &format!("T{index}"),
+                            );
+                        }
+                    }
+                    method.replacen("    pub fn ", "    fn ", 1)
+                })
+                .collect::<BTreeSet<_>>();
+            let mut methods = methods;
+            if let Some(index) = evidence.iteration_element_index
+                && index < arity
+                && !evidence.conflicting_iteration_element
+            {
+                methods.insert(format!(
+                    "    fn iter(&self) -> std::slice::Iter<'_, T{index}> {{ [].iter() }}"
+                ));
+            }
+            self.opaque_types.remove(&trait_name);
+            self.trait_type_names.insert(trait_name.clone());
+            self.traits
+                .entry(type_key)
+                .and_modify(|surface| {
+                    surface.methods.extend(methods.clone());
+                    if surface.type_params.len() < arity {
+                        surface.type_params = type_params.clone();
+                    }
+                })
+                .or_insert(ExternalFacadeTrait {
+                    trait_name,
+                    type_params,
+                    methods,
+                    source_interface_object_support: false,
+                });
+        }
+    }
+
     /// Adds the carrier conversions needed when a summary-only source class
     /// extends a platform type. Summary classes are represented by opaque
     /// local facades, so until their bodies are translated there is no sound
@@ -19162,55 +19626,43 @@ impl ExternalApiFacadeSupport {
         representations: &RepresentationPlan,
         plans: Option<&SourceBoundaryTraitPlans<'_>>,
     ) {
-        fn visit(
-            support: &mut ExternalApiFacadeSupport,
-            facts: &FactSet,
-            ty: &TypeDecl,
-            source_summary_program: &Program,
-            source_summary_types: &BTreeSet<String>,
-            emitted_local_types: &BTreeSet<String>,
-            representations: &RepresentationPlan,
-            plans: Option<&SourceBoundaryTraitPlans<'_>>,
-        ) {
-            for super_name in ty.implements.iter().chain(ty.extends.iter()) {
-                let type_key = canonical_external_receiver_type_key(super_name);
-                if emitted_local_types.contains(&type_key)
-                    || !source_summary_types.contains(&type_key)
-                {
-                    continue;
-                }
-                let _ = support.add_source_boundary_interface_trait(
-                    facts,
-                    source_summary_program,
-                    &type_key,
-                    representations,
-                    plans,
-                );
-            }
-            for member in &ty.members {
-                if let Member::Type(nested) = member {
-                    visit(
-                        support,
-                        facts,
-                        nested,
-                        source_summary_program,
-                        source_summary_types,
-                        emitted_local_types,
-                        representations,
-                        plans,
-                    );
-                }
-            }
+        let mut referenced_names = BTreeSet::new();
+        for ty in &emitted_program.types {
+            collect_type_decl_java_type_reference_names(ty, &mut referenced_names);
         }
 
-        for ty in &emitted_program.types {
-            visit(
-                self,
+        // A bound interface can mention another summary-only interface in a
+        // parent, field, argument, or result. Compute that declaration closure
+        // before rendering so every Rust trait path resolves to a trait rather
+        // than an unrelated opaque facade struct.
+        let mut pending = referenced_names.into_iter().collect::<Vec<_>>();
+        let mut reachable_interfaces = BTreeSet::new();
+        while let Some(reference) = pending.pop() {
+            let type_key = canonical_external_receiver_type_key(&reference);
+            if emitted_local_types.contains(&type_key)
+                || !source_summary_types.contains(&type_key)
+                || reachable_interfaces.contains(&type_key)
+            {
+                continue;
+            }
+            let Some(summary_ty) = find_program_type_by_key(source_summary_program, &type_key)
+            else {
+                continue;
+            };
+            if summary_ty.kind != TypeKind::Interface {
+                continue;
+            }
+            reachable_interfaces.insert(type_key);
+            let mut dependencies = BTreeSet::new();
+            collect_type_decl_java_type_reference_names(summary_ty, &mut dependencies);
+            pending.extend(dependencies);
+        }
+
+        for type_key in reachable_interfaces {
+            let _ = self.add_source_boundary_interface_trait(
                 facts,
-                ty,
                 source_summary_program,
-                source_summary_types,
-                emitted_local_types,
+                &type_key,
                 representations,
                 plans,
             );
@@ -19309,6 +19761,7 @@ impl ExternalApiFacadeSupport {
             trait_name.clone(),
             ExternalFacadeTrait {
                 trait_name,
+                type_params: ty.type_params.clone(),
                 methods,
                 source_interface_object_support: true,
             },
@@ -20394,30 +20847,70 @@ impl ExternalApiFacadeSupport {
         local_types: &BTreeSet<String>,
     ) {
         match stmt {
-            Stmt::VarDecl { ty, .. } => self.add_declared_java_type(ty, local_types),
+            Stmt::VarDecl {
+                ty, initializer, ..
+            } => {
+                self.add_declared_java_type(ty, local_types);
+                if let Some(initializer) = initializer {
+                    self.add_declared_external_types_from_expr(initializer, local_types);
+                }
+            }
             Stmt::If {
+                condition,
                 then_block,
                 else_block,
-                ..
             } => {
+                self.add_declared_external_types_from_expr(condition, local_types);
                 self.add_declared_external_types_from_block(then_block, local_types);
                 if let Some(else_block) = else_block {
                     self.add_declared_external_types_from_block(else_block, local_types);
                 }
             }
-            Stmt::While { body, .. }
-            | Stmt::DoWhile { body, .. }
-            | Stmt::EnhancedFor { body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            }
+            | Stmt::DoWhile {
+                condition, body, ..
+            } => {
+                self.add_declared_external_types_from_expr(condition, local_types);
                 self.add_declared_external_types_from_block(body, local_types);
             }
-            Stmt::For { init, body, .. } => {
+            Stmt::EnhancedFor {
+                var_type,
+                iterable,
+                body,
+                ..
+            } => {
+                self.add_declared_java_type(var_type, local_types);
+                self.add_declared_external_types_from_expr(iterable, local_types);
+                self.add_declared_external_types_from_block(body, local_types);
+            }
+            Stmt::For {
+                init,
+                condition,
+                update,
+                body,
+                ..
+            } => {
                 for stmt in init {
                     self.add_declared_external_types_from_stmt(stmt, local_types);
                 }
+                if let Some(condition) = condition {
+                    self.add_declared_external_types_from_expr(condition, local_types);
+                }
+                for expr in update {
+                    self.add_declared_external_types_from_expr(expr, local_types);
+                }
                 self.add_declared_external_types_from_block(body, local_types);
             }
-            Stmt::Switch { cases, .. } => {
+            Stmt::Switch { selector, cases } => {
+                self.add_declared_external_types_from_expr(selector, local_types);
                 for case in cases {
+                    for label in &case.labels {
+                        if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                            self.add_declared_external_types_from_expr(expr, local_types);
+                        }
+                    }
                     for stmt in &case.statements {
                         self.add_declared_external_types_from_stmt(stmt, local_types);
                     }
@@ -20447,14 +20940,167 @@ impl ExternalApiFacadeSupport {
             Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
                 self.add_declared_external_types_from_block(block, local_types)
             }
-            Stmt::Assign { .. }
-            | Stmt::Expr(_)
-            | Stmt::Return(_)
-            | Stmt::Throw(_)
-            | Stmt::ConstructorInvocation { .. }
-            | Stmt::Break(_)
-            | Stmt::Continue(_)
-            | Stmt::Unsupported(_) => {}
+            Stmt::Assign { target, value } => {
+                self.add_declared_external_types_from_expr(target, local_types);
+                self.add_declared_external_types_from_expr(value, local_types);
+            }
+            Stmt::Expr(expr) | Stmt::Throw(expr) => {
+                self.add_declared_external_types_from_expr(expr, local_types)
+            }
+            Stmt::Return(expr) => {
+                if let Some(expr) = expr {
+                    self.add_declared_external_types_from_expr(expr, local_types);
+                }
+            }
+            Stmt::ConstructorInvocation { args, .. } => {
+                for arg in args {
+                    self.add_declared_external_types_from_expr(arg, local_types);
+                }
+            }
+            Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+        }
+    }
+
+    fn add_declared_external_types_from_expr(
+        &mut self,
+        expr: &Expr,
+        local_types: &BTreeSet<String>,
+    ) {
+        match expr {
+            Expr::FieldAccess(receiver, _) | Expr::Unary { expr: receiver, .. } => {
+                self.add_declared_external_types_from_expr(receiver, local_types)
+            }
+            Expr::ArrayAccess(array, index)
+            | Expr::Binary {
+                left: array,
+                right: index,
+                ..
+            } => {
+                self.add_declared_external_types_from_expr(array, local_types);
+                self.add_declared_external_types_from_expr(index, local_types);
+            }
+            Expr::ArrayCreation {
+                element_type,
+                dimensions,
+                initializer,
+            } => {
+                self.add_declared_java_type(element_type, local_types);
+                for dimension in dimensions {
+                    self.add_declared_external_types_from_expr(dimension, local_types);
+                }
+                for value in initializer.iter().flatten() {
+                    self.add_declared_external_types_from_expr(value, local_types);
+                }
+            }
+            Expr::ArrayInitializer(values) => {
+                for value in values {
+                    self.add_declared_external_types_from_expr(value, local_types);
+                }
+            }
+            Expr::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                self.add_declared_external_types_from_expr(condition, local_types);
+                self.add_declared_external_types_from_expr(then_expr, local_types);
+                self.add_declared_external_types_from_expr(else_expr, local_types);
+            }
+            Expr::Switch { selector, cases } => {
+                self.add_declared_external_types_from_expr(selector, local_types);
+                for case in cases {
+                    for label in &case.labels {
+                        if let crate::java_ir::SwitchLabel::Expr(expr) = label {
+                            self.add_declared_external_types_from_expr(expr, local_types);
+                        }
+                    }
+                    self.add_declared_external_types_from_expr(&case.value, local_types);
+                }
+            }
+            Expr::Call { receiver, args, .. } => {
+                if let Some(receiver) = receiver {
+                    self.add_declared_external_types_from_expr(receiver, local_types);
+                }
+                for arg in args {
+                    self.add_declared_external_types_from_expr(arg, local_types);
+                }
+            }
+            Expr::New {
+                ty,
+                qualifier,
+                args,
+                body,
+                ..
+            } => {
+                self.add_declared_java_type(ty, local_types);
+                if let Some(qualifier) = qualifier {
+                    self.add_declared_external_types_from_expr(qualifier, local_types);
+                }
+                for arg in args {
+                    self.add_declared_external_types_from_expr(arg, local_types);
+                }
+                for member in body.iter().flatten() {
+                    match member {
+                        Member::Field(field) => {
+                            self.add_declared_java_type(&field.ty, local_types);
+                            if let Some(initializer) = &field.initializer {
+                                self.add_declared_external_types_from_expr(
+                                    initializer,
+                                    local_types,
+                                );
+                            }
+                        }
+                        Member::Method(method) => {
+                            self.add_declared_java_type(&method.return_type, local_types);
+                            for param in &method.params {
+                                self.add_declared_java_type(&param.ty, local_types);
+                            }
+                            if let Some(body) = &method.body {
+                                self.add_declared_external_types_from_block(body, local_types);
+                            }
+                        }
+                        Member::Constructor(constructor) => {
+                            for param in &constructor.params {
+                                self.add_declared_java_type(&param.ty, local_types);
+                            }
+                            if let Some(body) = &constructor.body {
+                                self.add_declared_external_types_from_block(body, local_types);
+                            }
+                        }
+                        Member::Type(nested) => {
+                            self.add_declared_external_types_from_type(nested, local_types)
+                        }
+                        Member::Unsupported { .. } => {}
+                    }
+                }
+            }
+            Expr::Cast { ty, expr } | Expr::InstanceOf { ty, expr, .. } => {
+                self.add_declared_java_type(ty, local_types);
+                self.add_declared_external_types_from_expr(expr, local_types);
+            }
+            Expr::Lambda { params, body } => {
+                for param in params {
+                    if let Some(ty) = &param.ty {
+                        self.add_declared_java_type(ty, local_types);
+                    }
+                }
+                match body {
+                    crate::java_ir::LambdaBody::Expr(expr) => {
+                        self.add_declared_external_types_from_expr(expr, local_types)
+                    }
+                    crate::java_ir::LambdaBody::Block(block) => {
+                        self.add_declared_external_types_from_block(block, local_types)
+                    }
+                }
+            }
+            Expr::ClassLiteral(ty) => self.add_declared_java_type(ty, local_types),
+            Expr::Literal(_)
+            | Expr::Var(_)
+            | Expr::This
+            | Expr::Super
+            | Expr::MethodReference { .. }
+            | Expr::Unsupported { .. }
+            | Expr::Raw(_) => {}
         }
     }
 
@@ -20469,6 +21115,16 @@ impl ExternalApiFacadeSupport {
                 let canonical = canonical_external_receiver_type_key(name);
                 if !local_types.contains(&canonical) {
                     let rust_name = rust_name_for_java_named_type(&canonical);
+                    if !args.is_empty() {
+                        self.external_generic_type_arities
+                            .entry(rust_name.clone())
+                            .and_modify(|arity| {
+                                if *arity != args.len() {
+                                    *arity = usize::MAX;
+                                }
+                            })
+                            .or_insert(args.len());
+                    }
                     self.add_opaque_type(rust_name.clone());
                     self.add_java_platform_output_stream_overload_methods(name, &rust_name);
                 }
@@ -22273,6 +22929,20 @@ impl ExternalApiFacadeSupport {
             );
         }
         if used_calls
+            .get("nano_time")
+            .is_some_and(|arities| arities.contains(&0))
+        {
+            self.add_opaque_type("System".to_string());
+            self.add_method(
+                "System".to_string(),
+                "    pub fn nano_time() -> i64 {
+        static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        START.get_or_init(std::time::Instant::now).elapsed().as_nanos() as i64
+    }"
+                .to_string(),
+            );
+        }
+        if used_calls
             .get("identity_hash_code")
             .is_some_and(|arities| arities.contains(&1))
         {
@@ -23450,7 +24120,11 @@ impl ExternalApiFacadeSupport {
     ) {
         if receiver_type.is_some_and(|receiver| {
             let receiver = canonical_external_receiver_type_key(receiver);
-            external_facade_generic_carrier(&receiver).is_some()
+            external_facade_generic_carrier_with_inferred_arity(
+                &receiver,
+                &self.external_generic_type_arities,
+            )
+            .is_some()
         }) {
             // A generic facade owns its receiver-specific type parameters.
             // Copying such a method into the process-wide erased-object trait
@@ -23551,6 +24225,7 @@ impl ExternalApiFacadeSupport {
                 .entry(type_key.clone())
                 .or_insert_with(|| ExternalFacadeTrait {
                     trait_name: trait_name.clone(),
+                    type_params: Vec::new(),
                     methods: BTreeSet::new(),
                     source_interface_object_support: false,
                 });
@@ -23575,6 +24250,7 @@ impl ExternalApiFacadeSupport {
                 .entry(type_key.clone())
                 .or_insert_with(|| ExternalFacadeTrait {
                     trait_name: trait_name.clone(),
+                    type_params: Vec::new(),
                     methods: BTreeSet::new(),
                     source_interface_object_support: false,
                 });
@@ -23601,6 +24277,15 @@ impl ExternalApiFacadeSupport {
                 &merged_facts,
             );
             if !valid_rust_method_ident(&rust_method) {
+                continue;
+            }
+            if trait_surface.methods.iter().any(|method| {
+                trait_surface_method_name(method).is_some_and(|name| name == rust_method)
+                    && facade_method_arg_count(method) == arg_count
+            }) {
+                // A parsed source-summary declaration owns this ABI. External
+                // facts may carry a weaker erased fallback for the same slot;
+                // retaining both creates duplicate Rust trait methods.
                 continue;
             }
             let return_type = effect
@@ -23955,6 +24640,9 @@ impl ExternalApiFacadeSupport {
 
     fn into_items(mut self, facts: &FactSet) -> Vec<crate::rust_ir::RustItem> {
         let source_generic_type_arities = self.source_generic_type_arities.clone();
+        self.external_generic_type_arities
+            .retain(|_, arity| *arity != usize::MAX);
+        let external_generic_type_arities = self.external_generic_type_arities.clone();
         self.add_javalibs_static_owner_aliases();
         let alias_names = self.aliases.keys().cloned().collect::<BTreeSet<_>>();
         let aliases = self.aliases.clone();
@@ -24120,8 +24808,16 @@ impl ExternalApiFacadeSupport {
                 lines.push(java_time_unit_facade_type_item());
             } else if external_facade_type_is_functional_closure_carrier(&ty) {
                 lines.push(external_facade_functional_closure_carrier_struct(&ty));
-            } else if external_facade_type_is_generic_carrier(&ty) {
-                lines.push(external_facade_generic_carrier_struct(&ty));
+            } else if external_facade_generic_carrier_with_inferred_arity(
+                &ty,
+                &external_generic_type_arities,
+            )
+            .is_some()
+            {
+                lines.push(external_facade_generic_carrier_struct(
+                    &ty,
+                    &external_generic_type_arities,
+                ));
             } else if self.source_declared_facade_shadows.contains(&ty) {
                 lines.push(format!(
                     "#[derive(Clone, Debug, Default)]\npub struct {ty};\n\nimpl {ty} {{\n    pub fn new() -> Self {{ Self }}\n}}"
@@ -24140,14 +24836,18 @@ impl ExternalApiFacadeSupport {
             let source_summary_declares_to_string = self
                 .source_summary_declared_methods
                 .contains(&(ty.clone(), "to_string".to_string(), 0));
-            lines.push(external_facade_eq_impl(ty));
-            lines.push(external_facade_hash_impl(ty));
+            lines.push(external_facade_eq_impl(ty, &external_generic_type_arities));
+            lines.push(external_facade_hash_impl(
+                ty,
+                &external_generic_type_arities,
+            ));
             lines.push(external_facade_display_impl(
                 ty,
                 source_summary_declares_to_string
                     || (!source_declared_shadow
                         && external_type_has_display_to_string_capability(facts, ty)),
                 source_declared_shadow,
+                &external_generic_type_arities,
             ));
         }
         if should_emit_level_constants_fallback {
@@ -24210,7 +24910,11 @@ impl ExternalApiFacadeSupport {
                 continue;
             }
             let (impl_generics, source_type, target_type) =
-                external_facade_generic_conversion_types(&from, &to);
+                external_facade_generic_conversion_types(
+                    &from,
+                    &to,
+                    &external_generic_type_arities,
+                );
             lines.push(format!(
                 // A Java upcast must preserve the object. These facade types
                 // carry no state today, so `Default::default()` happens to lose
@@ -24253,11 +24957,17 @@ impl ExternalApiFacadeSupport {
                         .unwrap_or(0),
                 )
             } else {
-                external_facade_impl_header(&owner)
+                external_facade_impl_header(&owner, &external_generic_type_arities)
             };
             let methods = dedup_facade_methods_by_signature(methods)
                 .into_iter()
-                .map(|method| avoid_external_facade_method_generic_collisions(&owner, method))
+                .map(|method| {
+                    avoid_external_facade_method_generic_collisions_with_arities(
+                        &owner,
+                        method,
+                        &external_generic_type_arities,
+                    )
+                })
                 .collect::<Vec<_>>();
             lines.push(format!("{impl_header} {{\n{}\n}}", methods.join("\n")));
         }
@@ -24352,8 +25062,14 @@ impl ExternalApiFacadeSupport {
     }
 }
 
-fn avoid_external_facade_method_generic_collisions(owner: &str, mut method: String) -> String {
-    let Some(carrier) = external_facade_generic_carrier(owner) else {
+fn avoid_external_facade_method_generic_collisions_with_arities(
+    owner: &str,
+    mut method: String,
+    inferred_arities: &BTreeMap<String, usize>,
+) -> String {
+    let Some(carrier) =
+        external_facade_generic_carrier_with_inferred_arity(owner, inferred_arities)
+    else {
         return method;
     };
     let Some(fn_offset) = method.find("pub fn ") else {
@@ -29071,8 +29787,9 @@ fn java_constructor_fact_arg_type_is_precise(java_type: &JavaType) -> bool {
     }
 }
 
-fn external_facade_eq_impl(ty: &str) -> String {
-    if let Some(carrier) = external_facade_generic_carrier(ty) {
+fn external_facade_eq_impl(ty: &str, inferred_arities: &BTreeMap<String, usize>) -> String {
+    if let Some(carrier) = external_facade_generic_carrier_with_inferred_arity(ty, inferred_arities)
+    {
         let generics = carrier.impl_params;
         return format!(
             "impl<{generics}> PartialEq for {ty}<{generics}> {{\n    fn eq(&self, _other: &Self) -> bool {{ true }}\n}}\n\nimpl<{generics}> Eq for {ty}<{generics}> {{}}"
@@ -29083,8 +29800,9 @@ fn external_facade_eq_impl(ty: &str) -> String {
     )
 }
 
-fn external_facade_hash_impl(ty: &str) -> String {
-    if let Some(carrier) = external_facade_generic_carrier(ty) {
+fn external_facade_hash_impl(ty: &str, inferred_arities: &BTreeMap<String, usize>) -> String {
+    if let Some(carrier) = external_facade_generic_carrier_with_inferred_arity(ty, inferred_arities)
+    {
         let generics = carrier.impl_params;
         return format!(
             "impl<{generics}> std::hash::Hash for {ty}<{generics}> {{\n    fn hash<H: std::hash::Hasher>(&self, _state: &mut H) {{}}\n}}"
@@ -29142,6 +29860,7 @@ fn external_facade_display_impl(
     ty: &str,
     use_to_string_method: bool,
     source_declared_shadow: bool,
+    inferred_arities: &BTreeMap<String, usize>,
 ) -> String {
     let (formatter_arg, body) = if use_to_string_method {
         ("f", "write!(f, \"{}\", self.to_string())".to_string())
@@ -29155,7 +29874,8 @@ fn external_facade_display_impl(
             format!("panic!(\"unsupported Java external facade display: {ty}\")"),
         )
     };
-    if let Some(carrier) = external_facade_generic_carrier(ty) {
+    if let Some(carrier) = external_facade_generic_carrier_with_inferred_arity(ty, inferred_arities)
+    {
         let generics = carrier.impl_params;
         return format!(
             "impl<{generics}> std::fmt::Display for {ty}<{generics}> {{\n    fn fmt(&self, {formatter_arg}: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {{ {body} }}\n}}"
@@ -29258,10 +29978,31 @@ fn external_facade_functional_closure_carrier_struct(ty: &str) -> String {
 }
 
 struct ExternalFacadeGenericCarrier {
-    decl_params: &'static str,
-    impl_params: &'static str,
-    marker_tuple: &'static str,
+    decl_params: String,
+    impl_params: String,
+    marker_tuple: String,
     arity: usize,
+}
+
+impl ExternalFacadeGenericCarrier {
+    fn opaque(arity: usize) -> Option<Self> {
+        if arity == 0 || arity == usize::MAX {
+            return None;
+        }
+        let impl_params = (0..arity)
+            .map(|index| format!("T{index}"))
+            .collect::<Vec<_>>();
+        Some(Self {
+            decl_params: impl_params
+                .iter()
+                .map(|param| format!("{param} = Box<dyn std::any::Any>"))
+                .collect::<Vec<_>>()
+                .join(", "),
+            marker_tuple: impl_params.join(", "),
+            impl_params: impl_params.join(", "),
+            arity,
+        })
+    }
 }
 
 fn external_facade_generic_carrier(ty: &str) -> Option<ExternalFacadeGenericCarrier> {
@@ -29273,9 +30014,9 @@ fn external_facade_generic_carrier(ty: &str) -> Option<ExternalFacadeGenericCarr
         // can take place. The carrier keeps the boundary type argument without
         // claiming to implement the external library's object state.
         Some(ExternalFacadeGenericCarrier {
-            decl_params: "T = Box<dyn std::any::Any>",
-            impl_params: "T",
-            marker_tuple: "T",
+            decl_params: "T = Box<dyn std::any::Any>".to_string(),
+            impl_params: "T".to_string(),
+            marker_tuple: "T".to_string(),
             arity: 1,
         })
     } else if ty == "FeatureCodec" {
@@ -29285,30 +30026,30 @@ fn external_facade_generic_carrier(ty: &str) -> Option<ExternalFacadeGenericCarr
         // monomorphic unit type makes otherwise valid Java signatures
         // ill-formed before ownership or upcast planning can run.
         Some(ExternalFacadeGenericCarrier {
-            decl_params: "T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>",
-            impl_params: "T0, T1",
-            marker_tuple: "T0, T1",
+            decl_params: "T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>".to_string(),
+            impl_params: "T0, T1".to_string(),
+            marker_tuple: "T0, T1".to_string(),
             arity: 2,
         })
     } else if ty.ends_with("Future") {
         Some(ExternalFacadeGenericCarrier {
-            decl_params: "T = Box<dyn std::any::Any>",
-            impl_params: "T",
-            marker_tuple: "T",
+            decl_params: "T = Box<dyn std::any::Any>".to_string(),
+            impl_params: "T".to_string(),
+            marker_tuple: "T".to_string(),
             arity: 1,
         })
     } else if let Some(arity) = external_facade_functional_interface_generic_arity(ty) {
         match arity {
             1 => Some(ExternalFacadeGenericCarrier {
-                decl_params: "T0 = Box<dyn std::any::Any>",
-                impl_params: "T0",
-                marker_tuple: "T0",
+                decl_params: "T0 = Box<dyn std::any::Any>".to_string(),
+                impl_params: "T0".to_string(),
+                marker_tuple: "T0".to_string(),
                 arity,
             }),
             2 => Some(ExternalFacadeGenericCarrier {
-                decl_params: "T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>",
-                impl_params: "T0, T1",
-                marker_tuple: "T0, T1",
+                decl_params: "T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>".to_string(),
+                impl_params: "T0, T1".to_string(),
+                marker_tuple: "T0, T1".to_string(),
                 arity,
             }),
             _ => None,
@@ -29316,6 +30057,18 @@ fn external_facade_generic_carrier(ty: &str) -> Option<ExternalFacadeGenericCarr
     } else {
         None
     }
+}
+
+fn external_facade_generic_carrier_with_inferred_arity(
+    ty: &str,
+    inferred_arities: &BTreeMap<String, usize>,
+) -> Option<ExternalFacadeGenericCarrier> {
+    external_facade_generic_carrier(ty).or_else(|| {
+        inferred_arities
+            .get(ty)
+            .copied()
+            .and_then(ExternalFacadeGenericCarrier::opaque)
+    })
 }
 
 pub(crate) fn external_facade_generic_carrier_arity(ty: &str) -> Option<usize> {
@@ -29343,15 +30096,21 @@ pub(crate) fn external_facade_generic_impl_target(ty: &str) -> Option<(String, S
 /// which makes the same legal upcast fail for every other instantiation.
 /// Give the source and destination disjoint binders so the adapter represents
 /// the erased Java relationship for all boundary arguments.
-fn external_facade_generic_conversion_types(from: &str, to: &str) -> (String, String, String) {
-    let source_params = external_facade_generic_carrier_arity(from)
+fn external_facade_generic_conversion_types(
+    from: &str,
+    to: &str,
+    inferred_arities: &BTreeMap<String, usize>,
+) -> (String, String, String) {
+    let source_params = external_facade_generic_carrier_with_inferred_arity(from, inferred_arities)
+        .map(|carrier| carrier.arity)
         .map(|arity| {
             (0..arity)
                 .map(|index| format!("S{index}"))
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
-    let target_params = external_facade_generic_carrier_arity(to)
+    let target_params = external_facade_generic_carrier_with_inferred_arity(to, inferred_arities)
+        .map(|carrier| carrier.arity)
         .map(|arity| {
             (0..arity)
                 .map(|index| format!("T{index}"))
@@ -29406,8 +30165,11 @@ fn external_facade_receiver_generic_arity(receiver_key: &str) -> usize {
         .unwrap_or(0)
 }
 
-fn external_facade_generic_carrier_struct(ty: &str) -> String {
-    let carrier = external_facade_generic_carrier(ty)
+fn external_facade_generic_carrier_struct(
+    ty: &str,
+    inferred_arities: &BTreeMap<String, usize>,
+) -> String {
+    let carrier = external_facade_generic_carrier_with_inferred_arity(ty, inferred_arities)
         .expect("generic carrier struct should only render known generic facade carriers");
     let decl_params = carrier.decl_params;
     let impl_params = carrier.impl_params;
@@ -29422,8 +30184,10 @@ fn external_facade_generic_carrier_struct(ty: &str) -> String {
     )
 }
 
-fn external_facade_impl_header(owner: &str) -> String {
-    if let Some(carrier) = external_facade_generic_carrier(owner) {
+fn external_facade_impl_header(owner: &str, inferred_arities: &BTreeMap<String, usize>) -> String {
+    if let Some(carrier) =
+        external_facade_generic_carrier_with_inferred_arity(owner, inferred_arities)
+    {
         let generics = carrier.impl_params;
         format!("impl<{generics}> {owner}<{generics}>")
     } else {
@@ -30737,20 +31501,35 @@ fn external_facade_objects_to_string_method_needs_arity_suffix(
 
 fn external_facade_trait_method(name: &str, arg_count: usize, return_type: &str) -> String {
     let rust_name = rust_raw_ident_if_needed(name);
+    let sized_guard = if arg_count == 0 {
+        ""
+    } else {
+        " where Self: Sized"
+    };
     format!(
-        "    fn {rust_name}{} -> {return_type} {{ {} }}",
+        "    fn {rust_name}{} -> {return_type}{sized_guard} {{ {} }}",
         external_facade_self_args(arg_count),
         external_facade_default_expr(return_type, Some(name))
     )
 }
 
+fn trait_surface_method_name(method: &str) -> Option<&str> {
+    let rest = method.split("fn ").nth(1)?;
+    let end = rest.find(['<', '('])?;
+    Some(&rest[..end])
+}
+
 fn external_facade_trait_item(trait_surface: &ExternalFacadeTrait) -> String {
+    let generic_declaration = if trait_surface.type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", trait_surface.type_params.join(", "))
+    };
+    let trait_path = format!("{}{}", trait_surface.trait_name, generic_declaration);
     let mut methods = trait_surface.methods.iter().cloned().collect::<Vec<_>>();
     if trait_surface.source_interface_object_support {
         methods.extend(
-            crate::representation_lowering::trait_object_support_method_signatures(
-                &trait_surface.trait_name,
-            ),
+            crate::representation_lowering::trait_object_support_method_signatures(&trait_path),
         );
     }
     let methods = methods.join("\n");
@@ -30759,22 +31538,17 @@ fn external_facade_trait_item(trait_surface: &ExternalFacadeTrait) -> String {
         .then(|| {
             format!(
                 "\n\n{}",
-                crate::representation_lowering::boxed_dyn_trait_clone_impl(
-                    &trait_surface.trait_name,
+                crate::representation_lowering::boxed_dyn_trait_clone_impl_with_generics(
+                    &trait_path,
+                    &trait_surface.type_params,
                 )
             )
         })
         .unwrap_or_default();
     if methods.is_empty() {
-        format!(
-            "pub trait {}: std::fmt::Display {{}}{}",
-            trait_surface.trait_name, clone_impl
-        )
+        format!("pub trait {trait_path}: std::fmt::Display {{}}{clone_impl}")
     } else {
-        format!(
-            "pub trait {}: std::fmt::Display {{\n{}\n}}{}",
-            trait_surface.trait_name, methods, clone_impl
-        )
+        format!("pub trait {trait_path}: std::fmt::Display {{\n{methods}\n}}{clone_impl}")
     }
 }
 
@@ -31302,6 +32076,14 @@ mod erased_object_unsized_facade_tests {
 
         assert!(external_erased_object_trait_method(&method).contains("where Self: Sized;"));
         assert!(external_erased_object_slice_impl_method(&method).contains("where Self: Sized {"));
+    }
+
+    #[test]
+    fn generic_external_trait_fallbacks_preserve_object_safety() {
+        let rendered = external_facade_trait_method("equals", 1, "bool");
+
+        assert!(rendered.contains("fn equals<T0>(&self, _arg0: T0) -> bool"));
+        assert!(rendered.contains("where Self: Sized"));
     }
 
     #[test]
@@ -33633,8 +34415,11 @@ fn external_enum_variant_names(facts: &FactSet, owner: &str) -> Vec<String> {
     let mut seen = BTreeSet::new();
     let mut variants = Vec::new();
     let mut record = |fact: &crate::facts::ExternalFieldFact| {
+        let fact_owner = fact.field.type_name();
+        let rendered_owner = external_static_constant_rust_owner(fact_owner);
         if fact.field_kind == ExternalFieldKind::EnumVariant
-            && external_static_constant_rust_owner(fact.field.type_name()).as_deref() == Some(owner)
+            && (rendered_owner.as_deref() == Some(owner)
+                || crate::java_signature::erased_type_names_match_with_aliases(fact_owner, owner))
         {
             let field = fact.field.field_name();
             if valid_rust_const_ident(field) && seen.insert(field.to_string()) {
@@ -33741,7 +34526,13 @@ fn static_constant_impl_lines(
         .iter()
         .filter(|(field, _)| valid_rust_const_ident(field))
         .filter_map(|(field, constant)| {
-            if constant.field_kind == ExternalFieldKind::NestedType {
+            if matches!(
+                constant.field_kind,
+                ExternalFieldKind::NestedType | ExternalFieldKind::EnumVariant
+            ) {
+                // Enum facades render these names as variants. Re-emitting an
+                // associated constant creates either a duplicate namespace
+                // entry or the invalid value expression `Owner = Owner`.
                 return None;
             }
             if runtime_modelled_static_constant(owner, field) {
@@ -33759,32 +34550,27 @@ fn static_constant_impl_lines(
             {
                 return None;
             }
-            let (rust_type, value) = if constant.field_kind == ExternalFieldKind::EnumVariant {
-                (owner.to_string(), owner.to_string())
-            } else {
-                let rust_type = static_constant_rust_type(&constant.field_type)?;
-                let mut value = static_constant_default_value(
-                    owner,
-                    field,
-                    Some(constant),
-                    &constant.field_type,
-                    local_static_string_values,
-                )?;
-                // A simple imported spelling may be emitted as a Rust type
-                // alias for this collision-safe facade. Type aliases cannot
-                // construct unit structs, so use the concrete owner only when
-                // the simple spelling is not itself a declared value type.
-                if constant.field_kind == ExternalFieldKind::StaticFinal
-                    && constant
-                        .alias_owner
-                        .as_deref()
-                        .is_some_and(|alias| alias == rust_type && !declared_owners.contains(alias))
-                    && value == rust_type
-                {
-                    value = owner.to_string();
-                }
-                (rust_type, value)
-            };
+            let rust_type = static_constant_rust_type(&constant.field_type)?;
+            let mut value = static_constant_default_value(
+                owner,
+                field,
+                Some(constant),
+                &constant.field_type,
+                local_static_string_values,
+            )?;
+            // A simple imported spelling may be emitted as a Rust type
+            // alias for this collision-safe facade. Type aliases cannot
+            // construct unit structs, so use the concrete owner only when
+            // the simple spelling is not itself a declared value type.
+            if constant.field_kind == ExternalFieldKind::StaticFinal
+                && constant
+                    .alias_owner
+                    .as_deref()
+                    .is_some_and(|alias| alias == rust_type && !declared_owners.contains(alias))
+                && value == rust_type
+            {
+                value = owner.to_string();
+            }
             let mut lines = vec![format!("    pub const {field}: {rust_type} = {value};")];
             if owner == "System" {
                 match field.as_str() {
@@ -37150,7 +37936,11 @@ fn static_utility_method_role(
         (Some("Files"), "newDirectoryStream", 1 | 2) => ExternalApiRole::Getter,
         (Some("System"), "getProperty" | "get_property", 1 | 2) => ExternalApiRole::Getter,
         (Some("System"), "lineSeparator" | "line_separator", 0) => ExternalApiRole::Getter,
-        (Some("System"), "currentTimeMillis" | "current_time_millis", 0) => ExternalApiRole::Getter,
+        (
+            Some("System"),
+            "currentTimeMillis" | "current_time_millis" | "nanoTime" | "nano_time",
+            0,
+        ) => ExternalApiRole::Getter,
         (Some("System"), "identityHashCode" | "identity_hash_code", 1) => ExternalApiRole::Getter,
         (Some("System"), "gc", 0) => ExternalApiRole::SideEffect,
         (Some("System"), "arraycopy", 5) => ExternalApiRole::Mutator,
@@ -38026,6 +38816,8 @@ mod external_nullability_derivation_tests {
             (Some("String"), "indexOf", 1),
             (Some("System"), "currentTimeMillis", 0),
             (Some("java.lang.System"), "currentTimeMillis", 0),
+            (Some("System"), "nanoTime", 0),
+            (Some("java.lang.System"), "nanoTime", 0),
         ] {
             let Some(return_ty) = known_external_method_return_type(receiver, name, arity) else {
                 continue;
@@ -38047,6 +38839,7 @@ mod external_nullability_derivation_tests {
     fn a_qualified_receiver_answers_like_its_simple_name() {
         for (simple, qualified, name, arity) in [
             ("System", "java.lang.System", "currentTimeMillis", 0),
+            ("System", "java.lang.System", "nanoTime", 0),
             ("Byte", "java.lang.Byte", "parseByte", 1),
             ("Byte", "java.lang.Byte", "parseByte", 2),
             ("Short", "java.lang.Short", "parseShort", 1),
@@ -38522,18 +39315,23 @@ mod functional_interface_shape_tests {
 mod external_facade_generic_carrier_tests {
     use super::*;
 
+    fn no_inferred_arities() -> BTreeMap<String, usize> {
+        BTreeMap::new()
+    }
+
     #[test]
     fn java_enum_preserves_its_erased_type_argument() {
         assert_eq!(external_facade_generic_carrier_arity("Enum"), Some(1));
-        let rendered = external_facade_generic_carrier_struct("Enum");
+        let rendered = external_facade_generic_carrier_struct("Enum", &no_inferred_arities());
         assert!(
             rendered.contains("pub struct Enum<T = Box<dyn std::any::Any>>"),
             "{rendered}"
         );
         assert!(
-            external_facade_eq_impl("Enum").contains("PartialEq for Enum<T>"),
+            external_facade_eq_impl("Enum", &no_inferred_arities())
+                .contains("PartialEq for Enum<T>"),
             "{}",
-            external_facade_eq_impl("Enum")
+            external_facade_eq_impl("Enum", &no_inferred_arities())
         );
     }
 
@@ -38543,7 +39341,8 @@ mod external_facade_generic_carrier_tests {
             external_facade_generic_carrier_arity("FeatureCodec"),
             Some(2)
         );
-        let rendered = external_facade_generic_carrier_struct("FeatureCodec");
+        let rendered =
+            external_facade_generic_carrier_struct("FeatureCodec", &no_inferred_arities());
         assert!(
             rendered.contains(
                 "pub struct FeatureCodec<T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>>"
@@ -38551,27 +39350,90 @@ mod external_facade_generic_carrier_tests {
             "{rendered}"
         );
         assert!(
-            external_facade_eq_impl("FeatureCodec").contains("PartialEq for FeatureCodec<T0, T1>"),
+            external_facade_eq_impl("FeatureCodec", &no_inferred_arities())
+                .contains("PartialEq for FeatureCodec<T0, T1>"),
             "{}",
-            external_facade_eq_impl("FeatureCodec")
+            external_facade_eq_impl("FeatureCodec", &no_inferred_arities())
         );
         assert!(
-            external_facade_hash_impl("FeatureCodec").contains("Hash for FeatureCodec<T0, T1>"),
+            external_facade_hash_impl("FeatureCodec", &no_inferred_arities())
+                .contains("Hash for FeatureCodec<T0, T1>"),
             "{}",
-            external_facade_hash_impl("FeatureCodec")
+            external_facade_hash_impl("FeatureCodec", &no_inferred_arities())
         );
     }
 
     #[test]
     fn method_generics_do_not_shadow_carrier_generics() {
-        let rendered = avoid_external_facade_method_generic_collisions(
+        let rendered = avoid_external_facade_method_generic_collisions_with_arities(
             "Function",
             "    pub fn equals<T0>(&self, _arg0: T0) -> bool { Default::default() }".to_string(),
+            &no_inferred_arities(),
         );
 
         assert_eq!(
             rendered,
             "    pub fn equals<A0>(&self, _arg0: A0) -> bool { Default::default() }"
+        );
+    }
+
+    #[test]
+    fn opaque_external_generic_arity_is_inferred_from_declared_use() {
+        let mut support = ExternalApiFacadeSupport::default();
+        support.add_declared_java_type(
+            &JavaType::Named {
+                name: "PairView".to_string(),
+                args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+            },
+            &BTreeSet::new(),
+        );
+
+        let arities = &support.external_generic_type_arities;
+        let rendered = external_facade_generic_carrier_struct("PairView", arities);
+        assert!(
+            rendered.contains(
+                "pub struct PairView<T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>>"
+            ),
+            "{rendered}"
+        );
+        assert_eq!(
+            external_facade_impl_header("PairView", arities),
+            "impl<T0, T1> PairView<T0, T1>"
+        );
+        assert!(
+            external_facade_eq_impl("PairView", arities).contains("PartialEq for PairView<T0, T1>")
+        );
+    }
+
+    #[test]
+    fn opaque_external_generic_arity_is_inferred_from_constructor_expression() {
+        let mut support = ExternalApiFacadeSupport::default();
+        support.add_declared_external_types_from_stmt(
+            &Stmt::Expr(Expr::New {
+                ty: JavaType::Named {
+                    name: "Parser".to_string(),
+                    args: vec![JavaType::String, JavaType::Primitive(PrimitiveType::Int)],
+                },
+                qualifier: None,
+                args: Vec::new(),
+                body: None,
+                resolved: None,
+            }),
+            &BTreeSet::new(),
+        );
+
+        assert_eq!(
+            support.external_generic_type_arities.get("Parser"),
+            Some(&2)
+        );
+        assert!(
+            external_facade_generic_carrier_struct(
+                "Parser",
+                &support.external_generic_type_arities,
+            )
+            .contains(
+                "pub struct Parser<T0 = Box<dyn std::any::Any>, T1 = Box<dyn std::any::Any>>"
+            )
         );
     }
 

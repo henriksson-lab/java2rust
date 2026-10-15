@@ -8934,7 +8934,11 @@ pub(crate) fn string_format_projection(mut args: Vec<RustExpr>) -> RustExpr {
         return function_call_projection(
             RustExpr::path(["java_string_format"]),
             vec![
-                format_arg,
+                // Java String arguments are references. Keep a dynamic
+                // template borrowed so repeated formatting in a loop does
+                // not consume its Rust String carrier; borrowing a temporary
+                // remains valid for the duration of this call.
+                force_shared_borrow_projection(format_arg),
                 RustExpr::VecLiteral(
                     args.into_iter()
                         .map(string_format_arg_value_projection)
@@ -8987,6 +8991,11 @@ fn java_format_to_rust_format(format: &str) -> String {
             if next.is_ascii_alphabetic() {
                 chars.next();
                 match next {
+                    // Java's platform-independent line separator consumes no
+                    // argument. Treating it as an unknown conversion emitted
+                    // an extra `{}` and made otherwise valid Rust `format!`
+                    // invocations fail their arity check.
+                    'n' => out.push('\n'),
                     's' | 'd' | 'b' | 'c' => out.push_str("{}"),
                     'f' => out.push_str(&rust_float_format(&spec)),
                     _ => out.push_str("{}"),
@@ -25374,6 +25383,19 @@ mod tests {
             ])),
             "format!(\"{}:{:04.2}\", name, score)"
         );
+        assert_eq!(
+            emit::emit_expr(&string_format_projection(vec![RustExpr::Literal(
+                "\"%n\"".to_string(),
+            )])),
+            "format!(\"\\n\")"
+        );
+        assert_eq!(
+            emit::emit_expr(&string_format_projection(vec![
+                RustExpr::Literal("\"%d%n\"".to_string()),
+                RustExpr::Var("count".to_string()),
+            ])),
+            "format!(\"{}\\n\", count)"
+        );
         assert!(matches!(
             string_format_projection(vec![
                 RustExpr::Literal("\"%s:%04.2f\"".to_string()),
@@ -25388,7 +25410,7 @@ mod tests {
                 RustExpr::Var("template".to_string()),
                 RustExpr::Var("count".to_string()),
             ])),
-            "java_string_format(template, vec![count.to_string()])"
+            "java_string_format(&template, vec![count.to_string()])"
         );
         let runtime_format = string_format_projection(vec![
             RustExpr::Var("template".to_string()),
@@ -25403,7 +25425,7 @@ mod tests {
                 RustExpr::Raw("\"%s\"".to_string()),
                 RustExpr::Var("name".to_string()),
             ])),
-            "java_string_format(\"%s\", vec![name.to_string()])"
+            "java_string_format(&\"%s\", vec![name.to_string()])"
         );
         assert!(is_java_locale_format_arg(&RustExpr::Var(
             "Locale".to_string()

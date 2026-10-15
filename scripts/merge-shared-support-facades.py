@@ -81,6 +81,15 @@ def trait_impl_name(raw_trait: str) -> str:
     return trait.rsplit("::", 1)[-1]
 
 
+def boxed_dyn_trait_target_name(raw_target: str):
+    target = raw_target.strip()
+    match = re.search(
+        r"(?:^|::)Box\s*<\s*dyn\s+([A-Za-z_][A-Za-z0-9_]*)",
+        target,
+    )
+    return match.group(1) if match else None
+
+
 def is_char_literal_start(line: str, index: int) -> bool:
     next_index = index + 1
     if next_index >= len(line):
@@ -153,7 +162,32 @@ def source_owned_nested_type_name(source_type: str, name: str) -> bool:
     if name == source_type or not name.startswith(source_type):
         return False
     suffix = name[len(source_type) :]
+    if suffix.startswith("_"):
+        suffix = suffix[1:]
     return bool(suffix) and suffix[0].isupper()
+
+
+def remove_duplicate_top_level_aliases(path: Path) -> None:
+    """Keep the last declaration of an identical local compatibility alias.
+
+    Nested source lowering can emit an early facade alias and then repeat the
+    same alias beside the authoritative nested declaration.  The latter owns
+    the source identity; retaining both is always an invalid Rust namespace.
+    """
+    lines = path.read_text().splitlines(keepends=True)
+    aliases = defaultdict(list)
+    depth = 0
+    for index, line in enumerate(lines):
+        if depth == 0 and (match := ALIAS_RE.match(line)):
+            aliases[(match.group(1), impl_target_name(match.group(2)))].append(index)
+        depth += brace_delta(line)
+    remove = {
+        index
+        for indices in aliases.values()
+        for index in indices[:-1]
+    }
+    if remove:
+        path.write_text("".join(line for index, line in enumerate(lines) if index not in remove))
 
 
 def item_end(lines: list[str], start: int) -> int:
@@ -511,6 +545,7 @@ def parse_items(
             trait_match = TRAIT_IMPL_RE.match(header)
             if trait_match and (
                 impl_target_name(trait_match.group(2)) in selected
+                or boxed_dyn_trait_target_name(trait_match.group(2)) in selected
                 or trait_impl_name(trait_match.group(1)) in selected
                 or (
                     (from_match := FROM_TRAIT_RE.match(trait_match.group(1).strip()))
@@ -595,6 +630,9 @@ def select_catalog_items(items: list[dict], selected: set[str]) -> list[dict]:
             include = include or item["target"] in selected
         elif kind == "trait_impl":
             include = include or item.get("trait") in selected
+            include = include or boxed_dyn_trait_target_name(
+                item.get("target", "")
+            ) in selected
             from_match = FROM_TRAIT_RE.match(item.get("trait_raw", ""))
             include = include or (
                 from_match is not None
@@ -672,6 +710,7 @@ def parse_shared_items_from_text(text: str, selected: set[str]) -> list[dict]:
             trait_match = TRAIT_IMPL_RE.match(header)
             if trait_match and (
                 impl_target_name(trait_match.group(2)) in selected
+                or boxed_dyn_trait_target_name(trait_match.group(2)) in selected
                 or trait_impl_name(trait_match.group(1)) in selected
                 or (
                     (from_match := FROM_TRAIT_RE.match(trait_match.group(1).strip()))
@@ -1662,6 +1701,13 @@ def preferred_decl_variant(variants: list[str]) -> tuple[str, str]:
     for text in variants:
         if re.search(r"(?m)^\s*pub\s+enum\s+", text):
             return text, "enum"
+    for text in variants:
+        if re.search(r"(?m)^\s*pub\s+trait\s+", text):
+            # A source-summary interface is authoritative semantic evidence.
+            # Other units that do not directly exercise the interface can
+            # synthesize an opaque struct with the same name; selecting that
+            # fallback makes every `dyn Interface` and generic bound invalid.
+            return text, "source-interface-trait"
     scored = [(declaration_information_score(text), index, text) for index, text in enumerate(variants)]
     score, _, selected = max(scored, key=lambda item: (item[0], -item[1]))
     return selected, "most-informative" if score > 0 else "first"
@@ -1899,12 +1945,23 @@ def append_missing_builtin_from_impls(
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--generated-dir", required=True)
+    parser.add_argument("--cleanup-module")
+    parser.add_argument("--generated-dir")
     parser.add_argument("--merge-input-dir")
-    parser.add_argument("--shared-support", required=True)
-    parser.add_argument("--shared-types", required=True)
-    parser.add_argument("--conflicts", required=True)
+    parser.add_argument("--shared-support")
+    parser.add_argument("--shared-types")
+    parser.add_argument("--conflicts")
     args = parser.parse_args()
+
+    if args.cleanup_module:
+        path = Path(args.cleanup_module)
+        remove_duplicate_source_owned_nested_stubs(path)
+        remove_duplicate_top_level_aliases(path)
+        remove_duplicate_inherent_methods(path)
+        return 0
+    for required in ["generated_dir", "shared_support", "shared_types", "conflicts"]:
+        if getattr(args, required) is None:
+            parser.error(f"--{required.replace('_', '-')} is required")
 
     generated_dir = Path(args.generated_dir)
     rust_paths = sorted(generated_dir.glob("*.rs"))
@@ -2227,6 +2284,7 @@ def main() -> int:
                 prelude_source_owned_nested_types(matching_input),
             )
             remove_duplicate_source_owned_nested_stubs(path)
+            remove_duplicate_top_level_aliases(path)
             remove_duplicate_inherent_methods(path)
         Path(args.conflicts).write_text("".join(conflict_lines))
         return 0
@@ -2452,7 +2510,14 @@ def main() -> int:
                 f"{name}\tdeclaration\tkept {selected_decl_reason} of {len(unique_decls)} variants\n"
             )
         selected_decl = (
-            merge_trait_declarations(name, unique_decls)
+            merge_trait_declarations(
+                name,
+                [
+                    declaration
+                    for declaration in unique_decls
+                    if re.match(r"^\s*pub\s+trait\b", declaration)
+                ],
+            )
             if selected_decl_is_trait
             else crate_visible_top_level_type(selected_decl)
         )
@@ -2491,6 +2556,12 @@ def main() -> int:
             inherent_methods.items()
         ):
             if not item_targets_name(type_name, name, alias_targets):
+                continue
+            if selected_decl_is_trait and not re.search(
+                rf"\bdyn\s+{re.escape(name)}(?:\s*<|\b)", impl_header
+            ):
+                # Inherent impls emitted beside an opaque fallback struct do
+                # not belong to the source interface selected above.
                 continue
             for path, text in variants:
                 emitted_header = (
@@ -2558,7 +2629,16 @@ def main() -> int:
             belongs_to_from_source = from_match is not None and impl_target_name(
                 from_match.group(1)
             ) == name
-            if not (belongs_to_type or belongs_to_from_source):
+            belongs_to_boxed_dyn_trait = boxed_dyn_trait_target_name(type_name) == name
+            if selected_decl_is_trait and belongs_to_type:
+                # Eq/Hash/Display impls synthesized for an opaque struct are
+                # invalid once the authoritative declaration is a trait.
+                continue
+            if not (
+                belongs_to_type
+                or belongs_to_from_source
+                or belongs_to_boxed_dyn_trait
+            ):
                 continue
             trait_impl_key = (type_name, trait_raw)
             if trait_impl_key in emitted_trait_impl_keys:
@@ -2858,6 +2938,7 @@ def main() -> int:
             source_owned_nested_types_by_filename.get(path.name, set()),
         )
         remove_duplicate_source_owned_nested_stubs(path)
+        remove_duplicate_top_level_aliases(path)
         remove_duplicate_inherent_methods(path)
 
     Path(args.conflicts).write_text("".join(conflict_lines))

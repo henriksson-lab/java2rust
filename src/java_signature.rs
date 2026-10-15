@@ -181,6 +181,107 @@ impl JavaCallableSlotKey {
     pub(crate) fn source_method(method: &MethodDecl) -> Self {
         JavaCallableKey::source_method(JavaOwnerKey::resolved_source(""), method).slot()
     }
+
+    pub(crate) fn matches_with_type_aliases(&self, other: &Self) -> bool {
+        source_callable_names_match(&self.java_name, &other.java_name)
+            && self.kind == other.kind
+            && self.staticness == other.staticness
+            && self.erased_param_types.len() == other.erased_param_types.len()
+            && self
+                .erased_param_types
+                .iter()
+                .zip(&other.erased_param_types)
+                .all(|(left, right)| erased_type_names_match_with_aliases(left, right))
+    }
+
+    /// Whether two source callables are in the same overload family and have
+    /// the same arity.  This is deliberately weaker than type matching and is
+    /// only safe when the caller proves that the candidate is unique.
+    pub(crate) fn matches_header_and_arity(&self, other: &Self) -> bool {
+        source_callable_names_match(&self.java_name, &other.java_name)
+            && self.kind == other.kind
+            && self.staticness == other.staticness
+            && self.erased_param_types.len() == other.erased_param_types.len()
+    }
+
+    pub(crate) fn arity(&self) -> usize {
+        self.erased_param_types.len()
+    }
+}
+
+fn source_callable_names_match(left: &str, right: &str) -> bool {
+    left == right || crate::parser::to_snake_case(left) == crate::parser::to_snake_case(right)
+}
+
+pub(crate) fn erased_type_names_match_with_aliases(left: &str, right: &str) -> bool {
+    if left == right {
+        return true;
+    }
+    let (left_base, left_suffix) = split_erased_array_suffix(left);
+    let (right_base, right_suffix) = split_erased_array_suffix(right);
+    if left_suffix != right_suffix {
+        return false;
+    }
+    // A simple-name compatibility check is useful when one declaration was
+    // flattened for Rust emission, but it must never erase a disagreement
+    // between two source-level package qualifications.
+    if source_name_has_package_prefix(left_base) && source_name_has_package_prefix(right_base) {
+        return false;
+    }
+    crate::facts::external_type_name_matches(left_base, right_base)
+        || nested_source_type_suffix_alias_matches(left_base, right_base)
+}
+
+fn nested_source_type_suffix_alias_matches(left: &str, right: &str) -> bool {
+    if source_name_has_package_prefix(left) && source_name_has_package_prefix(right) {
+        return false;
+    }
+    flattened_source_type_suffix(left) == flattened_source_type_suffix(right)
+}
+
+fn source_name_has_package_prefix(name: &str) -> bool {
+    name.split(['.', '$'])
+        .next()
+        .and_then(|segment| segment.chars().next())
+        .is_some_and(char::is_lowercase)
+}
+
+fn flattened_source_type_suffix(name: &str) -> String {
+    let segments = name.split(['.', '$']).collect::<Vec<_>>();
+    let first_type = segments
+        .iter()
+        .position(|segment| segment.chars().next().is_some_and(char::is_uppercase))
+        .unwrap_or(0);
+    segments[first_type..].join("_")
+}
+
+fn split_erased_array_suffix(name: &str) -> (&str, &str) {
+    let suffix_start = name
+        .find('[')
+        .or_else(|| name.find("..."))
+        .unwrap_or(name.len());
+    name.split_at(suffix_start)
+}
+
+#[cfg(test)]
+mod erased_alias_tests {
+    use super::*;
+
+    #[test]
+    fn flattened_nested_source_name_matches_qualified_java_name() {
+        assert!(crate::facts::external_type_name_matches(
+            "org.biojava.nbio.alignment.routines.AlignerHelper",
+            "AlignerHelper"
+        ));
+        assert!(erased_type_names_match_with_aliases(
+            "AlignerHelper_Subproblem",
+            "org.biojava.nbio.alignment.routines.AlignerHelper.Subproblem"
+        ));
+        assert!(!erased_type_names_match_with_aliases(
+            "a.AlignerHelper.Subproblem",
+            "b.AlignerHelper.Subproblem"
+        ));
+    }
 }
 
 pub(crate) fn erased_param_types(params: &[Param]) -> Vec<String> {

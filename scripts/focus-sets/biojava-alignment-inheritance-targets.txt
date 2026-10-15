@@ -1,0 +1,5 @@
+org/biojava/nbio/alignment/FractionalIdentityInProfileScorer.java
+org/biojava/nbio/alignment/FractionalSimilarityInProfileScorer.java
+org/biojava/nbio/alignment/NeedlemanWunsch.java
+org/biojava/nbio/alignment/routines/AnchoredPairwiseSequenceAligner.java
+org/biojava/nbio/alignment/routines/GuanUberbacher.java

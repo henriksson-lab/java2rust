@@ -125,6 +125,7 @@ impl Default for FactSet {
 pub struct ExternalFactLookupIndex<'a> {
     facts: &'a FactSet,
     external_api_by_method_alias: HashMap<String, Vec<usize>>,
+    external_api_candidates_by_query: RefCell<HashMap<String, Rc<[usize]>>>,
     external_field_by_name_alias: HashMap<String, Vec<usize>>,
     external_field_value_by_name_alias: HashMap<String, Vec<usize>>,
 }
@@ -193,6 +194,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
         Self {
             facts,
             external_api_by_method_alias,
+            external_api_candidates_by_query: RefCell::new(HashMap::new()),
             external_field_by_name_alias,
             external_field_value_by_name_alias,
         }
@@ -341,8 +343,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
             return Some(effect);
         }
         if provenance.is_none() {
-            let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
-                &self.facts.external_api_effect_facts,
+            let receiver_ambiguous = self.external_api_effect_simple_owner_alias_is_ambiguous(
                 receiver_type,
                 method_name,
                 |fact| fact.arg_count == arg_count && fact.return_type.is_some(),
@@ -363,8 +364,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
             }) {
                 return Some(effect);
             }
-            let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
-                &self.facts.external_api_effect_facts,
+            let receiver_ambiguous = self.external_api_effect_simple_owner_alias_is_ambiguous(
                 receiver_type,
                 method_name,
                 |fact| {
@@ -388,8 +388,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
         }
         arg_count
             .and_then(|arg_count| {
-                let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
-                    &self.facts.external_api_effect_facts,
+                let receiver_ambiguous = self.external_api_effect_simple_owner_alias_is_ambiguous(
                     receiver_type,
                     method_name,
                     |fact| fact.arg_count == Some(arg_count),
@@ -408,8 +407,7 @@ impl<'a> ExternalFactLookupIndex<'a> {
                 })
             })
             .or_else(|| {
-                let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
-                    &self.facts.external_api_effect_facts,
+                let receiver_ambiguous = self.external_api_effect_simple_owner_alias_is_ambiguous(
                     receiver_type,
                     method_name,
                     |fact| arg_count.is_none() || fact.arg_count.is_none(),
@@ -439,14 +437,17 @@ impl<'a> ExternalFactLookupIndex<'a> {
         let arg_count = arg_types.len();
         let mut saw_parameter_facts = false;
         let mut best = None::<(&'a ExternalApiEffectFact, (bool, usize, bool))>;
-        let receiver_ambiguous = external_api_effect_simple_owner_alias_is_ambiguous(
-            &self.facts.external_api_effect_facts,
+        let receiver_ambiguous = self.external_api_effect_simple_owner_alias_is_ambiguous(
             receiver_type,
             method_name,
             |fact| fact.arg_count == Some(arg_count),
             provenance,
         );
-        for index in self.external_api_candidate_indices(method_name) {
+        for index in self
+            .external_api_candidate_indices(method_name)
+            .iter()
+            .copied()
+        {
             let fact = &self.facts.external_api_effect_facts[index];
             if !external_method_name_matches(&fact.method_name, method_name)
                 || !external_api_effect_receiver_matches_for_fact(
@@ -599,7 +600,11 @@ impl<'a> ExternalFactLookupIndex<'a> {
         method_name: &str,
         predicate: impl Fn(&ExternalApiEffectFact) -> bool,
     ) -> Option<&'a ExternalApiEffectFact> {
-        for index in self.external_api_candidate_indices(method_name) {
+        for index in self
+            .external_api_candidate_indices(method_name)
+            .iter()
+            .copied()
+        {
             let fact = &self.facts.external_api_effect_facts[index];
             if predicate(fact) {
                 return Some(fact);
@@ -617,7 +622,40 @@ impl<'a> ExternalFactLookupIndex<'a> {
         })
     }
 
-    fn external_api_candidate_indices(&self, method_name: &str) -> Vec<usize> {
+    fn external_api_effect_simple_owner_alias_is_ambiguous(
+        &self,
+        receiver_type: Option<&str>,
+        method_name: &str,
+        signature_matches: impl Fn(&ExternalApiEffectFact) -> bool,
+        provenance: Option<FactProvenance>,
+    ) -> bool {
+        let Some(receiver_type) = receiver_type else {
+            return false;
+        };
+        package_simple_owner_alias_is_ambiguous(
+            self.external_api_candidate_indices(method_name)
+                .iter()
+                .filter_map(|index| {
+                    let fact = &self.facts.external_api_effect_facts[*index];
+                    (external_method_name_matches(&fact.method_name, method_name)
+                        && signature_matches(fact)
+                        && provenance.is_none_or(|provenance| fact.provenance == provenance))
+                    .then_some(fact.receiver_type.as_deref())
+                    .flatten()
+                }),
+            receiver_type,
+        )
+    }
+
+    fn external_api_candidate_indices(&self, method_name: &str) -> Rc<[usize]> {
+        if let Some(cached) = self
+            .external_api_candidates_by_query
+            .borrow()
+            .get(method_name)
+            .cloned()
+        {
+            return cached;
+        }
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
         for alias in external_method_name_aliases(method_name).iter() {
@@ -630,6 +668,10 @@ impl<'a> ExternalFactLookupIndex<'a> {
             }
         }
         indices.sort_by(|left, right| right.cmp(left));
+        let indices = Rc::<[usize]>::from(indices);
+        self.external_api_candidates_by_query
+            .borrow_mut()
+            .insert(method_name.to_string(), indices.clone());
         indices
     }
 
@@ -3769,13 +3811,42 @@ fn external_pack_directly_owns_type(pack: &ExternalLibraryPackFact, type_name: &
 }
 
 pub(crate) fn external_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    if fact_type_name == query_type_name {
+        return true;
+    }
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<String, HashMap<String, bool>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    let (left, right) = if fact_type_name <= query_type_name {
+        (fact_type_name, query_type_name)
+    } else {
+        (query_type_name, fact_type_name)
+    };
+    if let Some(cached) = CACHE.with(|cache| {
+        cache
+            .borrow()
+            .get(left)
+            .and_then(|matches| matches.get(right))
+            .copied()
+    }) {
+        return cached;
+    }
     let fact_aliases = external_type_name_aliases(fact_type_name);
     let query_aliases = external_type_name_aliases(query_type_name);
-    fact_aliases.iter().any(|fact_alias| {
+    let matches = fact_aliases.iter().any(|fact_alias| {
         query_aliases
             .iter()
             .any(|query_alias| query_alias == fact_alias)
-    })
+    });
+    CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .entry(left.to_string())
+            .or_default()
+            .insert(right.to_string(), matches)
+    });
+    matches
 }
 
 fn callable_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
@@ -3972,6 +4043,9 @@ fn external_optional_type_name_directly_matches(
 }
 
 fn external_method_name_matches(fact_method_name: &str, query_method_name: &str) -> bool {
+    if fact_method_name == query_method_name {
+        return true;
+    }
     let fact_aliases = external_method_name_aliases(fact_method_name);
     external_method_name_aliases(query_method_name)
         .iter()
@@ -4110,6 +4184,9 @@ fn nested_type_leaf_alias(type_name: &str) -> bool {
 }
 
 fn external_type_name_directly_matches(fact_type_name: &str, query_type_name: &str) -> bool {
+    if fact_type_name == query_type_name {
+        return true;
+    }
     let fact_aliases = external_direct_type_name_aliases(fact_type_name);
     let query_aliases = external_direct_type_name_aliases(query_type_name);
     fact_aliases.iter().any(|fact_alias| {
@@ -4129,6 +4206,9 @@ fn external_direct_type_name_aliases(type_name: &str) -> Vec<String> {
 }
 
 fn external_field_name_matches(fact_field_name: &str, query_field_name: &str) -> bool {
+    if fact_field_name == query_field_name {
+        return true;
+    }
     let fact_aliases = external_field_name_aliases(fact_field_name);
     let query_aliases = external_field_name_aliases(query_field_name);
     fact_aliases.iter().any(|fact_alias| {
@@ -4397,28 +4477,6 @@ fn external_api_effect_receiver_matches_for_fact(
     }
     !broad_match_is_ambiguous
         && external_optional_type_name_matches(fact.receiver_type.as_deref(), receiver_type)
-}
-
-fn external_api_effect_simple_owner_alias_is_ambiguous(
-    facts: &[ExternalApiEffectFact],
-    receiver_type: Option<&str>,
-    method_name: &str,
-    signature_matches: impl Fn(&ExternalApiEffectFact) -> bool,
-    provenance: Option<FactProvenance>,
-) -> bool {
-    let Some(receiver_type) = receiver_type else {
-        return false;
-    };
-    package_simple_owner_alias_is_ambiguous(
-        facts.iter().filter_map(|fact| {
-            (external_method_name_matches(&fact.method_name, method_name)
-                && signature_matches(fact)
-                && provenance.is_none_or(|provenance| fact.provenance == provenance))
-            .then_some(fact.receiver_type.as_deref())
-            .flatten()
-        }),
-        receiver_type,
-    )
 }
 
 fn find_external_crate_api_mapping_for_receiver<'a>(

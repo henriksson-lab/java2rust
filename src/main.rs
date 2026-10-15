@@ -12,7 +12,7 @@ use new_java2rust::output_markers;
 fn main() -> ExitCode {
     let Some(args) = parse_args(env::args().skip(1)) else {
         eprintln!(
-            "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>\n       new-java2rust count-invalid-patterns <file.rs>"
+            "usage: new-java2rust [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt] <file.java>\n       new-java2rust translate-batch --primary dir [--primary-file relative/or/absolute.java ...] [--emit-primary-file relative/or/absolute.java ...] --out-dir dir [--generated-dir dir] [--jobs n, default 10] [--phase-events path] [--worker-events path] [--context-dir dir] [--context-dir-emitted] [--context-source-summary-dir dir] [--context-dir-package dir:package.prefix] [--facts facts.txt] [--external-pack-manifest pack.txt]\n       new-java2rust resolver-bench [--source-root mode:path] [--source-root-package mode:path:package.prefix] [--no-builtin-external-packs] [--builtin-external-pack name] [--facts facts.txt] [--external-pack-manifest pack.txt] <dir>\n       new-java2rust count-invalid-patterns <file.rs>"
         );
         return ExitCode::from(2);
     };
@@ -77,6 +77,8 @@ fn main() -> ExitCode {
 
     if let Args::TranslateBatch {
         primary_path,
+        primary_files,
+        emit_primary_files,
         out_dir,
         generated_dir,
         external_inputs,
@@ -91,6 +93,8 @@ fn main() -> ExitCode {
     {
         return match run_translate_batch(
             &primary_path,
+            &primary_files,
+            &emit_primary_files,
             &out_dir,
             generated_dir.as_deref(),
             &external_inputs,
@@ -186,6 +190,8 @@ enum Args {
     },
     TranslateBatch {
         primary_path: String,
+        primary_files: Vec<String>,
+        emit_primary_files: Vec<String>,
         out_dir: String,
         generated_dir: Option<String>,
         external_inputs: ExternalInputPaths,
@@ -261,6 +267,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
     if args.peek().is_some_and(|arg| arg == "translate-batch") {
         args.next();
         let mut primary_path = None;
+        let mut primary_files = Vec::new();
+        let mut emit_primary_files = Vec::new();
         let mut out_dir = None;
         let mut generated_dir = None;
         let mut jobs = 10usize;
@@ -269,6 +277,10 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
         while let Some(arg) = args.next() {
             if arg == "--primary" {
                 primary_path = Some(args.next()?);
+            } else if arg == "--primary-file" {
+                primary_files.push(args.next()?);
+            } else if arg == "--emit-primary-file" {
+                emit_primary_files.push(args.next()?);
             } else if arg == "--out-dir" {
                 out_dir = Some(args.next()?);
             } else if arg == "--generated-dir" {
@@ -301,6 +313,8 @@ fn parse_args(args: impl Iterator<Item = String>) -> Option<Args> {
         }
         return Some(Args::TranslateBatch {
             primary_path: primary_path?,
+            primary_files,
+            emit_primary_files,
             out_dir: out_dir?,
             generated_dir,
             external_inputs,
@@ -468,8 +482,49 @@ fn load_batch_sources(path: &str) -> Result<Vec<new_java2rust::BatchSource>, Str
         .collect()
 }
 
+fn load_selected_batch_sources(
+    primary_path: &str,
+    primary_files: &[String],
+) -> Result<Vec<new_java2rust::BatchSource>, String> {
+    if primary_files.is_empty() {
+        return load_batch_sources(primary_path);
+    }
+    let primary_root = Path::new(primary_path);
+    let mut paths = primary_files
+        .iter()
+        .map(|path| {
+            let path = Path::new(path);
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                primary_root.join(path)
+            }
+        })
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .map(|path| {
+            if path.extension().and_then(|value| value.to_str()) != Some("java") {
+                return Err(format!(
+                    "selected primary is not a Java source file: {}",
+                    path.display()
+                ));
+            }
+            fs::read_to_string(&path)
+                .map(|source| {
+                    new_java2rust::BatchSource::new(path.to_string_lossy().into_owned(), source)
+                })
+                .map_err(|err| format!("failed to read {}: {err}", path.display()))
+        })
+        .collect()
+}
+
 fn run_translate_batch(
     primary_path: &str,
+    primary_files: &[String],
+    emit_primary_files: &[String],
     out_dir: &str,
     generated_dir_override: Option<&str>,
     external_inputs: &ExternalInputPaths,
@@ -492,7 +547,7 @@ fn run_translate_batch(
     )?;
 
     let input_start = Instant::now();
-    let primary_sources = load_batch_sources(primary_path)?;
+    let primary_sources = load_selected_batch_sources(primary_path, primary_files)?;
     if primary_sources.is_empty() {
         return Err(format!("no Java files found under: {primary_path}"));
     }
@@ -564,6 +619,31 @@ fn run_translate_batch(
             }
         }) as Arc<dyn Fn(new_java2rust::BatchTranslationEvent) + Send + Sync>
     });
+    let emission_paths = if emit_primary_files.is_empty() {
+        None
+    } else {
+        let paths = load_selected_batch_sources(primary_path, emit_primary_files)?
+            .into_iter()
+            .map(|source| source.path().to_string())
+            .collect::<Vec<_>>();
+        let primary_paths = primary_sources
+            .iter()
+            .map(new_java2rust::BatchSource::path)
+            .collect::<std::collections::BTreeSet<_>>();
+        if let Some(path) = paths
+            .iter()
+            .find(|path| !primary_paths.contains(path.as_str()))
+        {
+            return Err(format!(
+                "selected emission file is not in the analyzed primary set: {path}"
+            ));
+        }
+        Some(paths)
+    };
+    let mut translation_options = new_java2rust::BatchTranslationOptions::new(jobs, event_sink);
+    if let Some(emission_paths) = emission_paths {
+        translation_options = translation_options.with_emission_paths(emission_paths);
+    }
     let report =
         new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
             &primary_sources,
@@ -571,7 +651,7 @@ fn run_translate_batch(
             &context_summary_sources,
             context_dirs_are_emitted,
             &external_facts,
-            &new_java2rust::BatchTranslationOptions::new(jobs, event_sink),
+            &translation_options,
         );
     append_batch_phase_event(
         phase_events_path,
@@ -654,8 +734,18 @@ fn run_translate_batch(
         "index\tsource\trust_path\trust_hash\tdiagnostics\tinvalid_patterns\tstubbed_constants\n",
     );
     let write_start = Instant::now();
-    for (index, translation) in report.translations().iter().enumerate() {
-        let rust_path = generated_dir.join(batch_stem(index + 1, translation.path()) + ".rs");
+    for translation in report.translations() {
+        let index = primary_sources
+            .iter()
+            .position(|source| source.path() == translation.path())
+            .ok_or_else(|| {
+                format!(
+                    "emitted translation is not in the analyzed primary set: {}",
+                    translation.path()
+                )
+            })?
+            + 1;
+        let rust_path = generated_dir.join(batch_stem(index, translation.path()) + ".rs");
         fs::write(&rust_path, translation.rust())
             .map_err(|err| format!("failed to write {}: {err}", rust_path.display()))?;
         for diagnostic in translation.diagnostics().iter() {
@@ -686,7 +776,7 @@ fn run_translate_batch(
         ));
         manifest.push_str(&format!(
             "{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
-            index + 1,
+            index,
             translation.path(),
             rust_path.display(),
             stable_hash_hex(translation.rust()),
@@ -2369,6 +2459,44 @@ mod tests {
                 context_summary_dirs: vec!["deps/summary/src/main/java".to_string()],
                 context_dir_packages: Vec::new(),
                 context_dirs_are_emitted: false,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_args_accepts_selected_primary_files_for_batch_translation() {
+        assert_eq!(
+            parse_args(
+                [
+                    "translate-batch",
+                    "--primary",
+                    "src/main/java",
+                    "--primary-file",
+                    "pkg/A.java",
+                    "--primary-file",
+                    "/checkout/pkg/B.java",
+                    "--emit-primary-file",
+                    "pkg/A.java",
+                    "--out-dir",
+                    "out",
+                ]
+                .into_iter()
+                .map(str::to_string),
+            ),
+            Some(Args::TranslateBatch {
+                primary_path: "src/main/java".to_string(),
+                primary_files: vec!["pkg/A.java".to_string(), "/checkout/pkg/B.java".to_string(),],
+                emit_primary_files: vec!["pkg/A.java".to_string()],
+                out_dir: "out".to_string(),
+                generated_dir: None,
+                external_inputs: ExternalInputPaths::default(),
+                context_dirs: Vec::new(),
+                context_summary_dirs: Vec::new(),
+                context_dir_packages: Vec::new(),
+                context_dirs_are_emitted: false,
+                jobs: 10,
+                phase_events_path: None,
+                worker_events_path: None,
             })
         );
     }

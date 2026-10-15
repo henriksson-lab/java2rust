@@ -1068,6 +1068,12 @@ impl BindingUseFacts {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BindingUse {
     ContentRead,
+    /// An array element reached through this many index operations is
+    /// compared with Java null. The signature solver uses this evidence to
+    /// retain `Option` at the corresponding nested sequence layer.
+    IndexedElementComparedToNull {
+        index_depth: usize,
+    },
     AssignedSubtypeToLocal {
         local_name: String,
         local_binding: Option<BindingId>,
@@ -2518,6 +2524,43 @@ fn collect_call_graph_edges_from_expr(
         | Expr::ClassLiteral(_)
         | Expr::Raw(_)
         | Expr::Unsupported { .. } => {}
+    }
+}
+
+fn record_indexed_null_comparison_use(
+    facts: &mut MethodUsageFacts,
+    maybe_indexed: &Expr,
+    maybe_null: &Expr,
+    type_env: &TypeEnv,
+) {
+    if !matches!(maybe_null, Expr::Literal(Literal::Null)) {
+        return;
+    }
+    let mut current = maybe_indexed;
+    let mut index_depth = 0;
+    while let Expr::ArrayAccess(array, _) = current {
+        index_depth += 1;
+        current = array;
+    }
+    if index_depth > 0
+        && let Expr::Var(name) = current
+        && type_env.local_type(name).is_some_and(|java_ty| {
+            let mut indexed_ty = java_ty.clone();
+            for _ in 0..index_depth {
+                indexed_ty = crate::types::optional_element_type(&indexed_ty).unwrap_or(indexed_ty);
+                let Some(element) = crate::types::sequence_element_type(&indexed_ty) else {
+                    return false;
+                };
+                indexed_ty = element;
+            }
+            matches!(indexed_ty, JavaType::Array(_))
+        })
+    {
+        record_use(
+            facts,
+            name,
+            BindingUse::IndexedElementComparedToNull { index_depth },
+        );
     }
 }
 
@@ -4700,6 +4743,38 @@ fn analyze_expr_with_context(
             );
             restore_scoped_binding_uses(facts, right_pattern_bindings);
         }
+        Expr::Binary {
+            op: BinaryOp::Eq | BinaryOp::Ne,
+            left,
+            right,
+        } => {
+            record_indexed_null_comparison_use(facts, left, right, type_env);
+            record_indexed_null_comparison_use(facts, right, left, type_env);
+            analyze_expr(
+                left,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+            analyze_expr(
+                right,
+                facts,
+                current_type,
+                current_super_type,
+                internal_methods,
+                field_names,
+                field_types,
+                semantic_facts,
+                type_env,
+                source_return_nullability,
+            );
+        }
         Expr::Binary { left, right, .. } => {
             analyze_expr(
                 left,
@@ -5615,7 +5690,9 @@ fn expr_targets_self_field(
 ) -> bool {
     match expr {
         Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
-        Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This),
+        Expr::FieldAccess(receiver, _) => {
+            matches!(receiver.as_ref(), Expr::This | Expr::Super)
+        }
         Expr::ArrayAccess(array, _) => expr_targets_self_field(array, facts, field_names),
         Expr::Call {
             receiver: Some(receiver),
@@ -5636,7 +5713,9 @@ fn self_field_name<'a>(
 ) -> Option<&'a str> {
     match expr {
         Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => Some(name),
-        Expr::FieldAccess(receiver, field_name) if matches!(receiver.as_ref(), Expr::This) => {
+        Expr::FieldAccess(receiver, field_name)
+            if matches!(receiver.as_ref(), Expr::This | Expr::Super) =>
+        {
             Some(field_name)
         }
         _ => None,
@@ -5903,7 +5982,7 @@ fn trivial_accessor_for_self_call<'a>(
 }
 
 fn target_is_this_field(expr: &Expr) -> bool {
-    matches!(expr, Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This))
+    matches!(expr, Expr::FieldAccess(receiver, _) if matches!(receiver.as_ref(), Expr::This | Expr::Super))
 }
 
 fn array_assignment_targets_self_field(
@@ -5924,7 +6003,9 @@ fn array_expr_targets_self_field(
 ) -> bool {
     match expr {
         Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
-        Expr::FieldAccess(receiver, _) => matches!(receiver.as_ref(), Expr::This),
+        Expr::FieldAccess(receiver, _) => {
+            matches!(receiver.as_ref(), Expr::This | Expr::Super)
+        }
         Expr::ArrayAccess(array, _) => array_expr_targets_self_field(array, facts, field_names),
         _ => false,
     }

@@ -153,6 +153,7 @@ pub type BatchTranslationEventSink = dyn Fn(BatchTranslationEvent) + Send + Sync
 pub struct BatchTranslationOptions {
     emission_jobs: usize,
     event_sink: Option<Arc<BatchTranslationEventSink>>,
+    emission_paths: Option<BTreeSet<String>>,
 }
 
 impl fmt::Debug for BatchTranslationOptions {
@@ -163,6 +164,7 @@ impl fmt::Debug for BatchTranslationOptions {
                 "event_sink",
                 &self.event_sink.as_ref().map(|_| "<event-sink>"),
             )
+            .field("emission_paths", &self.emission_paths)
             .finish()
     }
 }
@@ -172,6 +174,7 @@ impl Default for BatchTranslationOptions {
         Self {
             emission_jobs: 1,
             event_sink: None,
+            emission_paths: None,
         }
     }
 }
@@ -181,7 +184,15 @@ impl BatchTranslationOptions {
         Self {
             emission_jobs,
             event_sink,
+            emission_paths: None,
         }
+    }
+
+    /// Restrict lowering/emission while retaining every primary in global
+    /// parsing, resolution, representation, and signature analysis.
+    pub fn with_emission_paths(mut self, emission_paths: impl IntoIterator<Item = String>) -> Self {
+        self.emission_paths = Some(emission_paths.into_iter().collect());
+        self
     }
 
     pub fn emission_jobs(&self) -> usize {
@@ -190,6 +201,10 @@ impl BatchTranslationOptions {
 
     pub fn event_sink(&self) -> Option<&BatchTranslationEventSink> {
         self.event_sink.as_deref()
+    }
+
+    pub fn emission_paths(&self) -> Option<&BTreeSet<String>> {
+        self.emission_paths.as_ref()
     }
 }
 
@@ -733,6 +748,17 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         &format!("jobs={}", options.emission_jobs().max(1)),
     );
     let emission_start = Instant::now();
+    let parsed_primary = parsed_primary
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, (path, parsed))| {
+            options
+                .emission_paths()
+                .is_none_or(|emission_paths| emission_paths.contains(&path))
+                .then_some((index, path, parsed))
+        })
+        .collect::<Vec<_>>();
+    let emitted_primary_count = parsed_primary.len();
     let (translations, events) = emit_batch_translations(
         parsed_primary,
         &context_build.context,
@@ -746,7 +772,10 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         "batch_emission",
         "ok",
         timings.emission_ms,
-        &format!("jobs={}", options.emission_jobs().max(1)),
+        &format!(
+            "jobs={}, files={emitted_primary_count}",
+            options.emission_jobs().max(1)
+        ),
     );
     let mut analysis_profile = context_build.analysis_profile;
     analysis_profile.primary_files = primary_sources.len();
@@ -885,6 +914,7 @@ struct BatchTranslationContext {
     semantic: semantic_analysis::SemanticFacts,
     representations: representation::RepresentationPlan,
     signatures: signature::SignaturePlan,
+    callable_context: lower::LoweringCallableContext,
 }
 
 struct BatchTranslationContextBuild {
@@ -1025,6 +1055,17 @@ fn build_batch_translation_context(
         "signature::solve_signatures",
     );
 
+    // The whole batch shares one call graph and one fallibility/exception ABI
+    // solution. Rebuilding these plans in every file emitter repeats an
+    // identical whole-program fixpoint and dominates large-corpus runtime.
+    let callable_context = lower::plan_lowering_callable_context(
+        &support_program,
+        &summary_program,
+        context_sources_are_emitted,
+        &semantic.facts,
+        &signature_plan,
+    );
+
     BatchTranslationContextBuild {
         context: BatchTranslationContext {
             source_symbols,
@@ -1035,6 +1076,7 @@ fn build_batch_translation_context(
             semantic,
             representations,
             signatures: signature_plan,
+            callable_context,
         },
         analysis_profile,
         timings,
@@ -1172,14 +1214,18 @@ fn count_facts(facts: &FactSet) -> usize {
 fn translate_parsed_source_with_batch_context(
     parsed: parser::ParsedProgram,
     context: &BatchTranslationContext,
+    mut record_phase: impl FnMut(&'static str, u128),
 ) -> Translation {
+    let phase_start = Instant::now();
     let resolved = resolve::resolve_program_with_source_symbols_and_facts(
         &parsed.program,
         parsed.diagnostics,
         &context.source_symbols,
         &context.external_facts,
     );
-    let mut lowered = lower::lower_program_with_semantic_plans_and_support_context(
+    record_phase("emit_resolve", phase_start.elapsed().as_millis());
+    let phase_start = Instant::now();
+    let mut lowered = lower::lower_program_with_semantic_plans_support_context_and_callable_context(
         &resolved.program,
         resolved.diagnostics,
         &context.semantic.facts,
@@ -1191,7 +1237,10 @@ fn translate_parsed_source_with_batch_context(
         &resolved.program,
         &context.summary_program,
         context.context_sources_are_emitted,
+        &context.callable_context,
     );
+    record_phase("emit_lower", phase_start.elapsed().as_millis());
+    let phase_start = Instant::now();
     for diagnostic in &context.semantic.diagnostics {
         lowered
             .diagnostics_mut()
@@ -1204,13 +1253,16 @@ fn translate_parsed_source_with_batch_context(
         &context.representations,
         lowered.diagnostics_mut(),
     );
+    record_phase("emit_diagnostics", phase_start.elapsed().as_millis());
     let (file, diagnostics) = lowered.into_parts();
+    let phase_start = Instant::now();
     let rust = emit::emit_file(&file);
+    record_phase("emit_render", phase_start.elapsed().as_millis());
     Translation { rust, diagnostics }
 }
 
 fn emit_batch_translations(
-    parsed_primary: Vec<(String, parser::ParsedProgram)>,
+    parsed_primary: Vec<(usize, String, parser::ParsedProgram)>,
     context: &BatchTranslationContext,
     context_diagnostics: &DiagnosticBag,
     emission_jobs: usize,
@@ -1219,7 +1271,7 @@ fn emit_batch_translations(
     if emission_jobs <= 1 || parsed_primary.len() <= 1 {
         let mut events = Vec::with_capacity(parsed_primary.len());
         let mut translations = Vec::with_capacity(parsed_primary.len());
-        for (index, (path, parsed)) in parsed_primary.into_iter().enumerate() {
+        for (index, path, parsed) in parsed_primary {
             let start_event =
                 BatchTranslationEvent::new("emit_start", index + 1, path.clone(), 0, "running");
             if let Some(event_sink) = event_sink {
@@ -1227,7 +1279,20 @@ fn emit_batch_translations(
             }
             events.push(start_event);
             let file_start = Instant::now();
-            let mut translation = translate_parsed_source_with_batch_context(parsed, context);
+            let mut translation =
+                translate_parsed_source_with_batch_context(parsed, context, |phase, elapsed_ms| {
+                    let event = BatchTranslationEvent::new(
+                        phase,
+                        index + 1,
+                        path.clone(),
+                        elapsed_ms,
+                        "ok",
+                    );
+                    if let Some(event_sink) = event_sink {
+                        event_sink(event.clone());
+                    }
+                    events.push(event);
+                });
             translation.diagnostics.extend(context_diagnostics.clone());
             let elapsed_ms = file_start.elapsed().as_millis();
             let end_event =
@@ -1263,15 +1328,16 @@ fn emit_batch_translations(
                     let mut worker_results = Vec::new();
                     loop {
                         let index = next_index.fetch_add(1, Ordering::Relaxed);
-                        let Some((path, parsed)) = parsed_primary.get(index) else {
+                        let Some((original_index, path, parsed)) = parsed_primary.get(index) else {
                             break;
                         };
+                        let original_index = *original_index;
                         let path = path.clone();
                         let parsed = parsed.clone();
                         let file_start = Instant::now();
                         let start_event = BatchTranslationEvent::new(
                             "emit_start",
-                            index + 1,
+                            original_index + 1,
                             path.clone(),
                             0,
                             "running",
@@ -1279,13 +1345,29 @@ fn emit_batch_translations(
                         if let Some(event_sink) = event_sink {
                             event_sink(start_event.clone());
                         }
-                        let mut translation =
-                            translate_parsed_source_with_batch_context(parsed, context);
+                        let mut item_events = vec![start_event];
+                        let mut translation = translate_parsed_source_with_batch_context(
+                            parsed,
+                            context,
+                            |phase, elapsed_ms| {
+                                let event = BatchTranslationEvent::new(
+                                    phase,
+                                    original_index + 1,
+                                    path.clone(),
+                                    elapsed_ms,
+                                    "ok",
+                                );
+                                if let Some(event_sink) = event_sink {
+                                    event_sink(event.clone());
+                                }
+                                item_events.push(event);
+                            },
+                        );
                         translation.diagnostics.extend(context_diagnostics.clone());
                         let elapsed_ms = file_start.elapsed().as_millis();
                         let end_event = BatchTranslationEvent::new(
                             "emit_end",
-                            index + 1,
+                            original_index + 1,
                             path.clone(),
                             elapsed_ms,
                             "ok",
@@ -1293,10 +1375,11 @@ fn emit_batch_translations(
                         if let Some(event_sink) = event_sink {
                             event_sink(end_event.clone());
                         }
+                        item_events.push(end_event);
                         worker_results.push((
-                            index,
+                            original_index,
                             BatchTranslation::new(path, translation.rust, translation.diagnostics),
-                            vec![start_event, end_event],
+                            item_events,
                         ));
                     }
                     worker_results

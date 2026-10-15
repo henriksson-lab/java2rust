@@ -8,6 +8,12 @@ usage: scripts/translate-focused-package.sh --primary <java-dir> --out <out-dir>
 
 Options:
   --source-root <mode:path>           Add a resolver-bench source root preflight input.
+  --focus-list <path>                 Emit only Java files named in this newline-delimited list.
+                                      Relative entries are resolved below --primary; the complete
+                                      primary tree remains source-summary dependency context.
+  --emit-list <path>                  Translation-only profiling mode: lower this subset of
+                                      --focus-list while retaining the complete focus set in
+                                      global analysis. Skips crate assembly and cargo check.
   --source-root-package <mode:path:package.prefix>
                                       Add a package-filtered resolver-bench source root preflight input.
   --facts <path>                      Add external fact overrides to translation and preflight.
@@ -44,6 +50,8 @@ USAGE
 
 primary=""
 out_dir=""
+focus_list=""
+emit_list=""
 source_roots=()
 source_root_packages=()
 facts_paths=()
@@ -68,6 +76,16 @@ while [[ $# -gt 0 ]]; do
     --out)
       [[ $# -ge 2 ]] || { echo "missing value for --out" >&2; exit 2; }
       out_dir="$2"
+      shift 2
+      ;;
+    --focus-list)
+      [[ $# -ge 2 ]] || { echo "missing value for --focus-list" >&2; exit 2; }
+      focus_list="$2"
+      shift 2
+      ;;
+    --emit-list)
+      [[ $# -ge 2 ]] || { echo "missing value for --emit-list" >&2; exit 2; }
+      emit_list="$2"
       shift 2
       ;;
     --source-root)
@@ -149,6 +167,32 @@ fi
 if [[ ! -d "$primary" ]]; then
   echo "primary Java directory does not exist: $primary" >&2
   exit 1
+fi
+if [[ -n "$focus_list" && ! -f "$focus_list" ]]; then
+  echo "focus list does not exist: $focus_list" >&2
+  exit 1
+fi
+if [[ -n "$emit_list" && ! -f "$emit_list" ]]; then
+  echo "emit list does not exist: $emit_list" >&2
+  exit 1
+fi
+if [[ -n "$emit_list" && -z "$focus_list" ]]; then
+  echo "--emit-list requires --focus-list so the analyzed dependency set is explicit" >&2
+  exit 2
+fi
+if [[ -n "$emit_list" && "$batch_translate" -ne 1 ]]; then
+  echo "--emit-list requires batch translation" >&2
+  exit 2
+fi
+if [[ -n "$emit_list" && "$resume_assembly" -eq 1 ]]; then
+  echo "--emit-list is translation-only and cannot be combined with --resume-assembly" >&2
+  exit 2
+fi
+if [[ -n "$focus_list" ]]; then
+  # Batch translation below already analyzes the complete primary tree as
+  # source-summary context. Do not repeat a full resolver benchmark on every
+  # small focused iteration.
+  run_resolver_bench=0
 fi
 
 case "$jobs" in
@@ -442,6 +486,7 @@ else
   printf "assembly_resume\trunning\t0\t%s\n" "$out_dir" >> "$phase_events_path"
 fi
 
+translator_build_elapsed_ms=0
 if [[ "$resume_assembly" -eq 1 ]]; then
   :
 elif [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
@@ -453,7 +498,10 @@ else
   # The focused package gate is an end-to-end translator test.  An existing
   # release executable may predate the source changes under test, so let Cargo
   # perform its incremental freshness check on every default invocation.
+  translator_build_start_ms="$(now_ms)"
   cargo build --quiet "${build_profile_args[@]}" --bin new-java2rust
+  translator_build_elapsed_ms="$(elapsed_ms_since "$translator_build_start_ms")"
+  printf "translator_build\tok\t%s\t%s\n" "$translator_build_elapsed_ms" "$binary" >> "$phase_events_path"
 fi
 
 external_dependency_lines=""
@@ -535,11 +583,61 @@ fi
 if [[ "$resume_assembly" -eq 0 ]]; then
   printf "source\trust_path\ttranslate_status\tdiagnostics\tinvalid_patterns\tunsupported_members\tstubbed_constants\n" > "$status_path"
 fi
-mapfile -t java_files < <(find "$primary" -type f -name '*.java' | sort)
+if [[ -n "$focus_list" ]]; then
+  java_files=()
+  while IFS= read -r selected || [[ -n "$selected" ]]; do
+    selected="${selected%$'\r'}"
+    [[ -z "$selected" || "$selected" == \#* ]] && continue
+    if [[ "$selected" = /* ]]; then
+      selected_path="$selected"
+    else
+      selected_path="$primary/$selected"
+    fi
+    if [[ ! -f "$selected_path" || "$selected_path" != *.java ]]; then
+      echo "focus-list entry is not a Java source file: $selected_path" >&2
+      exit 1
+    fi
+    java_files+=("$selected_path")
+  done < "$focus_list"
+  if [[ "${#java_files[@]}" -gt 0 ]]; then
+    mapfile -t java_files < <(printf '%s\n' "${java_files[@]}" | sort -u)
+  fi
+else
+  mapfile -t java_files < <(find "$primary" -type f -name '*.java' | sort)
+fi
 
 if [[ "${#java_files[@]}" -eq 0 ]]; then
   echo "no Java files found under: $primary" >&2
   exit 1
+fi
+analyzed_file_count="${#java_files[@]}"
+
+emit_java_files=()
+if [[ -n "$emit_list" ]]; then
+  while IFS= read -r selected || [[ -n "$selected" ]]; do
+    selected="${selected%$'\r'}"
+    [[ -z "$selected" || "$selected" == \#* ]] && continue
+    if [[ "$selected" = /* ]]; then
+      selected_path="$selected"
+    else
+      selected_path="$primary/$selected"
+    fi
+    if [[ ! -f "$selected_path" || "$selected_path" != *.java ]]; then
+      echo "emit-list entry is not a Java source file: $selected_path" >&2
+      exit 1
+    fi
+    if [[ ! " ${java_files[*]} " =~ " ${selected_path} " ]]; then
+      echo "emit-list entry is not in the analyzed focus set: $selected_path" >&2
+      exit 1
+    fi
+    emit_java_files+=("$selected_path")
+  done < "$emit_list"
+  if [[ "${#emit_java_files[@]}" -gt 0 ]]; then
+    mapfile -t emit_java_files < <(printf '%s\n' "${emit_java_files[@]}" | sort -u)
+  else
+    echo "emit list contains no Java files: $emit_list" >&2
+    exit 1
+  fi
 fi
 
 count_concrete_none_assignments() {
@@ -732,6 +830,15 @@ active_jobs=0
 translation_start_ms="$(now_ms)"
 if [[ "$batch_translate" -eq 1 ]]; then
   batch_args=("translate-batch" "--primary" "$primary" "--out-dir" "$out_dir" "--generated-dir" "$generated_dir" "--jobs" "$jobs" "--phase-events" "$phase_events_path" "--worker-events" "$worker_events_path" "--context-dir-emitted")
+  if [[ -n "$focus_list" ]]; then
+    for java_file in "${java_files[@]}"; do
+      batch_args+=("--primary-file" "$java_file")
+    done
+    batch_args+=("--context-source-summary-dir" "$primary")
+  fi
+  for java_file in "${emit_java_files[@]}"; do
+    batch_args+=("--emit-primary-file" "$java_file")
+  done
   if [[ "$enable_builtin_packs" -eq 0 ]]; then
     batch_args+=("--no-builtin-external-packs")
   fi
@@ -790,13 +897,51 @@ else
     cat "$fragment_path" >> "$status_path"
   done
 fi
+if [[ "${#emit_java_files[@]}" -gt 0 ]]; then
+  # Translation indices and generated filenames are assigned over the emitted
+  # subset. Assembly must therefore iterate that same set, while the complete
+  # focus set above remains the analyzed primary set passed to translate-batch.
+  java_files=("${emit_java_files[@]}")
+fi
 translation_elapsed_ms="$(elapsed_ms_since "$translation_start_ms")"
 printf "translation\tok\t%s\t%s files\n" "$translation_elapsed_ms" "${#java_files[@]}" >> "$phase_events_path"
 else
   printf "translation_reuse\tok\t0\t%s files\n" "${#java_files[@]}" >> "$phase_events_path"
 fi
+if [[ "${#emit_java_files[@]}" -gt 0 ]]; then
+  # Resume skips the translation branch above, but must retain the same
+  # emitted-subset indexing during assembly.
+  java_files=("${emit_java_files[@]}")
+fi
+
+if [[ "${#emit_java_files[@]}" -gt 0 ]]; then
+  emitted_file_count="$(awk -F '\t' 'NR > 1 { count++ } END { print count + 0 }' "$status_path")"
+  raw_generated_backup_dir="$out_dir/generated-raw-before-support-strip"
+  mkdir -p "$raw_generated_backup_dir"
+  find "$raw_generated_backup_dir" -type f -name '*.rs' -delete
+  cp "$generated_dir"/*.rs "$raw_generated_backup_dir"/
+  printf "translation_subset_only\tok\t0\t%s emitted from %s analyzed files\n" \
+    "$emitted_file_count" "$analyzed_file_count" >> "$phase_events_path"
+  printf "primary\t%s\n" "$primary"
+  printf "out_dir\t%s\n" "$out_dir"
+  printf "files_analyzed\t%s\n" "$analyzed_file_count"
+  printf "files_emitted\t%s\n" "$emitted_file_count"
+  printf "translation_elapsed_ms\t%s\n" "$translation_elapsed_ms"
+  printf "assembly\tskipped\n"
+  printf "cargo_check\tskipped\n"
+  printf "phase_events\t%s\n" "$phase_events_path"
+  printf "worker_events\t%s\n" "$worker_events_path"
+  exit 0
+fi
 
 assembly_start_ms="$(now_ms)"
+assembly_java_files=()
+assembly_rust_paths=()
+while IFS=$'\t' read -r source rust_path _; do
+  [[ "$source" == "source" || -z "$source" ]] && continue
+  assembly_java_files+=("$source")
+  assembly_rust_paths+=("$rust_path")
+done < "$status_path"
 module_types_path="$out_dir/generated-module-types.tsv"
 type_counts_path="$out_dir/generated-type-counts.tsv"
 unique_types_path="$out_dir/generated-unique-types.tsv"
@@ -806,12 +951,11 @@ shared_support_types_path="$out_dir/generated-shared-support-types.tsv"
 shared_support_conflicts_path="$out_dir/generated-shared-support-conflicts.tsv"
 rm -f "$module_types_path" "$type_counts_path" "$unique_types_path" "$source_types_path" "$shared_support_path" "$shared_support_types_path" "$shared_support_conflicts_path"
 
-for i in "${!java_files[@]}"; do
-  stem="$(basename "${java_files[$i]%.java}")"
+for i in "${!assembly_java_files[@]}"; do
+  stem="$(basename "${assembly_java_files[$i]%.java}")"
   stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
   printf "%s\n" "$stem" >> "$source_types_path"
-  rust_stem="$(printf '%05d_%s' "$((i + 1))" "$stem")"
-  rust_path="$generated_dir/$rust_stem.rs"
+  rust_path="${assembly_rust_paths[$i]}"
   if [[ -f "$rust_path" ]]; then
     awk -v outer="$stem" '
       /^pub[[:space:]]+(struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
@@ -3224,12 +3368,65 @@ for rust_path in "$generated_dir"/*.rs; do
   cp "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")"
 done
 
-if [[ -s "$shared_support_path" ]]; then
-  for rust_path in "$generated_dir"/*.rs; do
-    strip_shared_support_items "$rust_path" "$shared_support_types_path"
-    strip_source_type_facade_stubs "$rust_path" "$source_types_path" "$repo_root/scripts"
-    restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
+# The closure and cleanup passes below operate on one generated module at a
+# time.  Large translated modules make their Rust item scans noticeable, but
+# there is no cross-module mutation within a stage.  Reuse the translation
+# job limit here instead of serially rescanning every module.
+assembly_stage_begin() {
+  assembly_stage_active_jobs=0
+  assembly_stage_failed=0
+}
+
+assembly_stage_start_job() {
+  "$@" &
+  assembly_stage_active_jobs="$((assembly_stage_active_jobs + 1))"
+  if [[ "$assembly_stage_active_jobs" -ge "$jobs" ]]; then
+    if ! wait -n; then
+      assembly_stage_failed=1
+    fi
+    assembly_stage_active_jobs="$((assembly_stage_active_jobs - 1))"
+  fi
+}
+
+assembly_stage_finish() {
+  while [[ "$assembly_stage_active_jobs" -gt 0 ]]; do
+    if ! wait -n; then
+      assembly_stage_failed=1
+    fi
+    assembly_stage_active_jobs="$((assembly_stage_active_jobs - 1))"
   done
+  if [[ "$assembly_stage_failed" -ne 0 ]]; then
+    echo "generated module assembly stage failed" >&2
+    return 1
+  fi
+}
+
+strip_and_restore_generated_module() {
+  local rust_path="$1"
+  strip_shared_support_items "$rust_path" "$shared_support_types_path" &&
+    strip_source_type_facade_stubs "$rust_path" "$source_types_path" "$repo_root/scripts" &&
+    restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
+}
+
+restore_generated_module_dependencies() {
+  local rust_path="$1"
+  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path" "$repo_root/scripts" &&
+    restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
+}
+
+finalize_generated_module_dependencies() {
+  local rust_path="$1"
+  restore_generated_module_dependencies "$rust_path" &&
+    deduplicate_generated_coherence_items "$rust_path" "$repo_root/scripts" "$shared_support_path" &&
+    python3 "$repo_root/scripts/merge-shared-support-facades.py" --cleanup-module "$rust_path"
+}
+
+if [[ -s "$shared_support_path" ]]; then
+  assembly_stage_begin
+  for rust_path in "$generated_dir"/*.rs; do
+    assembly_stage_start_job strip_and_restore_generated_module "$rust_path"
+  done
+  assembly_stage_finish || exit 1
 else
   touch "$shared_support_path" "$shared_support_types_path"
 fi
@@ -3333,10 +3530,11 @@ fi
 # surface reconciliation may remove it while leaving its accessors intact.
 # The restoration helper only copies raw statics still referenced by the final
 # module, so support-prelude state remains excluded.
+assembly_stage_begin
 for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path" "$repo_root/scripts"
-  restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
+  assembly_stage_start_job restore_generated_module_dependencies "$rust_path"
 done
+assembly_stage_finish || exit 1
 
 # Dependency-bearing expressions can be restored from the raw module by the
 # closure pass above. Detect dependencies against the final generated surface,
@@ -3348,11 +3546,9 @@ if grep -R -q 'ndarray::' "$generated_dir" "$shared_support_path"; then
   fi
 fi
 
-for i in "${!java_files[@]}"; do
-  index="$((i + 1))"
-  stem="$(printf '%05d_%s' "$index" "$(basename "${java_files[$i]%.java}")")"
-  stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
-  rust_path="$generated_dir/$stem.rs"
+for i in "${!assembly_java_files[@]}"; do
+  rust_path="${assembly_rust_paths[$i]}"
+  stem="$(basename "${rust_path%.rs}")"
   awk -v module="generated_$stem" '
     /^pub[[:space:]]+(struct|enum|type|trait)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/ {
       name = $3
@@ -3382,12 +3578,10 @@ else
   touch "$type_counts_path" "$unique_types_path"
 fi
 
-for i in "${!java_files[@]}"; do
-  index="$((i + 1))"
-  stem="$(printf '%05d_%s' "$index" "$(basename "${java_files[$i]%.java}")")"
-  stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
+for i in "${!assembly_java_files[@]}"; do
+  rust_path="${assembly_rust_paths[$i]}"
+  stem="$(basename "${rust_path%.rs}")"
   module="generated_$stem"
-  rust_path="$generated_dir/$stem.rs"
   import_list="$(
     awk -F '\t' -v module="$module" '
       FILENAME == ARGV[1] {
@@ -3427,15 +3621,15 @@ done
 # boundary.  The earlier pass must remain before type indexing because it can
 # restore nominal declarations; this final pass protects non-nominal companion
 # items such as trait-object carrier impls from every assembly ordering.
+assembly_stage_begin
 for rust_path in "$generated_dir"/*.rs; do
-  restore_missing_source_type_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$shared_support_types_path" "$shared_support_path" "$repo_root/scripts"
+  assembly_stage_start_job finalize_generated_module_dependencies "$rust_path"
   # Restored companion items can introduce dependencies on prelude helpers
   # after the main facade merge has already computed its closure. Re-run the
   # local support closure at the final module surface so those helpers remain
   # beside their source-owned companion instead of being dropped.
-  restore_missing_prelude_support_items "$rust_path" "$raw_generated_backup_dir/$(basename "$rust_path")" "$source_types_path" "$shared_support_types_path" "$repo_root/scripts"
-  deduplicate_generated_coherence_items "$rust_path" "$repo_root/scripts" "$shared_support_path"
 done
+assembly_stage_finish || exit 1
 
 # Batch translation records marker counts before crate assembly strips and
 # centralizes shared support. Those raw counts describe the intermediate
@@ -3464,10 +3658,8 @@ mv "$final_status_path" "$status_path"
   if [[ -s "$shared_support_path" ]]; then
     cat "$shared_support_path"
   fi
-  for i in "${!java_files[@]}"; do
-    index="$((i + 1))"
-    stem="$(printf '%05d_%s' "$index" "$(basename "${java_files[$i]%.java}")")"
-    stem="$(printf '%s' "$stem" | tr -c 'A-Za-z0-9_' '_')"
+  for i in "${!assembly_java_files[@]}"; do
+    stem="$(basename "${assembly_rust_paths[$i]%.rs}")"
     printf "#[path = \"generated/%s.rs\"]\npub mod generated_%s;\n" "$stem" "$stem"
   done
   if [[ -s "$unique_types_path" ]]; then
@@ -3506,7 +3698,7 @@ cargo_type_errors_valid="$(cargo_type_errors_valid_from_parse_failure_count "$pa
 parse_failure_scan_elapsed_ms="$(elapsed_ms_since "$parse_failure_scan_start_ms")"
 printf "parse_failure_scan\tok\t%s\t%s\n" "$parse_failure_scan_elapsed_ms" "$parse_failures_path" >> "$phase_events_path"
 
-total_files="${#java_files[@]}"
+total_files="${#assembly_java_files[@]}"
 translated_failed="$(awk -F '\t' 'NR > 1 && $3 == "errors" { count++ } END { print count + 0 }' "$status_path")"
 diagnostic_files="$(awk -F '\t' 'NR > 1 && $4 > 0 { count++ } END { print count + 0 }' "$status_path")"
 invalid_pattern_files="$(awk -F '\t' 'NR > 1 && $5 > 0 { count++ } END { print count + 0 }' "$status_path")"
@@ -3579,6 +3771,7 @@ printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_pa
   printf "out_dir\t%s\n" "$out_dir"
   printf "generated_crate\t%s\n" "$crate_dir"
   printf "translator_binary\t%s\n" "$binary"
+  printf "translator_build_elapsed_ms\t%s\n" "$translator_build_elapsed_ms"
   printf "cargo_target_dir\t%s\n" "${CARGO_TARGET_DIR:-}"
   printf "files\t%s\n" "$total_files"
   printf "resolver_bench\t%s\n" "$resolver_status"

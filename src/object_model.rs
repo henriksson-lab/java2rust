@@ -749,9 +749,10 @@ fn dispatch_requirements_for_binding_use(
             }
             CallArgumentBoundary::Unknown => vec![DispatchRequirementKind::RejectTraitObject],
         },
-        BindingUse::ContentRead | BindingUse::AssignedToLocal { .. } | BindingUse::Mutated => {
-            Vec::new()
-        }
+        BindingUse::ContentRead
+        | BindingUse::IndexedElementComparedToNull { .. }
+        | BindingUse::AssignedToLocal { .. }
+        | BindingUse::Mutated => Vec::new(),
         BindingUse::CastTarget { .. } => Vec::new(),
     }
 }

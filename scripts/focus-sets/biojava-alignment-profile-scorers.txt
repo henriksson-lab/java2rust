@@ -1,0 +1,2 @@
+org/biojava/nbio/alignment/FractionalIdentityInProfileScorer.java
+org/biojava/nbio/alignment/FractionalSimilarityInProfileScorer.java

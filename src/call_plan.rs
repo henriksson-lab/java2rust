@@ -2137,6 +2137,10 @@ impl NewTargetPlan {
         self.rust_name = rust_name;
     }
 
+    pub(crate) fn replace_owner_java_type(&mut self, java_ty: JavaType) {
+        self.owner_shape.java_ty = java_ty;
+    }
+
     pub(crate) fn set_native_collection(
         &mut self,
         native_collection: Option<NativeCollectionNewTarget>,

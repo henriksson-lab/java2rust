@@ -7043,15 +7043,26 @@ fn collect_field_declaration_facts_for_type(
     outer_name: Option<&str>,
 ) {
     let type_name = package_qualified_source_type_name(ty, package, outer_name);
+    let enum_variants = crate::object_model::java_enum_variant_names(ty)
+        .into_iter()
+        .collect::<HashSet<_>>();
     for member in &ty.members {
         match member {
             Member::Field(field) => {
                 let is_static_final = field.modifiers.contains(&Modifier::Static)
                     && field.modifiers.contains(&Modifier::Final);
+                let is_enum_variant = ty.kind == TypeKind::Enum
+                    && enum_variants.contains(
+                        &crate::object_model::rust_enum_variant_name_from_parsed_constant(
+                            &field.name,
+                        ),
+                    );
                 facts.external_field_facts.push(ExternalFieldFact {
                     field: FieldKey::named(type_name.clone(), field.name.clone()),
                     field_type: Some(field.ty.clone()),
-                    field_kind: if is_static_final {
+                    field_kind: if is_enum_variant {
+                        ExternalFieldKind::EnumVariant
+                    } else if is_static_final {
                         ExternalFieldKind::StaticFinal
                     } else {
                         ExternalFieldKind::Unknown

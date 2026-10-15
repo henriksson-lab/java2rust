@@ -1,0 +1,3 @@
+# Annotation models exercising CharSequence/StringBuffer runtime identity.
+org/biojava/nbio/alignment/io/StockholmFileAnnotation.java
+org/biojava/nbio/alignment/io/StockholmSequenceAnnotation.java

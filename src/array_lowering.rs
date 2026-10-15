@@ -155,6 +155,29 @@ pub(crate) fn nested_array2_with_nullable_rows_projection(
     Some(repeat_with_projection(present_row, rows))
 }
 
+/// A fully-sized rank-three primitive Java array stored as nullable matrices.
+///
+/// A field or local that is also assigned `new T[n][][]` needs the stable
+/// carrier `Vec<Option<Array2<T>>>`.  A fully-sized assignment to that same
+/// slot creates every matrix eagerly, so preserve the carrier by wrapping each
+/// independently-created matrix in `Some`.
+pub(crate) fn nested_array3_with_nullable_matrices_projection(
+    planes: RustExpr,
+    rows: RustExpr,
+    cols: RustExpr,
+    element_type: &JavaType,
+    element_has_default: bool,
+) -> Option<RustExpr> {
+    if !matches!(element_type, JavaType::Primitive(_)) {
+        return None;
+    }
+    let default = default_array_element_expr(element_type)
+        .or_else(|| element_has_default.then(object_element_default_expr))?;
+    let matrix = array2_from_elem_projection(rows, cols, default);
+    let present_matrix = function_call_projection(RustExpr::path(["Some"]), vec![matrix]);
+    Some(repeat_with_projection(present_matrix, planes))
+}
+
 /// A fully-sized Java array with three or more dimensions.
 ///
 /// Rust's carrier for these arrays is a nested `Vec`, because Java arrays of

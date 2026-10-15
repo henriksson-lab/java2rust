@@ -6,6 +6,538 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+fn emission_filter_retains_complete_primary_analysis_set() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new("example/A.java", "package example; class A { B value; }"),
+        new_java2rust::BatchSource::new(
+            "example/B.java",
+            "package example; class B { int value() { return 1; } }",
+        ),
+    ];
+    let options = new_java2rust::BatchTranslationOptions::new(1, None)
+        .with_emission_paths(["example/B.java".to_string()]);
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &options,
+        );
+
+    assert_eq!(report.analysis_profile().primary_files(), 2);
+    assert_eq!(report.translations().len(), 1);
+    assert_eq!(report.translations()[0].path(), "example/B.java");
+    assert!(report.translations()[0].rust().contains("pub struct B"));
+    assert!(report.events().iter().any(|event| {
+        event.phase() == "emit_start" && event.index() == 2 && event.path() == "example/B.java"
+    }));
+}
+
+#[test]
+fn summary_only_generic_interface_bound_emits_parameterized_capability_trait() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "alignment/BoundUse.java".to_string(),
+        r#"
+package alignment;
+
+import java.util.List;
+import org.example.Compound;
+import org.example.CompoundSet;
+import org.example.Sequence;
+
+class BoundUse<S extends Sequence<C>, C extends Compound> {
+    int length(S value) { return value.getLength(); }
+    C compoundAt(S value, int position) { return value.getCompoundAt(position); }
+    List<C> compounds(S value) { return value.getAsList(); }
+    CompoundSet<C> compoundSet(S value) { return value.getCompoundSet(); }
+}
+"#,
+    )];
+    let summary_sources = vec![
+        r#"
+package org.example;
+public interface Compound {}
+"#
+        .to_string(),
+        r#"
+package org.example;
+import java.util.List;
+public interface CompoundSet<C extends Compound> {
+    List<C> getAllCompounds();
+}
+"#
+        .to_string(),
+        r#"
+package org.example;
+import java.util.List;
+public interface Sequence<C extends Compound> {
+    int getLength();
+    C getCompoundAt(int position);
+    List<C> getAsList();
+    CompoundSet<C> getCompoundSet();
+}
+"#
+        .to_string(),
+        r#"
+package unrelated;
+public class Sequence<T> {}
+"#
+        .to_string(),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("pub trait Sequence<C>")
+            && rust.contains("S: Sequence<C>")
+            && rust.contains("C: Compound")
+            && rust.contains("value.get_length()")
+            && rust.contains("value.get_compound_at(position)"),
+        "{rust}"
+    );
+    assert!(
+        !rust.contains("fn get_length(&self) -> ()"),
+        "a weak erased fallback must not duplicate the typed summary slot:\n{rust}"
+    );
+    cargo_check_generated_modules(
+        "summary_generic_interface_bound",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn unavailable_external_generic_bound_emits_observed_capability_trait() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "alignment/BoundUse.java".to_string(),
+        r#"
+package alignment;
+
+import external.api.Sequence;
+
+class BoundUse<S extends Sequence<C>, C> {
+    int length(S value) { return value.getLength(); }
+}
+"#,
+    )];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("pub trait Sequence<T0>")
+            && rust.contains("S: Sequence<C>")
+            && rust.contains("fn get_length(&self) -> i32")
+            && rust.contains("value.get_length()"),
+        "{rust}"
+    );
+    assert!(
+        !rust.contains("pub struct Sequence<"),
+        "a generic upper bound must be a capability trait, not an opaque value carrier:\n{rust}"
+    );
+    cargo_check_generated_modules(
+        "unavailable_external_generic_bound",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn unavailable_external_bound_uses_declared_method_return_contracts() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "example/Use.java".to_string(),
+        r#"
+package example;
+import java.util.List;
+class Use<S extends Sequence<C>, C extends Compound> {
+    List<C> values(S value) { return value.getAsList(); }
+    CompoundSet<C> set(S value) { return value.getCompoundSet(); }
+    C item(S value, int index) { return value.getCompoundAt(index); }
+    int count(S value) {
+        int count = 0;
+        for (C ignored : value) count++;
+        return count;
+    }
+}
+"#,
+    )];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(
+        rust.contains("fn get_as_list(&self) -> Vec<T0>")
+            && rust.contains("fn get_compound_set(&self) -> CompoundSet<T0>")
+            && rust.contains("fn get_compound_at")
+            && rust.contains("-> T0")
+            && rust.contains("fn iter(&self) -> std::slice::Iter<'_, T0>"),
+        "declared Java return types should specialize an unavailable bound's capability surface:\n{rust}"
+    );
+    assert!(
+        !rust.contains("SequenceGetAsListResult")
+            && !rust.contains("SequenceGetCompoundSetResult")
+            && !rust.contains("SequenceGetCompoundAt1Result"),
+        "context-proven returns must replace weak opaque facade results:\n{rust}"
+    );
+}
+
+#[test]
+fn qualified_summary_nested_enum_reuses_canonical_facade_owner() {
+    let primary_sources = vec![new_java2rust::BatchSource::new(
+        "usecase/User.java".to_string(),
+        r#"
+package usecase;
+import org.example.Aligned.Step;
+class User {
+    Step step() { return Step.COMPOUND; }
+}
+"#,
+    )];
+    let summary_sources = vec![
+        r#"
+package org.example;
+public interface Aligned {
+    enum Step { COMPOUND, GAP }
+}
+"#
+        .to_string(),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &summary_sources,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations[0].rust();
+    assert!(rust.contains("pub enum Aligned_Step"), "{rust}");
+    assert!(rust.contains("Aligned_Step::COMPOUND"), "{rust}");
+    assert!(!rust.contains("OrgExampleAligned_Step::COMPOUND"), "{rust}");
+    cargo_check_generated_modules(
+        "qualified_summary_nested_enum",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: rust.to_string(),
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn inherited_partially_allocated_rank_three_field_keeps_base_storage_shape() {
+    let sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Base.java".to_string(),
+            r#"
+package example;
+public class Base {
+    protected int[][][] scores;
+    public void initialize(int rows, int columns) {
+        scores = new int[2][][];
+        scores[0] = new int[rows][columns];
+    }
+}
+"#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Middle.java".to_string(),
+            r#"
+package example;
+public class Middle extends Base {}
+"#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Child.java".to_string(),
+            r#"
+package example;
+public class Child extends Middle {
+    public int rows() { return scores[0].length; }
+}
+"#,
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &[r#"
+package example;
+public class Base {
+    protected int[][][] scores;
+    public void initialize(int rows, int columns);
+}
+"#
+            .to_string()],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let child = translations
+        .iter()
+        .find(|translation| translation.path() == "example/Child.java")
+        .expect("translated child")
+        .rust();
+    let base = translations
+        .iter()
+        .find(|translation| translation.path() == "example/Base.java")
+        .expect("translated base")
+        .rust();
+
+    assert!(
+        base.contains("scores: Option<Vec<Option<ndarray::Array2<i32>>>>"),
+        "the declaring field must retain partial-allocation evidence:\n{base}"
+    );
+
+    assert!(
+        child.contains("scores: Option<Vec<Option<ndarray::Array2<i32>>>>"),
+        "a flattened inherited field must reuse its declaring field's solved storage shape:\n{child}"
+    );
+    assert!(child.contains(".nrows() as i32"), "{child}");
+}
+
+#[test]
+fn partial_array_storage_keeps_canonical_nested_source_identity() {
+    let sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Helper.java".to_string(),
+            r#"package example;
+                public class Helper { public enum Last { FIRST, SECOND } }
+            "#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Base.java".to_string(),
+            r#"package example;
+                public class Base {
+                    public int run(int size) {
+                        example.Helper.Last[][][] traceback =
+                            new example.Helper.Last[size][][];
+                        return traceback.length;
+                    }
+                }
+            "#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Child.java".to_string(),
+            "package example; public class Child extends Base {}",
+        ),
+    ];
+    let options = new_java2rust::BatchTranslationOptions::new(1, None)
+        .with_emission_paths(["example/Child.java".to_string()]);
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &options,
+        );
+    let rust = report
+        .translations()
+        .iter()
+        .find(|translation| translation.path() == "example/Child.java")
+        .expect("translated child")
+        .rust();
+    assert!(
+        rust.contains("let traceback: Vec<Option<Vec<Vec<Option<Helper_Last>>>>>")
+            && !rust.contains("let traceback: Vec<Option<Vec<Vec<Option<ExampleHelper_Last>>>>>"),
+        "a partial-array carrier must not restore the qualified summary alias:\n{rust}"
+    );
+}
+
+#[test]
+fn emitted_method_signature_matches_qualified_summary_parameter_alias() {
+    let sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Helper.java".to_string(),
+            r#"
+package example;
+public class Helper {
+    public static class Part {
+        public Part() {}
+        public static int value() { return 7; }
+    }
+    public enum Mode { ON, OFF }
+    public static int set(int value) { return value; }
+    public static int[][] set(int value, Part part, int penalty, int[] substitutions,
+            boolean storing, int[][][] scores) { return new int[0][0]; }
+}
+"#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/User.java".to_string(),
+            r#"
+package example;
+public class User {
+    public static int use(example.Helper.Part part) {
+        example.Helper.Part local = part;
+        example.Helper.Part created = new example.Helper.Part();
+        int enabled = example.Helper.Mode.ON == example.Helper.Mode.ON ? 1 : 0;
+        return example.Helper.Part.value() + example.Helper.set(enabled);
+    }
+}
+"#,
+        ),
+    ];
+    let summaries = vec![
+        r#"
+package example;
+public class Helper {
+    public static class Part { public Part(); public static int value(); }
+    public enum Mode { ON, OFF }
+    public static int set(int value);
+    public static int[][] set(int value, example.Helper.Part part, int penalty,
+            int[] substitutions, boolean storing, int[][][] scores);
+}
+"#
+        .to_string(),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &summaries,
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let rust = translations
+        .iter()
+        .map(|translation| translation.rust())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rust.contains("pub fn set_int_helper_part_int_int_array_boolean_int_array_array_array"),
+        "{}",
+        rust
+    );
+    let user_rust = rust
+        .split_once("pub struct User")
+        .map(|(_, user)| user)
+        .expect("translated User declaration");
+    assert!(
+        !user_rust.contains("ExampleHelper_"),
+        "the emitted nested source type must outrank its qualified summary alias:\n{}",
+        user_rust
+    );
+    assert!(
+        user_rust.contains("let local: Helper_Part")
+            && user_rust.contains("Helper_Part::new()")
+            && user_rust.contains("Helper_Part::value()")
+            && user_rust.contains("Mode::ON")
+            && user_rust.contains("Helper::set_int(enabled)"),
+        "locals and qualified static call owners must share the canonical emitted identity:\n{user_rust}"
+    );
+}
+
+#[test]
+fn inherited_nested_local_canonicalization_preserves_owner_generic_bounds() {
+    let sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Sequence.java".to_string(),
+            "package example; public interface Sequence<C> { int length(); }",
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Helper.java".to_string(),
+            "package example; public class Helper { public static class Part {} }",
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Base.java".to_string(),
+            r#"package example;
+                public class Base<S extends Sequence<C>, C> {
+                    public int inherited(S value) {
+                        example.Helper.Part part = null;
+                        return value.length();
+                    }
+                }
+            "#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Child.java".to_string(),
+            "package example; public class Child<S extends Sequence<C>, C> extends Base<S, C> {}",
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &["package unrelated; public class Sequence<T> {}".to_string()],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let child = translations
+        .iter()
+        .find(|translation| translation.path() == "example/Child.java")
+        .expect("translated child")
+        .rust();
+    assert!(child.contains("S: Sequence<C>"), "{child}");
+    assert!(!child.contains("ExampleHelper_Part"), "{child}");
+}
+
+#[test]
+fn inherited_method_parameter_still_shadows_flattened_instance_field() {
+    let sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/Base.java".to_string(),
+            r#"package example;
+                public class Base<T> {
+                    protected T value;
+                    public void setValue(T value) { this.value = value; }
+                }
+            "#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/Child.java".to_string(),
+            "package example; public class Child<T> extends Base<T> {}",
+        ),
+    ];
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let child = translations
+        .iter()
+        .find(|translation| translation.path() == "example/Child.java")
+        .expect("translated child")
+        .rust();
+    assert!(
+        child.contains("self.value = Some(value)") && !child.contains("Some(self.value)"),
+        "an inherited field must not capture its setter parameter:\n{child}"
+    );
+}
+
+#[test]
 fn batch_generic_map_capacity_hierarchy_and_static_storage_reuse_shared_plans() {
     let primary_sources = vec![new_java2rust::BatchSource::new(
         "HeaderRepair.java".to_string(),
@@ -1736,8 +2268,16 @@ public class B {
             .collect::<Vec<_>>(),
         vec![
             ("emit_start", 1, "running"),
+            ("emit_resolve", 1, "ok"),
+            ("emit_lower", 1, "ok"),
+            ("emit_diagnostics", 1, "ok"),
+            ("emit_render", 1, "ok"),
             ("emit_end", 1, "ok"),
             ("emit_start", 2, "running"),
+            ("emit_resolve", 2, "ok"),
+            ("emit_lower", 2, "ok"),
+            ("emit_diagnostics", 2, "ok"),
+            ("emit_render", 2, "ok"),
             ("emit_end", 2, "ok")
         ]
     );
@@ -3944,6 +4484,19 @@ fn translate_batch_cli_writes_phase_and_worker_events() {
             .any(|line| line.starts_with("emit_start\t") && line.contains("\t1\t")),
         "{worker_events}"
     );
+    for phase in [
+        "emit_resolve",
+        "emit_lower",
+        "emit_diagnostics",
+        "emit_render",
+    ] {
+        assert!(
+            worker_events
+                .lines()
+                .any(|line| line.starts_with(&format!("{phase}\t"))),
+            "missing {phase} timing:\n{worker_events}"
+        );
+    }
     assert!(
         worker_events
             .lines()

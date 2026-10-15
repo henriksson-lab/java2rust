@@ -1,0 +1,21 @@
+# Concrete inheritance cases plus the superclass bodies and interface contracts
+# needed to assemble a meaningful focused crate. Other corpus files remain in
+# declaration-only source-summary context.
+org/biojava/nbio/alignment/FractionalIdentityInProfileScorer.java
+org/biojava/nbio/alignment/FractionalIdentityScorer.java
+org/biojava/nbio/alignment/FractionalSimilarityInProfileScorer.java
+org/biojava/nbio/alignment/FractionalSimilarityScorer.java
+org/biojava/nbio/alignment/NeedlemanWunsch.java
+org/biojava/nbio/alignment/routines/AnchoredPairwiseSequenceAligner.java
+org/biojava/nbio/alignment/routines/AlignerHelper.java
+org/biojava/nbio/alignment/routines/GuanUberbacher.java
+org/biojava/nbio/alignment/template/AbstractMatrixAligner.java
+org/biojava/nbio/alignment/template/AbstractPairwiseSequenceAligner.java
+org/biojava/nbio/alignment/template/AbstractScorer.java
+org/biojava/nbio/alignment/template/Aligner.java
+org/biojava/nbio/alignment/template/GapPenalty.java
+org/biojava/nbio/alignment/template/MatrixAligner.java
+org/biojava/nbio/alignment/template/PairInProfileScorer.java
+org/biojava/nbio/alignment/template/PairwiseSequenceAligner.java
+org/biojava/nbio/alignment/template/PairwiseSequenceScorer.java
+org/biojava/nbio/alignment/template/Scorer.java

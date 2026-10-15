@@ -1282,18 +1282,13 @@ fn source_hierarchy_carrier_forwarding_methods(
     virtual_dispatch_trait: Option<&str>,
     anonymous_sync: bool,
 ) -> Vec<String> {
-    // Per-file translation solves the primary declaration with the emitted
-    // source tree as support context, but its SignaturePlan does not contain
-    // entries for every support declaration.  Carrier receiver mutability is
-    // a hierarchy-wide ABI property, so solve the emitted support program once
-    // and use it as a fallback for concrete variants.
-    let support_usage = crate::usage::analyze_usage_with_facts(support_program, facts);
-    let support_signatures = crate::signature::solve_signatures_with_facts(
-        support_program,
-        representations,
-        &support_usage,
-        facts,
-    );
+    // Signature solving already includes every declaration in the support
+    // program (see `build_signature_plan_from_constraints`).  Re-solving the
+    // entire support program here once per emitted carrier made batch emission
+    // quadratic in the number of hierarchy roots and, with parallel emission,
+    // ran several identical whole-program fixpoints at once.  Reuse the
+    // authoritative plan for both primary and support lookups.
+    let support_signatures = signatures;
     ty.members
         .iter()
         .filter_map(|member| {
@@ -4613,13 +4608,10 @@ fn boxed_interface_upcast_impls(
                         if *covariant_erased_return {
                             return forwarded_covariant_object_upcast_method(signature);
                         }
-                        forwarded_trait_method(signature, SharedTraitHandle::Direct, None)
+                        forwarded_trait_method(signature, SharedTraitHandle::OwnedField, None)
                     })
                     .collect::<Option<Vec<_>>>()
-                    .expect("parent interface methods have an &self receiver")
-                    .into_iter()
-                    .map(|method| method.replace("(**self)", "(*self.0)"))
-                    .collect::<Vec<_>>()
+                    .expect("parent interface methods have a supported receiver")
                     .join("\n");
                 let carrier_name = format!(
                     "__JavaInterfaceUpcast{derived_trait_name}To{parent_trait_name}"
@@ -5429,8 +5421,30 @@ fn trait_impl_for_type(
     let trait_name = rust_name_for_java_named_type(trait_name);
     let impl_type_name = rust_name_for_java_named_type(&ty.name);
     let impl_type = crate::item_assembly::rust_use_name_for_source_type(ty);
-    let impl_params =
+    let concrete_is_clone = crate::item_assembly::source_type_supports_struct_derive_clone(
+        ty,
+        signatures,
+        facts,
+        representations,
+        program,
+    );
+    let mut impl_params =
         crate::item_assembly::rust_impl_params_for_source_type(ty, program, Some(representations));
+    if concrete_is_clone {
+        for (type_param, rendered) in ty.type_params.iter().zip(impl_params.iter_mut()) {
+            let declares_param = rendered == type_param
+                || rendered
+                    .strip_prefix(type_param)
+                    .is_some_and(|suffix| suffix.starts_with(':'));
+            if declares_param && !rendered.split('+').any(|bound| bound.trim() == "Clone") {
+                if rendered == type_param {
+                    rendered.push_str(": Clone");
+                } else {
+                    rendered.push_str(" + Clone");
+                }
+            }
+        }
+    }
     let impl_generics = (!impl_params.is_empty())
         .then(|| format!("<{}>", impl_params.join(", ")))
         .unwrap_or_default();
@@ -5492,13 +5506,6 @@ fn trait_impl_for_type(
             methods.join("\n")
         ));
     }
-    let concrete_is_clone = crate::item_assembly::source_type_supports_struct_derive_clone(
-        ty,
-        signatures,
-        facts,
-        representations,
-        program,
-    );
     methods.extend(trait_object_support_impl_methods(
         &trait_name,
         concrete_is_clone,
@@ -5850,6 +5857,10 @@ pub(crate) fn boxed_trait_forwarding_impl_with_generics(
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum SharedTraitHandle {
     Direct,
+    /// An owned `Box<dyn Trait>` stored in a wrapper's first field. Unlike a
+    /// shared Java-reference handle, this can forward both `&self` and
+    /// `&mut self` parent-interface methods.
+    OwnedField,
     Local,
     Sync,
     Boxed,
@@ -5901,13 +5912,17 @@ fn forwarded_trait_method(
         return Some(format!("    {signature_without_semicolon} {{ self }}"));
     }
     if (signature_return_is_borrowed(signature)
-        && !matches!(handle, SharedTraitHandle::Direct | SharedTraitHandle::Boxed))
+        && !matches!(
+            handle,
+            SharedTraitHandle::Direct | SharedTraitHandle::OwnedField | SharedTraitHandle::Boxed
+        ))
         || (mutable_receiver && handle == SharedTraitHandle::Direct)
     {
         return None;
     }
     let receiver = match handle {
         SharedTraitHandle::Direct => "(**self)".to_string(),
+        SharedTraitHandle::OwnedField => "(*self.0)".to_string(),
         SharedTraitHandle::Local if mutable_receiver => "self.borrow_mut()".to_string(),
         SharedTraitHandle::Local => "self.borrow()".to_string(),
         SharedTraitHandle::Sync if mutable_receiver => "self.lock().unwrap()".to_string(),
@@ -5918,11 +5933,21 @@ fn forwarded_trait_method(
         let trait_name = trait_value_path(trait_name);
         let borrow = if mutable_receiver { "&mut *" } else { "&*" };
         let receiver = match handle {
-            SharedTraitHandle::Direct | SharedTraitHandle::Boxed => {
+            SharedTraitHandle::Direct
+            | SharedTraitHandle::OwnedField
+            | SharedTraitHandle::Boxed => {
                 if mutable_receiver {
-                    "&mut **self".to_string()
+                    if handle == SharedTraitHandle::OwnedField {
+                        "&mut *self.0".to_string()
+                    } else {
+                        "&mut **self".to_string()
+                    }
                 } else {
-                    "&**self".to_string()
+                    if handle == SharedTraitHandle::OwnedField {
+                        "&*self.0".to_string()
+                    } else {
+                        "&**self".to_string()
+                    }
                 }
             }
             SharedTraitHandle::Local | SharedTraitHandle::Sync => {
@@ -7696,6 +7721,13 @@ fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> b
 }
 
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    let mut exact_matches = Vec::new();
+    for ty in &program.types {
+        collect_exact_type_decl_matches(ty, type_name, &mut exact_matches);
+    }
+    if let Some(exact) = unique_type_decl(exact_matches) {
+        return Some(exact);
+    }
     let mut matches = TypeDeclMatches::default();
     for ty in &program.types {
         collect_type_decl_matches(ty, type_name, program.package.as_deref(), &mut matches);
@@ -7712,6 +7744,13 @@ fn find_type_decl_for_owner_context<'a>(
     owner_name: &str,
     type_name: &str,
 ) -> Option<&'a TypeDecl> {
+    let mut exact_matches = Vec::new();
+    for ty in &program.types {
+        collect_exact_type_decl_matches(ty, type_name, &mut exact_matches);
+    }
+    if let Some(exact) = unique_type_decl(exact_matches) {
+        return Some(exact);
+    }
     let mut matches = TypeDeclMatches::default();
     for ty in &program.types {
         collect_type_decl_matches(ty, type_name, program.package.as_deref(), &mut matches);
@@ -7722,6 +7761,21 @@ fn find_type_decl_for_owner_context<'a>(
         .or_else(|| unique_same_package_type_decl(matches.simple.as_slice(), owner_name))
         .or_else(|| unique_type_decl(matches.emitted_alias))
         .or_else(|| unique_type_decl(matches.simple))
+}
+
+fn collect_exact_type_decl_matches<'a>(
+    ty: &'a TypeDecl,
+    type_name: &str,
+    matches: &mut Vec<&'a TypeDecl>,
+) {
+    if ty.name == type_name {
+        matches.push(ty);
+    }
+    for member in &ty.members {
+        if let Member::Type(nested) = member {
+            collect_exact_type_decl_matches(nested, type_name, matches);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -8186,6 +8240,56 @@ interface Joined extends Relay<String>, Named {}
         );
         assert!(
             rendered.contains("impl Relay<String> for __JavaInterfaceUpcastJoinedToRelay"),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn interface_upcast_wrapper_forwards_mutable_parent_contract() {
+        let parsed = parse_java_source(
+            r#"
+interface Parent { void mutate(); }
+interface Child extends Parent {}
+class Implementation implements Child {
+    int value;
+    public void mutate() { value++; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let child = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Child")
+            .unwrap();
+
+        let rendered = trait_item_for_type_with_program(
+            child,
+            &child.name,
+            &resolved.program,
+            &signatures,
+            &semantic.facts,
+            &ProgramExceptionPlan::default(),
+            &representations,
+            false,
+        );
+
+        assert!(
+            rendered.contains("impl Parent for __JavaInterfaceUpcastChildToParent"),
+            "{rendered}"
+        );
+        assert!(
+            rendered.contains("fn mutate(&mut self)") && rendered.contains("(*self.0).mutate()"),
             "{rendered}"
         );
     }
