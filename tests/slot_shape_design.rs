@@ -32117,6 +32117,36 @@ fn cast_shape_is_owned_by_type_inference_not_lowering() {
 }
 
 #[test]
+fn facade_fallback_generation_reuses_external_fact_lookup_index() {
+    let stdlib_source = include_str!("../src/stdlib.rs");
+    let helper = stdlib_source
+        .split("fn external_support_method_has_effect")
+        .nth(1)
+        .and_then(|tail| {
+            tail.split("fn external_api_effect_for_support_owner")
+                .next()
+        })
+        .expect("external support effect helper should remain discoverable");
+
+    assert!(
+        helper.contains("external_index\n            .external_api_effect_for_receiver_with_arity")
+            && !helper.contains("facts\n            .external_api_effect_for_receiver_with_arity"),
+        "facade fallback generation must reuse its ExternalFactLookupIndex instead of rebuilding one inside the owner/method cross-product"
+    );
+
+    let effect_helper = stdlib_source
+        .split("fn external_api_effect_for_support_owner")
+        .nth(1)
+        .and_then(|tail| tail.split("fn facade_abi_rust_method_for_support").next())
+        .expect("external support owner helper should remain discoverable");
+    assert!(
+        effect_helper.contains("external_api_effect_for_mapped_receiver_with_arity")
+            && !effect_helper.contains("external_api_effect_facts"),
+        "Rust-owner compatibility lookup must use indexed method candidates instead of scanning every external effect"
+    );
+}
+
+#[test]
 fn rendered_string_heuristics_have_centralization_guardrails() {
     let coercion_source = include_str!("../src/coercion.rs");
     let lower_source = include_str!("../src/lower.rs");

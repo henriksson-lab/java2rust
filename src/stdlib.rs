@@ -22205,14 +22205,13 @@ impl ExternalApiFacadeSupport {
                 let rust_lookup_method = crate::parser::to_snake_case(rust_method);
                 for arg_count in arities {
                     let java_method = Self::support_lookup_java_method_name(
-                        facts,
+                        external_index,
                         &owner,
                         &rust_lookup_method,
                         *arg_count,
                     );
                     if owner_is_builtin_external_facade
                         && Self::external_api_effect_for_support_owner(
-                            facts,
                             external_index,
                             &owner,
                             &java_method,
@@ -22321,7 +22320,6 @@ impl ExternalApiFacadeSupport {
                         continue;
                     }
                     if let Some(effect) = Self::external_api_effect_for_support_owner(
-                        facts,
                         external_index,
                         &owner,
                         &java_method,
@@ -22387,7 +22385,6 @@ impl ExternalApiFacadeSupport {
                         continue;
                     }
                     let Some(return_type) = Self::external_api_effect_for_support_owner(
-                        facts,
                         external_index,
                         &owner,
                         &java_method,
@@ -22490,20 +22487,25 @@ impl ExternalApiFacadeSupport {
     }
 
     fn support_lookup_java_method_name(
-        facts: &FactSet,
+        external_index: &ExternalFactLookupIndex<'_>,
         owner: &str,
         rust_method: &str,
         arg_count: usize,
     ) -> String {
         let java_method = lower_camel_from_snake(rust_method);
-        if Self::external_support_method_has_effect(facts, owner, &java_method, arg_count) {
+        if Self::external_support_method_has_effect(external_index, owner, &java_method, arg_count)
+        {
             return java_method;
         }
         let suffix = format!("_{arg_count}");
         if let Some(base) = rust_method.strip_suffix(&suffix) {
             let base_java_method = lower_camel_from_snake(base);
-            if Self::external_support_method_has_effect(facts, owner, &base_java_method, arg_count)
-            {
+            if Self::external_support_method_has_effect(
+                external_index,
+                owner,
+                &base_java_method,
+                arg_count,
+            ) {
                 return base_java_method;
             }
         }
@@ -22511,12 +22513,12 @@ impl ExternalApiFacadeSupport {
     }
 
     fn external_support_method_has_effect(
-        facts: &FactSet,
+        external_index: &ExternalFactLookupIndex<'_>,
         owner: &str,
         java_method: &str,
         arg_count: usize,
     ) -> bool {
-        facts
+        external_index
             .external_api_effect_for_receiver_with_arity(Some(owner), java_method, Some(arg_count))
             .is_some()
             || crate::external_packs::external_api_effect_for_receiver_with_arity(
@@ -22528,7 +22530,6 @@ impl ExternalApiFacadeSupport {
     }
 
     fn external_api_effect_for_support_owner(
-        facts: &FactSet,
         external_index: &ExternalFactLookupIndex<'_>,
         owner: &str,
         java_method: &str,
@@ -22538,18 +22539,16 @@ impl ExternalApiFacadeSupport {
             .external_api_effect_for_receiver_with_arity(Some(owner), java_method, Some(arg_count))
             .cloned()
             .or_else(|| {
-                facts
-                    .external_api_effect_facts
-                    .iter()
-                    .find(|fact| {
-                        fact.method_name == java_method
-                            && fact.arg_count.is_none_or(|arity| arity == arg_count)
-                            && fact.receiver_type.as_ref().is_some_and(|receiver_type| {
-                                rust_name_for_java_named_type(
-                                    &canonical_external_receiver_type_key(receiver_type),
-                                ) == owner
-                            })
-                    })
+                external_index
+                    .external_api_effect_for_mapped_receiver_with_arity(
+                        java_method,
+                        arg_count,
+                        |receiver_type| {
+                            rust_name_for_java_named_type(&canonical_external_receiver_type_key(
+                                receiver_type,
+                            )) == owner
+                        },
+                    )
                     .cloned()
             })
             .or_else(|| {
@@ -27254,7 +27253,6 @@ mod external_facade_support_tests {
         );
         assert!(
             ExternalApiFacadeSupport::external_api_effect_for_support_owner(
-                &facts,
                 &external_index,
                 "IntervalList",
                 "add",

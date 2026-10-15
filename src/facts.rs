@@ -236,6 +236,26 @@ impl<'a> ExternalFactLookupIndex<'a> {
         .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
     }
 
+    pub(crate) fn external_api_effect_for_mapped_receiver_with_arity(
+        &self,
+        method_name: &str,
+        arg_count: usize,
+        receiver_matches: impl Fn(&str) -> bool,
+    ) -> Option<&'a ExternalApiEffectFact> {
+        // Candidate indices are stored newest-first for normal override lookup.
+        // This compatibility lookup historically scanned the fact set forwards,
+        // so reverse them here to preserve its first-match precedence exactly.
+        self.external_api_candidate_indices(method_name)
+            .iter()
+            .rev()
+            .map(|index| &self.facts.external_api_effect_facts[*index])
+            .find(|fact| {
+                fact.method_name == method_name
+                    && fact.arg_count.is_none_or(|arity| arity == arg_count)
+                    && fact.receiver_type.as_deref().is_some_and(&receiver_matches)
+            })
+    }
+
     pub fn external_api_effect_for_call(
         &self,
         receiver_type: Option<&str>,
@@ -5417,5 +5437,32 @@ mod tests {
                 )
                 .is_none()
         );
+    }
+
+    #[test]
+    fn mapped_receiver_effect_lookup_preserves_forward_fact_precedence() {
+        let mut facts = FactSet::default();
+        for return_type in [JavaType::String, JavaType::Primitive(PrimitiveType::Int)] {
+            facts.external_api_effect_facts.push(ExternalApiEffectFact {
+                method_name: "value".to_string(),
+                receiver_type: Some("example.JavaOwner".to_string()),
+                arg_count: Some(0),
+                parameter_patterns: None,
+                role: ExternalApiRole::Getter,
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_type: Some(return_type),
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::ExternalLibraryPack,
+            });
+        }
+
+        let index = facts.external_lookup_index();
+        let effect = index
+            .external_api_effect_for_mapped_receiver_with_arity("value", 0, |receiver| {
+                receiver == "example.JavaOwner"
+            })
+            .expect("mapped receiver should resolve");
+        assert_eq!(effect.return_type, Some(JavaType::String));
     }
 }
