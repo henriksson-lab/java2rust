@@ -79499,16 +79499,48 @@ fn source_context_receiver_method_fallback_signature(
                 ctx.signatures
                     .method_signature_by_base_name_and_arity(&ty.name, name, args.len())
             })
-            .map(|(rust_name, signature)| (rust_name, signature.clone()))
-            .or_else(|| {
-                // A single-file translation may discover a context declaration
-                // that was not part of its shared signature plan. Preserve the
-                // old conservative fallback for that case, but never rerun an
-                // isolated solver when the whole-program plan already has the
-                // requested owner/method.
-                ctx.source_context_fallback_signature_cache
-                    .isolated_plan(ty, name, &arg_types, ctx)
-            });
+            .map(|(rust_name, signature)| (rust_name, signature.clone()));
+        if planned_signature.is_none()
+            && args.is_empty()
+            && let Some(method) = declared_method
+        {
+            // There are no parameter carriers to infer for a zero-argument
+            // call. Running an isolated whole-program signature solve here
+            // only rediscovers the resolved Rust name and receiver mode, and
+            // can dominate lowering for a source-summary interface method.
+            // Reuse the signature solver's authoritative fact-based receiver
+            // planner instead. This also preserves mutable receivers without
+            // maintaining a second mutability policy in lowering. A solved
+            // batch signature, when present, remains authoritative above.
+            let receiver = crate::signature::constrained_receiver_plan(
+                &crate::signature::receiver_constraints_with_facts(ty, method, ctx.facts),
+            );
+            let fallback_signature = ContextFallbackMethodSignature {
+                owner: Some(ty.name.clone()),
+                rust_name: context_method_effective_rust_name(&ty.name, method, ctx),
+                arg_shapes: Vec::new(),
+                receiver,
+                arg_shapes_are_authoritative: true,
+            };
+            let key = (ty.name.clone(), fallback_signature.rust_name.clone());
+            if selected_key.as_ref() == Some(&key) {
+                continue;
+            }
+            if selected.replace(fallback_signature).is_some() {
+                return None;
+            }
+            selected_key = Some(key);
+            continue;
+        }
+        let planned_signature = planned_signature.or_else(|| {
+            // A single-file translation may discover a context declaration
+            // that was not part of its shared signature plan. Preserve the
+            // old conservative fallback for that case, but never rerun an
+            // isolated solver when the whole-program plan already has the
+            // requested owner/method.
+            ctx.source_context_fallback_signature_cache
+                .isolated_plan(ty, name, &arg_types, ctx)
+        });
         if let Some((rust_name, signature)) = planned_signature {
             let Some(method) = declared_method else {
                 continue;
@@ -96184,6 +96216,54 @@ class Source {
             ctx.source_context_fallback_signature_cache
                 .isolated_solve_count(),
             2
+        );
+    }
+
+    #[test]
+    fn zero_arg_source_context_receiver_fallback_reuses_receiver_fact_without_isolated_solve() {
+        let program = Box::leak(Box::new(Program::default()));
+        let parsed = parse_java_source("interface Counter { int advance(); }");
+        let mut support_program = parsed.program;
+        crate::resolve::assign_rust_names_to_context_program(&mut support_program);
+        let support = Box::leak(Box::new(support_program));
+        let mut facts = FactSet::default();
+        facts
+            .method_effect_facts
+            .push(crate::facts::MethodEffectFact {
+                method: crate::facts::MethodKey::named("Counter", "advance"),
+                receiver_mutability: crate::facts::ReceiverMutabilityFact::MutatesReceiver,
+                return_nullability: crate::facts::NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: crate::facts::FactProvenance::CorpusAnalysis,
+            });
+        let mut ctx = lower_test_ctx_with_facts(facts);
+        ctx.program = program;
+        ctx.support_local_type_program = support;
+        let mut env = ShapeEnv::default();
+        env.insert_local(
+            "counter",
+            JavaType::Named {
+                name: "Counter".to_string(),
+                args: Vec::new(),
+            },
+        );
+
+        let signature = source_context_receiver_method_fallback_signature(
+            Some(&Expr::Var("counter".to_string())),
+            "advance",
+            &[],
+            &env,
+            ctx,
+        )
+        .expect("zero-argument source method should have a fallback signature");
+
+        assert_eq!(signature.rust_name, "advance");
+        assert_eq!(signature.receiver(), ReceiverPlan::Mutable);
+        assert!(signature.arg_shapes.is_empty());
+        assert_eq!(
+            ctx.source_context_fallback_signature_cache
+                .isolated_solve_count(),
+            0
         );
     }
 
