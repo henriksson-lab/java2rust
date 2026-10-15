@@ -253,7 +253,8 @@ use crate::statement_render::{
     render_enhanced_for, render_enhanced_for_iterator, while_let_stmt, while_stmt,
 };
 use crate::stdlib::{
-    SourceBoundaryTraitPlans, external_api_facade_support_items_with_semantic_plans,
+    ExternalFacadeInvariantInputs, SourceBoundaryTraitPlans,
+    external_api_facade_support_items_with_semantic_plans,
     external_static_string_constant_support_items_with_context_programs_and_declared_owners,
     java_arrays_set_all_support_item, java_class_support_item_with_classloader_shim,
     java_erased_object_runtime_support_item_with_source_programs_facts_and_representations,
@@ -512,6 +513,7 @@ pub(crate) struct LoweringCallableContext {
     call_graph: crate::usage::CallGraph,
     fallibility: crate::exception_plan::ProgramFallibilityPlan,
     exceptions: ProgramExceptionPlan,
+    facade_invariant_inputs: ExternalFacadeInvariantInputs,
 }
 
 pub(crate) fn plan_lowering_callable_context(
@@ -535,11 +537,13 @@ pub(crate) fn plan_lowering_callable_context(
     );
     let exceptions =
         plan_program_exceptions_with_fallibility(&context_program, facts, &fallibility);
+    let facade_invariant_inputs = ExternalFacadeInvariantInputs::new(facts);
     LoweringCallableContext {
         program: context_program,
         call_graph,
         fallibility,
         exceptions,
+        facade_invariant_inputs,
     }
 }
 
@@ -741,6 +745,7 @@ pub(crate) fn lower_program_with_semantic_plans_support_context_and_callable_con
             signatures,
             exceptions: &callable_context.exceptions,
         }),
+        &callable_context.facade_invariant_inputs,
     );
     record_lowering_profile_phase(profile_lowering, &mut profile_phase_start, "facade_support");
     let uses_java_stream = programs_use_java_stream_support(

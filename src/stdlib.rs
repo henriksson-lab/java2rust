@@ -17760,6 +17760,7 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
     _context_sources_are_emitted: bool,
     representations: &RepresentationPlan,
 ) -> Vec<crate::rust_ir::RustItem> {
+    let invariant_inputs = ExternalFacadeInvariantInputs::new(facts);
     external_api_facade_support_items_with_semantic_plans(
         program,
         facts,
@@ -17768,6 +17769,7 @@ pub(crate) fn external_api_facade_support_items_with_local_type_program(
         _context_sources_are_emitted,
         representations,
         None,
+        &invariant_inputs,
     )
 }
 
@@ -17775,6 +17777,23 @@ pub(crate) struct SourceBoundaryTraitPlans<'a> {
     pub program: &'a Program,
     pub signatures: &'a crate::signature::SignaturePlan,
     pub exceptions: &'a crate::exception_plan::ProgramExceptionPlan,
+}
+
+/// Batch-invariant facade projections derived solely from the effective fact
+/// set. The batch lowering context owns one instance and lends it to every
+/// file emitter, keeping invalidation tied to rebuilding that context rather
+/// than to an incomplete output cache key.
+#[derive(Debug, Clone)]
+pub(crate) struct ExternalFacadeInvariantInputs {
+    facade_abi_methods: BTreeMap<(String, String, usize), String>,
+}
+
+impl ExternalFacadeInvariantInputs {
+    pub(crate) fn new(facts: &FactSet) -> Self {
+        Self {
+            facade_abi_methods: facade_abi_methods_by_support_key(facts),
+        }
+    }
 }
 
 pub(crate) fn external_api_facade_support_items_with_semantic_plans(
@@ -17785,7 +17804,10 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
     _context_sources_are_emitted: bool,
     representations: &RepresentationPlan,
     source_boundary_plans: Option<SourceBoundaryTraitPlans<'_>>,
+    invariant_inputs: &ExternalFacadeInvariantInputs,
 ) -> Vec<crate::rust_ir::RustItem> {
+    let profile_facade = std::env::var_os("NEW_JAVA2RUST_PROFILE_LOWERING").is_some();
+    let mut profile_phase_start = std::time::Instant::now();
     let external_index = facts.external_lookup_index();
     let local_types = local_type_keys_for_program(local_type_program);
     let emitted_local_types = local_type_keys_for_program(program);
@@ -17864,6 +17886,8 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
     }
     let display_return_hints = collect_program_display_return_hints(program);
     let imported_static_owner_calls = collect_imported_static_owner_calls(program);
+
+    record_external_facade_profile_phase(profile_facade, &mut profile_phase_start, "inputs");
 
     let mut support = ExternalApiFacadeSupport {
         declared_external_type_exclusions: declared_external_type_exclusions.clone(),
@@ -18028,6 +18052,13 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
     support.add_inherited_support_field_types(program, local_type_program, &emitted_local_types);
     support.add_external_inherited_field_types(program, facts);
     support.add_external_inherited_static_final_surfaces(program, facts);
+
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "source_surfaces",
+    );
+
     support.add_used_external_constructors(
         facts,
         representations,
@@ -18058,6 +18089,12 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         &emitted_local_types,
         &imported_static_owner_calls,
         &source_type_params,
+    );
+
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "external_fact_surfaces",
     );
     support.saturate_source_summary_method_surfaces(
         facts,
@@ -18094,13 +18131,29 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         &source_surface_types,
         local_type_program,
     );
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "imported_static_calls",
+    );
     support.add_known_jdk_static_support_from_used_calls(&used_calls, &emitted_local_types);
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "jdk_static_calls",
+    );
     support.add_known_domain_getter_surfaces_from_used_calls(
         facts,
         &external_index,
+        invariant_inputs,
         &used_calls,
         &source_type_params,
         &local_types,
+    );
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "domain_getter_surfaces",
     );
     support.add_known_object_inherited_surfaces_from_used_calls(
         facts,
@@ -18108,16 +18161,54 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         &source_type_params,
         &local_types,
     );
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "object_inherited_surfaces",
+    );
     support.add_builder_surface_from_used_calls(facts, &used_calls);
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "builder_surfaces",
+    );
     support.add_display_context_return_hint_surfaces(facts, &display_return_hints);
+
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "display_return_surfaces",
+    );
+
     support.add_external_field_surfaces(facts, &local_types);
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "external_fields",
+    );
     support.add_static_external_api_facts_for_surface_types(facts, representations);
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "static_surface_methods",
+    );
     support.add_external_dyn_trait_surfaces(facts, &declared_external_type_exclusions);
+    record_external_facade_profile_phase(profile_facade, &mut profile_phase_start, "dyn_traits");
     support.promote_external_generic_bound_traits(
         &[program, local_type_program, source_summary_type_program],
         &declared_external_type_exclusions,
     );
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "generic_bound_traits",
+    );
     support.add_external_conversion_surfaces(facts, &local_types);
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "conversion_surfaces",
+    );
     support.suppress_rust_crate_mapped_external_types(facts);
     support.suppress_emitted_source_types(program);
     support.suppress_emitted_java_enum_types(program);
@@ -18133,7 +18224,28 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         local_type_program,
         &used_calls,
     );
-    support.into_items(facts)
+    record_external_facade_profile_phase(
+        profile_facade,
+        &mut profile_phase_start,
+        "final_surfaces",
+    );
+    let items = support.into_items(facts);
+    record_external_facade_profile_phase(profile_facade, &mut profile_phase_start, "render_items");
+    items
+}
+
+fn record_external_facade_profile_phase(
+    enabled: bool,
+    phase_start: &mut std::time::Instant,
+    phase: &str,
+) {
+    if enabled {
+        eprintln!(
+            "new_java2rust_facade_profile\t{phase}\t{}",
+            phase_start.elapsed().as_millis()
+        );
+    }
+    *phase_start = std::time::Instant::now();
 }
 
 fn local_type_keys_for_program(program: &Program) -> BTreeSet<String> {
@@ -18969,6 +19081,27 @@ struct ExternalApiFacadeSupport {
 /// the mechanism that makes the loop converge. Real programs settle in a
 /// handful of rounds.
 const SOURCE_SUMMARY_SURFACE_FIXPOINT_BUDGET: usize = 1_000;
+
+fn facade_abi_methods_by_support_key(facts: &FactSet) -> BTreeMap<(String, String, usize), String> {
+    let mut methods = BTreeMap::new();
+    for abi in &facts.facade_abi_facts {
+        let key = (
+            canonical_external_receiver_type_key(abi.key.owner_type()),
+            abi.key.member_name().to_string(),
+            abi.args.len(),
+        );
+        // The previous linear lookup selected the first matching fact.
+        // Preserve that precedence when duplicate ABI facts are present.
+        methods.entry(key).or_insert_with(|| {
+            abi.rust_path
+                .rsplit("::")
+                .next()
+                .unwrap_or(&abi.rust_path)
+                .to_string()
+        });
+    }
+    methods
+}
 
 fn is_awt_platform_facade_owner(owner: &str) -> bool {
     matches!(
@@ -22172,16 +22305,26 @@ impl ExternalApiFacadeSupport {
         &mut self,
         facts: &FactSet,
         external_index: &ExternalFactLookupIndex<'_>,
+        invariant_inputs: &ExternalFacadeInvariantInputs,
         used_calls: &BTreeMap<String, BTreeSet<usize>>,
         source_type_params: &BTreeSet<String>,
         source_declared_types: &BTreeSet<String>,
     ) {
         let opaque_types = self.opaque_types.iter().cloned().collect::<Vec<_>>();
+        // Call names and arities are file-invariant across every candidate
+        // owner. Project them once instead of allocating the same snake-case
+        // name for the full opaque-type cross product.
+        let used_call_surfaces = used_calls
+            .iter()
+            .map(|(method, arities)| (crate::parser::to_snake_case(method), arities))
+            .collect::<Vec<_>>();
+        let facade_abi_methods = &invariant_inputs.facade_abi_methods;
         for owner in opaque_types {
-            if source_type_params.contains(&canonical_external_receiver_type_key(&owner)) {
+            let owner_key = canonical_external_receiver_type_key(&owner);
+            if source_type_params.contains(&owner_key) {
                 continue;
             }
-            if source_declared_types.contains(&canonical_external_receiver_type_key(&owner)) {
+            if source_declared_types.contains(&owner_key) {
                 continue;
             }
             // Functional-interface support already supplies the single
@@ -22201,13 +22344,12 @@ impl ExternalApiFacadeSupport {
             ) {
                 continue;
             }
-            for (rust_method, arities) in used_calls {
-                let rust_lookup_method = crate::parser::to_snake_case(rust_method);
-                for arg_count in arities {
+            for (rust_lookup_method, arities) in &used_call_surfaces {
+                for arg_count in *arities {
                     let java_method = Self::support_lookup_java_method_name(
                         external_index,
                         &owner,
-                        &rust_lookup_method,
+                        rust_lookup_method,
                         *arg_count,
                     );
                     if owner_is_builtin_external_facade
@@ -22229,21 +22371,16 @@ impl ExternalApiFacadeSupport {
                             external_index,
                         );
                     let arity_rust_method = format!("{planned_rust_method}_{arg_count}");
-                    let support_rust_method = if let Some(abi_rust_method) =
-                        Self::facade_abi_rust_method_for_support(
-                            facts,
-                            &owner,
-                            &rust_lookup_method,
-                            *arg_count,
-                        ) {
-                        abi_rust_method
-                    } else if let Some(abi_rust_method) = Self::facade_abi_rust_method_for_support(
-                        facts,
-                        &owner,
-                        &arity_rust_method,
+                    let support_rust_method = if let Some(abi_rust_method) = facade_abi_methods
+                        .get(&(owner_key.clone(), rust_lookup_method.clone(), *arg_count))
+                    {
+                        abi_rust_method.clone()
+                    } else if let Some(abi_rust_method) = facade_abi_methods.get(&(
+                        owner_key.clone(),
+                        arity_rust_method.clone(),
                         *arg_count,
-                    ) {
-                        abi_rust_method
+                    )) {
+                        abi_rust_method.clone()
                     } else if matches!(java_method.as_str(), "read" | "write") && *arg_count > 1 {
                         arity_rust_method
                     } else {
@@ -22560,30 +22697,6 @@ impl ExternalApiFacadeSupport {
                 )
             });
         prefer_typed_builtin_external_api_effect(effect, owner, java_method, arg_count)
-    }
-
-    fn facade_abi_rust_method_for_support(
-        facts: &FactSet,
-        owner: &str,
-        rust_method: &str,
-        arg_count: usize,
-    ) -> Option<String> {
-        facts
-            .facade_abi_facts
-            .iter()
-            .find(|abi| {
-                canonical_external_receiver_type_key(abi.key.owner_type())
-                    == canonical_external_receiver_type_key(owner)
-                    && abi.key.member_name() == rust_method
-                    && abi.args.len() == arg_count
-            })
-            .map(|abi| {
-                abi.rust_path
-                    .rsplit("::")
-                    .next()
-                    .unwrap_or(&abi.rust_path)
-                    .to_string()
-            })
     }
 
     fn add_known_object_inherited_surfaces_from_used_calls(

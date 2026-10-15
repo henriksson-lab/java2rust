@@ -32119,6 +32119,34 @@ fn cast_shape_is_owned_by_type_inference_not_lowering() {
 #[test]
 fn facade_fallback_generation_reuses_external_fact_lookup_index() {
     let stdlib_source = include_str!("../src/stdlib.rs");
+    let domain_surfaces = stdlib_source
+        .split("fn add_known_domain_getter_surfaces_from_used_calls")
+        .nth(1)
+        .and_then(|tail| tail.split("fn support_lookup_java_method_name").next())
+        .expect("domain facade synthesis should remain discoverable");
+    assert!(
+        domain_surfaces.contains("invariant_inputs: &ExternalFacadeInvariantInputs")
+            && domain_surfaces.contains("&invariant_inputs.facade_abi_methods")
+            && domain_surfaces.contains("let used_call_surfaces = used_calls")
+            && !domain_surfaces.contains("facade_abi_facts.iter().find"),
+        "domain facade synthesis must project invariant call names and ABI keys before its owner/call cross product"
+    );
+    let abi_index = stdlib_source
+        .split("fn facade_abi_methods_by_support_key")
+        .nth(1)
+        .and_then(|tail| tail.split("fn is_awt_platform_facade_owner").next())
+        .expect("facade ABI support index should remain discoverable");
+    assert!(
+        abi_index.contains("methods.entry(key).or_insert_with"),
+        "the facade ABI index must preserve the old first-fact precedence"
+    );
+    let lower_source = include_str!("../src/lower.rs");
+    assert!(
+        lower_source.contains("facade_invariant_inputs: ExternalFacadeInvariantInputs")
+            && lower_source.contains("&callable_context.facade_invariant_inputs"),
+        "batch lowering must own and lend one immutable facade projection to every file emitter"
+    );
+
     let helper = stdlib_source
         .split("fn external_support_method_has_effect")
         .nth(1)
@@ -32137,7 +32165,10 @@ fn facade_fallback_generation_reuses_external_fact_lookup_index() {
     let effect_helper = stdlib_source
         .split("fn external_api_effect_for_support_owner")
         .nth(1)
-        .and_then(|tail| tail.split("fn facade_abi_rust_method_for_support").next())
+        .and_then(|tail| {
+            tail.split("fn add_known_object_inherited_surfaces_from_used_calls")
+                .next()
+        })
         .expect("external support owner helper should remain discoverable");
     assert!(
         effect_helper.contains("external_api_effect_for_mapped_receiver_with_arity")
