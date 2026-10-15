@@ -5885,6 +5885,32 @@ pub(crate) fn external_method_rust_name(
     arg_count: usize,
     facts: &FactSet,
 ) -> String {
+    external_method_rust_name_with_overload_check(receiver_type, method_name, arg_count, || {
+        external_method_needs_arity_name(receiver_type, method_name, facts)
+    })
+}
+
+pub(crate) fn external_method_rust_name_with_external_index(
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: usize,
+    external_index: &ExternalFactLookupIndex<'_>,
+) -> String {
+    external_method_rust_name_with_overload_check(receiver_type, method_name, arg_count, || {
+        external_method_needs_arity_name_with_external_index(
+            receiver_type,
+            method_name,
+            external_index,
+        )
+    })
+}
+
+fn external_method_rust_name_with_overload_check(
+    receiver_type: &str,
+    method_name: &str,
+    arg_count: usize,
+    overload_check: impl FnOnce() -> bool,
+) -> String {
     let base = external_method_base_rust_name(method_name);
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     if boxed_primitive_static_to_string_uses_unsuffixed_name(&receiver_key, &base, arg_count) {
@@ -5901,11 +5927,29 @@ pub(crate) fn external_method_rust_name(
     {
         return base;
     }
-    if external_method_needs_arity_name(receiver_type, method_name, facts) {
+    if overload_check() {
         format!("{base}_{arg_count}")
     } else {
         base
     }
+}
+
+fn external_method_needs_arity_name_with_external_index(
+    receiver_type: &str,
+    method_name: &str,
+    external_index: &ExternalFactLookupIndex<'_>,
+) -> bool {
+    let facts = external_index.facts();
+    let mut arities =
+        external_method_arities_for_with_external_index(external_index, receiver_type, method_name);
+    if !facts.disable_builtin_external_packs {
+        arities.extend(crate::external_packs::external_api_arities_for_receiver(
+            receiver_type,
+            method_name,
+        ));
+        arities.extend(java_platform_method_arities_for(receiver_type, method_name));
+    }
+    arities.len() > 1
 }
 
 fn external_method_base_rust_name(method_name: &str) -> String {
@@ -6012,6 +6056,26 @@ fn external_method_arities_for(
             fact.arg_count
         })
         .collect()
+}
+
+fn external_method_arities_for_with_external_index(
+    external_index: &ExternalFactLookupIndex<'_>,
+    receiver_type: &str,
+    method_name: &str,
+) -> BTreeSet<usize> {
+    let mut arities = BTreeSet::new();
+    external_index.visit_external_api_effect_candidates(method_name, |fact| {
+        let Some(fact_receiver) = fact.receiver_type.as_deref() else {
+            return;
+        };
+        if external_method_receiver_matches(fact_receiver, receiver_type)
+            && external_method_name_matches(&fact.method_name, method_name)
+            && let Some(arg_count) = fact.arg_count
+        {
+            arities.insert(arg_count);
+        }
+    });
+    arities
 }
 
 fn external_method_receiver_matches(fact_receiver: &str, query_receiver: &str) -> bool {
@@ -9320,6 +9384,77 @@ mod tests {
             CallExprPlan::Target(CallTargetPlan::FallbackSelf { rust_name })
                 if rust_name == "read_1"
         ));
+    }
+
+    #[test]
+    fn indexed_external_method_naming_matches_full_fact_scan_across_aliases() {
+        let mut facts = FactSet {
+            disable_builtin_external_packs: true,
+            ..FactSet::default()
+        };
+        for arg_count in [0, 2] {
+            facts.external_api_effect_facts.push(ExternalApiEffectFact {
+                method_name: "readValue".to_string(),
+                receiver_type: Some("dep.pkg.Reader".to_string()),
+                arg_count: Some(arg_count),
+                parameter_patterns: None,
+                role: ExternalApiRole::Getter,
+                receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+                return_type: Some(JavaType::String),
+                return_nullability: NullabilityState::DefinitelyNonNull,
+                thrown: Vec::new(),
+                provenance: FactProvenance::UserOverride,
+            });
+        }
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: "singleValue".to_string(),
+            receiver_type: Some("dep.pkg.Reader".to_string()),
+            arg_count: Some(1),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: NullabilityState::DefinitelyNonNull,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+        let external_index = facts.external_lookup_index();
+
+        for (owner, method, arity) in [
+            ("dep.pkg.Reader", "readValue", 0),
+            ("Reader", "read_value", 2),
+            ("DepPkgReader", "readValue", 0),
+            ("Reader", "single_value", 1),
+        ] {
+            assert_eq!(
+                external_method_rust_name_with_external_index(
+                    owner,
+                    method,
+                    arity,
+                    &external_index,
+                ),
+                external_method_rust_name(owner, method, arity, &facts),
+                "indexed overload discovery must preserve naming for {owner}::{method}/{arity}",
+            );
+        }
+        assert_eq!(
+            external_method_rust_name_with_external_index(
+                "Reader",
+                "read_value",
+                2,
+                &external_index,
+            ),
+            "read_value_2"
+        );
+        assert_eq!(
+            external_method_rust_name_with_external_index(
+                "Reader",
+                "single_value",
+                1,
+                &external_index,
+            ),
+            "single_value"
+        );
     }
 
     #[test]

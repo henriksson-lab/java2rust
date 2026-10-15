@@ -22221,12 +22221,13 @@ impl ExternalApiFacadeSupport {
                     {
                         continue;
                     }
-                    let planned_rust_method = crate::call_plan::external_method_rust_name(
-                        &owner,
-                        &java_method,
-                        *arg_count,
-                        facts,
-                    );
+                    let planned_rust_method =
+                        crate::call_plan::external_method_rust_name_with_external_index(
+                            &owner,
+                            &java_method,
+                            *arg_count,
+                            external_index,
+                        );
                     let arity_rust_method = format!("{planned_rust_method}_{arg_count}");
                     let support_rust_method = if let Some(abi_rust_method) =
                         Self::facade_abi_rust_method_for_support(

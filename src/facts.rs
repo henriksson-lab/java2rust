@@ -204,6 +204,19 @@ impl<'a> ExternalFactLookupIndex<'a> {
         self.facts
     }
 
+    /// Visits only external API facts whose Java/Rust method aliases can
+    /// match `method_name`. Callers still own receiver and arity policy; this
+    /// is the shared candidate index, not a second resolution implementation.
+    pub(crate) fn visit_external_api_effect_candidates(
+        &self,
+        method_name: &str,
+        mut visit: impl FnMut(&'a ExternalApiEffectFact),
+    ) {
+        for index in self.external_api_candidate_indices(method_name).iter() {
+            visit(&self.facts.external_api_effect_facts[*index]);
+        }
+    }
+
     pub fn external_api_effect_for_receiver(
         &self,
         receiver_type: Option<&str>,

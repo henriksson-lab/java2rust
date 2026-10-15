@@ -7291,114 +7291,18 @@ pub(crate) fn trait_method_receiver_plan(
     if interface_method.modifiers.contains(&Modifier::Static) {
         return None;
     }
-    // Focused-package assembly can retain both an emitted declaration and a
-    // package-qualified analysis copy of the same Java interface.  Trait items
-    // and concrete impls are then allowed to enter through different copies.
-    // Receiver mutability is an ABI property of the *emitted trait slot*, so
-    // planning it from only the particular TypeDecl pointer makes the two
-    // sides disagree (`&self` versus `&mut self`).  Canonicalize on the emitted
-    // interface and solved Rust callable identities and join every equivalent
-    // declaration/implementor.  This is the same identity boundary used for
-    // item emission and keeps read-only concrete methods read-only: only the
-    // trait adapter is widened when another implementation mutates its receiver.
-    let method_identity = crate::java_signature::source_method_rust_name(interface_method);
-    let mut types = Vec::new();
-    for ty in &program.types {
-        collect_type_decls_for_trait_receiver(ty, &mut types);
-    }
-    let mut slots = types
-        .iter()
-        .copied()
-        .filter(|candidate| {
-            candidate.kind == TypeKind::Interface
-                && crate::facts::external_type_name_matches(&candidate.name, &interface.name)
-        })
-        .flat_map(|candidate_interface| {
-            let method_identity = method_identity.clone();
-            candidate_interface
-                .members
-                .iter()
-                .filter_map(move |member| match member {
-                    Member::Method(candidate_method)
-                        if !candidate_method.modifiers.contains(&Modifier::Static)
-                            && crate::java_signature::source_method_rust_name(candidate_method)
-                                == method_identity =>
-                    {
-                        Some((candidate_interface, candidate_method))
-                    }
-                    _ => None,
-                })
-        })
-        .collect::<Vec<_>>();
-    if slots.is_empty() {
-        slots.push((interface, interface_method));
-    }
-
-    let mut receiver = ReceiverPlan::Shared;
-    // The override graph is the authoritative relation between a Java trait
-    // slot and all of its implementations.  In focused-package translation a
-    // bodyless summary copy can be encountered before the emitted declaration;
-    // choosing the first candidate then hides the latter's mutable receiver.
-    // Join every solved declaration in every matching override group instead.
-    for group in crate::exception_plan::override_groups_for_program(program) {
-        let matches_slot = group.iter().any(|callable| {
-            callable
-                .method_identity_parts()
-                .is_some_and(|(owner, rust_name)| {
-                    crate::facts::external_type_name_matches(owner, &interface.name)
-                        && rust_name == method_identity
-                })
-        });
-        if !matches_slot {
-            continue;
-        }
-        for callable in group {
-            let Some((owner, rust_name)) = callable.method_identity_parts() else {
-                continue;
-            };
-            for candidate_owner in types.iter().copied().filter(|ty| ty.name == owner) {
-                for candidate_method in candidate_owner.members.iter().filter_map(|member| {
-                    let Member::Method(method) = member else {
-                        return None;
-                    };
-                    (crate::java_signature::source_method_rust_name(method) == rust_name)
-                        .then_some(method)
-                }) {
-                    if signatures
-                        .required_method_signature(candidate_owner, candidate_method)
-                        .receiver()
-                        == ReceiverPlan::Mutable
-                    {
-                        receiver = ReceiverPlan::Mutable;
-                    }
-                }
-            }
-        }
-    }
-    for (candidate_interface, candidate_method) in slots {
-        if signatures
-            .required_method_signature(candidate_interface, candidate_method)
-            .receiver()
-            == ReceiverPlan::Mutable
-        {
-            receiver = ReceiverPlan::Mutable;
-        }
-        for (implementation_owner, implementation) in
-            source_interface_method_implementations(candidate_interface, candidate_method, program)
-        {
-            if signatures
-                .method_signature(implementation_owner, implementation)
-                .unwrap_or_else(|| {
-                    signatures.required_method_signature(implementation_owner, implementation)
-                })
-                .receiver()
-                == ReceiverPlan::Mutable
-            {
-                receiver = ReceiverPlan::Mutable;
-            }
-        }
-    }
-    Some(receiver)
+    // Receiver capability is solved once for the whole batch. The signature
+    // fixpoint joins override groups, generic interface implementations, and
+    // equivalent qualified/nested owner aliases while deliberately widening
+    // only the trait slot (not immutable concrete implementations). Repeating
+    // those whole-program traversals during every trait emission is both
+    // expensive and risks diverging from the call-site ABI.
+    let _ = program;
+    Some(
+        signatures
+            .required_method_signature(interface, interface_method)
+            .receiver(),
+    )
 }
 
 fn collect_type_decls_for_trait_receiver<'a>(ty: &'a TypeDecl, out: &mut Vec<&'a TypeDecl>) {
