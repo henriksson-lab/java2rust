@@ -1,0 +1,5 @@
+Coordinate.java
+CoordinateSequence.java
+Coordinates.java
+Envelope.java
+impl/PackedCoordinateSequence.java

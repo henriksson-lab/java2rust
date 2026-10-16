@@ -148,11 +148,13 @@ impl BatchTranslation {
 }
 
 pub type BatchTranslationEventSink = dyn Fn(BatchTranslationEvent) + Send + Sync;
+pub type BatchTranslationCompletionSink = dyn Fn(usize, &BatchTranslation) + Send + Sync;
 
 #[derive(Clone)]
 pub struct BatchTranslationOptions {
     emission_jobs: usize,
     event_sink: Option<Arc<BatchTranslationEventSink>>,
+    completion_sink: Option<Arc<BatchTranslationCompletionSink>>,
     emission_paths: Option<BTreeSet<String>>,
 }
 
@@ -164,6 +166,10 @@ impl fmt::Debug for BatchTranslationOptions {
                 "event_sink",
                 &self.event_sink.as_ref().map(|_| "<event-sink>"),
             )
+            .field(
+                "completion_sink",
+                &self.completion_sink.as_ref().map(|_| "<completion-sink>"),
+            )
             .field("emission_paths", &self.emission_paths)
             .finish()
     }
@@ -174,6 +180,7 @@ impl Default for BatchTranslationOptions {
         Self {
             emission_jobs: 1,
             event_sink: None,
+            completion_sink: None,
             emission_paths: None,
         }
     }
@@ -184,8 +191,21 @@ impl BatchTranslationOptions {
         Self {
             emission_jobs,
             event_sink,
+            completion_sink: None,
             emission_paths: None,
         }
+    }
+
+    /// Observe each completed translation before its `emit_end` event. This
+    /// lets long-running batch clients durably checkpoint independent results
+    /// instead of retaining the entire batch only in memory until the slowest
+    /// worker finishes.
+    pub fn with_completion_sink(
+        mut self,
+        completion_sink: Arc<BatchTranslationCompletionSink>,
+    ) -> Self {
+        self.completion_sink = Some(completion_sink);
+        self
     }
 
     /// Restrict lowering/emission while retaining every primary in global
@@ -201,6 +221,10 @@ impl BatchTranslationOptions {
 
     pub fn event_sink(&self) -> Option<&BatchTranslationEventSink> {
         self.event_sink.as_deref()
+    }
+
+    pub fn completion_sink(&self) -> Option<&BatchTranslationCompletionSink> {
+        self.completion_sink.as_deref()
     }
 
     pub fn emission_paths(&self) -> Option<&BTreeSet<String>> {
@@ -765,6 +789,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         &context_diagnostics,
         options.emission_jobs().max(1),
         options.event_sink(),
+        options.completion_sink(),
     );
     timings.emission_ms = emission_start.elapsed().as_millis();
     emit_batch_phase_progress(
@@ -1267,6 +1292,7 @@ fn emit_batch_translations(
     context_diagnostics: &DiagnosticBag,
     emission_jobs: usize,
     event_sink: Option<&(dyn Fn(BatchTranslationEvent) + Send + Sync)>,
+    completion_sink: Option<&BatchTranslationCompletionSink>,
 ) -> (Vec<BatchTranslation>, Vec<BatchTranslationEvent>) {
     if emission_jobs <= 1 || parsed_primary.len() <= 1 {
         let mut events = Vec::with_capacity(parsed_primary.len());
@@ -1294,6 +1320,11 @@ fn emit_batch_translations(
                     events.push(event);
                 });
             translation.diagnostics.extend(context_diagnostics.clone());
+            let translation =
+                BatchTranslation::new(path.clone(), translation.rust, translation.diagnostics);
+            if let Some(completion_sink) = completion_sink {
+                completion_sink(index + 1, &translation);
+            }
             let elapsed_ms = file_start.elapsed().as_millis();
             let end_event =
                 BatchTranslationEvent::new("emit_end", index + 1, path.clone(), elapsed_ms, "ok");
@@ -1301,11 +1332,7 @@ fn emit_batch_translations(
                 event_sink(end_event.clone());
             }
             events.push(end_event);
-            translations.push(BatchTranslation::new(
-                path,
-                translation.rust,
-                translation.diagnostics,
-            ));
+            translations.push(translation);
         }
         return (translations, events);
     }
@@ -1364,6 +1391,14 @@ fn emit_batch_translations(
                             },
                         );
                         translation.diagnostics.extend(context_diagnostics.clone());
+                        let translation = BatchTranslation::new(
+                            path.clone(),
+                            translation.rust,
+                            translation.diagnostics,
+                        );
+                        if let Some(completion_sink) = completion_sink {
+                            completion_sink(original_index + 1, &translation);
+                        }
                         let elapsed_ms = file_start.elapsed().as_millis();
                         let end_event = BatchTranslationEvent::new(
                             "emit_end",
@@ -1376,11 +1411,7 @@ fn emit_batch_translations(
                             event_sink(end_event.clone());
                         }
                         item_events.push(end_event);
-                        worker_results.push((
-                            original_index,
-                            BatchTranslation::new(path, translation.rust, translation.diagnostics),
-                            item_events,
-                        ));
+                        worker_results.push((original_index, translation, item_events));
                     }
                     worker_results
                 })

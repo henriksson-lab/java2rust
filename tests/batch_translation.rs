@@ -6,6 +6,60 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+fn completion_sink_observes_each_translation_before_emit_end() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new("example/A.java", "class A { int value() { return 1; } }"),
+        new_java2rust::BatchSource::new("example/B.java", "class B { int value() { return 2; } }"),
+    ];
+    let observations = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let event_observations = std::sync::Arc::clone(&observations);
+    let event_sink = std::sync::Arc::new(move |event: new_java2rust::BatchTranslationEvent| {
+        if event.phase() == "emit_end" {
+            event_observations
+                .lock()
+                .unwrap()
+                .push(format!("end:{}", event.index()));
+        }
+    });
+    let completion_observations = std::sync::Arc::clone(&observations);
+    let completion_sink = std::sync::Arc::new(
+        move |index: usize, translation: &new_java2rust::BatchTranslation| {
+            assert!(translation.rust().contains("pub struct"));
+            completion_observations
+                .lock()
+                .unwrap()
+                .push(format!("complete:{index}"));
+        },
+    );
+    let options = new_java2rust::BatchTranslationOptions::new(2, Some(event_sink))
+        .with_completion_sink(completion_sink);
+
+    let report =
+        new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+            &options,
+        );
+
+    assert_eq!(report.translations().len(), 2);
+    let observations = observations.lock().unwrap();
+    for index in 1..=2 {
+        let complete = observations
+            .iter()
+            .position(|entry| entry == &format!("complete:{index}"))
+            .unwrap();
+        let end = observations
+            .iter()
+            .position(|entry| entry == &format!("end:{index}"))
+            .unwrap();
+        assert!(complete < end, "{observations:?}");
+    }
+}
+
+#[test]
 fn emission_filter_retains_complete_primary_analysis_set() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new("example/A.java", "package example; class A { B value; }"),
@@ -6256,5 +6310,62 @@ public class LineUse {
             || show_child.contains("ChildLine::to_string_with_outer(line).unwrap_or_else(|ex|")),
         "an inherited fallible toString must retain its Result ABI in Java concatenation: {}",
         line_use.rust()
+    );
+}
+
+#[test]
+fn context_nested_type_leaf_does_not_shadow_implicit_java_lang_owner() {
+    let primary_sources = vec![
+        new_java2rust::BatchSource::new(
+            "example/NestedOwner.java",
+            r#"
+package example;
+public class NestedOwner {
+    public static class Double {
+        public static double custom(double value) { return value; }
+    }
+}
+"#,
+        ),
+        new_java2rust::BatchSource::new(
+            "example/UsesJavaLangDouble.java",
+            r#"
+package example;
+public class UsesJavaLangDouble {
+    static double missing() { return Double.NaN; }
+    static boolean finite(double value) { return Double.isFinite(value); }
+    static long bits(double value) { return Double.doubleToLongBits(value); }
+    static long qualifiedBits(double value) { return java.lang.Double.doubleToLongBits(value); }
+    static int hash(double value) { return Double.hashCode(value); }
+}
+"#,
+        ),
+    ];
+
+    let translations =
+        new_java2rust::translate_batch_sources_with_context_sources_and_summary_sources(
+            &primary_sources,
+            &[],
+            &[],
+            true,
+            &new_java2rust::facts::FactSet::default(),
+        );
+    let use_translation = translations
+        .iter()
+        .find(|translation| translation.path() == "example/UsesJavaLangDouble.java")
+        .expect("translated java.lang.Double user");
+    let rust = use_translation.rust();
+
+    assert!(
+        rust.contains("f64::NAN")
+            && rust.contains("Double::is_finite(value)")
+            && rust.contains("Double::double_to_long_bits(value)")
+            && rust.contains("Double::hash_code(value)")
+            && !rust.contains("NestedOwner_Double::NaN")
+            && !rust.contains("NestedOwner_Double::is_finite")
+            && !rust.contains("NestedOwner_Double::double_to_long_bits")
+            && !rust.contains("NestedOwner_Double::hash_code")
+            && !rust.contains("java::lang"),
+        "an unrelated nested type must not shadow an implicitly imported java.lang type:\n{rust}"
     );
 }

@@ -13229,7 +13229,12 @@ fn constrained_param_plan(
 ) -> ParamPlan {
     let mut constraints = constraints.to_vec();
     normalize_param_borrowed_slice_constraints(param, &mut constraints, facts);
-    normalize_source_hierarchy_param_dispatch_constraints(java_ty, facts, &mut constraints);
+    normalize_source_hierarchy_param_dispatch_constraints(
+        java_ty,
+        representations,
+        facts,
+        &mut constraints,
+    );
     // Call-site subtype observations used to force a closed carrier for every
     // parsed source target.  Interfaces have an authoritative DynTrait
     // representation instead; retaining both constraints made signatures
@@ -13304,25 +13309,34 @@ fn constrained_param_plan(
 
 fn normalize_source_hierarchy_param_dispatch_constraints(
     java_ty: &JavaType,
+    representations: &RepresentationPlan,
     facts: &FactSet,
     constraints: &mut Vec<SignatureConstraint>,
 ) {
+    let declared_dispatch = crate::shape_projection::dispatch_for_java_type_or_optional_element(
+        representations,
+        java_ty,
+    );
     if !signature_declared_type_has_parsed_source_capability(java_ty, &EffectiveFacts::new(facts))
-        || !constraints.iter().any(|constraint| {
-            matches!(
-                constraint,
-                SignatureConstraint::RequiredDispatch(DispatchShape::ClosedEnum { .. })
-            )
-        })
+        || !matches!(declared_dispatch, DispatchShape::ClosedEnum { .. })
     {
         return;
     }
+    // Interface contracts such as Comparable<Root> can contribute a
+    // conservative Concrete requirement. The emitted source ABI is still the
+    // representation plan's RootValue carrier; allowing the lattice's higher
+    // Concrete rank to win records a shape that disagrees with the rendered
+    // Rust type and later wraps RootValue inside its own Root variant.
     constraints.retain(|constraint| {
         !matches!(
             constraint,
             SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)
         )
     });
+    push_unique_signature_constraints(
+        constraints,
+        &[SignatureConstraint::RequiredDispatch(declared_dispatch)],
+    );
 }
 
 pub fn solve_signature_shape_with_facts(
@@ -13357,7 +13371,15 @@ pub fn solve_signature_shape_with_facts(
     let source_dispatch = if explicit_platform_facade {
         DispatchShape::Concrete
     } else {
-        representations.dispatch_for(request.java_ty())
+        // Nullability is represented by a synthetic `Optional<T>` Java type,
+        // but dispatch belongs to `T`.  Reuse the same projection used to
+        // build the base slot shape; looking up the wrapper itself yields
+        // `Concrete` and can overwrite a hierarchy carrier constraint even
+        // though the rendered Rust ABI is `Option<RootValue>`.
+        crate::shape_projection::dispatch_for_java_type_or_optional_element(
+            representations,
+            request.java_ty(),
+        )
     };
     let dispatch_policy = signature_slot_dispatch_requirement_policy_in_scope(
         request.java_ty(),
@@ -30771,6 +30793,7 @@ fn constrained_return_shape(
     }
     if !java_type_is_erased_object_boundary(&return_type)
         && !java_type_is_rust_crate_mapped_external(&return_type, facts)
+        && !representations.java_type_contains_source_hierarchy_carrier(&return_type)
         && return_constraints_select_concrete_declared_value(ty, method, constraints, facts)
     {
         let constraints = constraints

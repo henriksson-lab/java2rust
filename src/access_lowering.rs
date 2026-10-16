@@ -96,6 +96,21 @@ pub(crate) fn lower_field_access_with_facts(
     {
         return projected;
     }
+    if let Expr::Var(owner) = receiver {
+        let canonical_owner = crate::stdlib::canonical_external_receiver_type_key(owner);
+        if crate::call_plan::implicit_java_lang_static_owner_is_unshadowed(
+            owner,
+            &canonical_owner,
+            type_env,
+        ) && let Some(value) =
+            crate::stdlib::known_jdk_static_constant_value(&canonical_owner, field)
+        {
+            // Java implicitly imports java.lang. Render its primitive constants
+            // directly so a batch peer's unrelated nested type with the same
+            // leaf cannot retarget the access during Rust owner assembly.
+            return RustExpr::Raw(value.to_string());
+        }
+    }
     if let Some(plan) =
         crate::member_access_plan::plan_member_access_with_facts(receiver, field, type_env, facts)
     {

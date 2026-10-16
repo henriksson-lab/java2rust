@@ -3955,6 +3955,74 @@ pub struct UseShared;
 }
 
 #[test]
+fn nested_leaf_alias_does_not_replace_existing_shared_facade() {
+    let dir = unique_temp_dir("shared_support_nested_leaf_shared_collision");
+    let generated_dir = dir.join("generated");
+    fs::create_dir_all(&generated_dir).unwrap();
+    fs::write(
+        generated_dir.join("00001_Owner.rs"),
+        r#"
+pub struct Double;
+
+impl Double {
+    pub fn double_to_long_bits(value: f64) -> i64 { value.to_bits() as i64 }
+}
+
+pub struct Owner_Double;
+pub type Double = Owner_Double;
+pub struct Owner;
+"#,
+    )
+    .unwrap();
+
+    let shared_support = dir.join("shared.rs");
+    let shared_types = dir.join("shared-types.tsv");
+    let conflicts = dir.join("conflicts.tsv");
+    fs::write(&shared_support, "").unwrap();
+    fs::write(&shared_types, "").unwrap();
+
+    let script =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/merge-shared-support-facades.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .arg("--generated-dir")
+        .arg(&generated_dir)
+        .arg("--shared-support")
+        .arg(&shared_support)
+        .arg("--shared-types")
+        .arg(&shared_types)
+        .arg("--conflicts")
+        .arg(&conflicts)
+        .output()
+        .expect("run shared support merger");
+    assert!(
+        output.status.success(),
+        "shared support merger failed\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let shared = fs::read_to_string(&shared_support).unwrap();
+    assert!(shared.contains("pub struct Double"), "{shared}");
+    assert!(shared.contains("double_to_long_bits"), "{shared}");
+    assert!(!shared.contains("type Double = Owner_Double"), "{shared}");
+    assert!(
+        fs::read_to_string(&shared_types)
+            .unwrap()
+            .lines()
+            .any(|name| name == "Double")
+    );
+
+    let module = fs::read_to_string(generated_dir.join("00001_Owner.rs")).unwrap();
+    assert!(module.contains("pub struct Owner_Double"), "{module}");
+    assert!(
+        !module.contains("pub type Double = Owner_Double"),
+        "{module}"
+    );
+    assert!(!module.contains("pub fn double_to_long_bits"), "{module}");
+}
+
+#[test]
 fn shared_support_merger_replaces_fallback_impl_with_richer_representation() {
     let dir = unique_temp_dir("shared_support_richer_representation");
     let generated_dir = dir.join("generated");

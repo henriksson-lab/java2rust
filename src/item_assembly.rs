@@ -174,7 +174,7 @@ pub(crate) fn impl_item_for_type_with_support_context_and_representations(
     RustItem::Impl(RustImpl {
         target: rust_impl_target_for_source_type(ty, support_program, representations),
         trait_name: None,
-        associated_consts: associated_consts_for_type(ty),
+        associated_consts: associated_consts_for_type(ty, &std::collections::BTreeMap::new()),
         functions,
     })
 }
@@ -192,8 +192,9 @@ pub(crate) fn impl_items_for_type_with_static_partition(
     static_functions: Vec<RustFunction>,
     support_program: &Program,
     representations: Option<&RepresentationPlan>,
+    associated_const_value_overrides: &std::collections::BTreeMap<String, RustExpr>,
 ) -> Vec<RustItem> {
-    let associated_consts = associated_consts_for_type(ty);
+    let associated_consts = associated_consts_for_type(ty, associated_const_value_overrides);
     if ty.type_params.is_empty() {
         let mut functions = instance_functions;
         functions.extend(static_functions);
@@ -7104,7 +7105,10 @@ fn is_static_final_field(field: &FieldDecl) -> bool {
     field.modifiers.contains(&Modifier::Static) && field.modifiers.contains(&Modifier::Final)
 }
 
-fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
+fn associated_consts_for_type(
+    ty: &TypeDecl,
+    value_overrides: &std::collections::BTreeMap<String, RustExpr>,
+) -> Vec<RustAssociatedConst> {
     let const_infos = static_final_const_infos(ty);
     let source_static_field_rust_names = crate::java_naming::source_static_field_rust_names(ty);
     ty.members
@@ -7117,6 +7121,7 @@ fn associated_consts_for_type(ty: &TypeDecl) -> Vec<RustAssociatedConst> {
                     .map(String::as_str)
                     .unwrap_or(&field.name),
                 &const_infos,
+                value_overrides.get(&field.name),
             ),
             _ => None,
         })
@@ -7128,7 +7133,7 @@ pub(crate) fn static_final_field_has_associated_const(ty: &TypeDecl, field: &Fie
         return false;
     }
     let const_infos = static_final_const_infos(ty);
-    associated_const_for_field(field, &field.name, &const_infos).is_some()
+    associated_const_for_field(field, &field.name, &const_infos, None).is_some()
 }
 
 #[derive(Debug, Clone)]
@@ -7186,12 +7191,16 @@ fn associated_const_for_field(
     field: &FieldDecl,
     rust_name: &str,
     const_infos: &[StaticFinalConstInfo],
+    value_override: Option<&RustExpr>,
 ) -> Option<RustAssociatedConst> {
-    let (ty, value) = field
+    let (ty, mut value) = field
         .initializer
         .as_ref()
         .and_then(|initializer| const_type_and_value(&field.ty, initializer, const_infos))
         .or_else(|| non_literal_static_final_const_type_and_value(field))?;
+    if let Some(value_override) = value_override {
+        value = value_override.clone();
+    }
     Some(RustAssociatedConst {
         name: rust_name.to_string(),
         ty,

@@ -3713,7 +3713,7 @@ pub fn known_external_method_return_type(
         {
             Some(JavaType::Primitive(PrimitiveType::Boolean))
         }
-        (Some(owner), "isInfinite" | "is_infinite", 1)
+        (Some(owner), "isInfinite" | "is_infinite" | "isFinite" | "is_finite", 1)
             if canonical_external_receiver_type_key(owner)
                 .rsplit('.')
                 .next()
@@ -3744,6 +3744,14 @@ pub fn known_external_method_return_type(
                 .is_some_and(|simple| simple == "Double") =>
         {
             Some(JavaType::Primitive(PrimitiveType::Long))
+        }
+        (Some(owner), "hashCode" | "hash_code", 1)
+            if canonical_external_receiver_type_key(owner)
+                .rsplit('.')
+                .next()
+                .is_some_and(|simple| simple == "Double") =>
+        {
+            Some(JavaType::Primitive(PrimitiveType::Int))
         }
         (Some(owner), "doubleToRawLongBits" | "double_to_raw_long_bits", 1)
             if canonical_external_receiver_type_key(owner)
@@ -9580,7 +9588,7 @@ pub enum JavaIteratorRemoveStatus {
 }
 
 pub struct JavaIterator<T> {
-    items: Vec<T>,
+    items: Vec<Option<T>>,
     index: usize,
     last_returned: Option<usize>,
     removed_count: usize,
@@ -9683,7 +9691,7 @@ impl<T> Drop for JavaIterator<T> {
     }
 }
 
-impl<T: Clone> Iterator for JavaIterator<T> {
+impl<T> Iterator for JavaIterator<T> {
     type Item = T;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -10775,10 +10783,10 @@ impl<K: Ord + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringEl
     fn java_arrays_deep_to_string(&self) -> String { self.to_string() }
 }
 
-impl<T: Clone> JavaIterator<T> {
+impl<T> JavaIterator<T> {
     pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaIterator<T> {
         JavaIterator {
-            items: items.into_iter().collect(),
+            items: items.into_iter().map(Some).collect(),
             index: 0,
             last_returned: None,
             removed_count: 0,
@@ -10797,7 +10805,7 @@ impl<T: Clone> JavaIterator<T> {
         F: Fn(usize) -> Result<JavaIteratorRemoveStatus, JavaException> + 'static,
     {
         JavaIterator {
-            items: items.into_iter().collect(),
+            items: items.into_iter().map(Some).collect(),
             index: 0,
             last_returned: None,
             removed_count: 0,
@@ -10908,7 +10916,11 @@ impl<T: Clone> JavaIterator<T> {
             return next();
         }
         self.flush_pending_remove_result()?;
-        let value = self.items.get(self.index).cloned().ok_or_else(|| {
+        let value = self
+            .items
+            .get_mut(self.index)
+            .and_then(Option::take)
+            .ok_or_else(|| {
             JavaException::new(
                 "NoSuchElementException",
                 "Java iterator has no more elements".to_string(),
@@ -17843,6 +17855,26 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
         .chain(source_summary_types.iter())
         .cloned()
         .collect::<BTreeSet<_>>();
+    // Representation planning can introduce a Rust carrier whose name does
+    // not occur as a Java declaration (for example `ShapeValue` for a closed
+    // `Shape` hierarchy). Facade discovery sees lowered calls and return
+    // surfaces as well as Java declarations, so such a carrier can otherwise
+    // be mistaken for an unavailable external class and emitted a second time
+    // as an opaque struct in the very module that defines the real enum/trait.
+    // Keep generated representation names distinct from source declarations:
+    // a non-emitted source boundary may intentionally need an opaque facade,
+    // while a generated carrier is always supplied by generated Rust.
+    let local_representation_type_exclusions = representations
+        .type_representations()
+        .filter_map(|representation| match representation.representation() {
+            ObjectRepresentation::DynTrait { trait_name } => Some(trait_name),
+            ObjectRepresentation::JavaEnum { enum_name, .. }
+            | ObjectRepresentation::ClosedEnum { enum_name, .. } => Some(enum_name),
+            ObjectRepresentation::SourceHierarchyCarrier { carrier_name, .. } => Some(carrier_name),
+            ObjectRepresentation::ConcreteStruct | ObjectRepresentation::ErasedObject => None,
+        })
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let source_shadow_candidate_types = if _context_sources_are_emitted {
         source_summary_types.clone()
     } else {
@@ -17891,6 +17923,7 @@ pub(crate) fn external_api_facade_support_items_with_semantic_plans(
 
     let mut support = ExternalApiFacadeSupport {
         declared_external_type_exclusions: declared_external_type_exclusions.clone(),
+        local_representation_type_exclusions,
         opaque_types: source_declared_facade_shadows.clone(),
         source_declared_facade_shadows,
         source_generic_type_arities: source_generic_type_arities([
@@ -19048,6 +19081,9 @@ struct ExternalApiFacadeSupport {
     /// one carrier shape instead of relying on a name-specific allowlist.
     external_generic_type_arities: BTreeMap<String, usize>,
     declared_external_type_exclusions: BTreeSet<String>,
+    /// Names synthesized by the local representation plan. They are defined
+    /// by generated Rust and must never receive opaque facade declarations.
+    local_representation_type_exclusions: BTreeSet<String>,
     source_declared_facade_shadows: BTreeSet<String>,
     trait_type_names: BTreeSet<String>,
     /// Source interfaces whose inherited external methods are supplied as
@@ -22877,7 +22913,9 @@ impl ExternalApiFacadeSupport {
                     .to_string(),
                 );
             }
-            for method in ["is_nan", "is_infinite"] {
+        }
+        for owner in ["Double", "Float"] {
+            for method in ["is_nan", "is_infinite", "is_finite"] {
                 if used_calls
                     .get(method)
                     .is_some_and(|arities| arities.contains(&1))
@@ -22899,7 +22937,21 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type("Double".to_string());
             self.add_method(
                 "Double".to_string(),
-                "    pub fn double_to_long_bits<T0: Into<f64>>(value: T0) -> i64 { value.into().to_bits() as i64 }".to_string(),
+                "    pub fn double_to_long_bits<T0: Into<f64>>(value: T0) -> i64 { let value = value.into(); if value.is_nan() { f64::NAN.to_bits() as i64 } else { value.to_bits() as i64 } }".to_string(),
+            );
+        }
+        if used_calls
+            .get("hash_code")
+            .is_some_and(|arities| arities.contains(&1))
+        {
+            self.add_opaque_type("Double".to_string());
+            self.add_method(
+                "Double".to_string(),
+                "    pub fn hash_code<T0: Into<f64>>(value: T0) -> i32 { let bits = Self::double_to_long_bits(value); (bits ^ ((bits as u64 >> 32) as i64)) as i32 }".to_string(),
+            );
+            self.add_method(
+                "Double".to_string(),
+                "    pub fn double_to_long_bits<T0: Into<f64>>(value: T0) -> i64 { let value = value.into(); if value.is_nan() { f64::NAN.to_bits() as i64 } else { value.to_bits() as i64 } }".to_string(),
             );
         }
         if used_calls
@@ -22930,7 +22982,7 @@ impl ExternalApiFacadeSupport {
             self.add_opaque_type("Float".to_string());
             self.add_method(
                 "Float".to_string(),
-                "    pub fn float_to_int_bits<T0: Into<f32>>(value: T0) -> i32 { value.into().to_bits() as i32 }".to_string(),
+                "    pub fn float_to_int_bits<T0: Into<f32>>(value: T0) -> i32 { let value = value.into(); if value.is_nan() { f32::NAN.to_bits() as i32 } else { value.to_bits() as i32 } }".to_string(),
             );
         }
         if used_calls
@@ -23659,6 +23711,18 @@ impl ExternalApiFacadeSupport {
 
     fn add_opaque_type(&mut self, name: String) {
         if is_awt_platform_facade_owner(&name) || is_awt_platform_facade_rust_ident(&name) {
+            return;
+        }
+        let canonical = canonical_external_receiver_type_key(&name);
+        let rust_name = rust_name_for_java_named_type(&canonical);
+        if self.local_representation_type_exclusions.contains(&name)
+            || self
+                .local_representation_type_exclusions
+                .contains(&canonical)
+            || self
+                .local_representation_type_exclusions
+                .contains(&rust_name)
+        {
             return;
         }
         if valid_external_facade_type_ident(&name) {
@@ -27319,6 +27383,19 @@ mod external_facade_support_tests {
                     .any(|method| method.contains("pub fn to_string<T0>"))
             );
         }
+    }
+
+    #[test]
+    fn locally_generated_representation_name_cannot_become_an_opaque_facade() {
+        let mut support = ExternalApiFacadeSupport {
+            local_representation_type_exclusions: BTreeSet::from(["ShapeValue".to_string()]),
+            ..ExternalApiFacadeSupport::default()
+        };
+
+        support.add_opaque_type("ShapeValue".to_string());
+        support.add_external_facade_return_opaque_type("Option<ShapeValue>");
+
+        assert!(!support.opaque_types.contains("ShapeValue"));
     }
 
     fn render_external_api_facade_support_items(
@@ -34890,7 +34967,7 @@ fn unknown_static_named_constant_compile_error_value(
     crate::unsupported::compile_error_diverging_text(&message)
 }
 
-fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static str> {
+pub(crate) fn known_jdk_static_constant_value(owner: &str, field: &str) -> Option<&'static str> {
     let owner = owner.rsplit('.').next().unwrap_or(owner);
     let field = canonical_external_field_name(field);
     match (owner, field.as_str()) {
@@ -37997,6 +38074,8 @@ fn static_utility_method_role(
             | "is_na_n"
             | "isInfinite"
             | "is_infinite"
+            | "isFinite"
+            | "is_finite"
             | "parseFloat"
             | "parse_float"
             | "floatToIntBits"
@@ -38016,8 +38095,12 @@ fn static_utility_method_role(
             | "is_na_n"
             | "isInfinite"
             | "is_infinite"
+            | "isFinite"
+            | "is_finite"
             | "doubleToLongBits"
             | "double_to_long_bits"
+            | "hashCode"
+            | "hash_code"
             | "doubleToRawLongBits"
             | "double_to_raw_long_bits"
             | "longBitsToDouble"

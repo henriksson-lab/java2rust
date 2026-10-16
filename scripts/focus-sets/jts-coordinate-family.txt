@@ -1,0 +1,5 @@
+org/locationtech/jts/geom/Coordinate.java
+org/locationtech/jts/geom/CoordinateXY.java
+org/locationtech/jts/geom/CoordinateXYM.java
+org/locationtech/jts/geom/CoordinateXYZM.java
+org/locationtech/jts/geom/Coordinates.java

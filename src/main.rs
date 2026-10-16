@@ -619,6 +619,29 @@ fn run_translate_batch(
             }
         }) as Arc<dyn Fn(new_java2rust::BatchTranslationEvent) + Send + Sync>
     });
+    let checkpoint_error = Arc::new(Mutex::new(None::<String>));
+    let completion_sink = {
+        let generated_dir = generated_dir.clone();
+        let checkpoint_error = Arc::clone(&checkpoint_error);
+        Arc::new(
+            move |index: usize, translation: &new_java2rust::BatchTranslation| {
+                let rust_path = generated_dir.join(batch_stem(index, translation.path()) + ".rs");
+                let temporary_path = rust_path.with_extension("rs.part");
+                let result = fs::write(&temporary_path, translation.rust())
+                    .and_then(|()| fs::rename(&temporary_path, &rust_path));
+                if let Err(err) = result {
+                    let message = format!(
+                        "failed to checkpoint completed translation {}: {err}",
+                        rust_path.display()
+                    );
+                    eprintln!("{message}");
+                    *checkpoint_error
+                        .lock()
+                        .expect("batch checkpoint error lock poisoned") = Some(message);
+                }
+            },
+        ) as Arc<new_java2rust::BatchTranslationCompletionSink>
+    };
     let emission_paths = if emit_primary_files.is_empty() {
         None
     } else {
@@ -640,7 +663,8 @@ fn run_translate_batch(
         }
         Some(paths)
     };
-    let mut translation_options = new_java2rust::BatchTranslationOptions::new(jobs, event_sink);
+    let mut translation_options = new_java2rust::BatchTranslationOptions::new(jobs, event_sink)
+        .with_completion_sink(completion_sink);
     if let Some(emission_paths) = emission_paths {
         translation_options = translation_options.with_emission_paths(emission_paths);
     }
@@ -653,6 +677,13 @@ fn run_translate_batch(
             &external_facts,
             &translation_options,
         );
+    if let Some(err) = checkpoint_error
+        .lock()
+        .expect("batch checkpoint error lock poisoned")
+        .take()
+    {
+        return Err(err);
+    }
     append_batch_phase_event(
         phase_events_path,
         "batch_primary_parse",

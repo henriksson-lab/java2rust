@@ -6356,6 +6356,15 @@ pub(crate) fn java_iterator_from_collection_projection(receiver: RustExpr) -> Ru
     )
 }
 
+pub(crate) fn java_iterator_from_erased_object_collection_projection(
+    receiver: RustExpr,
+) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["JavaIterator", "new"]),
+        vec![erased_object_sequence_iter_cloned_projection(receiver)],
+    )
+}
+
 pub(crate) fn java_list_iterator_from_collection_projection(receiver: RustExpr) -> RustExpr {
     function_call_projection(
         RustExpr::path(["JavaListIterator", "new"]),
@@ -13356,7 +13365,10 @@ fn erased_object_closed_enum_instanceof_projection(
             mutable: false,
             name: object_name,
             ty: None,
-            value: Some(expr),
+            // `instanceof` observes its operand; it never consumes the Java
+            // reference. Keep the erased value available for a following
+            // cast or method call in the same source expression/block.
+            value: Some(force_shared_borrow_projection(expr)),
         }],
         tail: Some(Box::new(combined)),
     }
@@ -13415,7 +13427,7 @@ fn erased_object_closed_enum_pattern_downcast_projection(
             mutable: false,
             name: object_name,
             ty: None,
-            value: Some(expr),
+            value: Some(force_shared_borrow_projection(expr)),
         }],
         tail: Some(Box::new(tail)),
     }
@@ -25245,6 +25257,10 @@ mod tests {
             instanceof_check_projection(RustExpr::Var("object".to_string()), &erased_carrier_check);
         let rendered = emit::emit_expr(&erased_carrier_predicate);
         assert!(
+            rendered.contains("let __java_instanceof_value = &object"),
+            "{rendered}"
+        );
+        assert!(
             rendered.contains("__java_instanceof_value.is::<AnimalValue>()"),
             "{rendered}"
         );
@@ -25262,6 +25278,10 @@ mod tests {
         )
         .expect("erased-object source carrier instanceof should expose pattern recovery");
         let rendered = emit::emit_expr(&erased_carrier_downcast);
+        assert!(
+            rendered.contains("let __java_instanceof_value = &object"),
+            "{rendered}"
+        );
         assert!(
             rendered.contains("Some(std::clone::Clone::clone(__java_instanceof_value.downcast_ref::<AnimalValue>().expect(\"invalid Java cast\")))"),
             "{rendered}"

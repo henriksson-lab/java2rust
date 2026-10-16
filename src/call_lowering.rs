@@ -26,7 +26,8 @@ use crate::coercion::{
     file_exists_projection, force_shared_borrow_projection, free_function_path_projection,
     function_call_projection, index_to_usize_projection, java_class_literal_path_projection,
     java_class_static_path_projection, java_integral_parse_null_argument_as_number_format,
-    java_iterator_from_collection_projection, java_list_hash_code_projection,
+    java_iterator_from_collection_projection,
+    java_iterator_from_erased_object_collection_projection, java_list_hash_code_projection,
     java_list_iterator_from_collection_at_projection,
     java_list_iterator_from_collection_projection, java_map_hash_code_projection,
     java_plain_object_constructor_projection, java_set_hash_code_projection,
@@ -1318,7 +1319,11 @@ fn apply_native_collection_method(
         return owned_collection_to_vec_projection_for_receiver_type(receiver, receiver_ty);
     }
     if matches!(method, NativeCollectionMethod::Iterator) {
-        return java_iterator_from_collection_projection(receiver);
+        return if native_collection_iterator_needs_erased_object_clone(receiver_ty) {
+            java_iterator_from_erased_object_collection_projection(receiver)
+        } else {
+            java_iterator_from_collection_projection(receiver)
+        };
     }
     if matches!(method, NativeCollectionMethod::ListIterator) {
         if let Some(index) = args.pop() {
@@ -1618,6 +1623,23 @@ fn native_collection_mutation_needs_erased_object_arg(
     receiver_ty
         .and_then(crate::types::sequence_element_type)
         .is_some_and(|element_ty| matches!(element_ty, JavaType::Wildcard(_)))
+}
+
+fn native_collection_iterator_needs_erased_object_clone(receiver_ty: Option<&JavaType>) -> bool {
+    receiver_ty
+        .and_then(|receiver_ty| {
+            crate::types::sequence_element_type(receiver_ty).or_else(|| {
+                crate::call_plan::raw_sequence_receiver_erased_element_type(receiver_ty)
+            })
+        })
+        .is_some_and(|element_ty| {
+            matches!(element_ty, JavaType::Wildcard(_))
+                || matches!(
+                    element_ty,
+                    JavaType::Named { ref name, .. } | JavaType::Unknown(ref name)
+                        if matches!(name.as_str(), "Object" | "java.lang.Object")
+                )
+        })
 }
 
 fn apply_list_add(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {

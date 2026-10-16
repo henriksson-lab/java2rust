@@ -2119,6 +2119,15 @@ def main() -> int:
             for _path, target in variants
         )
     }
+    # A nested Java leaf alias is useful inside its declaring output module,
+    # but it must not replace an already shared crate identity with the same
+    # name.  `PackedCoordinateSequence.Double`, for example, may be spelled
+    # `Double` lexically in that source file while unrelated modules still
+    # require the shared `java.lang.Double` facade.
+    source_owned_nested_alias_shared_collisions = (
+        source_owned_nested_alias_names
+        & (existing_shared_types | set(candidates_by_type))
+    )
     # The structural generic alias belongs beside its nested declaration.  A
     # stale assembly seed with the same simple name must be removed from
     # shared support, but must not cause the authoritative module alias to be
@@ -2138,6 +2147,7 @@ def main() -> int:
         for alias in existing_shared_alias_names
         if alias in existing_shared_types and alias not in primary_output_types
     }
+    protected_shared_aliases.update(source_owned_nested_alias_shared_collisions)
     for path in merge_input_paths:
         for alias, target in prelude_aliases(path):
             if (
@@ -2169,8 +2179,10 @@ def main() -> int:
                 promoted_aliases.add(alias)
     selected.update(promoted_aliases)
     removal_only_names.update(promoted_aliases)
-    selected.update(protected_shared_aliases - source_owned_nested_alias_names)
-    removal_only_names.update(protected_shared_aliases - source_owned_nested_alias_names)
+    selected.update(protected_shared_aliases)
+    removal_only_names.update(
+        protected_shared_aliases - source_owned_nested_alias_shared_collisions
+    )
 
     # Build each raw module's top-level catalog once. Dependency closure grows
     # `selected` monotonically; reparsing every byte for every round made this
@@ -2455,7 +2467,10 @@ def main() -> int:
         shared_support_path,
         (protected_shared_aliases & existing_shared_declared_type_names)
         | source_shadowing_aliases
-        | source_owned_nested_alias_names,
+        | (
+            source_owned_nested_alias_names
+            - source_owned_nested_alias_shared_collisions
+        ),
     )
     remove_protected_names_from_shared_support(
         shared_support_path,
@@ -2469,7 +2484,8 @@ def main() -> int:
         Path(args.shared_types), source_shadowing_aliases
     )
     remove_protected_names_from_shared_types(
-        Path(args.shared_types), source_owned_nested_alias_names
+        Path(args.shared_types),
+        source_owned_nested_alias_names - source_owned_nested_alias_shared_collisions,
     )
     receiver_preferences = method_call_receiver_preferences(
         merge_input_paths, selected, alias_targets
@@ -2484,7 +2500,11 @@ def main() -> int:
         # has just been removed above and the selected replacement must be
         # emitted.  Otherwise every module imports a type that no longer has a
         # declaration in the assembled crate.
-        if name in removal_only_names and name not in replaced_shared_decl_names:
+        if (
+            name in removal_only_names
+            and name not in replaced_shared_decl_names
+            and name not in existing_shared_declared_type_names
+        ):
             continue
         decls = declarations.get(name, [])
         unique_decls = []

@@ -289,6 +289,13 @@ pub(crate) fn source_hierarchy_virtual_dispatch_field_getter_name(field_name: &s
     format!("__java_field_{}", crate::parser::to_snake_case(field_name))
 }
 
+pub(crate) fn source_hierarchy_carrier_field_setter_name(field_name: &str) -> String {
+    format!(
+        "__java_set_field_{}",
+        crate::parser::to_snake_case(field_name)
+    )
+}
+
 fn source_hierarchy_virtual_dispatch_method_signature(
     owner: &TypeDecl,
     method: &MethodDecl,
@@ -973,14 +980,30 @@ fn source_hierarchy_carrier_java_tree_key_impl(
         );
     }
     let erased_other = format!("match other {{\n{}\n        }}", arms.join("\n"));
-    let accepts_nullable_object = signatures
+    let parameter_shape = signatures
         .method_signature(declaring_ty, compare_method)
         .and_then(|signature| signature.params().first())
-        .is_some_and(|param| crate::types::optional_element_type(&param.shape().java_ty).is_some());
-    let argument = if accepts_nullable_object {
-        format!("Some({erased_other})")
+        .map(|param| param.shape());
+    let accepts_hierarchy_carrier = parameter_shape.is_some_and(|shape| {
+        matches!(
+            shape.dispatch,
+            crate::slot_shape::DispatchShape::ClosedEnum { .. }
+        ) || matches!(
+            representations.representation_for(&shape.java_ty),
+            ObjectRepresentation::SourceHierarchyCarrier { .. }
+        )
+    });
+    let parameter_is_optional = parameter_shape
+        .is_some_and(|shape| crate::types::optional_element_type(&shape.java_ty).is_some());
+    let value = if accepts_hierarchy_carrier {
+        "std::clone::Clone::clone(other)".to_string()
     } else {
         erased_other
+    };
+    let argument = if parameter_is_optional {
+        format!("Some({value})")
+    } else {
+        value
     };
     let rust_name = rust_identifier_token(&crate::java_signature::source_method_rust_name(
         compare_method,
@@ -2251,15 +2274,40 @@ fn source_hierarchy_carrier_field_accessor(
     let getter = format!(
         "    pub fn {rust_name}(&self) -> {return_ty}{where_clause} {{\n        match self {{\n{arms}\n        }}\n    }}"
     );
-    if !variants.iter().all(|variant| {
+    let all_variants_have_mutable_storage = variants.iter().all(|variant| {
         let placement = storage_placement_for_emitted_type_name(representations, variant);
-        placement.shared()
-            && placement.interior_mutable()
-            && !placement.sync()
-            && placement.is_implemented()
-    }) || has_anonymous_variant
-    {
+        placement.shared() && placement.interior_mutable() && placement.is_implemented()
+    });
+    if !all_variants_have_mutable_storage || has_anonymous_variant {
         return Some(getter);
+    }
+    let setter_name = source_hierarchy_carrier_field_setter_name(&field.name);
+    let setter_arms = variants
+        .iter()
+        .map(|variant| {
+            let receiver =
+                source_hierarchy_carrier_payload_receiver("value", variant, representations, true);
+            let storage_name =
+                rust_identifier_token(&source_hierarchy_carrier_variant_field_storage_name(
+                    variant,
+                    ty,
+                    field,
+                    support_program,
+                ));
+            format!(
+                "            Self::{variant}(value) => {receiver}.{storage_name} = __java_value,"
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let setter = format!(
+        "    pub fn {setter_name}(&self, __java_value: {return_ty}) {{\n        match self {{\n{setter_arms}\n        }}\n    }}"
+    );
+    if variants
+        .iter()
+        .any(|variant| storage_placement_for_emitted_type_name(representations, variant).sync())
+    {
+        return Some(format!("{getter}\n\n{setter}"));
     }
     let mutable_arms = variants
         .iter()
@@ -2279,7 +2327,7 @@ fn source_hierarchy_carrier_field_accessor(
         .collect::<Vec<_>>()
         .join("\n");
     Some(format!(
-        "{getter}\n\n    pub fn {rust_name}_mut(&self) -> std::cell::RefMut<'_, {return_ty}> {{\n        match self {{\n{mutable_arms}\n        }}\n    }}"
+        "{getter}\n\n{setter}\n\n    pub fn {rust_name}_mut(&self) -> std::cell::RefMut<'_, {return_ty}> {{\n        match self {{\n{mutable_arms}\n        }}\n    }}"
     ))
 }
 
@@ -7238,6 +7286,15 @@ fn trait_param_shape_should_widen_to_implementation(
     {
         return true;
     }
+    if interface_shape.java_ty == implementation_shape.java_ty
+        && matches!(interface_shape.dispatch, DispatchShape::Concrete)
+        && matches!(
+            implementation_shape.dispatch,
+            DispatchShape::ClosedEnum { .. }
+        )
+    {
+        return true;
+    }
     if interface_shape.ownership != OwnershipShape::SharedBorrow
         || interface_shape.java_ty != implementation_shape.java_ty
     {
@@ -7275,6 +7332,19 @@ fn trait_return_shape_should_widen_to_implementation(
         .optional_element_type()
         .is_some_and(|element_ty| element_ty == interface_shape.java_ty)
     {
+        return true;
+    }
+    if interface_shape.java_ty == implementation_shape.java_ty
+        && matches!(interface_shape.dispatch, DispatchShape::Concrete)
+        && matches!(
+            implementation_shape.dispatch,
+            DispatchShape::ClosedEnum { .. }
+        )
+    {
+        // The concrete implementation and the generated trait must name the
+        // same Rust ABI. A source hierarchy carrier is not covariant metadata:
+        // retaining the interface's stale Concrete tag renders the payload's
+        // Rc/Arc storage type while the implementation returns the carrier.
         return true;
     }
     interface_shape.ownership == OwnershipShape::SharedBorrow
@@ -9248,6 +9318,133 @@ class Product {}
         assert!(item.contains("impl Clone for std::boxed::Box<dyn Named>"));
         assert!(!item.contains("Named for std::rc::Rc<__JavaShared>"));
         assert!(item.contains("Named for std::rc::Rc<std::cell::RefCell<__JavaShared>>"));
+    }
+
+    #[test]
+    fn trait_contract_adopts_source_hierarchy_carrier_abi_from_implementation() {
+        let parsed = parse_java_source(
+            r#"
+interface RootSource {
+    Root get();
+    void set(Root value);
+    Root[] all();
+    void replace(Root[] values);
+}
+class Root {
+    static Root SHARED = new Root();
+    Root alias;
+    int value;
+    Root() { alias = this; }
+}
+class RootSourceImpl implements RootSource {
+    public Root get() { return new Root(); }
+    public void set(Root value) {}
+    public Root[] all() { return new Root[0]; }
+    public void replace(Root[] values) {}
+}
+class Use {
+    Root anonymousRoot() { return new Root() {}; }
+    RootSource source() { return new RootSourceImpl(); }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let source = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "RootSource")
+            .unwrap();
+        let RepresentationTypeEmission::RawRustItem(item) =
+            type_emission_for_program_with_facts_and_exceptions(
+                &representations,
+                &resolved.program,
+                source,
+                &signatures,
+                &semantic.facts,
+                &ProgramExceptionPlan::default(),
+            )
+        else {
+            panic!("interface should emit a raw trait item");
+        };
+
+        assert!(item.contains("fn get(&self) -> RootValue;"), "{item}");
+        assert!(item.contains("fn set(&self, value: RootValue);"), "{item}");
+        assert!(item.contains("Vec<Option<RootValue>>"), "{item}");
+        assert!(!item.contains("Rc<Root>"), "{item}");
+    }
+
+    #[test]
+    fn trait_contract_uses_source_hierarchy_carrier_without_visible_implementor() {
+        let parsed = parse_java_source(
+            r#"
+interface RootSource {
+    Root get(int index);
+    void get(int index, Root target);
+    Root getCopy(int index);
+    Root[] all();
+    void replace(Root[] values);
+}
+class Root {
+    static Root SHARED = new Root();
+    Root alias;
+    int value;
+    Root() { alias = this; }
+}
+class Child extends Root {
+    Child alias;
+    Child() { alias = this; }
+    void bump() { value++; }
+}
+class Use {
+    Root child() { return new Child(); }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        let representations = plan_representations(&resolved.program, &semantic.facts);
+        let usage = analyze_usage_with_facts(&resolved.program, &semantic.facts);
+        let signatures = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &usage,
+            &semantic.facts,
+        );
+        let source = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "RootSource")
+            .unwrap();
+        let RepresentationTypeEmission::RawRustItem(item) =
+            type_emission_for_program_with_facts_and_exceptions(
+                &representations,
+                &resolved.program,
+                source,
+                &signatures,
+                &semantic.facts,
+                &ProgramExceptionPlan::default(),
+            )
+        else {
+            panic!("interface should emit a raw trait item");
+        };
+
+        assert!(
+            item.contains("fn get_int(&self, index: i32) -> RootValue;"),
+            "{item}"
+        );
+        assert!(item.contains("Vec<Option<RootValue>>"), "{item}");
+        assert!(!item.contains("Rc<Root>"), "{item}");
     }
 
     #[test]

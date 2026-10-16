@@ -3942,6 +3942,15 @@ fn static_utility_owner_call_target<'a>(
     {
         return Some(target);
     }
+    if implicit_java_lang_static_owner_is_unshadowed(receiver_name, native_receiver_key, types)
+        && crate::stdlib::external_api_method_role(Some(native_receiver_key), name, arg_count)
+            != ExternalApiRole::Unknown
+    {
+        return Some(CallTargetPlan::StaticOwner {
+            owner: rust_static_owner_type_name_with_facts(native_receiver_key, facts),
+            rust_name: external_method_rust_name(native_receiver_key, name, arg_count, facts),
+        });
+    }
     if matches!(name, "valueOf" | "value_of")
         && receiver_key.rsplit('.').next().unwrap_or(&receiver_key) == "Integer"
         && args
@@ -5155,6 +5164,21 @@ fn unqualified_lowercase_native_static_owner_alias(
             .is_some_and(|ch| ch.is_ascii_lowercase())
 }
 
+pub(crate) fn implicit_java_lang_static_owner_is_unshadowed(
+    receiver_name: &str,
+    receiver_key: &str,
+    types: &TypeEnv,
+) -> bool {
+    types.local_type(receiver_name).is_none()
+        && types.field_type(receiver_name).is_none()
+        && types
+            .static_type_alias(receiver_name)
+            .is_none_or(|alias| native_static_owner_matches(alias, receiver_key))
+        && native_static_owner_qualified_names(receiver_key)
+            .iter()
+            .any(|qualified| qualified.starts_with("java.lang."))
+}
+
 fn resolved_static_owner_shadows_native_owner(
     resolved: Option<&ResolvedCall>,
     receiver_name: &str,
@@ -5176,14 +5200,32 @@ fn resolved_static_owner_shadows_native_owner(
     {
         return false;
     }
+    if types.static_type_alias(receiver_name).is_some_and(|alias| {
+        crate::facts::external_type_name_matches(alias, &call.declaring_type)
+            && !native_static_owner_qualified_names(native_owner).contains(&alias)
+    }) {
+        return true;
+    }
     let declaring_key = crate::stdlib::canonical_external_receiver_type_key(&call.declaring_type);
     if let Some(alias) = crate::javalibs::native_java_static_owner_alias(&declaring_key)
         && native_static_owner_matches(alias, native_owner)
     {
         return false;
     }
-    !native_static_owner_matches(&call.declaring_type, native_owner)
-        || call.declaring_type == receiver_name
+    if native_static_owner_matches(&call.declaring_type, native_owner) {
+        return false;
+    }
+
+    // A resolver result for a differently-qualified source type is not, by
+    // itself, proof that the type is visible through this leaf receiver. In a
+    // multi-file batch an unrelated nested `Outer.Double` must not steal the
+    // implicit `java.lang.Double` binding. Same-package/imported/lexical source
+    // types have an explicit static alias in the lowering environment; a
+    // genuinely same-named top-level source type is exact here.
+    call.declaring_type == receiver_name
+        || types.static_type_alias(receiver_name).is_some_and(|alias| {
+            crate::facts::external_type_name_matches(alias, &call.declaring_type)
+        })
 }
 
 fn static_type_alias_shadows_native_owner(

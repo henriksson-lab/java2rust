@@ -1212,7 +1212,7 @@ fn parse_params_node(node: tree_sitter::Node, source: &str) -> Vec<Param> {
                 .unwrap_or_else(|| JavaType::Unknown(name.clone()));
             Some(Param {
                 name: to_snake_case(&name),
-                source_name: to_snake_case_unescaped(&name),
+                source_name: expression_identifier_name(&name),
                 ty,
                 is_varargs,
                 binding: None,
@@ -1273,7 +1273,7 @@ fn parse_param_text_fallback(param_text: &str) -> Option<Param> {
     }
     Some(Param {
         name: to_snake_case(name),
-        source_name: to_snake_case_unescaped(name),
+        source_name: expression_identifier_name(name),
         ty,
         is_varargs,
         binding: None,
@@ -1648,7 +1648,7 @@ fn parse_resource_declaration_text(src: &str) -> Option<Stmt> {
     Some(Stmt::VarDecl {
         ty: parse_type(ty.trim()),
         name: to_snake_case(name.trim()),
-        source_name: to_snake_case_unescaped(name.trim()),
+        source_name: expression_identifier_name(name.trim()),
         initializer: Some(parse_expr(right.trim())),
         binding: None,
     })
@@ -1677,7 +1677,7 @@ fn parse_catch_clause(
         .unwrap_or_default();
     let (name, source_name) = parameter
         .and_then(|param| field_text(param, "name", source))
-        .map(|name| (to_snake_case(&name), to_snake_case_unescaped(&name)))
+        .map(|name| (to_snake_case(&name), expression_identifier_name(&name)))
         .unwrap_or_else(|| ("ex".to_string(), "ex".to_string()));
     let body = node
         .child_by_field_name("body")
@@ -1854,7 +1854,7 @@ fn parse_local_var_decls(node: tree_sitter::Node, source: &str) -> Vec<Stmt> {
             Stmt::VarDecl {
                 ty: type_with_declarator_array_dimensions(&ty, declaration_text, &name),
                 name: to_snake_case(&name),
-                source_name: to_snake_case_unescaped(&name),
+                source_name: expression_identifier_name(&name),
                 initializer,
                 binding: None,
             }
@@ -2008,7 +2008,7 @@ fn parse_enhanced_for_node(
         .unwrap_or_else(|| "item".to_string());
     let source_var_name = raw_name
         .as_deref()
-        .map(to_snake_case_unescaped)
+        .map(expression_identifier_name)
         .unwrap_or_else(|| "item".to_string());
     let base_var_type = node
         .child_by_field_name("type")
@@ -2079,7 +2079,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
         "parenthesized_expression" => first_named_non_comment_child(node)
             .map(|child| parse_expr_node(child, source))
             .unwrap_or_else(|| unsupported_expr_node(node, "empty parenthesized expression")),
-        "identifier" => Expr::Var(to_snake_case_unescaped(text(node, source))),
+        "identifier" => Expr::Var(expression_identifier_name(text(node, source))),
         "this" => Expr::This,
         "super" => Expr::Super,
         "decimal_integer_literal"
@@ -2113,7 +2113,7 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             if let Some(object) = object {
                 Expr::FieldAccess(Box::new(object), field)
             } else {
-                Expr::Var(to_snake_case_unescaped(&field))
+                Expr::Var(expression_identifier_name(&field))
             }
         }
         "array_access" => {
@@ -2289,6 +2289,21 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             node,
             &format!("unsupported expression node: {}", node.kind()),
         ),
+    }
+}
+
+/// Preserve a conventional Java constant identifier until lexical resolution.
+///
+/// Rust-style normalization is intentionally delayed for this population:
+/// eagerly mapping `X` to `x` makes it impossible to distinguish a static
+/// constant `X` from an instance field `x`. Lowering already assigns Rust
+/// names after it knows which declaration won. Ordinary class names and
+/// lower/camel-case locals keep the established normalized IR spelling.
+fn expression_identifier_name(source_name: &str) -> String {
+    if is_java_constant_name(source_name) {
+        source_name.to_string()
+    } else {
+        to_snake_case_unescaped(source_name)
     }
 }
 
@@ -2627,7 +2642,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
     match node.kind() {
         "identifier" => vec![LambdaParam {
             name: to_snake_case(text(node, source)),
-            source_name: to_snake_case_unescaped(text(node, source)),
+            source_name: expression_identifier_name(text(node, source)),
             ty: None,
         }],
         "inferred_parameters" => named_children(node)
@@ -2635,7 +2650,7 @@ fn parse_lambda_params(node: tree_sitter::Node, source: &str) -> Vec<LambdaParam
             .filter(|child| child.kind() == "identifier")
             .map(|id| LambdaParam {
                 name: to_snake_case(text(id, source)),
-                source_name: to_snake_case_unescaped(text(id, source)),
+                source_name: expression_identifier_name(text(id, source)),
                 ty: None,
             })
             .collect(),

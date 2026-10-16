@@ -3637,13 +3637,15 @@ class JavaIteratorCursorOverList {
         translation.rust.contains(
             "let mut i: JavaIterator<String> = JavaIterator::new(input.iter().cloned());"
         ) && translation.rust.contains("while i.has_next()")
-            && translation.rust.contains("out.push(i.next_result()?);")
+            && translation.rust.contains(
+                "out.push(i.next_result().unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex)));"
+            )
             && translation.rust.contains(
                 "self.next_result()\n            .unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))"
             )
             && translation
                 .rust
-                .contains("pub fn copy(input: &[String]) -> Result<Vec<String>, JavaException>")
+                .contains("pub fn copy(input: &[String]) -> Vec<String>")
             && translation.rust.contains("i.for_each_remaining(|value|")
             && translation.rust.contains("out.push(value);")
             && !translation.rust.contains("let mut i: Iterator")
@@ -3671,6 +3673,48 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn raw_collection_iterator_clones_erased_references_without_clone_bound() {
+    let translation = translate_source(
+        r#"
+import java.util.Collection;
+import java.util.Iterator;
+
+class RawCollectionIteratorUse {
+    static int countNonNull(Collection values) {
+        Iterator iterator = values.iterator();
+        int count = 0;
+        while (iterator.hasNext()) {
+            Object value = iterator.next();
+            if (value != null) count++;
+        }
+        return count;
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("JavaIterator<Box<dyn std::any::Any>>")
+            && translation
+                .rust
+                .contains("values.iter().map(|value| java_clone_erased_object_ref(value))")
+            && !translation.rust.contains("values.iter().cloned()"),
+        "raw Object collections require runtime-aware Java reference copies:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "raw_collection_iterator_erased_snapshot",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
         }],
     );
 }
@@ -9339,6 +9383,65 @@ mod generated_tests {
 }
 
 #[test]
+fn non_null_erased_cast_to_shared_source_clones_the_identity_handle() {
+    let translation = translate_source(
+        r#"
+class SharedObjectCastTarget implements Comparable {
+    int value;
+    SharedObjectCastTarget peer;
+
+    SharedObjectCastTarget(int value) {
+        this.value = value;
+    }
+
+    void setPeer(SharedObjectCastTarget peer) {
+        this.peer = peer;
+    }
+
+    public int compareTo(Object value) {
+        SharedObjectCastTarget other = (SharedObjectCastTarget) value;
+        return other.value;
+    }
+
+    static int run() {
+        SharedObjectCastTarget left = new SharedObjectCastTarget(1);
+        SharedObjectCastTarget right = new SharedObjectCastTarget(7);
+        SharedObjectCastTarget alias = left;
+        alias.setPeer(right);
+        return left.compareTo(right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("downcast_ref::<std::rc::Rc<std::cell::RefCell<SharedObjectCastTarget>>>()")
+            && !translation
+                .rust
+                .contains("downcast::<std::rc::Rc<std::cell::RefCell<SharedObjectCastTarget>>>()"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules_for_translation(
+        "non_null_erased_cast_to_shared_source",
+        translation.rust,
+        r#"
+#[test]
+fn cast_copies_the_shared_java_reference() {
+    assert_eq!(SharedObjectCastTarget::run(), 7);
+}
+"#,
+    );
+}
+
+#[test]
 fn instanceof_pattern_variable_negated_source_interface_uses_trait_downcast_plan() {
     let translation = translate_source(
         r#"
@@ -9706,6 +9809,47 @@ class NullableErasedObjectNullInitializer {
             rust: translation.rust,
             tests: "",
         }],
+    );
+}
+
+#[test]
+fn erased_object_equals_erased_object_uses_runtime_java_equality() {
+    let translation = translate_source(
+        r#"
+class ErasedPairEquality {
+    static boolean same(Object left, Object right) {
+        return left.equals(right);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("return java_erased_any_equals(left.as_ref(), right.as_ref());"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "erased_object_equals_erased_object",
+        translation.rust,
+        r#"
+#[test]
+fn erased_equality_uses_java_value_semantics_for_known_runtime_values() {
+    assert!(ErasedPairEquality::same(
+        Box::new("same".to_string()),
+        Box::new("same".to_string()),
+    ));
+    assert!(!ErasedPairEquality::same(
+        Box::new("left".to_string()),
+        Box::new("right".to_string()),
+    ));
+    assert!(ErasedPairEquality::same(Box::new(7_i32), Box::new(7_i32)));
+    assert!(!ErasedPairEquality::same(Box::new(7_i32), Box::new(8_i32)));
+}
+"#,
     );
 }
 
@@ -13186,6 +13330,7 @@ class JavaIntegerBinarySemantics {
         return result;
     }
 }
+
 "#,
     );
 
@@ -13228,6 +13373,40 @@ mod generated_tests {
     }
 }
 "#,
+        }],
+    );
+}
+
+#[test]
+fn uppercase_double_locals_keep_floating_binary_promotion() {
+    let translation = translate_source(
+        r#"
+class UppercaseDoubleLocals {
+    double reflect(double x, double y) {
+        double A = x - y;
+        double B = x + y;
+        double C = x * y;
+        double sum = A * A + B * B;
+        double difference = A * A - B * B;
+        return (-difference * x - 2 * A * B * y - 2 * A * C) / sum;
+    }
+}
+"#,
+    );
+
+    let rust = translation.rust;
+    assert!(
+        rust.contains("let sum: f64 = (A * A) + B * B;")
+            && rust.contains("let difference: f64 = (A * A) - B * B;")
+            && rust.contains("2 as f64"),
+        "double arithmetic must use Java binary numeric promotion rather than integer wrapping:\n{rust}"
+    );
+    cargo_check_generated_modules(
+        "uppercase_double_local_promotion",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust,
+            tests: "",
         }],
     );
 }
@@ -16238,6 +16417,97 @@ class LowercaseJdkStaticOwners {
 
     cargo_check_generated_modules(
         "lowercase_jdk_static_owners",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn jdk_floating_is_finite_facades_are_typed_and_executable() {
+    let translation = translate_source(
+        r#"
+class JdkFloatingFinite {
+    boolean finiteDouble(double value) {
+        return Double.isFinite(value);
+    }
+
+    boolean finiteFloat(float value) {
+        return Float.isFinite(value);
+    }
+
+    static long canonicalBits(double value) {
+        return Double.doubleToLongBits(value);
+    }
+
+    static int hash(double value) {
+        return Double.hashCode(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("Double::is_finite(value)")
+            && translation.rust.contains("Float::is_finite(value)")
+            && translation
+                .rust
+                .contains("Double::double_to_long_bits(value)")
+            && translation.rust.contains("Double::hash_code(value)")
+            && translation.rust.matches("pub fn is_finite").count() == 2
+            && !translation.rust.contains("Integer::is_finite"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_test_generated_modules_for_translation(
+        "jdk_floating_is_finite_and_bits",
+        translation.rust,
+        r#"
+#[test]
+fn double_bits_and_hash_match_java_canonicalization() {
+    let payload_nan = f64::from_bits(0x7ff0_0000_0000_0001);
+    assert_eq!(JdkFloatingFinite::canonical_bits(payload_nan), 0x7ff8_0000_0000_0000_i64);
+    assert_eq!(JdkFloatingFinite::hash(payload_nan), 0x7ff8_0000_i32);
+    assert_eq!(JdkFloatingFinite::canonical_bits(-0.0), i64::MIN);
+    assert_eq!(JdkFloatingFinite::hash(-0.0), i32::MIN);
+}
+"#,
+    );
+}
+
+#[test]
+fn inherited_default_body_keeps_declaring_type_lexical_aliases() {
+    let translation = translate_source(
+        r#"
+interface PlatformConstantDefault {
+    default double missing() {
+        return Double.NaN;
+    }
+}
+
+class DefaultBodyNestedOwner implements PlatformConstantDefault {
+    static class Double {
+        static double custom(double value) {
+            return value;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("return f64::NAN;")
+            && !translation
+                .rust
+                .contains("DefaultBodyNestedOwner_Double::NaN"),
+        "an inherited body must resolve type names in its declaring lexical scope:\n{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "inherited_default_body_lexical_aliases",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -27591,8 +27861,13 @@ class StandardLineRepair {
         !translation
             .rust
             .contains("unsupported Java instanceof shape: actual=Concrete, target=Concrete")
+            && translation
+                .rust
+                .contains("matches!(line, HeaderLineValue::FormatLine(_))")
+            && translation
+                .rust
+                .contains("matches!(line, HeaderLineValue::InfoLine(_))")
             && !translation.rust.contains("repair(Some(line))")
-            && !translation.rust.contains("repair(line)")
             && !translation.rust.contains("line = formats")
             && !translation.rust.contains("line = infos"),
         "{}",
@@ -27601,6 +27876,57 @@ class StandardLineRepair {
 
     cargo_check_generated_modules(
         "source_hierarchy_instanceof_repair",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn source_hierarchy_instanceof_non_leaf_target_checks_all_descendant_variants() {
+    let translation = translate_source(
+        r#"
+class RuntimeBase {
+}
+
+class RuntimeMiddle extends RuntimeBase {
+}
+
+class RuntimeLeaf extends RuntimeMiddle {
+}
+
+class RuntimeOther extends RuntimeBase {
+}
+
+class RuntimeTypeUse {
+    static boolean isMiddle(RuntimeBase value) {
+        return value instanceof RuntimeMiddle;
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation
+            .rust
+            .contains("unsupported Java instanceof check")
+            && translation
+                .rust
+                .contains("matches!(value, RuntimeBaseValue::RuntimeMiddle(_))")
+            && translation
+                .rust
+                .contains("matches!(value, RuntimeBaseValue::RuntimeLeaf(_))")
+            && !translation
+                .rust
+                .contains("matches!(value, RuntimeBaseValue::RuntimeOther(_))"),
+        "{}",
+        translation.rust
+    );
+
+    cargo_check_generated_modules(
+        "source_hierarchy_instanceof_non_leaf_target",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -31899,6 +32225,49 @@ fn clone_returns_an_independent_dynamic_receiver() {
     assert_eq!(ObjectSuperClone::run().unwrap(), 48);
 }
 "#,
+    );
+}
+
+#[test]
+fn object_super_clone_enters_source_hierarchy_without_erased_downcast() {
+    let translation = translate_source(
+        r#"
+class CloneHierarchyBase implements Cloneable, Comparable<CloneHierarchyBase> {
+    int value;
+
+    public int compareTo(CloneHierarchyBase other) {
+        return Integer.compare(value, other.value);
+    }
+
+    public CloneHierarchyBase clone() {
+        try {
+            return (CloneHierarchyBase) super.clone();
+        } catch (CloneNotSupportedException impossible) {
+            throw new AssertionError(impossible);
+        }
+    }
+}
+
+class CloneHierarchyChild extends CloneHierarchyBase {}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("std::clone::Clone::clone(self)")
+            && !translation
+                .rust
+                .contains("let __java_erased_object_value = std::clone::Clone::clone(self)")
+            && !translation.rust.contains("invalid Java cast"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "object_super_clone_source_hierarchy",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
     );
 }
 
@@ -58554,9 +58923,7 @@ class BoxedPrimitiveConstants {
     );
 
     assert!(
-        translation
-            .rust
-            .contains("pub const ZERO: f64 = Double::NaN")
+        translation.rust.contains("pub const ZERO: f64 = f64::NAN")
             && translation.rust.contains("pub const ONE: f64 = 0f64")
             && !translation.rust.contains("const ONE: Double"),
         "{}",
@@ -70193,6 +70560,78 @@ class NullableErasedObjectForwarding {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn reused_shared_source_reference_is_cloned_before_object_erasure() {
+    let translation = translate_source(
+        r#"
+class ReusedSharedSourceAsObject {
+    int value;
+
+    ReusedSharedSourceAsObject(int value) {
+        this.value = value;
+    }
+
+    void setValue(int value) {
+        this.value = value;
+    }
+
+}
+
+class ReusedSharedSourceUse {
+    boolean inspect(Object value) {
+        return value != null;
+    }
+
+    int inspectThenRead(ReusedSharedSourceAsObject other) {
+        inspect(other);
+        return other.value;
+    }
+
+    static int run() {
+        ReusedSharedSourceAsObject value = new ReusedSharedSourceAsObject(1);
+        ReusedSharedSourceAsObject alias = value;
+        alias.setValue(7);
+        return new ReusedSharedSourceUse().inspectThenRead(value);
+    }
+}
+"#,
+    );
+
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    assert!(
+        translation
+            .rust
+            .contains("Box::new(other.clone()) as Box<dyn std::any::Any>")
+            && !translation
+                .rust
+                .contains("Box::new(other) as Box<dyn std::any::Any>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "reused_shared_source_as_object",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[cfg(test)]
+mod generated_tests {
+    use super::*;
+
+    #[test]
+    fn object_handoff_does_not_consume_the_shared_java_reference() {
+        assert_eq!(ReusedSharedSourceUse::run(), 7);
+    }
+}
+"#,
         }],
     );
 }

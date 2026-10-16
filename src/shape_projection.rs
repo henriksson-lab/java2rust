@@ -628,7 +628,7 @@ pub fn return_shape_for_java_type(
     }
 }
 
-fn dispatch_for_java_type_or_optional_element(
+pub(crate) fn dispatch_for_java_type_or_optional_element(
     representations: &RepresentationPlan,
     java_ty: &JavaType,
 ) -> DispatchShape {

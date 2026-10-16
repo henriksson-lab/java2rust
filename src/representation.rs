@@ -2090,6 +2090,57 @@ impl RepresentationPlan {
             .or_else(|| self.unique_type_representation_by_simple_name(type_name))
     }
 
+    /// Whether a Java slot type is represented by a source hierarchy carrier.
+    ///
+    /// Most shape-producing paths retain the declared Java root name, but a
+    /// projected optional receiver can already carry the generated carrier
+    /// name (for example `RootValue`).  Both spellings describe the same Rust
+    /// receiver ABI and must select virtual carrier access rather than trying
+    /// to apply the root payload's Rc/Arc storage policy to the enum itself.
+    pub(crate) fn java_type_uses_source_hierarchy_carrier(&self, java_ty: &JavaType) -> bool {
+        let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = java_ty else {
+            return false;
+        };
+        if self
+            .type_representation(name)
+            .is_some_and(|representation| {
+                matches!(
+                    representation.representation(),
+                    ObjectRepresentation::SourceHierarchyCarrier { .. }
+                )
+            })
+        {
+            return true;
+        }
+        let rust_name = crate::java_naming::rust_name_for_java_named_type(name);
+        self.types.values().any(|representation| {
+            matches!(
+                representation.representation(),
+                ObjectRepresentation::SourceHierarchyCarrier { carrier_name, .. }
+                    if crate::java_naming::rust_name_for_java_named_type(carrier_name) == rust_name
+            )
+        })
+    }
+
+    pub(crate) fn java_type_contains_source_hierarchy_carrier(&self, java_ty: &JavaType) -> bool {
+        if self.java_type_uses_source_hierarchy_carrier(java_ty) {
+            return true;
+        }
+        match java_ty {
+            JavaType::Array(element) => self.java_type_contains_source_hierarchy_carrier(element),
+            JavaType::Named { args, .. } => args
+                .iter()
+                .any(|arg| self.java_type_contains_source_hierarchy_carrier(arg)),
+            JavaType::Wildcard(Some(bound)) => match bound {
+                crate::java_ir::WildcardBound::Extends(ty)
+                | crate::java_ir::WildcardBound::Super(ty) => {
+                    self.java_type_contains_source_hierarchy_carrier(ty)
+                }
+            },
+            _ => false,
+        }
+    }
+
     /// Returns the Rust carrier and variant used to construct a source value
     /// whose declared type is the root of a hierarchy carrier.
     ///
