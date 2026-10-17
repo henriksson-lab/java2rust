@@ -71,7 +71,7 @@ mod generated_tests {
         writer.write("@r\nAC\n+\n!!\n").unwrap();
         writer.flush().unwrap();
         writer.close().unwrap();
-        let observed = OutputCarrierRuntime::snapshot(&bytes).unwrap();
+        let observed = OutputCarrierRuntime::snapshot(&bytes);
         assert_eq!(
             observed.into_iter().map(|byte| byte as u8).collect::<Vec<_>>(),
             FASTQ

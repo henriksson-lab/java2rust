@@ -461,6 +461,7 @@ pub struct MethodUsageFacts {
     field_uses: Vec<FieldUse>,
     self_argument_uses: Vec<SelfArgumentUse>,
     mutates_self: bool,
+    uses_receiver: bool,
     active_non_null_bindings: HashSet<BindingId>,
     active_non_null_idless_names: HashSet<String>,
 }
@@ -704,6 +705,12 @@ fn contains_aliased_resolved_source_method_key(
 }
 
 impl MethodUsageFacts {
+    /// Whether evaluating the body reads the enclosing instance, including
+    /// field reads which do not participate in a specialized FieldUse flow.
+    pub(crate) fn uses_receiver(&self) -> bool {
+        self.uses_receiver
+    }
+
     pub fn call_sites(&self) -> &[CallSiteUse] {
         &self.call_sites
     }
@@ -1875,8 +1882,9 @@ pub fn build_call_graph(program: &Program) -> CallGraph {
 
 pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGraph {
     let mut graph = CallGraph::default();
+    let source_symbols = crate::resolve::source_symbols_from_program(program);
     for ty in &program.types {
-        build_type_call_graph(ty, program, &mut graph, facts);
+        build_type_call_graph(ty, program, &source_symbols, &mut graph, facts);
     }
     graph
 }
@@ -1890,8 +1898,18 @@ fn analyze_type_usage(
     let internal_methods = internal_method_names(ty);
     let same_type_method_arg_targets = same_type_method_arg_targets(ty);
     let source_return_nullability = source_return_nullability_by_call_name(ty, semantic_facts);
-    let field_names = field_names(ty, program);
-    let field_types = field_types(ty, program);
+    let mut field_names = field_names(ty, program);
+    let mut field_types = field_types(ty, program);
+    for field in
+        crate::inherited_members::external_inherited_instance_fields_for_type(ty, semantic_facts)
+    {
+        for name in [field.field_name(), field.rust_name()] {
+            field_names.insert(name.to_string());
+            field_types
+                .entry(name.to_string())
+                .or_insert_with(|| field.field_type().clone());
+        }
+    }
     let current_super_type = ty.extends.as_deref();
     for member in &ty.members {
         match member {
@@ -2049,8 +2067,33 @@ fn insert_usage_type_param_bounds(
     }
 }
 
-fn build_type_call_graph(ty: &TypeDecl, program: &Program, graph: &mut CallGraph, facts: &FactSet) {
+fn build_type_call_graph(
+    ty: &TypeDecl,
+    program: &Program,
+    source_symbols: &crate::resolve::SourceSymbols,
+    graph: &mut CallGraph,
+    facts: &FactSet,
+) {
     let internal_methods = all_method_names(ty);
+    let callable_env = |params: &[Param], type_params: &[String], bounds: &[Option<JavaType>]| {
+        let mut env = usage_type_env(ty, type_params, bounds);
+        for (name, java_ty) in field_types(ty, program) {
+            env.insert_field(name, java_ty);
+        }
+        for param in params {
+            env.insert_local(param.name.clone(), param.ty.clone());
+            env.insert_local(param.source_name.clone(), param.ty.clone());
+        }
+        for import in &program.imports {
+            if !import.is_static
+                && !import.is_wildcard
+                && let Some(leaf) = import.path.rsplit('.').next()
+            {
+                env.insert_static_type_alias(leaf, import.path.clone());
+            }
+        }
+        env
+    };
     for member in &ty.members {
         match member {
             Member::Method(method) => {
@@ -2062,6 +2105,12 @@ fn build_type_call_graph(ty: &TypeDecl, program: &Program, graph: &mut CallGraph
                         internal_methods.clone(),
                         caller,
                         program,
+                        source_symbols,
+                        callable_env(
+                            &method.params,
+                            &method.type_params,
+                            &method.type_param_bounds,
+                        ),
                     );
                     collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
@@ -2075,11 +2124,15 @@ fn build_type_call_graph(ty: &TypeDecl, program: &Program, graph: &mut CallGraph
                         internal_methods.clone(),
                         caller,
                         program,
+                        source_symbols,
+                        callable_env(&ctor.params, &ctor.type_params, &ctor.type_param_bounds),
                     );
                     collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
             }
-            Member::Type(nested) => build_type_call_graph(nested, program, graph, facts),
+            Member::Type(nested) => {
+                build_type_call_graph(nested, program, source_symbols, graph, facts)
+            }
             _ => {}
         }
     }
@@ -2091,6 +2144,9 @@ struct CallGraphBuildContext<'a> {
     internal_methods: HashSet<String>,
     current_callable: CallableKey,
     program: &'a Program,
+    source_symbols: &'a crate::resolve::SourceSymbols,
+    type_env: TypeEnv,
+    consumed_callback_bodies: HashSet<SourceLambdaBodyKey>,
     anonymous_super_type: Option<&'a TypeDecl>,
     anonymous_method_param_types: HashMap<String, JavaType>,
     next_lambda_ordinal: usize,
@@ -2104,12 +2160,17 @@ impl<'a> CallGraphBuildContext<'a> {
         internal_methods: HashSet<String>,
         current_callable: CallableKey,
         program: &'a Program,
+        source_symbols: &'a crate::resolve::SourceSymbols,
+        type_env: TypeEnv,
     ) -> Self {
         Self {
             current_type,
             internal_methods,
             current_callable,
             program,
+            source_symbols,
+            type_env,
+            consumed_callback_bodies: HashSet::new(),
             anonymous_super_type: None,
             anonymous_method_param_types: HashMap::new(),
             next_lambda_ordinal: 0,
@@ -2124,6 +2185,9 @@ impl<'a> CallGraphBuildContext<'a> {
             internal_methods: self.internal_methods.clone(),
             current_callable,
             program: self.program,
+            source_symbols: self.source_symbols,
+            type_env: self.type_env.clone(),
+            consumed_callback_bodies: self.consumed_callback_bodies.clone(),
             anonymous_super_type: self.anonymous_super_type,
             anonymous_method_param_types: self.anonymous_method_param_types.clone(),
             next_lambda_ordinal: 0,
@@ -2168,6 +2232,23 @@ impl<'a> CallGraphBuildContext<'a> {
     }
 }
 
+/// Identity in the immutable source AST, not structural equality: two lambdas
+/// with identical text still have distinct lexical captures and callables.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum SourceLambdaBodyKey {
+    Expr(*const Expr),
+    Block(*const Block),
+}
+
+impl SourceLambdaBodyKey {
+    fn for_lambda(body: &LambdaBody) -> Self {
+        match body {
+            LambdaBody::Expr(expr) => Self::Expr(expr.as_ref()),
+            LambdaBody::Block(block) => Self::Block(block),
+        }
+    }
+}
+
 fn all_method_names(ty: &TypeDecl) -> HashSet<String> {
     ty.members
         .iter()
@@ -2184,9 +2265,12 @@ fn collect_call_graph_edges_from_block(
     context: &mut CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) {
+    let outer_types = context.type_env.clone();
     for stmt in &block.statements {
         collect_call_graph_edges_from_stmt(stmt, graph, context, facts);
+        context.type_env.learn_stmt(stmt);
     }
+    context.type_env = outer_types;
 }
 
 fn collect_call_graph_edges_from_stmt(
@@ -2309,7 +2393,9 @@ fn collect_call_graph_edges_from_stmt(
                 collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
         }
-        Stmt::LocalType(ty) => build_type_call_graph(ty, context.program, graph, facts),
+        Stmt::LocalType(ty) => {
+            build_type_call_graph(ty, context.program, context.source_symbols, graph, facts)
+        }
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_call_graph_edges_from_block(block, graph, context, facts)
         }
@@ -2330,8 +2416,48 @@ fn collect_call_graph_edges_from_expr(
             resolved,
         } => {
             let (callee, edge_kind) =
-                call_graph_method_target(receiver.as_deref(), name, args, resolved, context);
+                call_graph_method_target(receiver.as_deref(), name, args, resolved, context, facts);
             add_call_graph_edge(graph, context, callee, edge_kind, facts);
+            if let Some(stream) = crate::stream::build_stream_plan(expr, &context.type_env, facts) {
+                stream.visit_consumed_callbacks(&mut |lambda, input| {
+                    let body_key = match lambda.body() {
+                        crate::stream::StreamLambdaBody::Expr(expr) => Some(SourceLambdaBodyKey::Expr(expr)),
+                        crate::stream::StreamLambdaBody::Block(block) => Some(SourceLambdaBodyKey::Block(block)),
+                        _ => None,
+                    };
+                    if let Some(key) = body_key {
+                        if context.consumed_callback_bodies.insert(key) {
+                            let callback = context.next_lambda();
+                            add_call_graph_edge(graph, context, callback.clone(), CallGraphEdgeKind::LambdaBody, facts);
+                            let mut child = context.child_for(callback);
+                            child.type_env.insert_local(lambda.param_name().to_string(), input.java_ty.clone());
+                            child.type_env.insert_local(lambda.rust_param_name(), input.java_ty.clone());
+                            match lambda.body() {
+                                crate::stream::StreamLambdaBody::Expr(expr) => collect_call_graph_edges_from_expr(expr, graph, &mut child, facts),
+                                crate::stream::StreamLambdaBody::Block(block) => collect_call_graph_edges_from_block(block, graph, &mut child, facts),
+                                _ => unreachable!(),
+                            }
+                        }
+                        return;
+                    }
+                    let crate::stream::StreamLambdaBody::MethodReference { target, method } = lambda.body() else { return; };
+                    // Preserve the established current-receiver callback
+                    // handling below; add only previously absent invocation
+                    // edges for bound and type-qualified source references.
+                    if matches!(target, "this" | "self") {
+                        return;
+                    }
+                    if let Some(call) = crate::resolve::resolve_single_input_source_method_reference(
+                        target, method, &input.java_ty, &context.current_type,
+                        context.source_symbols, &context.type_env, facts,
+                    ) {
+                        let callback = context.next_lambda();
+                        add_call_graph_edge(graph, context, callback.clone(), CallGraphEdgeKind::LambdaBody, facts);
+                        let child = context.child_for(callback);
+                        add_call_graph_edge(graph, &child, resolved_method_call_graph_key(&call, context), CallGraphEdgeKind::DirectMethodCall, facts);
+                    }
+                });
+            }
             if let Some(receiver) = receiver {
                 collect_call_graph_edges_from_expr(receiver, graph, context, facts);
             }
@@ -2345,6 +2471,7 @@ fn collect_call_graph_edges_from_expr(
             args,
             body,
             resolved,
+            ..
         } => {
             if let Some(qualifier) = qualifier {
                 collect_call_graph_edges_from_expr(qualifier, graph, context, facts);
@@ -2420,6 +2547,12 @@ fn collect_call_graph_edges_from_expr(
             }
         }
         Expr::Lambda { body, .. } => {
+            if context
+                .consumed_callback_bodies
+                .contains(&SourceLambdaBodyKey::for_lambda(body))
+            {
+                return;
+            }
             let lambda = context.next_lambda();
             add_call_graph_edge(
                 graph,
@@ -2616,6 +2749,7 @@ fn call_graph_method_target(
     args: &[Expr],
     resolved: &Option<ResolvedCall>,
     context: &CallGraphBuildContext<'_>,
+    facts: &FactSet,
 ) -> (CallableKey, CallGraphEdgeKind) {
     if matches!(receiver, Some(Expr::Super)) {
         if let Some(base) = context.anonymous_super_type
@@ -2632,6 +2766,24 @@ fn call_graph_method_target(
     if let Some(resolved) = resolved {
         return (
             resolved_method_call_graph_key(resolved, context),
+            CallGraphEdgeKind::DirectMethodCall,
+        );
+    }
+    let arg_types = args
+        .iter()
+        .map(|arg| crate::types::infer_expr_type(arg, &context.type_env))
+        .collect::<Vec<_>>();
+    if let Some(resolved) = crate::resolve::resolve_source_call_with_types(
+        receiver,
+        name,
+        &arg_types,
+        &context.current_type,
+        context.source_symbols,
+        &context.type_env,
+        facts,
+    ) {
+        return (
+            resolved_method_call_graph_key(&resolved, context),
             CallGraphEdgeKind::DirectMethodCall,
         );
     }
@@ -4472,6 +4624,11 @@ fn analyze_expr_with_context(
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
     result_returned: bool,
 ) {
+    if matches!(expr, Expr::This | Expr::Super)
+        || self_field_name(expr, facts, field_names).is_some()
+    {
+        facts.uses_receiver = true;
+    }
     if expr_mutates_self_field(
         expr,
         facts,
@@ -5733,12 +5890,20 @@ fn self_field_name<'a>(
 }
 
 fn call_receiver_java_type(receiver: Option<&Expr>, facts: &MethodUsageFacts) -> Option<JavaType> {
-    let Some(Expr::Var(name)) = receiver else {
+    let receiver = receiver?;
+    if let Expr::Var(name) = receiver {
+        return agreed_binding_java_type(facts, name).or_else(|| {
+            static_owner_receiver_name(name).map(|owner| JavaType::Unknown(owner.to_string()))
+        });
+    }
+    let owner = crate::stdlib::qualified_static_owner_java_name(receiver)?;
+    // A package-shaped expression rooted in a live binding is an instance
+    // expression, not a fully qualified static owner.
+    let root = owner.split('.').next()?;
+    if agreed_binding_java_type(facts, root).is_some() {
         return None;
-    };
-    agreed_binding_java_type(facts, name).or_else(|| {
-        static_owner_receiver_name(name).map(|owner| JavaType::Unknown(owner.to_string()))
-    })
+    }
+    Some(JavaType::Unknown(owner))
 }
 
 fn agreed_binding_java_type(facts: &MethodUsageFacts, name: &str) -> Option<JavaType> {
@@ -6527,6 +6692,42 @@ mod tests {
         FacadeSlot, FactProvenance, ReceiverAbi, ResultAbi, Staticness,
     };
     use crate::java_ir::{PrimitiveType, TypeKind};
+
+    #[test]
+    fn qualified_collection_static_owner_preserves_argument_effects_without_binding_shadowing() {
+        let receiver = Expr::FieldAccess(
+            Box::new(Expr::FieldAccess(
+                Box::new(Expr::Var("java".to_string())),
+                "util".to_string(),
+            )),
+            "Collections".to_string(),
+        );
+        let mut usage = MethodUsageFacts::default();
+        let owner = call_receiver_java_type(Some(&receiver), &usage);
+        assert_eq!(
+            owner,
+            Some(JavaType::Unknown("java.util.Collections".to_string()))
+        );
+        let platform_facts = FactSet {
+            external_api_argument_effect_facts:
+                crate::external_packs::java_platform_api_argument_effect_facts(),
+            ..FactSet::default()
+        };
+        assert!(call_argument_effect_mutates_argument(
+            &platform_facts,
+            owner.as_ref(),
+            "reverse",
+            1,
+            0,
+        ));
+        insert_binding_use_facts(
+            &mut usage,
+            "java".to_string(),
+            None,
+            JavaType::Unknown("PackageLikeObject".to_string()),
+        );
+        assert!(call_receiver_java_type(Some(&receiver), &usage).is_none());
+    }
 
     #[test]
     fn package_prefixed_summary_owner_matches_emitted_owner_but_peer_packages_do_not() {

@@ -1,0 +1,12 @@
+# Files from the initial JGraphT run whose generic Map/Set fields exercised
+# Java-key-semantic collection lowering, including nullable field slots.
+org/jgrapht/alg/connectivity/BiconnectivityInspector.java
+org/jgrapht/alg/connectivity/ConnectivityInspector.java
+org/jgrapht/alg/connectivity/KosarajuStrongConnectivityInspector.java
+org/jgrapht/alg/cycle/WeakChordalityInspector.java
+org/jgrapht/alg/interfaces/PlanarityTestingAlgorithm.java
+org/jgrapht/alg/shortestpath/FloydWarshallShortestPaths.java
+org/jgrapht/alg/shortestpath/GraphMeasurer.java
+org/jgrapht/alg/shortestpath/ListSingleSourcePathsImpl.java
+org/jgrapht/alg/shortestpath/TreeSingleSourcePathsImpl.java
+org/jgrapht/alg/util/NeighborCache.java

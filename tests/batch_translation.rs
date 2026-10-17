@@ -1119,12 +1119,19 @@ class BulkLocalCopy {
         "{}",
         rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "batch_bulk_collection_local_return_nullability",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: rust.to_string(),
-            tests: "",
+            tests: r#"
+#[test]
+fn bulk_copy_keeps_the_null_element() {
+    let copied = BulkLocalCopy::copy();
+    assert_eq!(copied.len(), 1);
+    assert!(copied.contains(&None));
+}
+"#,
         }],
     );
 }
@@ -1705,13 +1712,9 @@ public class CarrierProducer {
         "{}",
         block.rust()
     );
-    cargo_check_generated_modules(
+    common::cargo_check_translated_batch_sources(
         "batch_nullable_collection_constructor_field_shape",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: block.rust().to_string(),
-            tests: "",
-        }],
+        &primary_sources,
     );
 }
 
@@ -1922,7 +1925,7 @@ public class StreamUse {
         rendered.contains("pub enum BaseStreamValue")
             && rendered.contains("impl From<StreamFactory_ChildStream> for BaseStreamValue")
             && rendered.contains(
-                "let base: BaseStreamValue = BaseStreamValue::BaseStream(BaseStream::new(3))"
+                "let base: BaseStreamValue = BaseStreamValue::BaseStream(std::rc::Rc::new(BaseStream::new(3)))"
             )
             && !rendered
                 .contains("match BaseStream::new(3) { BaseStreamValue::BaseStream(value) => value"),
@@ -3503,7 +3506,9 @@ public class CompressionFormat {
         .expect("translated parser");
     let wrap_args = parser
         .rust()
-        .split("ExampleUtilCompressionFormat::wrap(")
+        // The canonical source name and its qualified facade alias denote
+        // the same boundary. Check the argument/upcast contract, not spelling.
+        .split("::wrap(")
         .nth(1)
         .and_then(|tail| tail.split_once(", name)"))
         .map(|(args, _)| args)
@@ -3686,11 +3691,22 @@ class ValueSink {
         .find(|translation| translation.path() == "example/LogMathUse.java")
         .expect("translated static object user");
 
+    let declaration = translations
+        .iter()
+        .find(|translation| translation.path() == "example/LogMath.java")
+        .expect("translated static object declaration");
+    let accessor = declaration
+        .rust()
+        .lines()
+        .find_map(|line| {
+            let (name, _) = line.trim().strip_prefix("pub fn ")?.split_once("()")?;
+            name.starts_with("__static_").then_some(name)
+        })
+        .expect("declared static storage accessor");
+    let accessor_call = format!("LogMath::{accessor}()");
+
     assert_eq!(
-        use_translation
-            .rust()
-            .matches("LogMath::__static_i_n_s_t()")
-            .count(),
+        use_translation.rust().matches(&accessor_call).count(),
         3,
         "{}",
         use_translation.rust()
@@ -3753,9 +3769,10 @@ public class ContextGetterConsumer {
 
     assert!(
         consumer.rust().contains("::pack(source")
+            && consumer.rust().contains("get_value().as_ref().ok_or_else(")
             && consumer
                 .rust()
-                .contains("get_value().as_ref().expect(\"Java null receiver\")")
+                .contains("JavaException::new(\"NullPointerException\"")
             && !consumer
                 .rust()
                 .contains("&source.borrow().get_value().as_ref()"),
@@ -4132,7 +4149,8 @@ public class Main {
         .unwrap_or_else(|| panic!("{:#?}", report.translations()));
 
     assert!(
-        main.rust().contains("AMode::value_of(name.as_str())"),
+        main.rust().contains("pub fn run(name: &str)")
+            && main.rust().contains("AMode::value_of(name)"),
         "{}",
         main.rust()
     );
@@ -4143,29 +4161,11 @@ public class Main {
     );
     assert!(!main.rust().contains("BMode::value_of("), "{}", main.rust());
 
-    cargo_check_generated_modules(
+    assert!(a_mode.rust().contains("pub enum AMode") && b_mode.rust().contains("pub enum BMode"));
+    common::cargo_run_translated_batch_sources(
         "batch_imported_source_enum_value_of_package_owner",
-        vec![GeneratedCrateModule {
-            name: "fixture",
-            rust: format!(
-                "pub struct JavaClass<T> {{ name: &'static str, _marker: std::marker::PhantomData<T> }}\n\
-                 impl<T> JavaClass<T> {{ pub fn literal(name: &'static str) -> Self {{ Self {{ name, _marker: std::marker::PhantomData }} }} pub fn get_name(&self) -> String {{ self.name.to_string() }} }}\n\
-                 pub trait JavaEnum: Clone + Eq + Ord + std::hash::Hash + std::fmt::Display {{ fn values() -> Vec<Self> where Self: Sized; fn ordinal(&self) -> i32; fn name(&self) -> &'static str; }}\n\
-                 pub trait JavaAppendValue {{ fn into_java_append_string(self) -> String; }}\n\
-                 pub fn java_erased_object_to_string<T>(_value: &T) -> String {{ panic!(\"unsupported Java erased object display: runtime target is erased\") }}\n\
-                 {}\n{}\n{}",
-                format!(
-                    "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\n{}",
-                    generated_source_items_from_marker(&a_mode.rust(), "pub enum AMode")
-                ),
-                format!(
-                    "#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]\n{}",
-                    generated_source_items_from_marker(&b_mode.rust(), "pub enum BMode")
-                ),
-                generated_source_items_from_marker(&main.rust(), "pub struct Main")
-            ),
-            tests: "",
-        }],
+        &primary_sources,
+        "fn main() { assert_eq!(translated::Main::run(\"FIRST\"), 0); assert_eq!(translated::Main::run(\"SECOND\"), 1); }",
     );
 }
 

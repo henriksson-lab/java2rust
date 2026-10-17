@@ -104,6 +104,8 @@ pub struct StreamRenderContext<'a> {
     current_type: Option<&'a str>,
     self_receiver_available: bool,
     propagate_java_exceptions: bool,
+    single_use_owned_input: bool,
+    representations: Option<&'a crate::representation::RepresentationPlan>,
 }
 
 impl<'a> StreamRenderContext<'a> {
@@ -118,6 +120,8 @@ impl<'a> StreamRenderContext<'a> {
             current_type: None,
             self_receiver_available: false,
             propagate_java_exceptions: false,
+            single_use_owned_input: false,
+            representations: None,
         }
     }
 
@@ -132,6 +136,8 @@ impl<'a> StreamRenderContext<'a> {
             current_type: None,
             self_receiver_available: false,
             propagate_java_exceptions: false,
+            single_use_owned_input: false,
+            representations: None,
         }
     }
 
@@ -154,6 +160,8 @@ impl<'a> StreamRenderContext<'a> {
             current_type,
             self_receiver_available,
             propagate_java_exceptions,
+            single_use_owned_input: false,
+            representations: None,
         }
     }
 
@@ -177,6 +185,8 @@ impl<'a> StreamRenderContext<'a> {
             current_type,
             self_receiver_available,
             propagate_java_exceptions,
+            single_use_owned_input: false,
+            representations: None,
         }
     }
 
@@ -191,6 +201,8 @@ impl<'a> StreamRenderContext<'a> {
             current_type: None,
             self_receiver_available: false,
             propagate_java_exceptions: false,
+            single_use_owned_input: false,
+            representations: None,
         }
     }
 
@@ -208,11 +220,21 @@ impl<'a> StreamRenderContext<'a> {
             current_type: self.current_type,
             self_receiver_available: self.self_receiver_available,
             propagate_java_exceptions: self.propagate_java_exceptions,
+            single_use_owned_input: self.single_use_owned_input,
+            representations: self.representations,
         }
     }
 
     pub(crate) fn with_local_shapes(mut self, locals: &'a [LocalPlan]) -> Self {
         self.current_local_shapes = Some(locals);
+        self
+    }
+
+    pub(crate) fn with_representations(
+        mut self,
+        representations: &'a crate::representation::RepresentationPlan,
+    ) -> Self {
+        self.representations = Some(representations);
         self
     }
 
@@ -472,6 +494,20 @@ fn stream_lambda_expr(expr: RustExpr, precedence: u8) -> StreamLambdaRenderedExp
     StreamLambdaRenderedExpr { expr, precedence }
 }
 
+fn stream_callback_result_expr(body: RustExpr) -> RustExpr {
+    function_call_projection(
+        RustExpr::generic_path(
+            ["Ok"],
+            vec![
+                crate::rust_ir::RustType::Named("_".to_string()),
+                crate::rust_ir::RustType::Named("JavaException".to_string()),
+            ],
+            None::<String>,
+        ),
+        vec![body],
+    )
+}
+
 pub(crate) fn emit_stream_lambda_body_expr(
     expr: &Expr,
     param: &str,
@@ -535,6 +571,53 @@ fn emit_stream_lambda_body_with_locals_prec(
     parent_prec: u8,
     right_child: bool,
 ) -> Option<StreamLambdaRenderedExpr> {
+    let mut lowered = emit_stream_lambda_body_with_locals_prec_impl(
+        expr,
+        param,
+        param_rust,
+        value,
+        locals,
+        ctx,
+        param_shape,
+        parent_prec,
+        right_child,
+    )?;
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = expr
+        && let Some((owner, rust_name, _)) = stream_source_call_signature(
+            receiver.as_deref(),
+            name,
+            args,
+            resolved.as_ref(),
+            param,
+            param_shape,
+            ctx,
+        )
+        && ctx.callable_analysis.is_some_and(|analysis| {
+            analysis.source_method_identity_returns_result(owner, rust_name)
+        })
+    {
+        lowered.expr = propagate_result_projection(lowered.expr);
+        lowered.precedence = 11;
+    }
+    Some(lowered)
+}
+
+fn emit_stream_lambda_body_with_locals_prec_impl(
+    expr: &Expr,
+    param: &str,
+    param_rust: &str,
+    value: StreamLambdaValue,
+    locals: &[&str],
+    ctx: StreamRenderContext<'_>,
+    param_shape: Option<&RustSlotShape>,
+    parent_prec: u8,
+    right_child: bool,
+) -> Option<StreamLambdaRenderedExpr> {
     if let Some(env) = ctx.env
         && let Some(plan) =
             crate::string_concat_plan::build_string_concat_plan(expr, env.type_env())
@@ -575,7 +658,22 @@ fn emit_stream_lambda_body_with_locals_prec(
             stream_lambda_expr(expr, precedence)
         }
         Expr::Var(name) if name == param => {
-            stream_lambda_expr(stream_lambda_value_expr(value, param_rust), 12)
+            let mut projected = stream_lambda_value_expr(value, param_rust);
+            if let Some(shape) = param_shape
+                && shape.capabilities().is_copy()
+            {
+                // Value projection has already removed the iterator's loan.
+                // Passing its old borrowed slot to coercion would dereference
+                // a second time. Record the physical Copy value we produced.
+                let mut actual = shape.clone();
+                actual.ownership = OwnershipShape::Owned;
+                projected = RustExpr::shaped_as(
+                    crate::rust_ir::RustExprShape::OwnedRecovery,
+                    Some(actual),
+                    projected,
+                );
+            }
+            stream_lambda_expr(projected, 12)
         }
         Expr::Var(name) => stream_lambda_expr(ctx.bare_name_expr(name, locals), 12),
         Expr::Binary {
@@ -874,7 +972,12 @@ fn emit_stream_lambda_body_with_locals_prec(
                 ctx,
                 param_shape,
             )?;
-            stream_lambda_expr(receiver_method_call_projection(receiver, name, args), 11)
+            let method = resolved
+                .as_ref()
+                .filter(|call| call.kind == CallKind::Instance)
+                .map(|call| call.rust_name.as_str())
+                .unwrap_or(name);
+            stream_lambda_expr(receiver_method_call_projection(receiver, method, args), 11)
         }
         Expr::Call {
             receiver: None,
@@ -897,11 +1000,35 @@ fn emit_stream_lambda_body_with_locals_prec(
                 .into_iter()
                 .map(|arg| arg.expr)
                 .collect::<Vec<_>>();
-            let method_name =
-                stream_receiverless_call_rust_name(name, args.len(), args, param, param_shape, ctx)
-                    .or_else(|| resolved.as_ref().map(|resolved| resolved.rust_name.clone()))
-                    .unwrap_or_else(|| name.clone());
+            let source_signature = stream_source_call_signature(
+                None,
+                name,
+                args,
+                resolved.as_ref(),
+                param,
+                param_shape,
+                ctx,
+            );
+            let method_name = source_signature
+                .as_ref()
+                .map(|(_, rust_name, _)| rust_name.clone())
+                .or_else(|| resolved.as_ref().map(|resolved| resolved.rust_name.clone()))
+                .unwrap_or_else(|| name.clone());
             let method = crate::parser::to_snake_case(method_name.as_str());
+            if let Some((owner, _, signature)) = source_signature
+                && matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
+            {
+                return Some(stream_lambda_expr(
+                    function_call_projection(
+                        owner_associated_path_projection(
+                            &stream_static_raw_owner_name(&owner, ctx),
+                            &method,
+                        ),
+                        call_args,
+                    ),
+                    11,
+                ));
+            }
             match resolved.as_ref().map(|resolved| resolved.kind) {
                 Some(CallKind::Instance) => stream_lambda_expr(
                     current_receiver_method_call_projection(&method, call_args),
@@ -1176,7 +1303,10 @@ fn render_stream_plan_structured(
         ctx,
         StreamRenderOptions::default(),
         matches!(plan.source().iteration(), StreamSourceIteration::Borrowed),
-        plan.source_element().shape().clone(),
+        effective_stream_item_shape(
+            plan.source_element().shape(),
+            matches!(plan.source().iteration(), StreamSourceIteration::Borrowed),
+        ),
     )?;
     expr = render_stream_terminal_expr(
         next_expr,
@@ -1208,17 +1338,47 @@ fn apply_stream_ops_structured(
         if item_is_result {
             return None;
         }
+        let callback = match op {
+            StreamOp::Filter(FilterPlan::Predicate(lambda))
+            | StreamOp::Map { lambda, .. }
+            | StreamOp::MapToPrimitive { lambda, .. } => Some(lambda),
+            _ => None,
+        };
+        let capture = callback.and_then(|lambda| stream_bound_receiver_capture(lambda, ctx));
+        let callback_ctx = capture
+            .as_ref()
+            .map(|capture| ctx.with_env(&capture.env))
+            .unwrap_or(ctx);
+        let input = capture.as_ref().map(|_| expr.clone());
+        if capture.is_some() {
+            expr = RustExpr::Var("__java_bound_stream".to_string());
+        }
         match op {
             StreamOp::Filter(FilterPlan::Predicate(lambda)) => {
+                let lambda = capture
+                    .as_ref()
+                    .map(|capture| &capture.lambda)
+                    .unwrap_or(lambda);
+                let body = emit_stream_lambda_closure_body_expr(
+                    lambda,
+                    if item_is_borrowed {
+                        StreamLambdaValue::FilterBorrowed
+                    } else {
+                        StreamLambdaValue::BorrowedItem
+                    },
+                    callback_ctx,
+                    Some(&item_shape),
+                )?;
+                if body.has_unbound_try() {
+                    // A bool-only Iterator::filter cannot carry Java errors.
+                    // Do not emit an invalid infallible closure; this requires
+                    // the general fallible-intermediate pipeline plan.
+                    return None;
+                }
                 expr = stream_filter_op_projection(
                     expr,
                     &lambda.param_name(),
-                    emit_stream_lambda_closure_body_expr(
-                        lambda,
-                        StreamLambdaValue::FilterBorrowed,
-                        ctx,
-                        Some(&item_shape),
-                    )?,
+                    body,
                     options.move_filter_closures,
                 );
             }
@@ -1239,13 +1399,18 @@ fn apply_stream_ops_structured(
                 lambda,
                 output_shape,
             } => {
+                let lambda = capture
+                    .as_ref()
+                    .map(|capture| &capture.lambda)
+                    .unwrap_or(lambda);
+                let ctx = callback_ctx;
                 let value = if item_is_borrowed {
                     StreamLambdaValue::BorrowedItem
                 } else {
                     StreamLambdaValue::OwnedItem
                 };
                 let param_shape = effective_stream_item_shape(&item_shape, item_is_borrowed);
-                let effective_output_shape = if matches!(op, StreamOp::Map { .. }) {
+                let mut effective_output_shape = if matches!(op, StreamOp::Map { .. }) {
                     render_context_lambda_output_shape(lambda, &param_shape, ctx)
                         .unwrap_or_else(|| output_shape.clone())
                 } else {
@@ -1253,12 +1418,59 @@ fn apply_stream_ops_structured(
                 };
                 let param =
                     render_stream_lambda_param(&lambda.rust_param_name(), &param_shape, ctx);
-                expr = stream_map_op_projection_with_param(
-                    expr,
-                    param,
-                    emit_stream_lambda_closure_body_expr(lambda, value, ctx, Some(&param_shape))?,
-                );
-                item_is_result = stream_lambda_returns_result(lambda, &param_shape, ctx);
+                let mut body =
+                    emit_stream_lambda_closure_body_expr(lambda, value, ctx, Some(&param_shape))?;
+                item_is_result = body.has_unbound_try();
+                if item_is_result {
+                    body = stream_callback_result_expr(body);
+                }
+                if matches!(op, StreamOp::MapToPrimitive { .. })
+                    && let Some(actual) =
+                        render_context_lambda_output_shape(lambda, &param_shape, ctx)
+                    && (actual.java_ty != effective_output_shape.java_ty
+                        || actual.ownership == OwnershipShape::SharedBorrow)
+                {
+                    let default_facts = FactSet::default();
+                    let conversion = plan_lowered_slot_conversion(
+                        &LoweredType::Slot(Box::new(actual)),
+                        Slot::Return(effective_output_shape.clone()),
+                        ctx.facts.unwrap_or(&default_facts),
+                    );
+                    body = if item_is_result {
+                        stream_map_op_projection_with_param(
+                            body,
+                            RustClosureParam {
+                                pattern: "__java_mapped_value".to_string(),
+                                ty: None,
+                            },
+                            apply_lowered_slot_conversion_to_expr(
+                                RustExpr::Var("__java_mapped_value".to_string()),
+                                &conversion,
+                            ),
+                        )
+                    } else {
+                        apply_lowered_slot_conversion_to_expr(body, &conversion)
+                    };
+                }
+                if effective_output_shape.ownership == OwnershipShape::SharedBorrow
+                    && !item_is_result
+                {
+                    // A map closure owns its input item. A source helper may
+                    // expose a borrowed view into that item, but the view
+                    // cannot escape the closure. Materialize through the same
+                    // slot conversion used at ordinary owned boundaries.
+                    let actual = effective_output_shape.clone();
+                    effective_output_shape.ownership = OwnershipShape::Owned;
+                    effective_output_shape.view = crate::slot_shape::ViewShape::Native;
+                    let default_facts = FactSet::default();
+                    let conversion = plan_lowered_slot_conversion(
+                        &LoweredType::Slot(Box::new(actual)),
+                        Slot::Return(effective_output_shape.clone()),
+                        ctx.facts.unwrap_or(&default_facts),
+                    );
+                    body = apply_lowered_slot_conversion_to_expr(body, &conversion);
+                }
+                expr = stream_map_op_projection_with_param(expr, param, body);
                 item_is_borrowed = false;
                 item_shape = effective_output_shape;
             }
@@ -1337,48 +1549,87 @@ fn apply_stream_ops_structured(
                 item_shape = pipeline.output_shape().clone();
             }
         }
+        if let Some(capture) = capture {
+            expr = crate::coercion::stream_bound_receiver_capture_projection(
+                input.unwrap(),
+                capture.value,
+                expr,
+            );
+        }
     }
     Some((expr, item_is_borrowed, item_shape, item_is_result))
 }
 
-fn stream_lambda_returns_result(
-    lambda: &LambdaPlan<'_>,
-    param_shape: &RustSlotShape,
+struct StreamBoundReceiverCapture<'a> {
+    value: RustExpr,
+    env: ShapeEnv,
+    lambda: LambdaPlan<'a>,
+}
+
+fn stream_bound_receiver_capture<'a>(
+    lambda: &LambdaPlan<'a>,
     ctx: StreamRenderContext<'_>,
-) -> bool {
-    let StreamLambdaBody::MethodReference { target, method } = lambda.body() else {
-        return false;
+) -> Option<StreamBoundReceiverCapture<'a>> {
+    let StreamLambdaBody::MethodReference { target, .. } = lambda.body() else {
+        return None;
     };
-    if !matches!(target, "this" | "self") {
-        return false;
+    let env = ctx.env?;
+    let receiver =
+        crate::method_reference_plan::bound_method_reference_receiver(target, env)?.source_expr();
+    let shape = infer_expr_shape_with_context(
+        &receiver,
+        env,
+        ExprShapeContext::new(ctx.signatures, None, ctx.facts),
+    );
+    let element_ty = shape.optional_element_type()?;
+    let lowered = emit_stream_lambda_body_with_locals_prec(
+        &receiver,
+        "__java_unused_bound_receiver",
+        "__java_unused_bound_receiver",
+        StreamLambdaValue::OwnedItem,
+        &[],
+        ctx,
+        None,
+        0,
+        false,
+    )?
+    .expr;
+    // Evaluating a bound reference checks its receiver before traversal, even
+    // for an empty stream. Reuse nullable-source exception projection rather
+    // than deferring the check to each invocation of the callback.
+    let mut value = crate::coercion::checked_optional_borrowed_receiver_projection(
+        lowered,
+        crate::coercion::OptionalSequenceReceiverProjection::Shared,
+        ctx.propagate_java_exceptions,
+    );
+    let default_facts = FactSet::default();
+    let mut captured_shape = optional_element_slot_shape_with_facts(
+        &shape,
+        element_ty,
+        ctx.facts.unwrap_or(&default_facts),
+    );
+    captured_shape.ownership = OwnershipShape::SharedBorrow;
+    if captured_shape.java_ty == JavaType::String {
+        // Capture an immutable string view, not a reference to a String
+        // container whose equality/argument ABI is different from `str`.
+        if captured_shape.view == crate::slot_shape::ViewShape::Str {
+            value = crate::coercion::deref_borrowed_projection(value);
+        }
+        let target = borrowed_string_content_shape();
+        let conversion = plan_lowered_slot_conversion(
+            &LoweredType::Slot(Box::new(captured_shape)),
+            Slot::Argument(target.clone()),
+            ctx.facts.unwrap_or(&default_facts),
+        );
+        value = apply_lowered_slot_conversion_to_expr(value, &conversion);
+        captured_shape = target;
     }
-    let Some(((current_type, signatures), callable_analysis)) = ctx
-        .current_type
-        .zip(ctx.signatures)
-        .zip(ctx.callable_analysis)
-    else {
-        return false;
-    };
-    let selected = ctx
-        .facts
-        .and_then(|facts| {
-            signatures.method_signature_by_base_name_and_arg_types_with_facts(
-                current_type,
-                method,
-                std::slice::from_ref(&param_shape.java_ty),
-                facts,
-            )
-        })
-        .or_else(|| {
-            signatures.method_signature_by_base_name_and_arg_types(
-                current_type,
-                method,
-                std::slice::from_ref(&param_shape.java_ty),
-            )
-        });
-    selected.is_some_and(|(rust_name, signature)| {
-        !matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
-            && callable_analysis.source_method_identity_returns_result(current_type, rust_name)
+    let mut captured_env = env.clone();
+    captured_env.insert_local_shape("__java_bound_receiver".to_string(), captured_shape);
+    Some(StreamBoundReceiverCapture {
+        value,
+        env: captured_env,
+        lambda: lambda.with_method_reference_target("__java_bound_receiver")?,
     })
 }
 
@@ -1472,6 +1723,27 @@ fn render_stream_terminal_expr(
     ctx: StreamRenderContext<'_>,
 ) -> Option<RustExpr> {
     match &plan.terminal() {
+        StreamTerminal::Sum => {
+            let JavaType::Primitive(primitive) = item_shape.java_ty else {
+                return None;
+            };
+            let receiver =
+                primitive_terminal_receiver(receiver, item_is_borrowed, item_is_result, ctx)?;
+            Some(crate::coercion::stream_sum_terminal_projection(
+                receiver, primitive,
+            ))
+        }
+        StreamTerminal::PrimitiveExtremum { maximum } => {
+            let JavaType::Primitive(primitive) = item_shape.java_ty else {
+                return None;
+            };
+            crate::stdlib::primitive_optional_name(primitive)?;
+            let receiver =
+                primitive_terminal_receiver(receiver, item_is_borrowed, item_is_result, ctx)?;
+            Some(crate::coercion::stream_extremum_terminal_projection(
+                receiver, primitive, *maximum,
+            ))
+        }
         StreamTerminal::Count => Some(RustExpr::Cast {
             expr: Box::new(receiver_method_call_projection_exact(
                 receiver,
@@ -1551,9 +1823,26 @@ fn render_stream_terminal_expr(
                 )?,
             ))
         }
-        StreamTerminal::Join { delimiter } => {
+        StreamTerminal::Join { delimiter, affixes } => {
+            let eager_arguments = affixes.is_some()
+                || delimiter.is_some_and(|expr| !matches!(expr, Expr::Literal(_)));
             let delimiter = stream_join_delimiter_projection(*delimiter, ctx)?;
             let item_display = stream_join_item_display_projection(item_shape);
+            if eager_arguments {
+                let affixes = match affixes {
+                    Some((prefix, suffix)) => Some((
+                        stream_join_delimiter_projection(Some(prefix), ctx)?,
+                        stream_join_delimiter_projection(Some(suffix), ctx)?,
+                    )),
+                    None => None,
+                };
+                return Some(crate::coercion::staged_stream_join_terminal_projection(
+                    receiver,
+                    item_display,
+                    delimiter,
+                    affixes,
+                ));
+            }
             Some(stream_join_terminal_projection(
                 receiver,
                 item_display,
@@ -1561,6 +1850,15 @@ fn render_stream_terminal_expr(
             ))
         }
         StreamTerminal::AnyMatch(lambda) | StreamTerminal::AllMatch(lambda) => {
+            let capture = stream_bound_receiver_capture(lambda, ctx);
+            let callback_ctx = capture
+                .as_ref()
+                .map(|capture| ctx.with_env(&capture.env))
+                .unwrap_or(ctx);
+            let callback = capture
+                .as_ref()
+                .map(|capture| &capture.lambda)
+                .unwrap_or(lambda);
             let terminal_method = match &plan.terminal() {
                 StreamTerminal::AnyMatch(_) => "any",
                 StreamTerminal::AllMatch(_) => "all",
@@ -1571,12 +1869,46 @@ fn render_stream_terminal_expr(
             } else {
                 StreamLambdaValue::OwnedItem
             };
-            Some(stream_match_terminal_projection(
-                receiver,
-                terminal_method,
-                &lambda.rust_param_name(),
-                emit_stream_lambda_closure_body_expr(lambda, value, ctx, Some(item_shape))?,
-            ))
+            let input = if capture.is_some() {
+                RustExpr::Var("__java_bound_stream".to_string())
+            } else {
+                receiver.clone()
+            };
+            let body = emit_stream_lambda_closure_body_expr(
+                callback,
+                value,
+                callback_ctx,
+                Some(item_shape),
+            )?;
+            let result = if body.has_unbound_try() || item_is_result {
+                let result = crate::coercion::fallible_stream_match_terminal_projection(
+                    input,
+                    terminal_method == "all",
+                    &callback.rust_param_name(),
+                    body,
+                    item_is_result,
+                );
+                if ctx.propagate_java_exceptions {
+                    propagate_result_projection(result)
+                } else {
+                    crate::coercion::unwrap_result_or_panic_uncaught_java_exception(result)
+                }
+            } else {
+                stream_match_terminal_projection(
+                    input,
+                    terminal_method,
+                    &callback.rust_param_name(),
+                    body,
+                )
+            };
+            Some(match capture {
+                Some(capture) => crate::coercion::stream_bound_receiver_capture_projection(
+                    receiver,
+                    capture.value,
+                    result,
+                ),
+                None => result,
+            })
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List)
         | StreamTerminal::ToArray
@@ -1587,12 +1919,15 @@ fn render_stream_terminal_expr(
                 "Result<Vec<_>, JavaException>",
             )))
         }
-        StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set)
-            if item_is_result && ctx.propagate_java_exceptions =>
+        StreamTerminal::Collect(kind)
+            if kind.is_set_like() && item_is_result && ctx.propagate_java_exceptions =>
         {
             Some(propagate_result_projection(typed_collect_projection(
                 receiver,
-                "Result<std::collections::HashSet<_>, JavaException>",
+                &format!(
+                    "Result<{}, JavaException>",
+                    crate::coercion::set_collect_type_for_kind(*kind)?
+                ),
             )))
         }
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Map) => None,
@@ -1610,6 +1945,33 @@ fn render_stream_terminal_expr(
     }
 }
 
+fn primitive_terminal_receiver(
+    receiver: RustExpr,
+    borrowed: bool,
+    fallible: bool,
+    ctx: StreamRenderContext<'_>,
+) -> Option<RustExpr> {
+    let mut receiver = if fallible {
+        if !ctx.propagate_java_exceptions {
+            return None;
+        }
+        receiver_method_call_projection_exact(
+            propagate_result_projection(typed_collect_projection(
+                receiver,
+                "Result<Vec<_>, JavaException>",
+            )),
+            "into_iter",
+            Vec::new(),
+        )
+    } else {
+        receiver
+    };
+    if borrowed {
+        receiver = receiver_method_call_projection_exact(receiver, "copied", Vec::new());
+    }
+    Some(receiver)
+}
+
 fn render_no_op_stream_plan_structured(
     plan: &StreamPlan<'_>,
     lowered_source: RustExpr,
@@ -1625,7 +1987,7 @@ fn render_no_op_stream_plan_structured(
         sequence_iteration_projection(plan.source().iteration()),
     );
     let item_is_borrowed = matches!(plan.source().iteration(), StreamSourceIteration::Borrowed);
-    let item_shape = plan.source_element().shape().clone();
+    let item_shape = effective_stream_item_shape(plan.source_element().shape(), item_is_borrowed);
     let actual = stream_terminal_actual_after_rendered_ops(plan, item_is_borrowed, &item_shape);
     Some(LoweredExpr::new(
         receiver_method_call_projection_exact(iter, terminal_method, Vec::new()),
@@ -1635,11 +1997,13 @@ fn render_no_op_stream_plan_structured(
 
 fn no_op_stream_terminal_method(terminal: &StreamTerminal<'_>) -> Option<&'static str> {
     match terminal {
-        StreamTerminal::Sum => Some("sum::<i32>"),
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::List)
         | StreamTerminal::ToArray => Some("collect::<Vec<_>>"),
         StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
             Some("collect::<std::collections::HashSet<_>>")
+        }
+        StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::InsertionOrderedSet) => {
+            Some("collect::<JavaLinkedHashSet<_>>")
         }
         StreamTerminal::FindFirst => Some("next"),
         _ => None,
@@ -1657,8 +2021,11 @@ fn stream_terminal_actual_after_rendered_ops(
             | StreamTerminal::ToArray => {
                 return LoweredType::collected_list_from_element_shape(item_shape.clone());
             }
-            StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
-                return LoweredType::collected_set_from_element_shape(item_shape.clone());
+            StreamTerminal::Collect(kind) if kind.is_set_like() => {
+                return LoweredType::collected_set_kind_from_element_shape(
+                    item_shape.clone(),
+                    *kind,
+                );
             }
             StreamTerminal::FindFirst => {
                 if let LoweredType::OptionalElementBorrow { option_shape, .. } = &plan.actual() {
@@ -1677,8 +2044,11 @@ fn stream_terminal_actual_after_rendered_ops(
             | StreamTerminal::ToArray => {
                 return LoweredType::collected_list_from_element_shape(item_shape.clone());
             }
-            StreamTerminal::Collect(crate::stdlib::JavaCollectionKind::Set) => {
-                return LoweredType::collected_set_from_element_shape(item_shape.clone());
+            StreamTerminal::Collect(kind) if kind.is_set_like() => {
+                return LoweredType::collected_set_kind_from_element_shape(
+                    item_shape.clone(),
+                    *kind,
+                );
             }
             _ => {}
         }
@@ -1765,6 +2135,24 @@ fn render_context_lambda_output_shape(
         );
     }
     let return_expr = lambda.body().return_expr()?;
+    if let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+    } = return_expr
+        && let Some((_, _, signature)) = stream_source_call_signature(
+            receiver.as_deref(),
+            name,
+            args,
+            resolved.as_ref(),
+            lambda.param_name(),
+            Some(param_shape),
+            ctx,
+        )
+    {
+        return signature.return_shape_cloned();
+    }
     let mut lambda_env = env.clone();
     lambda_env.insert_local_shape(lambda.param_name(), param_shape.clone());
     Some(infer_expr_shape_with_context(
@@ -1780,51 +2168,101 @@ fn source_method_reference_output_shape(
     param_shape: &RustSlotShape,
     ctx: StreamRenderContext<'_>,
 ) -> Option<RustSlotShape> {
-    let signatures = ctx.signatures?;
+    source_method_reference_signature(target, method, param_shape, ctx)?
+        .2
+        .return_shape_cloned()
+}
 
+fn source_method_reference_signature<'a>(
+    target: &str,
+    method: &str,
+    param_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'a>,
+) -> Option<(String, String, &'a crate::signature::MethodSignaturePlan)> {
+    if let Some(bound) = source_bound_method_reference_signature(target, method, param_shape, ctx) {
+        return Some(bound);
+    }
     if matches!(target, "this" | "self") {
-        let current_type = ctx.current_type?;
-        let selected = ctx
-            .facts
-            .and_then(|facts| {
-                signatures.method_signature_by_base_name_and_arg_types_with_facts(
-                    current_type,
-                    method,
-                    std::slice::from_ref(&param_shape.java_ty),
-                    facts,
-                )
-            })
-            .or_else(|| {
-                signatures.method_signature_by_base_name_and_arg_types(
-                    current_type,
-                    method,
-                    std::slice::from_ref(&param_shape.java_ty),
-                )
-            });
-        return selected
-            .filter(|(_, signature)| {
-                !matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
-            })
-            .and_then(|(_, signature)| signature.return_shape_cloned());
+        return None;
     }
-
-    // `Owner::method` can denote either an unbound instance method whose
-    // receiver is supplied by the stream item, or a static function whose
-    // sole argument is the stream item. The solved receiver plan lets this
-    // lookup preserve the source method's full Rust ABI (including a nullable
-    // return carrier) without guessing from the Java spelling alone.
-    if let Some((_, signature)) =
-        signatures.method_signature_by_base_name_accepting_arity(target, method, 0)
-        && !matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
-    {
-        return signature.return_shape_cloned();
-    }
-    signatures
-        .method_signature_by_base_name_accepting_arity(target, method, 1)
+    let owner = ctx
+        .env
+        .and_then(|env| env.type_env().static_type_alias(target))
+        .unwrap_or(target);
+    let unbound = ctx
+        .signatures?
+        .method_signature_by_base_name_accepting_arity(owner, method, 0)
         .filter(|(_, signature)| {
-            matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
+            !matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
         })
-        .and_then(|(_, signature)| signature.return_shape_cloned())
+        .map(|(name, signature)| (owner.to_string(), name, signature));
+    let input = "__java_method_ref_input";
+    let static_call = stream_source_call_signature(
+        Some(&Expr::Var(owner.to_string())),
+        method,
+        &[Expr::Var(input.to_string())],
+        None,
+        input,
+        Some(param_shape),
+        ctx,
+    )
+    .filter(|(_, _, signature)| {
+        matches!(signature.receiver(), crate::signature::ReceiverPlan::None)
+    });
+    match (unbound, static_call) {
+        (Some(selected), None) | (None, Some(selected)) => Some(selected),
+        _ => None,
+    }
+}
+
+fn source_bound_method_reference_signature<'a>(
+    target: &str,
+    method: &str,
+    param_shape: &RustSlotShape,
+    ctx: StreamRenderContext<'a>,
+) -> Option<(String, String, &'a crate::signature::MethodSignaturePlan)> {
+    let signatures = ctx.signatures?;
+    let env = ctx.env?;
+    let owner = if matches!(target, "this" | "self") {
+        ctx.current_type?.to_string()
+    } else {
+        let receiver = crate::method_reference_plan::bound_method_reference_receiver(target, env)?;
+        let ty = crate::types::infer_expr_type(&receiver.source_expr(), env.type_env());
+        let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+        let name = match &ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+            _ => return None,
+        };
+        let bounded = env.type_env().type_param_bound(name).unwrap_or(&ty);
+        match bounded {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => env
+                .type_env()
+                .static_type_alias(name)
+                .unwrap_or(name)
+                .to_string(),
+            JavaType::String => "String".to_string(),
+            _ => return None,
+        }
+    };
+    let selected = ctx
+        .facts
+        .and_then(|facts| {
+            signatures.method_signature_by_base_name_and_arg_types_with_facts(
+                &owner,
+                method,
+                std::slice::from_ref(&param_shape.java_ty),
+                facts,
+            )
+        })
+        .or_else(|| {
+            signatures.method_signature_by_base_name_and_arg_types(
+                &owner,
+                method,
+                std::slice::from_ref(&param_shape.java_ty),
+            )
+        })?;
+    (!matches!(selected.1.receiver(), crate::signature::ReceiverPlan::None))
+        .then(|| (owner, selected.0, selected.1))
 }
 
 fn render_stream_lambda_param(
@@ -2135,7 +2573,11 @@ fn stream_join_expr_delimiter_projection(
             BorrowProjectionUse::StringView,
         ));
     };
-    let actual = crate::expr_shape::infer_expr_shape(expr, env);
+    let actual = infer_expr_shape_with_context(
+        expr,
+        env,
+        ExprShapeContext::new(ctx.signatures, None, ctx.facts),
+    );
     let default_facts;
     let facts = match ctx.facts {
         Some(facts) => facts,
@@ -2240,6 +2682,119 @@ fn emit_stream_method_reference_body_expr(
     let StreamLambdaBody::MethodReference { target, method } = lambda.body() else {
         return None;
     };
+    if method != "new"
+        && let Some((owner, rust_name, signature)) = param_shape
+            .and_then(|shape| source_method_reference_signature(target, method, shape, ctx))
+    {
+        let static_call = matches!(signature.receiver(), crate::signature::ReceiverPlan::None);
+        let bound = ctx.env.and_then(|env| {
+            crate::method_reference_plan::bound_method_reference_receiver(target, env)
+        });
+        let current_receiver = matches!(target, "this" | "self");
+        let unbound = !static_call && !current_receiver && bound.is_none();
+        let receiver = if static_call {
+            Expr::Var(owner.clone())
+        } else if let Some(bound) = bound {
+            bound.source_expr()
+        } else if current_receiver {
+            Expr::This
+        } else {
+            Expr::Var(lambda.param_name().to_string())
+        };
+        let call = Expr::Call {
+            receiver: Some(Box::new(receiver)),
+            name: method.to_string(),
+            args: if unbound {
+                Vec::new()
+            } else {
+                vec![Expr::Var(lambda.param_name().to_string())]
+            },
+            resolved: Some(crate::java_ir::ResolvedCall {
+                declaring_type: owner,
+                rust_name,
+                kind: if static_call {
+                    CallKind::Static
+                } else {
+                    CallKind::Instance
+                },
+                return_type: signature
+                    .return_shape()
+                    .map(|shape| shape.java_ty.clone())
+                    .unwrap_or(JavaType::Void),
+                arg_target_types: signature
+                    .params()
+                    .iter()
+                    .map(|param| param.shape().java_ty.clone())
+                    .collect(),
+                arg_coercions: Vec::new(),
+            }),
+        };
+        return emit_stream_lambda_body_with_locals_prec(
+            &call,
+            lambda.param_name(),
+            &lambda.rust_param_name(),
+            value,
+            &[lambda.param_name()],
+            StreamRenderContext {
+                single_use_owned_input: matches!(value, StreamLambdaValue::OwnedItem),
+                ..ctx
+            },
+            param_shape,
+            0,
+            false,
+        )
+        .map(|lowered| lowered.expr);
+    }
+    if method != "new"
+        && let Some(bound) = ctx.env.and_then(|env| {
+            crate::method_reference_plan::bound_method_reference_receiver(target, env)
+        })
+    {
+        let resolved = param_shape
+            .and_then(|shape| source_bound_method_reference_signature(target, method, shape, ctx))
+            .map(
+                |(owner, rust_name, signature)| crate::java_ir::ResolvedCall {
+                    declaring_type: owner,
+                    rust_name,
+                    kind: CallKind::Instance,
+                    return_type: signature
+                        .return_shape()
+                        .map(|shape| shape.java_ty.clone())
+                        .unwrap_or(JavaType::Void),
+                    arg_target_types: signature
+                        .params()
+                        .iter()
+                        .map(|param| param.shape().java_ty.clone())
+                        .collect(),
+                    arg_coercions: Vec::new(),
+                },
+            );
+        let call = Expr::Call {
+            receiver: Some(Box::new(bound.source_expr())),
+            name: method.to_string(),
+            args: vec![Expr::Var(lambda.param_name().to_string())],
+            resolved,
+        };
+        // A bound method reference forwards its input exactly once. A map
+        // closure owns that input, unlike a filter's borrowed item; consuming
+        // it needs neither a Clone bound nor a copied Java reference carrier.
+        let ctx = StreamRenderContext {
+            single_use_owned_input: matches!(value, StreamLambdaValue::OwnedItem),
+            ..ctx
+        };
+        return emit_stream_lambda_body_with_locals_prec(
+            &call,
+            lambda.param_name(),
+            &lambda.rust_param_name(),
+            value,
+            &[lambda.param_name()],
+            ctx,
+            param_shape,
+            0,
+            false,
+        )
+        .map(|lowered| lowered.expr);
+    }
     if let Some(expr) = emit_stream_method_reference_body_through_call_plan(
         target,
         method,
@@ -3657,7 +4212,13 @@ fn emit_stream_lambda_call_args_for_resolved_exprs(
                         if matches!(arg, Expr::Var(name) if name == param)
                             && stream_lambda_borrowed_item_expr(lowered.expr(), param)
                         {
-                            recover_stream_lambda_owned_arg_move_expr(arg, lowered, param, locals)
+                            recover_stream_lambda_owned_arg_move_expr(
+                                arg,
+                                lowered,
+                                param,
+                                locals,
+                                ctx.single_use_owned_input,
+                            )
                         } else {
                             lowered
                         }
@@ -3665,18 +4226,6 @@ fn emit_stream_lambda_call_args_for_resolved_exprs(
             })
             .collect(),
     )
-}
-
-fn stream_receiverless_call_rust_name(
-    name: &str,
-    arg_count: usize,
-    args: &[Expr],
-    param: &str,
-    param_shape: Option<&RustSlotShape>,
-    ctx: StreamRenderContext<'_>,
-) -> Option<String> {
-    stream_receiverless_call_signature(name, arg_count, args, param, param_shape, ctx)
-        .map(|(rust_name, _)| rust_name)
 }
 
 fn stream_receiverless_call_signature<'a>(
@@ -3687,9 +4236,44 @@ fn stream_receiverless_call_signature<'a>(
     param_shape: Option<&RustSlotShape>,
     ctx: StreamRenderContext<'a>,
 ) -> Option<(String, &'a crate::signature::MethodSignaturePlan)> {
-    let current_type = ctx.current_type?;
+    let _ = arg_count;
+    stream_source_call_signature(None, name, args, None, param, param_shape, ctx)
+        .map(|(_, rust_name, signature)| (rust_name, signature))
+}
+
+fn stream_source_call_signature<'a>(
+    receiver: Option<&Expr>,
+    name: &str,
+    args: &[Expr],
+    resolved: Option<&crate::java_ir::ResolvedCall>,
+    param: &str,
+    param_shape: Option<&RustSlotShape>,
+    ctx: StreamRenderContext<'a>,
+) -> Option<(String, String, &'a crate::signature::MethodSignaturePlan)> {
     let signatures = ctx.signatures?;
     let env = ctx.env?;
+    let owner = if let Some(receiver) = receiver {
+        let mut types = env.type_env().clone();
+        if let Some(shape) = param_shape {
+            types.insert_local(param.to_string(), shape.java_ty.clone());
+        }
+        let ty = crate::types::infer_expr_type(receiver, &types);
+        let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+        match ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+            _ => resolved?.declaring_type.clone(),
+        }
+    } else {
+        resolved
+            .map(|call| call.declaring_type.as_str())
+            .or(ctx.current_type)?
+            .to_string()
+    };
+    let owner = env
+        .type_env()
+        .static_type_alias(&owner)
+        .unwrap_or(&owner)
+        .to_string();
     let arg_types = args
         .iter()
         .map(|arg| {
@@ -3702,11 +4286,22 @@ fn stream_receiverless_call_signature<'a>(
             }
         })
         .collect::<Vec<_>>();
-    signatures
-        .method_signature_by_base_name_and_arg_types(current_type, name, &arg_types)
-        .or_else(|| {
-            signatures.method_signature_by_base_name_and_arity(current_type, name, arg_count)
+    let selected = ctx
+        .facts
+        .and_then(|facts| {
+            signatures.method_signature_by_base_name_and_arg_types_with_facts(
+                &owner, name, &arg_types, facts,
+            )
         })
+        .or_else(|| {
+            signatures.method_signature_by_base_name_and_arg_types(&owner, name, &arg_types)
+        })
+        .or_else(|| {
+            resolved
+                .and_then(|call| signatures.method_signature_by_rust_name(&owner, &call.rust_name))
+                .map(|signature| (resolved.unwrap().rust_name.clone(), signature))
+        })?;
+    Some((owner, selected.0, selected.1))
 }
 
 fn adapt_stream_lambda_arg_for_slot_expr(
@@ -3744,6 +4339,7 @@ fn adapt_stream_lambda_arg_for_slot_expr(
             planned.unwrap_or(lowered),
             param,
             locals,
+            ctx.single_use_owned_input,
         ),
         StreamLambdaArgumentSlotPlan::GenericSlotConversion => planned.unwrap_or(lowered),
     };
@@ -3833,7 +4429,11 @@ fn render_stream_lambda_arg_to_slot_through_plan_expr(
     ctx: StreamRenderContext<'_>,
     param_shape: Option<&RustSlotShape>,
 ) -> Option<StreamLambdaRenderedExpr> {
-    let actual = stream_lambda_arg_actual_shape(arg, param, locals, ctx, param_shape)?;
+    let actual = lowered
+        .expr
+        .recorded_slot_shape()
+        .cloned()
+        .or_else(|| stream_lambda_arg_actual_shape(arg, param, locals, ctx, param_shape))?;
     let default_facts;
     let facts = match ctx.facts {
         Some(facts) => facts,
@@ -3891,9 +4491,10 @@ fn recover_stream_lambda_owned_arg_move_expr(
     lowered: StreamLambdaRenderedExpr,
     param: &str,
     locals: &[&str],
+    single_use_owned_input: bool,
 ) -> StreamLambdaRenderedExpr {
     match arg {
-        Expr::Var(name) if name == param => {
+        Expr::Var(name) if name == param && !single_use_owned_input => {
             stream_lambda_expr(apply_clone_projection(lowered.expr), 11)
         }
         Expr::Var(name) if locals.iter().all(|local| *local != name) => {
@@ -3919,7 +4520,9 @@ fn recover_stream_lambda_borrowed_string_param_move_expr(
         && stream_lambda_arg_actual_shape(arg, param, locals, ctx, param_shape)
             .is_some_and(|shape| shape.java_ty == JavaType::String)
     {
-        stream_lambda_expr(apply_clone_projection(RustExpr::Var(param.to_string())), 11)
+        // Clone the projected String, not the closure's reference to it.
+        // Explicit Clone::clone on &(&String) only copies the reference.
+        stream_lambda_expr(apply_clone_projection(lowered.expr), 11)
     } else {
         lowered
     }
@@ -4095,6 +4698,16 @@ fn stream_static_owner_segment_name(owner: &str) -> String {
 }
 
 fn stream_static_owner_type_name_with_context(owner: &str, ctx: StreamRenderContext<'_>) -> String {
+    if let Some((representations, facts)) = ctx.representations.zip(ctx.facts)
+        && crate::effective_facts::EffectiveFacts::new(facts)
+            .has_parsed_source_type_capability_for_name(owner)
+    {
+        return crate::emit::emit_type(&crate::slot_render::rust_source_static_owner_type(
+            owner,
+            &crate::effective_facts::EffectiveFacts::new(facts),
+            representations,
+        ));
+    }
     let rendered = ctx
         .facts
         .map(|facts| crate::call_plan::rust_static_owner_type_name_with_facts(owner, facts))
@@ -4248,6 +4861,45 @@ fn emit_stream_lambda_receiver_with_locals_expr(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn primitive_mapping_does_not_invent_a_sum_for_a_numeric_slot() {
+        let expr = parse_expr("Arrays.stream(values).mapToInt(String::length)");
+        let mut env = TypeEnv::new();
+        env.insert_local("values", JavaType::Array(Box::new(JavaType::String)));
+        let facts = FactSet::default();
+        assert!(crate::stream::build_stream_plan(&expr, &env, &facts).is_none());
+        assert!(crate::stream::build_stream_plan_for_slot(&expr, &env, &facts).is_none());
+    }
+
+    #[test]
+    fn constructor_reference_uses_type_namespace_despite_same_named_local() {
+        let expr =
+            parse_expr("Arrays.stream(values).map(Factory::new).collect(Collectors.toList())");
+        let mut env = ShapeEnv::new();
+        env.insert_local_shape(
+            "values".to_string(),
+            RustSlotShape::conservative(JavaType::Array(Box::new(JavaType::String))),
+        );
+        env.insert_local_shape(
+            "Factory".to_string(),
+            RustSlotShape::conservative(JavaType::Named {
+                name: "Factory".to_string(),
+                args: Vec::new(),
+            }),
+        );
+        let facts = FactSet::default();
+        let plan = crate::stream::build_stream_plan(&expr, env.type_env(), &facts).unwrap();
+        let lowered = render_stream_plan_with_context(
+            &plan,
+            RustExpr::Var("values".to_string()),
+            StreamRenderContext::new_with_facts(&env, &facts),
+        )
+        .unwrap();
+        let rust = crate::emit::emit_expr(&lowered.into_expr());
+        assert!(rust.contains("Factory::new"), "{rust}");
+        assert!(!rust.contains("factory.new"), "{rust}");
+    }
     use crate::emit::emit_expr;
     use crate::facts::{ExternalConstructorFact, FactProvenance};
     use crate::java_ir::PrimitiveType;
@@ -4296,6 +4948,7 @@ mod tests {
     #[test]
     fn stream_mutated_local_scan_sees_qualified_new_receiver() {
         let expr = Expr::New {
+            infer_type_arguments: false,
             ty: JavaType::Unknown("Inner".to_string()),
             qualifier: Some(Box::new(Expr::Unary {
                 op: UnaryOp::PostInc,
@@ -4493,6 +5146,9 @@ mod tests {
             RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
         );
         env.insert_static_type_alias("genomics_d_b_utils", "org.genomicsdb.GenomicsDBUtils");
+        // Source expressions retain Java type spelling; the normalized alias
+        // is still seeded separately for compatibility inputs below.
+        env.insert_static_type_alias("GenomicsDBUtils", "org.genomicsdb.GenomicsDBUtils");
         env.insert_local_shape(
             "vid_map_p_b",
             RustSlotShape::for_storage(JavaType::Unknown("VidMapPB".to_string())),

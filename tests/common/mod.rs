@@ -57,6 +57,115 @@ pub(crate) fn cargo_test_generated_modules(crate_name: &str, modules: Vec<Genera
     cargo_verify_generated_modules(crate_name, modules, "test");
 }
 
+/// Verify an actual multi-file translation through production crate assembly.
+/// A peer emitted by the batch is not an opaque stand-in in each isolated file.
+pub(crate) fn cargo_check_translated_batch_sources(
+    name: &str,
+    sources: &[new_java2rust::BatchSource],
+) {
+    verify_translated_batch_sources(name, sources, None, None);
+}
+
+pub(crate) fn cargo_run_translated_batch_sources(
+    name: &str,
+    sources: &[new_java2rust::BatchSource],
+    probe_main: &str,
+) {
+    verify_translated_batch_sources(name, sources, Some(probe_main), None);
+}
+
+pub(crate) fn cargo_run_translated_batch_sources_with_facts(
+    name: &str,
+    sources: &[new_java2rust::BatchSource],
+    probe_main: &str,
+    facts: &str,
+) {
+    verify_translated_batch_sources(name, sources, Some(probe_main), Some(facts));
+}
+
+fn verify_translated_batch_sources(
+    name: &str,
+    sources: &[new_java2rust::BatchSource],
+    probe_main: Option<&str>,
+    facts: Option<&str>,
+) {
+    let unique = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = std::env::temp_dir().join(format!("new_java2rust_batch_{name}_{unique}"));
+    let primary = dir.join("java");
+    for source in sources {
+        let relative = Path::new(source.path());
+        assert!(
+            relative.is_relative()
+                && relative
+                    .components()
+                    .all(|part| matches!(part, std::path::Component::Normal(_)))
+        );
+        let path = primary.join(relative);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, source.source()).unwrap();
+    }
+    let out = dir.join("out");
+    let mut command = Command::new(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh"),
+    );
+    if let Some(facts) = facts {
+        let facts_path = dir.join("external.facts");
+        fs::write(&facts_path, facts).unwrap();
+        command.arg("--facts").arg(facts_path);
+    }
+    command
+        .args([
+            "--skip-resolver-bench",
+            "--offline-cargo",
+            "--jobs",
+            "2",
+            "--primary",
+        ])
+        .arg(&primary)
+        .arg("--out")
+        .arg(&out)
+        .env("NEW_JAVA2RUST_BIN", env!("CARGO_BIN_EXE_new-java2rust"))
+        .env_remove("CARGO_MAKEFLAGS")
+        .env_remove("MAKEFLAGS");
+    let output = run_with_watchdog(&mut command, generated_crate_verify_timeout());
+    assert!(
+        output.status.is_some_and(|status| status.success()),
+        "{}\n{}\nfixture: {}",
+        output.stdout,
+        output.stderr,
+        dir.display()
+    );
+    if let Some(main) = probe_main {
+        // A separate consumer checks behavior without changing generated Rust.
+        let probe = dir.join("probe");
+        fs::create_dir_all(probe.join("src")).unwrap();
+        fs::write(probe.join("Cargo.toml"), format!(
+            "[package]\nname=\"batch-behavior-probe\"\nversion=\"0.0.0\"\nedition=\"2024\"\n[dependencies]\ntranslated={{package=\"new-java2rust-focused-output\",path={:?}}}\n",
+            out.join("generated-crate").to_str().unwrap(),
+        )).unwrap();
+        fs::write(probe.join("src/main.rs"), main).unwrap();
+        let mut command = Command::new(env!("CARGO"));
+        command
+            .args(["run", "--quiet", "--offline"])
+            .current_dir(&probe)
+            .env("CARGO_TARGET_DIR", probe.join("target"))
+            .env_remove("CARGO_MAKEFLAGS")
+            .env_remove("MAKEFLAGS");
+        let output = run_with_watchdog(&mut command, generated_crate_verify_timeout());
+        assert!(
+            output.status.is_some_and(|status| status.success()),
+            "{}\n{}\nfixture: {}",
+            output.stdout,
+            output.stderr,
+            dir.display()
+        );
+    }
+    fs::remove_dir_all(dir).unwrap();
+}
+
 pub(crate) fn cargo_check_generated_modules_fails_with(
     crate_name: &str,
     modules: Vec<GeneratedCrateModule>,

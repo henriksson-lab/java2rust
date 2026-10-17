@@ -1,3 +1,4 @@
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 use crate::emit::emit_type;
@@ -22,6 +23,63 @@ use crate::slot_shape::{DispatchShape, OwnershipShape, RustSlotShape, ViewShape}
 pub(crate) enum RepresentationTypeEmission {
     LowerAsConcreteStruct,
     RawRustItem(String),
+}
+
+/// Run representation lowering with memoized source-type declaration lookup.
+///
+/// Representation emission asks the same context-sensitive type questions
+/// from many independently reusable helpers.  A lookup used to recursively
+/// scan the entire support program every time, including rebuilding emitted
+/// aliases for every declaration.  Keep the existing resolver as the single
+/// source of truth, but remember its answer as an owned structural path for
+/// the duration of one lowering operation.  Paths avoid retaining AST
+/// references in thread-local state, and the scoped session prevents a reused
+/// allocation address from confusing two different programs.
+pub(crate) fn with_type_decl_lookup_session<R>(f: impl FnOnce() -> R) -> R {
+    TYPE_DECL_LOOKUP_SESSION.with(|slot| {
+        let previous = slot.replace(Some(TypeDeclLookupSession::default()));
+        struct Restore<'a> {
+            slot: &'a RefCell<Option<TypeDeclLookupSession>>,
+            previous: Option<TypeDeclLookupSession>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.slot.replace(self.previous.take());
+            }
+        }
+        let _restore = Restore { slot, previous };
+        f()
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TypeDeclPath {
+    top_level: usize,
+    nested_members: Vec<usize>,
+}
+
+#[derive(Debug, Default)]
+struct ProgramTypeDeclLookupCache {
+    unqualified: HashMap<String, Option<TypeDeclPath>>,
+    owner_qualified: HashMap<String, HashMap<String, Option<TypeDeclPath>>>,
+}
+
+#[derive(Debug, Default)]
+struct TypeDeclLookupSession {
+    by_program_address: HashMap<usize, ProgramTypeDeclLookupCache>,
+}
+
+thread_local! {
+    static TYPE_DECL_LOOKUP_SESSION: RefCell<Option<TypeDeclLookupSession>> = const {
+        RefCell::new(None)
+    };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TYPE_DECL_LOOKUP_MISS_COUNT: std::cell::Cell<usize> = const {
+        std::cell::Cell::new(0)
+    };
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -93,6 +151,7 @@ fn type_emission_for_with_facts_and_exceptions(
                 signatures,
                 facts,
                 exceptions,
+                representations,
                 representations.storage_placement_for(&ty.name).sync(),
             ))
         }
@@ -273,7 +332,7 @@ pub(crate) fn source_hierarchy_virtual_dispatch_trait_item_for_type(
     let mut items = methods;
     items.extend(field_getters);
     Some(format!(
-        "pub trait {clone_trait_name} {{\n    fn clone_box(&self) -> Box<dyn {trait_name}>;\n}}\n\nimpl<T> {clone_trait_name} for T\nwhere\n    T: {trait_name} + Clone + 'static,\n{{\n    fn clone_box(&self) -> Box<dyn {trait_name}> {{ Box::new(std::clone::Clone::clone(self)) }}\n}}\n\nimpl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}\n\npub trait {trait_name}: {clone_trait_name} {{\n{}\n}}",
+        "pub trait {clone_trait_name} {{\n    fn clone_box(&self) -> Box<dyn {trait_name}>;\n}}\n\nimpl<T> {clone_trait_name} for T\nwhere\n    T: {trait_name} + Clone + 'static,\n{{\n    fn clone_box(&self) -> Box<dyn {trait_name}> {{ Box::new(std::clone::Clone::clone(self)) }}\n}}\n\nimpl Clone for Box<dyn {trait_name}> {{\n    fn clone(&self) -> Self {{ self.clone_box() }}\n}}\n\npub trait {trait_name}: {clone_trait_name} + std::fmt::Display {{\n{}\n}}",
         items.join("\n"),
     ))
 }
@@ -1449,6 +1508,7 @@ fn source_hierarchy_carrier_forwarding_method(
             &carrier_method.params,
             carrier_method.body.as_ref(),
             &required_clone_bounds,
+            Some(owner),
         );
     let type_params = if type_params.is_empty() {
         String::new()
@@ -1619,6 +1679,7 @@ fn source_hierarchy_carrier_forwarding_method(
                                         support_program,
                                         facts,
                                         representations,
+                                        signatures,
                                     )
                             {
                                 return adapted;
@@ -1631,7 +1692,12 @@ fn source_hierarchy_carrier_forwarding_method(
                             }) {
                                 materialized_param_types.push(method.params[index].ty.clone());
                             }
-                            trait_impl_forwarded_arg(name, carrier_shape, payload_shape.as_ref())
+                            trait_impl_forwarded_arg_with_facts(
+                                name,
+                                carrier_shape,
+                                payload_shape.as_ref(),
+                                facts,
+                            )
                         },
                     )
                 })
@@ -1691,6 +1757,7 @@ fn source_hierarchy_carrier_forwarding_method(
                 facts,
                 representations,
                 exceptions,
+                signatures,
             );
             format!("            Self::{variant}({carrier_binding}) => {call},")
         })
@@ -1755,6 +1822,7 @@ fn source_hierarchy_specialized_type_param_forwarded_arg(
     program: &Program,
     facts: &FactSet,
     representations: &RepresentationPlan,
+    signatures: &SignaturePlan,
 ) -> Option<String> {
     if !owner
         .type_params
@@ -1792,6 +1860,7 @@ fn source_hierarchy_specialized_type_param_forwarded_arg(
                 program,
                 facts,
                 representations,
+                signatures,
             )
     {
         debug_assert_eq!(payload_type, storage_ty);
@@ -1856,6 +1925,7 @@ fn adapt_source_hierarchy_carrier_covariant_return(
     facts: &FactSet,
     representations: &RepresentationPlan,
     exceptions: MethodExceptionPlan,
+    signatures: &SignaturePlan,
 ) -> String {
     let Some(payload_method) = payload_method else {
         return call;
@@ -1881,6 +1951,7 @@ fn adapt_source_hierarchy_carrier_covariant_return(
             program,
             facts,
             representations,
+            signatures,
         );
         let type_param = rust_identifier_token(type_param);
         let recover = |value: &str| {
@@ -1941,6 +2012,7 @@ fn erased_interface_retarget_for_hierarchy_return(
     program: &Program,
     facts: &FactSet,
     representations: &RepresentationPlan,
+    signatures: &SignaturePlan,
 ) -> Option<(String, String, String, String)> {
     let index = carrier_owner
         .type_params
@@ -1967,7 +2039,7 @@ fn erased_interface_retarget_for_hierarchy_return(
         find_type_decl_for_owner_context(program, &carrier_owner.name, payload_name)?;
     let interface = find_type_decl_for_owner_context(program, &carrier_owner.name, interface_name)?;
     if interface.kind != TypeKind::Interface
-        || !generic_interface_supports_retarget_adapter(program, interface)
+        || !generic_interface_supports_retarget_adapter(program, interface, signatures)
     {
         return None;
     }
@@ -3499,22 +3571,19 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
     if !matches!(ty.kind, TypeKind::Class | TypeKind::Enum) {
         return Vec::new();
     }
-    let explicit_parameterized = ty
-        .implements
-        .iter()
-        .filter_map(|implemented| {
-            let JavaType::Named { name, args } = crate::parser::parse_hierarchy_type(implemented)
-            else {
-                return None;
-            };
-            (!args.is_empty()).then_some((name, args))
-        })
-        .collect::<Vec<_>>();
-    let mut emitted = explicit_parameterized
-        .iter()
-        .filter_map(|(interface_name, args)| {
-            let trait_name = dyn_trait_name_for(representations, interface_name)?;
-            let interface = find_type_decl_for_owner_context(program, &ty.name, interface_name)?;
+    implemented_interfaces_for_type(program, ty)
+        .into_iter()
+        .filter_map(|interface_name| {
+            let interface = find_type_decl_for_owner_context(program, &ty.name, &interface_name)?;
+            let trait_name = rust_name_for_java_named_type(&dyn_trait_name_for(
+                representations,
+                &interface.name,
+            )?);
+            // Resolve every implemented slot through the existing ancestor
+            // substitution machinery. Comparing lexical edge spellings to
+            // canonical owners lost nested-interface arguments and emitted a
+            // second, unparameterized impl for the same Java interface.
+            let args = interface_type_arguments_in_target(program, ty, interface)?;
             let rendered_args = args
                 .iter()
                 .map(|arg| {
@@ -3526,33 +3595,21 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            let trait_path = format!("{trait_name}<{rendered_args}>");
+            let trait_path = if args.is_empty() {
+                trait_name
+            } else {
+                format!("{trait_name}<{rendered_args}>")
+            };
             let substitutions = interface
                 .type_params
                 .iter()
                 .cloned()
                 .zip(args.iter().cloned())
                 .collect::<HashMap<_, _>>();
-            let mut specialized_interface = interface.clone();
-            specialized_interface.type_params.clear();
-            specialized_interface.type_param_bounds.clear();
-            for member in &mut specialized_interface.members {
-                if let Member::Method(method) = member {
-                    method.return_type = crate::resolve::substitute_method_type_variables(
-                        &method.return_type,
-                        &substitutions,
-                    );
-                    for param in &mut method.params {
-                        param.ty = crate::resolve::substitute_method_type_variables(
-                            &param.ty,
-                            &substitutions,
-                        );
-                    }
-                }
-            }
             trait_impl_for_type(
                 ty,
-                &specialized_interface,
+                interface,
+                &substitutions,
                 program,
                 &trait_path,
                 signatures,
@@ -3561,31 +3618,7 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
                 representations,
             )
         })
-        .collect::<Vec<_>>();
-    emitted.extend(
-        implemented_interfaces_for_type(program, ty)
-            .into_iter()
-            .filter(|interface_name| {
-                !explicit_parameterized
-                    .iter()
-                    .any(|(explicit, _)| explicit == interface_name)
-            })
-            .filter_map(|interface_name| {
-                let trait_name = dyn_trait_name_for(representations, &interface_name)?;
-                let interface = find_type_decl(program, &interface_name)?;
-                trait_impl_for_type(
-                    ty,
-                    interface,
-                    program,
-                    &trait_name,
-                    signatures,
-                    facts,
-                    exceptions,
-                    representations,
-                )
-            }),
-    );
-    emitted
+        .collect()
 }
 
 pub(crate) fn source_class_bound_trait_item_for_type(
@@ -4000,6 +4033,15 @@ fn source_class_bound_trait_method_signature_with_return_shape(
     return_shape_override: Option<RustSlotShape>,
     representations: &RepresentationPlan,
 ) -> String {
+    // Signature planning reifies source wildcard inputs as callable generics.
+    // The class-bound declaration and every forwarding impl must bind those
+    // same generics, not render only the original Java method parameters.
+    let effective_method = crate::inherited_members::method_with_synthesized_source_wildcard_params(
+        method,
+        ty,
+        &[program],
+    );
+    let method = &effective_method;
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
     params.push(match signature.receiver() {
@@ -4032,8 +4074,24 @@ fn source_class_bound_trait_method_signature_with_return_shape(
         .rust_name
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
-    let type_params = rust_method_type_params(method, program, &ty.name);
-    let where_clause = source_trait_method_where_clause(ty, method, program, representations);
+    let type_params =
+        crate::item_assembly::function_type_params_with_optional_lifetime_and_support_contexts(
+            Some(&method.name),
+            &method.type_params,
+            &method.type_param_bounds,
+            false,
+            &[program],
+            &method.params,
+            method.body.as_ref(),
+            Some(ty),
+        );
+    let type_params = if type_params.is_empty() {
+        String::new()
+    } else {
+        format!("<{}>", type_params.join(", "))
+    };
+    let where_clause =
+        source_trait_method_where_clause(ty, method, program, facts, representations, None);
     format!(
         "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
         params.join(", ")
@@ -4044,20 +4102,36 @@ fn source_trait_method_where_clause(
     owner: &TypeDecl,
     method: &MethodDecl,
     program: &Program,
+    facts: &FactSet,
     representations: &RepresentationPlan,
+    owner_substitutions: Option<&HashMap<String, JavaType>>,
 ) -> String {
     let mut bounds = Vec::new();
     if !method.type_params.is_empty() {
         bounds.push("Self: Sized".to_string());
     }
-    bounds.extend(
-        crate::item_assembly::source_method_class_type_param_where_bounds(
+    let cache = crate::item_assembly::CloneRequirementCache::default();
+    for (parameter, capabilities) in
+        crate::item_assembly::source_method_class_type_param_capabilities_with_cache(
             owner,
             method,
             Some(representations),
             &[program],
-        ),
-    );
+            &cache,
+        )
+    {
+        let parameter = owner_substitutions
+            .and_then(|substitutions| substitutions.get(&parameter))
+            .map(|actual| {
+                emit_type(&rust_type_for_java_type_with_facts_and_representations(
+                    actual,
+                    facts,
+                    representations,
+                ))
+            })
+            .unwrap_or(parameter);
+        bounds.push(format!("{parameter}: {}", capabilities.join(" + ")));
+    }
     if bounds.is_empty() {
         String::new()
     } else {
@@ -4173,7 +4247,12 @@ fn source_class_bound_trait_impl_method(
                 .params()
                 .get(index)
                 .map(|param| param.shape());
-            trait_impl_forwarded_arg(param.name(), param.shape(), implementation_shape)
+            trait_impl_forwarded_arg_with_facts(
+                param.name(),
+                param.shape(),
+                implementation_shape,
+                facts,
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -4214,6 +4293,7 @@ fn source_class_bound_trait_impl_method(
             .or(bound_signature.return_shape()),
         &implementation_signature.return_shape_cloned(),
         exceptions,
+        facts,
     );
     let body = if source_class_bound_trait_method_return_type_with_shape(
         bound_method,
@@ -4291,24 +4371,15 @@ fn adapt_source_class_bound_trait_impl_return(
     trait_return_shape: Option<&RustSlotShape>,
     implementation_return_shape: &Option<RustSlotShape>,
     exceptions: MethodExceptionPlan,
+    facts: &FactSet,
 ) -> String {
-    if exceptions.wrap_returns_in_result() {
-        return call;
-    }
-    let Some(trait_shape) = trait_return_shape else {
-        return call;
-    };
-    if trait_shape.optional_element_type().is_some() {
-        return call;
-    }
-    if let Some(shape) = implementation_return_shape
-        && shape
-            .optional_element_type()
-            .is_some_and(|element_ty| element_ty == trait_shape.java_ty)
-    {
-        return format!("{call}.expect(\"Java null receiver\")");
-    }
-    call
+    adapt_trait_impl_forwarded_return(
+        call,
+        trait_return_shape,
+        implementation_return_shape,
+        exceptions,
+        facts,
+    )
 }
 
 fn implemented_interfaces_for_type(program: &Program, ty: &TypeDecl) -> Vec<String> {
@@ -4372,6 +4443,7 @@ fn trait_item_for_type(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
     sync_trait: bool,
 ) -> String {
     let trait_name = rust_name_for_java_named_type(trait_name);
@@ -4385,6 +4457,7 @@ fn trait_item_for_type(
                 signatures,
                 facts,
                 exceptions.method_plan(ty, method),
+                representations,
             )),
             _ => None,
         })
@@ -4466,7 +4539,7 @@ fn interface_ancestor_instantiations<'a>(
             else {
                 continue;
             };
-            if parent.kind != TypeKind::Interface || !seen.insert(parent.name.clone()) {
+            if !seen.insert(parent.name.clone()) {
                 continue;
             }
             let args = parent
@@ -4487,10 +4560,12 @@ fn interface_ancestor_instantiations<'a>(
                 .cloned()
                 .zip(args.iter().cloned())
                 .collect::<HashMap<_, _>>();
-            out.push(InterfaceAncestorInstantiation {
-                interface: parent,
-                args,
-            });
+            if parent.kind == TypeKind::Interface {
+                out.push(InterfaceAncestorInstantiation {
+                    interface: parent,
+                    args,
+                });
+            }
             visit(program, parent, &parent_substitutions, seen, out);
         }
     }
@@ -4547,6 +4622,49 @@ pub(crate) fn interface_type_arguments_in_target(
         .map(|ancestor| ancestor.args)
 }
 
+pub(crate) fn source_interface_upcast_facts(
+    program: &Program,
+) -> Vec<crate::facts::SourceInterfaceUpcastFact> {
+    fn collect(
+        program: &Program,
+        ty: &TypeDecl,
+        out: &mut Vec<crate::facts::SourceInterfaceUpcastFact>,
+    ) {
+        if ty.kind == TypeKind::Interface {
+            for parent in interface_ancestor_instantiations(program, ty) {
+                out.push(crate::facts::SourceInterfaceUpcastFact {
+                    source_type: JavaType::Named {
+                        name: ty.name.clone(),
+                        args: ty
+                            .type_params
+                            .iter()
+                            .map(|name| JavaType::Named {
+                                name: name.clone(),
+                                args: Vec::new(),
+                            })
+                            .collect(),
+                    },
+                    target_type: JavaType::Named {
+                        name: parent.interface.name.clone(),
+                        args: parent.args,
+                    },
+                    type_params: ty.type_params.clone(),
+                });
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect(program, nested, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for ty in &program.types {
+        collect(program, ty, &mut out);
+    }
+    out
+}
+
 fn boxed_interface_upcast_impls(
     ty: &TypeDecl,
     derived_trait_name: &str,
@@ -4560,7 +4678,7 @@ fn boxed_interface_upcast_impls(
         return None;
     }
     let parents = interface_ancestor_instantiations(program, ty);
-    let derived_contracts = specialized_interface_abstract_contracts(program, ty);
+    let derived_contracts = specialized_interface_instance_contracts(program, ty, &HashMap::new());
     let derived_trait_path =
         parameterized_interface_trait_path(derived_trait_name, &ty.type_params);
     let generic_impl_params = if ty.type_params.is_empty() {
@@ -4596,28 +4714,26 @@ fn boxed_interface_upcast_impls(
                     .cloned()
                     .zip(parent_instantiation.args.iter().cloned())
                     .collect::<HashMap<_, _>>();
-                let mut parent_signatures = specialized_interface_abstract_contracts(program, parent)
+                let mut parent_signatures = specialized_interface_instance_contracts(program, parent, &substitutions)
                     .into_iter()
+                    // A generic method has no trait-object vtable slot. When
+                    // the derived surface selects this exact default body,
+                    // inherit that body on the upcast carrier instead of
+                    // trying to call it through the erased child. Do not
+                    // silently substitute a parent default for an override.
+                    .filter(|contract| !(contract.method.body.is_some()
+                        && !contract.method.type_params.is_empty()
+                        && derived_contracts.iter().any(|selected|
+                            selected.owner.name == contract.owner.name
+                                && selected.method == contract.method)))
                     .map(|contract| {
                         let owner = contract.owner;
                         let method = contract.method;
-                        let return_type = crate::resolve::substitute_method_type_variables(
-                            &contract.return_type,
-                            &substitutions,
+                        let return_type = contract.return_type.clone();
+                        let param_types = contract.param_types.clone();
+                        let return_shape = specialized_interface_method_return_shape(
+                            owner, method, &return_type, program, signatures, representations,
                         );
-                        let param_types = contract
-                            .param_types
-                            .iter()
-                            .map(|ty| crate::resolve::substitute_method_type_variables(ty, &substitutions))
-                            .collect::<Vec<_>>();
-                        let return_shape = if return_type != method.return_type
-                            || matches!(&return_type, JavaType::Named { name, args }
-                                if args.is_empty() && ty.type_params.contains(name))
-                        {
-                            Some(RustSlotShape::for_storage(return_type.clone()))
-                        } else {
-                            trait_method_return_shape_plan(owner, method, program, signatures)
-                        };
                         let signature = trait_method_signature_with_receiver_and_return_shape_and_params(
                             owner,
                             method,
@@ -4628,7 +4744,8 @@ fn boxed_interface_upcast_impls(
                             return_shape,
                             program,
                             Some(&param_types),
-                            Some(representations),
+                            representations,
+                            Some(&contract.owner_substitutions),
                         );
                         let covariant_erased_return = derived_contracts.iter().any(|contract| {
                             contract.method.name == method.name
@@ -4708,20 +4825,19 @@ fn trait_item_for_type_with_program(
     sync_trait: bool,
 ) -> String {
     let trait_name = rust_name_for_java_named_type(trait_name);
-    let trait_path = parameterized_interface_trait_path(&trait_name, &ty.type_params);
-    let mut methods = specialized_interface_abstract_contracts(program, ty)
+    let methods = specialized_interface_abstract_contracts(program, ty)
         .into_iter()
         .map(|contract| {
             let owner = contract.owner;
             let method = contract.method;
-            let return_shape = if contract.return_type != method.return_type
-                || matches!(&contract.return_type, JavaType::Named { name, args }
-                    if args.is_empty() && ty.type_params.contains(name))
-            {
-                Some(RustSlotShape::for_storage(contract.return_type))
-            } else {
-                trait_method_return_shape_plan(owner, method, program, signatures)
-            };
+            let return_shape = specialized_interface_method_return_shape(
+                owner,
+                method,
+                &contract.return_type,
+                program,
+                signatures,
+                representations,
+            );
             trait_method_signature_with_receiver_and_return_shape_and_params(
                 owner,
                 method,
@@ -4732,10 +4848,39 @@ fn trait_item_for_type_with_program(
                 return_shape,
                 program,
                 Some(&contract.param_types),
-                Some(representations),
+                representations,
+                Some(&contract.owner_substitutions),
             )
         })
         .collect::<Vec<_>>();
+    source_interface_trait_item_with_surface(
+        ty,
+        &trait_name,
+        program,
+        signatures,
+        facts,
+        exceptions,
+        representations,
+        sync_trait,
+        methods.clone(),
+        methods,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn source_interface_trait_item_with_surface(
+    ty: &TypeDecl,
+    trait_name: &str,
+    program: &Program,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    exceptions: &ProgramExceptionPlan,
+    representations: &RepresentationPlan,
+    sync_trait: bool,
+    mut methods: Vec<String>,
+    mut forwarding_signatures: Vec<String>,
+) -> String {
+    let trait_path = parameterized_interface_trait_path(trait_name, &ty.type_params);
     let object_defaults = external_object_interface_trait_default_methods(
         ty,
         &trait_path,
@@ -4743,16 +4888,21 @@ fn trait_item_for_type_with_program(
         Some(program),
     );
     methods.extend(trait_object_support_method_signatures(&trait_path));
+    forwarding_signatures.extend(trait_object_support_method_signatures(&trait_path));
     let forwarding = shared_handle_forwarding_impl_with_policy_and_generics_and_cell_policy(
         &trait_path,
         &ty.type_params,
-        &methods,
+        &forwarding_signatures,
         sync_trait,
         !interface_has_interior_mutable_implementor(program, ty, facts, representations),
     )
     .map(|item| format!("\n\n{item}"))
     .unwrap_or_default();
-    let closure_adapter = (!sync_trait && ty.type_params.is_empty())
+    let abstract_contracts = specialized_interface_abstract_contracts(program, ty);
+    let closure_adapter = (!sync_trait
+        && ty.type_params.is_empty()
+        && abstract_contracts.len() == 1
+        && abstract_contracts[0].owner.name == ty.name)
         .then(|| {
             zero_arg_closure_trait_impl(
                 ty,
@@ -4768,7 +4918,13 @@ fn trait_item_for_type_with_program(
         .flatten();
     let boxed_forwarding = closure_adapter
         .is_none()
-        .then(|| boxed_trait_forwarding_impl_with_generics(&trait_path, &ty.type_params, &methods))
+        .then(|| {
+            boxed_trait_forwarding_impl_with_generics(
+                &trait_path,
+                &ty.type_params,
+                &forwarding_signatures,
+            )
+        })
         .flatten()
         .map(|item| format!("\n\n{item}"))
         .unwrap_or_default();
@@ -4828,31 +4984,18 @@ fn generic_interface_retarget_adapter_item(
     let [type_param] = interface.type_params.as_slice() else {
         return None;
     };
-    let contracts = specialized_interface_abstract_contracts(program, interface);
-    if contracts.is_empty()
-        || contracts.iter().any(|contract| {
-            contract.method.modifiers.contains(&Modifier::Static)
-                || contract
-                    .method
-                    .type_params
-                    .iter()
-                    .any(|name| name == type_param)
-                || contract
-                    .param_types
-                    .iter()
-                    .any(|ty| !generic_retarget_type_is_supported(ty, type_param, &interface.name))
-                || !generic_retarget_type_is_supported(
-                    &contract.return_type,
-                    type_param,
-                    &interface.name,
-                )
-        })
-    {
+    let contracts = specialized_interface_instance_contracts(program, interface, &HashMap::new());
+    if !generic_interface_supports_retarget_adapter(program, interface, signatures) {
         return None;
     }
 
     let trait_name = rust_name_for_java_named_type(&interface.name);
     let adapter_name = generic_interface_retarget_adapter_name(&interface.name);
+    let needs_java_key = contracts.iter().any(|contract| {
+        std::iter::once(&contract.return_type)
+            .chain(contract.param_types.iter())
+            .any(|ty| crate::item_assembly::java_type_uses_type_param_as_hash_key(ty, type_param))
+    });
     let from = "__JavaFrom";
     let to = "__JavaTo";
     let supports_erased_bound = representations
@@ -4880,8 +5023,33 @@ fn generic_interface_retarget_adapter_item(
             .iter()
             .map(|ty| crate::resolve::substitute_method_type_variables(ty, &target_substitutions))
             .collect::<Vec<_>>();
-        let return_shape = (!matches!(target_return, JavaType::Void))
-            .then(|| RustSlotShape::for_storage(target_return));
+        let return_shape = specialized_interface_method_return_shape(
+            contract.owner,
+            contract.method,
+            &target_return,
+            program,
+            signatures,
+            representations,
+        );
+        let target_owner_substitutions = contract
+            .owner
+            .type_params
+            .iter()
+            .map(|parameter| {
+                let identity = JavaType::Named {
+                    name: parameter.clone(),
+                    args: Vec::new(),
+                };
+                let actual = contract
+                    .owner_substitutions
+                    .get(parameter)
+                    .unwrap_or(&identity);
+                (
+                    parameter.clone(),
+                    crate::resolve::substitute_method_type_variables(actual, &target_substitutions),
+                )
+            })
+            .collect();
         let signature = trait_method_signature_with_receiver_and_return_shape_and_params(
             contract.owner,
             contract.method,
@@ -4892,19 +5060,27 @@ fn generic_interface_retarget_adapter_item(
             return_shape,
             program,
             Some(&target_params),
-            Some(representations),
+            representations,
+            Some(&target_owner_substitutions),
         );
         let signature = signature.trim().strip_suffix(';')?;
+        let contract_params = specialized_interface_method_param_shapes(
+            contract.owner,
+            contract.method,
+            Some(&contract.param_types),
+            program,
+            signatures,
+        );
         let args = contract
             .method
             .params
             .iter()
-            .zip(&contract.param_types)
-            .map(|(param, ty)| {
+            .zip(&contract_params)
+            .map(|(param, shape)| {
                 let name = rust_identifier_token(&param.name);
                 generic_retarget_value_expr(
                     &name,
-                    ty,
+                    &shape.java_ty,
                     type_param,
                     &interface.name,
                     to,
@@ -4935,9 +5111,17 @@ fn generic_interface_retarget_adapter_item(
         let body = if matches!(contract.return_type, JavaType::Void) {
             call
         } else {
+            let contract_return = specialized_interface_method_return_shape(
+                contract.owner,
+                contract.method,
+                &contract.return_type,
+                program,
+                signatures,
+                representations,
+            )?;
             let converted = generic_retarget_value_expr(
                 "__java_value",
-                &contract.return_type,
+                &contract_return.java_ty,
                 type_param,
                 &interface.name,
                 from,
@@ -4956,10 +5140,11 @@ fn generic_interface_retarget_adapter_item(
     methods.push(format!(
         "    fn clone_box(&self) -> std::boxed::Box<dyn {trait_name}<{to}>> {{ std::boxed::Box::new(std::clone::Clone::clone(self)) }}"
     ));
-    let generic_bound = if supports_erased_bound {
-        "Clone + 'static"
-    } else {
-        "'static"
+    let generic_bound = match (supports_erased_bound, needs_java_key) {
+        (true, true) => "Clone + JavaMapKey + 'static",
+        (false, true) => "JavaMapKey + 'static",
+        (true, false) => "Clone + 'static",
+        (false, false) => "'static",
     };
     Some(format!(
         "pub struct {adapter_name}<{from}: {generic_bound}, {to}: {generic_bound}> {{\n    __java_inner: std::boxed::Box<dyn {trait_name}<{from}>>,\n    __java_marker: std::marker::PhantomData<fn({to})>,\n}}\n\nimpl<{from}: {generic_bound}, {to}: {generic_bound}> Clone for {adapter_name}<{from}, {to}> {{\n    fn clone(&self) -> Self {{ Self {{ __java_inner: std::clone::Clone::clone(&self.__java_inner), __java_marker: std::marker::PhantomData }} }}\n}}\n\nimpl<{from}: {generic_bound}, {to}: {generic_bound}> {adapter_name}<{from}, {to}> {{\n    pub fn new(__java_inner: std::boxed::Box<dyn {trait_name}<{from}>>) -> Self {{ Self {{ __java_inner, __java_marker: std::marker::PhantomData }} }}\n}}\n\nimpl<{from}: {generic_bound}, {to}: {generic_bound}> {trait_name}<{to}> for {adapter_name}<{from}, {to}> {{\n{}\n}}",
@@ -4977,23 +5162,35 @@ pub(crate) fn generic_interface_retarget_adapter_name(interface_name: &str) -> S
 pub(crate) fn generic_interface_supports_retarget_adapter(
     program: &Program,
     interface: &TypeDecl,
+    signatures: &SignaturePlan,
 ) -> bool {
     let [type_param] = interface.type_params.as_slice() else {
         return false;
     };
-    let contracts = specialized_interface_abstract_contracts(program, interface);
+    let contracts = specialized_interface_instance_contracts(program, interface, &HashMap::new());
     !contracts.is_empty()
         && contracts.iter().all(|contract| {
             !contract.method.modifiers.contains(&Modifier::Static)
-                && contract
-                    .param_types
-                    .iter()
-                    .all(|ty| generic_retarget_type_is_supported(ty, type_param, &interface.name))
+                && !contract.method.type_params.contains(type_param)
+                && contract.param_types.iter().all(|ty| {
+                    generic_retarget_type_is_supported(ty, type_param, &interface.name, program)
+                })
                 && generic_retarget_type_is_supported(
                     &contract.return_type,
                     type_param,
                     &interface.name,
+                    program,
                 )
+                // Retargeting uses owned, checked conversions. A borrowed
+                // dependent input cannot be turned into a boxed adapter by
+                // fabricating ownership or extending its borrow lifetime.
+                && specialized_interface_method_param_shapes(
+                    contract.owner, contract.method, Some(&contract.param_types), program, signatures,
+                ).iter().all(|shape| !java_type_mentions_type_param(&shape.java_ty, type_param)
+                    || matches!(shape.ownership, OwnershipShape::Owned | OwnershipShape::CopyValue))
+                && trait_method_return_shape_plan(contract.owner, contract.method, program, signatures)
+                    .is_none_or(|shape| !java_type_mentions_type_param(&contract.return_type, type_param)
+                        || matches!(shape.ownership, OwnershipShape::Owned | OwnershipShape::CopyValue))
         })
 }
 
@@ -5001,25 +5198,31 @@ fn generic_retarget_type_is_supported(
     ty: &JavaType,
     type_param: &str,
     interface_name: &str,
+    program: &Program,
 ) -> bool {
+    if let Some(element) = crate::types::optional_element_type(ty) {
+        return generic_retarget_type_is_supported(&element, type_param, interface_name, program);
+    }
     if !java_type_mentions_type_param(ty, type_param) {
         return true;
     }
     match ty {
         JavaType::Named { name, args } if name == type_param && args.is_empty() => true,
         JavaType::Array(element) => {
-            generic_retarget_type_is_supported(element, type_param, interface_name)
+            generic_retarget_type_is_supported(element, type_param, interface_name, program)
         }
         JavaType::Named { name, args }
             if args.len() == 1
                 && (crate::facts::external_type_name_matches(name, interface_name)
-                    || generic_retarget_collection_name(name)) =>
+                    || (generic_retarget_collection_name(name)
+                        && find_type_decl_for_owner_context(program, interface_name, name)
+                            .is_none())) =>
         {
-            generic_retarget_type_is_supported(&args[0], type_param, interface_name)
+            generic_retarget_type_is_supported(&args[0], type_param, interface_name, program)
         }
         JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
         | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
-            generic_retarget_type_is_supported(bound, type_param, interface_name)
+            generic_retarget_type_is_supported(bound, type_param, interface_name, program)
         }
         _ => false,
     }
@@ -5036,6 +5239,18 @@ fn generic_retarget_value_expr(
 ) -> Option<String> {
     if !java_type_mentions_type_param(ty, type_param) {
         return Some(value.to_string());
+    }
+    if let Some(element) = crate::types::optional_element_type(ty) {
+        let converted = generic_retarget_value_expr(
+            "__java_present",
+            &element,
+            type_param,
+            interface_name,
+            source_param,
+            target_param,
+            supports_erased_bound,
+        )?;
+        return Some(format!("{value}.map(|__java_present| {converted})"));
     }
     match ty {
         JavaType::Named { name, args } if name == type_param && args.is_empty() => {
@@ -5167,6 +5382,7 @@ pub(crate) struct SpecializedInterfaceContract<'a> {
     pub(crate) method: &'a MethodDecl,
     pub(crate) return_type: JavaType,
     pub(crate) param_types: Vec<JavaType>,
+    pub(crate) owner_substitutions: HashMap<String, JavaType>,
     depth: usize,
 }
 
@@ -5224,20 +5440,67 @@ pub(crate) fn specialized_interface_abstract_contracts<'a>(
     program: &'a Program,
     interface: &'a TypeDecl,
 ) -> Vec<SpecializedInterfaceContract<'a>> {
-    specialized_interface_contracts(program, interface, false)
+    specialized_interface_contracts(program, interface, false, &HashMap::new())
 }
 
-fn specialized_interface_instance_contracts<'a>(
+pub(crate) fn specialized_interface_instance_contracts<'a>(
+    program: &'a Program,
+    interface: &'a TypeDecl,
+    substitutions: &HashMap<String, JavaType>,
+) -> Vec<SpecializedInterfaceContract<'a>> {
+    specialized_interface_contracts(program, interface, true, substitutions)
+}
+
+/// Named parent-default calls retain a body even after a child overrides the
+/// virtual slot. Instantiations come from the same ancestry walk as upcasts.
+pub(crate) fn declared_interface_default_contracts<'a>(
     program: &'a Program,
     interface: &'a TypeDecl,
 ) -> Vec<SpecializedInterfaceContract<'a>> {
-    specialized_interface_contracts(program, interface, true)
+    let mut out = Vec::new();
+    for ancestor in interface_ancestor_instantiations(program, interface) {
+        let owner = ancestor.interface;
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.body.is_none() || method.modifiers.contains(&Modifier::Static) {
+                continue;
+            }
+            let substitutions = owner
+                .type_params
+                .iter()
+                .cloned()
+                .zip(ancestor.args.iter().cloned())
+                .filter(|(name, _)| !method.type_params.contains(name))
+                .collect();
+            out.push(SpecializedInterfaceContract {
+                owner,
+                method,
+                return_type: crate::resolve::substitute_method_type_variables(
+                    &method.return_type,
+                    &substitutions,
+                ),
+                param_types: method
+                    .params
+                    .iter()
+                    .map(|param| {
+                        crate::resolve::substitute_method_type_variables(&param.ty, &substitutions)
+                    })
+                    .collect(),
+                owner_substitutions: substitutions,
+                depth: 0,
+            });
+        }
+    }
+    out
 }
 
 fn specialized_interface_contracts<'a>(
     program: &'a Program,
     interface: &'a TypeDecl,
     include_defaults: bool,
+    initial_substitutions: &HashMap<String, JavaType>,
 ) -> Vec<SpecializedInterfaceContract<'a>> {
     fn visit<'a>(
         program: &'a Program,
@@ -5332,6 +5595,7 @@ fn specialized_interface_contracts<'a>(
                 method,
                 return_type,
                 param_types,
+                owner_substitutions: visible_substitutions,
                 depth,
             };
             if let Some(index) = out.iter().position(|existing| {
@@ -5369,7 +5633,7 @@ fn specialized_interface_contracts<'a>(
     visit(
         program,
         interface,
-        &HashMap::new(),
+        initial_substitutions,
         0,
         include_defaults,
         &mut HashSet::new(),
@@ -5459,6 +5723,7 @@ pub(crate) fn zero_arg_functional_method(ty: &TypeDecl) -> Option<&MethodDecl> {
 fn trait_impl_for_type(
     ty: &TypeDecl,
     interface: &TypeDecl,
+    substitutions: &HashMap<String, JavaType>,
     program: &Program,
     trait_name: &str,
     signatures: &SignaturePlan,
@@ -5478,18 +5743,44 @@ fn trait_impl_for_type(
     );
     let mut impl_params =
         crate::item_assembly::rust_impl_params_for_source_type(ty, program, Some(representations));
-    if concrete_is_clone {
-        for (type_param, rendered) in ty.type_params.iter().zip(impl_params.iter_mut()) {
+    let clone_cache = crate::item_assembly::CloneRequirementCache::with_storage_context(
+        facts,
+        representations,
+        signatures,
+        program,
+    );
+    for (type_param, rendered) in ty.type_params.iter().zip(impl_params.iter_mut()) {
+        use crate::item_assembly::TraitImplCapability;
+        for capability in [TraitImplCapability::Clone, TraitImplCapability::JavaMapKey] {
+            if capability == TraitImplCapability::Clone && !concrete_is_clone {
+                continue;
+            }
+            let bound = capability.rust_bound();
             let declares_param = rendered == type_param
                 || rendered
                     .strip_prefix(type_param)
                     .is_some_and(|suffix| suffix.starts_with(':'));
-            if declares_param && !rendered.split('+').any(|bound| bound.trim() == "Clone") {
+            if declares_param
+                && crate::item_assembly::source_type_param_needs_trait_impl_capability(
+                    ty,
+                    type_param,
+                    capability,
+                    signatures,
+                    facts,
+                    representations,
+                    program,
+                    &clone_cache,
+                )
+                && !rendered
+                    .split(['+', ':'])
+                    .any(|existing| existing.trim() == bound)
+            {
                 if rendered == type_param {
-                    rendered.push_str(": Clone");
+                    rendered.push_str(": ");
                 } else {
-                    rendered.push_str(" + Clone");
+                    rendered.push_str(" + ");
                 }
+                rendered.push_str(bound);
             }
         }
     }
@@ -5502,7 +5793,11 @@ fn trait_impl_for_type(
     );
     let shared_adapter =
         (placement.shared() && placement.interior_mutable()).then_some(placement.sync());
-    let methods = specialized_interface_instance_contracts(program, interface)
+    // Carry the implementor's substitutions through the existing ancestry
+    // walk. Mutating a declaration copy specializes only local methods and
+    // leaves inherited edges such as Parent<T> with an unbound T; it also
+    // loses the declaration identity used by the signature solver.
+    let methods = specialized_interface_instance_contracts(program, interface, substitutions)
         .into_iter()
         .filter_map(|contract| {
             let method_owner = contract.owner;
@@ -5527,6 +5822,7 @@ fn trait_impl_for_type(
                 trait_method_exception_plan(method_owner, &effective_method, program, exceptions),
                 representations,
                 shared_adapter,
+                &contract.owner_substitutions,
             )
         })
         .collect::<Vec<_>>();
@@ -5896,8 +6192,18 @@ pub(crate) fn boxed_trait_forwarding_impl_with_generics(
                 .join(", ")
         )
     };
+    // A Sized-only method cannot be forwarded through an unsized payload.
+    // This is the same constraint imposed on the shared-handle forwarders.
+    let unsized_bound = if signatures
+        .iter()
+        .any(|signature| signature.contains("Self: Sized"))
+    {
+        ""
+    } else {
+        " + ?Sized"
+    };
     Some(format!(
-        "impl<{impl_prefix}__JavaBoxed: {trait_name} + ?Sized> {trait_name} for std::boxed::Box<__JavaBoxed> {{\n{}\n}}",
+        "impl<{impl_prefix}__JavaBoxed: {trait_name}{unsized_bound}> {trait_name} for std::boxed::Box<__JavaBoxed> {{\n{}\n}}",
         methods.join("\n")
     ))
 }
@@ -6108,9 +6414,16 @@ fn trait_impl_method(
     interface_exceptions: MethodExceptionPlan,
     representations: &RepresentationPlan,
     shared_adapter: Option<bool>,
+    owner_substitutions: &HashMap<String, JavaType>,
 ) -> Option<String> {
-    let mut trait_return_shape =
-        trait_method_return_shape_plan(interface, declared_interface_method, program, signatures);
+    let mut trait_return_shape = specialized_interface_method_return_shape(
+        interface,
+        declared_interface_method,
+        &declared_interface_method.return_type,
+        program,
+        signatures,
+        representations,
+    );
     if let Some(mut specialized_shape) = specialized_interface_trait_return_shape(
         ty,
         interface,
@@ -6118,6 +6431,7 @@ fn trait_impl_method(
         interface_method,
         program,
         signatures,
+        representations,
     ) {
         if let Some(solved_trait_shape) = trait_return_shape.as_ref()
             && !matches!(solved_trait_shape.dispatch, DispatchShape::Concrete)
@@ -6170,7 +6484,8 @@ fn trait_impl_method(
         trait_return_shape,
         program,
         Some(&specialized_param_types),
-        Some(representations),
+        representations,
+        Some(owner_substitutions),
     );
     let candidates = implementing_method_candidates_in_hierarchy(ty, interface_method, program);
     if candidates.is_empty() {
@@ -6189,6 +6504,12 @@ fn trait_impl_method(
             .compile_error_body(&signature),
         );
     };
+    let effective_candidate = |owner: &TypeDecl, candidate: &MethodDecl| {
+        let substitutions =
+            crate::inherited_members::source_ancestor_type_arguments(program, ty, owner)
+                .unwrap_or_default();
+        crate::java_type_substitution::specialized_method(candidate, &substitutions)
+    };
     let covariant_return = |candidate: &MethodDecl| {
         interface_contract_return_refines(
             program,
@@ -6197,9 +6518,10 @@ fn trait_impl_method(
         ) && trait_impl_method_compatibility_error(interface_method, candidate)
             == Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch)
     };
-    let compatible = candidates.iter().copied().find(|(_, candidate)| {
-        trait_impl_method_compatibility_error(interface_method, candidate).is_none()
-            || covariant_return(candidate)
+    let compatible = candidates.iter().copied().find(|(owner, candidate)| {
+        let candidate = effective_candidate(owner, candidate);
+        trait_impl_method_compatibility_error(interface_method, &candidate).is_none()
+            || covariant_return(&candidate)
     });
     // A `default` method that nothing overrides keeps the interface's body --
     // that is what `default` means. Candidates are gathered by *name*, so an
@@ -6215,9 +6537,10 @@ fn trait_impl_method(
         return None;
     }
     let (implementing_owner, implementing_method) = compatible.unwrap_or(candidates[0]);
+    let effective_implementation = effective_candidate(implementing_owner, implementing_method);
     if let Some(message) =
-        trait_impl_method_compatibility_error(interface_method, implementing_method)
-            .filter(|_| !covariant_return(implementing_method))
+        trait_impl_method_compatibility_error(interface_method, &effective_implementation)
+            .filter(|_| !covariant_return(&effective_implementation))
     {
         return Some(
             trait_impl_method_message_policy(
@@ -6267,7 +6590,12 @@ fn trait_impl_method(
                 .get(index)
                 .map(|param| param.shape());
             let trait_shape = trait_param_shapes.get(index).unwrap_or(&param.shape());
-            trait_impl_forwarded_arg(param.name(), trait_shape, implementation_shape)
+            trait_impl_forwarded_arg_with_facts(
+                param.name(),
+                trait_shape,
+                implementation_shape,
+                facts,
+            )
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -6314,7 +6642,7 @@ fn trait_impl_method(
     } else {
         format!("{implementing_owner_name}::{rust_name}({receiver_arg})")
     };
-    let call = if covariant_return(implementing_method) {
+    let call = if covariant_return(&effective_implementation) {
         adapt_covariant_trait_impl_return(
             call,
             trait_return_shape_for_body
@@ -6329,7 +6657,7 @@ fn trait_impl_method(
     } else {
         call
     };
-    let call = if covariant_return(implementing_method) {
+    let call = if covariant_return(&effective_implementation) {
         call
     } else {
         adapt_trait_impl_forwarded_return(
@@ -6339,6 +6667,7 @@ fn trait_impl_method(
                 .or(interface_signature.return_shape()),
             &implementation_signature.return_shape_cloned(),
             interface_exceptions,
+            facts,
         )
     };
     let body = if interface_exceptions.wrap_returns_in_result()
@@ -6386,6 +6715,7 @@ fn specialized_interface_trait_return_shape(
     effective_interface_method: &MethodDecl,
     program: &Program,
     signatures: &SignaturePlan,
+    representations: &RepresentationPlan,
 ) -> Option<RustSlotShape> {
     let original_interface =
         find_type_decl_for_owner_context(program, &target.name, &interface.name)?;
@@ -6393,29 +6723,18 @@ fn specialized_interface_trait_return_shape(
         let Member::Method(method) = member else {
             return None;
         };
-        (method.name == declared_interface_method.name
-            && method.params.len() == declared_interface_method.params.len())
+        (crate::java_signature::JavaCallableSlotKey::source_method(method)
+            == crate::java_signature::JavaCallableSlotKey::source_method(declared_interface_method))
         .then_some(method)
     })?;
-    let args = interface_type_arguments_in_target(program, target, original_interface)?;
-    if original_interface.type_params.len() != args.len() {
-        return None;
-    }
-    let substitutions = original_interface
-        .type_params
-        .iter()
-        .cloned()
-        .zip(args)
-        .collect::<HashMap<_, _>>();
-    let mut shape =
-        trait_method_return_shape_plan(original_interface, original_method, program, signatures)?;
-    shape.java_ty =
-        crate::resolve::substitute_method_type_variables(&shape.java_ty, &substitutions);
-    java_types_differ_only_by_nested_optionality(
-        &shape.java_ty,
+    specialized_interface_method_return_shape(
+        original_interface,
+        original_method,
         &effective_interface_method.return_type,
+        program,
+        signatures,
+        representations,
     )
-    .then_some(shape)
 }
 
 fn java_types_differ_only_by_nested_optionality(left: &JavaType, right: &JavaType) -> bool {
@@ -6467,30 +6786,44 @@ fn adapt_trait_impl_forwarded_return(
     trait_return_shape: Option<&RustSlotShape>,
     implementation_return_shape: &Option<RustSlotShape>,
     interface_exceptions: MethodExceptionPlan,
+    facts: &FactSet,
 ) -> String {
-    if interface_exceptions.wrap_returns_in_result() {
-        return call;
-    }
-    let Some(trait_shape) = trait_return_shape else {
+    let (Some(target), Some(actual)) = (trait_return_shape, implementation_return_shape) else {
         return call;
     };
-    if let Some(trait_element_ty) = trait_shape.optional_element_type() {
-        if let Some(implementation_shape) = implementation_return_shape
-            && implementation_shape.optional_element_type().is_none()
-            && implementation_shape.java_ty == trait_element_ty
-        {
-            return format!("Some({call})");
+    let plan = crate::conversion_plan::plan_slot_conversion(
+        actual.clone(),
+        crate::conversion_plan::Slot::Return(target.clone()),
+        facts,
+    );
+    let call_expr =
+        crate::coercion::recover_parseable_raw_operand_projection(RustExpr::raw_leaf(call.clone()));
+    let converted = if interface_exceptions.wrap_returns_in_result() {
+        // The exception carrier is not the Java return value. Adapt only the
+        // successful payload, retaining the callee's error and single evaluation.
+        let value = RustExpr::Var("__java_return_value".to_string());
+        let converted =
+            crate::conversion_lowering::apply_slot_expr_conversion(value.clone(), &plan);
+        if converted.unshaped() == &value {
+            return call;
         }
-        return call;
-    }
-    if let Some(implementation_shape) = implementation_return_shape
-        && implementation_shape
-            .optional_element_type()
-            .is_some_and(|element_ty| element_ty == trait_shape.java_ty)
-    {
-        return format!("{call}.expect(\"Java null receiver\")");
-    }
-    call
+        RustExpr::MethodCall {
+            receiver: Box::new(call_expr),
+            method: "map".to_string(),
+            args: vec![RustExpr::Closure {
+                is_move: false,
+                params: vec![crate::rust_ir::RustClosureParam {
+                    pattern: "__java_return_value".to_string(),
+                    ty: None,
+                }],
+                return_type: None,
+                body: crate::rust_ir::RustClosureBody::Expr(Box::new(converted)),
+            }],
+        }
+    } else {
+        crate::conversion_lowering::apply_slot_expr_conversion(call_expr, &plan)
+    };
+    crate::emit::emit_expr(&converted)
 }
 
 fn adapt_covariant_trait_impl_return(
@@ -6684,12 +7017,44 @@ fn forwarded_arg_requires_owned_view_materialization(
         )
 }
 
+#[cfg(test)]
 fn trait_impl_forwarded_arg(
     arg_name: &str,
     trait_shape: &RustSlotShape,
     implementation_shape: Option<&RustSlotShape>,
 ) -> String {
+    trait_impl_forwarded_arg_with_facts(
+        arg_name,
+        trait_shape,
+        implementation_shape,
+        &FactSet::default(),
+    )
+}
+
+fn trait_impl_forwarded_arg_with_facts(
+    arg_name: &str,
+    trait_shape: &RustSlotShape,
+    implementation_shape: Option<&RustSlotShape>,
+    facts: &FactSet,
+) -> String {
     let arg_name = rust_identifier_token(arg_name);
+    if let Some(shape) = implementation_shape
+        && trait_shape.java_ty == shape.java_ty
+        && trait_shape.ownership == OwnershipShape::Owned
+        && trait_shape.view == ViewShape::Native
+        && shape.ownership == OwnershipShape::SharedBorrow
+        && shape.view == ViewShape::Native
+    {
+        let plan = crate::conversion_plan::plan_slot_conversion(
+            trait_shape.clone(),
+            crate::conversion_plan::Slot::Argument(shape.clone()),
+            facts,
+        );
+        return crate::emit::emit_expr(&crate::conversion_lowering::apply_slot_expr_conversion(
+            RustExpr::Var(arg_name),
+            &plan,
+        ));
+    }
     if implementation_shape.is_some_and(|shape| {
         trait_shape.java_ty == shape.java_ty
             && trait_shape.ownership == OwnershipShape::Owned
@@ -6773,6 +7138,27 @@ fn trait_impl_forwarded_arg(
 #[cfg(test)]
 mod trait_impl_forwarded_arg_tests {
     use super::*;
+
+    #[test]
+    fn owned_generic_trait_arguments_use_the_ordinary_borrow_conversion() {
+        let owned = RustSlotShape::for_storage(JavaType::Named {
+            name: "Payload".into(),
+            args: vec![],
+        });
+        let mut borrowed = owned.clone();
+        borrowed.ownership = OwnershipShape::SharedBorrow;
+        assert_eq!(
+            trait_impl_forwarded_arg("payload", &owned, Some(&borrowed)),
+            "&payload"
+        );
+        let owned = RustSlotShape::for_storage(crate::types::optional_java_type(owned.java_ty));
+        let mut borrowed = owned.clone();
+        borrowed.ownership = OwnershipShape::SharedBorrow;
+        assert_eq!(
+            trait_impl_forwarded_arg("payload", &owned, Some(&borrowed)),
+            "payload.as_ref()"
+        );
+    }
 
     #[test]
     fn owned_trait_values_borrow_for_string_and_array_views() {
@@ -6876,9 +7262,6 @@ fn trait_impl_method_compatibility_error(
     interface_method: &MethodDecl,
     implementing_method: &MethodDecl,
 ) -> Option<TraitImplMethodCompatibilityError> {
-    if implementing_method.return_type != interface_method.return_type {
-        return Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch);
-    }
     if implementing_method.params.len() != interface_method.params.len() {
         return Some(TraitImplMethodCompatibilityError::ParameterCountMismatch);
     }
@@ -6891,6 +7274,11 @@ fn trait_impl_method_compatibility_error(
         })
     {
         return Some(TraitImplMethodCompatibilityError::ParameterTypeMismatch);
+    }
+    // Only the same Java parameter slot can refine a covariant return. Checking
+    // returns first lets an unrelated overload look like a covariant override.
+    if implementing_method.return_type != interface_method.return_type {
+        return Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch);
     }
     None
 }
@@ -6934,6 +7322,7 @@ fn trait_method_signature(
     signatures: &SignaturePlan,
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
+    representations: &RepresentationPlan,
 ) -> String {
     trait_method_signature_with_receiver(
         ty,
@@ -6943,6 +7332,7 @@ fn trait_method_signature(
         exceptions,
         None,
         &Program::default(),
+        representations,
     )
 }
 
@@ -6954,6 +7344,7 @@ fn trait_method_signature_with_receiver(
     exceptions: MethodExceptionPlan,
     receiver_override: Option<ReceiverPlan>,
     program: &Program,
+    representations: &RepresentationPlan,
 ) -> String {
     trait_method_signature_with_receiver_and_return_shape(
         ty,
@@ -6964,6 +7355,7 @@ fn trait_method_signature_with_receiver(
         receiver_override,
         None,
         program,
+        representations,
     )
 }
 
@@ -6976,6 +7368,7 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
     receiver_override: Option<ReceiverPlan>,
     return_shape_override: Option<RustSlotShape>,
     program: &Program,
+    representations: &RepresentationPlan,
 ) -> String {
     trait_method_signature_with_receiver_and_return_shape_and_params(
         ty,
@@ -6987,6 +7380,7 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape(
         return_shape_override,
         program,
         None,
+        representations,
         None,
     )
 }
@@ -7001,7 +7395,8 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape_and_params(
     return_shape_override: Option<RustSlotShape>,
     program: &Program,
     specialized_param_types: Option<&[JavaType]>,
-    representations: Option<&RepresentationPlan>,
+    representations: &RepresentationPlan,
+    owner_substitutions: Option<&HashMap<String, JavaType>>,
 ) -> String {
     let signature = signatures.required_method_signature(ty, method);
     let mut params = Vec::new();
@@ -7011,28 +7406,25 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape_and_params(
             ReceiverPlan::Shared | ReceiverPlan::None => "&self".to_string(),
         });
     }
-    let param_shapes = trait_method_param_shape_plan(ty, method, program, signatures);
+    let param_shapes = specialized_interface_method_param_shapes(
+        ty,
+        method,
+        specialized_param_types,
+        program,
+        signatures,
+    );
     params.extend(signature.params().iter().enumerate().map(|(index, param)| {
-        let specialized = specialized_param_types
-            .and_then(|types| types.get(index))
-            .filter(|ty| !trait_shape_has_declared_java_type(param.shape(), ty))
-            .map(|ty| RustSlotShape::for_storage(ty.clone()));
-        let shape = specialized
-            .as_ref()
-            .or_else(|| param_shapes.get(index))
-            .unwrap_or(&param.shape());
+        let shape = param_shapes.get(index).unwrap_or(&param.shape());
         format!(
             "{}: {}",
             rust_identifier_token(param.name()),
-            emit_type(&if let Some(representations) = representations {
-                crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            emit_type(
+                &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
                     shape,
                     facts,
                     representations,
                 )
-            } else {
-                rust_type_for_slot_with_facts(shape, facts)
-            })
+            )
         )
     }));
     let return_type = trait_method_return_type_with_exception_plan(
@@ -7051,7 +7443,17 @@ pub(crate) fn trait_method_signature_with_receiver_and_return_shape_and_params(
         .clone()
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     let type_params = rust_method_type_params(method, program, &ty.name);
-    let where_clause = rust_generic_trait_method_where_clause(method);
+    // Default bodies and every forwarding surface must carry the same
+    // per-method payload capabilities as ordinary source methods. Merely
+    // mentioning an interface argument must not constrain its handle.
+    let where_clause = source_trait_method_where_clause(
+        ty,
+        method,
+        program,
+        facts,
+        representations,
+        owner_substitutions,
+    );
     format!(
         "    fn {rust_name}{type_params}({}){return_type}{where_clause};",
         params.join(", ")
@@ -7062,44 +7464,19 @@ fn rust_method_type_params(method: &MethodDecl, program: &Program, owner_name: &
     if method.type_params.is_empty() {
         return String::new();
     }
-    let params = method
-        .type_params
-        .iter()
-        .enumerate()
-        .map(|(index, name)| {
-            let Some(Some(bound)) = method.type_param_bounds.get(index) else {
-                return name.clone();
-            };
-            let bounds = crate::item_assembly::rust_bounds_for_java_type_param(bound, &[program]);
-            if bounds.is_empty() {
-                // Preserve the owner-aware fallback for ambiguous simple source
-                // names; the central projector intentionally fails closed.
-                if let JavaType::Named { name: bound, .. } = bound {
-                    return match find_type_decl_for_owner_context(program, owner_name, bound) {
-                        Some(ty) if matches!(ty.kind, TypeKind::Interface) => {
-                            format!("{name}: {}", rust_name_for_java_named_type(&ty.name))
-                        }
-                        Some(ty) if matches!(ty.kind, TypeKind::Class) => {
-                            format!("{name}: {}", source_class_bound_trait_name(&ty.name))
-                        }
-                        _ => name.clone(),
-                    };
-                }
-                name.clone()
-            } else {
-                format!("{name}: {}", bounds.join(" + "))
-            }
-        })
-        .collect::<Vec<_>>();
+    let owner = find_type_decl_for_owner_context(program, owner_name, owner_name);
+    let params =
+        crate::item_assembly::function_type_params_with_optional_lifetime_and_support_contexts(
+            Some(&method.name),
+            &method.type_params,
+            &method.type_param_bounds,
+            false,
+            &[program],
+            &method.params,
+            method.body.as_ref(),
+            owner,
+        );
     format!("<{}>", params.join(", "))
-}
-
-fn rust_generic_trait_method_where_clause(method: &MethodDecl) -> &'static str {
-    if method.type_params.is_empty() {
-        ""
-    } else {
-        " where Self: Sized"
-    }
 }
 
 pub(crate) fn trait_method_return_shape_plan(
@@ -7108,6 +7485,9 @@ pub(crate) fn trait_method_return_shape_plan(
     program: &Program,
     signatures: &SignaturePlan,
 ) -> Option<RustSlotShape> {
+    if let Some(shape) = signatures.interface_return_shape(interface, interface_method) {
+        return shape.clone();
+    }
     let interface_shape = signatures
         .required_method_signature(interface, interface_method)
         .return_shape()
@@ -7149,6 +7529,36 @@ pub(crate) fn trait_method_return_shape_plan(
         }
     }
     Some(interface_shape)
+}
+
+/// Apply an instantiated Java contract to the solved interface ABI. Generic
+/// substitution must not discard nullable wrappers selected by signature
+/// solving. Declarations, default bodies and forwarding adapters share this
+/// projection rather than constructing unrelated storage shapes.
+pub(crate) fn specialized_interface_method_return_shape(
+    interface: &TypeDecl,
+    method: &MethodDecl,
+    effective_return: &JavaType,
+    program: &Program,
+    signatures: &SignaturePlan,
+    representations: &RepresentationPlan,
+) -> Option<RustSlotShape> {
+    let solved = trait_method_return_shape_plan(interface, method, program, signatures)?;
+    let shape = crate::shape_projection::specialize_slot_shape_java_type(&solved, effective_return);
+    let generic_value = matches!(&method.return_type, JavaType::Named { name, args }
+        if args.is_empty()
+            && (interface.type_params.contains(name) || method.type_params.contains(name)));
+    if generic_value {
+        // An escaping type parameter uses an owned generic value, not the
+        // erased or borrowed view inferred from one implementation. Preserve
+        // the solver's optionality while selecting that value's representation.
+        Some(crate::shape_projection::storage_shape_for_java_type(
+            representations,
+            shape.java_ty,
+        ))
+    } else {
+        Some(shape)
+    }
 }
 
 fn trait_shape_with_declared_generic_contract(
@@ -7276,6 +7686,24 @@ fn trait_shape_has_declared_java_type(shape: &RustSlotShape, declared: &JavaType
     shape.java_ty == *declared || shape.optional_element_type().as_ref() == Some(declared)
 }
 
+pub(crate) fn specialized_interface_method_param_shapes(
+    interface: &TypeDecl,
+    method: &MethodDecl,
+    effective_params: Option<&[JavaType]>,
+    program: &Program,
+    signatures: &SignaturePlan,
+) -> Vec<RustSlotShape> {
+    let mut shapes = trait_method_param_shape_plan(interface, method, program, signatures);
+    if let Some(effective_params) = effective_params {
+        for (shape, effective) in shapes.iter_mut().zip(effective_params) {
+            if !trait_shape_has_declared_java_type(shape, effective) {
+                *shape = crate::shape_projection::specialize_slot_shape_java_type(shape, effective);
+            }
+        }
+    }
+    shapes
+}
+
 fn trait_param_shape_should_widen_to_implementation(
     interface_shape: &RustSlotShape,
     implementation_shape: &RustSlotShape,
@@ -7397,13 +7825,6 @@ pub(crate) fn source_interface_method_implementations<'a>(
     for ty in &program.types {
         collect_type_decls_for_trait_receiver(ty, &mut types);
     }
-    let method_uses_type_param = interface.type_params.iter().any(|type_param| {
-        java_type_mentions_named_type(&interface_method.return_type, type_param)
-            || interface_method
-                .params
-                .iter()
-                .any(|param| java_type_mentions_named_type(&param.ty, type_param))
-    });
     types
         .into_iter()
         .filter(|ty| {
@@ -7415,37 +7836,43 @@ pub(crate) fn source_interface_method_implementations<'a>(
                     })
         })
         .filter_map(|implementor| {
+            let (return_type, param_types) =
+                interface_method_types_in_target(program, implementor, interface, interface_method);
+            let mut effective_contract = interface_method.clone();
+            effective_contract.return_type = return_type;
+            for (param, ty) in effective_contract.params.iter_mut().zip(param_types) {
+                param.ty = ty;
+            }
             implementing_method_candidates_in_hierarchy(implementor, interface_method, program)
                 .into_iter()
-                .find(|candidate| {
-                    trait_impl_method_compatibility_error(interface_method, candidate.1).is_none()
-                        || (method_uses_type_param
-                            && candidate.1.params.len() == interface_method.params.len()
-                            && candidate
-                                .1
-                                .params
-                                .iter()
-                                .zip(&interface_method.params)
-                                .all(|(actual, expected)| actual.is_varargs == expected.is_varargs))
+                .find(|(owner, candidate)| {
+                    let substitutions = crate::inherited_members::source_ancestor_type_arguments(
+                        program,
+                        implementor,
+                        owner,
+                    )
+                    .unwrap_or_default();
+                    let effective_candidate = crate::java_type_substitution::specialized_method(
+                        candidate,
+                        &substitutions,
+                    );
+                    match trait_impl_method_compatibility_error(
+                        &effective_contract,
+                        &effective_candidate,
+                    ) {
+                        None => true,
+                        Some(TraitImplMethodCompatibilityError::ReturnTypeMismatch) => {
+                            interface_contract_return_refines(
+                                program,
+                                &effective_candidate.return_type,
+                                &effective_contract.return_type,
+                            )
+                        }
+                        _ => false,
+                    }
                 })
         })
         .collect()
-}
-
-fn java_type_mentions_named_type(ty: &JavaType, name: &str) -> bool {
-    match ty {
-        JavaType::Named {
-            name: candidate,
-            args,
-        } => {
-            candidate == name
-                || args
-                    .iter()
-                    .any(|arg| java_type_mentions_named_type(arg, name))
-        }
-        JavaType::Array(element) => java_type_mentions_named_type(element, name),
-        _ => false,
-    }
 }
 
 /// The trait declaration's exception plan.
@@ -7474,7 +7901,7 @@ fn trait_method_return_type_with_exception_plan(
     facts: &FactSet,
     exceptions: MethodExceptionPlan,
     return_shape_override: Option<RustSlotShape>,
-    representations: Option<&RepresentationPlan>,
+    representations: &RepresentationPlan,
 ) -> Option<RustType> {
     let return_shape = return_shape_override
         .or_else(|| {
@@ -7485,15 +7912,11 @@ fn trait_method_return_type_with_exception_plan(
         })
         .map(|shape| trait_shape_with_declared_generic_contract(shape, &method.return_type));
     let rust_return = return_shape.as_ref().map(|shape| {
-        if let Some(representations) = representations {
-            crate::slot_render::rust_type_for_slot_with_facts_and_representations(
-                shape,
-                facts,
-                representations,
-            )
-        } else {
-            rust_type_for_slot_with_facts(shape, facts)
-        }
+        crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            shape,
+            facts,
+            representations,
+        )
     });
     if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(rust_return.unwrap_or(RustType::Unit)))
@@ -7572,6 +7995,19 @@ fn implementing_method_candidates_in_hierarchy<'a>(
                 }),
         );
     }
+    for inherited in crate::inherited_members::inherited_instance_method_refs_for_type(ty, program)
+    {
+        let method = inherited.method();
+        if inherited.declaring_ty().kind == TypeKind::Interface
+            && method.body.is_some()
+            && method.name == interface_method.name
+            && seen_slots.insert(crate::java_signature::JavaCallableSlotKey::source_method(
+                method,
+            ))
+        {
+            out.push((inherited.declaring_ty(), method));
+        }
+    }
     out
 }
 
@@ -7615,26 +8051,47 @@ fn source_type_param_bounds(program: &Program) -> Vec<SourceTypeParamBound> {
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     for ty in &program.types {
-        collect_source_type_param_bounds_in_type(ty, &mut seen, &mut out);
+        collect_source_type_param_bounds_in_type(program, ty, &mut seen, &mut out);
     }
     out
 }
 
 fn collect_source_type_param_bounds_in_type(
+    program: &Program,
     ty: &TypeDecl,
     seen: &mut HashSet<SourceTypeParamBound>,
     out: &mut Vec<SourceTypeParamBound>,
 ) {
-    collect_bound_names(&ty.name, &ty.type_param_bounds, seen, out);
+    collect_bound_names(
+        &ty.name,
+        &ty.type_param_bounds,
+        &[&ty.type_params],
+        seen,
+        out,
+    );
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                collect_bound_names(&ty.name, &method.type_param_bounds, seen, out)
+                let scope = [&ty.type_params[..], &method.type_params[..]];
+                collect_bound_names(&ty.name, &method.type_param_bounds, &scope, seen, out);
+                let capture_bounds =
+                    crate::inherited_members::synthesized_source_wildcard_bounds_for_method(
+                        method,
+                        ty,
+                        &[program],
+                    );
+                collect_bound_names(&ty.name, &capture_bounds, &scope, seen, out);
             }
-            Member::Constructor(constructor) => {
-                collect_bound_names(&ty.name, &constructor.type_param_bounds, seen, out)
+            Member::Constructor(constructor) => collect_bound_names(
+                &ty.name,
+                &constructor.type_param_bounds,
+                &[&ty.type_params, &constructor.type_params],
+                seen,
+                out,
+            ),
+            Member::Type(nested) => {
+                collect_source_type_param_bounds_in_type(program, nested, seen, out)
             }
-            Member::Type(nested) => collect_source_type_param_bounds_in_type(nested, seen, out),
             _ => {}
         }
     }
@@ -7643,22 +8100,27 @@ fn collect_source_type_param_bounds_in_type(
 fn collect_bound_names(
     owner_name: &str,
     bounds: &[Option<JavaType>],
+    type_param_scopes: &[&[String]],
     seen: &mut HashSet<SourceTypeParamBound>,
     out: &mut Vec<SourceTypeParamBound>,
 ) {
     fn collect_one(
         owner_name: &str,
         bound: &JavaType,
+        type_param_scopes: &[&[String]],
         seen: &mut HashSet<SourceTypeParamBound>,
         out: &mut Vec<SourceTypeParamBound>,
     ) {
         if let JavaType::Intersection(bounds) = bound {
             for bound in bounds {
-                collect_one(owner_name, bound, seen, out);
+                collect_one(owner_name, bound, type_param_scopes, seen, out);
             }
             return;
         }
         if let JavaType::Named { name, .. } = bound {
+            if type_param_scopes.iter().any(|scope| scope.contains(name)) {
+                return;
+            }
             let bound = SourceTypeParamBound {
                 owner_name: owner_name.to_string(),
                 bound_name: name.clone(),
@@ -7669,7 +8131,7 @@ fn collect_bound_names(
         }
     }
     for bound in bounds.iter().flatten() {
-        collect_one(owner_name, bound, seen, out);
+        collect_one(owner_name, bound, type_param_scopes, seen, out);
     }
 }
 
@@ -7694,14 +8156,20 @@ fn source_type_extends(program: &Program, ty: &TypeDecl, target_name: &str) -> b
     false
 }
 
+#[cfg(test)]
 fn find_type_decl<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
-    let mut exact_matches = Vec::new();
-    for ty in &program.types {
-        collect_exact_type_decl_matches(ty, type_name, &mut exact_matches);
+    if let Some(cached) = cached_type_decl_path(program, None, type_name) {
+        return cached.and_then(|path| type_decl_at_path(program, &path));
     }
-    if let Some(exact) = unique_type_decl(exact_matches) {
-        return Some(exact);
-    }
+    let resolved = find_type_decl_uncached(program, type_name);
+    cache_type_decl_path(program, None, type_name, resolved);
+    resolved
+}
+
+#[cfg(test)]
+fn find_type_decl_uncached<'a>(program: &'a Program, type_name: &str) -> Option<&'a TypeDecl> {
+    #[cfg(test)]
+    TYPE_DECL_LOOKUP_MISS_COUNT.with(|count| count.set(count.get() + 1));
     let mut matches = TypeDeclMatches::default();
     for ty in &program.types {
         collect_type_decl_matches(ty, type_name, program.package.as_deref(), &mut matches);
@@ -7718,13 +8186,33 @@ fn find_type_decl_for_owner_context<'a>(
     owner_name: &str,
     type_name: &str,
 ) -> Option<&'a TypeDecl> {
-    let mut exact_matches = Vec::new();
-    for ty in &program.types {
-        collect_exact_type_decl_matches(ty, type_name, &mut exact_matches);
+    // Hierarchy edges and receiver types may include arguments. Declaration
+    // lookup uses the erased name; callers retain the full type for the
+    // existing ancestor-argument substitution pass. Normalize at this shared
+    // boundary so interface discovery and method forwarding cannot disagree.
+    let erased_name = type_name
+        .contains('<')
+        .then(|| match crate::parser::parse_hierarchy_type(type_name) {
+            JavaType::Named { name, .. } => Some(name),
+            _ => None,
+        })
+        .flatten();
+    let type_name = erased_name.as_deref().unwrap_or(type_name);
+    if let Some(cached) = cached_type_decl_path(program, Some(owner_name), type_name) {
+        return cached.and_then(|path| type_decl_at_path(program, &path));
     }
-    if let Some(exact) = unique_type_decl(exact_matches) {
-        return Some(exact);
-    }
+    let resolved = find_type_decl_for_owner_context_uncached(program, owner_name, type_name);
+    cache_type_decl_path(program, Some(owner_name), type_name, resolved);
+    resolved
+}
+
+fn find_type_decl_for_owner_context_uncached<'a>(
+    program: &'a Program,
+    owner_name: &str,
+    type_name: &str,
+) -> Option<&'a TypeDecl> {
+    #[cfg(test)]
+    TYPE_DECL_LOOKUP_MISS_COUNT.with(|count| count.set(count.get() + 1));
     let mut matches = TypeDeclMatches::default();
     for ty in &program.types {
         collect_type_decl_matches(ty, type_name, program.package.as_deref(), &mut matches);
@@ -7737,19 +8225,100 @@ fn find_type_decl_for_owner_context<'a>(
         .or_else(|| unique_type_decl(matches.simple))
 }
 
-fn collect_exact_type_decl_matches<'a>(
-    ty: &'a TypeDecl,
+/// `Some(None)` means a cached miss; `None` means that no lookup session is
+/// active or this query has not been cached yet.
+fn cached_type_decl_path(
+    program: &Program,
+    owner_name: Option<&str>,
     type_name: &str,
-    matches: &mut Vec<&'a TypeDecl>,
+) -> Option<Option<TypeDeclPath>> {
+    let address = program as *const Program as usize;
+    TYPE_DECL_LOOKUP_SESSION.with(|slot| {
+        let session = slot.borrow();
+        let cache = session.as_ref()?.by_program_address.get(&address)?;
+        match owner_name {
+            Some(owner_name) => cache
+                .owner_qualified
+                .get(owner_name)?
+                .get(type_name)
+                .cloned(),
+            None => cache.unqualified.get(type_name).cloned(),
+        }
+    })
+}
+
+fn cache_type_decl_path(
+    program: &Program,
+    owner_name: Option<&str>,
+    type_name: &str,
+    resolved: Option<&TypeDecl>,
 ) {
-    if ty.name == type_name {
-        matches.push(ty);
-    }
-    for member in &ty.members {
-        if let Member::Type(nested) = member {
-            collect_exact_type_decl_matches(nested, type_name, matches);
+    let path = resolved.and_then(|resolved| type_decl_path(program, resolved));
+    let address = program as *const Program as usize;
+    TYPE_DECL_LOOKUP_SESSION.with(|slot| {
+        let mut session = slot.borrow_mut();
+        let Some(session) = session.as_mut() else {
+            return;
+        };
+        let cache = session.by_program_address.entry(address).or_default();
+        match owner_name {
+            Some(owner_name) => {
+                cache
+                    .owner_qualified
+                    .entry(owner_name.to_string())
+                    .or_default()
+                    .insert(type_name.to_string(), path);
+            }
+            None => {
+                cache.unqualified.insert(type_name.to_string(), path);
+            }
+        }
+    });
+}
+
+fn type_decl_path(program: &Program, target: &TypeDecl) -> Option<TypeDeclPath> {
+    for (top_level, ty) in program.types.iter().enumerate() {
+        let mut nested_members = Vec::new();
+        if collect_type_decl_path(ty, target, &mut nested_members) {
+            return Some(TypeDeclPath {
+                top_level,
+                nested_members,
+            });
         }
     }
+    None
+}
+
+fn collect_type_decl_path(
+    current: &TypeDecl,
+    target: &TypeDecl,
+    nested_members: &mut Vec<usize>,
+) -> bool {
+    if std::ptr::eq(current, target) {
+        return true;
+    }
+    for (member_index, member) in current.members.iter().enumerate() {
+        let Member::Type(nested) = member else {
+            continue;
+        };
+        nested_members.push(member_index);
+        if collect_type_decl_path(nested, target, nested_members) {
+            return true;
+        }
+        nested_members.pop();
+    }
+    false
+}
+
+fn type_decl_at_path<'a>(program: &'a Program, path: &TypeDeclPath) -> Option<&'a TypeDecl> {
+    let mut current = program.types.get(path.top_level)?;
+    for member_index in &path.nested_members {
+        let Member::Type(nested) = current.members.get(*member_index)? else {
+            return None;
+        };
+        current = nested;
+    }
+    Some(current)
 }
 
 #[derive(Default)]
@@ -7818,6 +8387,68 @@ fn collect_type_decl_matches<'a>(
 
 #[cfg(test)]
 mod type_emission_tests {
+    #[test]
+    fn generic_interface_implementation_matching_rejects_unrelated_same_arity_overload() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+interface Picker<T> { T pick(T value); }
+class Item {}
+class Special extends Item {}
+interface CovariantPicker<T> { Item select(T value); }
+class Words implements Picker<String> {
+    public Integer pick(Integer value) { return null; }
+    public String pick(String value) { return value; }
+}
+class Items implements CovariantPicker<String> {
+    public Special select(Integer value) { return null; }
+    public Item select(String value) { return null; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let interface = &resolved.program.types[0];
+        let method = interface
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let implementations =
+            super::source_interface_method_implementations(interface, method, &resolved.program);
+        assert_eq!(implementations.len(), 1);
+        assert_eq!(implementations[0].0.name, "Words");
+        assert_eq!(
+            implementations[0].1.params[0].ty,
+            crate::java_ir::JavaType::String
+        );
+        let covariant_interface = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "CovariantPicker")
+            .unwrap();
+        let covariant_method = covariant_interface
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let implementations = super::source_interface_method_implementations(
+            covariant_interface,
+            covariant_method,
+            &resolved.program,
+        );
+        assert_eq!(implementations.len(), 1);
+        assert_eq!(
+            implementations[0].1.params[0].ty,
+            crate::java_ir::JavaType::String
+        );
+    }
+
     use super::{
         RepresentationTypeEmission, TraitImplMethodCompatibilityError,
         TraitImplMethodFallbackPolicy, TraitImplMethodMessagePolicy,
@@ -7845,6 +8476,35 @@ mod type_emission_tests {
     use crate::slot_shape::{DispatchShape, RustSlotShape};
     use crate::storage_strategy::TypeStorageFacts;
     use crate::usage::{analyze_usage, analyze_usage_with_facts};
+
+    #[test]
+    fn implementor_substitutions_reach_inherited_contracts_without_cloning_declarations() {
+        let parsed = parse_java_source(
+            "interface Parent<T> { T item(); <T> T echo(T value); } interface Child<T> extends Parent<T> {}",
+        );
+        let parent = &parsed.program.types[0];
+        let child = &parsed.program.types[1];
+        let substitutions = std::collections::HashMap::from([("T".to_string(), JavaType::String)]);
+        let contracts =
+            super::specialized_interface_instance_contracts(&parsed.program, child, &substitutions);
+        assert_eq!(contracts.len(), 2);
+        let item = contracts
+            .iter()
+            .find(|contract| contract.method.name == "item")
+            .unwrap();
+        assert_eq!(item.return_type, JavaType::String);
+        assert!(std::ptr::eq(item.owner, parent));
+        let echo = contracts
+            .iter()
+            .find(|contract| contract.method.name == "echo")
+            .unwrap();
+        let method_param = JavaType::Named {
+            name: "T".to_string(),
+            args: vec![],
+        };
+        assert_eq!(echo.return_type, method_param);
+        assert_eq!(echo.param_types, vec![method_param]);
+    }
 
     #[test]
     fn covariant_return_does_not_parameterize_a_non_generic_trait_declaration() {
@@ -9045,7 +9705,9 @@ class Use {
             "{rendered}"
         );
         assert!(
-            rendered.contains("pub trait BaseAnonymousDispatch"),
+            rendered.contains(
+                "pub trait BaseAnonymousDispatch: BaseAnonymousDispatchClone + std::fmt::Display"
+            ),
             "{rendered}"
         );
         assert!(
@@ -9655,6 +10317,19 @@ class NullName implements Named {
     }
 
     #[test]
+    fn interface_arguments_propagate_through_parameterized_source_superclass() {
+        let parsed = parse_java_source(
+            "interface Source<T> {} class Parent<U> implements Source<U> {} class Child extends Parent<String> {}",
+        );
+        let source = &parsed.program.types[0];
+        let child = &parsed.program.types[2];
+        assert_eq!(
+            super::interface_type_arguments_in_target(&parsed.program, child, source),
+            Some(vec![JavaType::String])
+        );
+    }
+
+    #[test]
     fn trait_impl_forwarding_wraps_nonnull_return_for_nullable_trait_contract() {
         let parsed = parse_java_source(
             r#"
@@ -9809,7 +10484,10 @@ class Source implements IdSource {
                 &facts,
             ),
             vec![
-                "impl IdSource for Source {\n    fn ids(&self, values: Vec<ExternalId>) -> Vec<ExternalId> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}"
+                // The user fact still supplies Vec<ExternalId> as content.
+                // Returning the existing source reference retains its shared
+                // carrier instead of promising an independent Vec value.
+                "impl IdSource for Source {\n    fn ids(&self, values: std::rc::Rc<Vec<ExternalId>>) -> std::rc::Rc<Vec<ExternalId>> { Source::ids(self, values) }\n    fn as_any(&self) -> &dyn std::any::Any { self }\n    fn clone_box(&self) -> std::boxed::Box<dyn IdSource> { std::boxed::Box::new(std::clone::Clone::clone(self)) }\n}"
                     .to_string()
             ]
         );
@@ -10117,8 +10795,9 @@ interface Mapper {
 #[cfg(test)]
 mod type_lookup_tests {
     use super::{
-        find_type_decl, find_type_decl_for_owner_context, implemented_interfaces_for_type,
-        rust_method_type_params, source_type_extends,
+        TYPE_DECL_LOOKUP_MISS_COUNT, find_type_decl, find_type_decl_for_owner_context,
+        implemented_interfaces_for_type, rust_method_type_params, source_type_extends,
+        with_type_decl_lookup_session,
     };
     use crate::diagnostics::Span;
     use crate::java_ir::{JavaType, Member, MethodDecl, Program, TypeDecl, TypeKind};
@@ -10183,6 +10862,32 @@ mod type_lookup_tests {
                 .map(|ty| ty.name.as_str()),
             Some("b.Base")
         );
+    }
+
+    #[test]
+    fn scoped_type_lookup_session_reuses_precedence_aware_resolution() {
+        let program = Program {
+            package: None,
+            imports: Vec::new(),
+            types: vec![
+                empty_type("a.Base"),
+                empty_type("b.Base"),
+                empty_type("b.Child"),
+            ],
+        };
+        TYPE_DECL_LOOKUP_MISS_COUNT.with(|count| count.set(0));
+
+        with_type_decl_lookup_session(|| {
+            for _ in 0..3 {
+                assert_eq!(
+                    find_type_decl_for_owner_context(&program, "b.Child", "Base")
+                        .map(|ty| ty.name.as_str()),
+                    Some("b.Base")
+                );
+            }
+        });
+
+        assert_eq!(TYPE_DECL_LOOKUP_MISS_COUNT.with(|count| count.get()), 1);
     }
 
     #[test]
@@ -10475,6 +11180,21 @@ mod shared_handle_forwarding_tests {
 
     /// A Java interface method may declare its own type parameter; the impl's
     /// must not collide with it (E0403).
+    #[test]
+    fn boxed_forwarding_respects_sized_only_method_obligations() {
+        let rendered = boxed_trait_forwarding_impl_with_generics(
+            "Mapper",
+            &[],
+            &["fn id<T>(&self, value: T) -> T where Self: Sized;".to_string()],
+        )
+        .unwrap();
+        assert!(
+            rendered.contains("impl<__JavaBoxed: Mapper> Mapper for std::boxed::Box<__JavaBoxed>"),
+            "{rendered}"
+        );
+        assert!(!rendered.contains("?Sized"), "{rendered}");
+    }
+
     #[test]
     fn does_not_shadow_a_method_type_parameter() {
         let rendered = shared_handle_forwarding_impl(

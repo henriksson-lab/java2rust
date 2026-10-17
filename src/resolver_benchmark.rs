@@ -2096,7 +2096,7 @@ impl SourceTypeIndex {
                 .find(|qualified_name| {
                     self.by_qualified_name
                         .get(*qualified_name)
-                        .is_some_and(|entry| entry.ty.name == ty_name)
+                        .is_some_and(|entry| source_type_context_name(entry) == ty_name)
                 })
                 .cloned()
             else {
@@ -2296,10 +2296,29 @@ fn push_source_type_by_qualified_name(
     let Some(entry) = index.by_qualified_name.get(qualified_name) else {
         return;
     };
-    let ty = &entry.ty;
-    if seen.insert(qualified_name.to_string()) && seen_simple_names.insert(ty.name.clone()) {
-        types.push(ty.clone());
+    let context_name = source_type_context_name(entry);
+    if seen.insert(qualified_name.to_string()) && seen_simple_names.insert(context_name.to_string())
+    {
+        let mut ty = entry.ty.clone();
+        ty.name = context_name.to_string();
+        types.push(ty);
     }
+}
+
+fn source_type_context_name(entry: &SourceTypeEntry) -> &str {
+    // The index supplies the package boundary, so extracted nested types can
+    // retain their Java owner without guessing from identifier capitalization.
+    entry
+        .qualified_name
+        .strip_prefix(&entry.package)
+        .and_then(|rest| {
+            if entry.package.is_empty() {
+                Some(rest)
+            } else {
+                rest.strip_prefix('.')
+            }
+        })
+        .unwrap_or(&entry.ty.name)
 }
 
 fn source_type_dependencies(ty: &TypeDecl) -> Vec<String> {
@@ -9068,13 +9087,13 @@ public final class AssemblyGraph {
             source_program
                 .types
                 .iter()
-                .any(|ty| ty.name == "Connection"),
+                .any(|ty| ty.name == "AssemblyGraph.Connection"),
             "explicit nested import should add the nested summary declaration: {source_program:#?}"
         );
         let connection_methods = source_program
             .types
             .iter()
-            .find(|ty| ty.name == "Connection")
+            .find(|ty| ty.name == "AssemblyGraph.Connection")
             .map(|ty| {
                 ty.members
                     .iter()

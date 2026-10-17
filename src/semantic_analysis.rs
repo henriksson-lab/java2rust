@@ -146,6 +146,8 @@ pub fn analyze_program_with_config(
 ) -> SemanticFacts {
     let mut facts = resolved_facts.clone();
     facts.extend_from(external_facts.clone());
+    facts.source_interface_upcast_facts =
+        crate::representation_lowering::source_interface_upcast_facts(program);
     let mut diagnostics = Vec::new();
 
     collect_builtin_external_representation_facts(
@@ -2769,7 +2771,7 @@ fn external_api_role_can_be_fluent_from_context(
     ) || (allow_unknown_role && role == ExternalApiRole::Unknown)
 }
 
-fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
+pub(crate) fn walk_expr_outside_lambdas(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
         Expr::FieldAccess(receiver, _) => walk_expr_outside_lambdas(receiver, visit),
@@ -7166,6 +7168,7 @@ mod tests {
     fn qualified_new_expr(qualifier: Expr, args: Vec<Expr>) -> Expr {
         Expr::New {
             ty: JavaType::Unknown("Inner".to_string()),
+            infer_type_arguments: false,
             qualifier: Some(Box::new(qualifier)),
             args,
             body: None,
@@ -7177,6 +7180,7 @@ mod tests {
     fn thrown_exception_scan_sees_qualified_new_receiver() {
         let expr = qualified_new_expr(
             Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "URI".to_string(),
                     args: Vec::new(),

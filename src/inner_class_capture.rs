@@ -368,6 +368,7 @@ fn collect_unsupported_outer_this_constructed_type_names_from_expr(
             args,
             body,
             resolved,
+            ..
         } => {
             if let Some(qualifier) = qualifier {
                 collect_unsupported_outer_this_constructed_type_names_from_expr(qualifier, names);
@@ -624,6 +625,7 @@ fn collect_constructed_type_names_from_expr(expr: &Expr, names: &mut HashSet<Str
             args,
             body,
             resolved,
+            ..
         } => {
             if let Some(qualifier) = qualifier {
                 collect_constructed_type_names_from_expr(qualifier, names);

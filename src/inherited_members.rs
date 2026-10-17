@@ -20,6 +20,10 @@ pub(crate) struct ExternalInheritedInstanceField {
 }
 
 impl ExternalInheritedInstanceField {
+    pub(crate) fn field_name(&self) -> &str {
+        &self.field_name
+    }
+
     pub(crate) fn new(
         declaring_type: String,
         field_name: String,
@@ -1139,36 +1143,22 @@ pub(crate) fn specialized_inherited_method_for_type(
     target: &TypeDecl,
     inherited: &InheritedInstanceMethodRef<'_>,
 ) -> MethodDecl {
-    let mut method = inherited.method().clone();
-    let mut substitutions =
-        source_class_ancestor_type_arguments(program, target, inherited.declaring_ty())
-            .unwrap_or_default();
-    for type_param in &method.type_params {
-        substitutions.remove(type_param);
+    let substitutions = source_ancestor_type_arguments(program, target, inherited.declaring_ty())
+        .unwrap_or_default();
+    crate::java_type_substitution::specialized_method(inherited.method(), &substitutions)
+}
+
+pub(crate) fn source_ancestor_type_arguments(
+    program: &Program,
+    target: &TypeDecl,
+    owner: &TypeDecl,
+) -> Option<HashMap<String, JavaType>> {
+    if owner.kind == crate::java_ir::TypeKind::Interface {
+        crate::representation_lowering::interface_type_arguments_in_target(program, target, owner)
+            .map(|args| owner.type_params.iter().cloned().zip(args).collect())
+    } else {
+        source_class_ancestor_type_arguments(program, target, owner)
     }
-    if substitutions.is_empty() {
-        return method;
-    }
-    for param in &mut method.params {
-        param.ty = crate::resolve::substitute_method_type_variables(&param.ty, &substitutions);
-    }
-    method.return_type =
-        crate::resolve::substitute_method_type_variables(&method.return_type, &substitutions);
-    method.throws = method
-        .throws
-        .iter()
-        .map(|ty| crate::resolve::substitute_method_type_variables(ty, &substitutions))
-        .collect();
-    method.type_param_bounds = method
-        .type_param_bounds
-        .iter()
-        .map(|bound| {
-            bound
-                .as_ref()
-                .map(|ty| crate::resolve::substitute_method_type_variables(ty, &substitutions))
-        })
-        .collect();
-    method
 }
 
 /// Give source-generic wildcard input parameters a Rust-representable
@@ -1185,7 +1175,38 @@ pub(crate) fn method_with_synthesized_source_wildcard_params(
     emitted_owner: &TypeDecl,
     support_programs: &[&Program],
 ) -> MethodDecl {
+    let (params, synthesized) =
+        source_wildcard_input_reification(method, emitted_owner, support_programs);
     let mut effective = method.clone();
+    effective.params = params;
+    for (name, bound) in synthesized {
+        effective.type_params.push(name);
+        effective.type_param_bounds.push(bound);
+    }
+    effective
+}
+
+/// Capabilities demanded by the exact same captures as callable emission.
+/// Inventory callers need neither a cloned method body nor a second wildcard
+/// bound traversal with potentially different source-owner resolution.
+pub(crate) fn synthesized_source_wildcard_bounds_for_method(
+    method: &MethodDecl,
+    emitted_owner: &TypeDecl,
+    support_programs: &[&Program],
+) -> Vec<Option<JavaType>> {
+    source_wildcard_input_reification(method, emitted_owner, support_programs)
+        .1
+        .into_iter()
+        .map(|(_, bound)| bound)
+        .collect()
+}
+
+fn source_wildcard_input_reification(
+    method: &MethodDecl,
+    emitted_owner: &TypeDecl,
+    support_programs: &[&Program],
+) -> (Vec<crate::java_ir::Param>, Vec<(String, Option<JavaType>)>) {
+    let mut params = method.params.clone();
     let mut used_names = emitted_owner
         .type_params
         .iter()
@@ -1235,8 +1256,7 @@ pub(crate) fn method_with_synthesized_source_wildcard_params(
         {
             continue;
         }
-        let matching_params = effective
-            .params
+        let matching_params = params
             .iter()
             .enumerate()
             .filter(|(_, param)| java_type_contains_named_type_param(&param.ty, owner_param))
@@ -1263,13 +1283,13 @@ pub(crate) fn method_with_synthesized_source_wildcard_params(
         if synthesized.len() == synthesized_before {
             continue;
         }
-        for param in &mut effective.params {
+        for param in &mut params {
             if java_type_is_named_type_param(&param.ty, owner_param) {
                 param.ty = reified_bound.clone();
             }
         }
     }
-    for param in &mut effective.params {
+    for param in &mut params {
         param.ty = synthesize_source_wildcards_in_type(
             &param.ty,
             &emitted_owner.name,
@@ -1279,11 +1299,7 @@ pub(crate) fn method_with_synthesized_source_wildcard_params(
             &mut synthesized,
         );
     }
-    for (name, bound) in synthesized {
-        effective.type_params.push(name);
-        effective.type_param_bounds.push(bound);
-    }
-    effective
+    (params, synthesized)
 }
 
 fn java_type_is_named_type_param(ty: &JavaType, type_param: &str) -> bool {
@@ -1393,9 +1409,24 @@ fn synthesize_source_wildcards_in_type(
             synthesized,
         ))),
         JavaType::Named { name, args } => {
-            let source_decl = support_programs
+            // Only direct wildcard arguments demand this declaration's
+            // parameter bounds. Nested generic arguments resolve their own
+            // owner recursively; ordinary named types need no source scan.
+            let source_decl = args
                 .iter()
-                .find_map(|program| find_type_decl_for_owner_context(program, owner_name, name));
+                .any(|arg| {
+                    matches!(
+                        arg,
+                        JavaType::Wildcard(None)
+                            | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(_)))
+                    )
+                })
+                .then(|| {
+                    support_programs.iter().find_map(|program| {
+                        find_type_decl_for_owner_context(program, owner_name, name)
+                    })
+                })
+                .flatten();
             let args = args
                 .iter()
                 .enumerate()

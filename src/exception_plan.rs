@@ -60,6 +60,10 @@ pub enum FallibilityReason {
     /// A nullable Java reference was dereferenced as a receiver and can throw
     /// NullPointerException.
     NullReceiverThrow,
+    /// A checked reference conversion can throw ClassCastException.
+    ClassCastThrow,
+    /// Array reads and writes can fail bounds checks even for non-null arrays.
+    ArrayBoundsThrow,
     /// A Java `throw` statement escapes the callable. Runtime exceptions are
     /// unchecked by javac, but they are still catchable Java control flow.
     DirectThrow,
@@ -650,7 +654,13 @@ pub fn plan_program_exceptions_with_fallibility(
         collect_method_exception_plans_for_type(ty, facts, fallibility, &mut methods);
     }
     ProgramExceptionPlan {
-        support: plan_java_exception_support(program, facts),
+        support: JavaExceptionSupportPlan::new(
+            program_uses_java_exception_with_facts(program, facts)
+                || fallibility
+                    .callables
+                    .values()
+                    .any(CallableFallibility::returns_result),
+        ),
         methods,
     }
 }
@@ -677,6 +687,16 @@ pub fn plan_program_fallibility_with_signatures(
     call_graph: &CallGraph,
     facts: &FactSet,
     signatures: Option<&crate::signature::SignaturePlan>,
+) -> ProgramFallibilityPlan {
+    plan_program_fallibility_with_cast_context(program, call_graph, facts, signatures, None)
+}
+
+pub(crate) fn plan_program_fallibility_with_cast_context(
+    program: &Program,
+    call_graph: &CallGraph,
+    facts: &FactSet,
+    signatures: Option<&crate::signature::SignaturePlan>,
+    representations: Option<&crate::representation::RepresentationPlan>,
 ) -> ProgramFallibilityPlan {
     let mut callables = call_graph
         .nodes()
@@ -722,6 +742,16 @@ pub fn plan_program_fallibility_with_signatures(
             entry.reasons.push(FallibilityReason::NullReceiverThrow);
         }
     }
+    for key in checked_cast_throw_callables(program, facts, signatures, representations) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        entry.reasons.push(FallibilityReason::ClassCastThrow);
+    }
+    for key in array_bounds_throw_callables(program) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        entry.reasons.push(FallibilityReason::ArrayBoundsThrow);
+    }
     for key in direct_throw_callables(program, facts) {
         let entry = callables.entry(key).or_default();
         if !entry.returns_result {
@@ -738,7 +768,43 @@ pub fn plan_program_fallibility_with_signatures(
             continue;
         };
         let nullable_params = nullable_reference_param_names(&method.params);
+        let mut cast_env = crate::expr_shape::ShapeEnv::new();
+        for param in &method.params {
+            let shape = crate::shape_projection::project_java_value_shape(
+                representations,
+                param.ty.clone(),
+            );
+            cast_env.insert_param_shape_with_java_type(
+                param.name.clone(),
+                shape.clone(),
+                param.ty.clone(),
+            );
+            cast_env.insert_param_shape_with_java_type(
+                param.source_name.clone(),
+                shape,
+                param.ty.clone(),
+            );
+        }
+        let fallback_signatures = crate::signature::SignaturePlan::default();
         let reasons = [
+            (
+                block_has_unhandled_array_bounds(body),
+                FallibilityReason::ArrayBoundsThrow,
+            ),
+            (
+                block_has_unhandled_checked_cast(
+                    body,
+                    &cast_env,
+                    crate::expr_shape::ExprShapeContext::new(
+                        signatures,
+                        representations,
+                        Some(facts),
+                    ),
+                    &[],
+                    signatures.unwrap_or(&fallback_signatures),
+                ),
+                FallibilityReason::ClassCastThrow,
+            ),
             (
                 block_has_unhandled_integer_div_rem(body),
                 FallibilityReason::IntegerDivRemThrow,
@@ -877,16 +943,7 @@ fn declared_throw_callables(program: &Program, facts: &FactSet) -> Vec<(Callable
 /// — never clears it. Without this, a method that catches its own divide-by-zero
 /// is still marked fallible and returns `Result` for an exception it handles.
 fn catches_arithmetic_exception(catches: &[CatchClause]) -> bool {
-    catches.iter().any(|catch| {
-        catch.types.iter().any(|ty| {
-            let name = exception_class_name(ty);
-            let simple = name.rsplit('.').next().unwrap_or(&name);
-            matches!(
-                simple,
-                "ArithmeticException" | "RuntimeException" | "Exception" | "Throwable"
-            )
-        })
-    })
+    catches_intrinsic_exception(catches, "ArithmeticException")
 }
 
 /// Integer `/` or `%` that is *not* already handled by an enclosing catch.
@@ -973,13 +1030,131 @@ fn stmt_has_unhandled_integer_div_rem(stmt: &Stmt) -> bool {
 }
 
 fn block_has_unhandled_integer_div_rem_with_env(block: &Block, env: &TypeEnv) -> bool {
-    block
-        .statements
-        .iter()
-        .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+    block_has_unhandled_expression_effect(
+        block,
+        env,
+        &ExpressionEffect {
+            expression: &expr_has_throwing_integer_div_rem_expr,
+            handles: &catches_arithmetic_exception,
+            learn: None,
+        },
+    )
 }
 
-fn stmt_has_unhandled_integer_div_rem_with_env(stmt: &Stmt, env: &TypeEnv) -> bool {
+/// Shared typed control-flow traversal for immediate expression effects.
+/// Environments are borrowed until a local declaration requires a scoped copy.
+struct ExpressionEffect<'a, E> {
+    expression: &'a dyn Fn(&Expr, &E) -> bool,
+    handles: &'a dyn Fn(&[CatchClause]) -> bool,
+    learn: Option<&'a dyn Fn(&Stmt, &mut E)>,
+}
+
+fn catches_array_bounds_exception(catches: &[CatchClause]) -> bool {
+    catches_intrinsic_exception(catches, "ArrayIndexOutOfBoundsException")
+}
+
+/// Intrinsic effects use the same JDK subtype closure as explicit throws and
+/// the semantic exception model, rather than owning superclass answer lists.
+fn catches_intrinsic_exception(catches: &[CatchClause], thrown: &str) -> bool {
+    catches
+        .iter()
+        .flat_map(|catch| &catch.types)
+        .any(|ty| crate::stdlib::is_known_java_subtype(thrown, &exception_class_name(ty)))
+}
+
+fn expr_has_immediate_array_access(expr: &Expr) -> bool {
+    let mut found = false;
+    crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+        found |= matches!(expr, Expr::ArrayAccess(..));
+        if let Expr::New {
+            body: Some(members),
+            ..
+        } = expr
+        {
+            // Object initialization executes now; its methods execute later.
+            found |= members.iter().any(|member| match member {
+                Member::Field(field) => field
+                    .initializer
+                    .as_ref()
+                    .is_some_and(expr_has_immediate_array_access),
+                _ => false,
+            });
+        }
+    });
+    found
+}
+
+fn block_has_unhandled_array_bounds(body: &Block) -> bool {
+    block_has_unhandled_expression_effect(
+        body,
+        &(),
+        &ExpressionEffect {
+            expression: &|expr, _| expr_has_immediate_array_access(expr),
+            handles: &catches_array_bounds_exception,
+            learn: None,
+        },
+    )
+}
+
+fn array_bounds_throw_callables(program: &Program) -> Vec<CallableKey> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    for ty in types {
+        for member in &ty.members {
+            let (key, body) = match member {
+                Member::Method(method) => (
+                    CallableKey::source_method_for_type(ty, method),
+                    method.body.as_ref(),
+                ),
+                Member::Constructor(ctor) => (
+                    CallableKey::source_constructor_for_type(ty, ctor),
+                    ctor.body.as_ref(),
+                ),
+                _ => continue,
+            };
+            if body.is_some_and(block_has_unhandled_array_bounds) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+fn block_has_unhandled_expression_effect<E: Clone>(
+    block: &Block,
+    env: &E,
+    effect: &ExpressionEffect<'_, E>,
+) -> bool {
+    let mut frame = std::borrow::Cow::Borrowed(env);
+    statements_have_unhandled_expression_effect(&block.statements, &mut frame, effect)
+}
+
+fn statements_have_unhandled_expression_effect<E: Clone>(
+    statements: &[Stmt],
+    frame: &mut std::borrow::Cow<'_, E>,
+    effect: &ExpressionEffect<'_, E>,
+) -> bool {
+    for stmt in statements {
+        if stmt_has_unhandled_expression_effect(stmt, frame.as_ref(), effect) {
+            return true;
+        }
+        if matches!(stmt, Stmt::VarDecl { .. }) {
+            if let Some(learn) = effect.learn {
+                learn(stmt, frame.to_mut());
+            }
+        }
+    }
+    false
+}
+
+fn stmt_has_unhandled_expression_effect<E: Clone>(
+    stmt: &Stmt,
+    env: &E,
+    effect: &ExpressionEffect<'_, E>,
+) -> bool {
     match stmt {
         Stmt::Try {
             resources,
@@ -987,40 +1162,58 @@ fn stmt_has_unhandled_integer_div_rem_with_env(stmt: &Stmt, env: &TypeEnv) -> bo
             catches,
             finally_block,
         } => {
-            let guarded_counts = !catches_arithmetic_exception(catches);
+            let guarded_counts = !(effect.handles)(catches);
+            let mut resource_frame = std::borrow::Cow::Borrowed(env);
             (guarded_counts
-                && (resources
-                    .iter()
-                    .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
-                    || block_has_unhandled_integer_div_rem_with_env(body, env)))
-                || catches
-                    .iter()
-                    .any(|catch| block_has_unhandled_integer_div_rem_with_env(&catch.body, env))
+                && (statements_have_unhandled_expression_effect(
+                    resources,
+                    &mut resource_frame,
+                    effect,
+                ) || block_has_unhandled_expression_effect(
+                    body,
+                    resource_frame.as_ref(),
+                    effect,
+                )))
+                || catches.iter().any(|catch| {
+                    let mut catch_frame = std::borrow::Cow::Borrowed(env);
+                    if let (Some(learn), Some(ty)) = (effect.learn, catch.types.first()) {
+                        learn(
+                            &Stmt::VarDecl {
+                                ty: ty.clone(),
+                                name: catch.name.clone(),
+                                source_name: catch.source_name.clone(),
+                                initializer: None,
+                                binding: catch.binding.clone(),
+                            },
+                            catch_frame.to_mut(),
+                        );
+                    }
+                    block_has_unhandled_expression_effect(&catch.body, catch_frame.as_ref(), effect)
+                })
                 || finally_block
                     .as_ref()
-                    .is_some_and(|block| block_has_unhandled_integer_div_rem_with_env(block, env))
+                    .is_some_and(|block| block_has_unhandled_expression_effect(block, env, effect))
         }
         Stmt::VarDecl { initializer, .. } => initializer
             .as_ref()
-            .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, env)),
+            .is_some_and(|expr| (effect.expression)(expr, env)),
         Stmt::Assign { target, value } => {
-            expr_has_throwing_integer_div_rem_expr(target, env)
-                || expr_has_throwing_integer_div_rem_expr(value, env)
+            (effect.expression)(target, env) || (effect.expression)(value, env)
         }
-        Stmt::Expr(expr) | Stmt::Throw(expr) => expr_has_throwing_integer_div_rem_expr(expr, env),
+        Stmt::Expr(expr) | Stmt::Throw(expr) => (effect.expression)(expr, env),
         Stmt::Return(expr) => expr
             .as_ref()
-            .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, env)),
+            .is_some_and(|expr| (effect.expression)(expr, env)),
         Stmt::If {
             condition,
             then_block,
             else_block,
         } => {
-            expr_has_throwing_integer_div_rem_expr(condition, env)
-                || block_has_unhandled_integer_div_rem_with_env(then_block, env)
+            (effect.expression)(condition, env)
+                || block_has_unhandled_expression_effect(then_block, env, effect)
                 || else_block
                     .as_ref()
-                    .is_some_and(|block| block_has_unhandled_integer_div_rem_with_env(block, env))
+                    .is_some_and(|block| block_has_unhandled_expression_effect(block, env, effect))
         }
         Stmt::While {
             condition, body, ..
@@ -1028,8 +1221,8 @@ fn stmt_has_unhandled_integer_div_rem_with_env(stmt: &Stmt, env: &TypeEnv) -> bo
         | Stmt::DoWhile {
             condition, body, ..
         } => {
-            expr_has_throwing_integer_div_rem_expr(condition, env)
-                || block_has_unhandled_integer_div_rem_with_env(body, env)
+            (effect.expression)(condition, env)
+                || block_has_unhandled_expression_effect(body, env, effect)
         }
         Stmt::For {
             init,
@@ -1038,40 +1231,65 @@ fn stmt_has_unhandled_integer_div_rem_with_env(stmt: &Stmt, env: &TypeEnv) -> bo
             body,
             ..
         } => {
-            init.iter()
-                .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+            let mut frame = std::borrow::Cow::Borrowed(env);
+            statements_have_unhandled_expression_effect(init, &mut frame, effect)
                 || condition
                     .as_ref()
-                    .is_some_and(|expr| expr_has_throwing_integer_div_rem_expr(expr, env))
+                    .is_some_and(|expr| (effect.expression)(expr, frame.as_ref()))
                 || update
                     .iter()
-                    .any(|expr| expr_has_throwing_integer_div_rem_expr(expr, env))
-                || block_has_unhandled_integer_div_rem_with_env(body, env)
+                    .any(|expr| (effect.expression)(expr, frame.as_ref()))
+                || block_has_unhandled_expression_effect(body, frame.as_ref(), effect)
         }
-        Stmt::EnhancedFor { iterable, body, .. } => {
-            expr_has_throwing_integer_div_rem_expr(iterable, env)
-                || block_has_unhandled_integer_div_rem_with_env(body, env)
+        Stmt::EnhancedFor {
+            iterable,
+            body,
+            var_type,
+            var_name,
+            source_var_name,
+            binding,
+            ..
+        } => {
+            if (effect.expression)(iterable, env) {
+                return true;
+            }
+            let mut frame = std::borrow::Cow::Borrowed(env);
+            if let Some(learn) = effect.learn {
+                learn(
+                    &Stmt::VarDecl {
+                        ty: var_type.clone(),
+                        name: var_name.clone(),
+                        source_name: source_var_name.clone(),
+                        initializer: None,
+                        binding: binding.clone(),
+                    },
+                    frame.to_mut(),
+                );
+            }
+            block_has_unhandled_expression_effect(body, frame.as_ref(), effect)
         }
         Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
-            block_has_unhandled_integer_div_rem_with_env(body, env)
+            block_has_unhandled_expression_effect(body, env, effect)
         }
         Stmt::Switch { selector, cases } => {
-            expr_has_throwing_integer_div_rem_expr(selector, env)
+            // Java case groups share the switch block's local scope. Learn
+            // declarations in source order without leaking them outside it.
+            let mut frame = std::borrow::Cow::Borrowed(env);
+            (effect.expression)(selector, env)
                 || cases.iter().any(|case| {
                     case.labels.iter().any(|label| match label {
-                        SwitchLabel::Expr(expr) => {
-                            expr_has_throwing_integer_div_rem_expr(expr, env)
-                        }
+                        SwitchLabel::Expr(expr) => (effect.expression)(expr, frame.as_ref()),
                         SwitchLabel::Default => false,
-                    }) || case
-                        .statements
-                        .iter()
-                        .any(|stmt| stmt_has_unhandled_integer_div_rem_with_env(stmt, env))
+                    }) || statements_have_unhandled_expression_effect(
+                        &case.statements,
+                        &mut frame,
+                        effect,
+                    )
                 })
         }
-        Stmt::ConstructorInvocation { args, .. } => args
-            .iter()
-            .any(|expr| expr_has_throwing_integer_div_rem_expr(expr, env)),
+        Stmt::ConstructorInvocation { args, .. } => {
+            args.iter().any(|expr| (effect.expression)(expr, env))
+        }
         // A local/anonymous type owns a separate type environment. The call
         // graph seeds its callable independently, so it must not contaminate
         // the enclosing callable here.
@@ -1377,6 +1595,172 @@ fn expr_is_math_static_owner(expr: &Expr) -> bool {
         }
         _ => false,
     }
+}
+
+fn catches_class_cast_exception(catches: &[CatchClause]) -> bool {
+    catches_intrinsic_exception(catches, "ClassCastException")
+}
+
+fn expr_has_checked_cast(
+    expr: &Expr,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+) -> bool {
+    let mut found = false;
+    crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+        if found {
+            return;
+        }
+        if let Expr::Cast { ty, expr } = expr {
+            if !matches!(ty, JavaType::Primitive(_) | JavaType::Void)
+                && !matches!(expr.as_ref(), Expr::Literal(crate::java_ir::Literal::Null))
+            {
+                let plan = crate::conversion_plan::plan_cast_conversion(expr, ty, env, ctx);
+                found = plan.coercion().unsupported_diagnostics().is_empty()
+                    && plan.coercion().may_throw_class_cast();
+            }
+        }
+        // Anonymous methods execute later, but their field initializers run
+        // immediately when the object is constructed.
+        if let Expr::New {
+            body: Some(members),
+            ..
+        } = expr
+        {
+            found |= members.iter().any(|member| match member {
+                Member::Field(field) => field
+                    .initializer
+                    .as_ref()
+                    .is_some_and(|expr| expr_has_checked_cast(expr, env, ctx)),
+                _ => false,
+            });
+        }
+    });
+    found
+}
+
+fn checked_cast_throw_callables(
+    program: &Program,
+    facts: &FactSet,
+    signatures: Option<&crate::signature::SignaturePlan>,
+    representations: Option<&crate::representation::RepresentationPlan>,
+) -> Vec<CallableKey> {
+    let mut types = Vec::new();
+    for ty in &program.types {
+        collect_type_decls(ty, &mut types);
+    }
+    let mut keys = Vec::new();
+    let fallback_signatures = crate::signature::SignaturePlan::default();
+    let signature_plan = signatures.unwrap_or(&fallback_signatures);
+    let ctx = crate::expr_shape::ExprShapeContext::new(signatures, representations, Some(facts));
+    for ty in types {
+        for member in &ty.members {
+            let body = match member {
+                Member::Method(method) => method.body.as_ref(),
+                Member::Constructor(ctor) => ctor.body.as_ref(),
+                _ => None,
+            };
+            let Some(body) = body else {
+                continue;
+            };
+            let mut contains_cast = false;
+            crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+                contains_cast |= matches!(expr, Expr::Cast { .. });
+            });
+            if !contains_cast {
+                continue;
+            }
+            let (key, params, body, solved_env, locals) = match member {
+                Member::Method(method) => (
+                    CallableKey::source_method_for_type(ty, method),
+                    method.params.as_slice(),
+                    method.body.as_ref(),
+                    signatures.and_then(|plan| {
+                        plan.method_signature(ty, method).map(|signature| {
+                            crate::expr_shape::shape_env_for_method(ty, method, signature, plan)
+                        })
+                    }),
+                    signature_plan.method_local_shapes_or_empty(ty, method),
+                ),
+                Member::Constructor(ctor) => (
+                    CallableKey::source_constructor_for_type(ty, ctor),
+                    ctor.params.as_slice(),
+                    ctor.body.as_ref(),
+                    signatures.and_then(|plan| {
+                        plan.constructor_signature(ty, ctor).map(|signature| {
+                            crate::expr_shape::shape_env_for_constructor(ty, ctor, signature, plan)
+                        })
+                    }),
+                    signatures
+                        .and_then(|plan| plan.constructor_signature(ty, ctor))
+                        .map(|signature| signature.locals())
+                        .unwrap_or(&[]),
+                ),
+                _ => continue,
+            };
+            let Some(body) = body else {
+                continue;
+            };
+            let env = solved_env.unwrap_or_else(|| {
+                let mut env = crate::expr_shape::ShapeEnv::new();
+                for field in &ty.members {
+                    if let Member::Field(field) = field {
+                        env.insert_field_shape(
+                            field.name.clone(),
+                            crate::shape_projection::project_java_value_shape(
+                                representations,
+                                field.ty.clone(),
+                            ),
+                        );
+                    }
+                }
+                for param in params {
+                    let shape = crate::shape_projection::project_java_value_shape(
+                        representations,
+                        param.ty.clone(),
+                    );
+                    env.insert_param_shape_with_java_type(
+                        param.name.clone(),
+                        shape.clone(),
+                        param.ty.clone(),
+                    );
+                    env.insert_param_shape_with_java_type(
+                        param.source_name.clone(),
+                        shape,
+                        param.ty.clone(),
+                    );
+                }
+                env
+            });
+            if block_has_unhandled_checked_cast(body, &env, ctx, locals, signature_plan) {
+                keys.push(key);
+            }
+        }
+    }
+    keys
+}
+
+fn block_has_unhandled_checked_cast(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let expression =
+        |expr: &Expr, env: &crate::expr_shape::ShapeEnv| expr_has_checked_cast(expr, env, ctx);
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx))
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &catches_class_cast_exception,
+            learn: Some(&learn),
+        },
+    )
 }
 
 fn nullable_receiver_throw_callables(
@@ -1720,16 +2104,7 @@ fn java_type_can_be_null(ty: &JavaType) -> bool {
 }
 
 fn catches_null_pointer_exception(catches: &[CatchClause]) -> bool {
-    catches.iter().any(|catch| {
-        catch.types.iter().any(|ty| {
-            let name = exception_class_name(ty);
-            let simple = name.rsplit('.').next().unwrap_or(&name);
-            matches!(
-                simple,
-                "NullPointerException" | "RuntimeException" | "Exception" | "Throwable"
-            )
-        })
-    })
+    catches_intrinsic_exception(catches, "NullPointerException")
 }
 
 fn block_has_unhandled_nullable_receiver_deref(block: &Block, names: &HashSet<String>) -> bool {
@@ -2677,6 +3052,7 @@ mod tests {
     fn qualified_new_expr(qualifier: Expr) -> Expr {
         Expr::New {
             ty: JavaType::Unknown("Inner".to_string()),
+            infer_type_arguments: false,
             qualifier: Some(Box::new(qualifier)),
             args: Vec::new(),
             body: None,
@@ -2758,6 +3134,181 @@ mod tests {
     }
 
     #[test]
+    fn intrinsic_exception_handlers_share_jdk_subtype_rules() {
+        let checks: [(fn(&[CatchClause]) -> bool, &str); 4] = [
+            (catches_arithmetic_exception, "ArithmeticException"),
+            (
+                catches_array_bounds_exception,
+                "ArrayIndexOutOfBoundsException",
+            ),
+            (catches_class_cast_exception, "ClassCastException"),
+            (catches_null_pointer_exception, "NullPointerException"),
+        ];
+        let handler = |name: &str| CatchClause {
+            types: vec![JavaType::Named {
+                name: name.to_string(),
+                args: vec![],
+            }],
+            name: "error".to_string(),
+            source_name: "error".to_string(),
+            body: Block { statements: vec![] },
+            binding: None,
+        };
+        for (matches, leaf) in checks {
+            for caught in [leaf, "java.lang.RuntimeException", "Exception", "Throwable"] {
+                assert!(matches(&[handler(caught)]), "{leaf} -> {caught}");
+            }
+            assert!(!matches(&[handler("IOException")]), "{leaf}");
+            assert!(!matches(&[handler("Error")]), "{leaf}");
+        }
+        assert!(catches_array_bounds_exception(&[handler(
+            "java.lang.IndexOutOfBoundsException"
+        )]));
+        assert!(!catches_class_cast_exception(&[handler(
+            "IndexOutOfBoundsException"
+        )]));
+    }
+
+    #[test]
+    fn array_bounds_effects_respect_handlers_and_deferred_bodies() {
+        let parsed = parse_java_source(
+            r#"
+class Reads {
+    static int direct(int[] values) { return values[0] + 2; }
+    static void write(int[] values) { values[1] = 3; }
+    static int handled(int[] values) {
+        try { return values[0]; }
+        catch (IndexOutOfBoundsException error) { return -1; }
+    }
+    static int otherHandler(int[] values) {
+        try { return values[0]; }
+        catch (ArithmeticException error) { return -1; }
+    }
+    static Object deferred(int[] values) {
+        return new Object() { int read() { return values[0]; } };
+    }
+    static Runnable lambda(int[] values) {
+        return () -> { int value = values[0]; };
+    }
+    static Object immediate(int[] values) {
+        return new Object() { int value = values[0]; };
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let keys = array_bounds_throw_callables(&resolved.program);
+        let ty = &resolved.program.types[0];
+        for member in &ty.members {
+            if let Member::Method(method) = member {
+                assert_eq!(
+                    keys.contains(&CallableKey::source_method_for_type(ty, method)),
+                    matches!(
+                        method.name.as_str(),
+                        "direct" | "write" | "otherHandler" | "immediate"
+                    ),
+                    "{}",
+                    method.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checked_cast_effects_use_conversion_plans_and_scoped_handlers() {
+        let parsed = parse_java_source(
+            r#"
+class Casts {
+    static String checked(Object value) { return (String) value; }
+    static String identity(String value) { return (String) value; }
+    static String nullValue() { return (String) null; }
+    static long numeric(int value) { return (long) value; }
+    static String handled(Object value) {
+        try { return (String) value; }
+        catch (ClassCastException error) { return "caught"; }
+    }
+    static String unhandled(Object value) {
+        try { return (String) value; }
+        catch (IllegalArgumentException error) { return "other"; }
+    }
+    static String loop() {
+        for (String value = "ok"; true;) { return (String) value; }
+    }
+    static String loopChecked() {
+        for (Object value = "ok"; true;) { return (String) value; }
+    }
+    static String switched(int selector) {
+        switch (selector) {
+            case 0: String value = "ok"; return (String) value;
+            default: return "default";
+        }
+    }
+    static String switchChecked(int selector) {
+        switch (selector) {
+            case 0: Object value = "ok"; return (String) value;
+            default: return "default";
+        }
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(!resolved.diagnostics.has_errors());
+        let keys = checked_cast_throw_callables(&resolved.program, &FactSet::default(), None, None);
+        let ty = &resolved.program.types[0];
+        for member in &ty.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            let expected = matches!(
+                method.name.as_str(),
+                "checked" | "unhandled" | "loopChecked" | "switchChecked"
+            );
+            assert_eq!(
+                keys.contains(&CallableKey::source_method_for_type(ty, method)),
+                expected,
+                "{}",
+                method.name
+            );
+        }
+    }
+
+    #[test]
+    fn checked_cast_in_anonymous_override_promotes_its_contract_not_factory() {
+        let parsed = parse_java_source(
+            r#"
+class Base { String cast(Object value) { return "base"; } }
+class Use {
+    static Base make() {
+        return new Base() {
+            @Override String cast(Object value) { return (String) value; }
+        };
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let facts = FactSet::default();
+        let call_graph = crate::usage::build_call_graph_with_facts(&resolved.program, &facts);
+        let plan = plan_program_fallibility(&resolved.program, &call_graph, &facts);
+        let anonymous: Vec<_> = call_graph.anonymous_methods().iter().collect();
+        assert_eq!(anonymous.len(), 1);
+        assert!(plan.returns_result(anonymous[0].0));
+        for ty in &resolved.program.types {
+            for member in &ty.members {
+                if let Member::Method(method) = member {
+                    assert_eq!(
+                        plan.returns_result(&CallableKey::source_method_for_type(ty, method)),
+                        method.name == "cast",
+                        "{}",
+                        method.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
     fn non_throwing_interface_override_group_stays_infallible() {
         let parsed = parse_java_source(
             r#"
@@ -2809,6 +3360,86 @@ class FixedMetric implements Metric {
         }
 
         let _semantic = analyze_program(&resolved.program, &resolved.facts, &facts);
+    }
+
+    #[test]
+    fn stream_callback_consumed_references_propagate_errors_but_creation_does_not() {
+        let parsed = parse_java_source(
+            r#"
+import java.util.Arrays;
+import java.util.stream.IntStream;
+interface IntCheck { boolean test(int value); }
+class Callback {
+    static boolean checked(int value) {
+        if (value < 0) throw new IllegalArgumentException("negative");
+        return value > 0;
+    }
+    static boolean checked(String value) { return true; }
+    static boolean consumed(int[] values) { return Arrays.stream(values).anyMatch(Callback::checked); }
+    static boolean qualified(int[] values) { return Arrays.stream(values).allMatch(value -> Callback.checked(value)); }
+    static IntCheck created() { return Callback::checked; }
+    static IntStream delayed(int[] values) { return Arrays.stream(values).filter(Callback::checked); }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let fallibility = plan_program_fallibility(&resolved.program, &graph, &resolved.facts);
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Callback")
+            .unwrap();
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method)
+                if matches!(
+                    method.name.as_str(),
+                    "consumed" | "qualified" | "created" | "delayed"
+                ) =>
+            {
+                Some(method)
+            }
+            _ => None,
+        }) {
+            assert_eq!(
+                fallibility.returns_result(&CallableKey::source_method_for_type(owner, method)),
+                matches!(method.name.as_str(), "consumed" | "qualified"),
+                "{}",
+                method.name
+            );
+        }
+        let consumed_key = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "consumed" => {
+                    Some(CallableKey::source_method_for_type(owner, method))
+                }
+                _ => None,
+            })
+            .unwrap();
+        let callbacks = graph
+            .edges()
+            .iter()
+            .filter(|edge| {
+                edge.caller() == &consumed_key
+                    && edge.kind() == crate::usage::CallGraphEdgeKind::LambdaBody
+            })
+            .map(|edge| edge.callee())
+            .collect::<Vec<_>>();
+        assert_eq!(callbacks.len(), 1);
+        let targets = graph
+            .edges()
+            .iter()
+            .filter(|edge| callbacks.contains(&edge.caller()))
+            .map(|edge| edge.callee())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            targets.len(),
+            1,
+            "a typed unary callback must not collect unrelated overloads"
+        );
     }
 
     #[test]
@@ -3198,6 +3829,7 @@ class Use {
     #[test]
     fn throw_expr_plan_preserves_new_existing_and_cause_or_self_shapes() {
         let thrown_new = Expr::New {
+            infer_type_arguments: false,
             ty: JavaType::Named {
                 name: "IllegalArgumentException".to_string(),
                 args: Vec::new(),

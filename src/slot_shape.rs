@@ -8,6 +8,10 @@ pub struct RustSlotShape {
     pub view: ViewShape,
     pub dispatch: DispatchShape,
     pub mutability: MutabilityShape,
+    /// Solver-owned carrier choices below the outer slot. Keys are Java
+    /// subtrees, not global type-variable names; lexical shadowing is resolved
+    /// when the signature is planned.
+    pub nested_collection_views: Vec<(JavaType, ViewShape)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -21,6 +25,8 @@ pub enum OwnershipShape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewShape {
     Native,
+    /// Native hash collection using Java key equality instead of Rust Eq/Hash.
+    JavaSemanticHash,
     Str,
     Slice,
     DynTraitView,
@@ -64,6 +70,45 @@ pub struct TypeCapabilities {
 }
 
 impl RustSlotShape {
+    /// Project a child slot from a solved container without rediscovering its
+    /// carrier from a context-free Java spelling.
+    pub(crate) fn inherit_nested_collection_views(&mut self, parent: &Self) {
+        fn contains(ty: &JavaType, child: &JavaType) -> bool {
+            ty == child
+                || match ty {
+                    JavaType::Named { args, .. } | JavaType::Intersection(args) => {
+                        args.iter().any(|ty| contains(ty, child))
+                    }
+                    JavaType::Array(element) => contains(element, child),
+                    JavaType::Wildcard(Some(WildcardBound::Extends(bound)))
+                    | JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+                        contains(bound, child)
+                    }
+                    _ => false,
+                }
+        }
+        let base = optional_element_type(&self.java_ty).unwrap_or_else(|| self.java_ty.clone());
+        for (ty, view) in &parent.nested_collection_views {
+            if &base == ty {
+                if self.view == ViewShape::Native {
+                    self.view = view.clone();
+                }
+                continue;
+            }
+            if !contains(&self.java_ty, ty) {
+                continue;
+            }
+            if !self
+                .nested_collection_views
+                .iter()
+                .any(|(key, _)| key == ty)
+            {
+                self.nested_collection_views
+                    .push((ty.clone(), view.clone()));
+            }
+        }
+    }
+
     pub fn java_ty(&self) -> JavaType {
         self.java_ty.clone()
     }
@@ -74,6 +119,7 @@ impl RustSlotShape {
 
     pub fn conservative(java_ty: JavaType) -> Self {
         Self {
+            nested_collection_views: Vec::new(),
             ownership: conservative_ownership(&java_ty),
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,
@@ -84,6 +130,7 @@ impl RustSlotShape {
 
     pub fn for_storage(java_ty: JavaType) -> Self {
         Self {
+            nested_collection_views: Vec::new(),
             ownership: conservative_ownership(&java_ty),
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,

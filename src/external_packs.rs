@@ -30558,17 +30558,19 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
         }
     }
     for receiver_type in ["Collections", "java.util.Collections"] {
-        facts.push(ExternalApiArgumentEffectFact {
-            method_name: "sort".to_string(),
-            receiver_type: Some(receiver_type.to_string()),
-            arg_count: Some(1),
-            parameter_index: 0,
-            parameter_type: None,
-            parameter_nullability: NullabilityState::DefinitelyNonNull,
-            argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
-            alias_policy: ExternalArgumentAliasPolicy::Unknown,
-            provenance: FactProvenance::BuiltinExternalModel,
-        });
+        for (method_name, arg_count) in [("sort", 1), ("sort", 2), ("reverse", 1)] {
+            facts.push(ExternalApiArgumentEffectFact {
+                method_name: method_name.to_string(),
+                receiver_type: Some(receiver_type.to_string()),
+                arg_count: Some(arg_count),
+                parameter_index: 0,
+                parameter_type: None,
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::MutatesReceiver,
+                alias_policy: ExternalArgumentAliasPolicy::Unknown,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
     }
     for receiver_type in [
         "JPanel",

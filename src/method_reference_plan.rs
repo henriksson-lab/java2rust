@@ -28,6 +28,47 @@ pub(crate) enum BoundMethodReferenceReceiver {
     InstanceField(String),
 }
 
+impl BoundMethodReferenceReceiver {
+    pub(crate) fn source_expr(&self) -> crate::java_ir::Expr {
+        match self {
+            Self::Local(name) => crate::java_ir::Expr::Var(name.clone()),
+            Self::InstanceField(name) => crate::java_ir::Expr::FieldAccess(
+                Box::new(crate::java_ir::Expr::This),
+                name.clone(),
+            ),
+        }
+    }
+}
+
+/// Lexical bindings, not capitalization, distinguish a bound receiver from a
+/// type owner. Shared by ordinary callbacks and stream callbacks.
+pub(crate) fn bound_method_reference_receiver(
+    target: &str,
+    env: &crate::expr_shape::ShapeEnv,
+) -> Option<BoundMethodReferenceReceiver> {
+    if env.local_type(target).is_some() {
+        return Some(BoundMethodReferenceReceiver::Local(
+            crate::parser::to_snake_case(target),
+        ));
+    }
+    if env.field_type(target).is_some() {
+        return Some(BoundMethodReferenceReceiver::InstanceField(
+            target.to_string(),
+        ));
+    }
+    let normalized = crate::parser::to_snake_case(target);
+    if normalized == target {
+        return None;
+    }
+    if env.local_type(&normalized).is_some() {
+        return Some(BoundMethodReferenceReceiver::Local(normalized));
+    }
+    if env.field_type(&normalized).is_some() {
+        return Some(BoundMethodReferenceReceiver::InstanceField(normalized));
+    }
+    None
+}
+
 pub(crate) fn plan_method_reference(target: &str, method: &str) -> MethodReferencePlan {
     let method = crate::parser::to_snake_case(method);
     if method == "new" {

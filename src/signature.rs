@@ -7,8 +7,8 @@ use crate::effective_facts::EffectiveFacts;
 use crate::fact_saturation::{FiniteSaturationPolicy, SaturationStep};
 use crate::facts::{
     CaptureOrigin, CaptureSource, DispatchRequirementKind, ExternalApiArgumentEffectFact,
-    ExternalArgumentAliasPolicy, FacadeAbiFact, FactProvenance, FactSet, HierarchyOverride,
-    HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
+    ExternalArgumentAliasPolicy, ExternalFactLookupIndex, FacadeAbiFact, FactProvenance, FactSet,
+    HierarchyOverride, HierarchyStrategy, NullabilityState, OwnedRecoveryCapability, ReceiverAbi,
     ReceiverMutabilityFact, external_parameter_nullability_policy,
 };
 use crate::graph::strongly_connected_components;
@@ -54,6 +54,8 @@ pub struct SignaturePlan {
     rust_method_names_by_java_key: HashMap<JavaCallableKey, String>,
     constructors: HashMap<ConstructorKey, ConstructorSignaturePlan>,
     fields: HashMap<FieldKey, RustSlotShape>,
+    type_params_by_owner: HashMap<JavaOwnerKey, Vec<String>>,
+    interface_return_shapes: HashMap<MethodKey, Option<RustSlotShape>>,
     solve_iterations: usize,
     diagnostics: Vec<SignatureDiagnostic>,
 }
@@ -2533,12 +2535,14 @@ fn collect_signature_constraints_with_optional_representations(
 ) -> SignatureConstraintState {
     let mut constraints = SignatureConstraintState::default();
     let declared_source_types = program_declared_source_type_names(program);
+    let external_index = facts.external_lookup_index();
     for ty in &program.types {
         collect_type_signature_constraints(
             ty,
             representations,
             usage,
             facts,
+            &external_index,
             &declared_source_types,
             &mut constraints,
         );
@@ -4410,7 +4414,6 @@ struct SourceOverrideConstraintGroup {
 #[derive(Debug, Clone, Default)]
 struct SourceOverrideConstraintTopology {
     groups: Vec<SourceOverrideConstraintGroup>,
-    interface_implementations: Vec<(MethodKey, Vec<MethodKey>)>,
 }
 
 /// Build the immutable relationships used while joining source override
@@ -4484,12 +4487,49 @@ fn build_source_override_constraint_topology(
                 .collect::<Vec<_>>();
             Some((key.clone(), implementations))
         })
-        .collect();
+        .collect::<Vec<_>>();
 
-    SourceOverrideConstraintTopology {
-        groups,
-        interface_implementations,
+    // Generic implementations can have different erased Java spellings from
+    // their interface declaration (T versus String). They still share the
+    // same null-capable value domain. Feed the already-specialized source
+    // implementation relation into the ordinary override join, rather than
+    // widening the emitted trait only after callers have been solved.
+    for (interface_key, implementations) in interface_implementations {
+        let mut keys = vec![interface_key];
+        keys.extend(implementations);
+        keys.sort_by(|left, right| {
+            left.type_name()
+                .cmp(right.type_name())
+                .then_with(|| left.rust_name.cmp(&right.rust_name))
+        });
+        keys.dedup();
+        if keys.len() < 2 {
+            continue;
+        }
+        let interface_keys = keys
+            .iter()
+            .filter(|key| {
+                find_signature_type_decl(program, key.type_name())
+                    .is_some_and(|ty| ty.kind == TypeKind::Interface)
+            })
+            .cloned()
+            .collect();
+        groups.push(SourceOverrideConstraintGroup {
+            keys,
+            group_has_interface: true,
+            interface_keys,
+        });
     }
+    let mut seen = HashSet::new();
+    groups.retain_mut(|group| {
+        group.keys.sort_by(|left, right| {
+            left.type_name()
+                .cmp(right.type_name())
+                .then_with(|| left.rust_name.cmp(&right.rust_name))
+        });
+        seen.insert(group.keys.clone())
+    });
+    SourceOverrideConstraintTopology { groups }
 }
 
 fn equalize_source_override_nullability_constraints_with_topology(
@@ -4573,41 +4613,6 @@ fn equalize_source_override_nullability_constraints_with_topology(
                 method.receiver.push(ReceiverConstraint::MutableReceiver);
                 changed = true;
             }
-        }
-    }
-    // Generic interface substitutions are intentionally more permissive at
-    // trait emission than the ordinary override graph (for example
-    // `Centroid<O>` implemented as `Centroid<ObservationReal>`). Join the
-    // interface receiver through that same authoritative implementation
-    // relation so callers are solved against the trait ABI, not a bodyless
-    // declaration that still appears read-only.
-    let mutable_interface_keys = topology
-        .interface_implementations
-        .iter()
-        .filter(|(_, implementations)| {
-            implementations.iter().any(|implementation_key| {
-                constraints
-                    .methods
-                    .get(implementation_key)
-                    .is_some_and(|implementation| {
-                        implementation
-                            .receiver
-                            .contains(&ReceiverConstraint::MutableReceiver)
-                    })
-            })
-        })
-        .map(|(interface_key, _)| interface_key.clone())
-        .collect::<Vec<_>>();
-    for key in mutable_interface_keys {
-        let Some(method) = constraints.methods.get_mut(&key) else {
-            continue;
-        };
-        if !method
-            .receiver
-            .contains(&ReceiverConstraint::MutableReceiver)
-        {
-            method.receiver.push(ReceiverConstraint::MutableReceiver);
-            changed = true;
         }
     }
     changed
@@ -5235,6 +5240,16 @@ fn propagate_resolved_source_mutable_receiver_binding_constraints(
                         binding.clone(),
                         SignatureConstraint::MutableBinding,
                     ));
+                    if binding
+                        .binding()
+                        .is_some_and(|id| id.kind() == BindingKind::Param)
+                    {
+                        pending_methods.push((
+                            caller_key.clone(),
+                            binding.clone(),
+                            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                        ));
+                    }
                 }
             }
         }
@@ -5271,6 +5286,16 @@ fn propagate_resolved_source_mutable_receiver_binding_constraints(
                         binding.clone(),
                         SignatureConstraint::MutableBinding,
                     ));
+                    if binding
+                        .binding()
+                        .is_some_and(|id| id.kind() == BindingKind::Param)
+                    {
+                        pending_constructors.push((
+                            caller_key.clone(),
+                            binding.clone(),
+                            SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                        ));
+                    }
                 }
             }
         }
@@ -9823,9 +9848,51 @@ fn build_signature_plan_from_constraints(
                 .entry(key)
                 .or_insert(rust_name);
         }
+        for (owner, params) in support_plan.type_params_by_owner {
+            plan.type_params_by_owner.entry(owner).or_insert(params);
+        }
     }
     reconcile_inherited_field_storage_shapes(program, support_program, &mut plan);
+    for ty in &program.types {
+        collect_interface_return_shapes(ty, support_program, &mut plan);
+    }
+    if !std::ptr::eq(program, support_program) {
+        for ty in &support_program.types {
+            collect_interface_return_shapes(ty, support_program, &mut plan);
+        }
+    }
     plan
+}
+
+fn collect_interface_return_shapes(
+    ty: &TypeDecl,
+    support_program: &Program,
+    plan: &mut SignaturePlan,
+) {
+    for member in &ty.members {
+        match member {
+            Member::Method(method)
+                if ty.kind == TypeKind::Interface
+                    && !method.modifiers.contains(&Modifier::Static) =>
+            {
+                let key = MethodKey::source_method(ty, method);
+                if plan.interface_return_shapes.contains_key(&key)
+                    || plan.method_signature(ty, method).is_none()
+                {
+                    continue;
+                }
+                let shape = crate::representation_lowering::trait_method_return_shape_plan(
+                    ty,
+                    method,
+                    support_program,
+                    plan,
+                );
+                plan.interface_return_shapes.insert(key, shape);
+            }
+            Member::Type(nested) => collect_interface_return_shapes(nested, support_program, plan),
+            _ => {}
+        }
+    }
 }
 
 fn reconcile_inherited_field_storage_shapes(
@@ -9917,6 +9984,15 @@ fn reconcile_inherited_field_storage_shapes_for_type(
 }
 
 impl SignaturePlan {
+    pub(crate) fn interface_return_shape(
+        &self,
+        owner: &TypeDecl,
+        method: &MethodDecl,
+    ) -> Option<&Option<RustSlotShape>> {
+        self.interface_return_shapes
+            .get(&MethodKey::source_method(owner, method))
+    }
+
     fn java_method_family_signatures(
         &self,
         type_name: &str,
@@ -10033,13 +10109,8 @@ impl SignaturePlan {
         if let [signature] = exact_owner_matches.as_slice() {
             return Some(*signature);
         }
-        if let Some((first_key, first_signature)) = typed_matches.first().copied()
-            && typed_matches.iter().skip(1).all(|(candidate, signature)| {
-                !distinct_qualified_type_owners(candidate.owner(), first_key.owner())
-                    && *signature == first_signature
-            })
-        {
-            return Some(first_signature);
+        if let Some(signature) = unique_duplicate_java_callable_signature(&typed_matches) {
+            return Some(signature);
         }
 
         // Lowering may replace a source nested type with its flattened emitted
@@ -10481,6 +10552,42 @@ impl SignaturePlan {
         })
     }
 
+    /// Instantiate a field's solved ABI using the receiver's declared type
+    /// parameters, retaining all solver-owned nullability wrappers.
+    pub(crate) fn field_shape_for_receiver_type(
+        &self,
+        receiver_ty: &JavaType,
+        field_name: &str,
+    ) -> Option<RustSlotShape> {
+        let receiver_ty = optional_element_type(receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+        let (name, args) = match &receiver_ty {
+            JavaType::Named { name, args } => (name.as_str(), args.as_slice()),
+            JavaType::Unknown(name) => (name.as_str(), &[][..]),
+            _ => return None,
+        };
+        let shape = self.field_shape(name, field_name)?;
+        let key = FieldKey::rust_identity(name, field_name);
+        let params = self.type_params_by_owner.get(&key.owner).or_else(|| {
+            // Follow precisely the same unique-owner alias rule as fields.
+            let mut matches = self.type_params_by_owner.iter().filter(|(owner, _)| {
+                crate::facts::external_type_name_matches(owner.as_str(), name)
+            });
+            let (_, params) = matches.next()?;
+            matches.next().is_none().then_some(params)
+        });
+        let Some(params) = params.filter(|params| !args.is_empty() && params.len() == args.len())
+        else {
+            return Some(shape.clone());
+        };
+        let substitutions = params.iter().cloned().zip(args.iter().cloned()).collect();
+        let specialized =
+            crate::resolve::substitute_method_type_variables(&shape.java_ty, &substitutions);
+        Some(crate::shape_projection::specialize_slot_shape_java_type(
+            shape,
+            &specialized,
+        ))
+    }
+
     pub(crate) fn field_shape(&self, type_name: &str, field_name: &str) -> Option<&RustSlotShape> {
         let key = FieldKey::rust_identity(type_name, field_name);
         let exact = self.fields.get(&key);
@@ -10721,12 +10828,20 @@ fn unique_duplicate_java_callable_signature<'a>(
 ) -> Option<&'a MethodSignaturePlan> {
     let (first_key, first_signature) = matches.first().copied()?;
     let first_slot = first_key.slot();
+    // Reuse the solver's alias topology policy: nested short/full names are
+    // one owner only when the complete candidate set has one expansion.
+    // Looking at pairs alone would miss ambiguity introduced by a third
+    // package with the same nested suffix.
+    let owners = matches
+        .iter()
+        .map(|(key, _)| key.owner())
+        .collect::<Vec<_>>();
     matches
         .iter()
         .skip(1)
         .all(|(candidate, signature)| {
             candidate.slot().matches_with_type_aliases(&first_slot)
-                && !distinct_qualified_type_owners(candidate.owner(), first_key.owner())
+                && signature_owner_alias_matches(candidate.owner(), first_key.owner(), &owners)
                 && *signature == first_signature
         })
         .then_some(first_signature)
@@ -11113,6 +11228,8 @@ fn collect_type_signatures(
     facts: &FactSet,
     plan: &mut SignaturePlan,
 ) {
+    plan.type_params_by_owner
+        .insert(JavaOwnerKey::source_type(ty), ty.type_params.clone());
     for member in &ty.members {
         match member {
             crate::java_ir::Member::Field(field) => {
@@ -11661,7 +11778,7 @@ fn inherited_source_method_signature(
         inherited.declaring_type(),
         method_rust_name(inherited.method()),
     ));
-    let mut owner_substitutions = crate::inherited_members::source_class_ancestor_type_arguments(
+    let mut owner_substitutions = crate::inherited_members::source_ancestor_type_arguments(
         support_program,
         emitted_ty,
         declaring_ty,
@@ -11670,6 +11787,23 @@ fn inherited_source_method_signature(
     for type_param in &method.type_params {
         owner_substitutions.remove(type_param);
     }
+    // Binding constraints belong to the declaration, just like parameter
+    // constraints. Specialize their types before selecting local carriers;
+    // changing only the rendered Java type leaves e.g. a generic semantic set
+    // planned as a native HashSet under an out-of-scope ancestor binder.
+    let local_constraints = method_constraints
+        .map(|constraints| constraints.locals.as_slice())
+        .unwrap_or(&[])
+        .iter()
+        .cloned()
+        .map(|mut local| {
+            local.java_ty = crate::resolve::substitute_method_type_variables(
+                &local.java_ty,
+                &owner_substitutions,
+            );
+            local
+        })
+        .collect::<Vec<_>>();
     let type_param_scope = type_params_in_scope(&emitted_ty.type_params, &method.type_params);
     MethodSignaturePlan::new(
         method
@@ -11717,6 +11851,17 @@ fn inherited_source_method_signature(
                 facts,
                 &type_param_scope,
             )
+            .map(|mut shape| {
+                // The constraints belong to the declaration, but the inherited
+                // companion receives the emitted subclass's canonical handle.
+                materialize_shared_receiver_return_shape(
+                    emitted_ty,
+                    method,
+                    representations,
+                    &mut shape,
+                );
+                shape
+            })
         },
         method
             .body
@@ -11725,9 +11870,7 @@ fn inherited_source_method_signature(
                 collect_local_plans_from_constraints(
                     body,
                     representations,
-                    method_constraints
-                        .map(|constraints| constraints.locals.as_slice())
-                        .unwrap_or(&[]),
+                    &local_constraints,
                     facts,
                     &type_param_scope,
                 )
@@ -11797,16 +11940,52 @@ pub fn method_param_shape_constraints(
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
-    method_param_shape_constraints_with_declared_source_types(
+    let body_facts = MethodParamBodyConstraintFacts::collect(method, facts);
+    method_param_shape_constraints_with_declared_source_types_and_body_facts(
         ty,
         method,
         param,
         usage,
         facts,
         &HashSet::new(),
+        &body_facts,
     )
 }
 
+#[derive(Debug, Default)]
+struct MethodParamBodyConstraintFacts {
+    field_receiver_mutated_names: HashSet<String>,
+    map_view_receiver_mutated_names: HashSet<String>,
+    field_receiver_read_names: HashSet<String>,
+    array_element_mutated_names: HashSet<String>,
+    facade_mut_borrow_argument_names: HashSet<String>,
+}
+
+impl MethodParamBodyConstraintFacts {
+    fn collect(method: &MethodDecl, facts: &FactSet) -> Self {
+        let Some(body) = method.body.as_ref() else {
+            return Self::default();
+        };
+        let mut local_types = method
+            .params
+            .iter()
+            .map(|param| (param.source_name.clone(), param.ty.clone()))
+            .collect::<HashMap<_, _>>();
+        Self {
+            field_receiver_mutated_names: collect_field_receiver_mutated_names(body),
+            map_view_receiver_mutated_names: collect_map_view_backing_receiver_mutated_names(body),
+            field_receiver_read_names: collect_field_receiver_read_names(body),
+            array_element_mutated_names: collect_array_element_mutated_names(body),
+            facade_mut_borrow_argument_names: collect_facade_mut_borrow_argument_names(
+                body,
+                facts,
+                &mut local_types,
+            ),
+        }
+    }
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
 fn method_param_shape_constraints_with_declared_source_types(
     ty: &TypeDecl,
     method: &MethodDecl,
@@ -11815,48 +11994,46 @@ fn method_param_shape_constraints_with_declared_source_types(
     facts: &FactSet,
     declared_source_types: &HashSet<String>,
 ) -> Vec<SignatureConstraint> {
+    let body_facts = MethodParamBodyConstraintFacts::collect(method, facts);
+    method_param_shape_constraints_with_declared_source_types_and_body_facts(
+        ty,
+        method,
+        param,
+        usage,
+        facts,
+        declared_source_types,
+        &body_facts,
+    )
+}
+
+fn method_param_shape_constraints_with_declared_source_types_and_body_facts(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    param: &Param,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    declared_source_types: &HashSet<String>,
+    body_facts: &MethodParamBodyConstraintFacts,
+) -> Vec<SignatureConstraint> {
     let method_usage = usage.source_method_usage(ty, method);
     let binding = method_usage.and_then(|usage| usage.binding_facts_for_param(param));
-    let field_receiver_mutated_names = method
-        .body
-        .as_ref()
-        .map(collect_field_receiver_mutated_names)
-        .unwrap_or_default();
-    let map_view_receiver_mutated_names = method
-        .body
-        .as_ref()
-        .map(collect_map_view_backing_receiver_mutated_names)
-        .unwrap_or_default();
-    let field_receiver_read_names = method
-        .body
-        .as_ref()
-        .map(collect_field_receiver_read_names)
-        .unwrap_or_default();
-    let array_element_mutated_names = method
-        .body
-        .as_ref()
-        .map(collect_array_element_mutated_names)
-        .unwrap_or_default();
-    let facade_mut_borrow_argument_names = method
-        .body
-        .as_ref()
-        .map(|body| {
-            let mut local_types = method
-                .params
-                .iter()
-                .map(|param| (param.source_name.clone(), param.ty.clone()))
-                .collect::<HashMap<_, _>>();
-            collect_facade_mut_borrow_argument_names(body, facts, &mut local_types)
-        })
-        .unwrap_or_default();
     let mut boundary_kind = method_param_boundary_policy(ty, method, param, usage).kind();
     let param_source_name = param.source_name.as_str();
     let param_uses_shared_local_handle =
         java_type_has_implemented_shared_local_storage_in_owner(&param.ty, &ty.name, facts);
-    if (field_receiver_mutated_names.contains(param_source_name) && !param_uses_shared_local_handle)
-        || array_element_mutated_names.contains(param_source_name)
-        || facade_mut_borrow_argument_names.contains(&param.source_name)
-        || map_view_receiver_mutated_names.contains(param_source_name)
+    if (body_facts
+        .field_receiver_mutated_names
+        .contains(param_source_name)
+        && !param_uses_shared_local_handle)
+        || body_facts
+            .array_element_mutated_names
+            .contains(param_source_name)
+        || body_facts
+            .facade_mut_borrow_argument_names
+            .contains(&param.source_name)
+        || body_facts
+            .map_view_receiver_mutated_names
+            .contains(param_source_name)
     {
         boundary_kind = None;
     }
@@ -12013,9 +12190,13 @@ fn method_param_shape_constraints_with_declared_source_types(
                 &method.params,
             ),
         );
-        if field_receiver_mutated_names.contains(param_source_name)
+        if body_facts
+            .field_receiver_mutated_names
+            .contains(param_source_name)
             && !param_uses_shared_local_handle
-            || map_view_receiver_mutated_names.contains(param_source_name)
+            || body_facts
+                .map_view_receiver_mutated_names
+                .contains(param_source_name)
         {
             push_unique_signature_constraints(
                 &mut constraints,
@@ -12051,7 +12232,10 @@ fn method_param_shape_constraints_with_declared_source_types(
                 );
             }
         }
-        if array_element_mutated_names.contains(param_source_name) {
+        if body_facts
+            .array_element_mutated_names
+            .contains(param_source_name)
+        {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[
@@ -12060,7 +12244,10 @@ fn method_param_shape_constraints_with_declared_source_types(
                 ],
             );
         }
-        if facade_mut_borrow_argument_names.contains(&param.source_name) {
+        if body_facts
+            .facade_mut_borrow_argument_names
+            .contains(&param.source_name)
+        {
             push_unique_signature_constraints(
                 &mut constraints,
                 &[
@@ -12069,7 +12256,9 @@ fn method_param_shape_constraints_with_declared_source_types(
                 ],
             );
         }
-        if field_receiver_read_names.contains(param_source_name)
+        if body_facts
+            .field_receiver_read_names
+            .contains(param_source_name)
             && signature_declared_type_has_parsed_source_capability(
                 &param.ty,
                 &EffectiveFacts::new(facts),
@@ -13229,27 +13418,6 @@ fn constrained_param_plan(
 ) -> ParamPlan {
     let mut constraints = constraints.to_vec();
     normalize_param_borrowed_slice_constraints(param, &mut constraints, facts);
-    normalize_source_hierarchy_param_dispatch_constraints(
-        java_ty,
-        representations,
-        facts,
-        &mut constraints,
-    );
-    // Call-site subtype observations used to force a closed carrier for every
-    // parsed source target.  Interfaces have an authoritative DynTrait
-    // representation instead; retaining both constraints made signatures
-    // demand an un-emitted `InterfaceValue` enum.
-    if matches!(
-        representations.dispatch_for(java_ty),
-        DispatchShape::DynTrait { .. } | DispatchShape::BoxedDynTrait { .. }
-    ) {
-        constraints.retain(|constraint| {
-            !matches!(
-                constraint,
-                SignatureConstraint::RequiredDispatch(DispatchShape::ClosedEnum { .. })
-            )
-        });
-    }
     if owner.is_some_and(|owner| {
         java_type_has_implemented_shared_local_storage_in_owner(java_ty, owner, facts)
             || java_type_has_implemented_shared_local_storage_in_owner_representations(
@@ -13276,7 +13444,7 @@ fn constrained_param_plan(
         // which to place `Option`.
         java_ty = crate::types::optional_java_type(java_ty);
     }
-    let shape = if builtin_boxed_primitive && !param.is_varargs {
+    let mut shape = if builtin_boxed_primitive && !param.is_varargs {
         // A java.lang boxed primitive has one authoritative scalar carrier.
         // Uses at Object/interface boundaries are conversions at those call
         // sites, not evidence that the public parameter itself should become
@@ -13298,6 +13466,13 @@ fn constrained_param_plan(
         )
         .expect("parameter signature shape is always present")
     };
+    project_declared_semantic_hash_collection_view(
+        &mut shape,
+        &param.ty,
+        type_param_scope,
+        facts,
+        representations,
+    );
     ParamPlan::new(
         param.name.clone(),
         java_ty.clone(),
@@ -13307,30 +13482,56 @@ fn constrained_param_plan(
     )
 }
 
-fn normalize_source_hierarchy_param_dispatch_constraints(
+fn normalize_source_hierarchy_dispatch_constraints(
     java_ty: &JavaType,
+    role: SignatureSlotRole,
     representations: &RepresentationPlan,
     facts: &FactSet,
     constraints: &mut Vec<SignatureConstraint>,
 ) {
-    let declared_dispatch = crate::shape_projection::dispatch_for_java_type_or_optional_element(
+    let declared_ty = optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+    let mut declared_dispatch = crate::shape_projection::dispatch_for_java_type_or_optional_element(
         representations,
         java_ty,
     );
-    if !signature_declared_type_has_parsed_source_capability(java_ty, &EffectiveFacts::new(facts))
-        || !matches!(declared_dispatch, DispatchShape::ClosedEnum { .. })
-    {
+    if !signature_declared_type_has_parsed_source_capability(
+        &declared_ty,
+        &EffectiveFacts::new(facts),
+    ) || !matches!(
+        declared_dispatch,
+        DispatchShape::DynTrait { .. }
+            | DispatchShape::BoxedDynTrait { .. }
+            | DispatchShape::ClosedEnum { .. }
+    ) {
         return;
     }
-    // Interface contracts such as Comparable<Root> can contribute a
-    // conservative Concrete requirement. The emitted source ABI is still the
-    // representation plan's RootValue carrier; allowing the lattice's higher
-    // Concrete rank to win records a shape that disagrees with the rendered
-    // Rust type and later wraps RootValue inside its own Root variant.
+    // Flow constraints describe uses, not a new declaration-level ABI. An
+    // unknown call must not erase a source interface in one slot while its
+    // field/return slot retains the typed carrier. Similarly, a conservative
+    // Concrete requirement cannot replace an emitted closed-hierarchy enum.
+    // Normalize all slots together, after combining inferred and fact-derived
+    // constraints, and project retained parameters just like escaping fields.
+    let retained = matches!(role, SignatureSlotRole::Return | SignatureSlotRole::Storage)
+        || constraints.iter().any(|constraint| {
+            matches!(
+                constraint,
+                SignatureConstraint::StorageSlot
+                    | SignatureConstraint::RequiredOwnership(OwnershipShape::Owned)
+                    | SignatureConstraint::RequiredDispatch(DispatchShape::BoxedDynTrait { .. })
+            )
+        });
+    if retained {
+        declared_dispatch =
+            crate::shape_projection::escaping_role_dispatch_policy(declared_dispatch)
+                .into_projected_dispatch();
+    }
     constraints.retain(|constraint| {
         !matches!(
             constraint,
-            SignatureConstraint::RequiredDispatch(DispatchShape::Concrete)
+            SignatureConstraint::RequiredDispatch(_)
+                | SignatureConstraint::RequiredView(
+                    ViewShape::ErasedObjectView | ViewShape::DynTraitView | ViewShape::EnumView
+                )
         )
     });
     push_unique_signature_constraints(
@@ -13357,7 +13558,8 @@ pub fn solve_signature_shape_with_facts(
         &SignatureConstraint::RequiredDispatch(DispatchShape::Concrete),
     ) && request
         .constraints()
-        .contains(&SignatureConstraint::RequiredView(ViewShape::Native));
+        .contains(&SignatureConstraint::RequiredView(ViewShape::Native))
+        && !EffectiveFacts::new(facts).has_parsed_source_definition(request.java_ty());
     let (java_ty, role, mut constraints, type_params) = request.into_parts();
     if explicit_platform_facade {
         constraints.retain(|constraint| {
@@ -13388,10 +13590,20 @@ pub fn solve_signature_shape_with_facts(
         facts,
         request.type_params(),
     );
+    let (java_ty, role, mut constraints, type_params) = request.into_parts();
+    push_unique_signature_constraints(&mut constraints, &dispatch_policy.into_constraints());
+    normalize_source_hierarchy_dispatch_constraints(
+        &java_ty,
+        role,
+        representations,
+        facts,
+        &mut constraints,
+    );
     solve_signature_shape_with_extra_constraints(
         representations,
-        request,
-        dispatch_policy.into_constraints(),
+        SignatureShapeRequest::new(java_ty, role, constraints, type_params),
+        Vec::new(),
+        facts,
     )
 }
 
@@ -13412,8 +13624,9 @@ fn solve_signature_shape_with_extra_constraints(
     representations: &RepresentationPlan,
     request: SignatureShapeRequest,
     extra_constraints: Vec<SignatureConstraint>,
+    facts: &FactSet,
 ) -> Option<RustSlotShape> {
-    let (java_ty, role, request_constraints, _) = request.into_parts();
+    let (java_ty, role, request_constraints, type_params) = request.into_parts();
     let mut all_constraints = request_constraints.clone();
     push_unique_signature_constraints(&mut all_constraints, &extra_constraints);
     let constraints = MergedSignatureConstraints::from_constraints(&request_constraints);
@@ -13439,6 +13652,7 @@ fn solve_signature_shape_with_extra_constraints(
     let constraints = MergedSignatureConstraints::from_constraints(&all_constraints);
     base_shape.map(|shape| {
         let mut shape = constraints.apply_to_shape(shape);
+        project_semantic_hash_collection_view(&mut shape, &type_params, facts, representations);
         if java_type_is_erased_object_boundary(&java_ty) {
             apply_required_dispatch(&mut shape, DispatchShape::ErasedObject);
             apply_required_view(&mut shape, ViewShape::ErasedObjectView);
@@ -13453,6 +13667,138 @@ pub fn apply_signature_constraints(
     constraints: &[SignatureConstraint],
 ) -> RustSlotShape {
     MergedSignatureConstraints::from_constraints(constraints).apply_to_shape(shape)
+}
+
+fn project_semantic_hash_collection_view(
+    shape: &mut RustSlotShape,
+    type_params: &[String],
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) {
+    fn collect(
+        ty: &JavaType,
+        type_params: &[String],
+        facts: &FactSet,
+        representations: &RepresentationPlan,
+        out: &mut Vec<(JavaType, ViewShape)>,
+    ) {
+        let children: &[JavaType] = match ty {
+            JavaType::Named { args, .. } | JavaType::Intersection(args) => args,
+            JavaType::Array(element) => std::slice::from_ref(element.as_ref()),
+            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+            | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+                std::slice::from_ref(bound.as_ref())
+            }
+            _ => &[],
+        };
+        for child in children {
+            let base = optional_element_type(child).unwrap_or_else(|| child.clone());
+            if semantic_hash_collection_view_required(child, type_params, facts, representations)
+                && !out.iter().any(|(ty, _)| ty == &base)
+            {
+                out.push((base, ViewShape::JavaSemanticHash));
+            }
+            collect(child, type_params, facts, representations, out);
+        }
+    }
+    collect(
+        &shape.java_ty,
+        type_params,
+        facts,
+        representations,
+        &mut shape.nested_collection_views,
+    );
+    if shape.view == ViewShape::Native
+        && semantic_hash_collection_view_required(
+            &shape.java_ty,
+            type_params,
+            facts,
+            representations,
+        )
+    {
+        shape.view = ViewShape::JavaSemanticHash;
+    }
+}
+
+fn semantic_hash_collection_view_required(
+    java_ty: &JavaType,
+    type_params: &[String],
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> bool {
+    let base = optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+    !facts
+            .type_capability_overrides_for(&base)
+            .any(|fact| fact.provenance == FactProvenance::ParsedSource)
+        && (crate::item_assembly::java_semantic_hash_collection_for_java_type_in_scope(
+            java_ty,
+            type_params,
+        )
+        .is_some()
+            // Concrete source hierarchy elements use the same semantic set
+            // chosen by slot rendering. Record that choice before planning
+            // conversions, not only when printing the destination Rust type.
+            || (crate::stdlib::java_collection_kind_for_type(&base)
+                == Some(crate::stdlib::JavaCollectionKind::Set)
+                && crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
+                    &base, facts, representations,
+                )
+                && crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+                    &base, representations,
+                )))
+}
+
+/// A concrete initializer/caller can refine an abstract Set to LinkedHashSet.
+/// That refinement must not replace a declaration's semantic hash-set ABI:
+/// callers, fields and local conversions all need the same carrier decision.
+/// Preserve learned element nullability and explicit concrete declarations.
+fn project_declared_semantic_hash_collection_view(
+    shape: &mut RustSlotShape,
+    declared_ty: &JavaType,
+    type_params: &[String],
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) {
+    let declared_base = optional_element_type(declared_ty).unwrap_or_else(|| declared_ty.clone());
+    let actual_base =
+        optional_element_type(&shape.java_ty).unwrap_or_else(|| shape.java_ty.clone());
+    if crate::stdlib::java_collection_kind_for_type(&declared_base)
+        != Some(crate::stdlib::JavaCollectionKind::Set)
+        || !matches!(
+            crate::stdlib::java_collection_kind_for_type(&actual_base),
+            Some(
+                crate::stdlib::JavaCollectionKind::Set
+                    | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+            )
+        )
+    {
+        return;
+    }
+    let (JavaType::Named { name, .. }, JavaType::Named { args, .. }) = (declared_base, actual_base)
+    else {
+        return;
+    };
+    let base = JavaType::Named { name, args };
+    let mut candidate = shape.clone();
+    candidate.java_ty = if optional_element_type(&shape.java_ty).is_some() {
+        crate::types::optional_java_type(base)
+    } else {
+        base
+    };
+    // Canonicalize the concrete hierarchy carrier that rendering already
+    // requires. Do not force generic parameters away from a caller-selected
+    // ordered carrier: borrowing/mutating that same collection is a stronger
+    // requirement than choosing a nominally uniform Set ABI.
+    if !crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+        &candidate.java_ty,
+        representations,
+    ) {
+        return;
+    }
+    project_semantic_hash_collection_view(&mut candidate, type_params, facts, representations);
+    if candidate.view == ViewShape::JavaSemanticHash {
+        *shape = candidate;
+    }
 }
 
 impl MergedSignatureConstraints {
@@ -13617,7 +13963,7 @@ pub fn signature_constraint_provenance(
         SignatureConstraint::RequiredOwnership(OwnershipShape::CopyValue) => {
             SignatureConstraintProvenance::CopyRequirement
         }
-        SignatureConstraint::RequiredView(ViewShape::Native) => {
+        SignatureConstraint::RequiredView(ViewShape::Native | ViewShape::JavaSemanticHash) => {
             SignatureConstraintProvenance::NativeViewRequirement
         }
         SignatureConstraint::RequiredView(ViewShape::Str) => {
@@ -14513,32 +14859,7 @@ fn constrained_field_shape(
     // solving for parameters and locals. Fields must use the same projection;
     // otherwise an alias such as `List<T>` can be `Vec<Option<T>>` at the
     // constructor boundary but `Vec<T>` in the field it initializes.
-    let mut constraints = constraints.to_vec();
-    let declared_dispatch = representations.dispatch_for(java_ty);
-    if signature_declared_type_has_parsed_source_capability(java_ty, &EffectiveFacts::new(facts))
-        && matches!(
-            declared_dispatch,
-            DispatchShape::DynTrait { .. }
-                | DispatchShape::BoxedDynTrait { .. }
-                | DispatchShape::ClosedEnum { .. }
-        )
-    {
-        // A field assignment from a conservatively classified call may add
-        // an erased-object boundary requirement.  That fallback cannot erase
-        // the field's parsed source interface ABI: callers still invoke the
-        // declared methods, and nested generic fields such as
-        // `Sink<? super L>` need the declaration-derived variance projection.
-        constraints.retain(|constraint| {
-            !matches!(
-                constraint,
-                SignatureConstraint::RequiredDispatch(DispatchShape::ErasedObject)
-            )
-        });
-        push_unique_signature_constraints(
-            &mut constraints,
-            &[SignatureConstraint::RequiredDispatch(declared_dispatch)],
-        );
-    }
+    let constraints = constraints.to_vec();
     let builtin_boxed_primitive = java_type_boxed_primitive_storage(java_ty).is_some()
         && !facts
             .type_capability_overrides_for(java_ty)
@@ -14585,6 +14906,13 @@ fn constrained_field_shape(
             apply_required_view(&mut shape, ViewShape::Native);
         }
     }
+    project_declared_semantic_hash_collection_view(
+        &mut shape,
+        java_ty,
+        type_param_scope,
+        facts,
+        representations,
+    );
     shape
 }
 
@@ -14920,6 +15248,7 @@ fn collect_type_signature_constraints(
     representations: Option<&RepresentationPlan>,
     usage: &UsageFacts,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     declared_source_types: &HashSet<String>,
     constraints: &mut SignatureConstraintState,
 ) {
@@ -14945,18 +15274,24 @@ fn collect_type_signature_constraints(
                     .iter()
                     .map(|param| param.name.clone())
                     .collect::<Vec<_>>();
+                let param_body_facts = if method.params.is_empty() {
+                    MethodParamBodyConstraintFacts::default()
+                } else {
+                    MethodParamBodyConstraintFacts::collect(method, facts)
+                };
                 let params = method
                     .params
                     .iter()
                     .map(|param| {
                         let mut constraints =
-                            method_param_shape_constraints_with_declared_source_types(
+                            method_param_shape_constraints_with_declared_source_types_and_body_facts(
                                 ty,
                                 method,
                                 param,
                                 usage,
                                 facts,
                                 declared_source_types,
+                                &param_body_facts,
                             );
                         if let Some(representations) = representations {
                             push_unique_signature_constraints(
@@ -14987,6 +15322,7 @@ fn collect_type_signature_constraints(
                             &method.params,
                             method_usage,
                             facts,
+                            external_index,
                             &captured,
                             declared_source_types,
                         )
@@ -15069,6 +15405,7 @@ fn collect_type_signature_constraints(
                                 &ctor.params,
                                 constructor_usage,
                                 facts,
+                                external_index,
                                 &captured,
                                 declared_source_types,
                             )
@@ -15100,6 +15437,7 @@ fn collect_type_signature_constraints(
                     representations,
                     usage,
                     facts,
+                    external_index,
                     declared_source_types,
                     constraints,
                 );
@@ -16401,6 +16739,11 @@ fn source_return_expr_nullability_state(
     refinements: &HashSet<String>,
 ) -> NullabilityState {
     match expr {
+        Expr::Cast { ty, expr } if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) => {
+            // Reference casts preserve null. Only a later dereference or
+            // primitive unboxing can require a non-null value.
+            source_return_expr_nullability_state(expr, source_nullability, ctx, scopes, refinements)
+        }
         Expr::Var(name) => {
             if refinements.contains(name) {
                 NullabilityState::DefinitelyNonNull
@@ -17099,6 +17442,9 @@ fn collect_null_comparison_assignment(
 fn source_expr_nullability_state(expr: &Expr) -> Option<NullabilityState> {
     match expr {
         Expr::Literal(Literal::Null) => Some(NullabilityState::DefinitelyNull),
+        Expr::Cast { ty, expr } if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) => {
+            source_expr_nullability_state(expr)
+        }
         Expr::Call {
             receiver: Some(receiver),
             name,
@@ -17134,19 +17480,24 @@ fn source_return_direct_nullability_state(expr: &Expr) -> Option<NullabilityStat
 fn initializer_proves_declared_non_null(
     expr: &Expr,
     declared_ty: &JavaType,
-    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     local_types: &HashMap<String, JavaType>,
 ) -> bool {
     matches!(
         source_expr_nullability_state(expr),
         Some(NullabilityState::DefinitelyNonNull)
-    ) || external_initializer_proves_declared_non_null(expr, declared_ty, facts, local_types)
+    ) || external_initializer_proves_declared_non_null(
+        expr,
+        declared_ty,
+        external_index,
+        local_types,
+    )
 }
 
 fn external_initializer_proves_declared_non_null(
     expr: &Expr,
     declared_ty: &JavaType,
-    facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     local_types: &HashMap<String, JavaType>,
 ) -> bool {
     let Expr::Call {
@@ -17161,7 +17512,7 @@ fn external_initializer_proves_declared_non_null(
     let Some(receiver_key) = initializer_receiver_key(receiver, local_types) else {
         return false;
     };
-    facts
+    external_index
         .external_api_effect_for_receiver_with_arity(Some(&receiver_key), name, Some(args.len()))
         .cloned()
         .or_else(|| {
@@ -18017,6 +18368,7 @@ fn collect_local_constraint_sets(
     params: &[crate::java_ir::Param],
     usage: Option<&MethodUsageFacts>,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     captured: &HashSet<String>,
     declared_source_types: &HashSet<String>,
 ) -> Vec<LocalConstraintSet> {
@@ -18040,6 +18392,7 @@ fn collect_local_constraint_sets(
         &liveness,
         usage,
         facts,
+        external_index,
         captured,
         &source_nullability,
         &mut local_types,
@@ -18146,6 +18499,7 @@ fn collect_local_constraint_sets_from_stmts(
     liveness: &crate::liveness::LivenessAnalysis,
     usage: Option<&MethodUsageFacts>,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     captured: &HashSet<String>,
     source_nullability: &SourceNullabilityMap,
     local_types: &mut HashMap<String, JavaType>,
@@ -18179,6 +18533,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     Some(&binding),
                     facts,
+                    Some(external_index),
                     declared_source_types,
                 );
                 if usage
@@ -18212,7 +18567,12 @@ fn collect_local_constraint_sets_from_stmts(
                     );
                 }
                 if initializer.as_ref().is_some_and(|initializer| {
-                    initializer_proves_declared_non_null(initializer, ty, facts, local_types)
+                    initializer_proves_declared_non_null(
+                        initializer,
+                        ty,
+                        external_index,
+                        local_types,
+                    )
                 }) {
                     push_unique_signature_constraints(
                         &mut constraints,
@@ -18259,6 +18619,7 @@ fn collect_local_constraint_sets_from_stmts(
                         liveness,
                         usage,
                         facts,
+                        external_index,
                         captured,
                         source_nullability,
                         local_types,
@@ -18276,6 +18637,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut for_types,
@@ -18289,6 +18651,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut for_types,
@@ -18322,6 +18685,7 @@ fn collect_local_constraint_sets_from_stmts(
                     usage,
                     Some(&binding),
                     facts,
+                    Some(external_index),
                     declared_source_types,
                 );
                 let source_constraints = source_nullability
@@ -18342,6 +18706,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut body_types,
@@ -18362,6 +18727,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut then_types,
@@ -18377,6 +18743,7 @@ fn collect_local_constraint_sets_from_stmts(
                         liveness,
                         usage,
                         facts,
+                        external_index,
                         captured,
                         source_nullability,
                         &mut else_types,
@@ -18397,6 +18764,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut body_types,
@@ -18414,6 +18782,7 @@ fn collect_local_constraint_sets_from_stmts(
                         liveness,
                         usage,
                         facts,
+                        external_index,
                         captured,
                         source_nullability,
                         &mut case_types,
@@ -18436,6 +18805,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut try_types,
@@ -18449,6 +18819,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut try_types,
@@ -18467,6 +18838,7 @@ fn collect_local_constraint_sets_from_stmts(
                         liveness,
                         usage,
                         facts,
+                        external_index,
                         captured,
                         source_nullability,
                         &mut catch_types,
@@ -18483,6 +18855,7 @@ fn collect_local_constraint_sets_from_stmts(
                         liveness,
                         usage,
                         facts,
+                        external_index,
                         captured,
                         source_nullability,
                         &mut finally_types,
@@ -18499,6 +18872,7 @@ fn collect_local_constraint_sets_from_stmts(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     local_types,
@@ -18525,6 +18899,7 @@ fn collect_local_constraint_sets_from_expr(
     liveness: &crate::liveness::LivenessAnalysis,
     usage: Option<&MethodUsageFacts>,
     facts: &FactSet,
+    external_index: &ExternalFactLookupIndex<'_>,
     captured: &HashSet<String>,
     source_nullability: &SourceNullabilityMap,
     local_types: &mut HashMap<String, JavaType>,
@@ -18540,6 +18915,7 @@ fn collect_local_constraint_sets_from_expr(
                 liveness,
                 usage,
                 facts,
+                external_index,
                 captured,
                 source_nullability,
                 local_types,
@@ -18633,6 +19009,7 @@ fn collect_local_constraint_sets_from_expr(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut lambda_types,
@@ -18646,6 +19023,7 @@ fn collect_local_constraint_sets_from_expr(
                     liveness,
                     usage,
                     facts,
+                    external_index,
                     captured,
                     source_nullability,
                     &mut lambda_types,
@@ -18778,6 +19156,7 @@ fn collect_local_plans_from_stmts(
                     binding,
                     name,
                     planned_ty,
+                    ty,
                     initializer.as_ref(),
                     representations,
                     binding_constraints,
@@ -18871,6 +19250,7 @@ fn collect_local_plans_from_stmts(
                     binding,
                     var_name,
                     planned_ty,
+                    var_type,
                     None,
                     representations,
                     binding_constraints,
@@ -19320,11 +19700,14 @@ mod tests {
                     .any(|state| *state == NullabilityState::MaybeNull),
             "lambda local nullability was not recorded: {nullability:?}\n{method:#?}"
         );
+        let facts = FactSet::default();
+        let external_index = facts.external_lookup_index();
         let constraints = collect_local_constraint_sets(
             method.body.as_ref().expect("method body"),
             &method.params,
             None,
-            &FactSet::default(),
+            &facts,
+            &external_index,
             &HashSet::new(),
             &HashSet::new(),
         );
@@ -20286,6 +20669,63 @@ class TrackingStream extends InputStream {
             &signature
         ));
 
+        let nested_short =
+            JavaCallableKey::source_method_for_type(&named_test_type("Outer.Inner"), &method);
+        let nested_qualified = JavaCallableKey::source_method_for_type(
+            &named_test_type("org.example.Outer.Inner"),
+            &method,
+        );
+        assert!(std::ptr::eq(
+            unique_duplicate_java_callable_signature(&[
+                (&nested_short, &signature),
+                (&nested_qualified, &signature),
+            ])
+            .expect("short and package-qualified nested owners describe one callable"),
+            &signature
+        ));
+
+        let other_package_nested = JavaCallableKey::source_method_for_type(
+            &named_test_type("other.example.Outer.Inner"),
+            &method,
+        );
+        assert!(
+            unique_duplicate_java_callable_signature(&[
+                (&nested_qualified, &signature),
+                (&other_package_nested, &signature),
+            ])
+            .is_none(),
+            "identical nested paths from different explicit packages remain ambiguous"
+        );
+        for candidates in [
+            vec![
+                (&nested_short, &signature),
+                (&nested_qualified, &signature),
+                (&other_package_nested, &signature),
+            ],
+            vec![
+                (&nested_qualified, &signature),
+                (&nested_short, &signature),
+                (&other_package_nested, &signature),
+            ],
+        ] {
+            assert!(
+                unique_duplicate_java_callable_signature(&candidates).is_none(),
+                "a short alias must not bridge two package owners"
+            );
+        }
+        let mut nested_plan = SignaturePlan::default();
+        nested_plan
+            .methods_by_java_key
+            .insert(nested_short, signature.clone());
+        nested_plan
+            .methods_by_java_key
+            .insert(nested_qualified, signature.clone());
+        assert_eq!(
+            nested_plan.required_method_signature(&named_test_type("Inner"), &method),
+            &signature,
+            "lowering a nested leaf must reuse the unique short/full declaration"
+        );
+
         let exact_owner = named_test_type("AlignerHelper");
         let exact_key = JavaCallableKey::source_method_for_type(&exact_owner, &qualified_method);
         let summary_key = qualified.clone();
@@ -21215,6 +21655,7 @@ class SourceEnhancedForNullableLocalOnly {
                     binding: None,
                 },
                 Stmt::Expr(Expr::New {
+                    infer_type_arguments: false,
                     ty: JavaType::Named {
                         name: "Inner".to_string(),
                         args: Vec::new(),
@@ -21252,6 +21693,7 @@ class SourceEnhancedForNullableLocalOnly {
                     binding: None,
                 },
                 Stmt::Expr(Expr::New {
+                    infer_type_arguments: false,
                     ty: JavaType::Named {
                         name: "Local".to_string(),
                         args: Vec::new(),
@@ -21733,6 +22175,7 @@ class PublicMapLookup {
             None,
             Some(&binding),
             &FactSet::default(),
+            None,
             &HashSet::new(),
         );
         assert!(
@@ -21751,6 +22194,7 @@ class PublicMapLookup {
             None,
             None,
             &FactSet::default(),
+            None,
             &HashSet::new(),
         );
         assert!(
@@ -22482,6 +22926,7 @@ class PublicMapLookup {
                         else_block: None,
                     },
                     Stmt::Return(Some(Expr::New {
+                        infer_type_arguments: false,
                         qualifier: None,
                         ty: JavaType::Unknown("Object".to_string()),
                         args: Vec::new(),
@@ -23295,6 +23740,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_facade_mut_borrow_argument_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Inner".to_string(),
                     args: Vec::new(),
@@ -23358,6 +23804,7 @@ class PublicMapLookup {
         let mut names = HashSet::new();
         collect_input_stream_read_buffer_argument_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Inner".to_string(),
                     args: Vec::new(),
@@ -23444,6 +23891,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_mutated_local_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Inner".to_string(),
                     args: Vec::new(),
@@ -23471,6 +23919,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_mutated_local_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Runnable".to_string(),
                     args: Vec::new(),
@@ -23506,6 +23955,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_mutated_local_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Local".to_string(),
                     args: Vec::new(),
@@ -23546,6 +23996,7 @@ class PublicMapLookup {
         let mut read = HashSet::new();
         collect_field_receiver_read_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Runnable".to_string(),
                     args: Vec::new(),
@@ -23637,6 +24088,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_field_receiver_mutated_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Inner".to_string(),
                     args: Vec::new(),
@@ -23667,6 +24119,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_field_receiver_mutated_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Runnable".to_string(),
                     args: Vec::new(),
@@ -23761,6 +24214,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_array_element_mutated_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Inner".to_string(),
                     args: Vec::new(),
@@ -23791,6 +24245,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_array_element_mutated_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Local".to_string(),
                     args: Vec::new(),
@@ -23861,6 +24316,7 @@ class PublicMapLookup {
         let mut mutated = HashSet::new();
         collect_map_view_backing_receiver_mutated_names_from_expr(
             &Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Local".to_string(),
                     args: Vec::new(),
@@ -24238,6 +24694,71 @@ class PublicMapLookup {
                 .receiver
                 .contains(&ReceiverConstraint::MutableReceiver),
             "ambiguous package peers must not widen the bare owner"
+        );
+    }
+
+    #[test]
+    fn late_mutable_receiver_requires_parameter_borrow_without_poisoning_other_owners() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Sink { void write() {} }
+class Reader { void write() {} }
+class Forwarder {
+    static void forward(Sink sink) { sink.write(); }
+    static void read(Reader reader) { reader.write(); }
+}
+class Holder { Holder(Sink sink) { sink.write(); } }
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let mut constraints =
+            collect_signature_constraints(&resolved.program, &usage, &FactSet::default());
+        fn method<'a>(ty: &'a TypeDecl, name: &str) -> &'a MethodDecl {
+            ty.members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == name => Some(method),
+                    _ => None,
+                })
+                .unwrap()
+        }
+        let sink = &resolved.program.types[0];
+        constraints
+            .methods
+            .get_mut(&MethodKey::source_method(sink, method(sink, "write")))
+            .unwrap()
+            .receiver
+            .push(ReceiverConstraint::MutableReceiver);
+        constraints.rebuild_method_lookup_index();
+        let graph = build_signature_dependency_graph(&constraints, &usage);
+        let analysis = analyze_signature_dependency_sccs(&graph);
+        let passes = plan_signature_solver_passes(&analysis);
+        execute_signature_solver_pass_plan(&mut constraints, &usage, &analysis, &passes);
+        let owner = &resolved.program.types[2];
+        let mutable = SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow);
+        assert!(
+            constraints.methods[&MethodKey::source_method(owner, method(owner, "forward"))].params
+                [0]
+            .contains(&mutable)
+        );
+        assert!(
+            !constraints.methods[&MethodKey::source_method(owner, method(owner, "read"))].params[0]
+                .contains(&mutable)
+        );
+        let holder = &resolved.program.types[3];
+        let constructor = holder
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(constructor) => Some(constructor),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            constraints.constructors[&ConstructorKey::source_constructor(holder, constructor)]
+                .params[0]
+                .contains(&mutable)
         );
     }
 
@@ -24706,6 +25227,7 @@ fn local_shape_constraints_with_usage_and_declared_source_types(
     usage: Option<&MethodUsageFacts>,
     binding_id: Option<&BindingId>,
     facts: &FactSet,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
     declared_source_types: &HashSet<String>,
 ) -> Vec<SignatureConstraint> {
     let effective_facts = EffectiveFacts::new(facts);
@@ -24716,6 +25238,7 @@ fn local_shape_constraints_with_usage_and_declared_source_types(
         usage,
         binding_id,
         facts,
+        external_index,
         declared_source_types,
         &effective_facts,
     )
@@ -24730,6 +25253,7 @@ fn local_shape_constraints_for_stmt_with_usage(
     usage: Option<&MethodUsageFacts>,
     binding_id: Option<&BindingId>,
     facts: &FactSet,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
     declared_source_types: &HashSet<String>,
 ) -> Vec<SignatureConstraint> {
     let no_name_set_mutations = HashSet::new();
@@ -24740,6 +25264,7 @@ fn local_shape_constraints_for_stmt_with_usage(
         usage,
         binding_id,
         facts,
+        external_index,
         declared_source_types,
     );
     let binding_mutated = liveness
@@ -24774,6 +25299,7 @@ fn local_shape_constraints_with_usage_and_effective_facts(
     usage: Option<&MethodUsageFacts>,
     binding_id: Option<&BindingId>,
     facts: &FactSet,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
     declared_source_types: &HashSet<String>,
     effective_facts: &EffectiveFacts<'_>,
 ) -> Vec<SignatureConstraint> {
@@ -24848,7 +25374,7 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         }
         push_unique_signature_constraints(
             &mut constraints,
-            &external_call_return_binding_constraints(binding, facts),
+            &external_call_return_binding_constraints_with_index(binding, facts, external_index),
         );
     }
     let modeled_native_map_get_declared_value = binding_usage.is_some_and(|binding| {
@@ -26090,10 +26616,23 @@ fn matching_facade_abi_argument_facts<'a>(
     receiver_type: Option<&JavaType>,
     name: &str,
 ) -> Vec<&'a FacadeAbiFact> {
+    let receiver_owner = receiver_type.and_then(|ty| {
+        let ty = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        match ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
+            _ => None,
+        }
+    });
     let candidates = facts
         .facade_abi_facts
         .iter()
         .filter(|abi| abi.key.member_name() == name)
+        .filter(|abi| {
+            facts.model_fact_applies_to_owner(
+                receiver_owner.as_deref().unwrap_or(abi.key.owner_type()),
+                abi.provenance,
+            )
+        })
         .collect::<Vec<_>>();
     if let Some(receiver_type) = receiver_type
         && let Some(receiver_key) = external_api_receiver_type_key_without_type_env(receiver_type)
@@ -26449,9 +26988,18 @@ pub fn external_argument_effect_constraints(
     constraints
 }
 
+#[allow(dead_code)]
 pub(crate) fn external_call_return_binding_constraints(
     binding: &BindingUseFacts,
     facts: &FactSet,
+) -> Vec<SignatureConstraint> {
+    external_call_return_binding_constraints_with_index(binding, facts, None)
+}
+
+fn external_call_return_binding_constraints_with_index(
+    binding: &BindingUseFacts,
+    facts: &FactSet,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> Vec<SignatureConstraint> {
     let mut constraints = Vec::new();
     for usage in binding.uses() {
@@ -26471,6 +27019,7 @@ pub(crate) fn external_call_return_binding_constraints(
             name,
             None,
             facts,
+            external_index,
         );
     }
     constraints
@@ -26482,6 +27031,7 @@ fn push_external_call_return_constraints(
     name: &str,
     arg_count: Option<usize>,
     facts: &FactSet,
+    external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) {
     if native_collection_get_return_may_be_null(receiver_type.as_deref(), name, arg_count) {
         push_unique_signature_constraints(
@@ -26502,8 +27052,19 @@ fn push_external_call_return_constraints(
             )],
         );
     }
-    if let Some(effect) =
-        facts.external_api_effect_for_receiver_with_arity(receiver_type.as_deref(), name, arg_count)
+    let effect = match external_index {
+        Some(index) => index.external_api_effect_for_receiver_with_arity(
+            receiver_type.as_deref(),
+            name,
+            arg_count,
+        ),
+        None => facts.external_api_effect_for_receiver_with_arity(
+            receiver_type.as_deref(),
+            name,
+            arg_count,
+        ),
+    };
+    if let Some(effect) = effect
         && effect.return_nullability != NullabilityState::Unknown
         && external_effect_return_nullability_is_signature_evidence(effect)
     {
@@ -26656,6 +27217,7 @@ fn local_plan(
     binding: BindingId,
     name: &str,
     java_ty: &JavaType,
+    declared_java_ty: &JavaType,
     initializer: Option<&Expr>,
     representations: &RepresentationPlan,
     constraints: &[SignatureConstraint],
@@ -26687,7 +27249,7 @@ fn local_plan(
         // after which the nullability constraint cannot add `Option`.
         java_ty = crate::types::optional_java_type(java_ty);
     }
-    let shape = if builtin_boxed_primitive {
+    let mut shape = if builtin_boxed_primitive {
         // JDK wrapper locals have a native scalar carrier.  Object-accepting
         // uses (for example DecimalFormat.format(Object)) are conversions at
         // that call boundary, not evidence that the local itself should be
@@ -26725,6 +27287,14 @@ fn local_plan(
         )
         .expect("local signature shape is always present")
     };
+    project_semantic_hash_collection_view(&mut shape, type_param_scope, facts, representations);
+    project_declared_semantic_hash_collection_view(
+        &mut shape,
+        declared_java_ty,
+        type_param_scope,
+        facts,
+        representations,
+    );
     LocalPlan::new(
         binding,
         name.to_string(),
@@ -27602,6 +28172,22 @@ fn collect_facade_mut_borrow_argument_names_from_expr(
                 abi.key.member_name() == name
                     && abi.key.arity() == args.len()
                     && abi.args.len() == args.len()
+                    && {
+                        let receiver_ty = receiver.as_deref().and_then(|receiver| match receiver {
+                            Expr::Var(name) => local_types.get(name),
+                            _ => None,
+                        });
+                        let receiver_owner = receiver_ty.and_then(|ty| match ty {
+                            JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                                Some(name.as_str())
+                            }
+                            _ => None,
+                        });
+                        facts.model_fact_applies_to_owner(
+                            receiver_owner.unwrap_or(abi.key.owner_type()),
+                            abi.provenance,
+                        )
+                    }
             }) {
                 if abi.receiver == ReceiverAbi::MutBorrowedSelf
                     && receiver.as_deref().is_some_and(|receiver| {
@@ -30506,6 +31092,7 @@ pub fn external_call_return_method_return_constraints(
             returned.name(),
             Some(returned.arg_count()),
             facts,
+            None,
         );
         if returned_external_call_result_matches_declared_return(
             returned,
@@ -30732,6 +31319,9 @@ fn constrained_return_shape(
     // do for parameter and local plans.
     let return_type = local_java_type_with_signature_constraints(declared_return_type, constraints);
     let public_api_return = source_method_api_boundary_policy(ty, method).public_api();
+    let owner_placement = representations.storage_placement_for(&ty.name);
+    let shared_receiver_return =
+        owner_placement.shared() && !method.modifiers.contains(&Modifier::Static);
     let merged_constraints = MergedSignatureConstraints::from_constraints(constraints);
     let borrowed_string_return_requested =
         constraints.contains(&SignatureConstraint::RequiredOwnership(
@@ -30741,6 +31331,7 @@ fn constrained_return_shape(
         && !constraints_require_nullable_storage(constraints)
         && !public_api_return
         && borrowed_string_return_requested
+        && !shared_receiver_return
     {
         let constraints = constraints
             .iter()
@@ -30815,6 +31406,7 @@ fn constrained_return_shape(
         apply_required_dispatch(&mut shape, DispatchShape::Concrete);
         apply_required_view(&mut shape, ViewShape::Native);
         apply_required_ownership(&mut shape, OwnershipShape::Owned);
+        project_semantic_hash_collection_view(&mut shape, type_param_scope, facts, representations);
         return Some(shape);
     }
     let mut solve_constraints = constraints.to_vec();
@@ -30840,20 +31432,29 @@ fn constrained_return_shape(
     } else if source_method_return_should_borrow_object(ty, method, facts) {
         apply_required_ownership(&mut shape, OwnershipShape::SharedBorrow);
     }
-    let owner_placement = representations.storage_placement_for(&ty.name);
-    if owner_placement.shared()
-        && owner_placement.interior_mutable()
+    materialize_shared_receiver_return_shape(ty, method, representations, &mut shape);
+    Some(shape)
+}
+
+fn materialize_shared_receiver_return_shape(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    representations: &RepresentationPlan,
+    shape: &mut RustSlotShape,
+) {
+    if representations.storage_placement_for(&ty.name).shared()
+        && !method.modifiers.contains(&Modifier::Static)
         && shape.ownership == OwnershipShape::SharedBorrow
     {
-        // A method invoked through `Rc<RefCell<T>>`/`Arc<Mutex<T>>` cannot
-        // return a reference into its receiver: the borrow guard belongs to
-        // the call expression and would be dropped before the reference can
-        // be used. Recover an owned value (or clone an owned shared handle)
-        // at the method boundary so the guard never escapes.
-        apply_required_ownership(&mut shape, OwnershipShape::Owned);
-        apply_required_view(&mut shape, ViewShape::Native);
+        // A canonical-handle companion receives Rc/Arc by value. Even without
+        // an interior-mutation guard, returning a reference into that handle
+        // invents a lifetime tied to a consumed argument. Materialize the
+        // owned Java value/carrier at the shared method boundary, not only
+        // for RefCell/Mutex receivers. Callers and companions then share one
+        // authoritative return ABI.
+        apply_required_ownership(shape, OwnershipShape::Owned);
+        apply_required_view(shape, ViewShape::Native);
     }
-    Some(shape)
 }
 
 fn string_return_can_use_borrowed_view(

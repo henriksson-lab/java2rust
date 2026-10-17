@@ -17,6 +17,38 @@ pub(crate) fn rust_generic_type(base: impl Into<String>, args: Vec<RustType>) ->
     }
 }
 
+/// Static members live on the nominal source declaration, not its virtual
+/// instance carrier. Java owner binders are out of scope in a static member;
+/// spell their existing planned raw erasures rather than leaking those binders
+/// into the caller or inventing a second wildcard/Any policy.
+pub(crate) fn rust_source_static_owner_type(
+    owner: &str,
+    effective_facts: &EffectiveFacts<'_>,
+    representations: &RepresentationPlan,
+) -> RustType {
+    let declaration_name = representations
+        .type_representation(owner)
+        .map(|entry| entry.java_name())
+        .unwrap_or(owner);
+    let base = rust_name_for_java_named_type(declaration_name);
+    match representations.raw_generic_arguments_for(declaration_name) {
+        Some(arguments) if !arguments.is_empty() => RustType::Generic {
+            base,
+            args: arguments
+                .iter()
+                .map(|argument| {
+                    rust_type_for_java_generic_arg_with_representations(
+                        argument,
+                        effective_facts,
+                        representations,
+                    )
+                })
+                .collect(),
+        },
+        _ => RustType::Named(base),
+    }
+}
+
 pub(crate) fn rust_boxed_dyn_trait_type(trait_name: impl Into<String>) -> RustType {
     rust_generic_type("Box", vec![RustType::DynTrait(trait_name.into())])
 }
@@ -70,19 +102,23 @@ pub enum SlotValueRustTypePolicy {
     },
     BoxedDynTrait {
         trait_name: String,
+        java_ty: JavaType,
     },
     ErasedObject,
     DynTrait {
         trait_name: String,
+        java_ty: JavaType,
     },
     ConcreteDispatch {
         java_ty: JavaType,
     },
     DynTraitView {
         trait_name: String,
+        java_ty: JavaType,
     },
     BoxedDynTraitView {
         trait_name: String,
+        java_ty: JavaType,
     },
     StringView,
     SliceView {
@@ -207,6 +243,8 @@ fn rust_type_for_slot_with_effective_facts_and_representations(
     effective_facts: EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    let effective_facts =
+        effective_facts.with_nested_collection_views(&shape.nested_collection_views);
     let rendered = rust_type_for_slot_with_facts_and_representations_unwrapped(
         shape,
         facts,
@@ -335,6 +373,17 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
     }
 
     let viewed = match (&shape.view, &shape.dispatch) {
+        (ViewShape::JavaSemanticHash, _) => {
+            let base = rust_type_for_java_type_with_effective_facts_and_representations(
+                &shape.java_ty,
+                effective_facts,
+                representations,
+            );
+            let semantic = semantic_hash_collection_base(&shape.java_ty)
+                .expect("semantic hash view requires a native hash collection");
+            crate::item_assembly::java_semantic_hash_collection_field_rust_type(base, semantic)
+                .expect("semantic hash view requires a collection carrier")
+        }
         (ViewShape::Str, _) => return rust_type_for_slot_with_facts(shape, facts),
         (ViewShape::Slice, _) if java_array_rank(&shape.java_ty) >= 3 => {
             let element_ty = crate::types::sequence_element_type(&shape.java_ty)
@@ -426,7 +475,8 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 &shape.java_ty,
                 JavaType::Named { name, .. } | JavaType::Unknown(name)
                     if crate::stdlib::is_java_platform_facade_type_name(name)
-            ) {
+            ) && !effective_facts.has_parsed_source_definition(&shape.java_ty)
+            {
                 // A concrete platform-facade constraint is authoritative: it
                 // was added only after source-name analysis established that
                 // the declaration refers to the modeled Java carrier (or a
@@ -508,6 +558,8 @@ pub fn rust_type_for_slot_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    let scoped_facts = (*facts).with_nested_collection_views(&shape.nested_collection_views);
+    let facts = &scoped_facts;
     if let Some(element_ty) = shape.optional_element_type() {
         if let JavaType::Named { name, args } = &element_ty
             && args.is_empty()
@@ -524,6 +576,22 @@ pub fn rust_type_for_slot_with_effective_facts(
             &element_shape,
             facts,
         )));
+    }
+    if shape.view == ViewShape::JavaSemanticHash {
+        let base = rust_type_for_java_type_with_effective_facts(&shape.java_ty, facts);
+        let semantic = semantic_hash_collection_base(&shape.java_ty)
+            .expect("semantic hash view requires a native hash collection");
+        let rendered =
+            crate::item_assembly::java_semantic_hash_collection_field_rust_type(base, semantic)
+                .expect("semantic hash view requires a collection carrier");
+        return match shape.ownership {
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow => RustType::Ref {
+                mutable: shape.ownership == OwnershipShape::MutableBorrow,
+                lifetime: None,
+                inner: Box::new(rendered),
+            },
+            _ => rendered,
+        };
     }
     if crate::javalibs::facade_sequence_element_type(&shape.java_ty).is_some() {
         let rendered = rust_type_for_java_type_with_effective_facts(&shape.java_ty, facts);
@@ -544,6 +612,17 @@ pub fn rust_type_for_slot_with_effective_facts(
     let rendered =
         render_slot_rust_type_policy(&slot_rust_type_policy_with_effective_facts(shape, facts));
     shared_handle_slot_rust_type(shape, facts, rendered)
+}
+
+pub(crate) fn semantic_hash_collection_base(ty: &JavaType) -> Option<&'static str> {
+    if let Some(element) = crate::types::optional_element_type(ty) {
+        return semantic_hash_collection_base(&element);
+    }
+    match crate::stdlib::java_collection_kind_for_type(ty)? {
+        crate::stdlib::JavaCollectionKind::Set => Some("JavaSemanticHashSet"),
+        crate::stdlib::JavaCollectionKind::Map => Some("JavaSemanticHashMap"),
+        _ => None,
+    }
 }
 
 /// Wraps an **owned** slot of a shared type in its handle (0002/0002b).
@@ -673,11 +752,13 @@ pub fn slot_value_rust_type_policy_with_effective_facts(
         (ViewShape::DynTraitView, DispatchShape::DynTrait { trait_name }, _) => {
             SlotValueRustTypePolicy::DynTraitView {
                 trait_name: trait_name.clone(),
+                java_ty: shape.java_ty.clone(),
             }
         }
         (ViewShape::DynTraitView, DispatchShape::BoxedDynTrait { trait_name }, _) => {
             SlotValueRustTypePolicy::BoxedDynTraitView {
                 trait_name: trait_name.clone(),
+                java_ty: shape.java_ty.clone(),
             }
         }
         (ViewShape::Str, _, _) if content.string_content() => SlotValueRustTypePolicy::StringView,
@@ -735,10 +816,12 @@ fn slot_dispatch_rust_type_policy(shape: &RustSlotShape) -> SlotValueRustTypePol
         },
         DispatchShape::BoxedDynTrait { trait_name } => SlotValueRustTypePolicy::BoxedDynTrait {
             trait_name: trait_name.clone(),
+            java_ty: shape.java_ty.clone(),
         },
         DispatchShape::ErasedObject => SlotValueRustTypePolicy::ErasedObject,
         DispatchShape::DynTrait { trait_name } => SlotValueRustTypePolicy::DynTrait {
             trait_name: trait_name.clone(),
+            java_ty: shape.java_ty.clone(),
         },
         DispatchShape::Concrete => SlotValueRustTypePolicy::ConcreteDispatch {
             java_ty: shape.java_ty.clone(),
@@ -752,20 +835,36 @@ pub(crate) fn render_slot_value_rust_type_policy_with_effective_facts(
 ) -> RustType {
     match policy {
         SlotValueRustTypePolicy::ClosedEnum { enum_name } => RustType::Named(enum_name.clone()),
-        SlotValueRustTypePolicy::BoxedDynTrait { trait_name }
-        | SlotValueRustTypePolicy::BoxedDynTraitView { trait_name } => {
+        SlotValueRustTypePolicy::BoxedDynTrait {
+            trait_name,
+            java_ty,
+        }
+        | SlotValueRustTypePolicy::BoxedDynTraitView {
+            trait_name,
+            java_ty,
+        } => {
             if external_crate_mapped_dyn_trait_path(trait_name, facts).is_some() {
                 return erased_object_rust_type();
             }
-            rust_boxed_dyn_trait_type(dyn_trait_rust_path_with_effective_facts(trait_name, facts))
+            rust_boxed_dyn_trait_type(parameterized_dyn_trait_path_with_effective_facts(
+                trait_name, java_ty, facts,
+            ))
         }
         SlotValueRustTypePolicy::ErasedObject => erased_object_rust_type(),
-        SlotValueRustTypePolicy::DynTrait { trait_name }
-        | SlotValueRustTypePolicy::DynTraitView { trait_name } => {
+        SlotValueRustTypePolicy::DynTrait {
+            trait_name,
+            java_ty,
+        }
+        | SlotValueRustTypePolicy::DynTraitView {
+            trait_name,
+            java_ty,
+        } => {
             if let Some(trait_path) = external_crate_mapped_dyn_trait_path(trait_name, facts) {
                 return RustType::ImplTrait(trait_path);
             }
-            RustType::DynTrait(dyn_trait_rust_path_with_effective_facts(trait_name, facts))
+            RustType::DynTrait(parameterized_dyn_trait_path_with_effective_facts(
+                trait_name, java_ty, facts,
+            ))
         }
         SlotValueRustTypePolicy::ConcreteDispatch { java_ty } => {
             if crate::javalibs::facade_sequence_element_type(java_ty).is_some() {
@@ -1333,6 +1432,15 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
     effective_facts: EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let Some(rendered) = planned_nested_collection_type(ty, &effective_facts, |argument| {
+        rust_type_for_java_generic_arg_with_representations(
+            argument,
+            &effective_facts,
+            representations,
+        )
+    }) {
+        return rendered;
+    }
     if java_array_rank(ty) >= 3 {
         // `Array2` is an exact rank-two carrier.  If its rank-two suffix is
         // rendered recursively as a generic argument of a higher-rank array,
@@ -1345,29 +1453,55 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
             representations,
         );
     }
-    if let JavaType::Named { name, args } = ty
-        && args.is_empty()
-        && let Some(erased_args) = representations.raw_generic_arguments_for(name)
-        && !erased_args.is_empty()
-    {
+    if let Some(instantiated) = raw_generic_instantiation_for_rendering(ty, representations) {
         // Java raw source generics erase each parameter to its declared upper
         // bound (or Object). Rust has no omitted-generic syntax, so make that
         // erasure explicit before choosing the concrete/trait/closed carrier.
         // Doing this at the canonical renderer keeps declarations, locals,
         // arguments, and hierarchy carriers on the same ABI.
         return rust_type_for_java_type_with_effective_facts_and_representations(
-            &JavaType::Named {
-                name: name.clone(),
-                args: erased_args.to_vec(),
-            },
+            &instantiated,
             effective_facts,
             representations,
         );
     }
     if let Some(carrier) =
-        source_map_entry_value_carrier_type(ty, &effective_facts, representations)
+        map_entry_rust_type_with_representations(ty, &effective_facts, representations)
     {
         return carrier;
+    }
+    if let Some(element_ty) = optional_element_type(ty) {
+        return RustType::Option(Box::new(
+            rust_type_for_optional_element_arg_with_representations(
+                &element_ty,
+                &effective_facts,
+                representations,
+            ),
+        ));
+    }
+    if let JavaType::Named { name, args } = ty
+        && effective_facts.parsed_source_controls_native_carrier(ty)
+    {
+        if let Some(dispatch) =
+            rust_type_for_representation_dispatch(ty, &effective_facts, representations)
+        {
+            return dispatch;
+        }
+        if args.is_empty() {
+            return RustType::Named(rust_name_for_java_named_type(name));
+        }
+        return rust_generic_type(
+            rust_name_for_java_named_type(name),
+            args.iter()
+                .map(|argument| {
+                    rust_type_for_java_generic_arg_with_representations(
+                        argument,
+                        &effective_facts,
+                        representations,
+                    )
+                })
+                .collect(),
+        );
     }
     if let JavaType::Named { name, args } = ty
         && crate::stdlib::canonical_external_receiver_type_key(name) == "Class"
@@ -1535,6 +1669,9 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
                     &effective_facts,
                     representations,
                 );
+                if kind == crate::stdlib::JavaCollectionKind::InsertionOrderedSet {
+                    return rust_generic_type("JavaLinkedHashSet", vec![element_rust]);
+                }
                 if java_set_element_uses_hash_free_carrier_with_representations(
                     Some(&element_ty),
                     &effective_facts,
@@ -1684,15 +1821,11 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
 
     if let JavaType::Named { name, args } = ty
         && !args.is_empty()
-        && representations.type_representation(name).is_some()
     {
-        // A nominal source generic is still a carrier boundary for each of
-        // its arguments.  Rendering the outer type through the legacy Java
-        // type mapper would recursively spell interface arguments as bare
-        // traits (for example `Reader<Product<T>>`) even though every slot
-        // renderer represents the same argument as `Box<dyn Product<T>>`.
-        // Keep the nominal outer carrier, but reuse the representation-aware
-        // generic-argument projection for its contents.
+        // Every remaining nominal generic is still a carrier boundary for
+        // its arguments, including an opaque external facade. Native and
+        // explicitly mapped carriers were selected above. Do not discard the
+        // representation plan while rendering their nominal peers' contents.
         return rust_generic_type(
             rust_name_for_java_named_type(name),
             args.iter()
@@ -1714,6 +1847,11 @@ pub fn rust_type_for_java_type_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(rendered) = planned_nested_collection_type(ty, facts, |argument| {
+        rust_type_for_java_generic_arg_with_effective_facts(argument, facts)
+    }) {
+        return rendered;
+    }
     if java_array_rank(ty) >= 3 {
         return rust_type_for_nested_higher_rank_array(ty, facts);
     }
@@ -1728,6 +1866,23 @@ fn java_array_rank(ty: &JavaType) -> usize {
         JavaType::Array(element) => 1 + java_array_rank(element),
         _ => 0,
     }
+}
+
+fn planned_nested_collection_type(
+    ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+    render_argument: impl FnMut(&JavaType) -> RustType,
+) -> Option<RustType> {
+    if facts.nested_collection_view(ty) != Some(&ViewShape::JavaSemanticHash) {
+        return None;
+    }
+    let JavaType::Named { args, .. } = ty else {
+        return None;
+    };
+    Some(rust_generic_type(
+        semantic_hash_collection_base(ty)?,
+        args.iter().map(render_argument).collect(),
+    ))
 }
 
 fn rust_type_for_nested_higher_rank_array_with_representations(
@@ -1760,6 +1915,34 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> NativeJavaRustTypePolicy {
+    if let JavaType::Named { name, args } = ty
+        && facts.parsed_source_controls_native_carrier(ty)
+    {
+        if args.is_empty() {
+            return NativeJavaRustTypePolicy::Direct {
+                ty: RustType::Named(rust_name_for_java_named_type(name)),
+            };
+        }
+        return NativeJavaRustTypePolicy::Direct {
+            ty: rust_generic_type(
+                rust_name_for_java_named_type(name),
+                args.iter()
+                    .map(|argument| {
+                        rust_type_for_java_generic_arg_with_effective_facts(argument, facts)
+                    })
+                    .collect(),
+            ),
+        };
+    }
+    if let JavaType::Named { name, args } = ty
+        && args.is_empty()
+        && let Some(primitive) = boxed_primitive_storage_java_type(name, facts)
+    {
+        return native_java_rust_type_policy_with_effective_facts(
+            &JavaType::Primitive(primitive),
+            facts,
+        );
+    }
     if let Some(element_ty) = crate::types::ndarray_array2_element_type(ty) {
         return NativeJavaRustTypePolicy::Direct {
             ty: RustType::Array2(Box::new(
@@ -2202,24 +2385,8 @@ fn erased_object_java_type() -> JavaType {
 }
 
 fn external_final_facade_should_keep_named_type(ty: &JavaType, facts: &EffectiveFacts<'_>) -> bool {
-    let erased;
-    let ty = if let JavaType::Named { name, args } = ty
-        && !args.is_empty()
-    {
-        erased = JavaType::Named {
-            name: name.clone(),
-            args: Vec::new(),
-        };
-        &erased
-    } else {
-        ty
-    };
-    matches!(
-        facts.object_representation_override_strategy_for(ty),
-        Some(HierarchyStrategy::ErasedObject)
-    ) && facts.is_final_type(ty)
-        || java_type_name_for_builtin_final_erased_lookup(ty)
-            .is_some_and(crate::external_packs::builtin_external_final_erased_object_type)
+    java_type_name_for_builtin_final_erased_lookup(ty)
+        .is_some_and(|name| facts.has_external_final_erased_facade_for_name(name))
 }
 
 /// A generated external-model facade is the executable carrier for an exact
@@ -2303,7 +2470,7 @@ fn erased_facade_concrete_dispatch_should_keep_named_type(
 /// Renders a generic argument, wrapping a shared type in its handle. Sound for
 /// user generics because every generated trait carries the `Rc`/`Arc` forwarding
 /// impls.
-fn rust_type_for_java_generic_arg_with_effective_facts(
+pub(crate) fn rust_type_for_java_generic_arg_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
@@ -2514,7 +2681,14 @@ pub(crate) fn rust_type_for_java_generic_arg_with_representations(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
-    if let Some(carrier) = source_map_entry_value_carrier_type(ty, facts, representations) {
+    if let Some(instantiated) = raw_generic_instantiation_for_rendering(ty, representations) {
+        return rust_type_for_java_generic_arg_with_representations(
+            &instantiated,
+            facts,
+            representations,
+        );
+    }
+    if let Some(carrier) = map_entry_rust_type_with_representations(ty, facts, representations) {
         return carrier;
     }
     if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
@@ -2549,6 +2723,18 @@ pub(crate) fn rust_type_for_java_generic_arg_with_representations(
     {
         return storage_ty;
     }
+    if matches!(ty, JavaType::Array(_))
+        || matches!(ty, JavaType::Named { args, .. } if !args.is_empty())
+    {
+        // The outer carrier has been selected; its children must use the same
+        // representation plan. The facts-only fallback recursively loses
+        // source interface and hierarchy representations at the next level.
+        return rust_type_for_java_type_with_effective_facts_and_representations(
+            ty,
+            *facts,
+            representations,
+        );
+    }
     rust_type_for_java_generic_arg_with_effective_facts(ty, facts)
 }
 
@@ -2574,14 +2760,11 @@ fn rust_type_for_external_generic_facade_with_representations(
     ))
 }
 
-fn source_map_entry_value_carrier_type(
+fn map_entry_rust_type_with_representations(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> Option<RustType> {
-    if !representations.source_map_entry_uses_value_carrier() {
-        return None;
-    }
     let JavaType::Named { name, args } = ty else {
         return None;
     };
@@ -2593,14 +2776,28 @@ fn source_map_entry_value_carrier_type(
     {
         return None;
     }
-    Some(rust_generic_type(
-        "JavaMapEntryValue",
-        args.iter()
-            .map(|arg| {
-                rust_type_for_java_generic_arg_with_representations(arg, facts, representations)
-            })
-            .collect(),
-    ))
+    // Source declarations and explicit user representations take precedence
+    // over the default platform-entry carrier, as at other native boundaries.
+    if representations
+        .type_representation(name)
+        .is_some_and(|entry| {
+            matches!(
+                entry.provenance(),
+                RepresentationProvenance::ParsedSource | RepresentationProvenance::UserOverride
+            )
+        })
+    {
+        return None;
+    }
+    let args = args
+        .iter()
+        .map(|arg| rust_type_for_java_generic_arg_with_representations(arg, facts, representations))
+        .collect();
+    Some(if representations.source_map_entry_uses_value_carrier() {
+        rust_generic_type("JavaMapEntryValue", args)
+    } else {
+        RustType::Tuple(args)
+    })
 }
 
 fn rust_type_for_optional_element_arg_with_representations(
@@ -2608,6 +2805,13 @@ fn rust_type_for_optional_element_arg_with_representations(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let Some(instantiated) = raw_generic_instantiation_for_rendering(ty, representations) {
+        return rust_type_for_optional_element_arg_with_representations(
+            &instantiated,
+            facts,
+            representations,
+        );
+    }
     if let JavaType::Wildcard(Some(WildcardBound::Extends(bound))) = ty {
         return rust_type_for_optional_element_arg_with_representations(
             bound,
@@ -2650,6 +2854,23 @@ fn rust_type_for_optional_element_arg_with_representations(
     rust_type_for_java_generic_arg_with_representations(ty, facts, representations)
 }
 
+fn raw_generic_instantiation_for_rendering(
+    ty: &JavaType,
+    representations: &RepresentationPlan,
+) -> Option<JavaType> {
+    let JavaType::Named { name, args } = ty else {
+        return None;
+    };
+    if !args.is_empty() {
+        return None;
+    }
+    let erased_args = representations.raw_generic_arguments_for(name)?;
+    (!erased_args.is_empty()).then(|| JavaType::Named {
+        name: name.clone(),
+        args: erased_args.to_vec(),
+    })
+}
+
 fn rust_type_for_representation_storage_placement(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
@@ -2667,7 +2888,11 @@ fn rust_type_for_representation_storage_placement(
     }
     Some(storage_placement_type(
         placement,
-        rust_type_for_java_type_with_effective_facts(ty, facts),
+        rust_type_for_java_type_with_effective_facts_and_representations(
+            ty,
+            *facts,
+            representations,
+        ),
     ))
 }
 
@@ -2821,11 +3046,12 @@ pub(crate) fn parameterized_dyn_trait_path(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> String {
+    let trait_path = dyn_trait_rust_path_with_effective_facts(trait_name, facts);
     let JavaType::Named { name, args } = java_ty else {
-        return trait_name.to_string();
+        return trait_path;
     };
     if args.is_empty() {
-        return trait_name.to_string();
+        return trait_path;
     }
     let args = args
         .iter()
@@ -2854,7 +3080,7 @@ pub(crate) fn parameterized_dyn_trait_path(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{trait_name}<{args}>")
+    format!("{trait_path}<{args}>")
 }
 
 pub(crate) fn parameterized_dyn_trait_path_with_facts(
@@ -2862,13 +3088,25 @@ pub(crate) fn parameterized_dyn_trait_path_with_facts(
     java_ty: &JavaType,
     facts: &FactSet,
 ) -> String {
+    parameterized_dyn_trait_path_with_effective_facts(
+        trait_name,
+        java_ty,
+        &EffectiveFacts::new(facts),
+    )
+}
+
+fn parameterized_dyn_trait_path_with_effective_facts(
+    trait_name: &str,
+    java_ty: &JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> String {
+    let trait_path = dyn_trait_rust_path_with_effective_facts(trait_name, facts);
     let JavaType::Named { name, args } = java_ty else {
-        return trait_name.to_string();
+        return trait_path;
     };
     if args.is_empty() {
-        return trait_name.to_string();
+        return trait_path;
     }
-    let effective_facts = EffectiveFacts::new(facts);
     let args = args
         .iter()
         .enumerate()
@@ -2882,13 +3120,12 @@ pub(crate) fn parameterized_dyn_trait_path_with_facts(
                 _ => arg,
             };
             crate::emit::emit_type(&rust_type_for_java_generic_arg_with_effective_facts(
-                arg,
-                &effective_facts,
+                arg, facts,
             ))
         })
         .collect::<Vec<_>>()
         .join(", ");
-    format!("{trait_name}<{args}>")
+    format!("{trait_path}<{args}>")
 }
 
 fn rust_type_for_facade_aware_representation_dispatch(
@@ -3127,6 +3364,234 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nested_native_collection_ignores_conservative_erased_hierarchy_entry() {
+        let facts = FactSet::default();
+        let mut representations = RepresentationPlan::default();
+        for owner in ["Set", "List", "Map"] {
+            representations.insert_test_type_representation(
+                crate::representation::TypeRepresentation::new(
+                    owner,
+                    crate::representation::ObjectRepresentation::ErasedObject,
+                    RepresentationProvenance::ConservativeFallback,
+                    Vec::new(),
+                ),
+            );
+        }
+        for (java_type, expected) in [
+            (
+                "List<Set<String>>",
+                "Vec<std::collections::HashSet<String>>",
+            ),
+            ("List<List<String>>", "Vec<Vec<String>>"),
+            (
+                "List<Map<String, Integer>>",
+                "Vec<std::collections::HashMap<String, i32>>",
+            ),
+        ] {
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_java_type_with_facts_and_representations(
+                    &crate::parser::parse_hierarchy_type(java_type),
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
+        let set = crate::parser::parse_hierarchy_type("Set<String>");
+        assert_eq!(representations.dispatch_for(&set), DispatchShape::Concrete);
+        let shape = crate::shape_projection::return_shape_for_java_type(&representations, &set)
+            .expect("collection return");
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                &shape,
+                &facts,
+                &representations,
+            )),
+            "std::collections::HashSet<String>"
+        );
+    }
+
+    #[test]
+    fn nested_carriers_preserve_source_interface_payload_representations() {
+        let parsed = crate::parser::parse_java_source(
+            "interface Port<T> { int size(); } class Packet<T> { T value; }",
+        );
+        assert!(!parsed.diagnostics.has_errors());
+        let facts = FactSet::default();
+        let representations = crate::representation::plan_representations(&parsed.program, &facts);
+        let effective = EffectiveFacts::new(&facts);
+        let mut failures = Vec::new();
+        for (java_type, expected) in [
+            (
+                "List<List<Port<String>>>",
+                "Vec<Vec<Box<dyn Port<String>>>>",
+            ),
+            (
+                "Map<String, List<Port<String>>>",
+                "std::collections::HashMap<String, Vec<Box<dyn Port<String>>>>",
+            ),
+            (
+                "Optional<List<Port<String>>>",
+                "Option<Vec<Box<dyn Port<String>>>>",
+            ),
+            (
+                "List<Packet<Port<String>>>",
+                "Vec<Packet<Box<dyn Port<String>>>>",
+            ),
+            (
+                "List<Port<String>[]>",
+                "Vec<Vec<Option<Box<dyn Port<String>>>>>",
+            ),
+            (
+                "Future<List<Port<String>>>",
+                "Future<Vec<Box<dyn Port<String>>>>",
+            ),
+            (
+                "BiFunction<Port<String>, String, Port<String>>",
+                "BiFunction<Box<dyn Port<String>>, String, Box<dyn Port<String>>>",
+            ),
+            (
+                "List<Map.Entry<String, Port<String>>>",
+                "Vec<(String, Box<dyn Port<String>>)>",
+            ),
+        ] {
+            let ty = crate::parser::parse_hierarchy_type(java_type);
+            for rendered in [
+                rust_type_for_java_type_with_facts_and_representations(
+                    &ty,
+                    &facts,
+                    &representations,
+                ),
+                rust_type_for_java_generic_arg_with_representations(
+                    &ty,
+                    &effective,
+                    &representations,
+                ),
+            ] {
+                let actual = crate::emit::emit_type(&rendered);
+                if actual != expected {
+                    failures.push(format!("{java_type}: expected {expected}, got {actual}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn shared_generic_payload_retains_nested_interface_representation() {
+        let parsed = crate::parser::parse_java_source(
+            "interface Port<T> { int size(); } class Packet<T> { T value; }",
+        );
+        let mut facts = FactSet::default();
+        facts.storage_strategies.insert(
+            "Packet".into(),
+            crate::storage_strategy::TypeStorageFacts::default()
+                .with_locally_aliased(true)
+                .with_mutated(true),
+        );
+        let reps = crate::representation::plan_representations(&parsed.program, &facts);
+        let ty = crate::parser::parse_hierarchy_type("List<Packet<Port<String>>>");
+        let expected = format!(
+            "Vec<{}>",
+            facts
+                .storage_placement_for("Packet")
+                .wrap("Packet<Box<dyn Port<String>>>".to_string())
+        );
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_java_type_with_facts_and_representations(
+                &ty, &facts, &reps,
+            )),
+            expected,
+        );
+    }
+
+    #[test]
+    fn explicit_entry_representations_are_not_platform_entry_tuples() {
+        let parsed = crate::parser::parse_java_source(
+            "class Entry<K, V> { K key; V value; } interface Port<T> { int size(); }",
+        );
+        let facts = FactSet::default();
+        let mut reps = crate::representation::plan_representations(&parsed.program, &facts);
+        let ty = crate::parser::parse_hierarchy_type("List<Entry<String, Port<String>>>");
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_java_type_with_facts_and_representations(
+                &ty, &facts, &reps,
+            )),
+            "Vec<Entry<String, Box<dyn Port<String>>>>",
+        );
+        reps.insert_test_type_representation(crate::representation::TypeRepresentation::new(
+            "Map.Entry",
+            crate::representation::ObjectRepresentation::ErasedObject,
+            RepresentationProvenance::UserOverride,
+            Vec::new(),
+        ));
+        let ty = crate::parser::parse_hierarchy_type("List<Map.Entry<String, Port<String>>>");
+        assert_eq!(
+            crate::emit::emit_type(&rust_type_for_java_type_with_facts_and_representations(
+                &ty, &facts, &reps,
+            )),
+            "Vec<Box<dyn std::any::Any>>",
+        );
+    }
+
+    #[test]
+    fn parameterized_nested_dyn_trait_uses_canonical_rust_name() {
+        let java_ty = JavaType::Named {
+            name: "Outer.Inner".to_string(),
+            args: vec![JavaType::Primitive(PrimitiveType::Int)],
+        };
+
+        assert_eq!(
+            parameterized_dyn_trait_path_with_facts("Outer.Inner", &java_ty, &FactSet::default(),),
+            "Outer_Inner<i32>"
+        );
+    }
+
+    #[test]
+    fn fact_only_trait_slots_preserve_declared_generic_arguments() {
+        for (dispatch, ownership, expected) in [
+            (
+                DispatchShape::BoxedDynTrait {
+                    trait_name: "Port".into(),
+                },
+                OwnershipShape::Owned,
+                "Box<dyn Port<String>>",
+            ),
+            (
+                DispatchShape::DynTrait {
+                    trait_name: "Port".into(),
+                },
+                OwnershipShape::SharedBorrow,
+                "&dyn Port<String>",
+            ),
+        ] {
+            let mut shape =
+                RustSlotShape::for_storage(crate::parser::parse_hierarchy_type("Port<String>"));
+            shape.dispatch = dispatch;
+            shape.ownership = ownership;
+            for view in [ViewShape::Native, ViewShape::DynTraitView] {
+                shape.view = view;
+                assert_eq!(
+                    crate::emit::emit_type(&rust_type_for_slot_with_facts(
+                        &shape,
+                        &FactSet::default()
+                    )),
+                    expected
+                );
+                let mut nullable = shape.clone();
+                nullable.java_ty = crate::types::optional_java_type(nullable.java_ty);
+                assert_eq!(
+                    crate::emit::emit_type(&rust_type_for_slot_with_facts(
+                        &nullable,
+                        &FactSet::default()
+                    )),
+                    format!("Option<{expected}>")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn shared_external_index_preserves_representation_aware_slot_rendering() {
         let facts = FactSet::default();
         let external_index = facts.external_lookup_index();
@@ -3184,6 +3649,7 @@ class ConcreteReader extends Reader<Item> {}
         let representations =
             crate::representation::plan_representations(&parsed.program, &FactSet::default());
         let shape = RustSlotShape {
+            nested_collection_views: Vec::new(),
             java_ty: JavaType::Named {
                 name: "Reader".to_string(),
                 args: Vec::new(),
@@ -3207,6 +3673,34 @@ class ConcreteReader extends Reader<Item> {}
     }
 
     #[test]
+    fn raw_source_generic_arguments_use_the_same_declared_erasure_as_outer_slots() {
+        let parsed = crate::parser::parse_java_source(
+            "class Item {} class Packet<T extends Item> { T value; }",
+        );
+        assert!(!parsed.diagnostics.has_errors());
+        let representations =
+            crate::representation::plan_representations(&parsed.program, &FactSet::default());
+        for (java_type, expected) in [
+            ("List<Packet>", "Vec<Packet<Item>>"),
+            ("List<Optional<Packet>>", "Vec<Option<Packet<Item>>>"),
+            (
+                "Map<String, Packet>",
+                "std::collections::HashMap<String, Packet<Item>>",
+            ),
+        ] {
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_java_type_with_facts_and_representations(
+                    &crate::parser::parse_hierarchy_type(java_type),
+                    &FactSet::default(),
+                    &representations,
+                )),
+                expected,
+                "{java_type}"
+            );
+        }
+    }
+
+    #[test]
     fn fact_only_closed_carrier_is_not_wrapped_outside_variant_handles() {
         let mut facts = FactSet::default();
         facts.storage_strategies.insert(
@@ -3216,6 +3710,7 @@ class ConcreteReader extends Reader<Item> {}
                 .with_mutated(true),
         );
         let shape = RustSlotShape {
+            nested_collection_views: Vec::new(),
             java_ty: JavaType::Named {
                 name: "Hmm".to_string(),
                 args: vec![JavaType::Wildcard(None)],
@@ -3625,6 +4120,7 @@ class ConcreteReader extends Reader<Item> {}
     #[test]
     fn nullable_unqualified_boxed_primitive_slot_renders_as_optional_scalar() {
         let shape = RustSlotShape {
+            nested_collection_views: Vec::new(),
             java_ty: crate::types::optional_java_type(JavaType::Named {
                 name: "Integer".to_string(),
                 args: Vec::new(),
@@ -3648,6 +4144,7 @@ class ConcreteReader extends Reader<Item> {}
     #[test]
     fn nullable_borrowed_boxed_trait_storage_renders_as_trait_view() {
         let shape = RustSlotShape {
+            nested_collection_views: Vec::new(),
             java_ty: crate::types::optional_java_type(JavaType::Named {
                 name: "BlockData".to_string(),
                 args: Vec::new(),
@@ -3709,6 +4206,21 @@ class ConcreteReader extends Reader<Item> {}
             crate::emit::emit_type(&rust_type_for_java_type_with_facts(&values, &facts)),
             "Vec<Option<Byte>>"
         );
+        let platform_byte = JavaType::Named {
+            name: "java.lang.Byte".to_string(),
+            args: Vec::new(),
+        };
+        for representations in [None, Some(RepresentationPlan::default())] {
+            let rendered = match representations {
+                None => rust_type_for_java_type_with_facts(&platform_byte, &facts),
+                Some(plan) => rust_type_for_java_type_with_facts_and_representations(
+                    &platform_byte,
+                    &facts,
+                    &plan,
+                ),
+            };
+            assert_eq!(crate::emit::emit_type(&rendered), "i8");
+        }
     }
 
     #[test]

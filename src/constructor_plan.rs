@@ -61,6 +61,9 @@ pub enum DelegatedConstructorTrailingStmt<'a> {
         /// statement. Calls to private methods and `super` remain statically
         /// bound to that class after constructor flattening.
         lexical_declaring_type: Option<&'a TypeDecl>,
+        /// Instance initializers run in class scope, outside constructor
+        /// parameter/local bindings, even when replayed inside its Rust fn.
+        initializer_scope: bool,
     },
     ExprStatement {
         expr: &'a Expr,
@@ -87,6 +90,45 @@ pub enum ConstructorFieldValuePlan<'a> {
         field_name: String,
         shape: RustSlotShape,
     },
+}
+
+/// Field initializers are an execution phase, not allocation-time defaults.
+/// Keep them in declaration order and retain the lexical owner so inherited
+/// field hiding and private calls use the same routing as constructor bodies.
+pub(crate) fn instance_field_initializer_statements(
+    ty: &TypeDecl,
+) -> Vec<DelegatedConstructorTrailingStmt<'_>> {
+    ty.members
+        .iter()
+        .filter_map(|member| {
+            let Member::Field(field) = member else {
+                return None;
+            };
+            if is_static_field(field) {
+                return None;
+            }
+            Some(instance_field_initializer_statement(
+                ty,
+                &field.name,
+                field.initializer.as_ref()?,
+            ))
+        })
+        .collect()
+}
+
+pub(crate) fn instance_field_initializer_statement<'a>(
+    ty: &'a TypeDecl,
+    field_name: &str,
+    value: &Expr,
+) -> DelegatedConstructorTrailingStmt<'a> {
+    DelegatedConstructorTrailingStmt::OwnedStatement {
+        stmt: Stmt::Assign {
+            target: Expr::FieldAccess(Box::new(Expr::This), field_name.to_string()),
+            value: value.clone(),
+        },
+        lexical_declaring_type: Some(ty),
+        initializer_scope: true,
+    }
 }
 
 pub fn plan_constructor_delegation(body: &Block) -> Option<ConstructorDelegationPlan<'_>> {
@@ -388,6 +430,20 @@ fn dedup_constructor_field_value_plans(plans: &mut Vec<ConstructorFieldValuePlan
 }
 
 impl<'a> ConstructorFieldValuePlan<'a> {
+    pub(crate) fn specialize_type_variables(
+        &mut self,
+        substitutions: &std::collections::HashMap<String, crate::java_ir::JavaType>,
+    ) {
+        let shape = match self {
+            Self::Assigned { shape, .. }
+            | Self::FieldInitializer { shape, .. }
+            | Self::Default { shape, .. } => shape,
+        };
+        let specialized =
+            crate::resolve::substitute_method_type_variables(&shape.java_ty, substitutions);
+        *shape = crate::shape_projection::specialize_slot_shape_java_type(shape, &specialized);
+    }
+
     fn field_name(&self) -> &str {
         match self {
             ConstructorFieldValuePlan::Assigned { field_name, .. }
@@ -473,4 +529,65 @@ fn constructor_field_assignments(body: Option<&Block>) -> Vec<(String, &Expr)> {
             .collect()
     })
     .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::slot_shape::{DispatchShape, OwnershipShape, ViewShape};
+
+    #[test]
+    fn field_plan_specialization_is_simultaneous_and_preserves_slot_metadata() {
+        let mut shape =
+            RustSlotShape::for_storage(crate::parser::parse_hierarchy_type("Pair<Optional<A>, B>"));
+        shape.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "Pair".into(),
+        };
+        shape.view = ViewShape::DynTraitView;
+        shape.ownership = OwnershipShape::SharedBorrow;
+        let mut expected = shape.clone();
+        expected.java_ty = crate::parser::parse_hierarchy_type("Pair<Optional<B>, String>");
+        let substitutions = std::collections::HashMap::from([
+            ("A".into(), crate::parser::parse_hierarchy_type("B")),
+            ("B".into(), crate::java_ir::JavaType::String),
+        ]);
+        let value = Expr::Var("argument".into());
+        let mut plans = [
+            ConstructorFieldValuePlan::Assigned {
+                field_name: "item".into(),
+                value: &value,
+                shape: shape.clone(),
+            },
+            ConstructorFieldValuePlan::FieldInitializer {
+                field_name: "item".into(),
+                value: &value,
+                shape: shape.clone(),
+            },
+            ConstructorFieldValuePlan::Default {
+                field_name: "item".into(),
+                shape,
+            },
+        ];
+        for plan in &mut plans {
+            plan.specialize_type_variables(&substitutions);
+            assert_eq!(plan.field_name(), "item");
+            let actual = match plan {
+                ConstructorFieldValuePlan::Assigned {
+                    shape,
+                    value: actual,
+                    ..
+                }
+                | ConstructorFieldValuePlan::FieldInitializer {
+                    shape,
+                    value: actual,
+                    ..
+                } => {
+                    assert_eq!(*actual, &value);
+                    shape
+                }
+                ConstructorFieldValuePlan::Default { shape, .. } => shape,
+            };
+            assert_eq!(actual, &expected);
+        }
+    }
 }

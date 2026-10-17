@@ -1037,10 +1037,9 @@ fn object_strategy_for_type_with_effective_facts_and_requirements(
     facts: &EffectiveFacts<'_>,
     requirements: Vec<DispatchRequirement>,
 ) -> ObjectStrategyPlan {
-    let explicit_hierarchy_override = facts
-        .hierarchy_overrides()
-        .iter()
-        .find(|override_fact| override_fact.type_name == ty.name);
+    let explicit_hierarchy_override = facts.hierarchy_overrides().iter().find(|override_fact| {
+        override_fact.type_name == ty.name && !override_fact.is_source_fallback()
+    });
     let (strategy, diagnostics) = match ty.kind {
         TypeKind::Class
             if ty.modifiers.contains(&crate::java_ir::Modifier::Abstract)
@@ -1917,7 +1916,7 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             continue;
         };
         if let Some(strategy) = plan.strategy_for_mut(policy.type_name()) {
-            if erased_override_should_not_replace_parsed_source(override_fact, strategy) {
+            if fallback_override_should_not_replace_parsed_source(override_fact, strategy) {
                 continue;
             }
             strategy.strategy = representation;
@@ -1926,7 +1925,7 @@ fn apply_hierarchy_overrides_to_strategy_plan(
             strategy.rejected.clear();
             continue;
         }
-        if erased_override_should_not_insert_beside_parsed_source(override_fact, plan) {
+        if fallback_override_should_not_insert_beside_parsed_source(override_fact, plan) {
             continue;
         }
         plan.insert_strategy(ObjectStrategyPlan {
@@ -1942,21 +1941,21 @@ fn apply_hierarchy_overrides_to_strategy_plan(
     }
 }
 
-fn erased_override_should_not_replace_parsed_source(
+fn fallback_override_should_not_replace_parsed_source(
     override_fact: &HierarchyOverride,
     strategy: &ObjectStrategyPlan,
 ) -> bool {
-    !matches!(override_fact.provenance, FactProvenance::UserOverride)
-        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+    (override_fact.is_source_fallback()
+        || crate::effective_facts::fact_precedence_key(override_fact.provenance)
+            < crate::effective_facts::fact_precedence_key(FactProvenance::ParsedSource))
         && strategy.has_provenance(FactProvenance::ParsedSource)
 }
 
-fn erased_override_should_not_insert_beside_parsed_source(
+fn fallback_override_should_not_insert_beside_parsed_source(
     override_fact: &HierarchyOverride,
     plan: &ObjectModelPlan,
 ) -> bool {
-    !matches!(override_fact.provenance, FactProvenance::UserOverride)
-        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+    override_fact.is_source_fallback()
         && plan.strategies.values().any(|strategy| {
             strategy.has_provenance(FactProvenance::ParsedSource)
                 && crate::facts::external_type_name_matches(
@@ -2520,6 +2519,7 @@ mod tests {
     fn qualified_new_expr(qualifier: Expr, args: Vec<Expr>) -> Expr {
         Expr::New {
             ty: JavaType::Unknown("Inner".to_string()),
+            infer_type_arguments: false,
             qualifier: Some(Box::new(qualifier)),
             args,
             body: None,

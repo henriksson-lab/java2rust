@@ -3293,7 +3293,7 @@ class InterfaceUpcast {
         r#"
 #[test]
 fn anonymous_derived_interface_is_accepted_by_parent_parameter() {
-    assert_eq!(InterfaceUpcast::run().unwrap(), 42);
+    assert_eq!(InterfaceUpcast::run(), 42);
 }
 "#,
     );
@@ -5207,9 +5207,11 @@ fn anonymous_override_calls_initialized_base_super_method() {
     assert_eq!(AnonymousClassSuper::plain_value(), 9);
     assert_eq!(AnonymousClassSuper::captured_value(), 11);
     assert_eq!(AnonymousClassSuper::captured_with_shadows(), 27);
-    assert_eq!(AnonymousClassSuper::captured_alias(), Ok(12));
-    assert_eq!(AnonymousClassSuper::captured_write(), Ok(17));
-    assert_eq!(AnonymousClassSuper::captured_conditional(), Ok(24));
+    // These factory captures are solved as non-null. Their plain ABI must not
+    // acquire an exception carrier merely because the reference is shared.
+    assert_eq!(AnonymousClassSuper::captured_alias(), 12);
+    assert_eq!(AnonymousClassSuper::captured_write(), 17);
+    assert_eq!(AnonymousClassSuper::captured_conditional(), 24);
     assert_eq!(AnonymousClassSuper::label(), "left");
 }
 "#,

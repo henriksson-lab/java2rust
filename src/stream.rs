@@ -8,8 +8,7 @@ use crate::shape_projection::iteration_element_shape;
 use crate::slot_shape::RustSlotShape;
 use crate::stdlib::JavaCollectionKind;
 use crate::stream_shape::{
-    infer_stream_lambda_body_shape_with_facts, infer_stream_map_to_int_shape,
-    infer_stream_source_element_shape_with_facts,
+    infer_stream_lambda_body_shape_with_facts, infer_stream_source_element_shape_with_facts,
 };
 use crate::types::{TypeEnv, optional_java_type, sequence_element_type};
 
@@ -40,6 +39,49 @@ impl<'a> StreamPlan<'a> {
 
     pub fn actual(&self) -> &LoweredType {
         &self.actual
+    }
+
+    /// Callbacks reached by consuming this pipeline, with their Java input
+    /// types. An iterator terminal transfers traversal to its caller and does
+    /// not execute the callbacks here.
+    pub(crate) fn visit_consumed_callbacks(
+        &self,
+        visit: &mut impl FnMut(&LambdaPlan<'a>, &RustSlotShape),
+    ) {
+        if matches!(self.terminal, StreamTerminal::Iterator) {
+            return;
+        }
+        let mut input = self.source_element.shape();
+        for op in &self.ops {
+            match op {
+                StreamOp::Filter(FilterPlan::Predicate(lambda)) => visit(lambda, input),
+                StreamOp::Filter(FilterPlan::NonNull { output_shape, .. }) => input = output_shape,
+                StreamOp::Map {
+                    lambda,
+                    output_shape,
+                }
+                | StreamOp::MapToPrimitive {
+                    lambda,
+                    output_shape,
+                } => {
+                    visit(lambda, input);
+                    input = output_shape;
+                }
+                // Flat-map callback inputs require the nested pipeline's
+                // cardinality/element contract, not the preceding item type.
+                StreamOp::FlatMap(_) => return,
+            }
+        }
+        match &self.terminal {
+            StreamTerminal::AnyMatch(lambda) | StreamTerminal::AllMatch(lambda) => {
+                visit(lambda, input)
+            }
+            StreamTerminal::CollectToMap { key, value } => {
+                visit(key, input);
+                visit(value, input);
+            }
+            _ => {}
+        }
     }
 }
 
@@ -111,6 +153,9 @@ pub enum FilterPlan<'a> {
 
 pub enum StreamTerminal<'a> {
     Sum,
+    PrimitiveExtremum {
+        maximum: bool,
+    },
     Count,
     Iterator,
     Reduce(ReducePlan<'a>),
@@ -121,6 +166,7 @@ pub enum StreamTerminal<'a> {
     },
     Join {
         delimiter: Option<&'a Expr>,
+        affixes: Option<(&'a Expr, &'a Expr)>,
     },
     ToArray,
     FindFirst,
@@ -161,6 +207,17 @@ impl<'a> LambdaPlan<'a> {
 
     pub fn body(&self) -> StreamLambdaBody<'a> {
         self.body
+    }
+
+    pub(crate) fn with_method_reference_target(&self, target: &'a str) -> Option<Self> {
+        let StreamLambdaBody::MethodReference { method, .. } = self.body else {
+            return None;
+        };
+        Some(Self {
+            param_name: self.param_name.clone(),
+            rust_param_name: self.rust_param_name.clone(),
+            body: StreamLambdaBody::MethodReference { target, method },
+        })
     }
 }
 
@@ -301,7 +358,7 @@ pub fn build_stream_plan<'a>(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<StreamPlan<'a>> {
-    build_stream_plan_core(expr, env, facts, false)
+    build_stream_plan_core(expr, env, facts)
 }
 
 pub fn build_stream_plan_for_slot<'a>(
@@ -309,14 +366,15 @@ pub fn build_stream_plan_for_slot<'a>(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<StreamPlan<'a>> {
-    build_stream_plan_core(expr, env, facts, true)
+    // Compatibility entry point: a destination slot must not invent a
+    // terminal operation for an intermediate primitive stream.
+    build_stream_plan_core(expr, env, facts)
 }
 
 fn build_stream_plan_core<'a>(
     expr: &'a Expr,
     env: &TypeEnv,
     facts: &FactSet,
-    allow_implicit_primitive_sum: bool,
 ) -> Option<StreamPlan<'a>> {
     let Expr::Call {
         receiver: Some(receiver),
@@ -330,13 +388,16 @@ fn build_stream_plan_core<'a>(
 
     let terminal = match name.as_str() {
         "sum" if args.is_empty() => StreamTerminal::Sum,
+        "min" | "max" if args.is_empty() => StreamTerminal::PrimitiveExtremum {
+            maximum: name == "max",
+        },
         "count" if args.is_empty() => StreamTerminal::Count,
         "iterator" if args.is_empty() => StreamTerminal::Iterator,
         "reduce" if args.len() == 2 => StreamTerminal::Reduce(ReducePlan {
             identity: &args[0],
             accumulator: reduce_lambda_plan(&args[1])?,
         }),
-        "collect" if args.len() == 1 => stream_collect_terminal(&args[0])?,
+        "collect" if args.len() == 1 => stream_collect_terminal(&args[0], env, facts)?,
         "toArray" | "to_array" if args.is_empty() => StreamTerminal::ToArray,
         "findFirst" if args.is_empty() => StreamTerminal::FindFirst,
         "anyMatch" | "any_match" if args.len() == 1 => {
@@ -345,18 +406,9 @@ fn build_stream_plan_core<'a>(
         "allMatch" | "all_match" if args.len() == 1 => {
             StreamTerminal::AllMatch(lambda_plan(&args[0])?)
         }
-        "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double" if args.len() == 1 => {
-            if !allow_implicit_primitive_sum {
-                return None;
-            }
-            StreamTerminal::Sum
-        }
         _ => return None,
     };
-    let chain_root = match name.as_str() {
-        "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double" if args.len() == 1 => expr,
-        _ => receiver,
-    };
+    let chain_root = receiver;
     let source_spec = receiver_source_spec(chain_root)?;
     let source_expr = source_spec.expr;
     let source_shape = infer_stream_source_element_shape_with_facts(source_expr, env, facts)?;
@@ -389,84 +441,93 @@ fn stream_source_is_optional_sequence(source: &Expr, env: &TypeEnv, facts: &Fact
             .is_some()
 }
 
-fn is_collectors_to_list(expr: &Expr) -> bool {
-    is_collectors_terminal(expr, "toList")
-}
-
-fn is_collectors_to_set(expr: &Expr) -> bool {
-    is_collectors_terminal(expr, "toSet")
-}
-
-fn stream_collect_terminal(expr: &Expr) -> Option<StreamTerminal<'_>> {
-    if is_collectors_to_list(expr) {
-        return Some(StreamTerminal::Collect(JavaCollectionKind::List));
-    }
-    if is_collectors_to_set(expr) {
-        return Some(StreamTerminal::Collect(JavaCollectionKind::Set));
-    }
-    if let Some(delimiter) = collectors_joining_delimiter(expr) {
-        return Some(StreamTerminal::Join { delimiter });
-    }
-    let (key, value) = collectors_to_map_lambdas(expr)?;
-    Some(StreamTerminal::CollectToMap { key, value })
-}
-
-fn collectors_joining_delimiter(expr: &Expr) -> Option<Option<&Expr>> {
+fn stream_collect_terminal<'a>(
+    expr: &'a Expr,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<StreamTerminal<'a>> {
     let Expr::Call {
         receiver: Some(receiver),
         name,
         args,
-        ..
+        resolved,
     } = expr
     else {
         return None;
     };
-    if name != "joining" {
-        return None;
-    }
-    if !matches!(receiver.as_ref(), Expr::Var(owner) if owner == "Collectors" || owner == "collectors")
+    let owner = match receiver.as_ref() {
+        Expr::Var(owner) if env.local_type(owner).is_none() && env.field_type(owner).is_none() => {
+            env.static_type_alias(owner).unwrap_or(owner).to_string()
+        }
+        // Qualified Java names are FieldAccess chains in the source IR.
+        // Reuse their resolved declaration identity instead of reconstructing
+        // a path or guessing from the final spelling.
+        Expr::FieldAccess(_, _) => {
+            let written_owner = crate::stdlib::qualified_static_owner_java_name(receiver)?;
+            let root = written_owner.split('.').next()?;
+            if env.local_type(root).is_some() || env.field_type(root).is_some() {
+                return None;
+            }
+            resolved
+                .as_ref()
+                .filter(|call| call.kind == crate::java_ir::CallKind::Static)
+                .map(|call| call.declaring_type.clone())
+                .unwrap_or(written_owner)
+        }
+        _ => return None,
+    };
+    let root = owner.split('.').next()?;
+    if env.local_type(root).is_some()
+        || env.field_type(root).is_some()
+        || crate::stdlib::canonical_external_receiver_type_key(&owner) != "Collectors"
+        || crate::call_plan::java_type_owner_is_parsed_source(&owner, env, facts)
     {
         return None;
     }
-    match args.as_slice() {
-        [] => Some(None),
-        [delimiter] => Some(Some(delimiter)),
+    match (name.as_str(), args.as_slice()) {
+        ("toList" | "to_list", []) => Some(StreamTerminal::Collect(JavaCollectionKind::List)),
+        ("toSet" | "to_set", []) => Some(StreamTerminal::Collect(JavaCollectionKind::Set)),
+        ("toCollection" | "to_collection", [Expr::MethodReference { target, method }])
+            if method == "new" =>
+        {
+            let owner = env.static_type_alias(target).unwrap_or(target);
+            if crate::call_plan::java_type_owner_is_parsed_source(owner, env, facts) {
+                return None;
+            }
+            let kind =
+                crate::stdlib::native_collection_constructor_kind_for_type(&JavaType::Named {
+                    name: owner.to_string(),
+                    args: Vec::new(),
+                })?;
+            // Reuse the existing native collection terminals and their
+            // element-carrier conversion. Ordered/set variants without a
+            // modeled collector retain the ordinary unsupported path.
+            matches!(
+                kind,
+                JavaCollectionKind::List
+                    | JavaCollectionKind::Set
+                    | JavaCollectionKind::InsertionOrderedSet
+            )
+            .then_some(StreamTerminal::Collect(kind))
+        }
+        ("joining", []) => Some(StreamTerminal::Join {
+            delimiter: None,
+            affixes: None,
+        }),
+        ("joining", [delimiter]) => Some(StreamTerminal::Join {
+            delimiter: Some(delimiter),
+            affixes: None,
+        }),
+        ("joining", [delimiter, prefix, suffix]) => Some(StreamTerminal::Join {
+            delimiter: Some(delimiter),
+            affixes: Some((prefix, suffix)),
+        }),
+        ("toMap" | "to_map", [key, value]) => Some(StreamTerminal::CollectToMap {
+            key: lambda_plan(key)?,
+            value: lambda_plan(value)?,
+        }),
         _ => None,
     }
-}
-
-fn collectors_to_map_lambdas<'a>(expr: &'a Expr) -> Option<(LambdaPlan<'a>, LambdaPlan<'a>)> {
-    let Expr::Call {
-        receiver: Some(receiver),
-        name,
-        args,
-        ..
-    } = expr
-    else {
-        return None;
-    };
-    if name != "toMap" || args.len() != 2 {
-        return None;
-    }
-    if !matches!(receiver.as_ref(), Expr::Var(owner) if owner == "Collectors" || owner == "collectors")
-    {
-        return None;
-    }
-    Some((lambda_plan(&args[0])?, lambda_plan(&args[1])?))
-}
-
-fn is_collectors_terminal(expr: &Expr, terminal_name: &str) -> bool {
-    matches!(
-        expr,
-        Expr::Call {
-            receiver: Some(receiver),
-            name,
-            args,
-            ..
-        } if name == terminal_name
-            && args.is_empty()
-            && matches!(receiver.as_ref(), Expr::Var(owner) if owner == "Collectors" || owner == "collectors")
-    )
 }
 
 fn receiver_source(expr: &Expr) -> Option<&Expr> {
@@ -526,8 +587,8 @@ fn collect_stream_chain_source(expr: &Expr) -> Option<StreamSourceSpec<'_>> {
         {
             Some(StreamSourceSpec { expr, range: None })
         }
-        "filter" | "map" | "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double"
-        | "mapToObj" | "map_to_obj" | "flatMap" | "flat_map"
+        "filter" | "map" | "mapToInt" | "map_to_int" | "mapToLong" | "map_to_long"
+        | "mapToDouble" | "map_to_double" | "mapToObj" | "map_to_obj" | "flatMap" | "flat_map"
             if args.len() == 1 =>
         {
             collect_stream_chain_source(receiver.as_deref()?)
@@ -599,6 +660,17 @@ fn collect_stream_chain<'a>(
             let lambda = lambda_plan(&args[0])?;
             let (source, mut ops, current_shape) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
+            let receiver_type = crate::types::infer_expr_type(receiver.as_deref()?, env);
+            if let JavaType::Named { name, .. } = &receiver_type
+                && let Some(primitive) = crate::stdlib::primitive_stream_payload(name)
+            {
+                let output_shape = RustSlotShape::for_storage(JavaType::Primitive(primitive));
+                ops.push(StreamOp::MapToPrimitive {
+                    lambda,
+                    output_shape: output_shape.clone(),
+                });
+                return Some((source, ops, output_shape));
+            }
             let output_shape =
                 infer_stream_lambda_output_shape(&lambda, &current_shape, env, facts);
             ops.push(StreamOp::Map {
@@ -619,22 +691,19 @@ fn collect_stream_chain<'a>(
             });
             Some((source, ops, output_shape))
         }
-        "mapToInt" | "map_to_int" | "mapToDouble" | "map_to_double" if args.len() == 1 => {
+        "mapToInt" | "map_to_int" | "mapToLong" | "map_to_long" | "mapToDouble"
+        | "map_to_double"
+            if args.len() == 1 =>
+        {
             let lambda = lambda_plan(&args[0])?;
             let (source, mut ops, _) =
                 collect_stream_chain(receiver.as_deref()?, input_shape, env, facts)?;
-            let output_shape = if matches!(name.as_str(), "mapToDouble" | "map_to_double") {
-                RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Double))
-            } else if matches!(lambda.body, StreamLambdaBody::MethodReference { .. }) {
-                infer_stream_lambda_output_shape(
-                    &lambda,
-                    &RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
-                    env,
-                    facts,
-                )
-            } else {
-                infer_stream_map_to_int_shape(lambda.body.return_expr()?)
+            let primitive = match name.as_str() {
+                "mapToDouble" | "map_to_double" => PrimitiveType::Double,
+                "mapToLong" | "map_to_long" => PrimitiveType::Long,
+                _ => PrimitiveType::Int,
             };
+            let output_shape = RustSlotShape::for_storage(JavaType::Primitive(primitive));
             ops.push(StreamOp::MapToPrimitive {
                 lambda,
                 output_shape: output_shape.clone(),
@@ -697,11 +766,15 @@ fn lambda_plan(lambda: &Expr) -> Option<LambdaPlan<'_>> {
                 body,
             })
         }
-        Expr::MethodReference { target, method } => Some(LambdaPlan {
-            param_name: "value".to_string(),
-            rust_param_name: "value".to_string(),
-            body: StreamLambdaBody::MethodReference { target, method },
-        }),
+        Expr::MethodReference { target, method } => {
+            let occupied = std::collections::HashSet::from([crate::parser::to_snake_case(target)]);
+            let param = crate::java_naming::allocate_rust_ident("value", &occupied);
+            Some(LambdaPlan {
+                param_name: param.clone(),
+                rust_param_name: param,
+                body: StreamLambdaBody::MethodReference { target, method },
+            })
+        }
         _ => None,
     }
 }
@@ -1047,7 +1120,23 @@ pub fn stream_terminal_actual(
     facts: &FactSet,
 ) -> LoweredType {
     match terminal {
-        StreamTerminal::Sum => LoweredType::from_java(JavaType::Primitive(PrimitiveType::Int)),
+        StreamTerminal::Sum => LoweredType::from_java(element_shape.java_ty.clone()),
+        StreamTerminal::PrimitiveExtremum { .. } => {
+            let primitive = match element_shape.java_ty {
+                JavaType::Primitive(primitive) => primitive,
+                _ => {
+                    return LoweredType::from_java(JavaType::Unknown(
+                        "non-primitive stream extremum".to_string(),
+                    ));
+                }
+            };
+            LoweredType::from_java(JavaType::Named {
+                name: crate::stdlib::primitive_optional_name(primitive)
+                    .unwrap_or("Optional")
+                    .to_string(),
+                args: Vec::new(),
+            })
+        }
         StreamTerminal::Count => LoweredType::from_java(JavaType::Primitive(PrimitiveType::Long)),
         StreamTerminal::Iterator => LoweredType::from_java(JavaType::Named {
             name: "Iterator".to_string(),
@@ -1057,11 +1146,11 @@ pub fn stream_terminal_actual(
             LoweredType::from_java(crate::types::infer_expr_type(reduce.identity, env))
         }
         StreamTerminal::Collect(JavaCollectionKind::List) => stream_collect_actual(element_shape),
-        StreamTerminal::Collect(JavaCollectionKind::Set)
-        | StreamTerminal::Collect(JavaCollectionKind::SortedSet)
-        | StreamTerminal::Collect(JavaCollectionKind::InsertionOrderedSet) => {
-            LoweredType::collected_set_from_element_shape(element_shape)
-        }
+        StreamTerminal::Collect(
+            kind @ (JavaCollectionKind::Set
+            | JavaCollectionKind::SortedSet
+            | JavaCollectionKind::InsertionOrderedSet),
+        ) => LoweredType::collected_set_kind_from_element_shape(element_shape, *kind),
         StreamTerminal::Collect(JavaCollectionKind::Map)
         | StreamTerminal::Collect(JavaCollectionKind::SortedMap)
         | StreamTerminal::Collect(JavaCollectionKind::InsertionOrderedMap) => {
@@ -1110,4 +1199,96 @@ fn infer_terminal_lambda_output_shape(
 
 pub fn stream_collect_actual(element_shape: RustSlotShape) -> LoweredType {
     LoweredType::collected_sequence_from_element_shape(element_shape)
+}
+
+#[cfg(test)]
+mod collector_tests {
+    use super::*;
+
+    fn collector_call(source: &str) -> (Expr, FactSet) {
+        let parsed = crate::parser::parse_java_source(source);
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Use")
+            .unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let Stmt::Return(Some(Expr::Call { args, .. })) =
+            &method.body.as_ref().unwrap().statements[0]
+        else {
+            panic!("expected a stream collect return");
+        };
+        (args[0].clone(), resolved.facts)
+    }
+
+    #[test]
+    fn source_collectors_owner_is_not_a_builtin_terminal() {
+        let (mut collector, facts) = collector_call(
+            r#"
+import java.util.List;
+import java.util.stream.Collector;
+class Collectors {
+    static <T> Collector<T, ?, List<T>> toList() {
+        return java.util.stream.Collectors.toList();
+    }
+}
+class Use {
+    List<String> run(List<String> values) {
+        return values.stream().collect(Collectors.toList());
+    }
+}
+"#,
+        );
+        let env = TypeEnv::new();
+        assert!(stream_collect_terminal(&collector, &env, &facts).is_none());
+        let Expr::Call { receiver, .. } = &mut collector else {
+            unreachable!()
+        };
+        *receiver = Some(Box::new(Expr::Var(
+            "java.util.stream.Collectors".to_string(),
+        )));
+        assert!(matches!(
+            stream_collect_terminal(&collector, &env, &facts),
+            Some(StreamTerminal::Collect(JavaCollectionKind::List))
+        ));
+    }
+
+    #[test]
+    fn source_collection_constructor_is_not_replaced_by_a_native_collector() {
+        let (mut collector, facts) = collector_call(
+            r#"
+import java.util.List;
+import java.util.stream.Collectors;
+class ArrayList<T> extends java.util.ArrayList<T> {}
+class Use {
+    List<String> run(List<String> values) {
+        return values.stream().collect(Collectors.toCollection(ArrayList::new));
+    }
+}
+"#,
+        );
+        let env = TypeEnv::new();
+        assert!(stream_collect_terminal(&collector, &env, &facts).is_none());
+        let Expr::Call { args, .. } = &mut collector else {
+            unreachable!()
+        };
+        let Expr::MethodReference { target, .. } = &mut args[0] else {
+            unreachable!()
+        };
+        *target = "java.util.ArrayList".to_string();
+        assert!(matches!(
+            stream_collect_terminal(&collector, &env, &facts),
+            Some(StreamTerminal::Collect(JavaCollectionKind::List))
+        ));
+    }
 }

@@ -1288,6 +1288,7 @@ mod tests {
     #[test]
     fn subexpression_visitor_sees_qualified_new_receiver() {
         let expr = Expr::New {
+            infer_type_arguments: false,
             ty: JavaType::Unknown("Inner".to_string()),
             qualifier: Some(Box::new(Expr::Var("outer".to_string()))),
             args: vec![Expr::Var("arg".to_string())],

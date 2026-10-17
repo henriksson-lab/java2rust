@@ -15,6 +15,7 @@ use crate::types::{
 pub struct EffectiveFacts<'a> {
     facts: &'a FactSet,
     external_index: Option<&'a ExternalFactLookupIndex<'a>>,
+    nested_collection_views: &'a [(JavaType, crate::slot_shape::ViewShape)],
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -141,9 +142,23 @@ impl<'a> EffectiveFacts<'a> {
 
     pub fn new(facts: &'a FactSet) -> Self {
         Self {
+            nested_collection_views: &[],
             facts,
             external_index: None,
         }
+    }
+
+    pub(crate) fn has_parsed_source_definition(&self, ty: &JavaType) -> bool {
+        capability_type_name(ty)
+            .is_some_and(|name| self.has_parsed_source_type_capability_for_name(name))
+    }
+
+    pub(crate) fn parsed_source_controls_native_carrier(&self, ty: &JavaType) -> bool {
+        self.has_parsed_source_definition(ty)
+            && !self.type_capability_overrides_for(ty).any(|fact| {
+                fact.provenance == FactProvenance::UserOverride
+                    && (fact.sequence_like.is_some() || fact.string_like == Some(true))
+            })
     }
 
     pub fn with_external_index(
@@ -153,7 +168,35 @@ impl<'a> EffectiveFacts<'a> {
         Self {
             facts,
             external_index: Some(external_index),
+            nested_collection_views: &[],
         }
+    }
+
+    pub(crate) fn with_nested_collection_views<'b>(
+        self,
+        views: &'b [(JavaType, crate::slot_shape::ViewShape)],
+    ) -> EffectiveFacts<'b>
+    where
+        'a: 'b,
+    {
+        EffectiveFacts {
+            facts: self.facts,
+            external_index: self.external_index,
+            nested_collection_views: if views.is_empty() {
+                self.nested_collection_views
+            } else {
+                views
+            },
+        }
+    }
+
+    pub(crate) fn nested_collection_view(
+        &self,
+        ty: &JavaType,
+    ) -> Option<&crate::slot_shape::ViewShape> {
+        self.nested_collection_views
+            .iter()
+            .find_map(|(key, view)| (key == ty).then_some(view))
     }
 
     pub fn generic_parameter_is_input_only(&self, type_name: &str, parameter_index: usize) -> bool {
@@ -389,7 +432,7 @@ impl<'a> EffectiveFacts<'a> {
             || capability_type_name(java_ty).is_some_and(|type_name| {
                 self.facts.hierarchy_overrides.iter().any(|override_fact| {
                     type_name_matches(&override_fact.type_name, type_name)
-                        && !erased_override_conflicts_with_parsed_source(
+                        && !fallback_override_conflicts_with_parsed_source(
                             override_fact,
                             type_name,
                             self.facts,
@@ -404,8 +447,23 @@ impl<'a> EffectiveFacts<'a> {
             .iter()
             .any(|capability| {
                 capability.provenance == FactProvenance::ParsedSource
-                    && type_name_matches(&capability.type_name, type_name)
+                    && source_type_name_matches(&capability.type_name, type_name)
             })
+    }
+
+    pub(crate) fn has_external_final_erased_facade_for_name(&self, name: &str) -> bool {
+        if self.has_parsed_source_type_capability_for_name(name) {
+            return false;
+        }
+        let erased = JavaType::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+        };
+        (matches!(
+            self.object_representation_override_strategy_for(&erased),
+            Some(HierarchyStrategy::ErasedObject)
+        ) && self.is_final_type(&erased))
+            || crate::external_packs::builtin_external_final_erased_object_type(name)
     }
 
     pub fn object_representation_override_strategy_for(
@@ -418,7 +476,11 @@ impl<'a> EffectiveFacts<'a> {
             .iter()
             .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
             .filter(|override_fact| {
-                !erased_override_conflicts_with_parsed_source(override_fact, type_name, self.facts)
+                !fallback_override_conflicts_with_parsed_source(
+                    override_fact,
+                    type_name,
+                    self.facts,
+                )
             })
             .max_by_key(|override_fact| {
                 (
@@ -582,7 +644,7 @@ fn effective_fact_precedence_key<T>(fact: &EffectiveFact<T>) -> u8 {
     fact_precedence_key(fact.provenance())
 }
 
-fn fact_precedence_key(provenance: FactProvenance) -> u8 {
+pub(crate) fn fact_precedence_key(provenance: FactProvenance) -> u8 {
     match provenance {
         FactProvenance::ConservativeFallback => 0,
         FactProvenance::CorpusAnalysis => 1,
@@ -605,13 +667,43 @@ fn type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {
     crate::facts::external_type_name_matches(fact_type_name, query_type_name)
 }
 
-fn erased_override_conflicts_with_parsed_source(
+// External models deliberately accept leaf aliases. Source ownership must not:
+// a source `Character` is not evidence for `java.lang.Character`. Retain the
+// full owner when comparing its emitted (flattened) Rust spelling.
+fn source_type_name_matches(source_name: &str, query_name: &str) -> bool {
+    source_name == query_name
+        || crate::java_naming::rust_name_for_java_named_type(source_name) == query_name
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use super::source_type_name_matches;
+
+    #[test]
+    fn source_identity_does_not_import_external_leaf_aliases() {
+        assert!(source_type_name_matches("Character", "Character"));
+        assert!(!source_type_name_matches(
+            "Character",
+            "java.lang.Character"
+        ));
+        assert!(!source_type_name_matches(
+            "other.Character",
+            "java.lang.Character"
+        ));
+        assert!(source_type_name_matches(
+            "other.Character",
+            "OtherCharacter"
+        ));
+        assert!(source_type_name_matches("Outer.Inner", "Outer_Inner"));
+    }
+}
+
+fn fallback_override_conflicts_with_parsed_source(
     override_fact: &HierarchyOverride,
     query_type_name: &str,
     facts: &FactSet,
 ) -> bool {
-    override_fact.provenance != FactProvenance::UserOverride
-        && matches!(override_fact.strategy, HierarchyStrategy::ErasedObject)
+    override_fact.is_source_fallback()
         && facts.type_capability_overrides.iter().any(|capability| {
             capability.provenance == FactProvenance::ParsedSource
                 && type_name_matches(&capability.type_name, query_type_name)

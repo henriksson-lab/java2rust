@@ -1450,6 +1450,7 @@ mod tests {
     fn idless_borrowed_return_policy_rejects_qualified_new_receiver_mutation() {
         let method = private_static_idless_method_with_body(vec![
             Stmt::Expr(Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Unknown("Outer.Inner".to_string()),
                 qualifier: Some(Box::new(Expr::Binary {
                     op: BinaryOp::Assign,
@@ -1616,6 +1617,7 @@ mod tests {
     fn idless_borrowed_return_policy_rejects_anonymous_field_initializer_mutation() {
         let method = private_static_idless_method_with_body(vec![
             Stmt::Expr(Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Runnable".to_string(),
                     args: Vec::new(),
@@ -1658,6 +1660,7 @@ mod tests {
     fn idless_borrowed_return_policy_rejects_anonymous_constructor_body_mutation() {
         let method = private_static_idless_method_with_body(vec![
             Stmt::Expr(Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Local".to_string(),
                     args: Vec::new(),

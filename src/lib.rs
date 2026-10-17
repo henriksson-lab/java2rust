@@ -32,6 +32,7 @@ mod item_assembly;
 pub mod java_ir;
 mod java_naming;
 mod java_signature;
+mod java_type_substitution;
 mod javalibs;
 mod lattice;
 mod literal_lowering;
@@ -62,6 +63,7 @@ pub mod slot_policy;
 pub mod slot_render;
 pub mod slot_shape;
 mod source_constant_values;
+mod source_emission;
 mod statement_render;
 pub mod stdlib;
 pub mod storage_strategy;
@@ -409,7 +411,7 @@ pub fn translate_source(source: &str) -> Translation {
 
 pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Translation {
     let mut parsed = parser::parse_java_source(source);
-    prepare_program_after_parse(&mut parsed.program);
+    prepare_program_after_parse(&mut parsed.program, source);
     let mut effective_external_facts = effective_external_facts_with_stdlib(external_facts, None);
     let translation = translate_parsed_source_with_context(
         parsed,
@@ -431,7 +433,7 @@ pub fn translate_source_with_facts(source: &str, external_facts: &FactSet) -> Tr
     {
         effective_external_facts.java_string_identity_representation = true;
         let mut parsed = parser::parse_java_source(source);
-        prepare_program_after_parse(&mut parsed.program);
+        prepare_program_after_parse(&mut parsed.program, source);
         return translate_parsed_source_with_context(
             parsed,
             None,
@@ -481,14 +483,14 @@ pub fn translate_source_with_context_sources_and_summary_sources(
     external_facts: &FactSet,
 ) -> Translation {
     let mut parsed = parser::parse_java_source(source);
-    prepare_program_after_parse(&mut parsed.program);
+    prepare_program_after_parse(&mut parsed.program, source);
     let mut summary_program = Program::default();
     let mut summary_facts = FactSet::default();
     let mut context_diagnostics = DiagnosticBag::new();
     let mut parsed_context = Vec::with_capacity(context_sources.len());
     for context_source in context_sources {
         let mut context_parsed = parser::parse_java_source(context_source);
-        prepare_program_after_parse(&mut context_parsed.program);
+        prepare_program_after_parse(&mut context_parsed.program, context_source);
         context_diagnostics.extend(context_parsed.diagnostics.clone());
         parsed_context.push(context_parsed);
     }
@@ -619,7 +621,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     let primary_parse_start = Instant::now();
     for source in primary_sources {
         let mut parsed = parser::parse_java_source(source.source());
-        prepare_program_after_parse(&mut parsed.program);
+        prepare_program_after_parse(&mut parsed.program, source.source());
         // A *primary* file's parse diagnostics belong to that file, and already
         // reach it through `parsed.diagnostics` in
         // `translate_parsed_source_with_batch_context`. Adding them to the
@@ -651,7 +653,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
     let context_parse_start = Instant::now();
     for context_source in context_sources {
         let mut context_parsed = parser::parse_java_source(context_source);
-        prepare_program_after_parse(&mut context_parsed.program);
+        prepare_program_after_parse(&mut context_parsed.program, context_source);
         context_diagnostics.extend(context_parsed.diagnostics.clone());
         parsed_context.push(context_parsed);
     }
@@ -743,7 +745,7 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         "resolver/semantic/representation/signature",
     );
     let global_analysis_start = Instant::now();
-    let context_build = build_batch_translation_context(
+    let mut context_build = build_batch_translation_context(
         source_program,
         summary_program,
         context_sources_are_emitted,
@@ -751,6 +753,21 @@ pub fn translate_batch_sources_with_context_sources_summary_sources_and_options(
         event_sink,
         batch_start,
     );
+    for (path, parsed) in &parsed_primary {
+        if options
+            .emission_paths()
+            .is_none_or(|paths| paths.contains(path))
+        {
+            std::sync::Arc::make_mut(&mut context_build.context.callable_context.source_emission)
+                .add_program(&parsed.program);
+        }
+    }
+    if context_sources_are_emitted {
+        for parsed in &parsed_context {
+            std::sync::Arc::make_mut(&mut context_build.context.callable_context.source_emission)
+                .add_program(&parsed.program);
+        }
+    }
     timings.global_analysis_ms = global_analysis_start.elapsed().as_millis();
     timings.global_resolve_ms = context_build.timings.global_resolve_ms;
     timings.global_semantic_ms = context_build.timings.global_semantic_ms;
@@ -1089,6 +1106,7 @@ fn build_batch_translation_context(
         context_sources_are_emitted,
         &semantic.facts,
         &signature_plan,
+        &representations,
     );
 
     BatchTranslationContextBuild {
@@ -2186,6 +2204,7 @@ fn rewrite_type_name_in_expr(expr: &mut Expr, old_name: &str, new_name: &str) {
             args,
             body,
             resolved,
+            ..
         } => {
             rewrite_type_name_in_java_type(ty, old_name, new_name);
             if let Some(qualifier) = qualifier {
@@ -2320,78 +2339,85 @@ fn qualified_merge_type_name(package: &str, type_name: &str) -> Option<String> {
     Some(format!("{package}.{type_name}"))
 }
 
-fn prepare_program_after_parse(program: &mut Program) {
-    rename_callable_type_params_shadowing_enclosing_type(program);
+fn prepare_program_after_parse(program: &mut Program, source: &str) {
+    rename_callable_type_params_shadowing_enclosing_type(program, source);
     qualify_same_package_class_literals(program);
 }
 
 /// Java permits a method or constructor type parameter to shadow one declared
 /// by its enclosing class (`class C<T> { static <T> T make(...) }`). Rust does
-/// not permit the same generic name on an `impl<T>` method. Rename only the
-/// callable scope before resolution so every later plan sees one consistent,
-/// collision-free identity.
-fn rename_callable_type_params_shadowing_enclosing_type(program: &mut Program) {
+/// not permit the same generic name on an `impl<T>` method. Primitive-wrapper
+/// spellings also need distinct identities before platform type mapping. Use
+/// binder-aware alpha-renaming before resolution so all later plans agree,
+/// without changing qualified references to the actual platform classes.
+fn rename_callable_type_params_shadowing_enclosing_type(program: &mut Program, source: &str) {
+    // Reserve source spellings (including references to other files) before
+    // alpha-renaming, so a fresh binder cannot capture an existing type name.
+    let mut used = source
+        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+        .filter(|name| !name.is_empty())
+        .map(str::to_string)
+        .collect::<BTreeSet<_>>();
     for ty in &mut program.types {
-        rename_shadowing_callable_type_params_in_type(ty);
+        rename_shadowing_callable_type_params_in_type(ty, &mut used);
     }
 }
 
-fn rename_shadowing_callable_type_params_in_type(ty: &mut TypeDecl) {
+fn rename_shadowing_callable_type_params_in_type(ty: &mut TypeDecl, used: &mut BTreeSet<String>) {
+    let collisions = ty
+        .type_params
+        .iter()
+        .enumerate()
+        .filter(|(_, name)| stdlib::boxed_primitive_type(name).is_some())
+        .map(|(index, name)| (index, name.clone()))
+        .collect::<Vec<_>>();
+    for (index, old) in collisions {
+        let new = unique_callable_type_param_name(&old, "Type", used);
+        used.insert(new.clone());
+        java_type_substitution::rename_class_parameter(ty, index, new);
+    }
     let enclosing = ty.type_params.iter().cloned().collect::<BTreeSet<_>>();
     for member in &mut ty.members {
         match member {
             Member::Method(method) => {
-                let mut used = enclosing.clone();
                 used.extend(method.type_params.iter().cloned());
                 let collisions = method
                     .type_params
                     .iter()
                     .enumerate()
-                    .filter(|(_, name)| enclosing.contains(*name))
+                    .filter(|(_, name)| {
+                        enclosing.contains(*name) || stdlib::boxed_primitive_type(name).is_some()
+                    })
                     .map(|(index, name)| (index, name.clone()))
                     .collect::<Vec<_>>();
                 for (index, old_name) in collisions {
-                    let new_name = unique_callable_type_param_name(&old_name, "Method", &used);
+                    let new_name = unique_callable_type_param_name(&old_name, "Method", used);
                     used.insert(new_name.clone());
-                    method.type_params[index] = new_name.clone();
-                    rewrite_type_name_in_java_type(&mut method.return_type, &old_name, &new_name);
-                    for bound in &mut method.type_param_bounds {
-                        rewrite_type_name_in_java_type_option(bound, &old_name, &new_name);
-                    }
-                    for param in &mut method.params {
-                        rewrite_type_name_in_java_type(&mut param.ty, &old_name, &new_name);
-                    }
-                    if let Some(body) = &mut method.body {
-                        rewrite_type_name_in_block(body, &old_name, &new_name);
-                    }
+                    java_type_substitution::rename_method_parameter(method, index, new_name);
                 }
             }
             Member::Constructor(constructor) => {
-                let mut used = enclosing.clone();
                 used.extend(constructor.type_params.iter().cloned());
                 let collisions = constructor
                     .type_params
                     .iter()
                     .enumerate()
-                    .filter(|(_, name)| enclosing.contains(*name))
+                    .filter(|(_, name)| {
+                        enclosing.contains(*name) || stdlib::boxed_primitive_type(name).is_some()
+                    })
                     .map(|(index, name)| (index, name.clone()))
                     .collect::<Vec<_>>();
                 for (index, old_name) in collisions {
-                    let new_name = unique_callable_type_param_name(&old_name, "Constructor", &used);
+                    let new_name = unique_callable_type_param_name(&old_name, "Constructor", used);
                     used.insert(new_name.clone());
-                    constructor.type_params[index] = new_name.clone();
-                    for bound in &mut constructor.type_param_bounds {
-                        rewrite_type_name_in_java_type_option(bound, &old_name, &new_name);
-                    }
-                    for param in &mut constructor.params {
-                        rewrite_type_name_in_java_type(&mut param.ty, &old_name, &new_name);
-                    }
-                    if let Some(body) = &mut constructor.body {
-                        rewrite_type_name_in_block(body, &old_name, &new_name);
-                    }
+                    java_type_substitution::rename_constructor_parameter(
+                        constructor,
+                        index,
+                        new_name,
+                    );
                 }
             }
-            Member::Type(nested) => rename_shadowing_callable_type_params_in_type(nested),
+            Member::Type(nested) => rename_shadowing_callable_type_params_in_type(nested, used),
             Member::Field(_) | Member::Unsupported { .. } => {}
         }
     }
@@ -2817,6 +2843,78 @@ mod tests {
     use crate::java_ir::{JavaType, Member, MethodDecl, TypeDecl};
     use crate::java_signature::JavaCallableKey;
 
+    #[test]
+    fn source_owner_contract_reader_uses_source_representation_and_fact_precedence() {
+        let source = r#"
+interface Reader<Key, Other> { int read(Key value); }
+class Use {
+    static <Key, Other> int invoke(Reader<Key, Other> reader, Key value) { return reader.read(value); }
+}
+"#;
+        let mut parsed = parser::parse_java_source(source);
+        prepare_program_after_parse(&mut parsed.program, source);
+        let external = effective_external_facts_with_stdlib(&FactSet::default(), None);
+        let resolved = resolve::resolve_program_with_source_program_and_facts(
+            &parsed.program,
+            parsed.diagnostics,
+            &parsed.program,
+            &external,
+        );
+        let semantic = semantic_analysis::analyze_program_with_config(
+            &resolved.program,
+            &resolved.facts,
+            &external,
+            semantic_analysis_config_from_facts(&external),
+        );
+        assert!(
+            !semantic
+                .facts
+                .model_fact_applies_to_owner("Reader", facts::FactProvenance::BuiltinExternalModel)
+        );
+        assert!(
+            semantic
+                .facts
+                .model_fact_applies_to_owner("Reader", facts::FactProvenance::UserOverride)
+        );
+        assert!(semantic.facts.model_fact_applies_to_owner(
+            "java.io.Reader",
+            facts::FactProvenance::BuiltinExternalModel
+        ));
+        let representations =
+            representation::plan_representations(&resolved.program, &semantic.facts);
+        let reader = parser::parse_hierarchy_type("Reader<Key, Other>");
+        assert!(
+            matches!(
+                representations.representation_for(&reader),
+                object_model::ObjectRepresentation::DynTrait { .. }
+            ),
+            "{:#?}",
+            representations.type_representation("Reader")
+        );
+        let signatures = signature::solve_signatures_with_facts_and_support_context(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+            &resolved.program,
+        );
+        let (_, invoke) = signatures
+            .method_signature_by_base_name_and_arity("Use", "invoke", 2)
+            .unwrap();
+        assert!(
+            matches!(
+                invoke.params()[0].shape().dispatch,
+                slot_shape::DispatchShape::DynTrait { .. }
+            ),
+            "{invoke:#?}"
+        );
+        assert_ne!(
+            invoke.params()[1].shape().ownership,
+            slot_shape::OwnershipShape::MutableBorrow,
+            "{invoke:#?}"
+        );
+    }
+
     fn source_who_methods(
         context: &BatchTranslationContext,
     ) -> Vec<(&TypeDecl, &MethodDecl, JavaCallableKey)> {
@@ -3191,7 +3289,7 @@ public class HeaderUse {
 }"#,
         ] {
             let mut parsed = parser::parse_java_source(source);
-            prepare_program_after_parse(&mut parsed.program);
+            prepare_program_after_parse(&mut parsed.program, source);
             merge_program_context(&mut program, parsed.program);
         }
         let built = build_batch_translation_context(
@@ -3241,7 +3339,7 @@ public class HeaderUse {
                     &built.context.representations,
                 )
             ),
-            "JavaSemanticHashSet<Option<HeaderLineValue>>"
+            "JavaLinkedHashSet<Option<HeaderLineValue>>"
         );
         let header_use = built
             .context
@@ -3265,6 +3363,10 @@ public class HeaderUse {
             .iter()
             .find(|local| local.name() == "lines")
             .expect("lines local");
+        assert_eq!(
+            lines.shape().view,
+            crate::slot_shape::ViewShape::JavaSemanticHash
+        );
         assert_eq!(
             crate::emit::emit_type(
                 &crate::slot_render::rust_type_for_slot_with_facts_and_representations(

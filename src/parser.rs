@@ -996,6 +996,7 @@ fn parse_enum_constant_decl(
         .find(|child| child.kind() == "class_body")
         .map(|body| parse_anonymous_class_body(body, source));
     let initializer = (!args.is_empty() || body.is_some()).then(|| Expr::New {
+        infer_type_arguments: false,
         ty: JavaType::Named {
             name: enum_name.to_string(),
             args: Vec::new(),
@@ -1089,7 +1090,7 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
                 .child_by_field_name("value")
                 .map(|value| parse_expr_node(value, source));
             Some(Member::Field(FieldDecl {
-                name: field_decl_name(&name, &modifiers),
+                name: expression_identifier_name(&name),
                 ty: type_with_declarator_array_dimensions(&ty, declaration_text, &name),
                 modifiers: modifiers.clone(),
                 initializer,
@@ -1097,17 +1098,6 @@ fn parse_field_decl(node: tree_sitter::Node, source: &str) -> Vec<Member> {
             }))
         })
         .collect()
-}
-
-fn field_decl_name(name: &str, modifiers: &[Modifier]) -> String {
-    if modifiers.contains(&Modifier::Static)
-        && modifiers.contains(&Modifier::Final)
-        && is_java_constant_name(name)
-    {
-        name.to_string()
-    } else {
-        to_snake_case_unescaped(name)
-    }
 }
 
 fn is_java_constant_name(name: &str) -> bool {
@@ -1459,6 +1449,7 @@ fn parse_assert_node(node: tree_sitter::Node, source: &str) -> Stmt {
         },
         then_block: Block {
             statements: vec![Stmt::Throw(Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "AssertionError".to_string(),
                     args: Vec::new(),
@@ -2198,6 +2189,8 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             let raw = text(node, source).trim_start();
             let op = if raw.starts_with('!') {
                 UnaryOp::Not
+            } else if raw.starts_with('~') {
+                UnaryOp::BitNot
             } else if raw.starts_with('-') {
                 UnaryOp::Neg
             } else if raw.starts_with('+') {
@@ -2259,6 +2252,11 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             let qualifier = parse_object_creation_qualifier_node(node, source).map(Box::new);
             Expr::New {
                 ty,
+                infer_type_arguments: node.child_by_field_name("type").is_some_and(|ty| {
+                    named_children(ty).into_iter().any(|child| {
+                        child.kind() == "type_arguments" && named_children(child).is_empty()
+                    })
+                }),
                 qualifier,
                 args: node
                     .child_by_field_name("arguments")
@@ -2292,15 +2290,19 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
     }
 }
 
-/// Preserve a conventional Java constant identifier until lexical resolution.
+/// Preserve constant and type-like identifiers until lexical resolution.
 ///
 /// Rust-style normalization is intentionally delayed for this population:
 /// eagerly mapping `X` to `x` makes it impossible to distinguish a static
 /// constant `X` from an instance field `x`. Lowering already assigns Rust
-/// names after it knows which declaration won. Ordinary class names and
-/// lower/camel-case locals keep the established normalized IR spelling.
+/// names after it knows which declaration won. `Bounds` and a field `bounds`
+/// likewise occupy distinct Java spellings even though Rust normalization
+/// would merge them. This preserves spelling, not a decision that the name is
+/// a type: an exact local binding still takes precedence during resolution.
 fn expression_identifier_name(source_name: &str) -> String {
-    if is_java_constant_name(source_name) {
+    if is_java_constant_name(source_name)
+        || crate::java_naming::java_name_part_looks_like_type(source_name)
+    {
         source_name.to_string()
     } else {
         to_snake_case_unescaped(source_name)
@@ -2750,7 +2752,7 @@ fn parse_named_type_node(node: tree_sitter::Node, source: &str) -> JavaType {
 }
 
 fn java_type_name_from_parse_tree_node(node: tree_sitter::Node, raw: &str) -> String {
-    if preserve_explicit_java_io_type_name(raw.trim()) {
+    if preserve_explicit_runtime_type_name(raw.trim()) {
         return raw.trim().to_string();
     }
     if matches!(node.kind(), "scoped_type_identifier" | "scoped_identifier")
@@ -3106,7 +3108,7 @@ fn parse_type_text(src: &str) -> JavaType {
 
 fn java_type_name_suffix(src: &str) -> String {
     let src = src.trim();
-    if preserve_explicit_java_io_type_name(src) {
+    if preserve_explicit_runtime_type_name(src) {
         return src.to_string();
     }
     let mut suffix = Vec::new();
@@ -3129,7 +3131,16 @@ fn java_type_name_suffix(src: &str) -> String {
     }
 }
 
-fn preserve_explicit_java_io_type_name(src: &str) -> bool {
+fn preserve_explicit_runtime_type_name(src: &str) -> bool {
+    // Qualification distinguishes a real platform wrapper from a lexical
+    // type parameter with the same simple spelling. Keep that evidence until
+    // binder normalization and source-name resolution have run.
+    if src
+        .strip_prefix("java.lang.")
+        .is_some_and(|name| crate::stdlib::boxed_primitive_type(name).is_some())
+    {
+        return true;
+    }
     matches!(
         src,
         "java.io.InputStream"
@@ -3748,13 +3759,31 @@ pub(crate) fn to_snake_case(name: &str) -> String {
 }
 
 pub(crate) fn to_snake_case_unescaped(name: &str) -> String {
-    let name = name.trim().trim_start_matches("this.");
-    let mut out = String::new();
+    // Most names arrive already token-trimmed. Avoid the general pattern
+    // searchers behind `trim`/`trim_start_matches` on that overwhelmingly
+    // common path, while preserving their exact repeated-prefix behavior.
+    let mut name = name;
+    if name.chars().next().is_some_and(char::is_whitespace)
+        || name.chars().next_back().is_some_and(char::is_whitespace)
+    {
+        name = name.trim();
+    }
+    while let Some(stripped) = name.strip_prefix("this.") {
+        name = stripped;
+    }
+    // Uppercase characters can add an underscore.  Reserving the worst-case
+    // ASCII size avoids repeated reallocations in the name-matching hot path;
+    // names are short enough that the small temporary over-allocation is much
+    // cheaper than growing the buffer several times.
+    let mut out = String::with_capacity(name.len().saturating_mul(2));
     for (idx, ch) in name.chars().enumerate() {
         if ch == '.' {
             out.push('.');
         } else if ch.is_ascii_uppercase() {
-            if idx > 0 && !out.ends_with('_') && !out.ends_with('.') {
+            // These are single-byte ASCII separators. Looking at the final
+            // byte avoids constructing two general substring searchers for
+            // every uppercase character in this very hot naming helper.
+            if idx > 0 && !matches!(out.as_bytes().last(), Some(b'_' | b'.')) {
                 out.push('_');
             }
             out.push(ch.to_ascii_lowercase());
@@ -3793,4 +3822,21 @@ fn java_type_suffix_name(name: &str) -> String {
             _ => ch,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod naming_tests {
+    use super::to_snake_case_unescaped;
+
+    #[test]
+    fn snake_case_preserves_existing_separator_policy() {
+        assert_eq!(to_snake_case_unescaped("URLValue"), "u_r_l_value");
+        assert_eq!(to_snake_case_unescaped("already_Split"), "already_split");
+        assert_eq!(
+            to_snake_case_unescaped("Owner.InnerValue"),
+            "owner.inner_value"
+        );
+        assert_eq!(to_snake_case_unescaped(" this.valueName "), "value_name");
+        assert_eq!(to_snake_case_unescaped("this.this.valueName"), "value_name");
+    }
 }

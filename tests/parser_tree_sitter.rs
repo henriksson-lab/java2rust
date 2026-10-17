@@ -854,6 +854,7 @@ class BitwiseExpressions {
         return (left & 0xFF) | (right ^ 3);
     }
 }
+
 "#,
     );
     assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
@@ -880,6 +881,37 @@ class BitwiseExpressions {
             op: BinaryOp::BitXor,
             ..
         }
+    ));
+}
+
+#[test]
+fn parses_integral_complement_as_structured_unary_op() {
+    let parsed = parse_java_source(
+        r#"
+class IntegralComplement {
+    int clearLowBits(int value) {
+        return value & ~3;
+    }
+}
+"#,
+    );
+    assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+
+    let method = first_method(&parsed.program.types[0]);
+    let Stmt::Return(Some(Expr::Binary {
+        op: BinaryOp::BitAnd,
+        right,
+        ..
+    })) = &method.body.as_ref().unwrap().statements[0]
+    else {
+        panic!("expected bitwise-and expression");
+    };
+    assert!(matches!(
+        right.as_ref(),
+        Expr::Unary {
+            op: UnaryOp::BitNot,
+            expr,
+        } if matches!(expr.as_ref(), Expr::Literal(Literal::Int(3)))
     ));
 }
 
@@ -1488,7 +1520,7 @@ class StaticUtilityReceiverUse {
     };
 
     assert_eq!(name, "toArray");
-    assert!(matches!(receiver.as_ref(), Expr::Var(owner) if owner == "ints"));
+    assert!(matches!(receiver.as_ref(), Expr::Var(owner) if owner == "Ints"));
 }
 
 #[test]

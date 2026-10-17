@@ -660,7 +660,13 @@ fn qualify_nested_type_names(program: &mut Program) {
     // builder values to `Box<dyn Any>`.
     let mut captured_type_params = HashMap::new();
     for ty in &mut program.types {
-        materialize_non_static_inner_type_params(ty, &[], &mut captured_type_params);
+        let qualified_name = ty.name.clone();
+        materialize_non_static_inner_type_params(
+            ty,
+            &qualified_name,
+            &[],
+            &mut captured_type_params,
+        );
     }
     let mut compilation_unit_nested = HashMap::new();
     for ty in &program.types {
@@ -684,6 +690,7 @@ struct CapturedInnerTypeParams {
 /// them consistently in declarations and references.
 fn materialize_non_static_inner_type_params(
     ty: &mut TypeDecl,
+    qualified_name: &str,
     inherited: &[String],
     captured: &mut HashMap<String, CapturedInnerTypeParams>,
 ) {
@@ -701,10 +708,8 @@ fn materialize_non_static_inner_type_params(
             continue;
         };
         let nested_simple = nested.name.rsplit('.').next().unwrap_or(&nested.name);
-        let qualified = format!("{}.{}", ty.name, nested_simple);
-        let captures_outer = !nested.modifiers.contains(&Modifier::Static)
-            && !matches!(nested.kind, TypeKind::Interface | TypeKind::Enum)
-            && ty.kind != TypeKind::Interface;
+        let qualified = format!("{qualified_name}.{nested_simple}");
+        let captures_outer = nested.has_enclosing_instance_in(ty.kind);
         let inherited = if captures_outer {
             effective.as_slice()
         } else {
@@ -712,14 +717,14 @@ fn materialize_non_static_inner_type_params(
         };
         if !inherited.is_empty() {
             captured.insert(
-                qualified,
+                qualified.clone(),
                 CapturedInnerTypeParams {
                     explicit_arity: nested.type_params.len(),
                     args: inherited.to_vec(),
                 },
             );
         }
-        materialize_non_static_inner_type_params(nested, inherited, captured);
+        materialize_non_static_inner_type_params(nested, &qualified, inherited, captured);
     }
 }
 
@@ -797,11 +802,32 @@ fn collect_nested_type_path_aliases(
     }
 }
 
+fn aliases_outside_type_parameter_scope<'a>(
+    aliases: &'a HashMap<String, String>,
+    parameters: &[String],
+) -> std::borrow::Cow<'a, HashMap<String, String>> {
+    if !parameters.iter().any(|name| aliases.contains_key(name)) {
+        return std::borrow::Cow::Borrowed(aliases);
+    }
+    std::borrow::Cow::Owned(
+        aliases
+            .iter()
+            .filter(|(name, _)| {
+                let root = name.split('.').next().unwrap_or(name);
+                !parameters.iter().any(|parameter| parameter == root)
+            })
+            .map(|(name, target)| (name.clone(), target.clone()))
+            .collect(),
+    )
+}
+
 fn rewrite_type_decl_references(
     ty: &mut TypeDecl,
     direct_nested: &HashMap<String, String>,
     captured_type_params: &HashMap<String, CapturedInnerTypeParams>,
 ) {
+    let class_aliases = aliases_outside_type_parameter_scope(direct_nested, &ty.type_params);
+    let direct_nested = class_aliases.as_ref();
     if let Some(extends) = &mut ty.extends
         && let Some(qualified) = direct_nested.get(extends)
     {
@@ -826,6 +852,9 @@ fn rewrite_type_decl_references(
                 }
             }
             Member::Method(method) => {
+                let member_aliases =
+                    aliases_outside_type_parameter_scope(direct_nested, &method.type_params);
+                let direct_nested = member_aliases.as_ref();
                 qualify_nested_java_type(
                     &mut method.return_type,
                     direct_nested,
@@ -847,6 +876,9 @@ fn rewrite_type_decl_references(
                 }
             }
             Member::Constructor(ctor) => {
+                let member_aliases =
+                    aliases_outside_type_parameter_scope(direct_nested, &ctor.type_params);
+                let direct_nested = member_aliases.as_ref();
                 for bound in &mut ctor.type_param_bounds {
                     if let Some(bound) = bound {
                         qualify_nested_java_type(bound, direct_nested, captured_type_params);
@@ -1391,6 +1423,36 @@ fn resolve_type_calls(
     let fields = collect_field_env(ty, symbols);
     for member in &mut ty.members {
         match member {
+            Member::Field(field) => {
+                if let Some(initializer) = &mut field.initializer {
+                    // Initializers are executable class-scope expressions,
+                    // not constructor bodies. Resolve calls and diamond
+                    // target typing with class bounds but no ctor bindings.
+                    let mut env = fields.clone();
+                    insert_scoped_type_param_bounds(
+                        &mut env,
+                        &ty.type_params,
+                        &ty.type_param_bounds,
+                    );
+                    resolve_expr_calls(
+                        initializer,
+                        &ty.name,
+                        symbols,
+                        &methods,
+                        &mut env,
+                        diagnostics,
+                        facts,
+                        external_facts,
+                        Some(&field.name),
+                    );
+                    apply_target_type_to_constructor_expr(
+                        initializer,
+                        &field.ty,
+                        symbols,
+                        external_facts,
+                    );
+                }
+            }
             Member::Method(method) => {
                 if let Some(body) = &mut method.body {
                     let mut env = fields.clone();
@@ -1418,6 +1480,7 @@ fn resolve_type_calls(
                         facts,
                         external_facts,
                         Some(&method.name),
+                        Some(&method.return_type),
                     );
                 }
             }
@@ -1448,6 +1511,7 @@ fn resolve_type_calls(
                         facts,
                         external_facts,
                         Some("<init>"),
+                        None,
                     );
                 }
             }
@@ -1567,10 +1631,17 @@ fn insert_scoped_type_param_bounds(
     type_params: &[String],
     type_param_bounds: &[Option<JavaType>],
 ) {
-    for (name, bound) in type_params.iter().zip(type_param_bounds.iter()) {
-        if let Some(bound) = bound {
-            env.insert_type_param_bound(name.clone(), bound.clone());
-        }
+    for (index, name) in type_params.iter().enumerate() {
+        env.insert_type_param_bound(
+            name.clone(),
+            type_param_bounds
+                .get(index)
+                .and_then(Clone::clone)
+                .unwrap_or_else(|| JavaType::Named {
+                    name: "Object".to_string(),
+                    args: Vec::new(),
+                }),
+        );
     }
 }
 
@@ -1599,6 +1670,7 @@ struct ConstructorSymbol {
     declaring_type: String,
     outer_type: Option<String>,
     rust_name: String,
+    type_params: Vec<String>,
     params: Vec<Param>,
 }
 
@@ -1644,6 +1716,7 @@ fn collect_constructor_symbols(ty: &TypeDecl, outer: Option<&TypeDecl>) -> Vec<C
                 declaring_type: ty.name.clone(),
                 outer_type: outer.map(|outer| outer.name.clone()),
                 rust_name: ctor.rust_name.clone().unwrap_or_else(|| "new".to_string()),
+                type_params: ctor.type_params.clone(),
                 params: ctor.params.clone(),
             }),
             _ => None,
@@ -1654,6 +1727,7 @@ fn collect_constructor_symbols(ty: &TypeDecl, outer: Option<&TypeDecl>) -> Vec<C
             declaring_type: ty.name.clone(),
             outer_type: outer.map(|outer| outer.name.clone()),
             rust_name: "new".to_string(),
+            type_params: Vec::new(),
             params: Vec::new(),
         });
     }
@@ -1714,8 +1788,50 @@ impl ProgramSymbols {
         for ty in &program.types {
             symbols.collect_type(ty, None);
         }
+        symbols.canonicalize_source_hierarchy();
         symbols.rebuild_hierarchy_indexes();
         symbols
+    }
+
+    fn canonicalize_source_hierarchy(&mut self) {
+        // Collect every declaration before interpreting parent names. A sibling
+        // nested parent may be declared later, and a global short-name lookup
+        // cannot distinguish two lexical owners' identically named parents.
+        // Canonicalize this shared inventory once, so method/field lookup,
+        // assignability and generic ancestry all walk the same source edges.
+        self.extends_type_by_type = self
+            .extends_type_by_type
+            .iter()
+            .map(|(owner, parent)| (owner.clone(), self.member_type_in_owner(parent, owner, &[])))
+            .collect();
+        self.implements_type_by_type = self
+            .implements_type_by_type
+            .iter()
+            .map(|(owner, parents)| {
+                (
+                    owner.clone(),
+                    parents
+                        .iter()
+                        .map(|parent| self.member_type_in_owner(parent, owner, &[]))
+                        .collect(),
+                )
+            })
+            .collect();
+        self.extends_by_type = self
+            .extends_type_by_type
+            .iter()
+            .map(|(owner, parent)| (owner.clone(), java_type_simple_name(parent)))
+            .collect();
+        self.implements_by_type = self
+            .implements_type_by_type
+            .iter()
+            .map(|(owner, parents)| {
+                (
+                    owner.clone(),
+                    parents.iter().map(java_type_simple_name).collect(),
+                )
+            })
+            .collect();
     }
 
     fn rebuild_hierarchy_indexes(&mut self) {
@@ -2195,27 +2311,93 @@ impl ProgramSymbols {
             .filter(|constructor| self.constructor_visible_from(constructor, current_type))
             .cloned()
             .collect::<Vec<_>>();
-        if scoped.is_empty() {
+        let mut selected = if scoped.is_empty() {
             constructors.to_vec()
         } else {
             scoped
+        };
+        for constructor in &mut selected {
+            for param in &mut constructor.params {
+                param.ty = self.member_type_in_owner(
+                    &param.ty,
+                    &constructor.declaring_type,
+                    &constructor.type_params,
+                );
+            }
         }
+        selected
     }
 
     fn lexical_constructor_type_name(&self, type_name: &str, current_type: &str) -> Option<String> {
         if type_name.contains('.') {
             return None;
         }
+        self.lexical_source_type_name(type_name, current_type)
+            .filter(|name| self.constructors_by_type.contains_key(name))
+    }
+
+    fn lexical_source_type_name(&self, type_name: &str, current_type: &str) -> Option<String> {
         self.lexical_type_scope(current_type)
             .into_iter()
             .filter_map(|scope_type| {
                 let candidate = format!("{scope_type}.{type_name}");
                 let source_name = self.source_type_name(&candidate).to_string();
-                self.constructors_by_type
+                self.kind_by_type
                     .contains_key(&source_name)
                     .then_some(source_name)
             })
             .next()
+    }
+
+    fn member_type_in_owner(
+        &self,
+        ty: &JavaType,
+        owner: &str,
+        member_type_params: &[String],
+    ) -> JavaType {
+        match ty {
+            JavaType::Named { name, args } => {
+                let is_parameter = member_type_params.contains(name)
+                    || self
+                        .type_params_for(owner)
+                        .is_some_and(|params| params.contains(name));
+                let name = if is_parameter {
+                    name.clone()
+                } else {
+                    self.lexical_source_type_name(name, owner)
+                        .unwrap_or_else(|| self.source_type_name(name).to_string())
+                };
+                JavaType::Named {
+                    name,
+                    args: args
+                        .iter()
+                        .map(|arg| self.member_type_in_owner(arg, owner, member_type_params))
+                        .collect(),
+                }
+            }
+            JavaType::Array(element) => JavaType::Array(Box::new(self.member_type_in_owner(
+                element,
+                owner,
+                member_type_params,
+            ))),
+            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound))) => {
+                JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(Box::new(
+                    self.member_type_in_owner(bound, owner, member_type_params),
+                ))))
+            }
+            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+                JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(Box::new(
+                    self.member_type_in_owner(bound, owner, member_type_params),
+                ))))
+            }
+            JavaType::Intersection(bounds) => JavaType::Intersection(
+                bounds
+                    .iter()
+                    .map(|bound| self.member_type_in_owner(bound, owner, member_type_params))
+                    .collect(),
+            ),
+            _ => ty.clone(),
+        }
     }
 
     fn constructor_visible_from(
@@ -2241,7 +2423,14 @@ impl ProgramSymbols {
                 break;
             }
             out.push(source_name.clone());
-            current = self.outer_by_type.get(&source_name).cloned();
+            // Source summaries can flatten a nested declaration into a
+            // top-level entry while retaining its dotted Java owner. Its
+            // lexical siblings remain visible even without a capture edge.
+            current = self.outer_by_type.get(&source_name).cloned().or_else(|| {
+                source_name
+                    .rsplit_once('.')
+                    .map(|(owner, _)| owner.to_string())
+            });
         }
         out
     }
@@ -2579,56 +2768,49 @@ impl ProgramSymbols {
         actual_ty: &JavaType,
         target_type: &str,
     ) -> Option<JavaType> {
+        let args = self.source_supertype_args(actual_ty, target_type)?;
+        (args.len() == 1).then(|| args[0].clone())
+    }
+
+    fn source_supertype_args(
+        &self,
+        actual_ty: &JavaType,
+        target_type: &str,
+    ) -> Option<Vec<JavaType>> {
         let JavaType::Named { name, args } = actual_ty else {
             return None;
         };
-        let mut current = self.source_type_name(name).to_string();
-        let mut substitutions = HashMap::new();
-        if let Some(params) = self.type_params_for(&current) {
-            for (param, arg) in params.iter().zip(args) {
-                substitutions.insert(param.clone(), arg.clone());
-            }
-        }
+        let target_type = self.source_type_name(target_type);
+        let mut pending = vec![(self.source_type_name(name).to_string(), args.clone())];
         let mut visited = HashSet::new();
-        loop {
+        while let Some((current, args)) = pending.pop() {
             if !visited.insert(current.clone()) {
-                return None;
+                continue;
             }
             if current == target_type {
-                let args = self
-                    .type_params_for(&current)
-                    .and_then(|params| params.first())
-                    .and_then(|param| substitutions.get(param))
-                    .cloned();
-                if args.is_some() {
-                    return args;
+                return Some(args);
+            }
+            let substitutions = self
+                .type_params_for(&current)
+                .unwrap_or(&[])
+                .iter()
+                .cloned()
+                .zip(args)
+                .collect();
+            for super_type in self.extends_type_by_type.get(&current).into_iter().chain(
+                self.implements_type_by_type
+                    .get(&current)
+                    .into_iter()
+                    .flatten(),
+            ) {
+                if let JavaType::Named { name, args } =
+                    substitute_method_type_variables(super_type, &substitutions)
+                {
+                    pending.push((self.source_type_name(&name).to_string(), args));
                 }
             }
-            if let Some(interfaces) = self.implements_type_by_type.get(&current) {
-                for interface_ty in interfaces {
-                    let substituted =
-                        substitute_method_type_variables(interface_ty, &substitutions);
-                    if let JavaType::Named {
-                        name: interface_name,
-                        args,
-                    } = &substituted
-                        && self.source_type_name(interface_name) == target_type
-                        && let Some(arg) = args.first()
-                    {
-                        return Some(arg.clone());
-                    }
-                }
-            }
-            let Some(super_type) = self.extends_type_by_type.get(&current) else {
-                return None;
-            };
-            let Some(super_name) =
-                extend_supertype_substitutions(self, &current, super_type, &mut substitutions)
-            else {
-                return None;
-            };
-            current = super_name;
         }
+        None
     }
 }
 
@@ -2668,13 +2850,24 @@ fn extend_supertype_substitutions(
         .and_then(|_| symbols.type_params_for(&super_name))
     {
         let super_bounds = symbols.type_param_bounds_for(&super_name).unwrap_or(&[]);
-        for (index, (param, arg)) in super_params.iter().zip(args).enumerate() {
-            let substituted_arg = substitute_method_type_variables(arg, substitutions);
-            substitutions.insert(
-                param.clone(),
-                wildcard_actual_or_declared_bound(&substituted_arg, super_bounds.get(index)),
-            );
-        }
+        // Evaluate every argument in the child's scope before introducing the
+        // parent's binders. In `Child<A,B> extends Parent<B,A>`, inserting A
+        // before evaluating the second argument would incorrectly turn both
+        // parent arguments into B. Bindings from older owners are not visible
+        // in the new lexical owner either.
+        let parent_bindings = super_params
+            .iter()
+            .zip(args)
+            .enumerate()
+            .map(|(index, (param, arg))| {
+                let substituted_arg = substitute_method_type_variables(arg, substitutions);
+                (
+                    param.clone(),
+                    wildcard_actual_or_declared_bound(&substituted_arg, super_bounds.get(index)),
+                )
+            })
+            .collect();
+        *substitutions = parent_bindings;
     }
     Some(super_name)
 }
@@ -2683,12 +2876,24 @@ fn substitute_method_symbol(
     method: &MethodSymbol,
     substitutions: &HashMap<String, JavaType>,
 ) -> MethodSymbol {
+    let substitutions = crate::java_type_substitution::without_shadowed_binders(
+        substitutions,
+        &method.method_type_params,
+    );
     MethodSymbol {
         declaring_type: method.declaring_type.clone(),
         owner_type_params: method.owner_type_params.clone(),
         owner_type_param_bounds: method.owner_type_param_bounds.clone(),
         method_type_params: method.method_type_params.clone(),
-        method_type_param_bounds: method.method_type_param_bounds.clone(),
+        method_type_param_bounds: method
+            .method_type_param_bounds
+            .iter()
+            .map(|bound| {
+                bound
+                    .as_ref()
+                    .map(|bound| substitute_method_type_variables(bound, &substitutions))
+            })
+            .collect(),
         java_name: method.java_name.clone(),
         rust_name: method.rust_name.clone(),
         params: method
@@ -2697,12 +2902,12 @@ fn substitute_method_symbol(
             .map(|param| Param {
                 name: param.name.clone(),
                 source_name: param.source_name.clone(),
-                ty: substitute_method_type_variables(&param.ty, substitutions),
+                ty: substitute_method_type_variables(&param.ty, &substitutions),
                 is_varargs: param.is_varargs,
                 binding: param.binding.clone(),
             })
             .collect(),
-        return_type: substitute_method_type_variables(&method.return_type, substitutions),
+        return_type: substitute_method_type_variables(&method.return_type, &substitutions),
         is_static: method.is_static,
     }
 }
@@ -2785,6 +2990,7 @@ fn resolve_block_calls(
     facts: &mut FactSet,
     external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
+    expected_return_type: Option<&JavaType>,
 ) {
     for stmt in &mut block.statements {
         resolve_stmt_calls(
@@ -2798,6 +3004,7 @@ fn resolve_block_calls(
             facts,
             external_facts,
             enclosing_member,
+            expected_return_type,
         );
         env.learn_stmt(stmt);
     }
@@ -2814,6 +3021,7 @@ fn resolve_stmt_calls(
     facts: &mut FactSet,
     external_facts: &ResolverExternalFacts<'_>,
     enclosing_member: Option<&str>,
+    expected_return_type: Option<&JavaType>,
 ) {
     match stmt {
         Stmt::VarDecl {
@@ -2858,6 +3066,14 @@ fn resolve_stmt_calls(
                 external_facts,
                 enclosing_member,
             );
+            let target_type = infer_resolver_expr_type_with_facts(
+                target,
+                current_type,
+                symbols,
+                env,
+                external_facts,
+            );
+            apply_target_type_to_constructor_expr(value, &target_type, symbols, external_facts);
         }
         Stmt::Expr(expr) => resolve_expr_calls(
             expr,
@@ -2870,17 +3086,34 @@ fn resolve_stmt_calls(
             external_facts,
             enclosing_member,
         ),
-        Stmt::Return(Some(expr)) => resolve_expr_calls(
-            expr,
-            current_type,
-            symbols,
-            methods,
-            env,
-            diagnostics,
-            facts,
-            external_facts,
-            enclosing_member,
-        ),
+        Stmt::Return(Some(expr)) => {
+            resolve_expr_calls(
+                expr,
+                current_type,
+                symbols,
+                methods,
+                env,
+                diagnostics,
+                facts,
+                external_facts,
+                enclosing_member,
+            );
+            if let Some(target) = expected_return_type {
+                resolve_lambda_with_expected_type(
+                    expr,
+                    target,
+                    current_type,
+                    symbols,
+                    methods,
+                    env,
+                    diagnostics,
+                    facts,
+                    external_facts,
+                    enclosing_member,
+                );
+                apply_target_type_to_constructor_expr(expr, target, symbols, external_facts);
+            }
+        }
         Stmt::If {
             condition,
             then_block,
@@ -2908,6 +3141,7 @@ fn resolve_stmt_calls(
                 facts,
                 external_facts,
                 enclosing_member,
+                expected_return_type,
             );
             if let Some(block) = else_block {
                 resolve_block_calls(
@@ -2921,6 +3155,7 @@ fn resolve_stmt_calls(
                     facts,
                     external_facts,
                     enclosing_member,
+                    expected_return_type,
                 );
             }
         }
@@ -2952,6 +3187,7 @@ fn resolve_stmt_calls(
                 facts,
                 external_facts,
                 enclosing_member,
+                expected_return_type,
             );
         }
         Stmt::For {
@@ -2973,6 +3209,7 @@ fn resolve_stmt_calls(
                     facts,
                     external_facts,
                     enclosing_member,
+                    expected_return_type,
                 );
                 env.learn_stmt(stmt);
             }
@@ -3013,6 +3250,7 @@ fn resolve_stmt_calls(
                 facts,
                 external_facts,
                 enclosing_member,
+                expected_return_type,
             );
         }
         Stmt::EnhancedFor {
@@ -3046,6 +3284,7 @@ fn resolve_stmt_calls(
                 facts,
                 external_facts,
                 enclosing_member,
+                expected_return_type,
             );
         }
         Stmt::Switch { selector, cases } => {
@@ -3089,6 +3328,7 @@ fn resolve_stmt_calls(
                         facts,
                         external_facts,
                         enclosing_member,
+                        expected_return_type,
                     );
                     case_env.learn_stmt(stmt);
                 }
@@ -3112,6 +3352,7 @@ fn resolve_stmt_calls(
                     facts,
                     external_facts,
                     enclosing_member,
+                    expected_return_type,
                 );
                 env.learn_stmt(resource);
             }
@@ -3126,6 +3367,7 @@ fn resolve_stmt_calls(
                 facts,
                 external_facts,
                 enclosing_member,
+                expected_return_type,
             );
             for catch in catches {
                 let mut catch_env = env.clone();
@@ -3143,6 +3385,7 @@ fn resolve_stmt_calls(
                     facts,
                     external_facts,
                     enclosing_member,
+                    expected_return_type,
                 );
             }
             if let Some(block) = finally_block {
@@ -3157,6 +3400,7 @@ fn resolve_stmt_calls(
                     facts,
                     external_facts,
                     enclosing_member,
+                    expected_return_type,
                 );
             }
         }
@@ -3209,6 +3453,28 @@ fn resolve_stmt_calls(
                     .cloned(),
             };
             if let Some(constructor_owner) = constructor_owner {
+                let constructed_type = match kind {
+                    ConstructorInvocationKind::This => JavaType::Named {
+                        name: current_type.to_string(),
+                        args: symbols
+                            .type_params_for(current_type)
+                            .unwrap_or(&[])
+                            .iter()
+                            .map(|name| JavaType::Named {
+                                name: name.clone(),
+                                args: Vec::new(),
+                            })
+                            .collect(),
+                    },
+                    ConstructorInvocationKind::Super => symbols
+                        .extends_type_by_type
+                        .get(symbols.source_type_name(current_type))
+                        .cloned()
+                        .unwrap_or_else(|| JavaType::Named {
+                            name: constructor_owner.clone(),
+                            args: Vec::new(),
+                        }),
+                };
                 let constructor_candidates = if matches!(kind, ConstructorInvocationKind::This) {
                     constructors.to_vec()
                 } else {
@@ -3219,8 +3485,18 @@ fn resolve_stmt_calls(
                     &constructor_candidates,
                     symbols,
                     external_facts,
+                    Some(&constructed_type),
+                    env,
                 ) {
-                    Ok(Some(constructor)) => *resolved = Some(constructor),
+                    Ok(Some(mut constructor)) => {
+                        refresh_constructor_derived_fields(
+                            &mut constructor,
+                            Some(&arg_types),
+                            symbols,
+                            external_facts,
+                        );
+                        *resolved = Some(constructor);
+                    }
                     Ok(None) => facts.unresolved_target_facts.push(UnresolvedTargetFact {
                         enclosing_type: current_type.to_string(),
                         enclosing_member: enclosing_member.map(str::to_string),
@@ -3255,6 +3531,7 @@ fn resolve_stmt_calls(
             facts,
             external_facts,
             enclosing_member,
+            expected_return_type,
         ),
         _ => {}
     }
@@ -3266,8 +3543,32 @@ fn apply_target_type_to_constructor_expr(
     symbols: &ProgramSymbols,
     external_facts: &FactSet,
 ) {
+    match expr {
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            apply_target_type_to_constructor_expr(then_expr, target_ty, symbols, external_facts);
+            apply_target_type_to_constructor_expr(else_expr, target_ty, symbols, external_facts);
+            return;
+        }
+        Expr::Switch { cases, .. } => {
+            for case in cases {
+                apply_target_type_to_constructor_expr(
+                    &mut case.value,
+                    target_ty,
+                    symbols,
+                    external_facts,
+                );
+            }
+            return;
+        }
+        _ => {}
+    }
     let Expr::New {
         ty,
+        infer_type_arguments,
         args,
         resolved: Some(resolved),
         ..
@@ -3275,15 +3576,162 @@ fn apply_target_type_to_constructor_expr(
     else {
         return;
     };
-    resolved.constructed_type = inferred_constructed_type(
+    if !*infer_type_arguments {
+        return;
+    }
+    let arg_types = constructor_argument_types_after_targeting(args, resolved);
+    let Some(contextual) = contextual_constructed_type(
         ty,
-        Some(target_ty),
-        &resolved.declaring_type,
+        target_ty,
+        resolved,
+        arg_types.as_deref(),
         symbols,
         external_facts,
-    );
+    ) else {
+        // Object/raw/non-nominal targets contribute no generic equations.
+        // In particular they must not erase argument-inferred witnesses.
+        return;
+    };
+    resolved.constructed_type = contextual;
     refresh_constructor_derived_fields(resolved, None, symbols, external_facts);
     apply_constructor_param_targets(args, resolved, symbols, external_facts);
+    // Nested diamond arguments now have their own target constraints. Refresh
+    // coercion evidence with those instantiated types, not the old raw types.
+    let arg_types = constructor_argument_types_after_targeting(args, resolved);
+    refresh_constructor_derived_fields(resolved, arg_types.as_deref(), symbols, external_facts);
+}
+
+fn constructor_argument_types_after_targeting(
+    args: &[Expr],
+    constructor: &ResolvedConstructor,
+) -> Option<Vec<JavaType>> {
+    let previous = constructor_arg_actual_types(constructor).unwrap_or_default();
+    args.iter()
+        .enumerate()
+        .map(|(index, argument)| match argument {
+            Expr::New {
+                resolved: Some(nested),
+                ..
+            } => Some(nested.constructed_type.clone()),
+            _ => previous.get(index).cloned(),
+        })
+        .collect()
+}
+
+fn contextual_constructed_type(
+    parsed_ty: &JavaType,
+    target_ty: &JavaType,
+    constructor: &ResolvedConstructor,
+    arg_types: Option<&[JavaType]>,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> Option<JavaType> {
+    let target_ty = crate::types::generic_read_type(target_ty);
+    let JavaType::Named {
+        name: target_name,
+        args: target_args,
+    } = &target_ty
+    else {
+        return None;
+    };
+    if target_args.is_empty() {
+        return None;
+    }
+    let Some(type_params) = symbols.type_params_for(&constructor.declaring_type) else {
+        let inferred = inferred_constructed_type(
+            parsed_ty,
+            Some(&target_ty),
+            &constructor.declaring_type,
+            symbols,
+            external_facts,
+        );
+        return matches!(&inferred, JavaType::Named { args, .. } if !args.is_empty())
+            .then_some(inferred);
+    };
+    let formal_owner = JavaType::Named {
+        name: constructor.declaring_type.clone(),
+        args: type_params
+            .iter()
+            .map(|name| JavaType::Named {
+                name: name.clone(),
+                args: vec![],
+            })
+            .collect(),
+    };
+    // Project the owner's formal frame through its real hierarchy. Copying
+    // target arguments by position is wrong for Child<A,B> extends Base<B,A>.
+    let formal_target_args = symbols.source_supertype_args(&formal_owner, target_name)?;
+    let formal_target = JavaType::Named {
+        name: target_name.clone(),
+        args: formal_target_args,
+    };
+    let mut context = HashMap::new();
+    collect_method_type_substitutions(
+        &formal_target,
+        &target_ty,
+        &mut context,
+        symbols,
+        Some(type_params),
+    );
+    let arguments = arg_types
+        .and_then(|types| {
+            constructor_argument_type_substitutions(constructor, types, symbols, external_facts)
+        })
+        .unwrap_or_default();
+    let bounds = symbols
+        .type_param_bounds_for(&constructor.declaring_type)
+        .unwrap_or(&[]);
+    let args = type_params
+        .iter()
+        .enumerate()
+        .map(|(index, parameter)| {
+            let actual = arguments
+                .get(parameter)
+                .filter(|ty| constructor_witness_is_instantiated(ty, symbols));
+            let target = context.get(parameter).or(actual)?;
+            Some(match target {
+                JavaType::Wildcard(Some(WildcardBound::Extends(bound))) => actual
+                    .filter(|actual| java_type_assignable(actual, bound, symbols, external_facts))
+                    .cloned()
+                    .unwrap_or_else(|| (**bound).clone()),
+                JavaType::Wildcard(Some(WildcardBound::Super(bound))) => actual
+                    .filter(|actual| java_type_assignable(bound, actual, symbols, external_facts))
+                    .cloned()
+                    .unwrap_or_else(|| (**bound).clone()),
+                JavaType::Wildcard(None) => actual.cloned().unwrap_or_else(|| {
+                    bounds
+                        .get(index)
+                        .and_then(Option::as_ref)
+                        .map(|bound| substitute_method_type_variables(bound, &context))
+                        .unwrap_or_else(|| JavaType::Named {
+                            name: "Object".into(),
+                            args: vec![],
+                        })
+                }),
+                other => other.clone(),
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    Some(JavaType::Named {
+        name: constructor.declaring_type.clone(),
+        args,
+    })
+}
+
+fn constructor_witness_is_instantiated(ty: &JavaType, symbols: &ProgramSymbols) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            symbols
+                .type_params_for(name)
+                .is_none_or(|params| params.len() == args.len())
+                && args
+                    .iter()
+                    .all(|arg| constructor_witness_is_instantiated(arg, symbols))
+        }
+        JavaType::Array(element) => constructor_witness_is_instantiated(element, symbols),
+        JavaType::Wildcard(_) | JavaType::Unknown(_) => false,
+        _ => true,
+    }
 }
 
 fn apply_constructor_param_targets(
@@ -3301,7 +3749,28 @@ fn constructor_params_for_constructed_type(
     constructor: &ResolvedConstructor,
     symbols: &ProgramSymbols,
 ) -> Vec<Param> {
-    let JavaType::Named { name, args } = &constructor.constructed_type else {
+    constructor_params_for_type(constructor, &constructor.constructed_type, symbols)
+}
+
+fn constructor_params_for_type(
+    constructor: &ResolvedConstructor,
+    constructed_type: &JavaType,
+    symbols: &ProgramSymbols,
+) -> Vec<Param> {
+    let declaration = symbols
+        .constructors_for(&constructor.declaring_type)
+        .iter()
+        .find(|declaration| {
+            declaration.rust_name == constructor.rust_name
+                && declaration.params.len() == constructor.params.len()
+        });
+    let member_type_params = declaration
+        .map(|decl| decl.type_params.as_slice())
+        .unwrap_or(&[]);
+    let declared_params = declaration
+        .map(|declaration| declaration.params.as_slice())
+        .unwrap_or(&constructor.params);
+    let JavaType::Named { name, args } = constructed_type else {
         return constructor.params.clone();
     };
     let Some(type_params) = symbols.type_params_for(name) else {
@@ -3310,15 +3779,22 @@ fn constructor_params_for_constructed_type(
     let substitutions = type_params
         .iter()
         .zip(args)
+        .filter(|(param, _)| !member_type_params.contains(param))
         .map(|(param, arg)| (param.clone(), arg.clone()))
         .collect::<HashMap<_, _>>();
-    constructor
-        .params
+    declared_params
         .iter()
         .map(|param| Param {
             name: param.name.clone(),
             source_name: param.source_name.clone(),
-            ty: substitute_method_type_variables(&param.ty, &substitutions),
+            ty: substitute_method_type_variables(
+                &symbols.member_type_in_owner(
+                    &param.ty,
+                    &constructor.declaring_type,
+                    member_type_params,
+                ),
+                &substitutions,
+            ),
             is_varargs: param.is_varargs,
             binding: param.binding.clone(),
         })
@@ -3417,6 +3893,88 @@ fn inferred_constructed_type(
         name: declaring_type.to_string(),
         args: target_args.clone(),
     }
+}
+
+fn diamond_constructed_type_from_arguments(
+    constructor: &ResolvedConstructor,
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> Option<JavaType> {
+    let type_params = symbols.type_params_for(&constructor.declaring_type)?;
+    if type_params.is_empty() {
+        return None;
+    }
+    let substitutions =
+        constructor_argument_type_substitutions(constructor, arg_types, symbols, external_facts)?;
+    // Unconstrained parameters still need target typing; do not manufacture
+    // an erasure and then treat it as inference evidence at later call sites.
+    let args = type_params
+        .iter()
+        .map(|param| substitutions.get(param).cloned())
+        .collect::<Option<Vec<_>>>()?;
+    if constructor
+        .params
+        .iter()
+        .zip(arg_types)
+        .any(|(param, actual)| {
+            !java_type_assignable(
+                actual,
+                &substitute_method_type_variables(&param.ty, &substitutions),
+                symbols,
+                external_facts,
+            )
+        })
+    {
+        return None;
+    }
+    Some(JavaType::Named {
+        name: constructor.declaring_type.clone(),
+        args,
+    })
+}
+
+/// Retain partial lower constraints for contextual inference. A constructor
+/// taking only Actual cannot infer its owner's other parameters from arguments
+/// alone, but its Actual evidence must not be discarded for that reason.
+fn constructor_argument_type_substitutions(
+    constructor: &ResolvedConstructor,
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> Option<HashMap<String, JavaType>> {
+    let type_params = symbols.type_params_for(&constructor.declaring_type)?;
+    let raw_owner = JavaType::Named {
+        name: constructor.declaring_type.clone(),
+        args: vec![],
+    };
+    let declared_params = constructor_params_for_type(constructor, &raw_owner, symbols);
+    let mut substitutions = HashMap::new();
+    for (param, actual) in declared_params.iter().zip(arg_types) {
+        let mut evidence = HashMap::new();
+        collect_method_type_substitutions(
+            &param.ty,
+            actual,
+            &mut evidence,
+            symbols,
+            Some(type_params),
+        );
+        for (name, actual) in evidence {
+            if is_null_type(&actual) {
+                continue;
+            }
+            if let Some(previous) = substitutions.get(&name) {
+                let common = resolver_common_type(previous, &actual, symbols, external_facts);
+                if matches!(common, JavaType::Unknown(_)) {
+                    return None;
+                }
+                substitutions.insert(name, common);
+            } else {
+                substitutions.insert(name, actual);
+            }
+        }
+    }
+    Some(substitutions)
 }
 
 fn resolve_expr_calls(
@@ -3642,6 +4200,7 @@ fn resolve_expr_calls(
                     symbols,
                     external_facts,
                     None,
+                    env,
                 ) {
                     Ok(Some(selection)) => {
                         resolve_target_typed_lambda_args(
@@ -3681,10 +4240,9 @@ fn resolve_expr_calls(
                     }),
                     Err(message) => diagnostics.error("resolve_call_ambiguous", message),
                 }
-            } else if let Some(receiver_ty) = receiver
-                .as_deref()
-                .and_then(|receiver| source_static_type_receiver(receiver, symbols, env))
-            {
+            } else if let Some(receiver_ty) = receiver.as_deref().and_then(|receiver| {
+                source_static_type_receiver(receiver, current_type, symbols, env)
+            }) {
                 let receiver_methods = symbols
                     .methods_for_hierarchy(&receiver_ty)
                     .into_iter()
@@ -3697,6 +4255,7 @@ fn resolve_expr_calls(
                     symbols,
                     external_facts,
                     None,
+                    env,
                 ) {
                     Ok(Some(selection)) => {
                         resolve_target_typed_lambda_args(
@@ -3748,6 +4307,7 @@ fn resolve_expr_calls(
                     symbols,
                     external_facts,
                     Some(&receiver_actual_ty),
+                    env,
                 ) {
                     Ok(Some(selection)) => {
                         resolve_target_typed_lambda_args(
@@ -3779,6 +4339,41 @@ fn resolve_expr_calls(
                     }),
                     Err(message) => diagnostics.error("resolve_call_ambiguous", message),
                 }
+            } else if let Some(identity_call) = receiver.as_deref().and_then(|receiver| {
+                let receiver_ty = infer_resolver_expr_type_with_facts(
+                    receiver,
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                );
+                let owner = match &receiver_ty {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
+                    _ => return None,
+                };
+                if symbols.source_type_kind(owner).is_some() {
+                    return None;
+                }
+                let target = crate::call_plan::plan_native_java_static_owner_call(
+                    owner,
+                    name,
+                    Some(args),
+                    env,
+                )?;
+                let index = target.checked_identity_argument_index()?;
+                Some(ResolvedCall {
+                    declaring_type: crate::stdlib::canonical_external_receiver_type_key(owner),
+                    rust_name: crate::parser::to_snake_case(name),
+                    kind: CallKind::Static,
+                    return_type: arg_types.get(index)?.clone(),
+                    // This generic identity boundary preserves its argument's
+                    // carrier until all arguments have been evaluated. A
+                    // non-null formal ABI would unwrap it too early.
+                    arg_target_types: Vec::new(),
+                    arg_coercions: Vec::new(),
+                })
+            }) {
+                *resolved = Some(identity_call);
             } else if let Some(enum_call) = receiver.as_deref().and_then(|receiver| {
                 external_enum_synthetic_call(
                     receiver,
@@ -3809,6 +4404,7 @@ fn resolve_expr_calls(
         }
         Expr::New {
             ty,
+            infer_type_arguments,
             qualifier,
             args,
             body,
@@ -3840,7 +4436,7 @@ fn resolve_expr_calls(
                     enclosing_member,
                 );
             }
-            if let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty {
+            if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &*ty {
                 let arg_types = args
                     .iter()
                     .map(|arg| {
@@ -3861,6 +4457,8 @@ fn resolve_expr_calls(
                         &constructor_candidates,
                         symbols,
                         external_facts,
+                        Some(ty),
+                        env,
                     )
                 } else {
                     resolve_same_class_constructor(
@@ -3868,17 +4466,31 @@ fn resolve_expr_calls(
                         &constructor_candidates,
                         symbols,
                         external_facts,
+                        Some(ty),
+                        env,
                     )
                 };
                 match selection {
                     Ok(Some(mut constructor)) => {
-                        constructor.constructed_type = inferred_constructed_type(
-                            ty,
-                            None,
-                            &constructor.declaring_type,
-                            symbols,
-                            external_facts,
-                        );
+                        constructor.constructed_type = if *infer_type_arguments {
+                            diamond_constructed_type_from_arguments(
+                                &constructor,
+                                &arg_types,
+                                symbols,
+                                external_facts,
+                            )
+                        } else {
+                            None
+                        }
+                        .unwrap_or_else(|| {
+                            inferred_constructed_type(
+                                ty,
+                                None,
+                                &constructor.declaring_type,
+                                symbols,
+                                external_facts,
+                            )
+                        });
                         refresh_constructor_derived_fields(
                             &mut constructor,
                             Some(&arg_types),
@@ -3944,6 +4556,7 @@ fn resolve_expr_calls(
                                     facts,
                                     external_facts,
                                     Some(&method.name),
+                                    Some(&method.return_type),
                                 );
                             }
                         }
@@ -3964,6 +4577,7 @@ fn resolve_expr_calls(
                                     facts,
                                     external_facts,
                                     Some(&ctor.name),
+                                    None,
                                 );
                             }
                         }
@@ -4153,6 +4767,7 @@ fn resolve_lambda_with_single_param_type(
             facts,
             external_facts,
             enclosing_member,
+            None,
         ),
     }
 }
@@ -4177,6 +4792,8 @@ fn resolve_lambda_with_expected_type(
         return;
     };
     let substitutions = functional_interface_type_substitutions(expected_ty, symbols);
+    let expected_return =
+        substitute_method_type_variables(&functional_method.return_type, &substitutions);
 
     let mut lambda_env = env.clone();
     for (lambda_param, method_param) in params.iter().zip(&functional_method.params) {
@@ -4186,17 +4803,20 @@ fn resolve_lambda_with_expected_type(
     }
 
     match body {
-        LambdaBody::Expr(expr) => resolve_expr_calls(
-            expr,
-            current_type,
-            symbols,
-            methods,
-            &lambda_env,
-            diagnostics,
-            facts,
-            external_facts,
-            enclosing_member,
-        ),
+        LambdaBody::Expr(expr) => {
+            resolve_expr_calls(
+                expr,
+                current_type,
+                symbols,
+                methods,
+                &lambda_env,
+                diagnostics,
+                facts,
+                external_facts,
+                enclosing_member,
+            );
+            apply_target_type_to_constructor_expr(expr, &expected_return, symbols, external_facts);
+        }
         LambdaBody::Block(block) => resolve_block_calls(
             block,
             current_type,
@@ -4208,6 +4828,7 @@ fn resolve_lambda_with_expected_type(
             facts,
             external_facts,
             enclosing_member,
+            Some(&expected_return),
         ),
     }
 }
@@ -4420,11 +5041,13 @@ fn type_qualified_static_field<'a>(
     let Expr::Var(name) = receiver else {
         return None;
     };
-    if env.local_type(name).is_some() || env.field_type(name).is_some() {
+    if env.local_type(name).is_some() || env.field_type_exact(name).is_some() {
         return None;
     }
-    let source_name = symbols.source_type_name(name);
-    symbols.static_field_for_from(source_name, field_name, current_type)
+    let source_name = symbols
+        .lexical_source_type_name(name, current_type)
+        .unwrap_or_else(|| symbols.source_type_name(name).to_string());
+    symbols.static_field_for_from(&source_name, field_name, current_type)
 }
 
 fn java_type_simple_name(java_ty: &JavaType) -> String {
@@ -4514,15 +5137,6 @@ fn infer_resolver_expr_type_with_facts(
             args,
             resolved: None,
         } => {
-            if name == "nonNull" && !args.is_empty() {
-                return infer_resolver_expr_type_with_facts(
-                    &args[0],
-                    current_type,
-                    symbols,
-                    env,
-                    external_facts,
-                );
-            }
             let receiver_type = receiver.as_deref().map(|receiver| {
                 infer_resolver_expr_type_with_facts(
                     receiver,
@@ -4532,6 +5146,57 @@ fn infer_resolver_expr_type_with_facts(
                     external_facts,
                 )
             });
+            let receiver_owner = receiver_type.as_ref().and_then(|ty| match ty {
+                JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.as_str()),
+                _ => None,
+            });
+            if let Some(owner) = receiver_owner
+                && symbols.source_type_kind(owner).is_none()
+                && let Some(target) = crate::call_plan::plan_native_java_static_owner_call(
+                    owner,
+                    name,
+                    Some(args),
+                    env,
+                )
+            {
+                if let Some(index) = target.checked_identity_argument_index()
+                    && let Some(value) = args.get(index)
+                {
+                    // Java-level type inference preserves the entire declared
+                    // type. Carrier nullability is projected later by shape
+                    // inference; a real Optional<T> must not become T here.
+                    return infer_resolver_expr_type_with_facts(
+                        value,
+                        current_type,
+                        symbols,
+                        env,
+                        external_facts,
+                    );
+                }
+                if let Some(result) = crate::call_plan::native_java_call_lowered_type(&target) {
+                    return result.into_slot_shape().java_ty;
+                }
+            }
+            if name == "nonNull"
+                && !args.is_empty()
+                && (receiver.is_none()
+                    || receiver_owner.is_some_and(|owner| {
+                        symbols.source_type_kind(owner).is_none()
+                            && crate::javalibs::imported_static_method_returns_first_arg(
+                                owner,
+                                name,
+                                args.len(),
+                            )
+                    }))
+            {
+                return infer_resolver_expr_type_with_facts(
+                    &args[0],
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                );
+            }
             if let Some(java_ty) = infer_stream_map_return_type(
                 receiver_type.as_ref(),
                 name,
@@ -4625,6 +5290,7 @@ fn infer_resolver_expr_type_with_facts(
                     symbols,
                     external_facts,
                     None,
+                    env,
                 ) {
                     return selection.call.return_type;
                 }
@@ -4649,6 +5315,7 @@ fn infer_resolver_expr_type_with_facts(
                     symbols,
                     external_facts,
                     Some(&receiver_actual_ty),
+                    env,
                 ) {
                     return selection.call.return_type;
                 }
@@ -4922,6 +5589,7 @@ fn primary_named_intersection_bound(bound: &JavaType) -> Option<&str> {
 
 fn source_static_type_receiver(
     receiver: &Expr,
+    current_type: &str,
     symbols: &ProgramSymbols,
     env: &TypeEnv,
 ) -> Option<String> {
@@ -4932,14 +5600,16 @@ fn source_static_type_receiver(
     // field such as `Parser.parser` is still an instance value even when its
     // normalized spelling collides with the source type `Parser`; treating it
     // as a type qualifier fabricates a static call on the enclosing class.
-    if env.local_type(name).is_some() || env.field_type(name).is_some() {
+    if env.local_type(name).is_some() || env.field_type_exact(name).is_some() {
         return None;
     }
-    let source_name = symbols.source_type_name(name);
+    let source_name = symbols
+        .lexical_source_type_name(name, current_type)
+        .unwrap_or_else(|| symbols.source_type_name(name).to_string());
     symbols
         .methods_by_type
-        .contains_key(source_name)
-        .then(|| source_name.to_string())
+        .contains_key(&source_name)
+        .then_some(source_name)
 }
 
 fn source_receiver_type_from_actual(
@@ -5211,6 +5881,7 @@ fn infer_method_reference_return_type(
             symbols,
             external_facts,
             None,
+            env,
         )
         .ok()
         .flatten()
@@ -5225,6 +5896,7 @@ fn infer_method_reference_return_type(
                         symbols,
                         external_facts,
                         None,
+                        env,
                     )
                     .ok()
                     .flatten()
@@ -5253,6 +5925,7 @@ fn infer_method_reference_return_type(
             symbols,
             external_facts,
             Some(&receiver_type),
+            env,
         ) {
             return Some(selection.call.return_type);
         }
@@ -5301,6 +5974,123 @@ fn method_reference_target_type(target: &str, env: &TypeEnv) -> Option<JavaType>
         .cloned()
 }
 
+/// Resolve a unary source callback with the same applicability, generic
+/// substitution and overload ordering as an ordinary source invocation.
+pub(crate) fn resolve_single_input_source_method_reference(
+    target: &str,
+    method: &str,
+    input: &JavaType,
+    current_type: &str,
+    source_symbols: &SourceSymbols,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<ResolvedCall> {
+    let symbols = &source_symbols.symbols;
+    let bound_type = if matches!(target, "this" | "self") {
+        Some(JavaType::Named {
+            name: current_type.to_string(),
+            args: Vec::new(),
+        })
+    } else {
+        method_reference_target_type(target, env)
+    };
+    let owner = bound_type
+        .as_ref()
+        .map(java_type_simple_name)
+        .unwrap_or_else(|| env.static_type_alias(target).unwrap_or(target).to_string());
+    let methods = symbols.methods_for_hierarchy(&owner);
+    let select = |static_call: bool, args: &[JavaType], receiver: Option<&JavaType>| {
+        let candidates = methods
+            .iter()
+            .filter(|method| method.is_static == static_call)
+            .cloned()
+            .collect::<Vec<_>>();
+        resolve_same_class_call(method, args, &candidates, symbols, facts, receiver, env)
+            .ok()
+            .flatten()
+            .map(|selection| selection.call)
+    };
+    if let Some(bound_type) = bound_type {
+        return select(false, std::slice::from_ref(input), Some(&bound_type));
+    }
+    let static_call = select(true, std::slice::from_ref(input), None);
+    let receiver_type = JavaType::Named {
+        name: owner,
+        args: Vec::new(),
+    };
+    let unbound = java_type_match_score(input, &receiver_type, symbols, facts)
+        .and_then(|_| select(false, &[], Some(input)));
+    match (static_call, unbound) {
+        (Some(call), None) | (None, Some(call)) => Some(call),
+        _ => None,
+    }
+}
+
+pub(crate) fn resolve_source_call_with_types(
+    receiver: Option<&Expr>,
+    name: &str,
+    arg_types: &[JavaType],
+    current_type: &str,
+    source_symbols: &SourceSymbols,
+    env: &TypeEnv,
+    facts: &FactSet,
+) -> Option<ResolvedCall> {
+    let symbols = &source_symbols.symbols;
+    let (methods, actual) = match receiver {
+        None | Some(Expr::This) => (
+            symbols.methods_for_unqualified_call(current_type),
+            Some(JavaType::Named {
+                name: current_type.to_string(),
+                args: Vec::new(),
+            }),
+        ),
+        Some(receiver) => {
+            let actual = infer_expr_type(receiver, env);
+            let actual = crate::types::optional_element_type(&actual).unwrap_or(actual);
+            let owner = java_type_simple_name(&actual);
+            let owner = env.static_type_alias(&owner).unwrap_or(&owner);
+            let mut methods = symbols.methods_for_hierarchy(owner);
+            if matches!(receiver, Expr::Var(name) if env.local_type(name).is_none() && env.field_type(name).is_none())
+            {
+                methods.retain(|method| method.is_static);
+                (methods, None)
+            } else {
+                (methods, Some(actual))
+            }
+        }
+    };
+    resolve_same_class_call(
+        name,
+        arg_types,
+        &methods,
+        symbols,
+        facts,
+        actual.as_ref(),
+        env,
+    )
+    .ok()
+    .flatten()
+    .or_else(|| {
+        let normalized = crate::parser::to_snake_case(name);
+        (normalized != name)
+            .then(|| {
+                resolve_same_class_call(
+                    &normalized,
+                    arg_types,
+                    &methods,
+                    symbols,
+                    facts,
+                    actual.as_ref(),
+                    env,
+                )
+                .ok()
+                .flatten()
+            })
+            .flatten()
+    })
+    .map(|selection| selection.call)
+}
+
 fn resolver_common_type(
     left: &JavaType,
     right: &JavaType,
@@ -5328,7 +6118,7 @@ fn resolver_common_type(
     JavaType::Unknown("common_type".to_string())
 }
 
-fn is_null_type(ty: &JavaType) -> bool {
+pub(crate) fn is_null_type(ty: &JavaType) -> bool {
     matches!(ty, JavaType::Unknown(name) if name == "null")
 }
 
@@ -5539,6 +6329,7 @@ fn resolve_same_class_call(
     symbols: &ProgramSymbols,
     external_facts: &FactSet,
     receiver_actual_ty: Option<&JavaType>,
+    scope: &TypeEnv,
 ) -> Result<Option<MethodResolution>, String> {
     let candidates = methods
         .iter()
@@ -5560,6 +6351,15 @@ fn resolve_same_class_call(
         .iter()
         .copied()
         .filter(|method| {
+            if !method_type_arguments_satisfy_bounds(
+                method,
+                &method_call_type_substitutions(method, arg_types, receiver_actual_ty, symbols),
+                scope,
+                symbols,
+                external_facts,
+            ) {
+                return false;
+            }
             let substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
             fixed_arity_exact_match(&method.params, arg_types, &substitutions)
         })
@@ -5568,7 +6368,17 @@ fn resolve_same_class_call(
         .iter()
         .copied()
         .filter(|method| {
-            let substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
+            let substitutions =
+                method_call_type_substitutions(method, arg_types, receiver_actual_ty, symbols);
+            if !method_type_arguments_satisfy_bounds(
+                method,
+                &substitutions,
+                scope,
+                symbols,
+                external_facts,
+            ) {
+                return false;
+            }
             callable_assignable_score(
                 &method.params,
                 arg_types,
@@ -5585,6 +6395,7 @@ fn resolve_same_class_call(
         symbols,
         external_facts,
         receiver_actual_ty,
+        scope,
     );
 
     let selected = if let [one] = exact.as_slice() {
@@ -5598,7 +6409,16 @@ fn resolve_same_class_call(
         one
     } else if assignable.len() == 1 {
         assignable[0]
-    } else if assignable.is_empty() && candidates.len() == 1 {
+    } else if assignable.is_empty()
+        && candidates.len() == 1
+        && method_type_arguments_satisfy_bounds(
+            candidates[0],
+            &method_call_type_substitutions(candidates[0], arg_types, receiver_actual_ty, symbols),
+            scope,
+            symbols,
+            external_facts,
+        )
+    {
         candidates[0]
     } else if assignable.is_empty() {
         return Err(format!(
@@ -5612,12 +6432,8 @@ fn resolve_same_class_call(
         ));
     };
 
-    let mut substitutions = method_type_substitutions(selected, arg_types, symbols);
-    substitutions.extend(receiver_type_substitutions(
-        selected,
-        receiver_actual_ty,
-        symbols,
-    ));
+    let substitutions =
+        method_call_type_substitutions(selected, arg_types, receiver_actual_ty, symbols);
     let substituted_params: Vec<Param> = selected
         .params
         .iter()
@@ -5704,6 +6520,9 @@ fn method_type_substitutions(
     symbols: &ProgramSymbols,
 ) -> HashMap<String, JavaType> {
     let mut substitutions = HashMap::new();
+    if method.method_type_params.is_empty() {
+        return substitutions;
+    }
     for (param, arg_ty) in method.params.iter().zip(arg_types) {
         collect_method_type_substitutions(
             &param.ty,
@@ -5725,17 +6544,83 @@ fn receiver_type_substitutions(
         return HashMap::new();
     };
     let receiver_bounds = symbols.type_param_bounds_for(name).unwrap_or(&[]);
-    method
-        .owner_type_params
+    // Hierarchy method symbols are already specialized into the receiver's
+    // lexical generic frame. Bind that frame to actual arguments, not the
+    // original ancestor's (possibly differently named/reordered) parameters.
+    let receiver_params = symbols
+        .type_params_for(name)
+        .unwrap_or(&method.owner_type_params);
+    owner_type_argument_substitutions(
+        receiver_params,
+        &method.method_type_params,
+        args,
+        receiver_bounds,
+    )
+}
+
+/// One owner/member binding rule for methods and constructors. A member's
+/// own generic binder shadows an identically named enclosing-class binder.
+pub(crate) fn owner_type_argument_substitutions(
+    owner_params: &[String],
+    member_params: &[String],
+    args: &[JavaType],
+    bounds: &[Option<JavaType>],
+) -> HashMap<String, JavaType> {
+    owner_params
         .iter()
         .zip(args.iter().enumerate())
+        .filter(|(param_name, _)| !member_params.contains(param_name))
         .map(|(param_name, (index, arg))| {
             (
                 param_name.clone(),
-                wildcard_actual_or_declared_bound(arg, receiver_bounds.get(index)),
+                wildcard_actual_or_declared_bound(arg, bounds.get(index)),
             )
         })
         .collect()
+}
+
+fn method_call_type_substitutions(
+    method: &MethodSymbol,
+    arg_types: &[JavaType],
+    receiver_actual_ty: Option<&JavaType>,
+    symbols: &ProgramSymbols,
+) -> HashMap<String, JavaType> {
+    let mut substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
+    substitutions.extend(method_type_substitutions(method, arg_types, symbols));
+    substitutions
+}
+
+fn method_type_arguments_satisfy_bounds(
+    method: &MethodSymbol,
+    substitutions: &HashMap<String, JavaType>,
+    scope: &TypeEnv,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> bool {
+    method
+        .method_type_params
+        .iter()
+        .zip(&method.method_type_param_bounds)
+        .all(|(param, bound)| {
+            let (Some(actual), Some(bound)) = (substitutions.get(param), bound) else {
+                return true;
+            };
+            let bound = substitute_method_type_variables(bound, substitutions);
+            let accepts = |bound: &JavaType| {
+                scoped_type_arguments_are_compatible(
+                    actual,
+                    bound,
+                    scope,
+                    symbols,
+                    external_facts,
+                    &mut HashSet::new(),
+                ) && java_type_assignable(actual, bound, symbols, external_facts)
+            };
+            match &bound {
+                JavaType::Intersection(bounds) => bounds.iter().all(accepts),
+                bound => accepts(bound),
+            }
+        })
 }
 
 fn wildcard_actual_or_declared_bound(
@@ -5760,16 +6645,71 @@ fn collect_method_type_substitutions(
     symbols: &ProgramSymbols,
     method_type_params: Option<&[String]>,
 ) {
+    collect_type_substitutions(
+        param_ty,
+        arg_ty,
+        substitutions,
+        Some(symbols),
+        method_type_params,
+    );
+}
+
+/// Recover callable-binder instantiations from the resolver's selected signature.
+/// Argument targets have already been projected through source inheritance and
+/// substituted, so downstream capability planning must not infer them again
+/// from argument spelling or pair unrelated generic positions.
+pub(crate) fn resolved_method_type_substitutions(
+    owner_type_params: &[String],
+    method: &MethodDecl,
+    call: &ResolvedCall,
+) -> HashMap<String, JavaType> {
+    let type_params = owner_type_params
+        .iter()
+        .filter(|name| !method.type_params.contains(name))
+        .chain(&method.type_params)
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut substitutions = HashMap::new();
+    for (param, target) in method.params.iter().zip(&call.arg_target_types) {
+        collect_type_substitutions(
+            &param.ty,
+            target,
+            &mut substitutions,
+            None,
+            Some(&type_params),
+        );
+    }
+    collect_type_substitutions(
+        &method.return_type,
+        &call.return_type,
+        &mut substitutions,
+        None,
+        Some(&type_params),
+    );
+    substitutions
+}
+
+fn collect_type_substitutions(
+    param_ty: &JavaType,
+    arg_ty: &JavaType,
+    substitutions: &mut HashMap<String, JavaType>,
+    symbols: Option<&ProgramSymbols>,
+    method_type_params: Option<&[String]>,
+) {
     match (param_ty, arg_ty) {
         (JavaType::Named { name, args }, actual)
             if args.is_empty() && is_method_type_variable(name, method_type_params) =>
         {
-            substitutions
-                .entry(name.clone())
-                .or_insert_with(|| actual.clone());
+            // Null, unresolved calls, and un-targeted lambdas/references are
+            // not concrete types from which to infer a fresh method binder.
+            if !matches!(actual, JavaType::Unknown(_)) {
+                substitutions
+                    .entry(name.clone())
+                    .or_insert_with(|| actual.clone());
+            }
         }
         (JavaType::Array(param_inner), JavaType::Array(arg_inner)) => {
-            collect_method_type_substitutions(
+            collect_type_substitutions(
                 param_inner,
                 arg_inner,
                 substitutions,
@@ -5786,7 +6726,7 @@ fn collect_method_type_substitutions(
                 crate::java_ir::WildcardBound::Extends(inner)
                 | crate::java_ir::WildcardBound::Super(inner) => inner,
             };
-            collect_method_type_substitutions(
+            collect_type_substitutions(
                 param_inner,
                 arg_inner,
                 substitutions,
@@ -5799,7 +6739,7 @@ fn collect_method_type_substitutions(
                 crate::java_ir::WildcardBound::Extends(inner)
                 | crate::java_ir::WildcardBound::Super(inner) => inner,
             };
-            collect_method_type_substitutions(
+            collect_type_substitutions(
                 param_inner,
                 actual,
                 substitutions,
@@ -5812,7 +6752,7 @@ fn collect_method_type_substitutions(
                 crate::java_ir::WildcardBound::Extends(inner)
                 | crate::java_ir::WildcardBound::Super(inner) => inner,
             };
-            collect_method_type_substitutions(
+            collect_type_substitutions(
                 param,
                 arg_inner,
                 substitutions,
@@ -5828,16 +6768,11 @@ fn collect_method_type_substitutions(
             },
             JavaType::Named { args: arg_args, .. },
         ) => {
-            let projected_arg = if param_args.len() == 1 {
-                symbols
-                    .source_single_arg_supertype_arg(arg_ty, param_name)
-                    .map(|arg| vec![arg])
-            } else {
-                None
-            };
+            let projected_arg =
+                symbols.and_then(|symbols| symbols.source_supertype_args(arg_ty, param_name));
             let effective_arg_args = projected_arg.as_deref().unwrap_or(arg_args);
             for (param_arg, arg_arg) in param_args.iter().zip(effective_arg_args) {
-                collect_method_type_substitutions(
+                collect_type_substitutions(
                     param_arg,
                     arg_arg,
                     substitutions,
@@ -5889,6 +6824,8 @@ fn resolve_same_class_constructor(
     constructors: &[ConstructorSymbol],
     symbols: &ProgramSymbols,
     external_facts: &FactSet,
+    constructed_type: Option<&JavaType>,
+    scope: &TypeEnv,
 ) -> Result<Option<ResolvedConstructor>, String> {
     let mut seen_candidate_signatures = HashSet::new();
     let candidates = constructors
@@ -5906,7 +6843,8 @@ fn resolve_same_class_constructor(
         .iter()
         .copied()
         .filter(|constructor| {
-            let substitutions = constructor_type_substitutions(constructor, arg_types, symbols);
+            let substitutions =
+                constructor_type_substitutions(constructor, arg_types, symbols, constructed_type);
             fixed_arity_exact_match(&constructor.params, arg_types, &substitutions)
         })
         .collect::<Vec<_>>();
@@ -5914,7 +6852,18 @@ fn resolve_same_class_constructor(
         .iter()
         .copied()
         .filter(|constructor| {
-            let substitutions = constructor_type_substitutions(constructor, arg_types, symbols);
+            let substitutions =
+                constructor_type_substitutions(constructor, arg_types, symbols, constructed_type);
+            if !constructor_arguments_respect_scope(
+                constructor,
+                arg_types,
+                &substitutions,
+                scope,
+                symbols,
+                external_facts,
+            ) {
+                return false;
+            }
             callable_assignable_score(
                 &constructor.params,
                 arg_types,
@@ -5925,7 +6874,14 @@ fn resolve_same_class_constructor(
             .is_some()
         })
         .collect::<Vec<_>>();
-    let best_assignable = best_constructor_match(&candidates, arg_types, symbols, external_facts);
+    let best_assignable = best_constructor_match(
+        &candidates,
+        arg_types,
+        symbols,
+        external_facts,
+        constructed_type,
+        scope,
+    );
 
     let selected = if let [one] = exact.as_slice() {
         *one
@@ -5938,7 +6894,17 @@ fn resolve_same_class_constructor(
         one
     } else if assignable.len() == 1 {
         assignable[0]
-    } else if assignable.is_empty() && candidates.len() == 1 {
+    } else if assignable.is_empty()
+        && candidates.len() == 1
+        && constructor_arguments_respect_scope(
+            candidates[0],
+            arg_types,
+            &constructor_type_substitutions(candidates[0], arg_types, symbols, constructed_type),
+            scope,
+            symbols,
+            external_facts,
+        )
+    {
         candidates[0]
     } else if assignable.is_empty() {
         return Err(format!(
@@ -5952,7 +6918,8 @@ fn resolve_same_class_constructor(
         ));
     };
 
-    let substitutions = constructor_type_substitutions(selected, arg_types, symbols);
+    let substitutions =
+        constructor_type_substitutions(selected, arg_types, symbols, constructed_type);
     let params = selected
         .params
         .iter()
@@ -5979,10 +6946,12 @@ fn resolve_same_class_constructor(
     Ok(Some(ResolvedConstructor {
         declaring_type: selected.declaring_type.clone(),
         rust_name: selected.rust_name.clone(),
-        constructed_type: JavaType::Named {
-            name: selected.declaring_type.clone(),
-            args: Vec::new(),
-        },
+        constructed_type: constructed_type
+            .cloned()
+            .unwrap_or_else(|| JavaType::Named {
+                name: selected.declaring_type.clone(),
+                args: Vec::new(),
+            }),
         params: selected.params.clone(),
         arg_coercions,
     }))
@@ -5994,6 +6963,8 @@ fn resolve_anonymous_class_constructor(
     constructors: &[ConstructorSymbol],
     symbols: &ProgramSymbols,
     external_facts: &FactSet,
+    constructed_type: Option<&JavaType>,
+    scope: &TypeEnv,
 ) -> Result<Option<ResolvedConstructor>, String> {
     match symbols.source_type_kind(target_name) {
         Some(TypeKind::Interface) if arg_types.is_empty() => Ok(Some(ResolvedConstructor {
@@ -6006,9 +6977,14 @@ fn resolve_anonymous_class_constructor(
             params: Vec::new(),
             arg_coercions: Vec::new(),
         })),
-        Some(TypeKind::Class | TypeKind::Record) => {
-            resolve_same_class_constructor(arg_types, constructors, symbols, external_facts)
-        }
+        Some(TypeKind::Class | TypeKind::Record) => resolve_same_class_constructor(
+            arg_types,
+            constructors,
+            symbols,
+            external_facts,
+            constructed_type,
+            scope,
+        ),
         Some(TypeKind::Enum) | None => Ok(None),
         Some(TypeKind::Interface) => Ok(None),
     }
@@ -6031,12 +7007,198 @@ fn constructor_type_substitutions(
     constructor: &ConstructorSymbol,
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
+    constructed_type: Option<&JavaType>,
 ) -> HashMap<String, JavaType> {
+    let owner_params = symbols
+        .type_params_for(&constructor.declaring_type)
+        .unwrap_or(&[]);
+    let type_params = owner_params
+        .iter()
+        .chain(&constructor.type_params)
+        .cloned()
+        .collect::<Vec<_>>();
     let mut substitutions = HashMap::new();
+    if let Some(JavaType::Named { args, .. }) = constructed_type {
+        // Class arguments (including captured outer arguments) are fixed by
+        // the constructed receiver, not inference variables of each overload.
+        // A constructor's own binder may shadow a same-named class binder.
+        substitutions.extend(owner_type_argument_substitutions(
+            owner_params,
+            &constructor.type_params,
+            args,
+            symbols
+                .type_param_bounds_for(&constructor.declaring_type)
+                .unwrap_or(&[]),
+        ));
+    }
     for (param, arg_ty) in constructor.params.iter().zip(arg_types) {
-        collect_method_type_substitutions(&param.ty, arg_ty, &mut substitutions, symbols, None);
+        collect_method_type_substitutions(
+            &param.ty,
+            arg_ty,
+            &mut substitutions,
+            symbols,
+            Some(&type_params),
+        );
     }
     substitutions
+}
+
+/// Fixed type arguments may contain variables of the caller's scope. They
+/// retain those identities; they are not fresh inference variables of this
+/// constructor. Validate these constraints before applying conversion costs.
+fn constructor_arguments_respect_scope(
+    constructor: &ConstructorSymbol,
+    arg_types: &[JavaType],
+    substitutions: &HashMap<String, JavaType>,
+    scope: &TypeEnv,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> bool {
+    let param_types = constructor
+        .params
+        .iter()
+        .map(|param| substitute_method_type_variables(&param.ty, substitutions))
+        .collect::<Vec<_>>();
+    let varargs = constructor
+        .params
+        .last()
+        .is_some_and(|param| param.is_varargs);
+    arg_types.iter().enumerate().all(|(index, actual)| {
+        let target = if varargs && index >= param_types.len().saturating_sub(1) {
+            let Some(JavaType::Array(element)) = param_types.last() else {
+                return false;
+            };
+            if arg_types.len() == param_types.len()
+                && (matches!(actual, JavaType::Array(_)) || is_null_type(actual))
+            {
+                param_types.last().unwrap()
+            } else {
+                element.as_ref()
+            }
+        } else {
+            let Some(target) = param_types.get(index) else {
+                return false;
+            };
+            target
+        };
+        scoped_type_arguments_are_compatible(
+            actual,
+            target,
+            scope,
+            symbols,
+            external_facts,
+            &mut HashSet::new(),
+        )
+    })
+}
+
+fn scoped_type_arguments_are_compatible(
+    actual: &JavaType,
+    target: &JavaType,
+    scope: &TypeEnv,
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+    visiting: &mut HashSet<String>,
+) -> bool {
+    if actual == target || is_null_type(actual) {
+        return true;
+    }
+    match target {
+        JavaType::Wildcard(None) => return true,
+        JavaType::Wildcard(Some(WildcardBound::Extends(bound))) => {
+            let actual = match actual {
+                JavaType::Wildcard(Some(WildcardBound::Extends(inner))) => inner.as_ref(),
+                actual => actual,
+            };
+            return scoped_type_arguments_are_compatible(
+                actual,
+                bound,
+                scope,
+                symbols,
+                external_facts,
+                visiting,
+            );
+        }
+        JavaType::Wildcard(Some(WildcardBound::Super(bound))) => {
+            let actual = match actual {
+                JavaType::Wildcard(Some(WildcardBound::Super(inner))) => inner.as_ref(),
+                actual => actual,
+            };
+            return scoped_type_arguments_are_compatible(
+                bound,
+                actual,
+                scope,
+                symbols,
+                external_facts,
+                visiting,
+            );
+        }
+        _ => {}
+    }
+    if let JavaType::Named { name, args } = actual
+        && args.is_empty()
+        && let Some(bound) = scope.type_param_bound(name)
+    {
+        if !visiting.insert(name.clone()) {
+            return false;
+        }
+        let accepts_bound = |bound: &JavaType, visiting: &mut HashSet<String>| {
+            scoped_type_arguments_are_compatible(
+                bound,
+                target,
+                scope,
+                symbols,
+                external_facts,
+                visiting,
+            ) && java_type_assignable(bound, target, symbols, external_facts)
+        };
+        let compatible = match bound {
+            JavaType::Intersection(bounds) => {
+                bounds.iter().any(|bound| accepts_bound(bound, visiting))
+            }
+            bound => accepts_bound(bound, visiting),
+        };
+        visiting.remove(name);
+        return compatible;
+    }
+    if let JavaType::Named { name, args } = target
+        && args.is_empty()
+        && scope.type_param_bound(name).is_some()
+    {
+        // No concrete class can be assumed to be a particular unknown T.
+        // The actual-variable case above proves valid U extends T flows.
+        return false;
+    }
+    match (actual, target) {
+        (JavaType::Array(actual), JavaType::Array(target)) => scoped_type_arguments_are_compatible(
+            actual,
+            target,
+            scope,
+            symbols,
+            external_facts,
+            visiting,
+        ),
+        (
+            JavaType::Named {
+                args: actual_args, ..
+            },
+            JavaType::Named { name, args },
+        ) => {
+            let projected = symbols.source_supertype_args(actual, name);
+            let actual_args = projected.as_deref().unwrap_or(actual_args);
+            actual_args.iter().zip(args).all(|(actual, target)| {
+                scoped_type_arguments_are_compatible(
+                    actual,
+                    target,
+                    scope,
+                    symbols,
+                    external_facts,
+                    visiting,
+                )
+            })
+        }
+        _ => true,
+    }
 }
 
 fn best_method_match<'a>(
@@ -6045,11 +7207,22 @@ fn best_method_match<'a>(
     symbols: &ProgramSymbols,
     external_facts: &FactSet,
     receiver_actual_ty: Option<&JavaType>,
+    scope: &TypeEnv,
 ) -> Option<&'a MethodSymbol> {
-    let mut scored = candidates
+    let scored = candidates
         .iter()
         .filter_map(|method| {
-            let substitutions = receiver_type_substitutions(method, receiver_actual_ty, symbols);
+            let substitutions =
+                method_call_type_substitutions(method, arg_types, receiver_actual_ty, symbols);
+            if !method_type_arguments_satisfy_bounds(
+                method,
+                &substitutions,
+                scope,
+                symbols,
+                external_facts,
+            ) {
+                return None;
+            }
             let param_types = method
                 .params
                 .iter()
@@ -6062,15 +7235,10 @@ fn best_method_match<'a>(
                 symbols,
                 external_facts,
             )
-            .map(|score| (*method, score))
+            .map(|score| (*method, score, param_types))
         })
         .collect::<Vec<_>>();
-    scored.sort_by_key(|(_, score)| *score);
-    match scored.as_slice() {
-        [(method, _)] => Some(*method),
-        [(first, first_score), (_, second_score), ..] if first_score < second_score => Some(*first),
-        _ => None,
-    }
+    select_best_callable(scored, arg_types, symbols, external_facts)
 }
 
 fn best_constructor_match<'a>(
@@ -6078,26 +7246,99 @@ fn best_constructor_match<'a>(
     arg_types: &[JavaType],
     symbols: &ProgramSymbols,
     external_facts: &FactSet,
+    constructed_type: Option<&JavaType>,
+    scope: &TypeEnv,
 ) -> Option<&'a ConstructorSymbol> {
-    let mut scored = candidates
+    let scored = candidates
         .iter()
         .filter_map(|constructor| {
-            let substitutions = constructor_type_substitutions(constructor, arg_types, symbols);
-            callable_assignable_score(
+            let substitutions =
+                constructor_type_substitutions(constructor, arg_types, symbols, constructed_type);
+            if !constructor_arguments_respect_scope(
+                constructor,
+                arg_types,
+                &substitutions,
+                scope,
+                symbols,
+                external_facts,
+            ) {
+                return None;
+            }
+            let param_types = constructor
+                .params
+                .iter()
+                .map(|param| substitute_method_type_variables(&param.ty, &substitutions))
+                .collect::<Vec<_>>();
+            callable_match_score(
                 &constructor.params,
+                &param_types,
                 arg_types,
                 symbols,
                 external_facts,
-                Some(&substitutions),
             )
-            .map(|score| (*constructor, score))
+            .map(|score| (*constructor, score, param_types))
         })
         .collect::<Vec<_>>();
-    scored.sort_by_key(|(_, score)| *score);
-    match scored.as_slice() {
-        [(constructor, _)] => Some(*constructor),
-        [(first, first_score), (_, second_score), ..] if first_score < second_score => Some(*first),
-        _ => None,
+    select_best_callable(scored, arg_types, symbols, external_facts)
+}
+
+/// Share the final specificity comparison between method and constructor
+/// overloads. Equal conversion costs do not imply ambiguity when exactly one
+/// instantiated parameter list is strictly narrower than every other one.
+fn select_best_callable<'a, T>(
+    mut scored: Vec<(&'a T, u32, Vec<JavaType>)>,
+    arg_types: &[JavaType],
+    symbols: &ProgramSymbols,
+    external_facts: &FactSet,
+) -> Option<&'a T> {
+    let best_score = scored.iter().map(|(_, score, _)| *score).min()?;
+    scored.retain(|(_, score, _)| *score == best_score);
+    if scored.len() == 1 {
+        return Some(scored[0].0);
+    }
+    // Unknown receiver/call results are not proof of applicability. Do not
+    // manufacture a target merely because one overload has a narrower type.
+    if arg_types
+        .iter()
+        .any(type_contains_unresolved_overload_evidence)
+    {
+        return None;
+    }
+    scored
+        .iter()
+        .enumerate()
+        .find_map(|(index, (callable, _, params))| {
+            scored
+                .iter()
+                .enumerate()
+                .all(|(other_index, (_, _, other_params))| {
+                    index == other_index
+                        || (params.len() == other_params.len()
+                            && params.iter().zip(other_params).all(|(param, other)| {
+                                java_type_assignable(param, other, symbols, external_facts)
+                            })
+                            && params.iter().zip(other_params).any(|(param, other)| {
+                                !java_type_assignable(other, param, symbols, external_facts)
+                            }))
+                })
+                .then_some(*callable)
+        })
+}
+
+fn type_contains_unresolved_overload_evidence(ty: &JavaType) -> bool {
+    match ty {
+        JavaType::Unknown(name) => name != "null",
+        JavaType::Named { args, .. } | JavaType::Intersection(args) => {
+            args.iter().any(type_contains_unresolved_overload_evidence)
+        }
+        JavaType::Array(inner) => type_contains_unresolved_overload_evidence(inner),
+        JavaType::Wildcard(Some(bound)) => match bound {
+            crate::java_ir::WildcardBound::Extends(inner)
+            | crate::java_ir::WildcardBound::Super(inner) => {
+                type_contains_unresolved_overload_evidence(inner)
+            }
+        },
+        _ => false,
     }
 }
 
@@ -7423,112 +8664,16 @@ fn collect_interface_object_safety_violations(
 ) {
     for member in &ty.members {
         match member {
-            Member::Method(method) => {
-                push_interface_method_object_safety_violations(&ty.name, method, violations)
-            }
+            // A named Java interface is a reference value, including when it
+            // names the enclosing interface. Its Rust carrier is a boxed or
+            // shared trait object, never Rust's unsized `Self`. Generic
+            // methods have their separate `Self: Sized` signature boundary.
+            Member::Method(_) => {}
             Member::Type(_) => {}
             Member::Unsupported { .. } => violations.push(ObjectSafetyViolation::UnsupportedMember),
             Member::Field(_) => {}
             Member::Constructor(_) => violations.push(ObjectSafetyViolation::ConstructorMember),
         }
-    }
-}
-
-fn push_interface_method_object_safety_violations(
-    interface_name: &str,
-    method: &MethodDecl,
-    violations: &mut Vec<ObjectSafetyViolation>,
-) {
-    if method.modifiers.contains(&Modifier::Static) {
-        return;
-    }
-    let combinator_self_return = is_combinator_self_return_method(method, interface_name);
-    match java_type_self_reference_kind(&method.return_type, interface_name) {
-        Some(InterfaceSelfReferenceKind::Direct)
-            if !is_clone_like_self_return_method(method) && !combinator_self_return =>
-        {
-            violations.push(ObjectSafetyViolation::SelfReferentialReturn {
-                method_name: method.name.clone(),
-            });
-        }
-        Some(InterfaceSelfReferenceKind::Direct) => {}
-        Some(InterfaceSelfReferenceKind::Nested) => {
-            violations.push(ObjectSafetyViolation::NestedSelfReferentialReturn {
-                method_name: method.name.clone(),
-            });
-        }
-        None => {}
-    }
-    for param in &method.params {
-        if combinator_self_return {
-            continue;
-        }
-        match java_type_self_reference_kind(&param.ty, interface_name) {
-            Some(InterfaceSelfReferenceKind::Direct) => {}
-            Some(InterfaceSelfReferenceKind::Nested) => {
-                violations.push(ObjectSafetyViolation::NestedSelfReferentialParameter {
-                    method_name: method.name.clone(),
-                    param_name: param.name.clone(),
-                });
-            }
-            None => {}
-        }
-    }
-}
-
-fn is_clone_like_self_return_method(method: &MethodDecl) -> bool {
-    method.params.is_empty() && matches!(method.name.as_str(), "copy" | "deepCopy" | "clone")
-}
-
-fn is_combinator_self_return_method(method: &MethodDecl, interface_name: &str) -> bool {
-    matches!(
-        method.name.as_str(),
-        "and" | "or" | "negate" | "andThen" | "compose"
-    ) && java_type_self_reference_kind(&method.return_type, interface_name)
-        == Some(InterfaceSelfReferenceKind::Direct)
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum InterfaceSelfReferenceKind {
-    Direct,
-    Nested,
-}
-
-fn java_type_self_reference_kind(
-    java_ty: &JavaType,
-    type_name: &str,
-) -> Option<InterfaceSelfReferenceKind> {
-    match java_ty {
-        JavaType::Named { name, args } => {
-            if name == type_name {
-                Some(InterfaceSelfReferenceKind::Direct)
-            } else if args
-                .iter()
-                .any(|arg| java_type_self_reference_kind(arg, type_name).is_some())
-            {
-                Some(InterfaceSelfReferenceKind::Nested)
-            } else {
-                None
-            }
-        }
-        JavaType::Array(inner) => java_type_self_reference_kind(inner, type_name)
-            .map(|_| InterfaceSelfReferenceKind::Nested),
-        JavaType::Intersection(bounds) => bounds
-            .iter()
-            .find_map(|bound| java_type_self_reference_kind(bound, type_name))
-            .map(|_| InterfaceSelfReferenceKind::Nested),
-        JavaType::Wildcard(Some(bound)) => match bound {
-            crate::java_ir::WildcardBound::Extends(bound)
-            | crate::java_ir::WildcardBound::Super(bound) => {
-                java_type_self_reference_kind(bound, type_name)
-                    .map(|_| InterfaceSelfReferenceKind::Nested)
-            }
-        },
-        JavaType::Void
-        | JavaType::Primitive(_)
-        | JavaType::String
-        | JavaType::Wildcard(None)
-        | JavaType::Unknown(_) => None,
     }
 }
 
@@ -7605,10 +8750,7 @@ impl CaptureAnalyzer {
                 // Member interfaces, enums, and records are implicitly static
                 // in Java.  Only a non-static member class has an enclosing
                 // instance to capture.
-                Member::Type(inner)
-                    if inner.kind == TypeKind::Class
-                        && !inner.modifiers.contains(&Modifier::Static) =>
-                {
+                Member::Type(inner) if inner.has_enclosing_instance_in(ty.kind) => {
                     let mut inner_enclosing_types = enclosing_types.to_vec();
                     inner_enclosing_types.push(ty);
                     self.analyze_inner_type(inner, ty, &inner_enclosing_types)
@@ -8462,6 +9604,55 @@ mod tests {
     use super::*;
 
     #[test]
+    fn nested_parent_edges_keep_lexical_identity_and_generic_arguments() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class First {
+    interface Child<X> extends Parent<X> {}
+    interface Parent<T> { T value(); }
+}
+class Second {
+    interface Parent<T> { int other(); }
+    interface Child<X> extends Parent<X> {}
+}
+"#,
+        );
+        let mut program = parsed.program;
+        qualify_nested_type_names(&mut program);
+        let symbols = ProgramSymbols::from_program(&program);
+        let methods = symbols.methods_for_hierarchy("First.Child");
+        let inherited = methods
+            .iter()
+            .find(|method| method.java_name == "value")
+            .unwrap();
+        assert_eq!(inherited.declaring_type, "First.Parent");
+        assert_eq!(
+            inherited.return_type,
+            JavaType::Named {
+                name: "X".into(),
+                args: vec![]
+            }
+        );
+        assert!(!methods.iter().any(|method| method.java_name == "other"));
+        assert!(
+            symbols
+                .methods_for_hierarchy("Second.Child")
+                .iter()
+                .any(|method| method.java_name == "other")
+        );
+        assert_eq!(
+            symbols.source_supertype_args(
+                &JavaType::Named {
+                    name: "First.Child".into(),
+                    args: vec![JavaType::String]
+                },
+                "First.Parent",
+            ),
+            Some(vec![JavaType::String])
+        );
+    }
+
+    #[test]
     fn explicit_nested_type_import_retains_its_source_owner_identity() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -8737,6 +9928,7 @@ class Path {}
     #[test]
     fn mutated_name_scan_sees_qualified_new_receiver() {
         let expr = Expr::New {
+            infer_type_arguments: false,
             ty: JavaType::Unknown("Inner".to_string()),
             qualifier: Some(Box::new(Expr::Unary {
                 op: crate::java_ir::UnaryOp::PostInc,
@@ -8801,5 +9993,32 @@ class Path {}
                 .outer_this_type_for_type("Outer.Pair")
                 .is_none()
         );
+    }
+
+    #[test]
+    fn interface_member_class_has_no_enclosing_instance_or_outer_type_parameters() {
+        let parsed = crate::parser::parse_java_source(
+            "interface Factory<T> { class Value<U> { U item; Value(U item) { this.item = item; } } }",
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            resolved
+                .facts
+                .captures
+                .outer_this_type_for_type("Factory.Value")
+                .is_none()
+        );
+        let nested = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| {
+                if let Member::Type(ty) = member {
+                    Some(ty)
+                } else {
+                    None
+                }
+            })
+            .expect("member class");
+        assert_eq!(nested.type_params, vec!["U"]);
     }
 }

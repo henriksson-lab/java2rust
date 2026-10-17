@@ -108,7 +108,13 @@ fn emit_impl(imp: &RustImpl) -> String {
         format!("impl {target} {{\n")
     };
     for associated_const in &imp.associated_consts {
-        let vis = if associated_const.is_pub { "pub " } else { "" };
+        let vis = if associated_const.is_pub {
+            "pub "
+        } else if associated_const.is_pub_crate {
+            "pub(crate) "
+        } else {
+            ""
+        };
         out.push_str(&format!(
             "    {vis}const {}: {} = {};\n\n",
             rust_ident(&associated_const.name),
@@ -609,8 +615,8 @@ fn emit_closure_expr(
     let params = params
         .iter()
         .map(|param| match &param.ty {
-            Some(ty) => format!("{}: {ty}", param.pattern),
-            None => param.pattern.clone(),
+            Some(ty) => format!("{}: {ty}", emit_closure_param_pattern(&param.pattern)),
+            None => emit_closure_param_pattern(&param.pattern),
         })
         .collect::<Vec<_>>()
         .join(", ");
@@ -627,6 +633,28 @@ fn emit_closure_expr(
             format!("{move_prefix}|{params}| {body}")
         }
     }
+}
+
+fn emit_closure_param_pattern(pattern: &str) -> String {
+    // Java lambda parameters enter the IR as simple binding names. Keep
+    // structured Rust patterns emitted by lowering intact, but route a simple
+    // binding through the same keyword policy as every other Rust binding.
+    // Otherwise a legal Java parameter such as `type` is escaped in its uses
+    // (`r#type`) but emitted unescaped at the closure boundary.
+    let is_simple_ident = |name: &str| {
+        name.chars().enumerate().all(|(index, ch)| {
+            ch == '_' || ch.is_ascii_alphanumeric() && (index > 0 || !ch.is_ascii_digit())
+        })
+    };
+    if is_simple_ident(pattern) {
+        return rust_ident(pattern);
+    }
+    if let Some(name) = pattern.strip_prefix("mut ")
+        && is_simple_ident(name)
+    {
+        return format!("mut {}", rust_ident(name));
+    }
+    pattern.to_string()
 }
 
 fn emit_typed_closure_body(body: &crate::rust_ir::RustClosureBody) -> String {
@@ -1398,6 +1426,20 @@ mod tests {
                 ]))),
             }),
             "move |(k, v): (String, i32)| (k, v)"
+        );
+        assert_eq!(
+            emit_expr(&RustExpr::Closure {
+                is_move: false,
+                return_type: None,
+                params: vec![crate::rust_ir::RustClosureParam {
+                    pattern: "type".to_string(),
+                    ty: Some("i32".to_string()),
+                }],
+                body: crate::rust_ir::RustClosureBody::Expr(Box::new(RustExpr::Var(
+                    "type".to_string(),
+                ))),
+            }),
+            "|r#type: i32| r#type"
         );
         assert_eq!(
             emit_expr(&RustExpr::Closure {

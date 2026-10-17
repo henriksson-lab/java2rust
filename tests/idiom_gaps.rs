@@ -5072,10 +5072,10 @@ class StrictMathCommonUse {
             && translation.rust.contains("java_math_round_f32(value)")
             && translation
                 .rust
-                .contains("java_math_floor_div_i32_result(left as i32, right as i32).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+                .contains("return Ok(java_math_floor_div_i32_result(left as i32, right as i32)?);")
             && translation
                 .rust
-                .contains("java_math_floor_mod_i32_result(left as i32, right as i32).unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))")
+                .contains("return Ok(java_math_floor_mod_i32_result(left as i32, right as i32)?);")
             && translation.rust.contains("java_math_max_f64(left, right)")
             && !translation.rust.contains("StrictMath::sqrt")
             && !translation.rust.contains("StrictMath::pow")
@@ -5087,7 +5087,7 @@ class StrictMathCommonUse {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "strict_math_common_use",
         vec![GeneratedCrateModule {
             name: "fixture",
@@ -5102,8 +5102,10 @@ mod generated_tests {
         assert_eq!(StrictMathCommonUse::shaped(4.0), 2.0 + 16.0 + 4.0);
         assert_eq!(StrictMathCommonUse::rounded(-2.5), -2);
         assert_eq!(StrictMathCommonUse::rounded_float(-2.5), -2);
-        assert_eq!(StrictMathCommonUse::floor_div(-7, 2), -4);
-        assert_eq!(StrictMathCommonUse::floor_mod(7, -2), -1);
+        assert_eq!(StrictMathCommonUse::floor_div(-7, 2).unwrap(), -4);
+        assert_eq!(StrictMathCommonUse::floor_mod(7, -2).unwrap(), -1);
+        assert!(StrictMathCommonUse::floor_div(1, 0).unwrap_err().is_instance(&["ArithmeticException"]));
+        assert!(StrictMathCommonUse::floor_mod(1, 0).unwrap_err().is_instance(&["ArithmeticException"]));
         assert!(StrictMathCommonUse::max_double(f64::NAN, 1.0).is_nan());
     }
 }
@@ -5397,6 +5399,7 @@ class ExplicitPrimitiveCastWholeShift {
         return (int)((bits >> 52) & 2047L);
     }
 }
+
 "#,
     );
 
@@ -5418,6 +5421,53 @@ class ExplicitPrimitiveCastWholeShift {
             name: "fixture",
             rust: translation.rust,
             tests: "",
+        }],
+    );
+}
+
+#[test]
+fn integral_complement_uses_rust_bitwise_not_without_placeholder() {
+    let translation = translate_source(
+        r#"
+class IntegralComplementUse {
+    static int clearLowBits(int value) {
+        return value & ~3;
+    }
+    static int byteValue(byte value) { return ~value; }
+    static int shortValue(short value) { return ~value; }
+    static int charValue(char value) { return ~value; }
+    static long longValue(long value) { return ~value; }
+    static int selected(int value) { return 1; }
+    static int selected(byte value) { return 2; }
+    static int selectPromoted(byte value) { return selected(~value); }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("value & !3")
+            && !translation
+                .rust
+                .contains("unsupported unary_expression operator"),
+        "{}",
+        translation.rust
+    );
+    cargo_test_generated_modules(
+        "integral_complement_uses_rust_bitwise_not_without_placeholder",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn complement_preserves_java_width_and_promotion() {
+    assert_eq!(IntegralComplementUse::clear_low_bits(15), 12);
+    assert_eq!(IntegralComplementUse::byte_value(-128), 127);
+    assert_eq!(IntegralComplementUse::short_value(32767), -32768);
+    assert_eq!(IntegralComplementUse::char_value('\u{ffff}'), -65536);
+    assert_eq!(IntegralComplementUse::long_value(i64::MIN), i64::MAX);
+    assert_eq!(IntegralComplementUse::select_promoted(3), 1);
+}
+"#,
         }],
     );
 }
@@ -24625,19 +24675,19 @@ class InterfaceDefaultOverloadIdentity {
             .contains("pub fn f_int(&self, a: i32) -> i32")
             && translation
                 .rust
-                .contains("pub fn f_string(&self, s: &str) -> Result<i32, JavaException>")
+                .contains("pub fn f_string(&self, s: &str) -> i32")
             && translation.rust.contains("self.f_int(1)")
             && translation.rust.contains("self.f_string(")
             && !translation.rust.contains("pub fn f(&self, a: i32)"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "interface_default_overloads_count_for_implementor_override_names",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: "#[test] fn overridden_and_inherited_overloads_execute() { assert_eq!(InterfaceDefaultOverloadIdentity_Impl::new().both(), 1103); }",
         }],
     );
 }
@@ -28002,12 +28052,20 @@ class GenericOuter<T> {
 "#,
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "non_static_inner_generic_outer_params",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn explicit_inner_argument_is_instantiated_and_keeps_its_outer() {
+    let owner = std::rc::Rc::new(std::cell::RefCell::new(GenericOuter::<i32>::new()));
+    let inner = GenericOuter::make_with_outer(owner.clone(), "retained".to_string());
+    assert_eq!(inner.inner.as_deref(), Some("retained"));
+    assert!(std::rc::Rc::ptr_eq(&owner, &inner.__outer));
+}
+"#,
         }],
     );
 }
@@ -33955,6 +34013,47 @@ fn same_handle_replaces_but_equal_fields_on_a_distinct_object_do_not() {
 }
 
 #[test]
+fn nullable_generic_hash_field_preserves_option_around_java_key_semantics() {
+    let translation = translate_source(
+        r#"
+import java.util.HashMap;
+import java.util.Map;
+
+class NullableHashOwner<T> {
+    private Map<T, Integer> values;
+
+    int size() {
+        if (values == null) {
+            return 0;
+        }
+        return values.size();
+    }
+
+    void reset() {
+        values = new HashMap<T, Integer>();
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation
+            .rust
+            .contains("values: Option<JavaSemanticHashMap<T, i32>>"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "nullable_generic_hash_field",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
 fn bounded_class_token_storage_selects_existing_source_hierarchy_carrier() {
     let translation = translate_source(
         r#"
@@ -37788,12 +37887,12 @@ class CheckedBase {
     );
 
     assert!(
-        translation.rust.contains("name: Some(name)")
-            && translation.rust.contains("count: count")
-            && translation.rust.contains("kind: Some(kind)")
+        translation.rust.contains("__java_self.name = Some(name)")
+            && translation.rust.contains("__java_self.count =")
+            && translation.rust.contains("__java_self.kind = Some(kind)")
             && translation
                 .rust
-                .contains("target: Some(\"CHILD\".to_string())")
+                .contains("__java_self.target = Some(\"CHILD\".to_string())")
             && translation
                 .rust
                 .contains("-> Result<CheckedChild, JavaException>")
@@ -37809,12 +37908,22 @@ class CheckedBase {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "source_super_constructor_with_trailing_throw_guard",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn superclass_initialization_precedes_child_guard() {
+    let value = CheckedChild::new("name".to_string(), 2, "kind".to_string()).unwrap();
+    assert_eq!(value.name.as_deref(), Some("name"));
+    assert_eq!(value.count, 2);
+    assert_eq!(value.kind.as_deref(), Some("kind"));
+    assert_eq!(value.target.as_deref(), Some("CHILD"));
+    assert!(CheckedChild::new("name".to_string(), -1, "kind".to_string()).is_err());
+}
+"#,
         }],
     );
 }
@@ -37912,7 +38021,7 @@ class ParsedBase {
 
     let parsed_pos = translation.rust.find("let parsed").unwrap_or_else(|| {
         panic!(
-            "child constructor local should be emitted before self construction:\n{}",
+            "child constructor local should be emitted:\n{}",
             translation.rust
         )
     });
@@ -37926,9 +38035,13 @@ class ParsedBase {
             )
         });
     assert!(
-        parsed_pos < self_pos
-            && translation.rust.contains("key: Some(\"KEY\".to_string())")
-            && translation.rust.contains("value: Some(\"\".to_string())")
+        self_pos < parsed_pos
+            && translation
+                .rust
+                .contains("__java_self.key = Some(\"KEY\".to_string())")
+            && translation
+                .rust
+                .contains("__java_self.value = Some(\"\".to_string())")
             && translation
                 .rust
                 .contains("__java_self.name = Some(std::clone::Clone::clone(&parsed)")
@@ -37943,12 +38056,24 @@ class ParsedBase {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "source_super_constructor_with_child_locals",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn child_locals_and_conditional_stores_follow_superclass_initialization() {
+    let modern = ParsedChild::new(" value ", true);
+    assert_eq!(modern.key.as_deref(), Some("KEY"));
+    assert_eq!(modern.value.as_deref(), Some(""));
+    assert_eq!(modern.name.as_deref(), Some("value"));
+    assert_eq!(modern.source.as_deref(), Some("value"));
+    let legacy = ParsedChild::new(" legacy ", false);
+    assert_eq!(legacy.name.as_deref(), Some("legacy"));
+    assert_eq!(legacy.source, None);
+}
+"#,
         }],
     );
 }
@@ -38202,7 +38327,7 @@ fn source_super_constructor_composes_delegated_parameter_bindings() {
     assert!(
         translation
             .rust
-            .contains("kind: Some(SourceSuperDelegatedParamSubstitutionBase_Kind::FORMAT)")
+            .contains("SourceSuperDelegatedParamSubstitutionBase_Kind::FORMAT")
             && translation.rust.contains("r#type: 7")
             && !translation.rust.contains("self.kind")
             && !translation.rust.contains("self.r#type")
@@ -38214,12 +38339,19 @@ fn source_super_constructor_composes_delegated_parameter_bindings() {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "source_super_constructor_composes_delegated_parameter_bindings",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn delegation_preserves_the_enum_and_primitive_arguments() {
+    let value = SourceSuperDelegatedParamSubstitution::new();
+    assert!(matches!(value.kind, Some(SourceSuperDelegatedParamSubstitutionBase_Kind::FORMAT)));
+    assert_eq!(value.r#type, 7);
+}
+"#,
         }],
     );
 }
@@ -38289,7 +38421,7 @@ class MaterializedNullGuardChild extends MaterializedNullGuardBase {
     );
 
     assert_eq!(
-        translation.rust.matches("Self::parse(line)").count(),
+        translation.rust.matches("::parse(line)").count(),
         1,
         "{}",
         translation.rust
@@ -44416,6 +44548,11 @@ class InnerOuterStaticField {
             values = new byte[SIZE];
         }
     }
+    static int probe() {
+        InnerOuterStaticField owner = new InnerOuterStaticField();
+        Inner value = owner.new Inner();
+        return value.values.length;
+    }
 }
 "#,
     );
@@ -44423,18 +44560,23 @@ class InnerOuterStaticField {
     assert!(
         !translation.rust.contains("self.__outer.borrow().s_i_z_e")
             && !translation.rust.contains("self.__outer.borrow().size")
-            && translation.rust.contains("__static_s_i_z_e")
+            && translation.rust.contains("__static_SIZE")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "inner_outer_static_field_constructor",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn constructor_reads_the_declaring_class_static() {
+    assert_eq!(InnerOuterStaticField::probe(), 4);
+}
+"#,
         }],
     );
 }
@@ -44501,6 +44643,9 @@ class InnerMethodCompanionRoute {
         B makeViaOuter() {
             return make();
         }
+
+        int makeLocal() { return 13; }
+        int local() { return makeLocal(); }
     }
 
     class B {
@@ -44512,6 +44657,15 @@ class InnerMethodCompanionRoute {
     B make() {
         return new B();
     }
+    int makeLocal() { return 21; }
+    static int probe() {
+        InnerMethodCompanionRoute owner = new InnerMethodCompanionRoute();
+        A first = owner.new A();
+        if (first.local() != 13) return -1;
+        B second = first.makeViaOuter();
+        owner.value = 11;
+        return second.get();
+    }
 }
 "#,
     );
@@ -44519,17 +44673,23 @@ class InnerMethodCompanionRoute {
     assert!(
         translation
             .rust
-            .contains("return InnerMethodCompanionRoute::make_with_outer(self.__outer.clone());"),
+            .contains("return InnerMethodCompanionRoute::make_with_outer(")
+            && translation.rust.contains("self.__outer"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "inner_method_companion_route",
         vec![GeneratedCrateModule {
             name: "inner_method_companion_route",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn method_companion_retains_the_same_outer_identity() {
+    assert_eq!(InnerMethodCompanionRoute::probe(), 11);
+}
+"#,
         }],
     );
 }
@@ -45473,9 +45633,7 @@ class ExternalEnumConstantDisplay {
         translation
             .rust
             .contains("impl std::fmt::Display for ExternalEnum")
-            && translation
-                .rust
-                .contains("write!(f, \"{}\", self.to_string())")
+            && translation.rust.contains("write!(f, \"{}\", self.name())")
             && translation
                 .rust
                 .contains("if let Some(value) = value.downcast_ref::<ExternalEnum>()")
@@ -45486,12 +45644,17 @@ class ExternalEnumConstantDisplay {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "display_capable_external_enum_constant_display",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn erased_enum_display_retains_the_constant_name() {
+    assert_eq!(ExternalEnumConstantDisplay::new().describe(), "A");
+}
+"#,
         }],
     );
 }
@@ -47385,7 +47548,7 @@ class ReusedSharedChild extends ReusedSharedBase {
         r#"
 #[test]
 fn shared_constructor_argument_survives_field_storage_and_later_reads() {
-    assert_eq!(ReusedSharedChild::run(), Ok(7));
+    assert_eq!(ReusedSharedChild::run(), 7);
 }
 "#,
     );
@@ -63181,18 +63344,27 @@ class CommonsMathLocalizedFormatUse {
         translation.rust
     );
     assert!(
-        translation
-            .rust
-            .contains("pub const OVERFLOW: LocalizedFormats = LocalizedFormats;"),
+        translation.rust.contains("pub enum LocalizedFormats {")
+            && translation.rust.contains("    OVERFLOW,")
+            && !translation
+                .rust
+                .contains("pub const OVERFLOW: LocalizedFormats = LocalizedFormats;"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "commons_math_localized_formats_pack_fields",
         vec![GeneratedCrateModule {
             name: "commons_math_localized_format_use",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn enum_value_and_translated_display_execute() {
+    let value = LocalizedFormats::OVERFLOW;
+    assert_eq!(value, value.clone());
+    assert!(!CommonsMathLocalizedFormatUse::new().message().is_empty());
+}
+"#,
         }],
     );
 }
@@ -68537,7 +68709,8 @@ class Sink {
     );
 
     assert!(
-        translation.rust.contains(".write_string(\"value\")")
+        translation.rust.contains("Sink::write_string_with_outer(")
+            && translation.rust.contains(", \"value\")")
             && !translation.rust.contains(".write(\"value\""),
         "{}",
         translation.rust
@@ -68998,6 +69171,46 @@ class SharedFieldCollector {
     );
     cargo_check_generated_modules(
         "shared_field_constructor_assignment_and_companion_call",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: "",
+        }],
+    );
+}
+
+#[test]
+fn enhanced_for_shared_source_field_write_uses_mutable_storage_projection() {
+    let translation = translate_source(
+        r#"
+import java.util.ArrayList;
+import java.util.List;
+
+class SharedLoopOwner<T> {
+    class SharedLoopNode {
+        int visited;
+    }
+    List<SharedLoopNode> nodes = new ArrayList<>();
+
+    void clear() {
+        for (SharedLoopNode node : nodes) {
+            node.visited = 0;
+        }
+    }
+}
+"#,
+    );
+
+    assert!(
+        translation.rust.contains("borrow_mut().visited = 0")
+            && !translation
+                .rust
+                .contains("__java_shared_field_guard.visited } = 0"),
+        "{}",
+        translation.rust
+    );
+    cargo_check_generated_modules(
+        "enhanced_for_shared_source_field_write_uses_mutable_storage_projection",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
@@ -70217,7 +70430,11 @@ class LoopChild extends LoopBase {
     );
 
     assert!(
-        translation.rust.contains("while i < source.size()")
+        translation.rust.matches("source.size()").count() == 1
+            && translation
+                .rust
+                .contains("let __java_super_arg_0 = source.size();")
+            && translation.rust.contains("while i < __java_super_arg_0")
             && !translation.rust.contains("compile_error!"),
         "{}",
         translation.rust
@@ -70228,7 +70445,7 @@ class LoopChild extends LoopBase {
         r#"
 #[test]
 fn delegated_super_loop_uses_the_call_argument() {
-    assert_eq!(LoopChild::run().unwrap(), 10);
+    assert_eq!(LoopChild::run(), 10);
 }
 "#,
     );

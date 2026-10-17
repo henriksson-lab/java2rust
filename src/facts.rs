@@ -36,6 +36,7 @@ pub struct FactSet {
     pub closed_hierarchy_facts: Vec<ClosedHierarchyFact>,
     pub sealed_permits_facts: Vec<SealedPermitsFact>,
     pub object_safety_facts: Vec<ObjectSafetyFact>,
+    pub source_interface_upcast_facts: Vec<SourceInterfaceUpcastFact>,
     pub generic_parameter_variance_facts: Vec<GenericParameterVarianceFact>,
     pub type_capability_overrides: Vec<TypeCapabilityOverride>,
     pub owned_recovery_capability_facts: Vec<OwnedRecoveryCapabilityFact>,
@@ -83,6 +84,7 @@ impl Default for FactSet {
             closed_hierarchy_facts: Vec::new(),
             sealed_permits_facts: Vec::new(),
             object_safety_facts: Vec::new(),
+            source_interface_upcast_facts: Vec::new(),
             generic_parameter_variance_facts: Vec::new(),
             type_capability_overrides: Vec::new(),
             owned_recovery_capability_facts: Vec::new(),
@@ -124,10 +126,10 @@ impl Default for FactSet {
 #[derive(Debug, Clone)]
 pub struct ExternalFactLookupIndex<'a> {
     facts: &'a FactSet,
-    external_api_by_method_alias: HashMap<String, Vec<usize>>,
+    external_api_by_method_alias: RefCell<Option<HashMap<String, Vec<usize>>>>,
     external_api_candidates_by_query: RefCell<HashMap<String, Rc<[usize]>>>,
-    external_field_by_name_alias: HashMap<String, Vec<usize>>,
-    external_field_value_by_name_alias: HashMap<String, Vec<usize>>,
+    external_field_by_name_alias: RefCell<Option<HashMap<String, Vec<usize>>>>,
+    external_field_value_by_name_alias: RefCell<Option<HashMap<String, Vec<usize>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,42 +164,52 @@ pub(crate) fn hierarchy_lookup_index_build_count() -> usize {
 
 impl<'a> ExternalFactLookupIndex<'a> {
     pub fn new(facts: &'a FactSet) -> Self {
-        let mut external_api_by_method_alias = HashMap::<String, Vec<usize>>::new();
-        for (index, fact) in facts.external_api_effect_facts.iter().enumerate() {
-            for alias in external_method_name_aliases(&fact.method_name).iter() {
-                external_api_by_method_alias
-                    .entry(alias.clone())
-                    .or_default()
-                    .push(index);
-            }
-        }
-
-        let mut external_field_by_name_alias = HashMap::<String, Vec<usize>>::new();
-        for (index, fact) in facts.external_field_facts.iter().enumerate() {
-            for alias in external_field_name_aliases(&fact.field.field_name) {
-                external_field_by_name_alias
-                    .entry(alias)
-                    .or_default()
-                    .push(index);
-            }
-        }
-        let mut external_field_value_by_name_alias = HashMap::<String, Vec<usize>>::new();
-        for (index, fact) in facts.external_field_value_facts.iter().enumerate() {
-            for alias in external_field_name_aliases(&fact.field.field_name) {
-                external_field_value_by_name_alias
-                    .entry(alias)
-                    .or_default()
-                    .push(index);
-            }
-        }
-
         Self {
             facts,
-            external_api_by_method_alias,
+            external_api_by_method_alias: RefCell::new(None),
             external_api_candidates_by_query: RefCell::new(HashMap::new()),
-            external_field_by_name_alias,
-            external_field_value_by_name_alias,
+            external_field_by_name_alias: RefCell::new(None),
+            external_field_value_by_name_alias: RefCell::new(None),
         }
+    }
+
+    fn ensure_external_api_alias_index(&self) {
+        if self.external_api_by_method_alias.borrow().is_some() {
+            return;
+        }
+        let mut by_alias = HashMap::<String, Vec<usize>>::new();
+        for (index, fact) in self.facts.external_api_effect_facts.iter().enumerate() {
+            for alias in external_method_name_aliases(&fact.method_name).iter() {
+                by_alias.entry(alias.clone()).or_default().push(index);
+            }
+        }
+        *self.external_api_by_method_alias.borrow_mut() = Some(by_alias);
+    }
+
+    fn ensure_external_field_alias_index(&self) {
+        if self.external_field_by_name_alias.borrow().is_some() {
+            return;
+        }
+        let mut by_alias = HashMap::<String, Vec<usize>>::new();
+        for (index, fact) in self.facts.external_field_facts.iter().enumerate() {
+            for alias in external_field_name_aliases(&fact.field.field_name) {
+                by_alias.entry(alias).or_default().push(index);
+            }
+        }
+        *self.external_field_by_name_alias.borrow_mut() = Some(by_alias);
+    }
+
+    fn ensure_external_field_value_alias_index(&self) {
+        if self.external_field_value_by_name_alias.borrow().is_some() {
+            return;
+        }
+        let mut by_alias = HashMap::<String, Vec<usize>>::new();
+        for (index, fact) in self.facts.external_field_value_facts.iter().enumerate() {
+            for alias in external_field_name_aliases(&fact.field.field_name) {
+                by_alias.entry(alias).or_default().push(index);
+            }
+        }
+        *self.external_field_value_by_name_alias.borrow_mut() = Some(by_alias);
     }
 
     pub fn facts(&self) -> &'a FactSet {
@@ -247,6 +259,12 @@ impl<'a> ExternalFactLookupIndex<'a> {
         })
         .or_else(|| self.find_external_api_effect(receiver_type, method_name, arg_count, None))
         .or_else(|| self.find_external_api_effect(None, method_name, arg_count, None))
+        .filter(|fact| {
+            receiver_type.is_none_or(|owner| {
+                self.facts
+                    .model_fact_applies_to_owner(owner, fact.provenance)
+            })
+        })
     }
 
     pub(crate) fn external_api_effect_for_mapped_receiver_with_arity(
@@ -600,6 +618,12 @@ impl<'a> ExternalFactLookupIndex<'a> {
                 None,
             )
         })
+        .filter(|fact| {
+            receiver_type.is_none_or(|owner| {
+                self.facts
+                    .model_fact_applies_to_owner(owner, fact.provenance)
+            })
+        })
     }
 
     fn find_exact_receiver_external_api_effect(
@@ -691,8 +715,13 @@ impl<'a> ExternalFactLookupIndex<'a> {
         }
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
+        self.ensure_external_api_alias_index();
+        let by_alias = self.external_api_by_method_alias.borrow();
+        let by_alias = by_alias
+            .as_ref()
+            .expect("external API alias index initialized");
         for alias in external_method_name_aliases(method_name).iter() {
-            if let Some(alias_indices) = self.external_api_by_method_alias.get(alias) {
+            if let Some(alias_indices) = by_alias.get(alias) {
                 for index in alias_indices {
                     if seen.insert(*index) {
                         indices.push(*index);
@@ -841,8 +870,13 @@ impl<'a> ExternalFactLookupIndex<'a> {
     fn external_field_candidate_indices(&self, field_name: &str) -> Vec<usize> {
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
+        self.ensure_external_field_alias_index();
+        let by_alias = self.external_field_by_name_alias.borrow();
+        let by_alias = by_alias
+            .as_ref()
+            .expect("external field alias index initialized");
         for alias in external_field_name_aliases(field_name) {
-            if let Some(alias_indices) = self.external_field_by_name_alias.get(&alias) {
+            if let Some(alias_indices) = by_alias.get(&alias) {
                 for index in alias_indices {
                     if seen.insert(*index) {
                         indices.push(*index);
@@ -857,8 +891,13 @@ impl<'a> ExternalFactLookupIndex<'a> {
     fn external_field_value_candidate_indices(&self, field_name: &str) -> Vec<usize> {
         let mut seen = HashSet::new();
         let mut indices = Vec::new();
+        self.ensure_external_field_value_alias_index();
+        let by_alias = self.external_field_value_by_name_alias.borrow();
+        let by_alias = by_alias
+            .as_ref()
+            .expect("external field-value alias index initialized");
         for alias in external_field_name_aliases(field_name) {
-            if let Some(alias_indices) = self.external_field_value_by_name_alias.get(&alias) {
+            if let Some(alias_indices) = by_alias.get(&alias) {
                 for index in alias_indices {
                     if seen.insert(*index) {
                         indices.push(*index);
@@ -2056,6 +2095,19 @@ pub struct HierarchyOverride {
     pub provenance: FactProvenance,
 }
 
+impl HierarchyOverride {
+    /// Whether this representation is only a fallback when no parsed source
+    /// definition is available. Keep planning and effective fact lookup on the
+    /// same precedence policy; explicit user overrides remain authoritative.
+    pub(crate) fn is_source_fallback(&self) -> bool {
+        matches!(
+            self.provenance,
+            FactProvenance::ExternalLibraryPack | FactProvenance::BuiltinExternalModel
+        ) || (self.provenance != FactProvenance::UserOverride
+            && matches!(self.strategy, HierarchyStrategy::ErasedObject))
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HierarchyStrategy {
     ConcreteStruct,
@@ -2114,6 +2166,15 @@ impl FactDiagnostic {
 pub struct HierarchyEdgeFact {
     pub super_name: String,
     pub sub_name: String,
+}
+
+/// A boxed adapter generated from a source interface's instantiated ancestry.
+/// Unlike a name-only hierarchy edge, this preserves the generic ABI.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceInterfaceUpcastFact {
+    pub source_type: JavaType,
+    pub target_type: JavaType,
+    pub type_params: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2340,6 +2401,8 @@ impl FactSet {
             .extend(other.closed_hierarchy_facts);
         self.sealed_permits_facts.extend(other.sealed_permits_facts);
         self.object_safety_facts.extend(other.object_safety_facts);
+        self.source_interface_upcast_facts
+            .extend(other.source_interface_upcast_facts);
         self.generic_parameter_variance_facts
             .extend(other.generic_parameter_variance_facts);
         self.type_capability_overrides
@@ -2738,6 +2801,10 @@ impl FactSet {
                     && fact.parameter_index == parameter_index
             })
         })
+        .filter(|fact| {
+            receiver_type
+                .is_none_or(|owner| self.model_fact_applies_to_owner(owner, fact.provenance))
+        })
     }
 
     fn unambiguous_explicit_arity_external_api_argument_effect(
@@ -2865,16 +2932,29 @@ impl FactSet {
         })
     }
 
+    /// Source declarations own their ABI. A familiar external leaf alias must
+    /// not override that declaration; explicit user mappings remain deliberate.
+    pub(crate) fn model_fact_applies_to_owner(
+        &self,
+        owner: &str,
+        provenance: FactProvenance,
+    ) -> bool {
+        crate::effective_facts::fact_precedence_key(provenance)
+            >= crate::effective_facts::fact_precedence_key(FactProvenance::ParsedSource)
+            || !crate::effective_facts::EffectiveFacts::new(self)
+                .has_parsed_source_type_capability_for_name(owner)
+    }
+
     pub(crate) fn facade_abi_for_key(&self, key: &CallableKey) -> Option<&FacadeAbiFact> {
         self.facade_abi_facts
             .iter()
             .rev()
             .find(|fact| &fact.key == key && fact.provenance == FactProvenance::UserOverride)
             .or_else(|| {
-                self.facade_abi_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| &fact.key == key)
+                self.facade_abi_facts.iter().rev().find(|fact| {
+                    &fact.key == key
+                        && self.model_fact_applies_to_owner(key.owner_type(), fact.provenance)
+                })
             })
     }
 
@@ -2898,10 +2978,10 @@ impl FactSet {
         arg_types: &[JavaType],
     ) -> Option<&FacadeAbiFact> {
         find_facade_abi_for_call(
-            self.facade_abi_facts
-                .iter()
-                .rev()
-                .filter(|fact| callable_key_header_directly_matches(&fact.key, key)),
+            self.facade_abi_facts.iter().rev().filter(|fact| {
+                callable_key_header_directly_matches(&fact.key, key)
+                    && self.model_fact_applies_to_owner(key.owner_type(), fact.provenance)
+            }),
             arg_types,
         )
         .or_else(|| {
@@ -2912,10 +2992,10 @@ impl FactSet {
                 return None;
             }
             find_facade_abi_for_call(
-                self.facade_abi_facts
-                    .iter()
-                    .rev()
-                    .filter(|fact| callable_key_header_matches(&fact.key, key)),
+                self.facade_abi_facts.iter().rev().filter(|fact| {
+                    callable_key_header_matches(&fact.key, key)
+                        && self.model_fact_applies_to_owner(key.owner_type(), fact.provenance)
+                }),
                 arg_types,
             )
         })
@@ -3040,6 +3120,10 @@ impl FactSet {
                 self.find_external_rust_result(receiver_type, method_name, arg_count, false)
             })
             .or_else(|| self.find_external_rust_result(None, method_name, arg_count, false))
+            .filter(|fact| {
+                receiver_type
+                    .is_none_or(|owner| self.model_fact_applies_to_owner(owner, fact.provenance))
+            })
     }
 
     fn find_external_rust_result(
@@ -3326,10 +3410,10 @@ impl FactSet {
                 })
             })
             .or_else(|| {
-                self.method_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| method_key_directly_matches(&fact.method, type_name, method_name))
+                self.method_effect_facts.iter().rev().find(|fact| {
+                    method_key_directly_matches(&fact.method, type_name, method_name)
+                        && self.model_fact_applies_to_owner(type_name, fact.provenance)
+                })
             })
             .or_else(|| {
                 if method_key_simple_owner_alias_is_ambiguous(
@@ -3339,10 +3423,10 @@ impl FactSet {
                 ) {
                     return None;
                 }
-                self.method_effect_facts
-                    .iter()
-                    .rev()
-                    .find(|fact| method_key_matches(&fact.method, type_name, method_name))
+                self.method_effect_facts.iter().rev().find(|fact| {
+                    method_key_matches(&fact.method, type_name, method_name)
+                        && self.model_fact_applies_to_owner(type_name, fact.provenance)
+                })
             })
     }
 
@@ -3880,6 +3964,31 @@ pub(crate) fn external_type_name_matches(fact_type_name: &str, query_type_name: 
             .insert(right.to_string(), matches)
     });
     matches
+}
+
+/// Alias-union index for repeated membership queries against a stable set of
+/// Java type names. This is equivalent to asking whether any stored name
+/// matches the query with [`external_type_name_matches`], but avoids the
+/// stored-set cross product at each call site.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ExternalTypeNameSetIndex {
+    aliases: HashSet<String>,
+}
+
+impl ExternalTypeNameSetIndex {
+    pub(crate) fn new<'a>(names: impl IntoIterator<Item = &'a String>) -> Self {
+        let mut aliases = HashSet::new();
+        for name in names {
+            aliases.extend(external_type_name_aliases(name).iter().cloned());
+        }
+        Self { aliases }
+    }
+
+    pub(crate) fn matches(&self, name: &str) -> bool {
+        external_type_name_aliases(name)
+            .iter()
+            .any(|alias| self.aliases.contains(alias))
+    }
 }
 
 fn callable_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
@@ -5477,5 +5586,30 @@ mod tests {
             })
             .expect("mapped receiver should resolve");
         assert_eq!(effect.return_type, Some(JavaType::String));
+    }
+
+    #[test]
+    fn external_type_name_set_index_matches_pairwise_alias_membership() {
+        let names = [
+            "org.jgrapht.Graph".to_string(),
+            "Outer.Inner".to_string(),
+            "java.io.InputStream".to_string(),
+        ];
+        let index = ExternalTypeNameSetIndex::new(&names);
+        for query in [
+            "Graph",
+            "org_jgrapht_graph",
+            "Outer$Inner",
+            "JavaIoInputStream",
+            "UnrelatedType",
+        ] {
+            assert_eq!(
+                index.matches(query),
+                names
+                    .iter()
+                    .any(|name| external_type_name_matches(name, query)),
+                "indexed membership diverged for {query}"
+            );
+        }
     }
 }

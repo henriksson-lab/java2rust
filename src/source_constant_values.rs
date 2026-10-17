@@ -310,6 +310,8 @@ fn fold_unary(op: UnaryOp, value: ConstantValue) -> Option<ConstantValue> {
         (UnaryOp::Neg, ConstantValue::Float(value)) => Some(ConstantValue::Float(-value)),
         (UnaryOp::Neg, ConstantValue::Double(value)) => Some(ConstantValue::Double(-value)),
         (UnaryOp::Not, ConstantValue::Bool(value)) => Some(ConstantValue::Bool(!value)),
+        (UnaryOp::BitNot, ConstantValue::Int(value)) => Some(ConstantValue::Int(!value)),
+        (UnaryOp::BitNot, ConstantValue::Long(value)) => Some(ConstantValue::Long(!value)),
         // `++`/`--` are not constant expressions.
         _ => None,
     }

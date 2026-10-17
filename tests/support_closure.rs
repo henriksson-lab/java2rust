@@ -150,6 +150,110 @@ impl OutputStream {
 }
 
 #[test]
+fn single_private_boxed_upcast_carrier_keeps_its_conversion_and_constructor_scope() {
+    let dir = temp_dir("single_private_boxed_upcast");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    fs::write(
+        generated.join("00001_Parent.rs"),
+        "use crate::*;\npub trait Parent<T> { fn value(&self) -> T; }\n",
+    )
+    .unwrap();
+    fs::write(
+        generated.join("00002_Child.rs"),
+        r#"
+use crate::*;
+pub trait Child<T> { fn value(&self) -> T; }
+struct UpcastBridge<T: 'static>(Box<dyn Child<T>>);
+impl<T: 'static> Parent<T> for UpcastBridge<T> {
+    fn value(&self) -> T { self.0.value() }
+}
+impl<T: 'static> From<Box<dyn Child<T>>> for Box<dyn Parent<T>> {
+    fn from(value: Box<dyn Child<T>>) -> Self { Box::new(UpcastBridge(value)) }
+}
+"#,
+    )
+    .unwrap();
+    let raw = dir.join("raw");
+    fs::create_dir_all(&raw).unwrap();
+    for name in ["00001_Parent.rs", "00002_Child.rs"] {
+        fs::copy(generated.join(name), raw.join(name)).unwrap();
+    }
+    // Model the preceding support-strip stage: the authoritative raw unit
+    // retains the helper, but the output module retains only its conversion.
+    fs::write(
+        generated.join("00002_Child.rs"),
+        r#"
+use crate::*;
+pub trait Child<T> { fn value(&self) -> T; }
+impl<T: 'static> From<Box<dyn Child<T>>> for Box<dyn Parent<T>> {
+    fn from(value: Box<dyn Child<T>>) -> Self { Box::new(UpcastBridge(value)) }
+}
+"#,
+    )
+    .unwrap();
+    let (shared, names) = run_merger(&dir);
+    let support = fs::read_to_string(&shared).unwrap_or_default();
+    assert!(
+        support.contains("pub(crate) struct UpcastBridge"),
+        "{support}\nfixture: {}",
+        dir.display()
+    );
+    assert!(
+        support.contains("From<Box<dyn Child<T>>> for Box<dyn Parent<T>>"),
+        "{support}"
+    );
+    assert!(
+        fs::read_to_string(names)
+            .unwrap()
+            .lines()
+            .any(|name| name == "UpcastBridge")
+    );
+    let child = fs::read_to_string(generated.join("00002_Child.rs")).unwrap();
+    assert!(!child.contains("struct UpcastBridge"), "{child}");
+    let root = dir.join("probe.rs");
+    fs::write(
+        &root,
+        r#"
+#![allow(unused_imports)]
+include!("shared.rs");
+#[path = "generated/00001_Parent.rs"] mod parent;
+#[path = "generated/00002_Child.rs"] mod child;
+pub use parent::Parent;
+pub use child::Child;
+struct Concrete;
+impl Child<i32> for Concrete { fn value(&self) -> i32 { 37 } }
+fn main() {
+    let child: Box<dyn Child<i32>> = Box::new(Concrete);
+    let parent: Box<dyn Parent<i32>> = child.into();
+    assert_eq!(parent.value(), 37);
+}
+"#,
+    )
+    .unwrap();
+    let output = Command::new("rustc")
+        .args(["--edition=2024", "--crate-name", "upcast_probe"])
+        .arg(&root)
+        .arg("--out-dir")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}\nfixture: {}",
+        String::from_utf8_lossy(&output.stderr),
+        dir.display()
+    );
+    let output = Command::new(dir.join("upcast_probe")).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
 fn shared_merger_coalesces_repeated_declaration_and_impl_surfaces() {
     let dir = temp_dir("repeated_support_surface");
     let generated = dir.join("generated");

@@ -80,7 +80,7 @@ fn plan_object_model_for_test(
 }
 
 #[test]
-fn object_model_owns_initial_interface_strategy_and_object_safety_fallback() {
+fn object_model_owns_initial_interface_reference_strategy() {
     let parsed = parse_java_source(
         r#"
 interface Named {
@@ -113,7 +113,12 @@ interface PredicateLike {
     );
     assert_eq!(named.primary_provenance(), FactProvenance::ParsedSource);
     assert_eq!(named.provenance(), vec![FactProvenance::ParsedSource]);
-    assert_eq!(factory.strategy(), ObjectRepresentation::ErasedObject);
+    assert_eq!(
+        factory.strategy(),
+        ObjectRepresentation::DynTrait {
+            trait_name: "Factory".to_string()
+        }
+    );
     assert_eq!(
         predicate.strategy(),
         ObjectRepresentation::DynTrait {
@@ -121,13 +126,7 @@ interface PredicateLike {
         }
     );
     assert!(predicate.diagnostics().is_empty());
-    assert!(factory.diagnostics().iter().any(|diagnostic| {
-        diagnostic.code() == "non_object_safe_trait_fallback"
-            && diagnostic.message().contains("interface Factory")
-            && diagnostic
-                .message()
-                .contains("method next returns the interface type")
-    }));
+    assert!(factory.diagnostics().is_empty());
 
     let representations = plan_representations(&resolved.program, &resolved.facts);
     assert_eq!(
@@ -144,7 +143,9 @@ interface PredicateLike {
             name: "Factory".to_string(),
             args: Vec::new(),
         }),
-        DispatchShape::ErasedObject
+        DispatchShape::DynTrait {
+            trait_name: "Factory".to_string()
+        }
     );
     assert_eq!(
         representations.dispatch_for(&JavaType::Named {
@@ -186,7 +187,7 @@ interface ReadLike {
 }
 
 #[test]
-fn object_model_keeps_general_self_returning_interface_methods_non_object_safe() {
+fn object_model_allows_general_interface_return_values() {
     let parsed = parse_java_source(
         r#"
 interface Factory {
@@ -198,13 +199,17 @@ interface Factory {
     let object_plan = plan_object_model_for_test(&resolved.program, &resolved.facts);
     let factory = object_plan.strategy_for("Factory").unwrap();
 
-    assert_eq!(factory.strategy(), ObjectRepresentation::ErasedObject);
-    assert!(factory.diagnostics().iter().any(|diagnostic| {
-        diagnostic.code() == "non_object_safe_trait_fallback"
-            && diagnostic
-                .message()
-                .contains("method next returns the interface type")
-    }));
+    assert_eq!(
+        factory.strategy(),
+        ObjectRepresentation::DynTrait {
+            trait_name: "Factory".to_string()
+        }
+    );
+    assert!(factory.diagnostics().is_empty());
+    assert_eq!(
+        resolved.facts.object_safe_trait_fact_for_name("Factory"),
+        Some(true)
+    );
 }
 
 #[test]
@@ -1228,6 +1233,63 @@ class FastqConstants {
     assert_eq!(constants.strategy(), ObjectRepresentation::ConcreteStruct);
     assert_eq!(constants.primary_provenance(), FactProvenance::ParsedSource);
     assert_eq!(constants.provenance(), vec![FactProvenance::ParsedSource]);
+}
+
+#[test]
+fn parsed_interface_identity_precedes_external_facade_strategies() {
+    let parsed = parse_java_source("interface Port<T> { T read(); }");
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    for strategy in [
+        HierarchyStrategy::ErasedObject,
+        HierarchyStrategy::ConcreteStruct,
+        HierarchyStrategy::DynTrait {
+            trait_name: "ExternalPort".to_string(),
+        },
+    ] {
+        for provenance in [
+            FactProvenance::ExternalLibraryPack,
+            FactProvenance::BuiltinExternalModel,
+        ] {
+            let mut facts = resolved.facts.clone();
+            facts.hierarchy_overrides.push(HierarchyOverride {
+                type_name: "Port".to_string(),
+                strategy: strategy.clone(),
+                provenance,
+            });
+            let plan = plan_object_model_for_test(&resolved.program, &facts);
+            assert_eq!(
+                EffectiveFacts::new(&facts).object_representation_override_strategy_for(
+                    &JavaType::Named {
+                        name: "Port".to_string(),
+                        args: vec![JavaType::String]
+                    }
+                ),
+                None,
+                "slot rendering and planning must agree on source precedence"
+            );
+            assert_eq!(
+                plan.strategy_for("Port").unwrap().strategy(),
+                ObjectRepresentation::DynTrait {
+                    trait_name: "Port".to_string()
+                },
+                "parsed interface must retain its source identity over {provenance:?} {strategy:?}"
+            );
+        }
+    }
+    let mut facts = resolved.facts.clone();
+    facts.hierarchy_overrides.push(HierarchyOverride {
+        type_name: "Port".to_string(),
+        strategy: HierarchyStrategy::ErasedObject,
+        provenance: FactProvenance::UserOverride,
+    });
+    assert_eq!(
+        plan_object_model_for_test(&resolved.program, &facts)
+            .strategy_for("Port")
+            .unwrap()
+            .strategy(),
+        ObjectRepresentation::ErasedObject,
+        "explicit user override remains authoritative"
+    );
 }
 
 #[test]

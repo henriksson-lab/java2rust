@@ -42,6 +42,7 @@ pub struct RustAssociatedConst {
     pub ty: RustType,
     pub value: RustExpr,
     pub is_pub: bool,
+    pub is_pub_crate: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -342,6 +343,10 @@ pub enum RustExprShape {
     /// batch-global) consumer can recognize that ownership/dispatch/nullability
     /// adaptation has already happened.
     SlotAdapted,
+    /// A Java reference whose outer Option is a nullable carrier, not a
+    /// semantic java.util.Optional value. Consumers must check this carrier
+    /// only at the Java operation's specified evaluation boundary.
+    NullableCarrier,
     /// A `&str`: `.as_str()`, a borrowed `String`, a string literal.
     StringView,
     /// A shared borrow of the underlying value.
@@ -352,6 +357,12 @@ pub enum RustExprShape {
     OwnedRecovery,
     /// An `Option` projected to borrow or deref its element.
     OptionalProjected,
+    /// Receiver of a generated Option payload map. This distinguishes its
+    /// error-lifting rules from Iterator::map and Result::map.
+    OptionalMapReceiver,
+    /// Failure branch of a generated runtime reference-type check. The
+    /// exception boundary may turn its panic fallback into ClassCastException.
+    CheckedCastFailure,
     /// An `Option` constructed around a present element.
     OptionalConstructed,
     /// A shared slice view: `.as_slice()`.
@@ -362,9 +373,80 @@ pub enum RustExprShape {
     AnonymousDynTrait,
     /// A fallible expression with `?` already applied.
     ResultPropagated,
+    /// A Result was discharged at an uncaught-exception boundary; this is its
+    /// plain payload, even after a storage adapter wraps it.
+    ResultPanicRecovered,
 }
 
 impl RustExpr {
+    /// Whether this expression propagates an error into its enclosing callable.
+    /// A nested closure owns its own `?` boundary, even when immediately called.
+    /// Raw leaves deliberately provide no evidence of structured effects.
+    pub(crate) fn has_unbound_try(&self) -> bool {
+        match self {
+            Self::Try(_) => true,
+            Self::Closure { .. } => false,
+            Self::Field(expr, _)
+            | Self::Unary { expr, .. }
+            | Self::Cast { expr, .. }
+            | Self::Grouped(expr)
+            | Self::PostfixComment { expr, .. }
+            | Self::MarkedBlock { expr, .. }
+            | Self::Shaped { expr, .. } => expr.has_unbound_try(),
+            Self::Index(left, right)
+            | Self::Binary { left, right, .. }
+            | Self::Range {
+                start: left,
+                end: right,
+                ..
+            }
+            | Self::VecRepeat {
+                value: left,
+                len: right,
+            } => left.has_unbound_try() || right.has_unbound_try(),
+            Self::If {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                condition.has_unbound_try()
+                    || then_expr.has_unbound_try()
+                    || else_expr.has_unbound_try()
+            }
+            Self::Call { function, args } => {
+                function.has_unbound_try() || args.iter().any(Self::has_unbound_try)
+            }
+            Self::MethodCall { receiver, args, .. } => {
+                receiver.has_unbound_try() || args.iter().any(Self::has_unbound_try)
+            }
+            Self::MacroCall { args, .. }
+            | Self::Tuple(args)
+            | Self::ArrayLiteral(args)
+            | Self::VecLiteral(args)
+            | Self::UnsupportedJavaArrayCreation {
+                dimensions: args, ..
+            } => args.iter().any(Self::has_unbound_try),
+            Self::Match { expr, arms } => {
+                expr.has_unbound_try() || arms.iter().any(|arm| arm.body.has_unbound_try())
+            }
+            Self::Block { stmts, tail } => {
+                stmts.iter().any(RustStmt::has_unbound_try)
+                    || tail.as_deref().is_some_and(Self::has_unbound_try)
+            }
+            Self::StructLit { fields, .. } => {
+                fields.iter().any(|(_, value)| value.has_unbound_try())
+            }
+            Self::Literal(_)
+            | Self::Var(_)
+            | Self::Path(_)
+            | Self::GenericPath { .. }
+            | Self::TypeAssociatedPath { .. }
+            | Self::TraitAssociatedPath { .. }
+            | Self::Pattern(_)
+            | Self::Raw(_) => false,
+        }
+    }
+
     pub(crate) fn raw_leaf(rendered: impl Into<String>) -> RustExpr {
         RustExpr::Raw(rendered.into())
     }
@@ -714,6 +796,48 @@ fn rust_tuple_type_projection(rendered: &str) -> Option<Vec<RustType>> {
 }
 
 impl RustStmt {
+    fn has_unbound_try(&self) -> bool {
+        match self {
+            Self::Let { value, .. } | Self::Return(value) => {
+                value.as_ref().is_some_and(RustExpr::has_unbound_try)
+            }
+            Self::Assign { target, value } | Self::AssignOp { target, value, .. } => {
+                target.has_unbound_try() || value.has_unbound_try()
+            }
+            Self::Expr(expr) | Self::BreakValue { value: expr, .. } => expr.has_unbound_try(),
+            Self::If {
+                condition,
+                then_body,
+                else_body,
+            } => {
+                condition.has_unbound_try()
+                    || then_body.iter().any(Self::has_unbound_try)
+                    || else_body.iter().any(Self::has_unbound_try)
+            }
+            Self::IfLet {
+                expr,
+                then_body,
+                else_body,
+                ..
+            } => {
+                expr.has_unbound_try()
+                    || then_body.iter().any(Self::has_unbound_try)
+                    || else_body.iter().any(Self::has_unbound_try)
+            }
+            Self::While { condition, body } => {
+                condition.has_unbound_try() || body.iter().any(Self::has_unbound_try)
+            }
+            Self::WhileLet { expr, body, .. }
+            | Self::For {
+                iterable: expr,
+                body,
+                ..
+            } => expr.has_unbound_try() || body.iter().any(Self::has_unbound_try),
+            Self::Loop { body, .. } => body.iter().any(Self::has_unbound_try),
+            Self::Break(_) | Self::Continue(_) | Self::Raw(_) => false,
+        }
+    }
+
     pub(crate) fn raw_leaf(rendered: impl Into<String>) -> RustStmt {
         RustStmt::Raw(rendered.into())
     }
@@ -723,6 +847,50 @@ impl RustStmt {
 mod tests {
     use super::*;
     use crate::emit::emit_expr;
+
+    #[test]
+    fn stream_callback_unbound_try_effect_respects_callable_and_statement_scopes() {
+        let fallible = RustExpr::Try(Box::new(RustExpr::path(["value"])));
+        let closure = RustExpr::Closure {
+            is_move: false,
+            params: Vec::new(),
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(fallible.clone())),
+        };
+        assert!(!closure.has_unbound_try());
+        let call = RustExpr::Call {
+            function: Box::new(closure),
+            args: Vec::new(),
+        };
+        assert!(!call.has_unbound_try());
+        assert!(RustExpr::Try(Box::new(call.clone())).has_unbound_try());
+        assert!(
+            RustExpr::Call {
+                function: Box::new(call),
+                args: vec![fallible.clone()]
+            }
+            .has_unbound_try()
+        );
+        assert!(
+            RustExpr::Block {
+                stmts: vec![RustStmt::For {
+                    label: None,
+                    pattern: "item".to_string(),
+                    iterable: RustExpr::path(["items"]),
+                    body: vec![RustStmt::Let {
+                        mutable: false,
+                        name: "value".to_string(),
+                        ty: None,
+                        value: Some(fallible)
+                    }],
+                }],
+                tail: None,
+            }
+            .has_unbound_try()
+        );
+        assert!(!RustExpr::Literal("\"question?\"".to_string()).has_unbound_try());
+        assert!(!RustExpr::raw_leaf("opaque?").has_unbound_try());
+    }
 
     /// A tag must not reach the output. If it did, every tagged producer would
     /// change the generated Rust and the migration could not be incremental.

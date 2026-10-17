@@ -1459,6 +1459,7 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         slot_value_rust_type_policy_with_effective_facts(&dyn_trait_shape, &effective_facts),
         SlotValueRustTypePolicy::DynTraitView {
             trait_name: "Animal".to_string(),
+            java_ty: dyn_trait_shape.java_ty.clone(),
         }
     );
     assert_eq!(
@@ -1487,6 +1488,7 @@ fn slot_render_owns_conservative_java_to_rust_type_projection() {
         slot_value_rust_type_policy_with_effective_facts(&boxed_trait_shape, &effective_facts),
         SlotValueRustTypePolicy::BoxedDynTrait {
             trait_name: "Animal".to_string(),
+            java_ty: boxed_trait_shape.java_ty.clone(),
         }
     );
     assert_eq!(
@@ -32388,11 +32390,14 @@ fn rendered_string_heuristics_have_centralization_guardrails() {
         .and_then(|tail| tail.split("fn add_external_field_surface_fact").next())
         .expect("external field surface support facts helper should remain discoverable");
     assert!(
-        add_external_field_surfaces_source.contains("field_surface_support_facts(facts)")
+        add_external_field_surfaces_source
+            .contains("invariant_inputs.external_field_facts_by_owner")
+            && add_external_field_surfaces_source
+                .contains("invariant_inputs.field_surface_support_facts")
             && !add_external_field_surfaces_source.contains("builtin_external_library_packs")
             && field_surface_support_facts_source.contains("builtin_external_pack_fact_sets_iter")
             && !field_surface_support_facts_source.contains("builtin_external_library_packs"),
-        "external field support generation should borrow builtin pack fact sets instead of cloning the aggregate FactSet"
+        "external field support generation should build pack support and its owner index once per batch instead of scanning or cloning all packs per emitted file"
     );
     let external_constructor_fact_arity_count_source = stdlib_source
         .split("fn external_constructor_fact_arity_count")

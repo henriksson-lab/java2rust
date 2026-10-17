@@ -291,11 +291,13 @@ pub enum Coercion {
     },
     BorrowDynTrait {
         trait_name: String,
+        mutable: bool,
     },
     BorrowClosedEnumAsDynTrait {
         enum_name: String,
         trait_name: String,
         variants: Vec<String>,
+        mutable: bool,
     },
     RewrapClosedEnum {
         actual_enum_name: String,
@@ -305,6 +307,7 @@ pub enum Coercion {
     },
     BorrowBoxedDynTrait {
         trait_name: String,
+        mutable: bool,
     },
     BorrowConcreteFacade {
         target_type: String,
@@ -317,6 +320,9 @@ pub enum Coercion {
         trait_name: String,
     },
     CloneBoxDynTrait {
+        trait_name: String,
+    },
+    IntoBoxedDynTrait {
         trait_name: String,
     },
     EraseObject,
@@ -509,10 +515,7 @@ impl ShapeCoercionPlan {
             plan.extend(view_coercions);
             return plan;
         }
-        if !matches!(
-            self.dispatch(),
-            DispatchCoercionPolicy::CloneBoxDynTrait { .. }
-        ) {
+        if !self.dispatch().recovers_owned_dyn_trait() {
             plan.extend(self.ownership().coercions());
         }
         if let Some(policy) = self.primitive_widening() {
@@ -704,6 +707,17 @@ pub(crate) fn ownership_coercion_fallback_message_policy(
 }
 
 impl DispatchCoercionPolicy {
+    fn recovers_owned_dyn_trait(&self) -> bool {
+        matches!(
+            self,
+            Self::CloneBoxDynTrait { .. }
+                | Self::UpcastBoxedDynTrait {
+                    clone_source: true,
+                    ..
+                }
+        )
+    }
+
     pub fn coercions(&self) -> Vec<Coercion> {
         match self {
             DispatchCoercionPolicy::NoDispatchChange => Vec::new(),
@@ -714,19 +728,25 @@ impl DispatchCoercionPolicy {
                 enum_name: enum_name.clone(),
                 variant_name: variant_name.clone(),
             }],
-            DispatchCoercionPolicy::BorrowDynTrait { trait_name } => {
+            DispatchCoercionPolicy::BorrowDynTrait {
+                trait_name,
+                mutable,
+            } => {
                 vec![Coercion::BorrowDynTrait {
                     trait_name: trait_name.clone(),
+                    mutable: *mutable,
                 }]
             }
             DispatchCoercionPolicy::BorrowClosedEnumAsDynTrait {
                 enum_name,
                 trait_name,
                 variants,
+                mutable,
             } => vec![Coercion::BorrowClosedEnumAsDynTrait {
                 enum_name: enum_name.clone(),
                 trait_name: trait_name.clone(),
                 variants: variants.clone(),
+                mutable: *mutable,
             }],
             DispatchCoercionPolicy::RewrapClosedEnum {
                 actual_enum_name,
@@ -739,9 +759,13 @@ impl DispatchCoercionPolicy {
                 variants: variants.clone(),
                 clone_payload: *clone_payload,
             }],
-            DispatchCoercionPolicy::BorrowBoxedDynTrait { trait_name } => {
+            DispatchCoercionPolicy::BorrowBoxedDynTrait {
+                trait_name,
+                mutable,
+            } => {
                 vec![Coercion::BorrowBoxedDynTrait {
                     trait_name: trait_name.clone(),
+                    mutable: *mutable,
                 }]
             }
             DispatchCoercionPolicy::BorrowConcreteFacade { target_type } => {
@@ -762,6 +786,22 @@ impl DispatchCoercionPolicy {
                 vec![Coercion::CloneBoxDynTrait {
                     trait_name: trait_name.clone(),
                 }]
+            }
+            DispatchCoercionPolicy::UpcastBoxedDynTrait {
+                source_trait,
+                target_trait,
+                clone_source,
+            } => {
+                let mut coercions = Vec::new();
+                if *clone_source {
+                    coercions.push(Coercion::CloneBoxDynTrait {
+                        trait_name: source_trait.clone(),
+                    });
+                }
+                coercions.push(Coercion::IntoBoxedDynTrait {
+                    trait_name: target_trait.clone(),
+                });
+                coercions
             }
             DispatchCoercionPolicy::EraseObject => vec![Coercion::EraseObject],
             DispatchCoercionPolicy::DowncastClosedEnum {
@@ -1035,10 +1075,7 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
             }
             let mapped_value =
                 apply_shape_coercion_plan(RustExpr::Var("value".to_string()), element_plan);
-            if matches!(
-                element_plan.dispatch(),
-                DispatchCoercionPolicy::CloneBoxDynTrait { .. }
-            ) {
+            if element_plan.dispatch().recovers_owned_dyn_trait() {
                 // Native collection reads expose a borrowed optional storage
                 // slot (`&Option<Box<dyn Trait>>`). Mapping that reference
                 // directly would try to consume the Option. Borrow its
@@ -1280,7 +1317,7 @@ fn apply_collection_carrier_conversion(
     }
     let actual_kind = crate::stdlib::java_collection_kind_for_type(&plan.actual().java_ty)?;
     let target_kind = crate::stdlib::java_collection_kind_for_type(&plan.target().java_ty)?;
-    if actual_kind == target_kind {
+    if actual_kind == target_kind && plan.actual().view == plan.target().view {
         return None;
     }
     let collect_type = if actual_kind.is_map_like() && target_kind.is_map_like() {
@@ -1289,14 +1326,21 @@ fn apply_collection_carrier_conversion(
         if actual_key != target_key || actual_value != target_value {
             return None;
         }
-        map_collect_type_for_kind(target_kind)?
+        if plan.target().view == ViewShape::JavaSemanticHash {
+            "JavaSemanticHashMap<_, _>"
+        } else {
+            map_collect_type_for_kind(target_kind)?
+        }
     } else if actual_kind.is_set_like() && target_kind.is_set_like() {
         if crate::types::sequence_element_type(&plan.actual().java_ty)
             != crate::types::sequence_element_type(&plan.target().java_ty)
         {
             return None;
         }
-        set_collect_type_for_kind(target_kind)?
+        set_collect_type_for_kind_and_equality(
+            target_kind,
+            plan.target().view == ViewShape::JavaSemanticHash,
+        )?
     } else {
         return None;
     };
@@ -1306,7 +1350,11 @@ fn apply_collection_carrier_conversion(
             zero_arg_method_projection(RustExpr::Grouped(Box::new(expr)), "into_iter")
         }
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow => {
-            borrowed_map_cloned_iter(expr)
+            if actual_kind.is_map_like() {
+                borrowed_map_cloned_iter(expr)
+            } else {
+                sequence_iter_cloned_projection(expr)
+            }
         }
         _ => return None,
     };
@@ -1330,7 +1378,19 @@ fn apply_collection_carrier_conversion(
     })
 }
 
-fn set_collect_type_for_kind(kind: crate::stdlib::JavaCollectionKind) -> Option<&'static str> {
+pub(crate) fn set_collect_type_for_kind(
+    kind: crate::stdlib::JavaCollectionKind,
+) -> Option<&'static str> {
+    set_collect_type_for_kind_and_equality(kind, false)
+}
+
+fn set_collect_type_for_kind_and_equality(
+    kind: crate::stdlib::JavaCollectionKind,
+    semantic_equality: bool,
+) -> Option<&'static str> {
+    if semantic_equality && kind == crate::stdlib::JavaCollectionKind::Set {
+        return Some("JavaSemanticHashSet<_>");
+    }
     match kind {
         crate::stdlib::JavaCollectionKind::Set => Some("std::collections::HashSet<_>"),
         crate::stdlib::JavaCollectionKind::SortedSet => Some("std::collections::BTreeSet<_>"),
@@ -1600,11 +1660,7 @@ fn optional_map_projection_expr(
         OptionalMapReceiverProjection::AsRef => zero_arg_method_projection(expr, "as_ref"),
         OptionalMapReceiverProjection::AsMut => zero_arg_method_projection(expr, "as_mut"),
     };
-    let mapped = RustExpr::MethodCall {
-        receiver: Box::new(receiver),
-        method: "map".to_string(),
-        args: vec![single_value_closure_projection(mapped_value)],
-    };
+    let mapped = optional_payload_map_projection(receiver, mapped_value);
     if receiver_was_result_propagated {
         // The receiver is already the successful payload of a fallible call.
         // Mapping its Option changes that payload but does not restore a
@@ -1613,6 +1669,18 @@ fn optional_map_projection_expr(
         RustExpr::shaped(RustExprShape::ResultPropagated, mapped)
     } else {
         mapped
+    }
+}
+
+pub(crate) fn optional_payload_map_projection(receiver: RustExpr, value: RustExpr) -> RustExpr {
+    RustExpr::MethodCall {
+        receiver: Box::new(RustExpr::Shaped {
+            shape: RustExprShape::OptionalMapReceiver,
+            actual: None,
+            expr: Box::new(receiver),
+        }),
+        method: "map".to_string(),
+        args: vec![single_value_closure_projection(value)],
     }
 }
 
@@ -2196,9 +2264,16 @@ pub(crate) fn expr_is_result_propagated(expr: &RustExpr) -> bool {
         // prevents `call()? as T` from becoming `(call()? as T)?`.
         RustExpr::Cast { expr, .. }
         | RustExpr::Grouped(expr)
+        | RustExpr::Unary { expr, .. }
         | RustExpr::PostfixComment { expr, .. }
         | RustExpr::MarkedBlock { expr, .. } => expr_is_result_propagated(expr),
         RustExpr::Shaped { expr, .. } => expr_is_result_propagated(expr),
+        // Java operators consume their operands' values; they do not produce
+        // a fresh Result ABI. In particular, `flag | call()?` and `!call()?`
+        // must not acquire another try operator at an enclosing value slot.
+        RustExpr::Binary { left, right, .. } => {
+            expr_is_result_propagated(left) || expr_is_result_propagated(right)
+        }
         // Argument staging wraps a call in `{ let tmp = ...; call(tmp) }`.
         // When the tail already contains `?`, the block evaluates to that
         // unwrapped payload; a surrounding slot must not append a second `?`
@@ -2679,27 +2754,54 @@ fn rendered_vec_macro_body(rendered: &str) -> Option<String> {
 }
 
 pub(crate) fn borrow_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
+    borrow_as_dyn_trait_with_mutability(expr, trait_name, false)
+}
+
+fn borrow_as_dyn_trait_with_mutability(
+    expr: RustExpr,
+    trait_name: &str,
+    mutable: bool,
+) -> RustExpr {
     if result_success_slot_shape(&expr).is_some_and(|shape| {
         shape.ownership == OwnershipShape::Owned
             && matches!(shape.dispatch, DispatchShape::BoxedDynTrait { .. })
     }) {
-        return borrow_boxed_as_dyn_trait(expr, trait_name);
+        return borrow_boxed_as_dyn_trait_with_mutability(expr, trait_name, mutable);
     }
     let trait_name = normalize_emitted_java_type_name(trait_name);
     RustExpr::shaped(
-        RustExprShape::Borrowed,
+        if mutable {
+            RustExprShape::MutBorrowed
+        } else {
+            RustExprShape::Borrowed
+        },
         RustExpr::Cast {
-            expr: Box::new(borrow_expr_leaf_for_dyn_cast(expr)),
-            ty: format!("&dyn {trait_name}"),
+            expr: Box::new(if mutable {
+                force_mutable_borrow_projection(expr)
+            } else {
+                borrow_expr_leaf_for_dyn_cast(expr)
+            }),
+            ty: format!("&{}dyn {trait_name}", if mutable { "mut " } else { "" }),
         },
     )
 }
 
+#[cfg(test)]
 fn borrow_closed_enum_as_dyn_trait(
     expr: RustExpr,
     enum_name: &str,
     trait_name: &str,
     variants: &[String],
+) -> RustExpr {
+    borrow_closed_enum_as_dyn_trait_with_mutability(expr, enum_name, trait_name, variants, false)
+}
+
+fn borrow_closed_enum_as_dyn_trait_with_mutability(
+    expr: RustExpr,
+    enum_name: &str,
+    trait_name: &str,
+    variants: &[String],
+    mutable: bool,
 ) -> RustExpr {
     let trait_name = normalize_emitted_java_type_name(trait_name);
     let mut arms = variants
@@ -2708,7 +2810,7 @@ fn borrow_closed_enum_as_dyn_trait(
             pattern: format!("{enum_name}::{variant}(value)"),
             body: RustExpr::Cast {
                 expr: Box::new(RustExpr::Var("value".to_string())),
-                ty: format!("&dyn {trait_name}"),
+                ty: format!("&{}dyn {trait_name}", if mutable { "mut " } else { "" }),
             },
         })
         .collect::<Vec<_>>();
@@ -2723,7 +2825,11 @@ fn borrow_closed_enum_as_dyn_trait(
         },
     });
     RustExpr::shaped(
-        RustExprShape::Borrowed,
+        if mutable {
+            RustExprShape::MutBorrowed
+        } else {
+            RustExprShape::Borrowed
+        },
         RustExpr::Match {
             // The result of this match is a view into a carrier payload.  Match
             // the carrier by reference so each `value` binding is itself a
@@ -2731,7 +2837,11 @@ fn borrow_closed_enum_as_dyn_trait(
             // the interface.  Destructuring the owned carrier would both move
             // its payload and leave no storage from which the returned trait
             // reference could borrow.
-            expr: Box::new(borrowed_raw_safe_expr(expr)),
+            expr: Box::new(if mutable {
+                force_mutable_borrow_projection(expr)
+            } else {
+                borrowed_raw_safe_expr(expr)
+            }),
             arms,
         },
     )
@@ -2800,16 +2910,29 @@ fn result_success_slot_shape(expr: &RustExpr) -> Option<&RustSlotShape> {
     })
 }
 
+#[cfg(test)]
 fn borrow_boxed_as_dyn_trait(expr: RustExpr, trait_name: &str) -> RustExpr {
+    borrow_boxed_as_dyn_trait_with_mutability(expr, trait_name, false)
+}
+
+fn borrow_boxed_as_dyn_trait_with_mutability(
+    expr: RustExpr,
+    trait_name: &str,
+    mutable: bool,
+) -> RustExpr {
     let trait_name = normalize_emitted_java_type_name(trait_name);
     RustExpr::shaped(
-        RustExprShape::Borrowed,
+        if mutable {
+            RustExprShape::MutBorrowed
+        } else {
+            RustExprShape::Borrowed
+        },
         RustExpr::Cast {
             expr: Box::new(zero_arg_method_projection(
                 parenthesize_raw_method_receiver(expr),
-                "as_ref",
+                if mutable { "as_mut" } else { "as_ref" },
             )),
-            ty: format!("&dyn {trait_name}"),
+            ty: format!("&{}dyn {trait_name}", if mutable { "mut " } else { "" }),
         },
     )
 }
@@ -2922,6 +3045,9 @@ pub(crate) fn optional_of_projection(value: RustExpr) -> RustExpr {
 }
 
 pub(crate) fn objects_require_non_null_projection(value: RustExpr) -> RustExpr {
+    if checked_identity_argument_is_semantic_optional(&value) {
+        return value;
+    }
     let value = unwrap_some_expr(&value).unwrap_or(value);
     if rust_expr_may_be_java_null_value(&value) {
         unwrap_java_null_receiver_projection(value)
@@ -2930,7 +3056,24 @@ pub(crate) fn objects_require_non_null_projection(value: RustExpr) -> RustExpr {
     }
 }
 
+/// At a typed identity boundary, an Option may be the Java Optional object
+/// itself rather than an extra null carrier. Empty Optional is not Java null.
+fn checked_identity_argument_is_semantic_optional(value: &RustExpr) -> bool {
+    value.recorded_shape() == Some(RustExprShape::SlotAdapted)
+        && value
+            .recorded_slot_shape()
+            .is_some_and(|shape| shape.optional_element_type().is_some())
+}
+
+pub(crate) fn checked_identity_argument_is_nullable(value: &RustExpr) -> bool {
+    !checked_identity_argument_is_semantic_optional(value)
+        && rust_expr_may_be_java_null_value(value)
+}
+
 pub(crate) fn rust_expr_may_be_java_null_value(expr: &RustExpr) -> bool {
+    if expr.recorded_shape() == Some(RustExprShape::NullableCarrier) {
+        return true;
+    }
     match expr {
         RustExpr::Shaped { expr, .. }
         | RustExpr::Grouped(expr)
@@ -8986,7 +9129,13 @@ fn java_format_to_rust_format(format: &str) -> String {
     let mut chars = format.chars().peekable();
     while let Some(ch) = chars.next() {
         if ch != '%' {
-            out.push(ch);
+            // Braces are ordinary Java text. Escape only literal text, not
+            // the Rust conversion placeholders inserted below.
+            match ch {
+                '{' => out.push_str("{{"),
+                '}' => out.push_str("}}"),
+                _ => out.push(ch),
+            }
             continue;
         }
         if matches!(chars.peek(), Some('%')) {
@@ -9104,7 +9253,7 @@ pub(crate) fn sequence_iteration_source_projection_with_result_context(
     let source = parenthesize_raw_method_receiver(source);
     match (optional_sequence, projection) {
         (true, SequenceIterationProjection::Borrowed) => zero_arg_method_projection(
-            optional_sequence_borrowed_source_projection(
+            checked_optional_borrowed_receiver_projection(
                 source,
                 OptionalSequenceReceiverProjection::Shared,
                 propagate_java_exceptions,
@@ -9112,7 +9261,7 @@ pub(crate) fn sequence_iteration_source_projection_with_result_context(
             "iter",
         ),
         (true, SequenceIterationProjection::MutBorrowed) => zero_arg_method_projection(
-            optional_sequence_borrowed_source_projection(
+            checked_optional_borrowed_receiver_projection(
                 source,
                 OptionalSequenceReceiverProjection::Mutable,
                 propagate_java_exceptions,
@@ -9135,7 +9284,7 @@ pub(crate) fn sequence_iteration_source_projection_with_result_context(
     }
 }
 
-fn optional_sequence_borrowed_source_projection(
+pub(crate) fn checked_optional_borrowed_receiver_projection(
     source: RustExpr,
     projection: OptionalSequenceReceiverProjection,
     propagate_java_exceptions: bool,
@@ -9162,6 +9311,35 @@ fn optional_sequence_borrowed_source_projection(
         ));
     }
     method_expect_projection(borrowed, "Java null receiver")
+}
+
+pub(crate) fn stream_bound_receiver_capture_projection(
+    stream: RustExpr,
+    value: RustExpr,
+    mut result: RustExpr,
+) -> RustExpr {
+    // The iterator can outlive this binding block. Own the checked reference
+    // in the callback instead of borrowing the local holding that reference.
+    if let RustExpr::MethodCall { args, .. } = &mut result
+        && let Some(RustExpr::Closure { is_move, .. }) = args.last_mut()
+    {
+        *is_move = true;
+    }
+    RustExpr::Match {
+        expr: Box::new(stream),
+        arms: vec![RustMatchArm {
+            pattern: "mut __java_bound_stream".to_string(),
+            body: RustExpr::Block {
+                stmts: vec![RustStmt::Let {
+                    mutable: false,
+                    name: "__java_bound_receiver".to_string(),
+                    ty: None,
+                    value: Some(value),
+                }],
+                tail: Some(Box::new(result)),
+            },
+        }],
+    }
 }
 
 fn optional_sequence_owned_source_projection(
@@ -9324,6 +9502,62 @@ pub(crate) fn stream_join_terminal_projection(
     )
 }
 
+/// Keep collector arguments eager while iterator operations remain lazy.
+/// A match binding extends temporary source lifetimes through the terminal;
+/// a separate `let iter = temporary_vec.iter()` would drop that source early.
+pub(crate) fn staged_stream_join_terminal_projection(
+    receiver: RustExpr,
+    item_display: RustExpr,
+    delimiter: RustExpr,
+    affixes: Option<(RustExpr, RustExpr)>,
+) -> RustExpr {
+    let binding = |name: &str, value: RustExpr, mutable| RustStmt::Let {
+        mutable,
+        name: name.to_string(),
+        ty: None,
+        value: Some(value),
+    };
+    let var = |name: &str| RustExpr::Var(name.to_string());
+    let string_value = |expr| method_call_projection(expr, "to_string", Vec::new());
+    let mut stmts = vec![binding(
+        "__java_join_delimiter",
+        string_value(delimiter),
+        false,
+    )];
+    let joined = stream_join_terminal_projection(
+        var("__java_join_stream"),
+        item_display,
+        shared_borrow_expr(var("__java_join_delimiter")),
+    );
+    let result = if let Some((prefix, suffix)) = affixes {
+        stmts.push(binding("__java_join_text", string_value(prefix), true));
+        stmts.push(binding("__java_join_suffix", string_value(suffix), false));
+        stmts.push(RustStmt::Expr(method_call_projection(
+            var("__java_join_text"),
+            "push_str",
+            vec![shared_borrow_expr(joined)],
+        )));
+        stmts.push(RustStmt::Expr(method_call_projection(
+            var("__java_join_text"),
+            "push_str",
+            vec![shared_borrow_expr(var("__java_join_suffix"))],
+        )));
+        var("__java_join_text")
+    } else {
+        joined
+    };
+    RustExpr::Match {
+        expr: Box::new(receiver),
+        arms: vec![RustMatchArm {
+            pattern: "__java_join_stream".to_string(),
+            body: RustExpr::Block {
+                stmts,
+                tail: Some(Box::new(result)),
+            },
+        }],
+    }
+}
+
 #[cfg(test)]
 fn render_stream_join_terminal(item_display: RustExpr, delimiter: RustExpr) -> String {
     let projection = stream_join_terminal_projection(
@@ -9348,6 +9582,63 @@ pub(crate) fn stream_match_terminal_projection(
         receiver,
         terminal_method,
         vec![single_param_closure_expr(param_name, predicate)],
+    )
+}
+
+/// A lazy matching terminal whose predicate propagates errors. The scoped
+/// closure owns callback `?` and returns before touching the next stream item.
+pub(crate) fn fallible_stream_match_terminal_projection(
+    receiver: RustExpr,
+    all: bool,
+    param_name: &str,
+    predicate: RustExpr,
+    item_is_result: bool,
+) -> RustExpr {
+    let condition = if all {
+        RustExpr::Unary {
+            op: "!".to_string(),
+            expr: Box::new(predicate),
+        }
+    } else {
+        predicate
+    };
+    let mut body = Vec::new();
+    if item_is_result {
+        body.push(RustStmt::Let {
+            mutable: false,
+            name: param_name.to_string(),
+            ty: None,
+            value: Some(RustExpr::Try(Box::new(RustExpr::Var(
+                param_name.to_string(),
+            )))),
+        });
+    }
+    body.push(RustStmt::If {
+        condition,
+        then_body: vec![RustStmt::Return(Some(ok_result_expr(RustExpr::Literal(
+            (!all).to_string(),
+        ))))],
+        else_body: Vec::new(),
+    });
+    function_call_projection(
+        RustExpr::Closure {
+            is_move: false,
+            params: Vec::new(),
+            return_type: Some(RustType::Generic {
+                base: "Result".to_string(),
+                args: vec![RustType::Bool, RustType::Named("JavaException".to_string())],
+            }),
+            body: RustClosureBody::Expr(Box::new(RustExpr::Block {
+                stmts: vec![RustStmt::For {
+                    label: None,
+                    pattern: param_name.to_string(),
+                    iterable: receiver,
+                    body,
+                }],
+                tail: Some(Box::new(ok_result_expr(RustExpr::Literal(all.to_string())))),
+            })),
+        },
+        Vec::new(),
     )
 }
 
@@ -9396,6 +9687,62 @@ pub(crate) fn stream_reduce_terminal_projection(
                 body,
             ),
         ],
+    )
+}
+
+pub(crate) fn stream_sum_terminal_projection(
+    receiver: RustExpr,
+    primitive: PrimitiveType,
+) -> RustExpr {
+    let rust_type = rust_primitive_type_name_policy(primitive).rust_name();
+    if matches!(primitive, PrimitiveType::Float | PrimitiveType::Double) {
+        return receiver_method_call_projection_exact(
+            receiver,
+            &format!("sum::<{rust_type}>"),
+            Vec::new(),
+        );
+    }
+    stream_reduce_terminal_projection(
+        receiver,
+        RustExpr::Literal(format!("0{rust_type}")),
+        "__java_sum",
+        "__java_item",
+        receiver_method_call_projection_exact(
+            RustExpr::Var("__java_sum".to_string()),
+            "wrapping_add",
+            vec![RustExpr::Var("__java_item".to_string())],
+        ),
+    )
+}
+
+pub(crate) fn stream_extremum_terminal_projection(
+    receiver: RustExpr,
+    primitive: PrimitiveType,
+    maximum: bool,
+) -> RustExpr {
+    let left = RustExpr::Var("__java_left".to_string());
+    let right = RustExpr::Var("__java_right".to_string());
+    let body = if maximum {
+        math_max_projection(left, right, primitive)
+    } else {
+        math_min_projection(left, right, primitive)
+    };
+    method_call_projection(
+        receiver,
+        "reduce",
+        vec![closure_expr(
+            vec![
+                RustClosureParam {
+                    pattern: "__java_left".to_string(),
+                    ty: None,
+                },
+                RustClosureParam {
+                    pattern: "__java_right".to_string(),
+                    ty: None,
+                },
+            ],
+            body,
+        )],
     )
 }
 
@@ -10486,7 +10833,10 @@ fn panic_recovered_result_expr_or_raw_leaf(rendered: &str) -> Option<RustExpr> {
     .then_some(recovered)
 }
 
-fn rust_expr_is_result_panic_recovered(expr: &RustExpr) -> bool {
+pub(crate) fn rust_expr_is_result_panic_recovered(expr: &RustExpr) -> bool {
+    if expr.recorded_shape() == Some(RustExprShape::ResultPanicRecovered) {
+        return true;
+    }
     match expr.unshaped() {
         RustExpr::MethodCall { method, args, .. } => {
             method == "unwrap_or_else"
@@ -13775,27 +14125,51 @@ fn apply_borrowed_element_adapter(
         (BorrowedElementCarrier::Vec, BorrowedElementRecoveryPolicy::StringViewToOwned) => {
             borrowed_collection_string_view_to_owned_projection(expr, "collect::<Vec<_>>")
         }
-        (BorrowedElementCarrier::Set, BorrowedElementRecoveryPolicy::StringViewToOwned) => {
-            borrowed_collection_string_view_to_owned_projection(
-                expr,
-                "collect::<std::collections::HashSet<_>>",
-            )
-        }
+        (
+            BorrowedElementCarrier::Set {
+                kind,
+                semantic_equality,
+            },
+            BorrowedElementRecoveryPolicy::StringViewToOwned,
+        ) => borrowed_collection_string_view_to_owned_projection(
+            expr,
+            &format!(
+                "collect::<{}>",
+                set_collect_type_for_kind_and_equality(kind, semantic_equality)
+                    .expect("set carrier")
+            ),
+        ),
         (BorrowedElementCarrier::Vec, BorrowedElementRecoveryPolicy::CopyElements) => {
             borrowed_collection_copy_to_owned_projection(expr, "collect::<Vec<_>>")
         }
-        (BorrowedElementCarrier::Set, BorrowedElementRecoveryPolicy::CopyElements) => {
-            borrowed_collection_copy_to_owned_projection(
-                expr,
-                "collect::<std::collections::HashSet<_>>",
-            )
-        }
+        (
+            BorrowedElementCarrier::Set {
+                kind,
+                semantic_equality,
+            },
+            BorrowedElementRecoveryPolicy::CopyElements,
+        ) => borrowed_collection_copy_to_owned_projection(
+            expr,
+            &format!(
+                "collect::<{}>",
+                set_collect_type_for_kind_and_equality(kind, semantic_equality)
+                    .expect("set carrier")
+            ),
+        ),
         (BorrowedElementCarrier::Vec, BorrowedElementRecoveryPolicy::CloneElements { policy }) => {
             apply_borrowed_vec_clone_adapter(expr, policy)
         }
-        (BorrowedElementCarrier::Set, BorrowedElementRecoveryPolicy::CloneElements { policy }) => {
-            apply_borrowed_set_clone_adapter(expr, policy)
-        }
+        (
+            BorrowedElementCarrier::Set {
+                kind,
+                semantic_equality,
+            },
+            BorrowedElementRecoveryPolicy::CloneElements { policy },
+        ) => apply_borrowed_set_clone_adapter(
+            expr,
+            policy,
+            set_collect_type_for_kind_and_equality(kind, semantic_equality).expect("set carrier"),
+        ),
         (_, BorrowedElementRecoveryPolicy::Unsupported { policy: fallback }) => {
             render_borrowed_element_recovery_fallback_policy(expr, policy.element_shape(), fallback)
         }
@@ -14333,20 +14707,23 @@ fn apply_borrowed_vec_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy
     )
 }
 
-fn apply_borrowed_set_clone_adapter(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExpr {
+fn apply_borrowed_set_clone_adapter(
+    expr: RustExpr,
+    policy: &CloneRecoveryPolicy,
+    collect_type: &str,
+) -> RustExpr {
     if expr.recorded_shape() == Some(RustExprShape::OwnedRecovery) {
         return expr;
     }
-    if let Some(projected) = borrowed_collect_clone_compat_projection(
-        &expr,
-        "collect::<std::collections::HashSet<_>>",
-        policy,
-    ) {
+    let collect_method = format!("collect::<{collect_type}>");
+    if let Some(projected) =
+        borrowed_collect_clone_compat_projection(&expr, &collect_method, policy)
+    {
         return projected;
     }
     borrowed_collect_clone_projection(
         zero_arg_method_projection(opaque_raw_method_receiver(expr), "into_iter"),
-        "collect::<std::collections::HashSet<_>>",
+        &collect_method,
         policy,
     )
 }
@@ -15730,12 +16107,18 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 }
             }
         }
-        Coercion::BorrowDynTrait { trait_name } => borrow_as_dyn_trait(expr, trait_name),
+        Coercion::BorrowDynTrait {
+            trait_name,
+            mutable,
+        } => borrow_as_dyn_trait_with_mutability(expr, trait_name, *mutable),
         Coercion::BorrowClosedEnumAsDynTrait {
             enum_name,
             trait_name,
             variants,
-        } => borrow_closed_enum_as_dyn_trait(expr, enum_name, trait_name, variants),
+            mutable,
+        } => borrow_closed_enum_as_dyn_trait_with_mutability(
+            expr, enum_name, trait_name, variants, *mutable,
+        ),
         Coercion::RewrapClosedEnum {
             actual_enum_name,
             target_enum_name,
@@ -15748,7 +16131,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             variants,
             *clone_payload,
         ),
-        Coercion::BorrowBoxedDynTrait { trait_name } => borrow_boxed_as_dyn_trait(expr, trait_name),
+        Coercion::BorrowBoxedDynTrait {
+            trait_name,
+            mutable,
+        } => borrow_boxed_as_dyn_trait_with_mutability(expr, trait_name, *mutable),
         Coercion::BorrowConcreteFacade { target_type } => {
             if is_structural_borrow_facade_target(target_type) {
                 ensure_borrow_projection(expr, None, None, BorrowProjectionUse::Argument)
@@ -15792,6 +16178,12 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
                 )
             }
         }
+        Coercion::IntoBoxedDynTrait { trait_name } => function_call_projection(
+            RustExpr::raw_leaf(format!(
+                "std::convert::Into::<std::boxed::Box<dyn {trait_name}>>::into"
+            )),
+            vec![expr],
+        ),
         Coercion::EraseObject => erased_object_box_projection(expr),
         Coercion::DowncastClosedEnum {
             enum_name,
@@ -16235,23 +16627,38 @@ fn escaped_literal_end(raw: &str, start: usize, quote: char) -> usize {
     cursor
 }
 
-fn is_native_collection_facade_target(target_type: &str) -> bool {
-    matches!(
-        target_type,
-        "Collection"
-            | "List"
-            | "ArrayList"
-            | "Set"
-            | "HashSet"
-            | "Map"
-            | "HashMap"
-            | "LinkedHashMap"
-    )
+fn is_structural_borrow_facade_target(target_type: &str) -> bool {
+    crate::stdlib::java_collection_kind_for_name(target_type).is_some()
+        || matches!(target_type, "Entry" | "Map_Entry" | "Map.Entry")
 }
 
-fn is_structural_borrow_facade_target(target_type: &str) -> bool {
-    is_native_collection_facade_target(target_type)
-        || matches!(target_type, "Entry" | "Map_Entry" | "Map.Entry")
+#[cfg(test)]
+mod native_collection_borrow_target_tests {
+    use super::*;
+
+    #[test]
+    fn native_collection_borrows_reuse_the_collection_kind_inventory() {
+        for target in [
+            "Collection",
+            "ArrayList",
+            "ArrayDeque",
+            "HashSet",
+            "LinkedHashSet",
+            "TreeSet",
+            "HashMap",
+            "LinkedHashMap",
+            "TreeMap",
+            "java.util.LinkedHashSet",
+        ] {
+            let borrowed = apply_one(
+                RustExpr::Var("source".to_string()),
+                &Coercion::BorrowConcreteFacade {
+                    target_type: target.to_string(),
+                },
+            );
+            assert_eq!(emit::emit_expr(&borrowed), "&source", "{target}");
+        }
+    }
 }
 
 fn apply_unsupported_dispatch_coercion(
@@ -16266,13 +16673,16 @@ fn apply_unsupported_dispatch_coercion(
 
 fn invalid_cast_policy_expr(policy: &InvalidCastPolicy) -> RustExpr {
     match policy {
-        InvalidCastPolicy::Panic => RustExpr::MacroCall {
-            macro_name: "panic".to_string(),
-            args: vec![RustExpr::Literal(format!(
-                "{:?}",
-                crate::output_markers::INVALID_JAVA_CAST_MESSAGE
-            ))],
-        },
+        InvalidCastPolicy::Panic => RustExpr::shaped(
+            RustExprShape::CheckedCastFailure,
+            RustExpr::MacroCall {
+                macro_name: "panic".to_string(),
+                args: vec![RustExpr::Literal(format!(
+                    "{:?}",
+                    crate::output_markers::INVALID_JAVA_CAST_MESSAGE
+                ))],
+            },
+        ),
     }
 }
 
@@ -16460,13 +16870,7 @@ fn apply_erased_object_closed_enum_downcast(
     let InvalidCastPolicy::Panic = invalid_cast;
     let object_name = "__java_erased_object".to_string();
     let object = RustExpr::Var(object_name.clone());
-    let fallback = RustExpr::MacroCall {
-        macro_name: "panic".to_string(),
-        args: vec![RustExpr::Literal(format!(
-            "\"{}\"",
-            crate::output_markers::INVALID_JAVA_CAST_MESSAGE
-        ))],
-    };
+    let fallback = invalid_cast_policy_expr(invalid_cast);
     let tail = variants.iter().rev().fold(fallback, |else_expr, variant| {
         let payload_type = normalize_emitted_java_type_name(variant);
         let variant_name = closed_enum_variant_name_for_payload_type(&payload_type);
@@ -16771,6 +17175,7 @@ fn apply_clone_recovery(expr: RustExpr, policy: &CloneRecoveryPolicy) -> RustExp
 /// preserve Java reference/value availability across a Rust move, so its
 /// operation is the Rust trait even when the source class declares `clone()`.
 fn rust_clone_trait_projection(expr: RustExpr) -> RustExpr {
+    let propagated = expr_is_result_propagated(&expr);
     let already_borrowed = rust_clone_trait_argument_is_already_borrowed(&expr);
     let argument = if already_borrowed {
         expr
@@ -16782,10 +17187,18 @@ fn rust_clone_trait_projection(expr: RustExpr) -> RustExpr {
         };
         borrowed_raw_safe_expr(expr)
     };
-    function_call_projection(
+    let cloned = function_call_projection(
         RustExpr::path(["std", "clone", "Clone", "clone"]),
         vec![argument],
-    )
+    );
+    // Ownership recovery clones the already-produced payload, not a new
+    // fallible Java call. Keep its consumed Result evidence inside the outer
+    // OwnedRecovery marker instead of relying on the rendered UFCS spelling.
+    if propagated {
+        RustExpr::shaped(RustExprShape::ResultPropagated, cloned)
+    } else {
+        cloned
+    }
 }
 
 fn rust_clone_trait_argument_is_already_borrowed(expr: &RustExpr) -> bool {
@@ -18642,11 +19055,14 @@ mod tests {
         assert_eq!(
             string_projected.clone().into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("name".to_string())),
-                    method: "as_ref".to_string(),
-                    args: Vec::new(),
-                }),
+                receiver: Box::new(RustExpr::shaped(
+                    RustExprShape::OptionalMapReceiver,
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("name".to_string())),
+                        method: "as_ref".to_string(),
+                        args: Vec::new(),
+                    }
+                )),
                 method: "map".to_string(),
                 args: vec![single_param_closure_expr(
                     "value",
@@ -18671,11 +19087,14 @@ mod tests {
         assert_eq!(
             raw_string_projected.clone().into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Raw("make_name()".to_string())),
-                    method: "as_ref".to_string(),
-                    args: Vec::new(),
-                }),
+                receiver: Box::new(RustExpr::shaped(
+                    RustExprShape::OptionalMapReceiver,
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Raw("make_name()".to_string())),
+                        method: "as_ref".to_string(),
+                        args: Vec::new(),
+                    }
+                )),
                 method: "map".to_string(),
                 args: vec![single_param_closure_expr(
                     "value",
@@ -18715,11 +19134,14 @@ mod tests {
         assert_eq!(
             slice_projected.clone().into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("values".to_string())),
-                    method: "as_ref".to_string(),
-                    args: Vec::new(),
-                }),
+                receiver: Box::new(RustExpr::shaped(
+                    RustExprShape::OptionalMapReceiver,
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("values".to_string())),
+                        method: "as_ref".to_string(),
+                        args: Vec::new(),
+                    }
+                )),
                 method: "map".to_string(),
                 args: vec![single_param_closure_expr(
                     "value",
@@ -18794,11 +19216,14 @@ mod tests {
         assert_eq!(
             custom_mut_slice_projected.clone().into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("values".to_string())),
-                    method: "as_mut".to_string(),
-                    args: Vec::new(),
-                }),
+                receiver: Box::new(RustExpr::shaped(
+                    RustExprShape::OptionalMapReceiver,
+                    RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("values".to_string())),
+                        method: "as_mut".to_string(),
+                        args: Vec::new(),
+                    }
+                )),
                 method: "map".to_string(),
                 args: vec![single_param_closure_expr(
                     "value",
@@ -18826,7 +19251,10 @@ mod tests {
         assert_eq!(
             owned_projected.clone().into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Var("name".to_string())),
+                receiver: Box::new(RustExpr::shaped(
+                    RustExprShape::OptionalMapReceiver,
+                    RustExpr::Var("name".to_string())
+                )),
                 method: "map".to_string(),
                 args: vec![single_param_closure_expr(
                     "value",
@@ -18851,7 +19279,10 @@ mod tests {
         assert_eq!(
             raw_owned_projected.clone().into_unshaped(),
             RustExpr::MethodCall {
-                receiver: Box::new(RustExpr::Raw("make_name()".to_string())),
+                receiver: Box::new(RustExpr::shaped(
+                    RustExprShape::OptionalMapReceiver,
+                    RustExpr::Raw("make_name()".to_string())
+                )),
                 method: "map".to_string(),
                 args: vec![single_param_closure_expr(
                     "value",
@@ -29689,6 +30120,45 @@ mod tests {
     }
 
     #[test]
+    fn payload_clone_and_operators_do_not_reintroduce_a_result_carrier() {
+        let call = || {
+            propagate_result_projection(function_call_projection(
+                RustExpr::path(["read"]),
+                Vec::new(),
+            ))
+        };
+        let cloned = apply_audited_clone_recovery(call());
+        assert_eq!(cloned.recorded_shape(), Some(RustExprShape::OwnedRecovery));
+        let operators = [
+            RustExpr::Binary {
+                op: "|".to_string(),
+                left: Box::new(RustExpr::Literal("false".to_string())),
+                right: Box::new(call()),
+            },
+            RustExpr::Unary {
+                op: "!".to_string(),
+                expr: Box::new(call()),
+            },
+            cloned,
+        ];
+        for value in operators {
+            assert!(expr_is_result_propagated(&value), "{value:?}");
+            assert_eq!(
+                emit::emit_expr(&propagate_result_projection(value.clone())),
+                emit::emit_expr(&value)
+            );
+        }
+        // A call may return a fresh Result even if an argument was already
+        // unwrapped. Do not recursively treat every call as a payload wrapper.
+        let fresh_result = function_call_projection(RustExpr::path(["convert"]), vec![call()]);
+        assert!(!expr_is_result_propagated(&fresh_result));
+        assert_eq!(
+            emit::emit_expr(&propagate_result_projection(fresh_result)),
+            "convert(read()?)?"
+        );
+    }
+
+    #[test]
     fn optional_map_preserves_but_arbitrary_method_calls_do_not_inherit_result_marker() {
         let propagated = propagate_result_projection(RustExpr::Raw("call()".to_string()));
         let mapped = optional_map_projection_expr(
@@ -29801,6 +30271,43 @@ mod tests {
         assert_eq!(
             emit::emit_expr(&lowered),
             "match &line { HeaderLineValue::InfoHeaderLine(value) => value as &dyn IdHeaderLine, _ => panic!(\"invalid Java cast\") }"
+        );
+    }
+
+    #[test]
+    fn mutable_trait_views_preserve_the_borrow_for_every_carrier() {
+        let value = || RustExpr::Var("value".to_string());
+        for (coercion, expected) in [
+            (
+                Coercion::BorrowDynTrait {
+                    trait_name: "Sink<Item>".to_string(),
+                    mutable: true,
+                },
+                "(&mut value) as &mut dyn Sink<Item>",
+            ),
+            (
+                Coercion::BorrowBoxedDynTrait {
+                    trait_name: "Sink<Item>".to_string(),
+                    mutable: true,
+                },
+                "value.as_mut() as &mut dyn Sink<Item>",
+            ),
+        ] {
+            let rendered = emit::emit_expr(&apply_coercions(value(), &[coercion]));
+            assert_eq!(rendered, expected);
+        }
+        let projected = borrow_closed_enum_as_dyn_trait_with_mutability(
+            value(),
+            "CellValue",
+            "Sink<Item>",
+            &["Cell".to_string()],
+            true,
+        );
+        let rendered = emit::emit_expr(&projected);
+        assert!(rendered.contains("match &mut value"), "{rendered}");
+        assert!(
+            rendered.contains("value as &mut dyn Sink<Item>"),
+            "{rendered}"
         );
     }
 

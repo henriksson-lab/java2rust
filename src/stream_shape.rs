@@ -59,6 +59,22 @@ pub fn infer_stream_source_element_shape_with_facts(
     env: &TypeEnv,
     facts: &FactSet,
 ) -> Option<RustSlotShape> {
+    // The resolver has already substituted a source declaration's generic
+    // return type. A fallback external facade must not erase that information
+    // (or make a non-sequence source method look like a sequence).
+    if let Expr::Call {
+        resolved: Some(call),
+        ..
+    } = source
+        && crate::call_plan::java_type_owner_is_parsed_source(&call.declaring_type, env, facts)
+    {
+        let effective_facts = EffectiveFacts::new(facts);
+        return infer_stream_source_element_shape_with_effective_facts(
+            source,
+            env,
+            &effective_facts,
+        );
+    }
     if let Some(element_ty) = external_call_stream_source_element_type(source, env, facts) {
         let effective_facts = EffectiveFacts::new(facts);
         return Some(iteration_element_shape_with_effective_facts(

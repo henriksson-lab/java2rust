@@ -344,6 +344,36 @@ fn apply_native_java_instance_method(
     args: Vec<RustExpr>,
 ) -> RustExpr {
     match method {
+        NativeJavaInstanceMethod::PrintStreamFormat => {
+            let stream_name = "__java_format_stream";
+            let text_name = "__java_format_text";
+            RustExpr::Block {
+                stmts: vec![
+                    RustStmt::Let {
+                        mutable: false,
+                        name: stream_name.to_string(),
+                        ty: None,
+                        value: Some(receiver_method_call_projection(
+                            receiver,
+                            "clone",
+                            Vec::new(),
+                        )),
+                    },
+                    RustStmt::Let {
+                        mutable: false,
+                        name: text_name.to_string(),
+                        ty: None,
+                        value: Some(string_format_projection(args)),
+                    },
+                    RustStmt::Expr(receiver_method_call_projection(
+                        RustExpr::Var(stream_name.to_string()),
+                        "print",
+                        vec![RustExpr::Var(text_name.to_string())],
+                    )),
+                ],
+                tail: Some(Box::new(RustExpr::Var(stream_name.to_string()))),
+            }
+        }
         NativeJavaInstanceMethod::StringLen => {
             len_i32_projection(strip_redundant_java_null_expect_after_unwrap(receiver))
         }
@@ -993,7 +1023,7 @@ fn apply_native_java_static_method(
             match args.next() {
                 None => objects_require_non_null_projection(value),
                 Some(message) if args.next().is_none() => {
-                    let nullable = crate::coercion::rust_expr_may_be_java_null_value(&value);
+                    let nullable = crate::coercion::checked_identity_argument_is_nullable(&value);
                     let value_name = "_java_require_non_null_value";
                     let tail = RustExpr::Var(value_name.to_string());
                     let tail = if nullable {
@@ -1277,6 +1307,24 @@ fn apply_native_collection_method(
     method: NativeCollectionMethod,
     mut args: Vec<RustExpr>,
 ) -> RustExpr {
+    if matches!(method, NativeCollectionMethod::ToString) {
+        let helper = if receiver_ty
+            .and_then(crate::stdlib::java_collection_kind_for_type)
+            .is_some_and(|kind| kind.is_map_like())
+        {
+            "java_map_to_string"
+        } else {
+            "java_collection_iter_to_string"
+        };
+        return function_call_projection(
+            RustExpr::path([helper]),
+            vec![receiver_method_call_projection_exact(
+                receiver,
+                "iter",
+                Vec::new(),
+            )],
+        );
+    }
     if matches!(method, NativeCollectionMethod::Len) {
         return len_i32_projection(strip_redundant_java_null_expect_after_unwrap(receiver));
     }
@@ -1337,6 +1385,9 @@ fn apply_native_collection_method(
         *arg = erased_object_box_projection(arg.clone());
     }
     let rust_name = match method {
+        NativeCollectionMethod::ToString => {
+            unreachable!("native collection formatting handled above")
+        }
         NativeCollectionMethod::Len => "len",
         NativeCollectionMethod::IsEmpty => "is_empty",
         NativeCollectionMethod::Clear => "clear",
@@ -3206,6 +3257,7 @@ fn apply_new_target_with_optional_representations(
             target.owner_shape(),
             target.rust_name(),
             facts,
+            representations,
         ),
         args,
     );
@@ -3312,9 +3364,45 @@ fn constructor_owner_associated_path_projection(
     owner_shape: &crate::slot_shape::RustSlotShape,
     member: &str,
     facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
     if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &owner_shape.java_ty {
         let owner = crate::java_naming::rust_name_for_java_named_type(name);
+        if let JavaType::Named { args, .. } = &owner_shape.java_ty
+            && !args.is_empty()
+            && facts
+                .type_capability_overrides_for(&owner_shape.java_ty)
+                .any(|fact| fact.provenance == crate::facts::FactProvenance::ParsedSource)
+        {
+            // The constructor belongs to the source declaration, not its
+            // Rc/enum storage carrier. Its generic arguments nevertheless use
+            // the same representation projection as every other type use.
+            let effective_facts = crate::effective_facts::EffectiveFacts::new(facts);
+            let rust_args = args
+                .iter()
+                .map(|arg| {
+                    representations.map_or_else(
+                        || {
+                            crate::slot_render::rust_type_for_java_generic_arg_with_effective_facts(
+                                arg,
+                                &effective_facts,
+                            )
+                        },
+                        |representations| {
+                            crate::slot_render::rust_type_for_java_generic_arg_with_representations(
+                                arg,
+                                &effective_facts,
+                                representations,
+                            )
+                        },
+                    )
+                })
+                .collect();
+            return rust_type_associated_path_projection(
+                crate::slot_render::rust_generic_type(owner, rust_args),
+                member,
+            );
+        }
         return owner_associated_path_projection(&owner, member);
     }
     rust_type_associated_path_projection(rust_type_for_slot_with_facts(owner_shape, facts), member)
@@ -4114,8 +4202,12 @@ mod tests {
             args: Vec::new(),
         });
 
-        let path =
-            constructor_owner_associated_path_projection(&owner_shape, "new", &FactSet::default());
+        let path = constructor_owner_associated_path_projection(
+            &owner_shape,
+            "new",
+            &FactSet::default(),
+            None,
+        );
 
         assert_eq!(emit::emit_expr(&path), "Wrapper::new");
     }

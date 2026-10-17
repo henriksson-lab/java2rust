@@ -174,7 +174,11 @@ pub(crate) fn impl_item_for_type_with_support_context_and_representations(
     RustItem::Impl(RustImpl {
         target: rust_impl_target_for_source_type(ty, support_program, representations),
         trait_name: None,
-        associated_consts: associated_consts_for_type(ty, &std::collections::BTreeMap::new()),
+        associated_consts: associated_consts_for_type(
+            ty,
+            &std::collections::BTreeMap::new(),
+            support_program,
+        ),
         functions,
     })
 }
@@ -194,7 +198,8 @@ pub(crate) fn impl_items_for_type_with_static_partition(
     representations: Option<&RepresentationPlan>,
     associated_const_value_overrides: &std::collections::BTreeMap<String, RustExpr>,
 ) -> Vec<RustItem> {
-    let associated_consts = associated_consts_for_type(ty, associated_const_value_overrides);
+    let associated_consts =
+        associated_consts_for_type(ty, associated_const_value_overrides, support_program);
     if ty.type_params.is_empty() {
         let mut functions = instance_functions;
         functions.extend(static_functions);
@@ -348,6 +353,105 @@ pub(crate) fn rust_bounds_for_java_type_param(
     }
 }
 
+/// Project dependent Java bounds using their lexical declarations. A bound
+/// naming another type parameter is a widening capability, not a Rust trait.
+/// Retain the upper parameter's declared capabilities transitively as well.
+pub(crate) fn rust_bounds_for_java_type_param_in_scope(
+    bound: &JavaType,
+    support_programs: &[&Program],
+    owner: Option<&TypeDecl>,
+    callable_params: &[String],
+    callable_bounds: &[Option<JavaType>],
+) -> Vec<String> {
+    fn project(
+        bound: &JavaType,
+        programs: &[&Program],
+        owner: Option<&TypeDecl>,
+        names: &[String],
+        bounds: &[Option<JavaType>],
+        visiting: &mut HashSet<String>,
+    ) -> Vec<String> {
+        if let JavaType::Intersection(parts) = bound {
+            let mut result = Vec::new();
+            for part in parts {
+                for capability in project(part, programs, owner, names, bounds, visiting) {
+                    if !result.contains(&capability) {
+                        result.push(capability);
+                    }
+                }
+            }
+            return result;
+        }
+        if let JavaType::Named { name, args } = bound
+            && args.is_empty()
+        {
+            let declared = names
+                .iter()
+                .position(|candidate| candidate == name)
+                .map(|index| bounds.get(index).and_then(Option::as_ref))
+                .or_else(|| {
+                    owner.and_then(|owner| {
+                        owner
+                            .type_params
+                            .iter()
+                            .position(|candidate| candidate == name)
+                            .map(|index| {
+                                owner.type_param_bounds.get(index).and_then(Option::as_ref)
+                            })
+                    })
+                });
+            if let Some(upper) = declared {
+                // This name was proved to be a binder, not a Java nominal
+                // type. In particular Integer/Object must not be unboxed or
+                // erased by the ordinary type-argument renderer.
+                let mut result = vec![format!("Into<{name}>")];
+                if visiting.insert(name.clone()) {
+                    if let Some(upper) = upper {
+                        for capability in project(upper, programs, owner, names, bounds, visiting) {
+                            if !result.contains(&capability) {
+                                result.push(capability);
+                            }
+                        }
+                    }
+                    visiting.remove(name);
+                }
+                return result;
+            }
+        }
+        if let (Some(owner), JavaType::Named { name, args }) = (owner, bound) {
+            // Resolve the nominal bound in its lexical owner before the
+            // shared capability projection. This also serves method bodies
+            // and trait signatures; neither should invent a fallback policy
+            // for ambiguous same-simple-name declarations.
+            let qualified = programs.iter().find_map(|program| {
+                crate::inherited_members::find_type_decl_for_owner_context(
+                    program,
+                    &owner.name,
+                    name,
+                )
+            });
+            if let Some(declaration) = qualified {
+                return rust_bounds_for_java_type_param(
+                    &JavaType::Named {
+                        name: declaration.name.clone(),
+                        args: args.clone(),
+                    },
+                    programs,
+                );
+            }
+        }
+        rust_bounds_for_java_type_param(bound, programs)
+    }
+    project(
+        bound,
+        support_programs,
+        owner,
+        callable_params,
+        callable_bounds,
+        &mut HashSet::new(),
+    )
+}
+
 fn primary_named_type_param_bound(bound: &JavaType) -> Option<&str> {
     match bound {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name),
@@ -482,7 +586,13 @@ pub(crate) fn rust_impl_params_for_source_type(
             let mut bounds = Vec::new();
             if let Some(Some(bound)) = ty.type_param_bounds.get(index) {
                 if !unexpressible_existential_bound_is_unused(ty, name, bound, support_program) {
-                    bounds.extend(rust_bounds_for_java_type_param(bound, &[support_program]));
+                    bounds.extend(rust_bounds_for_java_type_param_in_scope(
+                        bound,
+                        &[support_program],
+                        Some(ty),
+                        &[],
+                        &[],
+                    ));
                 }
             }
             // Java type arguments are heap objects with runtime class identity.
@@ -601,24 +711,30 @@ fn unexpressible_existential_bound_is_unused(
     })
 }
 
-fn java_type_uses_type_param_as_hash_key(ty: &JavaType, type_param: &str) -> bool {
+pub(crate) fn java_type_uses_type_param_as_hash_key(ty: &JavaType, type_param: &str) -> bool {
+    let JavaType::Named { args, .. } = ty else {
+        return false;
+    };
+    java_type_directly_uses_type_param_as_hash_key(ty, type_param)
+        || args
+            .iter()
+            .any(|arg| java_type_uses_type_param_as_hash_key(arg, type_param))
+}
+
+fn java_type_directly_uses_type_param_as_hash_key(ty: &JavaType, type_param: &str) -> bool {
     let JavaType::Named { name, args } = ty else {
         return false;
     };
     let simple = name.rsplit('.').next().unwrap_or(name);
-    let directly_hashed = match simple {
-        "Map" | "HashMap" | "Hashtable" | "ConcurrentHashMap" => args
+    match simple {
+        "Map" | "HashMap" | "LinkedHashMap" | "Hashtable" | "ConcurrentHashMap" => args
             .first()
             .is_some_and(|key| java_type_contains_type_param(key, type_param)),
-        "Set" | "HashSet" => args
+        "Set" | "HashSet" | "LinkedHashSet" => args
             .first()
             .is_some_and(|element| java_type_contains_type_param(element, type_param)),
         _ => false,
-    };
-    directly_hashed
-        || args
-            .iter()
-            .any(|arg| java_type_uses_type_param_as_hash_key(arg, type_param))
+    }
 }
 
 fn java_type_requires_hash_capability_for_type_param(
@@ -627,14 +743,15 @@ fn java_type_requires_hash_capability_for_type_param(
     support_programs: &[&Program],
     visiting: &mut HashSet<(String, String)>,
 ) -> bool {
-    if java_type_uses_type_param_as_hash_key(ty, type_param) {
-        return true;
-    }
     let JavaType::Named { name, args } = ty else {
         return false;
     };
     let Some(owner) = source_type_bound_decl(name, support_programs) else {
-        return false;
+        // Mentioning a key-bearing carrier as a list element/map value does
+        // not hash that carrier's payload. Only this instantiation's own key
+        // position supplies the native requirement. Parsed source definitions
+        // above take precedence over same-named platform collections.
+        return java_type_directly_uses_type_param_as_hash_key(ty, type_param);
     };
     owner
         .type_params
@@ -721,11 +838,22 @@ pub(crate) fn callable_type_param_needs_clone_bound(
     let Some(body) = body else {
         return false;
     };
-    let typed_params = params
+    let mut typed_params = params
         .iter()
         .filter(|param| java_type_contains_type_param(&param.ty, type_param))
-        .map(|param| param.name.as_str())
-        .collect::<Vec<_>>();
+        .map(|param| param.name.clone())
+        .collect::<HashSet<_>>();
+    // Reusing an owned local T has the same copying obligation as reusing a
+    // parameter T. Do not extend this rule to arbitrary carriers mentioning T:
+    // copying an interface/reference handle need not copy its payload.
+    collect_matching_local_names(
+        body,
+        &|ty| {
+            matches!(ty, JavaType::Named { name, args } if name == type_param && args.is_empty())
+                || matches!(ty, JavaType::Unknown(name) if name == type_param)
+        },
+        &mut typed_params,
+    );
     // Several lowering obligations arise from locals and enhanced-for
     // bindings, not only from formal parameters.  This is especially common
     // for class type parameters: a method can copy `T` values between local
@@ -748,7 +876,7 @@ pub(crate) fn callable_type_param_needs_clone_bound(
     }
     typed_params
         .iter()
-        .any(|name| counts.get(*name).copied().unwrap_or(0) > 1)
+        .any(|name| counts.get(name).copied().unwrap_or(0) > 1)
 }
 
 fn callable_type_param_trait_object_cast_needs_clone_bound(
@@ -831,10 +959,22 @@ fn callable_type_param_repeating_region_needs_clone_bound(
 }
 
 fn collect_type_param_local_names(block: &Block, type_param: &str, names: &mut HashSet<String>) {
+    collect_matching_local_names(
+        block,
+        &|ty| java_type_contains_type_param(ty, type_param),
+        names,
+    );
+}
+
+fn collect_matching_local_names(
+    block: &Block,
+    matches_type: &impl Fn(&JavaType) -> bool,
+    names: &mut HashSet<String>,
+) {
     for stmt in &block.statements {
         match stmt {
             Stmt::VarDecl { ty, name, .. } => {
-                if java_type_contains_type_param(ty, type_param) {
+                if matches_type(ty) {
                     names.insert(name.clone());
                 }
             }
@@ -843,26 +983,26 @@ fn collect_type_param_local_names(block: &Block, type_param: &str, names: &mut H
                 else_block,
                 ..
             } => {
-                collect_type_param_local_names(then_block, type_param, names);
+                collect_matching_local_names(then_block, matches_type, names);
                 if let Some(else_block) = else_block {
-                    collect_type_param_local_names(else_block, type_param, names);
+                    collect_matching_local_names(else_block, matches_type, names);
                 }
             }
             Stmt::While { body, .. }
             | Stmt::DoWhile { body, .. }
             | Stmt::Block(body)
             | Stmt::LabeledBlock { body, .. } => {
-                collect_type_param_local_names(body, type_param, names);
+                collect_matching_local_names(body, matches_type, names);
             }
             Stmt::For { init, body, .. } => {
-                collect_type_param_local_names(
+                collect_matching_local_names(
                     &Block {
                         statements: init.clone(),
                     },
-                    type_param,
+                    matches_type,
                     names,
                 );
-                collect_type_param_local_names(body, type_param, names);
+                collect_matching_local_names(body, matches_type, names);
             }
             Stmt::EnhancedFor {
                 var_type,
@@ -870,18 +1010,18 @@ fn collect_type_param_local_names(block: &Block, type_param: &str, names: &mut H
                 body,
                 ..
             } => {
-                if java_type_contains_type_param(var_type, type_param) {
+                if matches_type(var_type) {
                     names.insert(var_name.clone());
                 }
-                collect_type_param_local_names(body, type_param, names);
+                collect_matching_local_names(body, matches_type, names);
             }
             Stmt::Switch { cases, .. } => {
                 for case in cases {
-                    collect_type_param_local_names(
+                    collect_matching_local_names(
                         &Block {
                             statements: case.statements.clone(),
                         },
-                        type_param,
+                        matches_type,
                         names,
                     );
                 }
@@ -892,19 +1032,19 @@ fn collect_type_param_local_names(block: &Block, type_param: &str, names: &mut H
                 catches,
                 finally_block,
             } => {
-                collect_type_param_local_names(
+                collect_matching_local_names(
                     &Block {
                         statements: resources.clone(),
                     },
-                    type_param,
+                    matches_type,
                     names,
                 );
-                collect_type_param_local_names(body, type_param, names);
+                collect_matching_local_names(body, matches_type, names);
                 for catch in catches {
-                    collect_type_param_local_names(&catch.body, type_param, names);
+                    collect_matching_local_names(&catch.body, matches_type, names);
                 }
                 if let Some(finally_block) = finally_block {
-                    collect_type_param_local_names(finally_block, type_param, names);
+                    collect_matching_local_names(finally_block, matches_type, names);
                 }
             }
             Stmt::Assign { .. }
@@ -1041,12 +1181,20 @@ pub(crate) fn callable_type_param_needs_clone_bound_with_support_contexts(
 type CloneRequirementKey = (String, String, String);
 
 #[derive(Debug, Default)]
-struct CloneRequirementSearch {
+struct CloneRequirementSearch<'a> {
+    storage_context: Option<CloneStorageContext<'a>>,
+    memo: CloneRequirementMemoAccess<'a>,
+}
+
+#[derive(Debug, Default)]
+struct CloneRequirementMemo {
     visiting: HashSet<CloneRequirementKey>,
+    trait_impl_visiting: HashSet<(String, String)>,
     method_visiting: Vec<(String, MethodDecl, String)>,
     method_memo: Vec<(String, MethodDecl, String, bool)>,
     inherited_fields: HashMap<String, HashMap<String, JavaType>>,
     inherited_dispatch: HashMap<(String, String, usize), Option<(String, String, usize, usize)>>,
+    stored_fields: HashMap<String, std::sync::Arc<HashMap<String, RustType>>>,
 }
 
 /// Translation-scoped memoization for inferred `Clone` capabilities.
@@ -1057,11 +1205,104 @@ struct CloneRequirementSearch {
 /// the traversal state local to one translation, while sharing completed
 /// answers across every emitted method in that translation.
 #[derive(Debug, Default)]
-pub(crate) struct CloneRequirementCache {
-    search: RefCell<CloneRequirementSearch>,
+pub(crate) struct CloneRequirementCache<'a> {
+    storage_context: Option<CloneStorageContext<'a>>,
+    search: RefCell<CloneRequirementMemo>,
 }
 
-impl CloneRequirementSearch {
+#[derive(Debug)]
+enum CloneRequirementMemoAccess<'a> {
+    Owned(CloneRequirementMemo),
+    Borrowed(&'a mut CloneRequirementMemo),
+}
+
+impl Default for CloneRequirementMemoAccess<'_> {
+    fn default() -> Self {
+        Self::Owned(CloneRequirementMemo::default())
+    }
+}
+
+impl std::ops::Deref for CloneRequirementSearch<'_> {
+    type Target = CloneRequirementMemo;
+    fn deref(&self) -> &Self::Target {
+        match &self.memo {
+            CloneRequirementMemoAccess::Owned(memo) => memo,
+            CloneRequirementMemoAccess::Borrowed(memo) => memo,
+        }
+    }
+}
+
+impl std::ops::DerefMut for CloneRequirementSearch<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        match &mut self.memo {
+            CloneRequirementMemoAccess::Owned(memo) => memo,
+            CloneRequirementMemoAccess::Borrowed(memo) => memo,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CloneStorageContext<'a> {
+    facts: &'a FactSet,
+    representations: &'a RepresentationPlan,
+    signatures: &'a SignaturePlan,
+    program: &'a Program,
+}
+
+impl<'a> CloneRequirementCache<'a> {
+    pub(crate) fn with_storage_context(
+        facts: &'a FactSet,
+        representations: &'a RepresentationPlan,
+        signatures: &'a SignaturePlan,
+        program: &'a Program,
+    ) -> Self {
+        Self {
+            storage_context: Some(CloneStorageContext {
+                facts,
+                representations,
+                signatures,
+                program,
+            }),
+            ..Default::default()
+        }
+    }
+
+    fn search_with_memo<'b>(
+        &'b self,
+        memo: &'b mut CloneRequirementMemo,
+    ) -> CloneRequirementSearch<'b> {
+        CloneRequirementSearch {
+            storage_context: self.storage_context,
+            memo: CloneRequirementMemoAccess::Borrowed(memo),
+        }
+    }
+}
+
+impl CloneRequirementSearch<'_> {
+    fn stored_field_types(
+        &mut self,
+        ty: &TypeDecl,
+    ) -> Option<std::sync::Arc<HashMap<String, RustType>>> {
+        let context = self.storage_context?;
+        if let Some(fields) = self.stored_fields.get(&ty.name) {
+            return Some(fields.clone());
+        }
+        let fields = std::sync::Arc::new(
+            struct_fields_for_type(
+                ty,
+                context.signatures,
+                context.facts,
+                Some(context.representations),
+                context.program,
+            )
+            .into_iter()
+            .map(|field| (field.name, field.ty))
+            .collect::<HashMap<_, _>>(),
+        );
+        self.stored_fields.insert(ty.name.clone(), fields.clone());
+        Some(fields)
+    }
+
     fn insert(&mut self, key: CloneRequirementKey) -> bool {
         self.visiting.insert(key)
     }
@@ -1101,6 +1342,26 @@ pub(crate) fn source_method_emits_clone_bound_for_type_param_with_cache(
     support_programs: &[&Program],
     cache: &CloneRequirementCache,
 ) -> bool {
+    let mut memo = cache.search.borrow_mut();
+    let mut search = cache.search_with_memo(&mut memo);
+    source_method_emits_clone_bound_for_type_param_inner(
+        ty,
+        method,
+        type_param,
+        representations,
+        support_programs,
+        &mut search,
+    )
+}
+
+fn source_method_emits_clone_bound_for_type_param_inner(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    type_param: &str,
+    representations: Option<&RepresentationPlan>,
+    support_programs: &[&Program],
+    search: &mut CloneRequirementSearch,
+) -> bool {
     if let Some(index) = method
         .type_params
         .iter()
@@ -1121,7 +1382,7 @@ pub(crate) fn source_method_emits_clone_bound_for_type_param_with_cache(
                 &method.params,
                 method.body.as_ref(),
                 support_programs,
-                &mut cache.search.borrow_mut(),
+                search,
             );
     }
 
@@ -1149,7 +1410,6 @@ pub(crate) fn source_method_emits_clone_bound_for_type_param_with_cache(
         let placement = representations.storage_placement_for(&ty.name);
         placement.shared() && placement.is_implemented()
     });
-    let mut search = cache.search.borrow_mut();
     let fields = search.inherited_fields(ty, support_programs);
     source_method_class_type_param_needs_clone_bound(
         ty,
@@ -1158,7 +1418,7 @@ pub(crate) fn source_method_emits_clone_bound_for_type_param_with_cache(
         uses_shared_storage,
         &fields,
         support_programs,
-        &mut search,
+        search,
     )
 }
 
@@ -1230,6 +1490,9 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
     if callable_type_param_needs_clone_bound(type_param, params, body) {
         return true;
     }
+    if callable_stream_materialization_capabilities(type_param, params, body, support_programs).0 {
+        return true;
+    }
     let Some(body) = body else {
         return false;
     };
@@ -1257,6 +1520,12 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
                 &callable_types,
                 support_programs,
                 visiting,
+            ) || expr_receiver_requires_class_clone_capability(
+                expr,
+                type_param,
+                &callable_types,
+                support_programs,
+                visiting,
             );
         }
     });
@@ -1268,6 +1537,71 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
                 support_programs,
                 visiting,
             ))
+}
+
+/// A receiver can carry a caller variable even when no call argument does:
+/// `new Owner<U>(handle).read()` must forward Owner's U requirements. Reuse
+/// source-call selection and ancestor substitution, rather than assuming that
+/// every receiver parameter has the same obligation.
+fn expr_receiver_requires_class_clone_capability(
+    expr: &Expr,
+    type_param: &str,
+    caller_types: &TypeEnv,
+    support_programs: &[&Program],
+    visiting: &mut CloneRequirementSearch,
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    let receiver_ty = infer_expr_type(receiver, caller_types);
+    if !java_type_contains_type_param(&receiver_ty, type_param) {
+        return false;
+    }
+    let Some((owner, method, rust_name)) = source_call_for_capability_requirement(
+        resolved.as_ref(),
+        Some(receiver),
+        name,
+        args.len(),
+        caller_types,
+        support_programs,
+    ) else {
+        return false;
+    };
+    if method.modifiers.contains(&Modifier::Static) {
+        return false;
+    }
+    let substitutions =
+        source_receiver_owner_type_substitutions(owner, method, &receiver_ty, support_programs);
+    let fields = visiting.inherited_fields(owner, support_programs);
+    owner.type_params.iter().any(|parameter| {
+        if !substitutions.get(parameter).is_some_and(|actual| {
+            stored_java_type_clone_requires_parameter(actual, type_param, visiting.storage_context)
+        }) {
+            return false;
+        }
+        let key = (owner.name.clone(), rust_name.clone(), parameter.clone());
+        if !visiting.insert(key.clone()) {
+            return false;
+        }
+        let required = source_method_class_type_param_needs_clone_bound(
+            owner,
+            method,
+            parameter,
+            false,
+            &fields,
+            support_programs,
+            visiting,
+        );
+        visiting.remove(&key);
+        required
+    })
 }
 
 fn block_delegates_type_param_to_clone_requiring_constructor(
@@ -1502,7 +1836,6 @@ fn expr_delegates_type_param_to_clone_requiring_method(
             resolved.as_ref().is_some_and(|resolved| {
                 resolved_method_forwards_clone_requirement(
                     resolved,
-                    receiver.as_deref(),
                     args,
                     typed_params,
                     support_programs,
@@ -1683,27 +2016,19 @@ fn expr_delegates_type_param_to_clone_requiring_method(
 
 fn resolved_method_forwards_clone_requirement(
     resolved: &crate::java_ir::ResolvedCall,
-    receiver: Option<&Expr>,
     args: &[Expr],
     typed_params: &HashSet<&str>,
     support_programs: &[&Program],
     visiting: &mut CloneRequirementSearch,
 ) -> bool {
-    let Some(owner) = source_type_bound_decl(&resolved.declaring_type, support_programs) else {
+    let Some((owner, method)) = source_method_for_resolved_call(resolved, support_programs) else {
         return false;
     };
-    let Some(method) = owner.members.iter().find_map(|member| match member {
-        Member::Method(method)
-            if crate::java_signature::source_method_rust_name(method) == resolved.rust_name
-                && method.params.len() == args.len() =>
-        {
-            Some(method)
-        }
-        _ => None,
-    }) else {
-        return false;
-    };
-    let argument_requires_clone = args.iter().enumerate().any(|(arg_index, arg)| {
+    // Receiver requirements are handled by
+    // expr_receiver_requires_class_clone_capability, which projects the
+    // instantiated receiver arguments. A name-only receiver test here used
+    // to impose every owner capability on every mentioned caller parameter.
+    args.iter().enumerate().any(|(arg_index, arg)| {
         if !expr_reads_named_type_param_param(arg, typed_params) {
             return false;
         }
@@ -1766,40 +2091,6 @@ fn resolved_method_forwards_clone_requirement(
                 visiting.remove(&key);
                 needs_clone
             })
-    });
-    if argument_requires_clone {
-        return true;
-    }
-    if !receiver.is_some_and(|receiver| expr_reads_named_type_param_param(receiver, typed_params)) {
-        return false;
-    }
-    // The resolved call identifies the generic receiver declaration but not
-    // its instantiated type arguments. Reaching the call through a parameter
-    // already proven to contain the caller's type parameter is sufficient to
-    // propagate any receiver-class capability required by the selected
-    // method. This remains selective at the caller: unrelated receiver
-    // parameters do not participate.
-    let fields = source_field_types(owner);
-    owner.type_params.iter().any(|callee_type_param| {
-        let key = (
-            owner.name.clone(),
-            resolved.rust_name.clone(),
-            callee_type_param.clone(),
-        );
-        if !visiting.insert(key.clone()) {
-            return false;
-        }
-        let needs_clone = source_method_class_type_param_needs_clone_bound(
-            owner,
-            method,
-            callee_type_param,
-            false,
-            &fields,
-            support_programs,
-            visiting,
-        );
-        visiting.remove(&key);
-        needs_clone
     })
 }
 
@@ -2795,9 +3086,47 @@ fn source_method_needs_class_type_param_clone_bound(
     method: &MethodDecl,
     type_param: &str,
     fields: &HashMap<String, JavaType>,
+    stored_fields: Option<&HashMap<String, RustType>>,
+    storage_context: Option<CloneStorageContext<'_>>,
 ) -> bool {
     let Some(body) = &method.body else {
         return false;
+    };
+    let mut lexical_types = TypeEnv::new();
+    for (name, ty) in fields {
+        lexical_types.insert_field(name.clone(), ty.clone());
+    }
+    for param in &method.params {
+        lexical_types.insert_param(param.name.clone(), param.ty.clone());
+        lexical_types.insert_param(param.source_name.clone(), param.ty.clone());
+    }
+    for statement in &body.statements {
+        lexical_types.learn_stmt(statement);
+    }
+    let needs_clone = |ty: &JavaType| {
+        if !java_type_contains_type_param(ty, type_param) {
+            return false;
+        }
+        let Some(stored) = stored_fields else {
+            return true;
+        };
+        let mut matched = false;
+        for (name, field_ty) in fields {
+            if field_ty != ty {
+                continue;
+            }
+            let Some(actual) = stored
+                .get(name)
+                .or_else(|| stored.get(&crate::parser::to_snake_case(name)))
+            else {
+                return true;
+            };
+            matched = true;
+            if rust_clone_requires_parameter(actual, type_param) {
+                return true;
+            }
+        }
+        !matched
     };
     let generic_owner_locals = body
         .statements
@@ -2830,13 +3159,15 @@ fn source_method_needs_class_type_param_clone_bound(
         matches!(stmt,
             Stmt::VarDecl { ty, initializer: Some(initializer), .. }
                 if java_type_contains_type_param(ty, type_param)
-                    && (expr_java_type(initializer, fields).is_some_and(|field_ty| {
-                            java_type_contains_type_param(&field_ty, type_param)
+                    && (expr_java_type(initializer, fields, &lexical_types).is_some_and(|field_ty| {
+                            needs_clone(&field_ty)
                         })
                         || expr_recovers_owned_class_type_param_from_field(
                             initializer,
                             type_param,
                             fields,
+                            &needs_clone,
+                            &lexical_types,
                         ))
         )
     }) {
@@ -2844,12 +3175,93 @@ fn source_method_needs_class_type_param_clone_bound(
         // the emitted `.cloned()` requires this capability on the class impl.
         return true;
     }
+    let mut copies_argument_field = false;
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        if !copies_argument_field {
+            let args = match expr {
+                Expr::Call { args, .. } | Expr::New { args, .. } => args,
+                _ => return,
+            };
+            let candidates = args
+                .iter()
+                .enumerate()
+                .filter_map(|(index, argument)| {
+                    expr_recovers_owned_class_type_param_from_field(
+                        argument,
+                        type_param,
+                        fields,
+                        &needs_clone,
+                        &lexical_types,
+                    )
+                    .then_some(index)
+                })
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
+                return;
+            }
+            // The shared argument plan owns the borrowing decision. Merely
+            // mentioning a field in e.g. contains(field) does not copy it.
+            let plan = storage_context.map(|context| match expr {
+                Expr::Call {
+                    receiver,
+                    name,
+                    resolved,
+                    args,
+                    ..
+                } => crate::call_plan::plan_call_arguments_with_facts_and_args(
+                    receiver.as_deref(),
+                    name,
+                    resolved.as_ref(),
+                    args,
+                    context.signatures,
+                    context.facts,
+                    &lexical_types,
+                ),
+                Expr::New { resolved, args, .. } => crate::call_plan::plan_constructor_arguments(
+                    resolved.as_ref(),
+                    args.len(),
+                    context.signatures,
+                ),
+                _ => unreachable!(),
+            });
+            let owns = |shape: &RustSlotShape| {
+                matches!(
+                    shape.ownership,
+                    OwnershipShape::Owned | OwnershipShape::CopyValue
+                )
+            };
+            copies_argument_field = candidates.into_iter().any(|index| match &plan {
+                Some(crate::call_plan::ArgumentLoweringPlan::Shaped(shapes)) => {
+                    shapes.get(index).is_none_or(owns)
+                }
+                Some(crate::call_plan::ArgumentLoweringPlan::Slotted(slots)) => {
+                    slots.get(index).is_none_or(|slot| match slot {
+                        crate::conversion_plan::Slot::Argument(shape)
+                        | crate::conversion_plan::Slot::Assignment(shape)
+                        | crate::conversion_plan::Slot::Return(shape) => owns(shape),
+                        crate::conversion_plan::Slot::Value => true,
+                        _ => false,
+                    })
+                }
+                _ => true, // No solved metadata: retain conservative copying requirements.
+            });
+        }
+    });
+    if copies_argument_field {
+        return true;
+    }
     if !java_type_contains_type_param(&method.return_type, type_param) {
         return false;
     }
     body.statements.iter().any(|stmt| {
         method_return_expr(stmt).is_some_and(|expr| {
-            expr_recovers_owned_class_type_param_from_field(expr, type_param, fields)
+            expr_recovers_owned_class_type_param_from_field(
+                expr,
+                type_param,
+                fields,
+                &needs_clone,
+                &lexical_types,
+            )
         })
     })
 }
@@ -2861,51 +3273,169 @@ fn method_return_expr(stmt: &Stmt) -> Option<&Expr> {
     }
 }
 
+/// Cloning an owned reference carrier can be independent of its type
+/// arguments: Rc<T>, for example, copies the handle rather than cloning T.
+fn stored_java_type_clone_requires_parameter(
+    ty: &JavaType,
+    type_param: &str,
+    context: Option<CloneStorageContext<'_>>,
+) -> bool {
+    if !java_type_contains_type_param(ty, type_param) {
+        return false;
+    }
+    let Some(context) = context else {
+        return true;
+    };
+    let mut shape = crate::shape_projection::project_java_value_shape(
+        Some(context.representations),
+        ty.clone(),
+    );
+    shape.ownership = crate::slot_shape::OwnershipShape::Owned;
+    let stored = rust_type_for_slot_with_facts_and_representations(
+        &shape,
+        context.facts,
+        context.representations,
+    );
+    // This projection is used for substituted ancestor arguments, which need
+    // not have a stored field signature. If lexical information was erased by
+    // the fallback, relax a bound only across a proven clone-shielding carrier.
+    rust_clone_requires_parameter(&stored, type_param) || !rust_clone_shields_arguments(&stored)
+}
+
+fn rust_clone_shields_arguments(ty: &RustType) -> bool {
+    match ty {
+        RustType::Named(raw) | RustType::Raw(raw) => {
+            if raw_rust_shared_handle_type_inner(raw).is_some()
+                || raw_rust_generic_args(raw, "std::marker::PhantomData")
+                    .or_else(|| raw_rust_generic_args(raw, "PhantomData"))
+                    .is_some_and(|args| args.len() == 1)
+                || raw_rust_box_dyn_trait(raw).is_some_and(raw_dyn_trait_supports_box_clone_adapter)
+            {
+                return true;
+            }
+            raw_rust_option_inner(raw)
+                .or_else(|| raw_rust_vec_inner(raw))
+                .is_some_and(|inner| {
+                    rust_clone_shields_arguments(&rust_type_arg_projection_or_raw(inner))
+                })
+        }
+        RustType::Generic { base, args } if unconditional_clone_carrier(base) => args.len() == 1,
+        RustType::Generic { base, args } if matches!(base.as_str(), "Box" | "std::boxed::Box") => {
+            matches!(args.as_slice(), [RustType::DynTrait(name)] if raw_dyn_trait_supports_box_clone_adapter(name))
+        }
+        RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
+            rust_clone_shields_arguments(inner)
+        }
+        RustType::Ref { mutable: false, .. } | RustType::FnPointer { .. } => true,
+        _ => false,
+    }
+}
+
+fn unconditional_clone_carrier(base: &str) -> bool {
+    matches!(
+        base,
+        "std::rc::Rc"
+            | "Rc"
+            | "std::sync::Arc"
+            | "Arc"
+            | "std::marker::PhantomData"
+            | "PhantomData"
+    )
+}
+
+fn rust_clone_requires_parameter(ty: &RustType, type_param: &str) -> bool {
+    match ty {
+        RustType::Named(name) if name == type_param => true,
+        RustType::Named(name) | RustType::Raw(name) => {
+            if rust_clone_shields_arguments(ty) {
+                return false;
+            }
+            let parsed = rust_type_arg_projection_or_raw(name);
+            if &parsed == ty || matches!(parsed, RustType::Raw(_)) {
+                matches!(ty, RustType::Raw(_))
+                    || name
+                        .split(|ch: char| !ch.is_alphanumeric() && ch != '_')
+                        .any(|identifier| identifier == type_param)
+            } else {
+                rust_clone_requires_parameter(&parsed, type_param)
+            }
+        }
+        RustType::Generic { base, args }
+            if unconditional_clone_carrier(base) && args.len() == 1 =>
+        {
+            false
+        }
+        RustType::Generic { base, args }
+            if matches!(base.as_str(), "Box" | "std::boxed::Box")
+                && matches!(args.as_slice(), [RustType::DynTrait(name)] if raw_dyn_trait_supports_box_clone_adapter(name)) =>
+        {
+            false
+        }
+        RustType::Generic { args, .. } | RustType::Tuple(args) => args
+            .iter()
+            .any(|arg| rust_clone_requires_parameter(arg, type_param)),
+        RustType::Vec(inner) | RustType::Array2(inner) | RustType::Option(inner) => {
+            rust_clone_requires_parameter(inner, type_param)
+        }
+        RustType::Ref { .. } | RustType::FnPointer { .. } => false,
+        RustType::DynTrait(_) | RustType::ImplTrait(_) | RustType::ImplFnTrait { .. } => true,
+        _ => false,
+    }
+}
+
 fn expr_recovers_owned_class_type_param_from_field(
     expr: &Expr,
     type_param: &str,
     fields: &HashMap<String, JavaType>,
+    needs_clone: &impl Fn(&JavaType) -> bool,
+    lexical_types: &TypeEnv,
 ) -> bool {
     match expr {
-        Expr::Var(name) => fields
-            .get(name)
-            .is_some_and(|field_ty| java_type_contains_type_param(field_ty, type_param)),
-        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => fields
-            .get(field)
-            .is_some_and(|field_ty| java_type_contains_type_param(field_ty, type_param)),
+        Expr::Var(name) if lexical_types.local_type(name).is_none() => {
+            fields.get(name).is_some_and(needs_clone)
+        }
+        Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
+            fields.get(field).is_some_and(needs_clone)
+        }
         Expr::Call {
             receiver: Some(receiver),
             name,
             args,
             ..
-        } if name == "get" && args.len() == 1 => {
-            expr_java_type(receiver, fields).is_some_and(|receiver_ty| {
+        } if name == "get" && args.len() == 1 => expr_java_type(receiver, fields, lexical_types)
+            .is_some_and(|receiver_ty| {
                 collection_lookup_value_type(&receiver_ty)
-                    .is_some_and(|value_ty| java_type_contains_type_param(&value_ty, type_param))
-            })
-        }
+                    .is_some_and(|value_ty| needs_clone(&value_ty))
+            }),
         Expr::Call {
             receiver: Some(receiver),
             name,
             args,
             ..
         } if name == "iterator" && args.is_empty() => {
-            expr_java_type(receiver, fields).is_some_and(|receiver_ty| {
-                sequence_element_type(&receiver_ty).is_some_and(|element_ty| {
-                    java_type_contains_type_param(&element_ty, type_param)
-                })
+            expr_java_type(receiver, fields, lexical_types).is_some_and(|receiver_ty| {
+                sequence_element_type(&receiver_ty)
+                    .is_some_and(|element_ty| needs_clone(&element_ty))
             })
         }
-        Expr::Cast { expr, .. } => {
-            expr_recovers_owned_class_type_param_from_field(expr, type_param, fields)
-        }
+        Expr::Cast { expr, .. } => expr_recovers_owned_class_type_param_from_field(
+            expr,
+            type_param,
+            fields,
+            needs_clone,
+            lexical_types,
+        ),
         _ => false,
     }
 }
 
-fn expr_java_type(expr: &Expr, fields: &HashMap<String, JavaType>) -> Option<JavaType> {
+fn expr_java_type(
+    expr: &Expr,
+    fields: &HashMap<String, JavaType>,
+    lexical_types: &TypeEnv,
+) -> Option<JavaType> {
     match expr {
-        Expr::Var(name) => fields.get(name).cloned(),
+        Expr::Var(name) if lexical_types.local_type(name).is_none() => fields.get(name).cloned(),
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
             fields.get(field).cloned()
         }
@@ -3143,6 +3673,7 @@ pub(crate) fn constructor_function_shell_with_facts_and_support_contexts(
             support_programs,
             &ctor.params,
             ctor.body.as_ref(),
+            Some(ty),
         ),
         params: constructor_params(ty, ctor, signatures, facts),
         return_type: Some(constructor_return_type(ty, ctor, signatures)),
@@ -3189,6 +3720,7 @@ pub(crate) fn function_type_params_with_optional_lifetime_and_support_contexts(
     support_programs: &[&Program],
     callable_params: &[crate::java_ir::Param],
     callable_body: Option<&crate::java_ir::Block>,
+    owner: Option<&TypeDecl>,
 ) -> Vec<String> {
     function_type_params_with_required_clone_bounds_and_support_contexts(
         callable_name,
@@ -3199,6 +3731,7 @@ pub(crate) fn function_type_params_with_optional_lifetime_and_support_contexts(
         callable_params,
         callable_body,
         &[],
+        owner,
     )
 }
 
@@ -3215,6 +3748,33 @@ pub(crate) fn function_type_params_with_required_clone_bounds_and_support_contex
     callable_params: &[crate::java_ir::Param],
     callable_body: Option<&crate::java_ir::Block>,
     required_clone_bounds: &[bool],
+    owner: Option<&TypeDecl>,
+) -> Vec<String> {
+    function_type_params_with_clone_cache(
+        callable_name,
+        type_params,
+        type_param_bounds,
+        needs_lifetime,
+        support_programs,
+        callable_params,
+        callable_body,
+        required_clone_bounds,
+        owner,
+        None,
+    )
+}
+
+fn function_type_params_with_clone_cache(
+    callable_name: Option<&str>,
+    type_params: &[String],
+    type_param_bounds: &[Option<JavaType>],
+    needs_lifetime: bool,
+    support_programs: &[&Program],
+    callable_params: &[crate::java_ir::Param],
+    callable_body: Option<&Block>,
+    required_clone_bounds: &[bool],
+    owner: Option<&TypeDecl>,
+    clone_cache: Option<&CloneRequirementCache>,
 ) -> Vec<String> {
     let mut params = Vec::new();
     if needs_lifetime {
@@ -3224,15 +3784,38 @@ pub(crate) fn function_type_params_with_required_clone_bounds_and_support_contex
         let mut bounds = type_param_bounds
             .get(index)
             .and_then(|bound| bound.as_ref())
-            .map(|bound| rust_bounds_for_java_type_param(bound, support_programs))
+            .map(|bound| {
+                rust_bounds_for_java_type_param_in_scope(
+                    bound,
+                    support_programs,
+                    owner,
+                    type_params,
+                    type_param_bounds,
+                )
+            })
             .unwrap_or_default();
-        if callable_type_param_needs_clone_bound_with_support_contexts(
-            name,
-            callable_params,
-            callable_body,
-            support_programs,
-        ) || required_clone_bounds.get(index).copied().unwrap_or(false)
-        {
+        let needs_clone = clone_cache.map_or_else(
+            || {
+                callable_type_param_needs_clone_bound_with_support_contexts(
+                    name,
+                    callable_params,
+                    callable_body,
+                    support_programs,
+                )
+            },
+            |cache| {
+                let mut memo = cache.search.borrow_mut();
+                let mut search = cache.search_with_memo(&mut memo);
+                callable_type_param_needs_clone_bound_with_support_contexts_inner(
+                    name,
+                    callable_params,
+                    callable_body,
+                    support_programs,
+                    &mut search,
+                )
+            },
+        );
+        if needs_clone || required_clone_bounds.get(index).copied().unwrap_or(false) {
             bounds.retain(|bound| bound != "Clone");
             bounds.push("Clone".to_string());
         }
@@ -3246,31 +3829,25 @@ pub(crate) fn function_type_params_with_required_clone_bounds_and_support_contex
             // used elsewhere for reified generic values.
             bounds.push("std::any::Any".to_string());
         }
-        if crate::inherited_members::is_synthesized_source_wildcard_type_param(name)
-            && !bounds.iter().any(|bound| bound == "std::any::Any")
-        {
-            // A Java wildcard capture is still an owned heap-object type.
-            // Its Rust reification can escape behind a `Box<dyn Trait>`, whose
-            // default object lifetime is `'static`; `Any` expresses the same
-            // runtime-object lifetime contract used by source class generics.
-            bounds.push("std::any::Any".to_string());
-        }
-        if callable_type_param_flows_through_source_class_argument(
-            name,
-            callable_params,
-            support_programs,
-        ) && !bounds.iter().any(|bound| bound == "std::any::Any")
-        {
-            // Source class inherent impls use `Any` for Java runtime-class
-            // identity. A callable receiving `Model<T>` must therefore carry
-            // the same obligation before it can invoke even a bound-neutral
-            // method through that class or its hierarchy carrier.
-            bounds.push("std::any::Any".to_string());
-        }
-        if callable_type_param_reaches_hash_backed_source_type(
+        if callable_type_param_reaches_source_capability(
             name,
             callable_params,
             callable_body,
+            owner,
+            support_programs,
+            SourceCallableCapability::JavaAny,
+        ) && !bounds.iter().any(|bound| bound == "std::any::Any")
+        {
+            // Runtime-object/static-lifetime obligations must cross the same
+            // selected source calls as key capabilities, including reified
+            // wildcard witnesses inferred from the actual caller arguments.
+            bounds.push("std::any::Any".to_string());
+        }
+        if callable_type_param_reaches_hash_backed_source_type_in_owner(
+            name,
+            callable_params,
+            callable_body,
+            owner,
             support_programs,
         ) {
             // A Java method type parameter can instantiate a source generic
@@ -3299,83 +3876,442 @@ pub(crate) fn function_type_params_with_required_clone_bounds_and_support_contex
     params
 }
 
+#[cfg(test)]
 fn callable_type_param_reaches_hash_backed_source_type(
     type_param: &str,
     params: &[crate::java_ir::Param],
     body: Option<&crate::java_ir::Block>,
     support_programs: &[&Program],
 ) -> bool {
-    let Some(body) = body else {
+    callable_type_param_reaches_hash_backed_source_type_in_owner(
+        type_param,
+        params,
+        body,
+        None,
+        support_programs,
+    )
+}
+
+fn callable_type_param_reaches_hash_backed_source_type_in_owner(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&Block>,
+    declaring_owner: Option<&TypeDecl>,
+    support_programs: &[&Program],
+) -> bool {
+    callable_type_param_reaches_source_capability(
+        type_param,
+        params,
+        body,
+        declaring_owner,
+        support_programs,
+        SourceCallableCapability::JavaMapKey,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceCallableCapability {
+    JavaMapKey,
+    JavaAny,
+}
+
+fn callable_type_param_reaches_source_capability(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&Block>,
+    declaring_owner: Option<&TypeDecl>,
+    support_programs: &[&Program],
+    capability: SourceCallableCapability,
+) -> bool {
+    // Capability propagation is reachability in the selected source call graph.
+    // Visit a (method, binder) once, rather than repeatedly widening signatures
+    // or caching a provisional false answer when a recursive edge is reached.
+    let mut pending = vec![(type_param, params, body, declaring_owner)];
+    let mut visited = HashSet::new();
+    while let Some((type_param, params, body, caller_owner)) = pending.pop() {
+        if capability == SourceCallableCapability::JavaAny
+            && (crate::inherited_members::is_synthesized_source_wildcard_type_param(type_param)
+                || callable_type_param_flows_through_source_class_argument(
+                    type_param,
+                    params,
+                    body,
+                    support_programs,
+                )
+                || body.is_some_and(|body| {
+                    callable_type_param_trait_object_cast_needs_clone_bound(type_param, body)
+                }))
+        {
+            return true;
+        }
+        if capability == SourceCallableCapability::JavaMapKey
+            && callable_stream_materialization_capabilities(
+                type_param,
+                params,
+                body,
+                support_programs,
+            )
+            .1
+        {
+            return true;
+        }
+        let Some(body) = body else {
+            continue;
+        };
+        let mut types = caller_owner
+            .map(|owner| source_callable_type_env(owner, params))
+            .unwrap_or_default();
+        for param in params {
+            types.insert_param(param.source_name.clone(), param.ty.clone());
+            if param.name != param.source_name {
+                types.insert_param(param.name.clone(), param.ty.clone());
+            }
+        }
+        for stmt in &body.statements {
+            types.learn_stmt(stmt);
+        }
+        let mut requires_capability = false;
+        crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+            if requires_capability {
+                return;
+            }
+            let instantiated = if capability == SourceCallableCapability::JavaMapKey {
+                match expr {
+                    // The resolved constructor includes inferred diamond arguments.
+                    Expr::New { .. } => Some(infer_expr_type(expr, &types)),
+                    Expr::Call {
+                        receiver: Some(receiver),
+                        ..
+                    } => Some(infer_expr_type(receiver, &types)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            requires_capability = instantiated.as_ref().is_some_and(|ty| {
+                java_type_requires_hash_capability_for_type_param(
+                    ty,
+                    type_param,
+                    support_programs,
+                    &mut HashSet::new(),
+                )
+            });
+            if requires_capability {
+                return;
+            }
+            if capability == SourceCallableCapability::JavaMapKey
+                && generic_equals_uses_value_capability(expr, type_param, &types, support_programs)
+            {
+                requires_capability = true;
+                return;
+            }
+            if let Expr::Call {
+                receiver: Some(receiver),
+                name,
+                args,
+                ..
+            } = expr
+            {
+                let receiver_ty = infer_expr_type(receiver, &types);
+                let source_receiver = match &receiver_ty {
+                    JavaType::Named { name, .. } => {
+                        source_type_bound_decl(name, support_programs).is_some()
+                    }
+                    _ => false,
+                };
+                if capability == SourceCallableCapability::JavaMapKey
+                    && !source_receiver
+                    && matches!(
+                        crate::call_plan::plan_native_collection_receiver_call_for_type(
+                            receiver,
+                            name,
+                            Some(args),
+                            &receiver_ty,
+                            &types,
+                        ),
+                        Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod {
+                            method: crate::call_plan::NativeCollectionMethod::ListRemoveObject,
+                            ..
+                        })
+                    )
+                {
+                    requires_capability |= crate::types::sequence_element_type(&receiver_ty)
+                        .is_some_and(|element| java_type_contains_type_param(&element, type_param));
+                }
+            }
+            if let Expr::Call {
+                receiver,
+                args,
+                resolved: Some(call),
+                ..
+            } = expr
+            {
+                if let Some((owner, method)) =
+                    source_method_for_resolved_call(call, support_programs)
+                {
+                    if capability == SourceCallableCapability::JavaAny
+                        && (method
+                            .params
+                            .iter()
+                            .any(|param| crate::types::contains_wildcard_type(&param.ty))
+                            || owner
+                                .type_param_bounds
+                                .iter()
+                                .chain(&method.type_param_bounds)
+                                .flatten()
+                                .any(crate::types::contains_wildcard_type))
+                    {
+                        let effective = crate::inherited_members::method_with_synthesized_source_wildcard_params(method, owner, support_programs);
+                        if effective.type_params.len() != method.type_params.len() {
+                            let mut inferred = call.clone();
+                            inferred.arg_target_types = args
+                                .iter()
+                                .map(|arg| infer_expr_type(arg, &types))
+                                .collect();
+                            let captures = crate::resolve::resolved_method_type_substitutions(
+                                &owner.type_params,
+                                &effective,
+                                &inferred,
+                            );
+                            requires_capability |= effective.type_params.iter().filter(|name| crate::inherited_members::is_synthesized_source_wildcard_type_param(name)).any(|capture| {
+                                captures.get(capture).is_some_and(|actual| java_type_contains_type_param(actual, type_param))
+                            });
+                            if requires_capability {
+                                return;
+                            }
+                        }
+                    }
+                    let mut substitutions = crate::resolve::resolved_method_type_substitutions(
+                        &owner.type_params,
+                        method,
+                        call,
+                    );
+                    if !method.modifiers.contains(&Modifier::Static) {
+                        let receiver_ty = if receiver
+                            .as_deref()
+                            .is_none_or(|receiver| matches!(receiver, Expr::This))
+                        {
+                            caller_owner.map(|owner| JavaType::Named {
+                                name: owner.name.clone(),
+                                args: owner
+                                    .type_params
+                                    .iter()
+                                    .map(|name| JavaType::Named {
+                                        name: name.clone(),
+                                        args: vec![],
+                                    })
+                                    .collect(),
+                            })
+                        } else {
+                            receiver
+                                .as_ref()
+                                .map(|receiver| infer_expr_type(receiver, &types))
+                        };
+                        if let Some(receiver_ty) = receiver_ty {
+                            substitutions.extend(source_receiver_owner_type_substitutions(
+                                owner,
+                                method,
+                                &receiver_ty,
+                                support_programs,
+                            ));
+                        }
+                    }
+                    for callee_param in method.type_params.iter().chain(
+                        owner
+                            .type_params
+                            .iter()
+                            .filter(|param| !method.type_params.contains(param)),
+                    ) {
+                        if substitutions
+                            .get(callee_param)
+                            .is_some_and(|actual| java_type_contains_type_param(actual, type_param))
+                            && visited.insert((
+                                owner.name.as_str(),
+                                call.rust_name.clone(),
+                                callee_param.as_str(),
+                            ))
+                        {
+                            pending.push((
+                                callee_param.as_str(),
+                                method.params.as_slice(),
+                                method.body.as_ref(),
+                                Some(owner),
+                            ));
+                        }
+                    }
+                }
+            }
+        });
+        if requires_capability {
+            return true;
+        }
+    }
+    false
+}
+
+/// Bind an explicitly instantiated source receiver to the declaring owner's
+/// parameters. Inherited calls compose the existing shared ancestor projection;
+/// a callable's own binder shadows an identically named owner binder.
+fn source_receiver_owner_type_substitutions(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    receiver_ty: &JavaType,
+    support_programs: &[&Program],
+) -> HashMap<String, JavaType> {
+    let receiver_ty = optional_element_type(receiver_ty).unwrap_or_else(|| receiver_ty.clone());
+    let JavaType::Named { name, args } = &receiver_ty else {
+        return HashMap::new();
+    };
+    let Some(receiver_owner) = source_type_bound_decl(name, support_programs) else {
+        return HashMap::new();
+    };
+    let receiver_bindings = crate::resolve::owner_type_argument_substitutions(
+        &receiver_owner.type_params,
+        &[],
+        args,
+        &receiver_owner.type_param_bounds,
+    );
+    let bindings = if receiver_owner.name == owner.name {
+        receiver_bindings
+    } else {
+        let Some(ancestor_bindings) = support_programs.iter().find_map(|program| {
+            crate::inherited_members::source_ancestor_type_arguments(program, receiver_owner, owner)
+        }) else {
+            return HashMap::new();
+        };
+        ancestor_bindings
+            .into_iter()
+            .map(|(param, actual)| {
+                (
+                    param,
+                    crate::resolve::substitute_method_type_variables(&actual, &receiver_bindings),
+                )
+            })
+            .collect()
+    };
+    bindings
+        .into_iter()
+        .filter(|(name, _)| !method.type_params.contains(name))
+        .collect()
+}
+
+/// Use the resolver-selected identity, shared by Rust capability planners.
+fn generic_equals_uses_value_capability(
+    expr: &Expr,
+    type_param: &str,
+    types: &TypeEnv,
+    support_programs: &[&Program],
+) -> bool {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        resolved,
+    } = expr
+    else {
         return false;
     };
-    let mut types = TypeEnv::new();
-    for param in params {
-        types.insert_param(param.source_name.clone(), param.ty.clone());
-        if param.name != param.source_name {
-            types.insert_param(param.name.clone(), param.ty.clone());
+    if name != "equals"
+        || args.len() != 1
+        || resolved
+            .as_ref()
+            .is_some_and(|call| source_method_for_resolved_call(call, support_programs).is_some())
+    {
+        return false;
+    }
+    let is_parameter = |ty: JavaType| {
+        let ty = optional_element_type(&ty).unwrap_or(ty);
+        matches!(&ty, JavaType::Named { name, args } if name == type_param && args.is_empty())
+            || matches!(&ty, JavaType::Unknown(name) if name == type_param)
+    };
+    is_parameter(infer_expr_type(receiver, types)) && is_parameter(infer_expr_type(&args[0], types))
+}
+
+/// Use the resolver-selected identity, shared by Rust capability planners.
+fn source_method_for_resolved_call<'a>(
+    call: &crate::java_ir::ResolvedCall,
+    support_programs: &[&'a Program],
+) -> Option<(&'a TypeDecl, &'a MethodDecl)> {
+    let owner = source_type_bound_decl(&call.declaring_type, support_programs)?;
+    let method = owner.members.iter().find_map(|member| match member {
+        Member::Method(method)
+            if crate::java_signature::source_method_rust_name(method) == call.rust_name
+                && method.params.len() == call.arg_target_types.len() =>
+        {
+            Some(method)
         }
+        _ => None,
+    })?;
+    Some((owner, method))
+}
+
+/// Stream planning already knows which elements escape and which collection
+/// owns them. Reuse that plan for Rust-only generic capabilities rather than
+/// matching collector names independently in signature rendering.
+fn callable_stream_materialization_capabilities(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&Block>,
+    support_programs: &[&Program],
+) -> (bool, bool) {
+    let Some(body) = body else {
+        return (false, false);
+    };
+    // Avoid rebuilding the source inventory for ordinary generic methods.
+    // This is only a cheap necessary syntax condition; source identity,
+    // element ownership and collection capabilities still come from StreamPlan.
+    let mut may_materialize = false;
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        may_materialize |= matches!(expr, Expr::Call { name, .. }
+            if matches!(name.as_str(), "collect" | "toArray" | "to_array"));
+    });
+    if !may_materialize {
+        return (false, false);
+    }
+    let mut source_emission = crate::source_emission::SourceEmissionPlan::default();
+    for program in support_programs {
+        source_emission.add_program(program);
+    }
+    let mut types = TypeEnv::new();
+    types.set_source_emission(std::sync::Arc::new(source_emission));
+    for param in params {
+        types.insert_param(param.name.clone(), param.ty.clone());
+        types.insert_param(param.source_name.clone(), param.ty.clone());
     }
     for stmt in &body.statements {
         types.learn_stmt(stmt);
     }
-
-    let mut requires_hash = false;
+    let facts = FactSet::default();
+    let mut clone = false;
+    let mut key = false;
     crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
-        if requires_hash {
+        let Some(plan) = crate::stream::build_stream_plan(expr, &types, &facts) else {
             return;
-        }
-        let instantiated = match expr {
-            Expr::New { ty, .. } => Some(ty.clone()),
-            Expr::Call {
-                receiver: Some(receiver),
-                ..
-            } => Some(infer_expr_type(receiver, &types)),
+        };
+        let element = match plan.actual() {
+            crate::conversion_plan::LoweredType::VecElementBorrow { element_shape, .. }
+            | crate::conversion_plan::LoweredType::SetElementBorrow { element_shape, .. } => {
+                Some(element_shape)
+            }
             _ => None,
         };
-        requires_hash = instantiated.as_ref().is_some_and(|ty| {
-            source_type_instantiation_requires_hash_capability(ty, type_param, support_programs)
-        });
+        clone |=
+            element.is_some_and(|shape| java_type_contains_type_param(&shape.java_ty, type_param));
+        key |= plan
+            .actual()
+            .java_ty()
+            .is_some_and(|ty| java_type_uses_type_param_as_hash_key(ty, type_param));
     });
-    requires_hash
-}
-
-fn source_type_instantiation_requires_hash_capability(
-    ty: &JavaType,
-    callable_type_param: &str,
-    support_programs: &[&Program],
-) -> bool {
-    let JavaType::Named { name, args } = ty else {
-        return false;
-    };
-    let Some(owner) = source_type_bound_decl(name, support_programs) else {
-        return false;
-    };
-    owner
-        .type_params
-        .iter()
-        .enumerate()
-        .any(|(index, owner_param)| {
-            args.get(index).is_some_and(|arg| {
-                java_type_contains_type_param(arg, callable_type_param)
-                    && source_field_types(owner).values().any(|field_ty| {
-                        java_type_requires_hash_capability_for_type_param(
-                            field_ty,
-                            owner_param,
-                            support_programs,
-                            &mut HashSet::new(),
-                        )
-                    })
-            })
-        })
+    (clone, key)
 }
 
 fn callable_type_param_flows_through_source_class_argument(
     type_param: &str,
     params: &[crate::java_ir::Param],
+    body: Option<&Block>,
     support_programs: &[&Program],
 ) -> bool {
-    params.iter().any(|param| {
-        let JavaType::Named { name, args } = &param.ty else {
+    let uses_class_parameter = |ty: &JavaType| {
+        let JavaType::Named { name, args } = ty else {
             return false;
         };
         args.iter()
@@ -3386,7 +4322,37 @@ fn callable_type_param_flows_through_source_class_argument(
                     crate::java_ir::TypeKind::Class | crate::java_ir::TypeKind::Enum
                 )
             })
-    })
+    };
+    if params.iter().any(|param| uses_class_parameter(&param.ty)) {
+        return true;
+    }
+    let Some(body) = body else {
+        return false;
+    };
+    let mut types = TypeEnv::new();
+    for param in params {
+        types.insert_param(param.source_name.clone(), param.ty.clone());
+        if param.name != param.source_name {
+            types.insert_param(param.name.clone(), param.ty.clone());
+        }
+    }
+    for statement in &body.statements {
+        types.learn_stmt(statement);
+    }
+    let mut required = false;
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        if !required {
+            required = match expr {
+                Expr::New { .. } => uses_class_parameter(&infer_expr_type(expr, &types)),
+                Expr::Call {
+                    receiver: Some(receiver),
+                    ..
+                } => uses_class_parameter(&infer_expr_type(receiver, &types)),
+                _ => false,
+            };
+        }
+    });
+    required
 }
 
 fn submit_callable_synthetic_return_type_param(type_params: &[String]) -> String {
@@ -3705,6 +4671,35 @@ fn rust_stmt_reads_var(stmt: &RustStmt, var_name: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[test]
+    fn clone_requirements_follow_storage_carriers_not_mentioned_parameters() {
+        for source in [
+            "std::rc::Rc<std::cell::RefCell<T>>",
+            "std::sync::Arc<T>",
+            "std::marker::PhantomData<T>",
+            "Option<Box<dyn Source<T>>>",
+            "Vec<Box<dyn Source<T>>>",
+            "Option<std::rc::Rc<T>>",
+        ] {
+            let ty = rust_type_arg_projection_or_raw(source);
+            assert!(!rust_clone_requires_parameter(&ty, "T"), "{source}: {ty:?}");
+        }
+        for source in ["T", "Option<T>", "Vec<T>", "Box<T>", "T::Item"] {
+            let ty = rust_type_arg_projection_or_raw(source);
+            assert!(rust_clone_requires_parameter(&ty, "T"), "{source}: {ty:?}");
+        }
+        let unrelated = RustType::Named("OtherT".into());
+        assert!(!rust_clone_requires_parameter(&unrelated, "T"));
+        // Any does not have the source-interface clone_box adapter.
+        assert!(rust_clone_requires_parameter(
+            &RustType::Generic {
+                base: "Box".into(),
+                args: vec![RustType::DynTrait("std::any::Any".into())],
+            },
+            "T",
+        ));
+    }
+
     fn test_type_decl(name: &str, kind: TypeKind, extends: Option<&str>) -> TypeDecl {
         TypeDecl {
             kind,
@@ -3731,6 +4726,7 @@ mod tests {
     fn qualified_new_expr(qualifier: Expr, args: Vec<Expr>) -> Expr {
         Expr::New {
             ty: JavaType::Unknown("Inner".to_string()),
+            infer_type_arguments: false,
             qualifier: Some(Box::new(qualifier)),
             args,
             body: None,
@@ -3776,6 +4772,7 @@ mod tests {
     fn priority_queue_callback_storage_scan_sees_qualified_new_receiver() {
         let expr = qualified_new_expr(
             Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "PriorityQueue".to_string(),
                     args: Vec::new(),
@@ -4018,6 +5015,32 @@ class QueueUse {
     }
 
     #[test]
+    fn dependent_bound_projection_preserves_lexical_parameter_identifiers() {
+        for name in ["Integer", "Object", "Result", "INST", "itemType"] {
+            let bound = JavaType::Named {
+                name: name.to_string(),
+                args: Vec::new(),
+            };
+            let names = vec![name.to_string()];
+            assert_eq!(
+                rust_bounds_for_java_type_param_in_scope(&bound, &[], None, &names, &[None]),
+                vec![format!("Into<{name}>")],
+            );
+            let parsed = crate::parser::parse_java_source(&format!("class Owner<{name}> {{}}"));
+            assert_eq!(
+                rust_bounds_for_java_type_param_in_scope(
+                    &bound,
+                    &[],
+                    Some(&parsed.program.types[0]),
+                    &[],
+                    &[]
+                ),
+                vec![format!("Into<{name}>")],
+            );
+        }
+    }
+
+    #[test]
     fn intersection_type_param_bound_projects_every_declared_capability() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -4051,6 +5074,287 @@ class Holder {
             rust_bounds_for_java_type_param(bound, &[&parsed.program]),
             vec!["Observation", "CentroidFactory<T>"]
         );
+    }
+
+    #[test]
+    fn generic_key_capabilities_follow_selected_binders_and_recursive_calls() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.*;
+interface Pair<A, B> {}
+interface Flipped<X, Y> extends Pair<Y, X> {}
+class Use<Left> {
+    static <Key, Payload> int direct(Pair<Payload, Key> pair) {
+        Set<Key> keys = new HashSet<Key>();
+        return keys.size();
+    }
+    static <Left, Right> int nested(Pair<Left, Right> pair) { return direct(pair); }
+    static <Left, Right> int flipped(Flipped<Left, Right> pair) { return direct(pair); }
+    static <One, Two> int cycleOne(Pair<One, Two> pair, boolean stop) {
+        if (stop) return cycleTwo(pair, false);
+        return 1;
+    }
+    static <First, Second> int cycleTwo(Pair<First, Second> pair, boolean stop) {
+        if (stop) return cycleOne(pair, false);
+        return direct(pair);
+    }
+    static <Neutral> int neutralOne(Neutral value) { return neutralTwo(value); }
+    static <Other> int neutralTwo(Other value) { return neutralOne(value); }
+}
+"#,
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Use")
+            .unwrap();
+        for (method_name, expected) in [
+            ("direct", vec![true, false]),
+            ("nested", vec![false, true]),
+            ("flipped", vec![true, false]),
+            ("cycleOne", vec![false, true]),
+            ("cycleTwo", vec![false, true]),
+            ("neutralOne", vec![false]),
+            ("neutralTwo", vec![false]),
+        ] {
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == method_name => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            let actual = method
+                .type_params
+                .iter()
+                .map(|param| {
+                    callable_type_param_reaches_hash_backed_source_type(
+                        param,
+                        &method.params,
+                        method.body.as_ref(),
+                        &[&resolved.program],
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(actual, expected, "{method_name}");
+        }
+    }
+
+    #[test]
+    fn generic_list_key_capability_uses_native_overload_and_source_identity() {
+        for (source, expected) in [
+            (
+                r#"
+import java.util.*;
+class Use {
+    static <T> boolean removeValue(List<T> values, T value) { return values.remove(value); }
+    static <T> T removeIndex(List<T> values) { return values.remove(0); }
+    static <T> int count(List<T> values) { return values.size(); }
+}
+"#,
+                vec![
+                    ("removeValue", true),
+                    ("removeIndex", false),
+                    ("count", false),
+                ],
+            ),
+            (
+                r#"
+class List<T> { boolean remove(T value) { return true; } }
+class Use {
+    static <T> boolean removeValue(List<T> values, T value) { return values.remove(value); }
+}
+"#,
+                vec![("removeValue", false)],
+            ),
+        ] {
+            let parsed = crate::parser::parse_java_source(source);
+            assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            assert!(
+                !resolved.diagnostics.has_errors(),
+                "{:?}",
+                resolved.diagnostics
+            );
+            let owner = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == "Use")
+                .unwrap();
+            for (name, required) in expected {
+                let method = owner
+                    .members
+                    .iter()
+                    .find_map(|member| match member {
+                        Member::Method(method) if method.name == name => Some(method),
+                        _ => None,
+                    })
+                    .unwrap();
+                assert_eq!(
+                    callable_type_param_reaches_hash_backed_source_type(
+                        "T",
+                        &method.params,
+                        method.body.as_ref(),
+                        &[&resolved.program],
+                    ),
+                    required,
+                    "{name}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn receiver_key_capabilities_project_owner_arguments_and_respect_method_shadowing() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.*;
+class Table<Value, Key> {
+    int remember(Key key, Value payload) {
+        Set<Key> seen = new HashSet<Key>();
+        seen.add(key);
+        return seen.size();
+    }
+    int remember(int value) { return value; }
+    int indirect(Key key, Value payload) { return remember(key, payload); }
+    <Key> int shadow(Key value) { return 1; }
+}
+class Flipped<A, B> extends Table<B, A> {}
+class Use {
+    static <Left, Right> int direct(Table<Left, Right> table, Right key, Left payload) {
+        return table.indirect(key, payload);
+    }
+    static <Left, Right> int inherited(Flipped<Left, Right> table, Left key, Right payload) {
+        return table.remember(key, payload);
+    }
+    static <Left, Right> int shadow(Table<Left, Right> table, Left value) {
+        return table.shadow(value);
+    }
+    static <Left, Right> int neutral(Table<Left, Right> table) { return table.remember(0); }
+}
+"#,
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Use")
+            .unwrap();
+        for (name, expected) in [
+            ("direct", vec![false, true]),
+            ("inherited", vec![true, false]),
+            ("shadow", vec![false, false]),
+            ("neutral", vec![false, false]),
+        ] {
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == name => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            let required = method
+                .type_params
+                .iter()
+                .map(|param| {
+                    callable_type_param_reaches_hash_backed_source_type(
+                        param,
+                        &method.params,
+                        method.body.as_ref(),
+                        &[&resolved.program],
+                    )
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(required, expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn method_binders_do_not_become_owner_capability_requirements() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+interface Copies<T> {
+    default <T> java.util.List<T> twice(T value) {
+        java.util.List<T> result = new java.util.ArrayList<T>();
+        result.add(value); result.add(value);
+        return result;
+    }
+}
+"#,
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let owner = &parsed.program.types[0];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            source_method_class_type_param_where_bounds(owner, method, None, &[&parsed.program],)
+                .is_empty()
+        );
+        assert_eq!(
+            function_type_params_with_optional_lifetime_and_support_contexts(
+                Some(&method.name),
+                &method.type_params,
+                &method.type_param_bounds,
+                false,
+                &[&parsed.program],
+                &method.params,
+                method.body.as_ref(),
+                Some(owner),
+            ),
+            vec!["T: Clone"]
+        );
+    }
+
+    #[test]
+    fn key_requirements_belong_to_direct_keys_not_nested_value_carriers() {
+        let parsed = crate::parser::parse_java_source(
+            "class Set<T> {} class Stored<T> { java.util.Map<T, Integer> entries; }",
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        for (name, expected) in [
+            ("java.util.List<java.util.Set<T>>", false),
+            ("java.util.Map<Integer, java.util.Set<T>>", false),
+            ("java.util.Map<java.util.List<T>, Integer>", true),
+            ("java.util.Set<T>", true),
+            ("Set<T>", false),
+            ("Stored<T>", true),
+        ] {
+            let ty = crate::parser::parse_hierarchy_type(name);
+            assert_eq!(
+                java_type_requires_hash_capability_for_type_param(
+                    &ty,
+                    "T",
+                    &[&parsed.program],
+                    &mut HashSet::new(),
+                ),
+                expected,
+                "{name}"
+            );
+        }
     }
 
     #[test]
@@ -4905,7 +6209,7 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
         .unwrap_or_else(|| crate::parser::to_snake_case(&method.name));
     RustFunction {
         name,
-        type_params: function_type_params_with_optional_lifetime_and_support_contexts(
+        type_params: function_type_params_with_clone_cache(
             Some(&method.name),
             &retained_type_params,
             &retained_type_param_bounds,
@@ -4913,6 +6217,9 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
             support_programs,
             &method.params,
             method.body.as_ref(),
+            &[],
+            Some(ty),
+            clone_requirement_cache,
         ),
         params: method_params_with_optional_lifetime(
             ty,
@@ -4990,6 +6297,9 @@ pub(crate) fn source_method_class_type_param_where_bounds(
     representations: Option<&RepresentationPlan>,
     support_programs: &[&Program],
 ) -> Vec<String> {
+    // This compatibility entry point has no solved field signatures. Keep its
+    // conservative Java-level analysis rather than inventing an empty storage
+    // plan: hierarchy field projection requires actual solver-owned shapes.
     let cache = CloneRequirementCache::default();
     source_method_class_type_param_where_bounds_with_cache(
         ty,
@@ -5007,16 +6317,41 @@ pub(crate) fn source_method_class_type_param_where_bounds_with_cache(
     support_programs: &[&Program],
     cache: &CloneRequirementCache,
 ) -> Vec<String> {
+    source_method_class_type_param_capabilities_with_cache(
+        ty,
+        method,
+        representations,
+        support_programs,
+        cache,
+    )
+    .into_iter()
+    .map(|(parameter, bounds)| format!("{parameter}: {}", bounds.join(" + ")))
+    .collect()
+}
+
+/// Keep declaration requirements structured until the emitting surface has
+/// substituted its owner arguments. Inherited contracts cannot render the
+/// declaring owner's binder names directly in the child's scope.
+pub(crate) fn source_method_class_type_param_capabilities_with_cache(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    representations: Option<&RepresentationPlan>,
+    support_programs: &[&Program],
+    cache: &CloneRequirementCache,
+) -> Vec<(String, Vec<&'static str>)> {
     let uses_shared_storage = representations.is_some_and(|representations| {
         let placement = representations.storage_placement_for(&ty.name);
         placement.shared() && placement.is_implemented()
     });
-    let mut visiting = cache.search.borrow_mut();
+    let mut memo = cache.search.borrow_mut();
+    let mut visiting = cache.search_with_memo(&mut memo);
     let fields = visiting.inherited_fields(ty, support_programs);
     ty.type_params
         .iter()
-        .filter(|type_param| {
-            source_method_class_type_param_needs_clone_bound(
+        .filter(|type_param| !method.type_params.contains(type_param))
+        .filter_map(|type_param| {
+            let mut bounds = Vec::new();
+            if source_method_class_type_param_needs_clone_bound(
                 ty,
                 method,
                 type_param,
@@ -5024,10 +6359,168 @@ pub(crate) fn source_method_class_type_param_where_bounds_with_cache(
                 &fields,
                 support_programs,
                 &mut visiting,
-            )
+            ) {
+                bounds.push("Clone");
+            }
+            if callable_type_param_reaches_hash_backed_source_type_in_owner(
+                type_param,
+                &method.params,
+                method.body.as_ref(),
+                Some(ty),
+                support_programs,
+            ) {
+                bounds.push("JavaMapKey");
+            }
+            (!bounds.is_empty()).then(|| (type_param.clone(), bounds))
         })
-        .map(|type_param| format!("{type_param}: Clone"))
         .collect()
+}
+
+/// Requirements of an implementation combine copying its stored fields with
+/// the bounds of the methods it forwards. Interface handles do not expose the
+/// clone requirements of their generic payloads merely by mentioning them.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TraitImplCapability {
+    Clone,
+    JavaMapKey,
+}
+
+impl TraitImplCapability {
+    pub(crate) fn rust_bound(self) -> &'static str {
+        match self {
+            Self::Clone => "Clone",
+            Self::JavaMapKey => "JavaMapKey",
+        }
+    }
+}
+
+pub(crate) fn source_type_param_needs_trait_impl_capability(
+    ty: &TypeDecl,
+    type_param: &str,
+    capability: TraitImplCapability,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    program: &Program,
+    cache: &CloneRequirementCache,
+) -> bool {
+    let mut memo = cache.search.borrow_mut();
+    let mut search = CloneRequirementSearch {
+        storage_context: Some(CloneStorageContext {
+            facts,
+            representations,
+            signatures,
+            program,
+        }),
+        memo: CloneRequirementMemoAccess::Borrowed(&mut memo),
+    };
+    source_type_param_needs_trait_impl_capability_inner(
+        ty,
+        type_param,
+        capability,
+        &[program],
+        &mut search,
+    )
+}
+
+/// The same implementation requirements are queried while emitting an impl
+/// and while satisfying a source generic bound at a call site. Keep recursion
+/// inside the current search instead of reborrowing its translation cache.
+fn source_type_param_needs_trait_impl_capability_inner(
+    ty: &TypeDecl,
+    type_param: &str,
+    capability: TraitImplCapability,
+    support_programs: &[&Program],
+    search: &mut CloneRequirementSearch,
+) -> bool {
+    let field_requires = match capability {
+        TraitImplCapability::Clone => search.stored_field_types(ty).map_or_else(
+            || {
+                source_field_types(ty).values().any(|field| {
+                    stored_java_type_clone_requires_parameter(
+                        field,
+                        type_param,
+                        search.storage_context,
+                    )
+                })
+            },
+            |fields| {
+                fields
+                    .values()
+                    .any(|field| rust_clone_requires_parameter(field, type_param))
+            },
+        ),
+        TraitImplCapability::JavaMapKey => source_field_types(ty).values().any(|field| {
+            java_type_requires_hash_capability_for_type_param(
+                field,
+                type_param,
+                support_programs,
+                &mut HashSet::new(),
+            )
+        }),
+    };
+    if field_requires {
+        return true;
+    }
+    let storage_context = search.storage_context;
+    let mut method_requires =
+        |owner: &TypeDecl, method: &MethodDecl, parameter: &str| match capability {
+            TraitImplCapability::Clone => source_method_emits_clone_bound_for_type_param_inner(
+                owner,
+                method,
+                parameter,
+                search
+                    .storage_context
+                    .map(|context| context.representations),
+                support_programs,
+                search,
+            ),
+            TraitImplCapability::JavaMapKey => {
+                callable_type_param_reaches_hash_backed_source_type_in_owner(
+                    parameter,
+                    &method.params,
+                    method.body.as_ref(),
+                    Some(owner),
+                    support_programs,
+                )
+            }
+        };
+    if ty.members.iter().any(|member| match member {
+        Member::Method(method) if !method.type_params.iter().any(|name| name == type_param) => {
+            method_requires(ty, method, type_param)
+        }
+        _ => false,
+    }) {
+        return true;
+    }
+    support_programs.iter().any(|program| {
+        crate::inherited_members::inherited_instance_method_refs_for_type(ty, program)
+            .into_iter()
+            .any(|inherited| {
+                let owner = inherited.declaring_ty();
+                let Some(bindings) =
+                    crate::inherited_members::source_ancestor_type_arguments(program, ty, owner)
+                else {
+                    return true; // Preserve the old conservative obligation if rebasing is unknown.
+                };
+                owner.type_params.iter().any(|param| {
+                    !inherited.method().type_params.contains(param)
+                        && bindings.get(param).is_some_and(|actual| match capability {
+                            TraitImplCapability::JavaMapKey => {
+                                java_type_contains_type_param(actual, type_param)
+                            }
+                            TraitImplCapability::Clone => {
+                                stored_java_type_clone_requires_parameter(
+                                    actual,
+                                    type_param,
+                                    storage_context,
+                                )
+                            }
+                        })
+                        && method_requires(owner, inherited.method(), param)
+                })
+            })
+    })
 }
 
 fn source_method_class_type_param_needs_clone_bound(
@@ -5061,12 +6554,30 @@ fn source_method_class_type_param_needs_clone_bound(
     visiting
         .method_visiting
         .push((ty.name.clone(), method.clone(), type_param.to_string()));
+    let stored_fields = visiting.stored_field_types(ty);
+    let self_clone_requires_parameter = stored_fields.as_ref().map_or_else(
+        || {
+            fields
+                .values()
+                .any(|field| java_type_contains_type_param(field, type_param))
+        },
+        |stored| {
+            stored
+                .values()
+                .any(|field| rust_clone_requires_parameter(field, type_param))
+        },
+    );
     let needs_clone = callable_type_param_needs_clone_bound_with_support_contexts_inner(
         type_param,
         &method.params,
         method.body.as_ref(),
         support_programs,
         visiting,
+    ) || source_method_copies_borrowed_type_param_call_return(
+        ty,
+        method,
+        type_param,
+        visiting.storage_context,
     ) || source_callable_delegates_class_type_param_clone_requirement(
         ty,
         &method.params,
@@ -5076,12 +6587,19 @@ fn source_method_class_type_param_needs_clone_bound(
         visiting,
     ) || (!uses_shared_storage
         && java_type_contains_type_param(&method.return_type, type_param)
-        && method.body.as_ref().is_some_and(block_returns_this))
+        && method.body.as_ref().is_some_and(block_returns_this)
+        && self_clone_requires_parameter)
         || source_method_clones_class_type_param_param_to_owned_local(method, type_param)
         || (fields
             .values()
             .any(|field_ty| java_type_contains_type_param(field_ty, type_param))
-            && source_method_needs_class_type_param_clone_bound(method, type_param, fields));
+            && source_method_needs_class_type_param_clone_bound(
+                method,
+                type_param,
+                fields,
+                stored_fields.as_deref(),
+                visiting.storage_context,
+            ));
     visiting.method_visiting.pop();
     visiting.method_memo.push((
         ty.name.clone(),
@@ -5090,6 +6608,40 @@ fn source_method_class_type_param_needs_clone_bound(
         needs_clone,
     ));
     needs_clone
+}
+
+/// An owned generic result cannot move out of a borrowed source-call result.
+/// Match the already solved producer/consumer slots; this is independent of
+/// field names and does not impose payload bounds on boxed interface handles.
+fn source_method_copies_borrowed_type_param_call_return(
+    ty: &TypeDecl,
+    method: &MethodDecl,
+    type_param: &str,
+    context: Option<CloneStorageContext<'_>>,
+) -> bool {
+    let Some(context) = context else {
+        return false;
+    };
+    let Some(caller) = context.signatures.method_signature(ty, method) else {
+        return false;
+    };
+    if !caller
+        .return_shape()
+        .is_some_and(|shape| shape.ownership == OwnershipShape::Owned)
+    {
+        return false;
+    }
+    let Some(body) = &method.body else {
+        return false;
+    };
+    body.statements.iter().filter_map(method_return_expr).any(|expr| {
+        let Expr::Call { resolved: Some(call), name, .. } = expr else { return false; };
+        let actual = optional_element_type(&call.return_type).unwrap_or_else(|| call.return_type.clone());
+        let direct_parameter = matches!(&actual, JavaType::Named { name, args } if name == type_param && args.is_empty())
+            || matches!(&actual, JavaType::Unknown(name) if name == type_param);
+        direct_parameter && context.signatures.resolved_source_method_return_shape(call, name)
+            .is_some_and(|shape| matches!(shape.ownership, OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow))
+    })
 }
 
 fn expr_constructs_clone_requiring_generic_owner(
@@ -5118,6 +6670,18 @@ fn expr_constructs_clone_requiring_generic_owner(
     else {
         return false;
     };
+    // A concrete actual for `G extends SourceInterface<...>` must satisfy
+    // the generated implementation's obligations, even when the constructor
+    // itself only stores G and never clones it.
+    if constructed_source_bounds_require_clone(
+        owner,
+        &infer_expr_type(expr, caller_types),
+        caller_type_param,
+        support_programs,
+        visiting,
+    ) {
+        return true;
+    }
     owner.type_params.iter().any(|callee_type_param| {
         let receives_caller_type_param =
             args.iter()
@@ -5149,6 +6713,68 @@ fn expr_constructs_clone_requiring_generic_owner(
         visiting.remove(&key);
         needs_clone
     })
+}
+
+fn constructed_source_bounds_require_clone(
+    owner: &TypeDecl,
+    constructed_type: &JavaType,
+    caller_type_param: &str,
+    support_programs: &[&Program],
+    search: &mut CloneRequirementSearch,
+) -> bool {
+    let JavaType::Named { args, .. } = constructed_type else {
+        return false;
+    };
+    owner
+        .type_param_bounds
+        .iter()
+        .zip(args)
+        .any(|(bound, actual)| {
+            let Some(JavaType::Named {
+                name: bound_name, ..
+            }) = bound
+            else {
+                return false;
+            };
+            if !source_type_bound_is_trait_like(bound_name, support_programs) {
+                return false;
+            }
+            let JavaType::Named { name, args } = crate::types::generic_read_type(actual) else {
+                return false;
+            };
+            let Some(concrete) = source_type_bound_decl(&name, support_programs) else {
+                return false;
+            };
+            if !matches!(concrete.kind, TypeKind::Class | TypeKind::Enum) {
+                return false;
+            }
+            concrete
+                .type_params
+                .iter()
+                .zip(&args)
+                .any(|(parameter, argument)| {
+                    if !stored_java_type_clone_requires_parameter(
+                        argument,
+                        caller_type_param,
+                        search.storage_context,
+                    ) {
+                        return false;
+                    }
+                    let key = (concrete.name.clone(), parameter.clone());
+                    if !search.trait_impl_visiting.insert(key.clone()) {
+                        return false;
+                    }
+                    let required = source_type_param_needs_trait_impl_capability_inner(
+                        concrete,
+                        parameter,
+                        TraitImplCapability::Clone,
+                        support_programs,
+                        search,
+                    );
+                    search.trait_impl_visiting.remove(&key);
+                    required
+                })
+        })
 }
 
 fn source_callable_delegates_class_type_param_clone_requirement(
@@ -5257,21 +6883,19 @@ fn source_callable_delegates_class_type_param_clone_requirement(
                 return;
             };
             let receiver_ty = infer_expr_type(receiver, &caller_types);
-            let JavaType::Named { name, args } = receiver_ty else {
-                return;
-            };
-            let Some(receiver_owner) = source_type_bound_decl(&name, support_programs) else {
-                return;
-            };
-            if receiver_owner.name != owner.name {
-                return;
-            }
+            let substitutions = source_receiver_owner_type_substitutions(
+                owner,
+                callee,
+                &receiver_ty,
+                support_programs,
+            );
             owner
                 .type_params
                 .iter()
-                .zip(args.iter())
-                .filter_map(|(callee_type_param, argument)| {
-                    java_type_contains_type_param(argument, type_param).then_some(callee_type_param)
+                .filter(|callee_type_param| {
+                    substitutions
+                        .get(*callee_type_param)
+                        .is_some_and(|argument| java_type_contains_type_param(argument, type_param))
                 })
                 .collect::<Vec<_>>()
         };
@@ -6071,7 +7695,17 @@ pub(crate) fn java_semantic_hash_collection_for_source_field(
         }
         _ => None,
     })?;
-    let JavaType::Named { name, args } = &field.ty else {
+    java_semantic_hash_collection_for_java_type_in_scope(&field.ty, &owner.type_params)
+}
+
+pub(crate) fn java_semantic_hash_collection_for_java_type_in_scope(
+    ty: &JavaType,
+    type_params: &[String],
+) -> Option<&'static str> {
+    if let Some(element) = crate::types::optional_element_type(ty) {
+        return java_semantic_hash_collection_for_java_type_in_scope(&element, type_params);
+    }
+    let JavaType::Named { name, args } = ty else {
         return None;
     };
     let simple = name.rsplit('.').next().unwrap_or(name);
@@ -6080,8 +7714,7 @@ pub(crate) fn java_semantic_hash_collection_for_source_field(
         "Set" | "HashSet" => args.first()?,
         _ => return None,
     };
-    if !owner
-        .type_params
+    if !type_params
         .iter()
         .any(|param| java_type_contains_type_param(key, param))
     {
@@ -6093,14 +7726,58 @@ pub(crate) fn java_semantic_hash_collection_for_source_field(
     })
 }
 
-fn java_semantic_hash_collection_field_rust_type(
+pub(crate) fn java_semantic_hash_collection_field_rust_type(
     base: RustType,
     semantic_base: &str,
 ) -> Option<RustType> {
-    let RustType::Generic { args, .. } = base else {
-        return None;
-    };
-    Some(crate::slot_render::rust_generic_type(semantic_base, args))
+    match base {
+        RustType::Option(inner) => {
+            java_semantic_hash_collection_field_rust_type(*inner, semantic_base)
+                .map(|inner| RustType::Option(Box::new(inner)))
+        }
+        // Representation planning deliberately renders sets of hierarchy or
+        // erased carriers as `Vec<T>` when Rust's structural `Hash`/`Ord`
+        // contracts are unavailable. A source field whose Java key is an
+        // owner type parameter still needs Java equality semantics, so lift
+        // that element type into the semantic set carrier instead of treating
+        // the hash-free intermediate representation as an unsupported shape.
+        RustType::Vec(inner) if semantic_base == "JavaSemanticHashSet" => Some(
+            crate::slot_render::rust_generic_type(semantic_base, vec![*inner]),
+        ),
+        RustType::Generic { args, .. } => {
+            Some(crate::slot_render::rust_generic_type(semantic_base, args))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod semantic_hash_field_type_tests {
+    use super::*;
+
+    #[test]
+    fn hash_free_set_carrier_is_lifted_to_java_semantic_set() {
+        let element = RustType::Named("HierarchyValue".to_string());
+        assert_eq!(
+            java_semantic_hash_collection_field_rust_type(
+                RustType::Vec(Box::new(element.clone())),
+                "JavaSemanticHashSet",
+            ),
+            Some(crate::slot_render::rust_generic_type(
+                "JavaSemanticHashSet",
+                vec![element.clone()],
+            ))
+        );
+        assert_eq!(
+            java_semantic_hash_collection_field_rust_type(
+                RustType::Option(Box::new(RustType::Vec(Box::new(element.clone())))),
+                "JavaSemanticHashSet",
+            ),
+            Some(RustType::Option(Box::new(
+                crate::slot_render::rust_generic_type("JavaSemanticHashSet", vec![element],),
+            )))
+        );
+    }
 }
 
 fn live_native_map_field_rust_type(
@@ -6232,44 +7909,24 @@ fn source_field_is_private(field: &FieldDecl) -> bool {
 }
 
 fn source_type_has_context_subtypes(ty: &TypeDecl, support_program: &Program) -> bool {
-    support_program
-        .types
-        .iter()
-        .any(|candidate| source_type_extends(candidate, &ty.name, support_program))
-}
-
-fn source_type_extends(candidate: &TypeDecl, super_name: &str, support_program: &Program) -> bool {
-    let Some(extends) = candidate.extends.as_deref() else {
-        return false;
-    };
-    if java_type_names_same_after_optional(
-        &JavaType::Named {
-            name: extends.to_string(),
-            args: Vec::new(),
-        },
-        &JavaType::Named {
-            name: super_name.to_string(),
-            args: Vec::new(),
-        },
-    ) {
-        return true;
-    }
-    support_program
-        .types
-        .iter()
-        .find(|ty| {
-            java_type_names_same_after_optional(
-                &JavaType::Named {
-                    name: ty.name.clone(),
-                    args: Vec::new(),
-                },
-                &JavaType::Named {
-                    name: extends.to_string(),
-                    args: Vec::new(),
-                },
-            )
+    fn has_subtype(declarations: &[TypeDecl], owner: &TypeDecl, program: &Program) -> bool {
+        declarations.iter().any(|candidate| {
+            (candidate.name != owner.name
+                && crate::inherited_members::source_class_ancestor_type_arguments(
+                    program, candidate, owner,
+                )
+                .is_some())
+                || candidate.members.iter().any(|member| match member {
+                    Member::Type(nested) => {
+                        has_subtype(std::slice::from_ref(nested), owner, program)
+                    }
+                    _ => false,
+                })
         })
-        .is_some_and(|parent| source_type_extends(parent, super_name, support_program))
+    }
+    // Share hierarchy parsing, lexical owner lookup and the cycle guard with
+    // inherited-member specialization. Raw string equality misses Parent<T>.
+    has_subtype(&support_program.types, ty, support_program)
 }
 
 fn struct_derives_for_type(
@@ -6553,16 +8210,7 @@ fn rust_type_supports_struct_derive_clone(
                 visiting,
             )
         }
-        RustType::Generic { base, args }
-            if base == "std::rc::Rc"
-                || base == "Rc"
-                || base == "std::sync::Arc"
-                || base == "Arc"
-                || base == "std::marker::PhantomData"
-                || base == "PhantomData" =>
-        {
-            args.len() == 1
-        }
+        RustType::Generic { base, args } if unconditional_clone_carrier(base) => args.len() == 1,
         RustType::Tuple(items) => items.iter().all(|item| {
             rust_type_supports_struct_derive_clone(
                 item,
@@ -6635,6 +8283,45 @@ fn rust_type_supports_struct_derive_clone(
         | RustType::Str
         | RustType::Raw(_) => false,
     }
+}
+
+/// Unlike derive(Clone), a field-wise impl need not constrain a parameter
+/// that occurs only inside an unconditionally cloneable reference carrier.
+pub(crate) fn generic_source_struct_clone_impl(
+    ty: &TypeDecl,
+    strukt: &mut RustStruct,
+) -> Option<RustItem> {
+    if ty.type_params.is_empty() || !strukt.derives.iter().any(|derive| derive == "Clone") {
+        return None;
+    }
+    strukt.derives.retain(|derive| derive != "Clone");
+    let bounds = strukt
+        .fields
+        .iter()
+        .map(|field| format!("{}: std::clone::Clone", crate::emit::emit_type(&field.ty)))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    let fields = strukt
+        .fields
+        .iter()
+        .map(|field| {
+            let name = crate::representation_lowering::rust_identifier_token(&field.name);
+            format!("{name}: std::clone::Clone::clone(&self.{name})")
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    let where_clause = if bounds.is_empty() {
+        String::new()
+    } else {
+        format!(" where {bounds}")
+    };
+    Some(RustItem::Raw(format!(
+        "impl<{}> Clone for {}{where_clause} {{\n    fn clone(&self) -> Self {{ Self {{ {fields} }} }}\n}}",
+        ty.type_params.join(", "),
+        rust_use_name_for_source_type(ty),
+    )))
 }
 
 fn raw_rust_type_supports_derive_clone(
@@ -7108,9 +8795,11 @@ fn is_static_final_field(field: &FieldDecl) -> bool {
 fn associated_consts_for_type(
     ty: &TypeDecl,
     value_overrides: &std::collections::BTreeMap<String, RustExpr>,
+    support_program: &Program,
 ) -> Vec<RustAssociatedConst> {
     let const_infos = static_final_const_infos(ty);
     let source_static_field_rust_names = crate::java_naming::source_static_field_rust_names(ty);
+    let lexical_access_crosses_module = source_type_has_context_subtypes(ty, support_program);
     ty.members
         .iter()
         .filter_map(|member| match member {
@@ -7122,7 +8811,11 @@ fn associated_consts_for_type(
                     .unwrap_or(&field.name),
                 &const_infos,
                 value_overrides.get(&field.name),
-            ),
+            )
+            .map(|mut constant| {
+                constant.is_pub_crate = !constant.is_pub && lexical_access_crosses_module;
+                constant
+            }),
             _ => None,
         })
         .collect()
@@ -7206,6 +8899,7 @@ fn associated_const_for_field(
         ty,
         value,
         is_pub: !field.modifiers.contains(&Modifier::Private),
+        is_pub_crate: false,
     })
 }
 

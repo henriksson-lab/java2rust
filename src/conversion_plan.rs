@@ -411,11 +411,13 @@ pub enum DispatchCoercionPolicy {
     },
     BorrowDynTrait {
         trait_name: String,
+        mutable: bool,
     },
     BorrowClosedEnumAsDynTrait {
         enum_name: String,
         trait_name: String,
         variants: Vec<String>,
+        mutable: bool,
     },
     RewrapClosedEnum {
         actual_enum_name: String,
@@ -425,6 +427,7 @@ pub enum DispatchCoercionPolicy {
     },
     BorrowBoxedDynTrait {
         trait_name: String,
+        mutable: bool,
     },
     BorrowConcreteFacade {
         target_type: String,
@@ -438,6 +441,11 @@ pub enum DispatchCoercionPolicy {
     },
     CloneBoxDynTrait {
         trait_name: String,
+    },
+    UpcastBoxedDynTrait {
+        source_trait: String,
+        target_trait: String,
+        clone_source: bool,
     },
     EraseObject,
     DowncastClosedEnum {
@@ -469,6 +477,21 @@ pub enum DispatchCoercionPolicy {
         target_dispatch: DispatchShape,
         policy: DispatchCoercionFallbackPolicy,
     },
+}
+
+impl DispatchCoercionPolicy {
+    /// Runtime-checked narrowing conversions share one failure classification
+    /// across Java cast semantics and callable exception planning.
+    fn checked_cast_failure_policy(&self) -> Option<&InvalidCastPolicy> {
+        match self {
+            Self::DowncastClosedEnum { invalid_cast, .. }
+            | Self::DowncastDynTrait { invalid_cast, .. }
+            | Self::DowncastBoxedDynTrait { invalid_cast, .. }
+            | Self::DowncastErasedObject { invalid_cast, .. }
+            | Self::DowncastErasedObjectToClosedEnum { invalid_cast, .. } => Some(invalid_cast),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1057,10 +1080,33 @@ impl LoweredType {
     }
 
     pub fn collected_set_from_element_shape(element_shape: RustSlotShape) -> Self {
+        Self::collected_set_kind_from_element_shape(
+            element_shape,
+            crate::stdlib::JavaCollectionKind::Set,
+        )
+    }
+
+    pub fn collected_set_kind_from_element_shape(
+        element_shape: RustSlotShape,
+        kind: crate::stdlib::JavaCollectionKind,
+    ) -> Self {
+        let name = match kind {
+            crate::stdlib::JavaCollectionKind::Set => "Set",
+            crate::stdlib::JavaCollectionKind::SortedSet => "SortedSet",
+            crate::stdlib::JavaCollectionKind::InsertionOrderedSet => "LinkedHashSet",
+            _ => unreachable!("a collected set must have a set-like kind"),
+        };
+        let java_ty = JavaType::Named {
+            name: name.to_string(),
+            args: vec![element_shape.java_ty.clone()],
+        };
         if element_shape.ownership == OwnershipShape::SharedBorrow {
-            Self::set_element_borrow(element_shape)
+            Self::SetElementBorrow {
+                set_shape: Box::new(RustSlotShape::conservative(java_ty)),
+                element_shape: Box::new(element_shape),
+            }
         } else {
-            Self::from_java(set_java_type(element_shape.java_ty))
+            Self::from_java(java_ty)
         }
     }
 
@@ -1229,7 +1275,10 @@ impl RustUnsignedByteArrayReturnPolicy {
 pub enum BorrowedElementCarrier {
     Option,
     Vec,
-    Set,
+    Set {
+        kind: crate::stdlib::JavaCollectionKind,
+        semantic_equality: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1485,18 +1534,16 @@ pub fn java_cast_semantics_policy_with_facts(
         };
     }
     if coercion.unsupported_diagnostics().is_empty() {
+        if let Some(invalid_cast) = coercion.dispatch.checked_cast_failure_policy() {
+            return JavaCastSemanticsPolicy::CheckedReferenceDowncast {
+                invalid_cast: invalid_cast.clone(),
+            };
+        }
         return match &coercion.dispatch {
-            DispatchCoercionPolicy::DowncastClosedEnum { invalid_cast, .. }
-            | DispatchCoercionPolicy::DowncastDynTrait { invalid_cast, .. }
-            | DispatchCoercionPolicy::DowncastBoxedDynTrait { invalid_cast, .. }
-            | DispatchCoercionPolicy::DowncastErasedObject { invalid_cast, .. } => {
-                JavaCastSemanticsPolicy::CheckedReferenceDowncast {
-                    invalid_cast: invalid_cast.clone(),
-                }
-            }
             DispatchCoercionPolicy::WrapClosedEnum { .. }
             | DispatchCoercionPolicy::BorrowDynTrait { .. }
             | DispatchCoercionPolicy::BoxDynTrait { .. }
+            | DispatchCoercionPolicy::UpcastBoxedDynTrait { .. }
             | DispatchCoercionPolicy::EraseObject => JavaCastSemanticsPolicy::ReferenceUpcast,
             _ => JavaCastSemanticsPolicy::Identity,
         };
@@ -2007,7 +2054,12 @@ pub fn set_element_target_match_policy(
     element_shape: &RustSlotShape,
 ) -> SetElementTargetMatchPolicy {
     SetElementTargetMatchPolicy {
-        matches: target.java_ty == set_shape.java_ty && target.is_sequence_of(element_shape),
+        matches: crate::stdlib::java_collection_kind_for_type(&target.java_ty)
+            .is_some_and(|kind| kind.is_set_like())
+            && crate::stdlib::java_collection_kind_for_type(&set_shape.java_ty)
+                .is_some_and(|kind| kind.is_set_like())
+            && target.is_sequence_of(element_shape)
+            && set_shape.is_sequence_of(element_shape),
     }
 }
 
@@ -2213,7 +2265,7 @@ pub fn borrowed_element_slot_adapter_policy(
         BorrowedElementCarrier::Vec => {
             vec_element_target_match_policy(&target, carrier_shape, element_shape).matches()
         }
-        BorrowedElementCarrier::Set => {
+        BorrowedElementCarrier::Set { .. } => {
             set_element_target_match_policy(&target, carrier_shape, element_shape).matches()
         }
     };
@@ -2456,6 +2508,7 @@ pub fn dispatch_coercion_policy_with_facts(
                     OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
                 ) {
                     return DispatchCoercionPolicy::BorrowBoxedDynTrait {
+                        mutable: target.ownership == OwnershipShape::MutableBorrow,
                         trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
                             trait_name,
                             &actual.java_ty,
@@ -2524,6 +2577,9 @@ pub fn dispatch_coercion_policy_with_facts(
         // prevents Rust from inferring a generic call's result from its
         // arguments and destination.
         return DispatchCoercionPolicy::NoDispatchChange;
+    }
+    if let Some(policy) = source_boxed_interface_upcast_policy(actual, target, facts) {
+        return policy;
     }
     // An explicit external adapter describes the concrete facade ABI, while
     // hierarchy dispatch is a representation choice.  Source-summary
@@ -2605,6 +2661,7 @@ pub fn dispatch_coercion_policy_with_facts(
                 && object_safe_trait_boundary(&target.java_ty, facts)
             {
                 return DispatchCoercionPolicy::BorrowBoxedDynTrait {
+                    mutable: target.ownership == OwnershipShape::MutableBorrow,
                     trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
                         trait_name,
                         &target.java_ty,
@@ -2613,6 +2670,7 @@ pub fn dispatch_coercion_policy_with_facts(
                 };
             }
             DispatchCoercionPolicy::BorrowDynTrait {
+                mutable: target.ownership == OwnershipShape::MutableBorrow,
                 trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
                     trait_name,
                     &target.java_ty,
@@ -2629,6 +2687,7 @@ pub fn dispatch_coercion_policy_with_facts(
                 )
             {
                 DispatchCoercionPolicy::BorrowClosedEnumAsDynTrait {
+                    mutable: target.ownership == OwnershipShape::MutableBorrow,
                     enum_name: enum_name.clone(),
                     trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
                         trait_name,
@@ -2643,6 +2702,7 @@ pub fn dispatch_coercion_policy_with_facts(
                     .reaches()
             {
                 DispatchCoercionPolicy::BorrowDynTrait {
+                    mutable: target.ownership == OwnershipShape::MutableBorrow,
                     trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
                         trait_name,
                         &target.java_ty,
@@ -2682,6 +2742,7 @@ pub fn dispatch_coercion_policy_with_facts(
             },
         ) if dyn_trait_names_match(actual_trait, target_trait) => {
             DispatchCoercionPolicy::BorrowBoxedDynTrait {
+                mutable: target.ownership == OwnershipShape::MutableBorrow,
                 trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
                     target_trait,
                     &target.java_ty,
@@ -2865,6 +2926,82 @@ pub fn dispatch_coercion_policy_with_facts(
         }
         _ => unsupported_dispatch_coercion_policy(actual, target),
     }
+}
+
+fn source_boxed_interface_upcast_policy(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<DispatchCoercionPolicy> {
+    let source_trait = match &actual.dispatch {
+        DispatchShape::DynTrait { trait_name } | DispatchShape::BoxedDynTrait { trait_name } => {
+            trait_name.as_str()
+        }
+        // A conservative tag does not change the object-safe source
+        // interface's physical Box carrier. Adapter evidence below is still
+        // required; this does not box arbitrary concrete classes twice.
+        DispatchShape::Concrete => java_type_name_for_dispatch(&actual.java_ty)?,
+        _ => return None,
+    };
+    let DispatchShape::BoxedDynTrait {
+        trait_name: target_trait,
+    } = &target.dispatch
+    else {
+        return None;
+    };
+    if target.ownership != OwnershipShape::Owned
+        || !object_safe_trait_boundary(&actual.java_ty, facts)
+        || !object_safe_trait_boundary(&target.java_ty, facts)
+    {
+        return None;
+    }
+    let JavaType::Named { args, .. } = &actual.java_ty else {
+        return None;
+    };
+    let supported = facts.source_interface_upcast_facts.iter().any(|adapter| {
+        if adapter.type_params.len() != args.len() {
+            return false;
+        }
+        let substitutions = adapter
+            .type_params
+            .iter()
+            .cloned()
+            .zip(args.iter().cloned())
+            .collect();
+        let source_type =
+            crate::resolve::substitute_method_type_variables(&adapter.source_type, &substitutions);
+        let target_type =
+            crate::resolve::substitute_method_type_variables(&adapter.target_type, &substitutions);
+        let (
+            JavaType::Named {
+                name: source_name, ..
+            },
+            JavaType::Named {
+                name: target_name, ..
+            },
+        ) = (&source_type, &target_type)
+        else {
+            return false;
+        };
+        dyn_trait_rust_abi_matches(
+            source_trait,
+            &actual.java_ty,
+            source_name,
+            &source_type,
+            facts,
+        ) && dyn_trait_rust_abi_matches(
+            target_trait,
+            &target.java_ty,
+            target_name,
+            &target_type,
+            facts,
+        )
+    });
+    supported.then(|| DispatchCoercionPolicy::UpcastBoxedDynTrait {
+        source_trait: dyn_trait_rust_abi_path(source_trait, &actual.java_ty, facts),
+        target_trait: dyn_trait_rust_abi_path(target_trait, &target.java_ty, facts),
+        clone_source: actual.ownership != OwnershipShape::Owned,
+    })
 }
 
 fn dyn_trait_rust_abi_matches(
@@ -3159,6 +3296,18 @@ pub fn shape_coercion_plan_with_facts(
 }
 
 impl ShapeCoercionPlan {
+    pub(crate) fn may_throw_class_cast(&self) -> bool {
+        self.dispatch.checked_cast_failure_policy().is_some()
+            || match &self.optional {
+                OptionalShapeCoercionPolicy::MapElement { element_plan, .. }
+                | OptionalShapeCoercionPolicy::Wrap { element_plan, .. }
+                | OptionalShapeCoercionPolicy::Unwrap { element_plan, .. } => {
+                    element_plan.may_throw_class_cast()
+                }
+                OptionalShapeCoercionPolicy::NoChange => false,
+            }
+    }
+
     pub fn new(
         actual: RustSlotShape,
         target: RustSlotShape,
@@ -4305,6 +4454,7 @@ pub fn plan_cast_conversion_from_actual(
     ctx: ExprShapeContext<'_>,
 ) -> CastConversionPlan {
     let mut target = project_java_value_shape(ctx.representations(), target_ty.clone());
+    crate::shape_projection::preserve_reference_cast_nullability(&actual, &mut target);
     let default_facts = FactSet::default();
     let facts = ctx.facts().unwrap_or(&default_facts);
     if reifiable_raw_collection_runtime_target(target_ty).is_some() {
@@ -4539,6 +4689,7 @@ fn cast_target_shape_preserving_inner_ownership(
     inner_shape: &RustSlotShape,
 ) -> RustSlotShape {
     let mut target_shape = project_java_value_shape(ctx.representations(), target_ty);
+    crate::shape_projection::preserve_reference_cast_nullability(inner_shape, &mut target_shape);
     if !matches!(
         (&inner_shape.java_ty, &target_shape.java_ty),
         (JavaType::Primitive(_), _) | (_, JavaType::Primitive(_))
@@ -4776,7 +4927,13 @@ pub fn lowered_slot_conversion_plan_with_facts(
             },
             Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target),
         ) => SlotConversionPlan::BorrowedElement(borrowed_element_slot_adapter_policy(
-            BorrowedElementCarrier::Set,
+            BorrowedElementCarrier::Set {
+                semantic_equality: target.view == ViewShape::JavaSemanticHash,
+                kind: crate::stdlib::java_collection_kind_for_type(&target.java_ty)
+                    .filter(|kind| kind.is_set_like())
+                    .or_else(|| crate::stdlib::java_collection_kind_for_type(&set_shape.java_ty))
+                    .unwrap_or(crate::stdlib::JavaCollectionKind::Set),
+            },
             target,
             set_shape,
             element_shape,
@@ -5310,6 +5467,83 @@ mod tests {
     }
 
     #[test]
+    fn source_boxed_upcasts_require_the_generated_instantiated_ancestor_adapter() {
+        let parsed = crate::parser::parse_java_source(
+            "interface Parent<T> { T item(); } interface Child<T> extends Parent<T> {} interface Middle<X> extends Child<X> {}",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let named = |name: &str, args: Vec<JavaType>| JavaType::Named {
+            name: name.to_string(),
+            args,
+        };
+        let mut actual = RustSlotShape::for_storage(named("Middle", vec![JavaType::String]));
+        actual.dispatch = DispatchShape::DynTrait {
+            trait_name: "Middle".to_string(),
+        };
+        actual.ownership = OwnershipShape::SharedBorrow;
+        let mut target = RustSlotShape::for_storage(named("Parent", vec![JavaType::String]));
+        target.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "Parent".to_string(),
+        };
+        let expected = DispatchCoercionPolicy::UpcastBoxedDynTrait {
+            source_trait: "Middle<String>".to_string(),
+            target_trait: "Parent<String>".to_string(),
+            clone_source: true,
+        };
+        assert_eq!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &semantic.facts),
+            expected
+        );
+        actual.ownership = OwnershipShape::Owned;
+        actual.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "Middle".to_string(),
+        };
+        assert!(matches!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &semantic.facts),
+            DispatchCoercionPolicy::UpcastBoxedDynTrait {
+                clone_source: false,
+                ..
+            }
+        ));
+        actual.dispatch = DispatchShape::Concrete;
+        assert!(matches!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &semantic.facts),
+            DispatchCoercionPolicy::UpcastBoxedDynTrait {
+                clone_source: false,
+                ..
+            }
+        ));
+        actual.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "Middle".to_string(),
+        };
+        target.java_ty = named("Parent", vec![named("Integer", vec![])]);
+        assert!(matches!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &semantic.facts),
+            DispatchCoercionPolicy::Unsupported { .. }
+        ));
+        target.java_ty = named("Parent", vec![JavaType::String]);
+        let mut no_adapter = semantic.facts.clone();
+        no_adapter.source_interface_upcast_facts.clear();
+        assert!(matches!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &no_adapter),
+            DispatchCoercionPolicy::Unsupported { .. }
+        ));
+        actual.java_ty = named("foreign.Middle", vec![JavaType::String]);
+        actual.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: "ForeignMiddle".to_string(),
+        };
+        assert!(matches!(
+            dispatch_coercion_policy_with_facts(&actual, &target, &semantic.facts),
+            DispatchCoercionPolicy::Unsupported { .. }
+        ));
+    }
+
+    #[test]
     fn borrowed_dyn_trait_to_owned_storage_uses_clone_box_adapter() {
         let java_ty = JavaType::Named {
             name: "Product".to_string(),
@@ -5421,6 +5655,7 @@ mod tests {
             dispatch_coercion_policy_with_facts(&actual, &target, &facts),
             DispatchCoercionPolicy::BorrowBoxedDynTrait {
                 trait_name: "Opdf<O>".to_string(),
+                mutable: false,
             }
         );
 
@@ -5600,6 +5835,16 @@ mod tests {
             });
 
         let policy = dispatch_coercion_policy_with_facts(&actual, &target, &facts);
+        let coercion = shape_coercion_plan_with_facts(&actual, &target, &facts);
+        assert!(coercion.may_throw_class_cast());
+        assert_eq!(
+            policy.checked_cast_failure_policy(),
+            Some(&InvalidCastPolicy::Panic)
+        );
+        assert!(matches!(
+            java_cast_semantics_policy_with_facts(&actual, &target, &coercion, &facts),
+            JavaCastSemanticsPolicy::RawOrWildcardCast { .. }
+        ));
         let DispatchCoercionPolicy::DowncastErasedObjectToClosedEnum { variants, .. } = policy
         else {
             panic!("expected erased closed-hierarchy downcast");

@@ -1457,6 +1457,7 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
 
     let crate_mapped_actual = RustSlotShape {
         java_ty: crate_mapped_ty.clone(),
+        nested_collection_views: Vec::new(),
         ownership: OwnershipShape::SharedBorrow,
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
@@ -1465,6 +1466,7 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
     let crate_mapped_target = RustSlotShape::conservative(crate_mapped_ty);
     let source_actual = RustSlotShape {
         java_ty: source_helper_ty.clone(),
+        nested_collection_views: Vec::new(),
         ownership: OwnershipShape::SharedBorrow,
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
@@ -2894,7 +2896,7 @@ fn external_into_clones_source_before_consuming_conversion() {
 
     assert_eq!(
         emit_expr(&rendered),
-        "std::convert::Into::<OutputStream>::into(stream.clone()/* TODO(translation): validate added clone */)"
+        "std::convert::Into::<OutputStream>::into(std::clone::Clone::clone(&stream)/* TODO(translation): validate added clone */)"
     );
 }
 
@@ -3807,19 +3809,22 @@ fn shape_coercion_owns_closed_enum_upcast_and_downcast_adapters() {
         emit_expr(&downcast),
         "match animal { AnimalValue::Dog(value) => value, _ => panic!(\"invalid Java cast\") }"
     );
-    assert!(matches!(
-        downcast,
-        RustExpr::Match { arms, .. }
-            if matches!(
-                arms.as_slice(),
-                [RustMatchArm { pattern: dog_pattern, body: RustExpr::Var(value) },
-                 RustMatchArm { pattern: fallback_pattern, body: RustExpr::MacroCall { macro_name, .. } }]
-                    if dog_pattern == "AnimalValue::Dog(value)"
-                        && value == "value"
-                        && fallback_pattern == "_"
-                        && macro_name == "panic"
-            )
-    ));
+    let RustExpr::Match { arms, .. } = downcast.unshaped() else {
+        panic!("expected a checked carrier downcast: {downcast:?}");
+    };
+    let [success, failure] = arms.as_slice() else {
+        panic!("expected success and checked-failure arms: {arms:?}");
+    };
+    assert_eq!(success.pattern, "AnimalValue::Dog(value)");
+    assert!(matches!(success.body.unshaped(), RustExpr::Var(value) if value == "value"));
+    assert_eq!(failure.pattern, "_");
+    assert_eq!(
+        failure.body.recorded_shape(),
+        Some(RustExprShape::CheckedCastFailure)
+    );
+    assert!(
+        matches!(failure.body.unshaped(), RustExpr::MacroCall { macro_name, .. } if macro_name == "panic")
+    );
 }
 
 #[test]
@@ -4542,6 +4547,7 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
         plan_shape_coercion_with_facts(&actual, &dyn_target, &FactSet::default()),
         vec![Coercion::BorrowDynTrait {
             trait_name: "Animal".to_string(),
+            mutable: false,
         }]
     );
     let dyn_borrow = apply_expr_to_slot_with_facts(
@@ -4724,6 +4730,7 @@ fn shape_coercion_owns_dyn_trait_and_erased_object_adapters() {
         plan_shape_coercion_with_facts(&boxed_actual, &borrowed_dyn_target, &FactSet::default()),
         vec![Coercion::BorrowBoxedDynTrait {
             trait_name: "Animal".to_string(),
+            mutable: false,
         }]
     );
     let boxed_dyn_borrow = apply_expr_to_slot_with_facts(
@@ -5753,7 +5760,10 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
     );
 
     let set_policy = borrowed_element_slot_adapter_policy(
-        BorrowedElementCarrier::Set,
+        BorrowedElementCarrier::Set {
+            kind: new_java2rust::stdlib::JavaCollectionKind::Set,
+            semantic_equality: false,
+        },
         &set_target,
         &set_shape,
         &string_element,
@@ -5762,7 +5772,10 @@ fn borrowed_element_slot_adapter_policy_combines_carrier_match_and_recovery() {
     assert_eq!(set_policy.matches(), true);
     assert_eq!(
         set_policy.adapter().unwrap().carrier(),
-        BorrowedElementCarrier::Set
+        BorrowedElementCarrier::Set {
+            kind: new_java2rust::stdlib::JavaCollectionKind::Set,
+            semantic_equality: false,
+        }
     );
 
     let mismatch = borrowed_element_slot_adapter_policy(
@@ -6054,6 +6067,7 @@ fn optional_boxed_dyn_trait_maps_borrow_over_payload() {
         element_plan.dispatch(),
         &DispatchCoercionPolicy::BorrowBoxedDynTrait {
             trait_name: "BlockData".to_string(),
+            mutable: false,
         }
     );
     assert_eq!(

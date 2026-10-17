@@ -5,6 +5,22 @@ use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{optional_element_type, optional_java_type};
 
+/// Reference casting changes the nominal type, not the Java null value.
+/// Primitive targets are unboxing/numeric operations and retain their own
+/// required-value checks instead of acquiring an Option result.
+pub(crate) fn preserve_reference_cast_nullability(
+    actual: &RustSlotShape,
+    target: &mut RustSlotShape,
+) {
+    if !matches!(target.java_ty, JavaType::Primitive(_) | JavaType::Void)
+        && (actual.optional_element_type().is_some()
+            || crate::resolve::is_null_type(&actual.java_ty))
+        && target.optional_element_type().is_none()
+    {
+        target.java_ty = optional_java_type(target.java_ty.clone());
+    }
+}
+
 /// Applies a resolver-specialized Java type to an already-solved Rust slot.
 ///
 /// Signature solving may add `Optional` at any nesting depth.  A resolved
@@ -19,7 +35,130 @@ pub(crate) fn specialize_slot_shape_java_type(
     let mut specialized_shape = shape.clone();
     specialized_shape.java_ty =
         specialize_java_type_preserving_optionality(&shape.java_ty, specialized);
+    if !shape.nested_collection_views.is_empty() {
+        fn project(
+            old: &JavaType,
+            new: &JavaType,
+            views: &[(JavaType, ViewShape)],
+            out: &mut Vec<(JavaType, ViewShape)>,
+        ) {
+            let old_element = optional_element_type(old);
+            let new_element = optional_element_type(new);
+            let old = old_element.as_ref().unwrap_or(old);
+            let new = new_element.as_ref().unwrap_or(new);
+            for (key, view) in views {
+                if key == old && !out.iter().any(|(ty, _)| ty == new) {
+                    out.push((new.clone(), view.clone()));
+                }
+            }
+            match (old, new) {
+                (JavaType::Named { args: old, .. }, JavaType::Named { args: new, .. })
+                | (JavaType::Intersection(old), JavaType::Intersection(new)) => {
+                    for (old, new) in old.iter().zip(new) {
+                        project(old, new, views, out);
+                    }
+                }
+                (JavaType::Array(old), JavaType::Array(new)) => project(old, new, views, out),
+                (
+                    JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(old))),
+                    JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(new))),
+                )
+                | (
+                    JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(old))),
+                    JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(new))),
+                ) => project(old, new, views, out),
+                _ => {}
+            }
+        }
+        let mut views = Vec::new();
+        project(
+            &shape.java_ty,
+            &specialized_shape.java_ty,
+            &shape.nested_collection_views,
+            &mut views,
+        );
+        specialized_shape.nested_collection_views = views;
+    }
     specialized_shape
+}
+
+/// Applies a resolver argument instantiation without undoing reified wildcard
+/// witnesses. Ordinary binders beside those witnesses still specialize.
+pub(crate) fn specialize_resolved_argument_preserving_source_wildcards(
+    shape: &RustSlotShape,
+    inferred: &JavaType,
+) -> RustSlotShape {
+    fn overlay(solved: &JavaType, inferred: &JavaType) -> JavaType {
+        use crate::java_ir::WildcardBound;
+        if let Some(element) = optional_element_type(solved) {
+            let inferred_element = optional_element_type(inferred);
+            return optional_java_type(overlay(
+                &element,
+                inferred_element.as_ref().unwrap_or(inferred),
+            ));
+        }
+        match (solved, inferred) {
+            (JavaType::Named { name, args }, _)
+                if args.is_empty()
+                    && crate::inherited_members::is_synthesized_source_wildcard_type_param(
+                        name,
+                    ) =>
+            {
+                solved.clone()
+            }
+            (
+                JavaType::Named { name, args },
+                JavaType::Named {
+                    args: inferred_args,
+                    ..
+                },
+            ) if args.len() == inferred_args.len()
+                && crate::slot_shape::java_types_have_same_erased_identity(solved, inferred) =>
+            {
+                JavaType::Named {
+                    name: name.clone(),
+                    args: args
+                        .iter()
+                        .zip(inferred_args)
+                        .map(|(old, new)| overlay(old, new))
+                        .collect(),
+                }
+            }
+            (JavaType::Array(old), JavaType::Array(new)) => {
+                JavaType::Array(Box::new(overlay(old, new)))
+            }
+            (JavaType::Intersection(old), JavaType::Intersection(new))
+                if old.len() == new.len() =>
+            {
+                JavaType::Intersection(
+                    old.iter()
+                        .zip(new)
+                        .map(|(old, new)| overlay(old, new))
+                        .collect(),
+                )
+            }
+            (
+                JavaType::Wildcard(Some(WildcardBound::Extends(old))),
+                JavaType::Wildcard(Some(WildcardBound::Extends(new))),
+            ) => JavaType::Wildcard(Some(WildcardBound::Extends(Box::new(overlay(old, new))))),
+            (
+                JavaType::Wildcard(Some(WildcardBound::Super(old))),
+                JavaType::Wildcard(Some(WildcardBound::Super(new))),
+            ) => JavaType::Wildcard(Some(WildcardBound::Super(Box::new(overlay(old, new))))),
+            _ if crate::inherited_members::java_type_contains_synthesized_source_wildcard(
+                solved,
+            ) =>
+            {
+                // Reification can replace an old resolver binder H with an
+                // entire emitted carrier Model<W>. Do not undo that rewrite.
+                solved.clone()
+            }
+            _ => inferred.clone(),
+        }
+    }
+    // Preserve only the reified witnesses, not their ordinary sibling binders.
+    // Reuse the canonical overlay for nullability and nested collection views.
+    specialize_slot_shape_java_type(shape, &overlay(&shape.java_ty, inferred))
 }
 
 /// Specializes a solved source-method return at a resolved generic call site.
@@ -293,8 +432,6 @@ pub fn value_shape_for_java_type(
     let mut shape = RustSlotShape::conservative(java_ty.clone());
     let dispatch = if java_type_is_erased_object_boundary(&java_ty) {
         DispatchShape::ErasedObject
-    } else if java_type_is_known_platform_facade(&java_ty) {
-        DispatchShape::Concrete
     } else {
         dispatch_for_java_type_or_optional_element(representations, &java_ty)
     };
@@ -341,6 +478,35 @@ fn java_type_is_known_platform_facade(java_ty: &JavaType) -> bool {
         }
         _ => false,
     }
+}
+
+fn java_type_is_platform_facade_in_plan(
+    java_ty: &JavaType,
+    representations: &RepresentationPlan,
+) -> bool {
+    // Most named types here are ordinary source names or generic binders.
+    // Only platform names can need the provenance exception; querying the
+    // representation catalog first scans its aliases for every missing binder.
+    if !java_type_is_known_platform_facade(java_ty) {
+        return false;
+    }
+    let owner = match java_ty {
+        JavaType::Named { name, .. } | JavaType::Unknown(name) => Some(name.as_str()),
+        _ => None,
+    };
+    if owner
+        .and_then(|name| representations.type_representation(name))
+        .is_some_and(|entry| {
+            matches!(
+                entry.provenance(),
+                crate::representation::RepresentationProvenance::ParsedSource
+                    | crate::representation::RepresentationProvenance::UserOverride
+            )
+        })
+    {
+        return false;
+    }
+    true
 }
 
 pub fn borrowed_string_content_shape() -> RustSlotShape {
@@ -635,12 +801,12 @@ pub(crate) fn dispatch_for_java_type_or_optional_element(
     if let Some(element_ty) = optional_element_type(java_ty) {
         if java_type_is_erased_object_boundary(&element_ty) {
             DispatchShape::ErasedObject
-        } else if java_type_is_known_platform_facade(&element_ty) {
+        } else if java_type_is_platform_facade_in_plan(&element_ty, representations) {
             DispatchShape::Concrete
         } else {
             representations.dispatch_for(&element_ty)
         }
-    } else if java_type_is_known_platform_facade(java_ty) {
+    } else if java_type_is_platform_facade_in_plan(java_ty, representations) {
         DispatchShape::Concrete
     } else {
         representations.dispatch_for(java_ty)
@@ -841,7 +1007,146 @@ pub fn sequence_element_projection_policy_with_effective_facts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn collection_projection_non_platform_names_do_not_scan_the_representation_catalog() {
+        let plan = super::RepresentationPlan::default();
+        crate::representation::take_simple_name_catalog_scan_count();
+        for name in ["T", "V", "E", "DomainNode"] {
+            let ty = super::JavaType::Named {
+                name: name.to_string(),
+                args: Vec::new(),
+            };
+            assert!(!super::java_type_is_platform_facade_in_plan(&ty, &plan));
+        }
+        assert_eq!(
+            crate::representation::take_simple_name_catalog_scan_count(),
+            0
+        );
+        let native = super::JavaType::Named {
+            name: "Reader".to_string(),
+            args: Vec::new(),
+        };
+        assert!(super::java_type_is_platform_facade_in_plan(&native, &plan));
+        assert_eq!(
+            crate::representation::take_simple_name_catalog_scan_count(),
+            1
+        );
+    }
+
+    #[test]
+    fn reference_cast_preserves_null_but_primitive_unboxing_does_not() {
+        let actual =
+            super::RustSlotShape::for_storage(super::optional_java_type(super::JavaType::Named {
+                name: "Integer".to_string(),
+                args: vec![],
+            }));
+        let mut reference = super::RustSlotShape::for_storage(super::JavaType::Named {
+            name: "Object".to_string(),
+            args: vec![],
+        });
+        super::preserve_reference_cast_nullability(&actual, &mut reference);
+        assert!(reference.optional_element_type().is_some());
+        let mut primitive = super::RustSlotShape::for_storage(super::JavaType::Primitive(
+            crate::java_ir::PrimitiveType::Int,
+        ));
+        super::preserve_reference_cast_nullability(&actual, &mut primitive);
+        assert!(primitive.optional_element_type().is_none());
+        let null = super::RustSlotShape::for_storage(super::JavaType::Unknown("null".to_string()));
+        let mut literal_target = super::RustSlotShape::for_storage(super::JavaType::String);
+        super::preserve_reference_cast_nullability(&null, &mut literal_target);
+        assert!(literal_target.optional_element_type().is_some());
+    }
+
     use super::*;
+
+    #[test]
+    fn resolver_argument_specialization_protects_only_reified_witnesses() {
+        let parse = crate::parser::parse_hierarchy_type;
+        let mut solved =
+            RustSlotShape::for_storage(parse("Optional<Set<Pair<MethodItem, __JavaWildcard0>>>"));
+        solved.ownership = OwnershipShape::MutableBorrow;
+        solved.nested_collection_views.push((
+            parse("Set<Pair<MethodItem, __JavaWildcard0>>"),
+            ViewShape::JavaSemanticHash,
+        ));
+        let specialized = specialize_resolved_argument_preserving_source_wildcards(
+            &solved,
+            &parse("Set<Pair<String, ?>>"),
+        );
+        assert_eq!(
+            specialized.java_ty,
+            parse("Optional<Set<Pair<String, __JavaWildcard0>>>")
+        );
+        assert_eq!(specialized.ownership, OwnershipShape::MutableBorrow);
+        assert_eq!(
+            specialized.nested_collection_views,
+            vec![(
+                parse("Set<Pair<String, __JavaWildcard0>>"),
+                ViewShape::JavaSemanticHash
+            )]
+        );
+        let array = RustSlotShape::for_storage(parse("Pair<MethodItem, __JavaWildcard0>[]"));
+        assert_eq!(
+            specialize_resolved_argument_preserving_source_wildcards(
+                &array,
+                &parse("Pair<String, ?>[]")
+            )
+            .java_ty,
+            parse("Pair<String, __JavaWildcard0>[]")
+        );
+    }
+
+    #[test]
+    fn resolver_argument_specialization_does_not_restore_a_pre_reification_owner() {
+        let parse = crate::parser::parse_hierarchy_type;
+        let solved = RustSlotShape::for_storage(parse("Model<__JavaWildcard0>"));
+        let specialized =
+            specialize_resolved_argument_preserving_source_wildcards(&solved, &parse("H"));
+        assert_eq!(specialized, solved);
+    }
+
+    #[test]
+    fn collection_child_slots_inherit_only_relevant_carrier_decisions() {
+        let parse = crate::parser::parse_hierarchy_type;
+        let mut parent = RustSlotShape::for_storage(parse("List<List<Set<Item>>>"));
+        parent
+            .nested_collection_views
+            .push((parse("Set<Item>"), ViewShape::JavaSemanticHash));
+        let mut element = RustSlotShape::for_storage(parse("Set<Item>"));
+        element.inherit_nested_collection_views(&parent);
+        assert_eq!(element.view, ViewShape::JavaSemanticHash);
+        assert!(element.nested_collection_views.is_empty());
+        let mut row = RustSlotShape::for_storage(parse("List<Set<Item>>"));
+        row.inherit_nested_collection_views(&parent);
+        assert_eq!(row.nested_collection_views, parent.nested_collection_views);
+        let mut index = RustSlotShape::for_storage(parse("int"));
+        index.inherit_nested_collection_views(&parent);
+        assert!(index.nested_collection_views.is_empty());
+    }
+
+    #[test]
+    fn slot_specialization_retains_nested_collection_carriers_and_nullability() {
+        let parse = crate::parser::parse_hierarchy_type;
+        let mut shape = RustSlotShape::for_storage(parse("List<Optional<Set<Item>>>"));
+        shape
+            .nested_collection_views
+            .push((parse("Set<Item>"), ViewShape::JavaSemanticHash));
+        let specialized = specialize_slot_shape_java_type(&shape, &parse("List<Set<String>>"));
+        assert_eq!(specialized.java_ty, parse("List<Optional<Set<String>>>"));
+        assert_eq!(
+            specialized.nested_collection_views,
+            vec![(parse("Set<String>"), ViewShape::JavaSemanticHash)]
+        );
+        let rendered = crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            &specialized,
+            &FactSet::default(),
+            &RepresentationPlan::default(),
+        );
+        assert_eq!(
+            crate::emit::emit_type(&rendered),
+            "Vec<Option<JavaSemanticHashSet<String>>>"
+        );
+    }
 
     #[test]
     fn slot_specialization_preserves_nested_sequence_optionality() {

@@ -1,8 +1,8 @@
 use crate::coercion::{
-    Coercion, apply_coercions, function_call_projection, java_update_expression_projection,
-    logical_not_projection, optional_string_view_projection, receiver_method_call_projection_exact,
-    recover_parseable_raw_operand_projection, rust_string_literal_projection, shared_borrow_expr,
-    string_equality_operand_projection,
+    Coercion, apply_coercions, expr_is_result_propagated, function_call_projection,
+    java_update_expression_projection, logical_not_projection, optional_string_view_projection,
+    receiver_method_call_projection_exact, recover_parseable_raw_operand_projection,
+    rust_string_literal_projection, shared_borrow_expr, string_equality_operand_projection,
 };
 use crate::facts::FactSet;
 use crate::java_ir::{BinaryOp, JavaType, PrimitiveType, UnaryOp};
@@ -488,11 +488,16 @@ pub fn lower_null_comparison_expr(
         NullComparisonMethod::IsNone => "is_none",
         NullComparisonMethod::IsSome => "is_some",
     };
-    Some(receiver_method_call_projection_exact(
-        value,
-        method,
-        Vec::new(),
-    ))
+    // Testing the nullable payload does not introduce a new Result carrier.
+    // Keep propagation evidence when the operand was already unwrapped, so
+    // an enclosing condition/return slot cannot append `?` to the boolean.
+    let propagated = expr_is_result_propagated(&value);
+    let comparison = receiver_method_call_projection_exact(value, method, Vec::new());
+    Some(if propagated {
+        RustExpr::shaped(crate::rust_ir::RustExprShape::ResultPropagated, comparison)
+    } else {
+        comparison
+    })
 }
 
 impl EqualityComparisonPlan {
@@ -1250,6 +1255,10 @@ pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {
             op: "!".to_string(),
             expr: Box::new(operand),
         },
+        UnaryOp::BitNot => RustExpr::Unary {
+            op: "!".to_string(),
+            expr: Box::new(operand),
+        },
         UnaryOp::Neg => RustExpr::Unary {
             op: "-".to_string(),
             expr: Box::new(operand),
@@ -1262,7 +1271,7 @@ pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {
 
 pub fn stream_unary_prefix(op: UnaryOp) -> Option<&'static str> {
     match op {
-        UnaryOp::Not => Some("!"),
+        UnaryOp::Not | UnaryOp::BitNot => Some("!"),
         UnaryOp::Neg => Some("-"),
         UnaryOp::Pos => Some(""),
         _ => None,
@@ -1278,6 +1287,7 @@ mod equality_symmetry_tests {
 
     fn shape(java_ty: JavaType, ownership: OwnershipShape, view: ViewShape) -> RustSlotShape {
         RustSlotShape {
+            nested_collection_views: Vec::new(),
             java_ty,
             ownership,
             view,
@@ -1599,6 +1609,7 @@ mod shared_handle_identity_tests {
             }
         };
         RustSlotShape {
+            nested_collection_views: Vec::new(),
             java_ty,
             ownership,
             view: ViewShape::Native,

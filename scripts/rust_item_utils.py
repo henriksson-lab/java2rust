@@ -5,6 +5,7 @@ pass its own approximation of Rust generic syntax.
 """
 
 import re
+from functools import cache
 
 
 _MACRO_DEFINITION_RE = re.compile(
@@ -98,6 +99,7 @@ def inherent_impl_target_name(line: str):
     return impl_target_name(parts[1])
 
 
+@cache
 def _rust_delimiter_depths(line: str, depths: tuple[int, int, int]):
     """Advance Rust (), [] and {} depths while ignoring literals/comments."""
     paren, bracket, brace = depths

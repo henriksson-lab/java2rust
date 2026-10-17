@@ -97,6 +97,13 @@ impl ShapeEnv {
         &self.types
     }
 
+    pub(crate) fn set_source_emission(
+        &mut self,
+        plan: std::sync::Arc<crate::source_emission::SourceEmissionPlan>,
+    ) {
+        self.types.set_source_emission(plan);
+    }
+
     pub(crate) fn mark_shared_native_map_local(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.shared_native_map_locals.insert(binding.clone());
@@ -731,6 +738,19 @@ impl ShapeEnv {
         }
     }
 
+    /// Enclosing instance members are lexically visible only when this class
+    /// has no field of its own with that spelling. Locals remain independent:
+    /// a constructor parameter must not hide a field in initializer scope.
+    pub(crate) fn seed_lexical_outer_instance_fields(&mut self, outer: &Self) {
+        for name in &outer.instance_field_names {
+            if self.types.field_type_exact(name).is_none()
+                && let Some(shape) = outer.field_shapes.get(name)
+            {
+                self.insert_field_shape(name.clone(), shape.clone());
+            }
+        }
+    }
+
     fn insert_field_shape_with_access_name(
         &mut self,
         name: impl Into<String>,
@@ -1196,6 +1216,28 @@ impl ShapeEnv {
         self.types.local_type(name)
     }
 
+    pub(crate) fn without_local_scope(&self) -> Self {
+        let mut env = self.clone();
+        for name in self.local_shapes.keys() {
+            env.clear_local_side_facts(name);
+        }
+        env.local_shapes.clear();
+        env.binding_ids.clear();
+        env.binding_access_names.clear();
+        env.types.clear_local_scope();
+        env
+    }
+
+    pub(crate) fn fresh_local_name(&self, base: &str) -> String {
+        let occupied = self
+            .local_shapes
+            .keys()
+            .chain(self.binding_access_names.values())
+            .cloned()
+            .collect();
+        crate::java_naming::allocate_rust_ident(base, &occupied)
+    }
+
     pub(crate) fn insert_binding_access_name(
         &mut self,
         name: impl Into<String>,
@@ -1601,21 +1643,19 @@ fn infer_expr_shape_with_context_and_external_index(
         .or_else(|| java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx))
         .unwrap_or_else(|| value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))),
         Expr::New {
-            ty,
             resolved: Some(resolved),
             ..
-        } => {
-            let java_ty = if matches!(ty, JavaType::Unknown(_)) {
-                JavaType::Named {
-                    name: resolved.declaring_type.clone(),
-                    args: Vec::new(),
-                }
-            } else {
-                ty.clone()
-            };
-            value_shape_or_conservative(ctx, java_ty)
+        } => value_shape_or_conservative(ctx, resolved.constructed_type.clone()),
+        Expr::Cast { ty, expr } => {
+            let mut target = value_shape_or_conservative(ctx, ty.clone());
+            if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) {
+                crate::shape_projection::preserve_reference_cast_nullability(
+                    &infer_expr_shape_with_context(expr, env, ctx),
+                    &mut target,
+                );
+            }
+            target
         }
-        Expr::Cast { ty, .. } => value_shape_or_conservative(ctx, ty.clone()),
         _ => value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env())),
     }
 }
@@ -1682,6 +1722,13 @@ fn resolved_external_call_expr_shape(
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> Option<RustSlotShape> {
     let facts = ctx.facts?;
+    if crate::call_plan::java_type_owner_is_parsed_source(
+        &call.declaring_type,
+        env.type_env(),
+        facts,
+    ) {
+        return None;
+    }
     let effect = match external_index {
         Some(external_index) => external_index.external_api_effect_for_receiver_with_arity(
             Some(&call.declaring_type),
@@ -1777,16 +1824,14 @@ fn native_java_call_expr_shape(
             crate::types::optional_java_type(JavaType::String),
         ));
     }
-    if matches!(
-        target,
-        crate::call_plan::CallTargetPlan::NativeJavaStatic {
-            method: crate::call_plan::NativeJavaStaticMethod::ObjectsRequireNonNull,
-        }
-    ) && let Some(value) = args.first()
+    if let Some(index) = target.checked_identity_argument_index()
+        && let Some(value) = args.get(index)
     {
         let value_shape =
             infer_expr_shape_with_context_and_external_index(value, env, ctx, external_index);
-        if let Some(element_ty) = value_shape.optional_element_type() {
+        if let Some(element_ty) = value_shape.optional_element_type()
+            && !resolved.is_some_and(|call| call.return_type == value_shape.java_ty)
+        {
             // `requireNonNull` is Java's generic identity boundary with the
             // additional postcondition that its result is non-null.  Project
             // the element as a value because lowering unwraps the optional
@@ -2025,6 +2070,25 @@ pub fn learn_stmt_shapes(
     locals: &[LocalPlan],
     signatures: &SignaturePlan,
 ) {
+    learn_stmt_shapes_with_context(stmt, env, locals, signatures, None)
+}
+
+/// Learn scoped bindings with the same representation projection used for
+/// expression values when a whole-program context is available. Legacy callers
+/// without that context retain their conservative fallback.
+pub(crate) fn learn_stmt_shapes_with_context(
+    stmt: &Stmt,
+    env: &mut ShapeEnv,
+    locals: &[LocalPlan],
+    signatures: &SignaturePlan,
+    ctx: Option<ExprShapeContext<'_>>,
+) {
+    let fallback = |ty: &JavaType| match ctx {
+        Some(ctx) => {
+            crate::shape_projection::project_java_value_shape(ctx.representations(), ty.clone())
+        }
+        None => fallback_local_shape_from_declared_type(ty),
+    };
     match stmt {
         Stmt::VarDecl {
             ty,
@@ -2041,7 +2105,7 @@ pub fn learn_stmt_shapes(
                 local_plan_for_declaration_shape(signatures, locals, binding.as_ref(), name, ty);
             let shape = local_plan
                 .map(|plan| plan.shape().clone())
-                .unwrap_or_else(|| fallback_local_shape_from_declared_type(ty));
+                .unwrap_or_else(|| fallback(ty));
             let env_binding = binding
                 .clone()
                 .or_else(|| local_plan.map(|plan| plan.binding().clone()));
@@ -2148,7 +2212,7 @@ pub fn learn_stmt_shapes(
             );
             let shape = local_plan
                 .map(|plan| plan.shape().clone())
-                .unwrap_or_else(|| fallback_local_shape_from_declared_type(var_type));
+                .unwrap_or_else(|| fallback(var_type));
             let env_binding = binding
                 .clone()
                 .or_else(|| local_plan.map(|plan| plan.binding().clone()));
@@ -2414,7 +2478,7 @@ fn infer_field_access_shape(
         }
     }
     let receiver_ty = infer_expr_type(receiver, env.type_env());
-    let name = match receiver_ty {
+    let name = match &receiver_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
         _ => return None,
     };
@@ -2423,9 +2487,14 @@ fn infer_field_access_shape(
     }
     ctx.signatures.and_then(|signatures| {
         signatures
-            .field_shape(&name, field)
-            .or_else(|| signatures.field_shape(&name, &crate::parser::to_snake_case(field)))
-            .map(field_access_shape_from_signature_shape)
+            .field_shape_for_receiver_type(&receiver_ty, field)
+            .or_else(|| {
+                signatures.field_shape_for_receiver_type(
+                    &receiver_ty,
+                    &crate::parser::to_snake_case(field),
+                )
+            })
+            .map(|shape| field_access_shape_from_signature_shape(&shape))
     })
 }
 

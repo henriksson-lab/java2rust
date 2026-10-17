@@ -13,6 +13,9 @@ pub struct TypeEnv {
     type_fields: HashMap<(String, String), JavaType>,
     type_param_bounds: HashMap<String, JavaType>,
     static_type_aliases: HashMap<String, String>,
+    // Shared across lexical environment clones: emission ownership is a
+    // batch invariant, not a per-expression map to rebuild or deep-copy.
+    source_emission: Option<std::sync::Arc<crate::source_emission::SourceEmissionPlan>>,
     static_member_imports: HashMap<String, String>,
 }
 
@@ -23,6 +26,13 @@ impl TypeEnv {
 
     pub fn insert_local(&mut self, name: impl Into<String>, ty: JavaType) {
         self.locals.insert(name.into(), ty);
+    }
+
+    pub(crate) fn clear_local_scope(&mut self) {
+        self.locals.clear();
+        self.params.clear();
+        self.callable_locals.clear();
+        self.comparator_object_locals.clear();
     }
 
     pub fn mark_callable_local(&mut self, name: impl Into<String>) {
@@ -140,6 +150,14 @@ impl TypeEnv {
     }
 
     pub fn field_type(&self, name: &str) -> Option<&JavaType> {
+        self.field_type_exact(name).or_else(|| {
+            let plain = name.strip_prefix("r#").unwrap_or(name);
+            let alias = crate::parser::to_snake_case(plain);
+            (alias != plain).then(|| self.fields.get(&alias)).flatten()
+        })
+    }
+
+    pub(crate) fn field_type_exact(&self, name: &str) -> Option<&JavaType> {
         self.fields
             .get(name)
             .or_else(|| {
@@ -152,11 +170,6 @@ impl TypeEnv {
                 } else {
                     self.fields.get(&format!("r#{name}"))
                 }
-            })
-            .or_else(|| {
-                let plain = name.strip_prefix("r#").unwrap_or(name);
-                let alias = crate::parser::to_snake_case(plain);
-                (alias != plain).then(|| self.fields.get(&alias)).flatten()
             })
     }
 
@@ -171,6 +184,19 @@ impl TypeEnv {
 
     pub fn static_type_alias(&self, name: &str) -> Option<&str> {
         self.static_type_aliases.get(name).map(String::as_str)
+    }
+
+    pub(crate) fn set_source_emission(
+        &mut self,
+        plan: std::sync::Arc<crate::source_emission::SourceEmissionPlan>,
+    ) {
+        self.source_emission = Some(plan);
+    }
+
+    pub(crate) fn is_emitted_source_owner(&self, owner: &str) -> bool {
+        self.source_emission
+            .as_ref()
+            .is_some_and(|plan| plan.rust_owner(owner).is_some())
     }
 
     pub fn static_member_import_owner(&self, member: &str) -> Option<&str> {
@@ -241,6 +267,19 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
                 JavaType::Array(Box::new(JavaType::Unknown("array_initializer".to_string())))
             }),
         Expr::Binary { op, left, right } => infer_binary_type(*op, left, right, env),
+        Expr::Unary {
+            op: crate::java_ir::UnaryOp::BitNot,
+            expr,
+        } => match infer_expr_type(expr, env) {
+            JavaType::Primitive(PrimitiveType::Long) => JavaType::Primitive(PrimitiveType::Long),
+            JavaType::Primitive(
+                PrimitiveType::Byte
+                | PrimitiveType::Short
+                | PrimitiveType::Char
+                | PrimitiveType::Int,
+            ) => JavaType::Primitive(PrimitiveType::Int),
+            other => other,
+        },
         Expr::Unary { expr, .. } => infer_expr_type(expr, env),
         Expr::Ternary {
             then_expr,
@@ -284,6 +323,10 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
                 .unwrap_or_else(|| JavaType::Unknown(name.clone()))
             }
         }
+        Expr::New {
+            resolved: Some(resolved),
+            ..
+        } => resolved.constructed_type.clone(),
         Expr::New { ty, .. } => ty.clone(),
         Expr::Cast { ty, .. } => ty.clone(),
         Expr::InstanceOf { .. } => JavaType::Primitive(PrimitiveType::Boolean),
@@ -482,6 +525,9 @@ fn two_dimensional_array_element_type_after_optional(java_ty: &JavaType) -> Opti
 
 pub fn optional_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
+        JavaType::Named { name, args } if args.is_empty() => {
+            crate::stdlib::primitive_optional_payload(name).map(JavaType::Primitive)
+        }
         JavaType::Named { name, args }
             if matches!(name.as_str(), "Optional" | "java.util.Optional") && args.len() == 1 =>
         {

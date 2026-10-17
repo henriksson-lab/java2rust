@@ -31,6 +31,17 @@ pub struct TypeDecl {
     pub span: Span,
 }
 
+impl TypeDecl {
+    /// Only a non-static member class of a class has an enclosing instance.
+    /// Member types declared in interfaces, and member interfaces/enums/
+    /// records themselves, are implicitly static under Java's nesting rules.
+    pub(crate) fn has_enclosing_instance_in(&self, enclosing_kind: TypeKind) -> bool {
+        self.kind == TypeKind::Class
+            && !self.modifiers.contains(&Modifier::Static)
+            && enclosing_kind != TypeKind::Interface
+    }
+}
+
 /// A `static { ... }` initializer block, with the position it occupied among the
 /// type's members. Java runs static field initializers and static blocks in
 /// textual order (JLS 12.4.2), so class initialization needs the position, not
@@ -339,6 +350,9 @@ pub enum Expr {
     },
     New {
         ty: JavaType,
+        /// True for Java diamond syntax (`new Type<>(...)`), distinct from
+        /// constructing a raw generic type (`new Type(...)`).
+        infer_type_arguments: bool,
         qualifier: Option<Box<Expr>>,
         args: Vec<Expr>,
         body: Option<Vec<Member>>,
@@ -636,6 +650,7 @@ pub enum BinaryOp {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
     Not,
+    BitNot,
     Neg,
     Pos,
     PreInc,
@@ -652,6 +667,7 @@ mod tests {
     fn qualified_new_receiver_mentions_this() {
         let block = Block {
             statements: vec![Stmt::Expr(Expr::New {
+                infer_type_arguments: false,
                 ty: JavaType::Named {
                     name: "Inner".to_string(),
                     args: Vec::new(),

@@ -1939,28 +1939,7 @@ fn collect_stmt_facts(
             if let Expr::FieldAccess(receiver, _) = target
                 && !(in_constructor && matches!(receiver.as_ref(), Expr::This))
             {
-                match handle_type_name(receiver, owner, declared, locals) {
-                    Some(name) => {
-                        if let Some(facts) = into.get_mut(&name) {
-                            facts.mutated = true;
-                        }
-                    }
-                    // A field write through a receiver this walk cannot type —
-                    // `arr[i].f = v`, `other.f = v` — is still a *mutation of
-                    // something*. `mutated` has to over-approximate: it is what
-                    // says a type may be held as `Rc<T>` with no `RefCell`, and
-                    // being wrong that way does not cost a pointer indirection,
-                    // it emits `cannot assign to data in an Rc` and does not
-                    // compile. Under-approximating is the unsafe direction, and
-                    // the design's "over-sharing is cheap" argument does not
-                    // cover it
-                    // ([0002b](../claude_audits/0002b-shared-representation-design.md)).
-                    None => {
-                        for facts in into.values_mut() {
-                            facts.mutation_provably_absent = false;
-                        }
-                    }
-                }
+                record_receiver_mutation(receiver, owner, declared, locals, into);
             }
         }
         Stmt::If {
@@ -2130,10 +2109,45 @@ fn collect_stmt_facts(
                 }
             }
         }
-        Stmt::Return(Some(expr)) | Stmt::Expr(expr) | Stmt::Throw(expr) => {
+        Stmt::Return(Some(expr)) => {
+            // Returning an existing reference can leave both caller and
+            // callee referring to the same object. Unlike a fresh constructor
+            // result, it is not merely a value moving out of the method.
+            // Reuse the same bare-handle/type proof as local aliasing; this
+            // includes `return this` without a method-name special case.
+            if expr_is_bare_handle(expr)
+                && let Some(name) = handle_type_name(expr, owner, declared, locals)
+                && let Some(facts) = into.get_mut(&name)
+            {
+                facts.locally_aliased = true;
+            }
+            collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
+        }
+        Stmt::Expr(expr) | Stmt::Throw(expr) => {
             collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
         }
         _ => {}
+    }
+}
+
+fn record_receiver_mutation(
+    receiver: &Expr,
+    owner: &TypeDecl,
+    declared: &BTreeSet<String>,
+    locals: &BTreeMap<String, JavaType>,
+    into: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    if let Some(name) = handle_type_name(receiver, owner, declared, locals) {
+        if let Some(facts) = into.get_mut(&name) {
+            facts.mutated = true;
+        }
+    } else {
+        // An untyped receiver (including an inferred lambda parameter) is
+        // still a mutation of something. Absence of mutation is not proved;
+        // choosing Rc<T> here would make the eventual field write invalid.
+        for facts in into.values_mut() {
+            facts.mutation_provably_absent = false;
+        }
     }
 }
 
@@ -2150,6 +2164,39 @@ fn collect_anonymous_body_facts_from_expr(
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
     match expr {
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            // An assignment expression has the same alias and mutation
+            // effects as an assignment statement, even inside a lambda.
+            collect_stmt_facts(
+                &Stmt::Assign {
+                    target: left.as_ref().clone(),
+                    value: right.as_ref().clone(),
+                },
+                owner,
+                program,
+                declared,
+                false,
+                &mut locals.clone(),
+                into,
+            );
+        }
+        Expr::Unary {
+            op:
+                crate::java_ir::UnaryOp::PreInc
+                | crate::java_ir::UnaryOp::PreDec
+                | crate::java_ir::UnaryOp::PostInc
+                | crate::java_ir::UnaryOp::PostDec,
+            expr,
+        } => {
+            if let Expr::FieldAccess(receiver, _) = expr.as_ref() {
+                record_receiver_mutation(receiver, owner, declared, locals, into);
+            }
+            collect_anonymous_body_facts_from_expr(expr, owner, program, declared, locals, into);
+        }
         Expr::FieldAccess(receiver, _)
         | Expr::Unary { expr: receiver, .. }
         | Expr::Cast { expr: receiver, .. }
@@ -3219,6 +3266,28 @@ mod constructor_mutation_tests {
             .facts(type_name)
             .unwrap_or_else(|| panic!("missing storage facts for {type_name}"))
             .clone()
+    }
+
+    #[test]
+    fn returning_existing_receiver_retains_observable_identity() {
+        assert_eq!(
+            strategy_of(
+                "class Fluent { int value; Fluent same() { return this; } void update() { value++; } }",
+                "Fluent",
+            ),
+            StorageStrategy::SharedLocal,
+        );
+    }
+
+    #[test]
+    fn returning_fresh_constructor_result_does_not_invent_an_alias() {
+        assert_eq!(
+            strategy_of(
+                "class Fresh { int value; static Fresh make() { return new Fresh(); } void update() { value++; } }",
+                "Fresh",
+            ),
+            StorageStrategy::Value,
+        );
     }
 
     #[test]

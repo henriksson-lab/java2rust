@@ -90,6 +90,28 @@ def boxed_dyn_trait_target_name(raw_target: str):
     return match.group(1) if match else None
 
 
+def is_boxed_trait_conversion(raw_trait: str, raw_target: str) -> bool:
+    source = re.fullmatch(r"(?:[A-Za-z_][A-Za-z0-9_]*::)*From<(.*)>", raw_trait.strip())
+    return bool(
+        source
+        and boxed_dyn_trait_target_name(source.group(1))
+        and boxed_dyn_trait_target_name(raw_target)
+    )
+
+
+@cache
+def private_support_types(path: Path) -> set[str]:
+    """Internal representation carriers can follow the primary declaration."""
+    names = set()
+    depth = 0
+    for line in path.read_text().splitlines(keepends=True):
+        if depth == 0 and not re.match(r"^\s*pub\s+", line):
+            if match := TYPE_RE.match(line):
+                names.add(match.group(2))
+        depth += brace_delta(line)
+    return names
+
+
 def is_char_literal_start(line: str, index: int) -> bool:
     next_index = index + 1
     if next_index >= len(line):
@@ -99,7 +121,17 @@ def is_char_literal_start(line: str, index: int) -> bool:
     return index + 2 < len(line) and line[index + 2] == "'"
 
 
+@cache
 def brace_delta(line: str) -> int:
+    """Return the structural brace delta for one generated Rust line.
+
+    Assembly deliberately makes several independent top-level-item passes over
+    the raw modules. Those modules also share a large generated support
+    prelude, so the same line was previously scanned character-by-character
+    millions of times. The result depends only on immutable line text; caching
+    it preserves every caller's parser state while reducing the repeated work
+    to one scan per distinct generated line.
+    """
     delta = 0
     index = 0
     state = "code"
@@ -551,6 +583,12 @@ def parse_items(
                     (from_match := FROM_TRAIT_RE.match(trait_match.group(1).strip()))
                     and impl_target_name(from_match.group(1)) in selected
                 )
+                or (
+                    is_boxed_trait_conversion(trait_match.group(1), trait_match.group(2))
+                    and referenced_nominal_names(
+                        ["".join(lines[index:item_end(lines, index)])], selected
+                    )
+                )
             ):
                 raw_trait = trait_match.group(1).strip()
                 raw_target = trait_match.group(2).strip()
@@ -637,6 +675,13 @@ def select_catalog_items(items: list[dict], selected: set[str]) -> list[dict]:
             include = include or (
                 from_match is not None
                 and impl_target_name(from_match.group(1)) in selected
+            )
+            # The private adapter and the conversion that constructs it form
+            # one ownership group; splitting them also changes tuple-field
+            # constructor privacy when the adapter moves to crate root.
+            include = include or (
+                is_boxed_trait_conversion(item.get("trait_raw", ""), item.get("target", ""))
+                and bool(referenced_nominal_names([item["text"]], selected))
             )
         if include:
             result.append(item)
@@ -1512,7 +1557,10 @@ def call_argument_count(text: str, open_paren: int) -> int | None:
 
 
 def method_call_arity_preferences(
-    rust_paths: list[Path], selected: set[str], alias_targets: dict[str, str]
+    rust_paths: list[Path],
+    selected: set[str],
+    alias_targets: dict[str, str],
+    item_catalogs: dict[Path, list[dict]] | None = None,
 ) -> dict[tuple[str, str], set[int]]:
     preferences = defaultdict(set)
     names_by_target = defaultdict(set)
@@ -1523,7 +1571,11 @@ def method_call_arity_preferences(
     path_texts = [path.read_text() for path in rust_paths]
     parsed_items = []
     for path in rust_paths:
-        parsed_items.extend(parse_items(path, selected))
+        parsed_items.extend(
+            select_catalog_items(item_catalogs[path], selected)
+            if item_catalogs is not None
+            else parse_items(path, selected)
+        )
     method_names_by_target = defaultdict(set)
     for item in parsed_items:
         if item["kind"] == "inherent_impl":
@@ -1548,7 +1600,10 @@ def method_call_arity_preferences(
 
 
 def method_call_receiver_preferences(
-    rust_paths: list[Path], selected: set[str], alias_targets: dict[str, str]
+    rust_paths: list[Path],
+    selected: set[str],
+    alias_targets: dict[str, str],
+    item_catalogs: dict[Path, list[dict]] | None = None,
 ) -> dict[tuple[str, str], set[str]]:
     preferences = defaultdict(set)
     names_by_target = defaultdict(set)
@@ -1559,7 +1614,11 @@ def method_call_receiver_preferences(
     path_texts = [path.read_text() for path in rust_paths]
     parsed_items = []
     for path in rust_paths:
-        parsed_items.extend(parse_items(path, selected))
+        parsed_items.extend(
+            select_catalog_items(item_catalogs[path], selected)
+            if item_catalogs is not None
+            else parse_items(path, selected)
+        )
     method_names_by_target = defaultdict(set)
     for item in parsed_items:
         if item["kind"] == "inherent_impl":
@@ -2010,7 +2069,7 @@ def main() -> int:
     macro_definitions_by_name = defaultdict(list)
     macro_invocations_by_name = defaultdict(list)
     for path in merge_input_paths:
-        for name in prelude_support_types(path):
+        for name in prelude_support_types(path) | private_support_types(path):
             candidates_by_type[name].append(path)
         for alias, target in prelude_aliases(path):
             alias_candidates_by_name[alias].append((path, target))
@@ -2197,6 +2256,20 @@ def main() -> int:
     merge_item_catalogs = {
         path: parse_items(path, catalog_names) for path in merge_input_paths
     }
+
+    # A boxed interface conversion may own a private adapter found in just
+    # one source unit. Duplication is not evidence of whether it is required.
+    # Seed its nominal dependencies, then reuse the ordinary support closure.
+    for path, items in merge_item_catalogs.items():
+        for item in items:
+            if item["kind"] == "trait_impl" and is_boxed_trait_conversion(
+                item.get("trait_raw", ""), item.get("target", "")
+            ):
+                selected.update(
+                    referenced_nominal_names([item["text"]], private_support_types(path))
+                    - primary_output_types
+                    - protected_source_owned_nested_names
+                )
 
     # Shared seed code and a promoted declaration form one Rust coherence
     # unit. Close nominal dependencies before extracting items: otherwise a
@@ -2455,6 +2528,11 @@ def main() -> int:
     shared_aliases = set()
     alias_targets = {}
     emitted_from_impl_keys = set(existing_shared_from_impl_keys)
+    boxed_conversion_dependencies = {
+        key: referenced_nominal_names([text for _path, text in variants], selected)
+        for key, variants in trait_impls.items()
+        if is_boxed_trait_conversion(key[1], key[0])
+    }
     for alias_name, variants in aliases.items():
         if alias_name in protected_shared_aliases:
             continue
@@ -2488,10 +2566,10 @@ def main() -> int:
         source_owned_nested_alias_names - source_owned_nested_alias_shared_collisions,
     )
     receiver_preferences = method_call_receiver_preferences(
-        merge_input_paths, selected, alias_targets
+        merge_input_paths, selected, alias_targets, merge_item_catalogs
     )
     arity_preferences = method_call_arity_preferences(
-        merge_input_paths, selected, alias_targets
+        merge_input_paths, selected, alias_targets, merge_item_catalogs
     )
     for name in sorted(selected):
         # A conversion target is normally removal-only because an authoritative
@@ -2650,6 +2728,9 @@ def main() -> int:
                 from_match.group(1)
             ) == name
             belongs_to_boxed_dyn_trait = boxed_dyn_trait_target_name(type_name) == name
+            belongs_to_adapter_dependency = name in boxed_conversion_dependencies.get(
+                (type_name, trait_raw), ()
+            )
             if selected_decl_is_trait and belongs_to_type:
                 # Eq/Hash/Display impls synthesized for an opaque struct are
                 # invalid once the authoritative declaration is a trait.
@@ -2658,6 +2739,7 @@ def main() -> int:
                 belongs_to_type
                 or belongs_to_from_source
                 or belongs_to_boxed_dyn_trait
+                or belongs_to_adapter_dependency
             ):
                 continue
             trait_impl_key = (type_name, trait_raw)

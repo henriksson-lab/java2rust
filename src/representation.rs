@@ -26,6 +26,16 @@ pub use crate::object_model::{
 };
 use crate::slot_shape::DispatchShape;
 
+#[cfg(test)]
+thread_local! {
+    static SIMPLE_NAME_CATALOG_SCANS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn take_simple_name_catalog_scan_count() -> usize {
+    SIMPLE_NAME_CATALOG_SCANS.with(|count| count.replace(0))
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepresentationPlan {
     types: HashMap<String, TypeRepresentation>,
@@ -1867,11 +1877,12 @@ fn keep_source_platform_facade_subclasses_concrete(
 }
 
 fn keep_source_platform_facade_subclass_concrete(ty: &TypeDecl, plan: &mut RepresentationPlan) {
-    if crate::stdlib::is_java_platform_facade_type_name(&ty.name)
-        || ty
-            .extends
-            .as_deref()
-            .is_some_and(crate::stdlib::is_java_platform_facade_type_name)
+    if ty.kind != TypeKind::Interface
+        && (crate::stdlib::is_java_platform_facade_type_name(&ty.name)
+            || ty
+                .extends
+                .as_deref()
+                .is_some_and(crate::stdlib::is_java_platform_facade_type_name))
     {
         plan.types.insert(
             ty.name.clone(),
@@ -2257,9 +2268,26 @@ impl RepresentationPlan {
 
     pub fn representation_lookup_policy(&self, java_ty: &JavaType) -> RepresentationLookupPolicy {
         let planned_representation = match java_ty {
-            JavaType::Named { name, .. } => self
-                .type_representation(name)
-                .map(|entry| entry.representation.clone()),
+            JavaType::Named { name, .. } => self.type_representation(name).map(|entry| {
+                // Hierarchy discovery can create an erased placeholder
+                // for an unavailable collection superclass. Native JDK
+                // containers already have a complete representation;
+                // that placeholder must not erase their signatures or
+                // nested generic carriers. Explicit/source plans retain
+                // their usual authority.
+                if matches!(entry.representation, ObjectRepresentation::ErasedObject)
+                    && matches!(
+                        entry.provenance,
+                        RepresentationProvenance::BuiltinExternalModel
+                            | RepresentationProvenance::ConservativeFallback
+                    )
+                    && crate::stdlib::native_collection_receiver_kind_for_type(java_ty).is_some()
+                {
+                    ObjectRepresentation::ConcreteStruct
+                } else {
+                    entry.representation.clone()
+                }
+            }),
             _ => None,
         };
         object_representation_lookup_policy(java_ty, planned_representation)
@@ -2378,6 +2406,8 @@ impl RepresentationPlan {
         if type_name.contains('.') {
             return None;
         }
+        #[cfg(test)]
+        SIMPLE_NAME_CATALOG_SCANS.with(|count| count.set(count.get() + 1));
         let mut matches = self
             .types
             .values()
@@ -3993,7 +4023,10 @@ fn anonymous_source_class_super_return_is_supported(expr: &Expr, field_names: &[
     }
     if let Expr::Unary {
         op:
-            crate::java_ir::UnaryOp::Not | crate::java_ir::UnaryOp::Neg | crate::java_ir::UnaryOp::Pos,
+            crate::java_ir::UnaryOp::Not
+            | crate::java_ir::UnaryOp::BitNot
+            | crate::java_ir::UnaryOp::Neg
+            | crate::java_ir::UnaryOp::Pos,
         expr,
     } = expr
     {
@@ -6154,6 +6187,7 @@ class PlainFieldMap {
     #[test]
     fn anonymous_zero_arg_interface_support_refuses_ambiguous_simple_owner() {
         let anonymous = Expr::New {
+            infer_type_arguments: false,
             ty: JavaType::Named {
                 name: "Task".to_string(),
                 args: Vec::new(),
@@ -6215,6 +6249,7 @@ class PlainFieldMap {
     #[test]
     fn anonymous_zero_arg_interface_body_using_this_still_reports_unsupported() {
         let anonymous = Expr::New {
+            infer_type_arguments: false,
             ty: JavaType::Named {
                 name: "Task".to_string(),
                 args: Vec::new(),

@@ -1,6 +1,31 @@
 use std::collections::{HashMap, HashSet};
 
-use crate::java_ir::{FieldDecl, Member, Modifier, TypeDecl};
+use crate::java_ir::{FieldDecl, Member, Modifier, Program, TypeDecl};
+
+/// Reconcile relative and already-qualified declarations without duplicating
+/// the lexical owner. Shared by emission inventories and declaration lookup.
+pub(crate) fn source_type_name_in_owner(name: &str, enclosing: Option<&str>) -> String {
+    match enclosing {
+        Some(owner) if !name.starts_with(&format!("{owner}.")) => format!("{owner}.{name}"),
+        _ => name.to_string(),
+    }
+}
+
+/// Recover a declaration's lexical path by identity, not by guessing which of
+/// several same-leaf nested types a summary intended.
+pub(crate) fn source_type_declaration_path(program: &Program, target: &TypeDecl) -> Option<String> {
+    fn visit(ty: &TypeDecl, target: &TypeDecl, enclosing: Option<&str>) -> Option<String> {
+        let name = source_type_name_in_owner(&ty.name, enclosing);
+        if std::ptr::eq(ty, target) {
+            return Some(name);
+        }
+        ty.members.iter().find_map(|member| match member {
+            Member::Type(nested) => visit(nested, target, Some(&name)),
+            _ => None,
+        })
+    }
+    program.types.iter().find_map(|ty| visit(ty, target, None))
+}
 
 pub(crate) fn java_getter_method_name(name: &str) -> bool {
     java_getter_property_suffix(name).is_some()
@@ -31,20 +56,40 @@ pub(crate) fn rust_name_for_java_named_type(name: &str) -> String {
         }
         return name.to_string();
     }
-    let mut out = String::new();
+    // Dots and identifier separators disappear (or become a single `_`), so
+    // the source length is a tight lower bound for almost every output.  More
+    // importantly, append each part directly: this helper is used in the
+    // innermost external-facade matching loops and allocating a temporary
+    // `String` for every package segment made qualified names surprisingly
+    // expensive on large source contexts.
+    let mut out = String::with_capacity(name.len());
     let mut previous_part_was_type = false;
     for part in name.split('.').filter(|part| !part.trim().is_empty()) {
         let part_was_type = java_name_part_looks_like_type(part);
         if previous_part_was_type && part_was_type {
             out.push('_');
         }
-        out.push_str(&upper_camel_identifier_part(part));
+        push_upper_camel_identifier_part(&mut out, part);
         previous_part_was_type = part_was_type;
     }
     out
 }
 
-fn java_name_part_looks_like_type(part: &str) -> bool {
+fn push_upper_camel_identifier_part(out: &mut String, part: &str) {
+    let mut uppercase_next = true;
+    for ch in part.chars() {
+        if ch == '_' || ch == '-' || ch == '$' {
+            uppercase_next = true;
+        } else if uppercase_next {
+            out.push(ch.to_ascii_uppercase());
+            uppercase_next = false;
+        } else if ch.is_ascii_alphanumeric() {
+            out.push(ch);
+        }
+    }
+}
+
+pub(crate) fn java_name_part_looks_like_type(part: &str) -> bool {
     part.chars()
         .find(|ch| ch.is_ascii_alphanumeric())
         .is_some_and(|ch| ch.is_ascii_uppercase())
@@ -230,22 +275,6 @@ fn lower_camel_from_snake(name: &str) -> String {
     out
 }
 
-fn upper_camel_identifier_part(part: &str) -> String {
-    let mut out = String::new();
-    let mut uppercase_next = true;
-    for ch in part.chars() {
-        if ch == '_' || ch == '-' || ch == '$' {
-            uppercase_next = true;
-        } else if uppercase_next {
-            out.push(ch.to_ascii_uppercase());
-            uppercase_next = false;
-        } else if ch.is_ascii_alphanumeric() {
-            out.push(ch);
-        }
-    }
-    out
-}
-
 fn push_unique_alias(aliases: &mut Vec<String>, alias: String) {
     if !aliases.iter().any(|existing| existing == &alias) {
         aliases.push(alias);
@@ -255,6 +284,28 @@ fn push_unique_alias(aliases: &mut Vec<String>, alias: String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn declaration_paths_distinguish_same_leaf_nested_summary_types() {
+        let parsed = crate::parser::parse_java_source(
+            "class First { enum Part { ONE } } class Second { enum Part { TWO } }",
+        );
+        for (index, expected) in [(0, "First.Part"), (1, "Second.Part")] {
+            let nested = parsed.program.types[index]
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Type(nested) => Some(nested),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                source_type_declaration_path(&parsed.program, nested).as_deref(),
+                Some(expected)
+            );
+            assert!(source_type_declaration_path(&parsed.program, &nested.clone()).is_none());
+        }
+    }
     use crate::diagnostics::Span;
     use crate::java_ir::{JavaType, PrimitiveType, TypeKind};
 
