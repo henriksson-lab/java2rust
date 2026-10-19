@@ -37,6 +37,7 @@ use crate::usage::{MethodUsageFacts, UsageFacts};
 /// A clone that Java would not have made, where the difference is observable.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ObservableAlias {
+    native_allocation_preserved: bool,
     /// `Type.member`, for the diagnostic message.
     callable: String,
     /// The binding whose value is copied because it is still needed.
@@ -69,6 +70,7 @@ impl ObservableAlias {
         mutation: MutationKind,
     ) -> Self {
         Self {
+            native_allocation_preserved: false,
             callable,
             original,
             alias,
@@ -139,14 +141,24 @@ fn observable_aliases(program: &Program, usage: &UsageFacts) -> Vec<ObservableAl
 }
 
 /// Every observable alias, including fact-backed external receiver mutations.
+#[cfg(test)]
 pub(crate) fn observable_aliases_with_facts(
     program: &Program,
     usage: &UsageFacts,
     facts: &FactSet,
 ) -> Vec<ObservableAlias> {
+    observable_aliases_with_signatures(program, usage, facts, None)
+}
+
+fn observable_aliases_with_signatures(
+    program: &Program,
+    usage: &UsageFacts,
+    facts: &FactSet,
+    signatures: Option<&crate::signature::SignaturePlan>,
+) -> Vec<ObservableAlias> {
     let mut found = Vec::new();
     for ty in &program.types {
-        collect_in_type(ty, usage, facts, &mut found);
+        collect_in_type(ty, usage, facts, signatures, &mut found);
     }
     found
 }
@@ -159,10 +171,12 @@ pub(crate) fn report_observable_aliases(
     usage: &UsageFacts,
     facts: &FactSet,
     representations: &RepresentationPlan,
+    signatures: &crate::signature::SignaturePlan,
     into: &mut DiagnosticBag,
 ) {
-    for alias in observable_aliases_with_facts(program, usage, facts) {
-        if direct_local_alias_mutation_is_represented(&alias, facts)
+    for alias in observable_aliases_with_signatures(program, usage, facts, Some(signatures)) {
+        if alias.native_allocation_preserved
+            || direct_local_alias_mutation_is_represented(&alias, facts)
             || source_map_entry_alias_mutation_is_represented(&alias, program, representations)
         {
             continue;
@@ -247,19 +261,149 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
         return false;
     };
     let placement = facts.storage_placement_for(name);
-    placement.shared() && placement.interior_mutable() && placement.is_implemented()
+    if placement.shared() && placement.interior_mutable() && placement.is_implemented() {
+        return true;
+    }
+    // A native SAM value captures the source implementor's canonical handle;
+    // its own facade type does not have a source storage placement. Require
+    // the same source identity/subtype and implemented mutable-handle proofs
+    // as the conversion, rather than treating every interface alias as safe.
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    let Some(JavaType::Named {
+        name: original_name,
+        ..
+    }) = alias.original_ty.as_ref()
+    else {
+        return false;
+    };
+    if crate::shape_projection::java_type_is_erased_object_storage(alias.aliased_ty())
+        && !effective.parsed_source_controls_native_carrier(alias.aliased_ty())
+        && effective.parsed_source_controls_native_carrier(alias.original_ty.as_ref().unwrap())
+    {
+        // Source-to-Object boxing stores the canonical source reference, not
+        // a copy of its payload. Require the implemented mutable carrier that
+        // this observed mutation needs; a plain boxed source value is not proof.
+        let source_placement = facts.storage_placement_for(original_name);
+        return source_placement.shared()
+            && source_placement.interior_mutable()
+            && source_placement.is_implemented();
+    }
+    if effective
+        .native_functional_carrier(alias.aliased_ty())
+        .is_none()
+        || !effective.has_parsed_source_type_capability_for_name(original_name)
+        || !facts
+            .hierarchy_subtype_policy(alias.original_ty.as_ref().unwrap(), alias.aliased_ty())
+            .reaches()
+    {
+        return false;
+    }
+    let source_placement = facts.storage_placement_for(original_name);
+    source_placement.shared()
+        && source_placement.interior_mutable()
+        && source_placement.is_implemented()
+}
+
+#[derive(Default)]
+struct NativeAliasStorage {
+    allocations: HashMap<crate::binding_id::BindingId, crate::storage_strategy::StoragePlacement>,
+    params: HashMap<String, crate::binding_id::BindingId>,
+    fields: HashMap<String, crate::storage_strategy::StoragePlacement>,
+}
+
+impl NativeAliasStorage {
+    fn from_slots(
+        params: &[crate::java_ir::Param],
+        slots: &[crate::signature::ParamPlan],
+        locals: &[crate::signature::LocalPlan],
+        facts: &FactSet,
+    ) -> Self {
+        let mut result = Self::default();
+        for (param, slot) in params.iter().zip(slots) {
+            if let Some(binding) = &param.binding {
+                result.params.insert(param.name.clone(), binding.clone());
+                result.record(binding, slot.shape(), facts);
+            }
+        }
+        for local in locals {
+            result.record(local.binding(), local.shape(), facts);
+        }
+        result
+    }
+
+    fn with_fields(
+        mut self,
+        owner: &TypeDecl,
+        signatures: &crate::signature::SignaturePlan,
+        facts: &FactSet,
+    ) -> Self {
+        for member in &owner.members {
+            if let Member::Field(field) = member
+                && let Some(shape) = signatures.field_shape_for_declared_field(owner, field)
+                && let Some(placement) = Self::native_placement(shape, facts)
+            {
+                self.fields.insert(field.name.clone(), placement);
+            }
+        }
+        self
+    }
+
+    fn record(
+        &mut self,
+        binding: &crate::binding_id::BindingId,
+        shape: &crate::slot_shape::RustSlotShape,
+        facts: &FactSet,
+    ) {
+        if let Some(placement) = Self::native_placement(shape, facts) {
+            self.allocations.insert(binding.clone(), placement);
+        }
+    }
+
+    fn native_placement(
+        shape: &crate::slot_shape::RustSlotShape,
+        facts: &FactSet,
+    ) -> Option<crate::storage_strategy::StoragePlacement> {
+        let ty = crate::types::optional_element_type(&shape.java_ty)
+            .unwrap_or_else(|| shape.java_ty.clone());
+        let effective = crate::effective_facts::EffectiveFacts::new(facts);
+        if (matches!(ty, JavaType::Array(_))
+            || effective.retained_native_collection_kind(&ty).is_some()
+            || effective.native_iterable_element_type(&ty).is_some())
+            && shape.native_allocation.shared()
+            && shape.native_allocation.interior_mutable()
+            && shape.native_allocation.is_implemented()
+        {
+            Some(shape.native_allocation)
+        } else {
+            None
+        }
+    }
 }
 
 fn collect_in_type(
     ty: &TypeDecl,
     usage: &UsageFacts,
     facts: &FactSet,
+    signatures: Option<&crate::signature::SignaturePlan>,
     found: &mut Vec<ObservableAlias>,
 ) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 if let Some(body) = &method.body {
+                    let storage = signatures
+                        .and_then(|signatures| {
+                            signatures.method_signature(ty, method).map(|plan| {
+                                NativeAliasStorage::from_slots(
+                                    &method.params,
+                                    plan.params(),
+                                    plan.locals(),
+                                    facts,
+                                )
+                                .with_fields(ty, signatures, facts)
+                            })
+                        })
+                        .unwrap_or_default();
                     let type_env =
                         aliasing_type_env(ty, &method.type_params, &method.type_param_bounds);
                     collect_in_body(
@@ -269,12 +413,28 @@ fn collect_in_type(
                         facts,
                         &type_env,
                         usage.source_method_usage(ty, method),
+                        &storage,
                         found,
                     );
                 }
             }
             Member::Constructor(constructor) => {
                 if let Some(body) = &constructor.body {
+                    let storage = signatures
+                        .and_then(|signatures| {
+                            signatures
+                                .constructor_signature(ty, constructor)
+                                .map(|plan| {
+                                    NativeAliasStorage::from_slots(
+                                        &constructor.params,
+                                        plan.params(),
+                                        plan.locals(),
+                                        facts,
+                                    )
+                                    .with_fields(ty, signatures, facts)
+                                })
+                        })
+                        .unwrap_or_default();
                     let type_env = aliasing_type_env(
                         ty,
                         &constructor.type_params,
@@ -288,11 +448,12 @@ fn collect_in_type(
                         facts,
                         &type_env,
                         constructor_usage,
+                        &storage,
                         found,
                     );
                 }
             }
-            Member::Type(nested) => collect_in_type(nested, usage, facts, found),
+            Member::Type(nested) => collect_in_type(nested, usage, facts, signatures, found),
             _ => {}
         }
     }
@@ -328,6 +489,7 @@ fn collect_in_body(
     facts: &FactSet,
     type_env: &TypeEnv,
     method_usage: Option<&MethodUsageFacts>,
+    native_storage: &NativeAliasStorage,
     found: &mut Vec<ObservableAlias>,
 ) {
     // Statement identity in the analysis is the address of the `Stmt`, so the
@@ -372,7 +534,7 @@ fn collect_in_body(
         }) else {
             continue;
         };
-        found.push(ObservableAlias::new(
+        let mut alias = ObservableAlias::new(
             callable.to_string(),
             point.original.clone(),
             point.alias.display(),
@@ -382,7 +544,36 @@ fn collect_in_body(
             point.original_ty.clone(),
             point.original_is_live_native_map_entry,
             site.kind.clone(),
-        ));
+        );
+        if (!native_storage.allocations.is_empty() || !native_storage.fields.is_empty())
+            && let Some(alias_name) = point.alias.local_name()
+        {
+            let binding_at = |name: &str| {
+                if let Some(site) = liveness.declaration_site_at(point.stmt, name) {
+                    statements.iter().find_map(|stmt| {
+                        if std::ptr::from_ref::<Stmt>(*stmt) as usize != site {
+                            return None;
+                        }
+                        match stmt {
+                            Stmt::VarDecl { binding, .. } | Stmt::EnhancedFor { binding, .. } => {
+                                binding.as_ref()
+                            }
+                            _ => None,
+                        }
+                    })
+                } else {
+                    native_storage.params.get(name)
+                }
+            };
+            let placement_at = |name: &str| match binding_at(name) {
+                Some(binding) => native_storage.allocations.get(binding),
+                None => native_storage.fields.get(name),
+            };
+            alias.native_allocation_preserved = placement_at(&point.original)
+                .zip(placement_at(alias_name))
+                .is_some_and(|(original, alias)| original == alias);
+        }
+        found.push(alias);
     }
 }
 
@@ -813,6 +1004,7 @@ fn collect_expr_mutations(
             name,
             args,
             resolved,
+            ..
         } => {
             if let Expr::Var(handle) = receiver.as_ref() {
                 if lambda_invocation_name(name)
@@ -1393,6 +1585,7 @@ mod tests {
             &usage,
             &FactSet::default(),
             &RepresentationPlan::default(),
+            &crate::signature::SignaturePlan::default(),
             &mut diagnostics,
         );
 
@@ -1407,6 +1600,7 @@ mod tests {
     fn live_native_map_entry_alias_exemption_requires_supported_map_origin() {
         fn call(receiver: Expr, name: &str) -> Expr {
             Expr::Call {
+                type_args: Vec::new(),
                 receiver: Some(Box::new(receiver)),
                 name: name.to_string(),
                 args: Vec::new(),

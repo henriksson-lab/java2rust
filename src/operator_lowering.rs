@@ -340,6 +340,19 @@ fn integer_wrapping_method_projection(left: RustExpr, method: &str, right: RustE
 
 fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> RustExpr {
     match expr {
+        RustExpr::Grouped(expr) => {
+            RustExpr::Grouped(Box::new(integer_wrapping_receiver_expr(*expr, primitive)))
+        }
+        // A conditional containing only integer literals has no concrete
+        // receiver type in Rust. Java's promotion plan supplies that type.
+        expr @ RustExpr::If { .. } => RustExpr::Cast {
+            expr: Box::new(RustExpr::Grouped(Box::new(expr))),
+            ty: match primitive {
+                PrimitiveType::Long => "i64",
+                _ => "i32",
+            }
+            .into(),
+        },
         RustExpr::Literal(rendered) if integer_wrapping_receiver_is_literal(&rendered) => {
             integer_wrapping_receiver_literal_expr(None, rendered, primitive)
         }
@@ -353,6 +366,31 @@ fn integer_wrapping_receiver_expr(expr: RustExpr, primitive: PrimitiveType) -> R
             },
         },
         other => other,
+    }
+}
+
+#[cfg(test)]
+mod numeric_receiver_tests {
+    use super::*;
+
+    #[test]
+    fn conditional_integer_receivers_use_the_java_promotion_type() {
+        for (primitive, rust_type) in [(PrimitiveType::Int, "i32"), (PrimitiveType::Long, "i64")] {
+            let conditional = RustExpr::If {
+                condition: Box::new(RustExpr::Var("condition".into())),
+                then_expr: Box::new(RustExpr::Literal("10".into())),
+                else_expr: Box::new(RustExpr::Literal("0".into())),
+            };
+            let lowered = lower_numeric_binary_expr(
+                BinaryOp::Add,
+                RustExpr::Grouped(Box::new(conditional)),
+                RustExpr::Literal("1".into()),
+                NumericBinaryPromotionPlan::identity(primitive),
+            );
+            let rendered = crate::emit::emit_expr(&lowered);
+            assert!(rendered.contains(&format!("as {rust_type}")), "{rendered}");
+            assert!(rendered.contains("wrapping_add"), "{rendered}");
+        }
     }
 }
 
@@ -1287,7 +1325,9 @@ mod equality_symmetry_tests {
 
     fn shape(java_ty: JavaType, ownership: OwnershipShape, view: ViewShape) -> RustSlotShape {
         RustSlotShape {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             java_ty,
             ownership,
             view,
@@ -1609,7 +1649,9 @@ mod shared_handle_identity_tests {
             }
         };
         RustSlotShape {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             java_ty,
             ownership,
             view: ViewShape::Native,

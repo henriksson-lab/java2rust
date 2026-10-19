@@ -1043,14 +1043,46 @@ impl<'a> HierarchyFactLookupIndex<'a> {
         let result = self.reachable_hierarchy_edges_for_type_with_stats(subtype);
         let reaches = match (java_type_name(subtype), java_type_name(supertype)) {
             (Some(sub_name), Some(super_name)) if sub_name == super_name => true,
-            (Some(_), Some(super_name)) => result
-                .edges()
-                .iter()
-                .any(|edge| edge.super_name == super_name),
+            (Some(sub_name), Some(super_name)) => hierarchy_edges_reach_with_platform(
+                self.facts,
+                sub_name,
+                super_name,
+                result.edges(),
+            ),
             _ => false,
         };
         HierarchySubtypePolicy::new(reaches)
     }
+}
+
+/// Extend recorded source edges through the shared JDK subtype authority. A
+/// source definition or explicit user hierarchy overrides platform fallback.
+/// Both indexed and direct queries use this exact boundary policy.
+fn hierarchy_edges_reach_with_platform(
+    facts: &FactSet,
+    subtype: &str,
+    supertype: &str,
+    edges: &[HierarchyEdgeFact],
+) -> bool {
+    if edges.iter().any(|edge| edge.super_name == supertype) {
+        return true;
+    }
+    // Most queries are entirely source-defined. Reject them before consulting
+    // provenance indexes, and reuse the existing indexed override lookup for
+    // the remaining platform boundary rather than rescanning all overrides.
+    let mut candidates = std::iter::once(subtype)
+        .chain(edges.iter().map(|edge| edge.super_name.as_str()))
+        .filter(|name| crate::stdlib::is_known_java_platform_subtype(name, supertype));
+    let Some(first) = candidates.next() else {
+        return false;
+    };
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    if !effective.allows_platform_hierarchy_fallback(supertype) {
+        return false;
+    }
+    std::iter::once(first)
+        .chain(candidates)
+        .any(|name| effective.allows_platform_hierarchy_fallback(name))
 }
 
 fn external_method_name_aliases(method_name: &str) -> Rc<[String]> {
@@ -2314,6 +2346,7 @@ pub struct CaptureOwner {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaptureOwnerKind {
     Lambda,
+    MethodReference,
     LocalClass,
     AnonymousClass,
     InnerClass,
@@ -2335,6 +2368,8 @@ pub enum CaptureOrigin {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Capture {
+    /// Resolver declaration identity; external capture facts may omit it.
+    pub binding: Option<crate::binding_id::BindingId>,
     pub name: String,
     pub source: CaptureSource,
     pub ty: JavaType,
@@ -3756,10 +3791,9 @@ impl FactSet {
         let result = self.reachable_hierarchy_edges_for_type_with_stats(subtype);
         let reaches = match (java_type_name(subtype), java_type_name(supertype)) {
             (Some(sub_name), Some(super_name)) if sub_name == super_name => true,
-            (Some(_), Some(super_name)) => result
-                .edges()
-                .iter()
-                .any(|edge| edge.super_name == super_name),
+            (Some(sub_name), Some(super_name)) => {
+                hierarchy_edges_reach_with_platform(self, sub_name, super_name, result.edges())
+            }
             _ => false,
         };
         HierarchySubtypePolicy::new(reaches)
@@ -3975,6 +4009,50 @@ pub(crate) struct ExternalTypeNameSetIndex {
     aliases: HashSet<String>,
 }
 
+/// Alias-to-row index for an immutable ordered fact collection. Candidate
+/// rows retain original order, including distinct facts with identical names.
+/// Use the same alias expansion as pairwise external name matching, rather
+/// than approximating it with a simple-name or canonical-name key.
+#[derive(Debug)]
+pub(crate) struct ExternalTypeNameLookupIndex {
+    by_alias: HashMap<String, Vec<usize>>,
+    by_query: RefCell<HashMap<String, Rc<[usize]>>>,
+}
+
+impl ExternalTypeNameLookupIndex {
+    pub(crate) fn new<'a>(names: impl IntoIterator<Item = &'a str>) -> Self {
+        let mut by_alias = HashMap::<String, Vec<usize>>::new();
+        for (index, name) in names.into_iter().enumerate() {
+            for alias in external_type_name_aliases(name).iter() {
+                by_alias.entry(alias.clone()).or_default().push(index);
+            }
+        }
+        Self {
+            by_alias,
+            by_query: RefCell::new(HashMap::new()),
+        }
+    }
+
+    pub(crate) fn matching_indices(&self, name: &str) -> Rc<[usize]> {
+        if let Some(indices) = self.by_query.borrow().get(name) {
+            return indices.clone();
+        }
+        let mut indices = Vec::new();
+        for alias in external_type_name_aliases(name).iter() {
+            if let Some(candidates) = self.by_alias.get(alias) {
+                indices.extend_from_slice(candidates);
+            }
+        }
+        indices.sort_unstable();
+        indices.dedup();
+        let indices = Rc::<[usize]>::from(indices);
+        self.by_query
+            .borrow_mut()
+            .insert(name.to_string(), indices.clone());
+        indices
+    }
+}
+
 impl ExternalTypeNameSetIndex {
     pub(crate) fn new<'a>(names: impl IntoIterator<Item = &'a String>) -> Self {
         let mut aliases = HashSet::new();
@@ -3992,8 +4070,15 @@ impl ExternalTypeNameSetIndex {
 }
 
 fn callable_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
-    external_type_name_matches(fact.owner_type(), query.owner_type())
-        && fact.member_name() == query.member_name()
+    callable_key_non_owner_header_matches(fact, query)
+        && external_type_name_matches(fact.owner_type(), query.owner_type())
+}
+
+// Reject unrelated members before computing owner aliases. These scalar
+// predicates are shared by direct and alias fallback lookup; neither candidate
+// ordering nor source/override precedence changes.
+fn callable_key_non_owner_header_matches(fact: &CallableKey, query: &CallableKey) -> bool {
+    fact.member_name() == query.member_name()
         && fact.kind() == query.kind()
         && (fact.staticness() == query.staticness()
             || fact.staticness() == Staticness::Unknown
@@ -4005,16 +4090,8 @@ fn callable_key_header_matches(fact: &CallableKey, query: &CallableKey) -> bool 
 }
 
 fn callable_key_header_directly_matches(fact: &CallableKey, query: &CallableKey) -> bool {
-    external_type_name_directly_matches(fact.owner_type(), query.owner_type())
-        && fact.member_name() == query.member_name()
-        && fact.kind() == query.kind()
-        && (fact.staticness() == query.staticness()
-            || fact.staticness() == Staticness::Unknown
-            || query.staticness() == Staticness::Unknown)
-        && fact.arity() == query.arity()
-        && (fact.generic_arity().is_none()
-            || query.generic_arity().is_none()
-            || fact.generic_arity() == query.generic_arity())
+    callable_key_non_owner_header_matches(fact, query)
+        && external_type_name_directly_matches(fact.owner_type(), query.owner_type())
 }
 
 fn callable_key_simple_owner_alias_is_ambiguous<'a>(
@@ -4243,7 +4320,7 @@ fn external_type_name_aliases(type_name: &str) -> Rc<[String]> {
 }
 
 fn external_type_name_aliases_uncached(type_name: &str) -> Vec<String> {
-    let mut aliases = external_direct_type_name_aliases(type_name);
+    let mut aliases = external_direct_type_name_aliases(type_name).to_vec();
     let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
     aliases.extend(nested_type_suffix_aliases(type_name));
     if let Some(simple) = package_qualified_simple_alias(type_name) {
@@ -4338,12 +4415,27 @@ fn external_type_name_directly_matches(fact_type_name: &str, query_type_name: &s
     })
 }
 
-fn external_direct_type_name_aliases(type_name: &str) -> Vec<String> {
+fn external_direct_type_name_aliases(type_name: &str) -> Rc<[String]> {
+    // Direct matching intentionally excludes leaf/nested suffix aliases.
+    // Its spelling calculation is nevertheless just as pure as the broader
+    // alias calculation, and is shared by every method-effect lookup.
+    thread_local! {
+        static CACHE: RefCell<HashMap<String, Rc<[String]>>> = RefCell::new(HashMap::new());
+    }
+    if let Some(aliases) = CACHE.with(|cache| cache.borrow().get(type_name).cloned()) {
+        return aliases;
+    }
     let canonical = crate::stdlib::canonical_external_receiver_type_key(type_name);
     let snake = crate::parser::to_snake_case(type_name);
     let mut aliases = vec![type_name.to_string(), canonical, snake];
     aliases.sort();
     aliases.dedup();
+    let aliases = Rc::<[String]>::from(aliases);
+    CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(type_name.to_string(), aliases.clone())
+    });
     aliases
 }
 
@@ -5441,6 +5533,69 @@ mod tests {
     use crate::java_ir::PrimitiveType;
 
     #[test]
+    fn callable_header_prefilter_preserves_direct_and_alias_matching() {
+        let mut keys = Vec::new();
+        for owner in [
+            "pkg.Outer.Inner",
+            "Outer.Inner",
+            "Outer_Inner",
+            "other.Inner",
+        ] {
+            for member in ["read", "write"] {
+                for staticness in [
+                    Staticness::Static,
+                    Staticness::Instance,
+                    Staticness::Unknown,
+                ] {
+                    for arity in [0, 1] {
+                        for kind in [CallableKind::Method, CallableKind::Constructor] {
+                            for generic_arity in [None, Some(0), Some(1)] {
+                                let mut key = CallableKey::method(owner, member, staticness, arity);
+                                key.kind = kind;
+                                key.generic_arity = generic_arity;
+                                keys.push(key);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for fact in &keys {
+            for query in &keys {
+                // Keep an independent copy of the previous owner-first rule.
+                let reference = |owner_matches: bool| {
+                    owner_matches
+                        && fact.member_name() == query.member_name()
+                        && fact.kind() == query.kind()
+                        && (fact.staticness() == query.staticness()
+                            || fact.staticness() == Staticness::Unknown
+                            || query.staticness() == Staticness::Unknown)
+                        && fact.arity() == query.arity()
+                        && (fact.generic_arity().is_none()
+                            || query.generic_arity().is_none()
+                            || fact.generic_arity() == query.generic_arity())
+                };
+                assert_eq!(
+                    callable_key_header_matches(fact, query),
+                    reference(external_type_name_matches(
+                        fact.owner_type(),
+                        query.owner_type()
+                    )),
+                    "alias {fact:?} {query:?}"
+                );
+                assert_eq!(
+                    callable_key_header_directly_matches(fact, query),
+                    reference(external_type_name_directly_matches(
+                        fact.owner_type(),
+                        query.owner_type()
+                    )),
+                    "direct {fact:?} {query:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn hierarchy_lookup_index_saturates_only_queried_types_and_memoizes_them() {
         let mut facts = FactSet::default();
         facts
@@ -5611,5 +5766,69 @@ mod tests {
                 "indexed membership diverged for {query}"
             );
         }
+    }
+
+    #[test]
+    fn external_type_name_lookup_index_matches_ordered_pairwise_rows() {
+        let names = [
+            "example.BoxedThing",
+            "BoxedThing",
+            "example.Outer.Inner",
+            "other.BoxedThing",
+            "example.BoxedThing",
+        ];
+        let index = ExternalTypeNameLookupIndex::new(names);
+        for query in [
+            "BoxedThing",
+            "example.BoxedThing",
+            "example_boxed_thing",
+            "Outer$Inner",
+            "Inner",
+            "example.Outer.Inner",
+            "Missing",
+        ] {
+            let expected = names
+                .iter()
+                .enumerate()
+                .filter_map(|(index, name)| {
+                    external_type_name_matches(name, query).then_some(index)
+                })
+                .collect::<Vec<_>>();
+            let actual = index.matching_indices(query);
+            assert_eq!(actual.as_ref(), expected.as_slice(), "{query}");
+            assert!(Rc::ptr_eq(&actual, &index.matching_indices(query)));
+        }
+    }
+
+    #[test]
+    fn direct_type_alias_memo_preserves_qualified_owner_distinctions() {
+        for name in [
+            "example.BoxedThing",
+            "other.BoxedThing",
+            "Outer.Inner",
+            "Outer$Inner",
+        ] {
+            let mut expected = vec![
+                name.to_string(),
+                crate::stdlib::canonical_external_receiver_type_key(name),
+                crate::parser::to_snake_case(name),
+            ];
+            expected.sort();
+            expected.dedup();
+            let actual = external_direct_type_name_aliases(name);
+            assert_eq!(actual.as_ref(), expected.as_slice());
+            assert!(Rc::ptr_eq(
+                &actual,
+                &external_direct_type_name_aliases(name)
+            ));
+        }
+        assert!(!external_type_name_directly_matches(
+            "example.BoxedThing",
+            "other.BoxedThing"
+        ));
+        assert!(!external_type_name_directly_matches(
+            "example.BoxedThing",
+            "BoxedThing"
+        ));
     }
 }

@@ -860,6 +860,7 @@ fn parse_accessor_inline_policy(value: &str) -> Option<AccessorInlinePolicy> {
 fn parse_capture_owner_kind(value: &str) -> Option<CaptureOwnerKind> {
     match value {
         "lambda" => Some(CaptureOwnerKind::Lambda),
+        "method-reference" => Some(CaptureOwnerKind::MethodReference),
         "local-class" => Some(CaptureOwnerKind::LocalClass),
         "anonymous-class" => Some(CaptureOwnerKind::AnonymousClass),
         "inner-class" => Some(CaptureOwnerKind::InnerClass),
@@ -1014,6 +1015,7 @@ fn push_capture_fact(
         target_type: parse_optional_type(input.target_type),
         origin,
         captures: vec![Capture {
+            binding: None,
             name: input.capture_name.to_string(),
             source: capture_source,
             ty: parse_type(input.capture_type),

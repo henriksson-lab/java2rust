@@ -1,6 +1,88 @@
 use std::collections::BTreeSet;
 
+pub(crate) fn native_map_entry_accessor_index(name: &str) -> Option<usize> {
+    match name {
+        "getKey" | "get_key" => Some(0),
+        "getValue" | "get_value" => Some(1),
+        _ => None,
+    }
+}
+
 use crate::coercion::OptionalReceiverProjection;
+
+/// The Java operations implicitly performed by enhanced-for. Resolution and
+/// lowering share this selected call instead of separately guessing a source
+/// iterator method or treating an Iterable as contiguous storage.
+pub(crate) struct EnhancedForIteratorPlan {
+    pub call: Expr,
+    pub element_type: JavaType,
+}
+
+/// A checked native iterator reads Java references from one retained allocation.
+/// Arrays have Java's indexed enhanced-for semantics and are not collections.
+pub(crate) fn retained_native_iteration_element_type(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    if !shape.native_allocation.shared() {
+        return None;
+    }
+    EffectiveFacts::new(facts).retained_native_collection_kind(&shape.java_ty)?;
+    RustSlotShape::native_child_type_at_path(&shape.java_ty, &[0])
+}
+
+pub(crate) fn plan_enhanced_for_iterator(
+    iterable: &Expr,
+    types: &TypeEnv,
+    current_type: &str,
+    symbols: &crate::resolve::SourceSymbols,
+    facts: &FactSet,
+) -> Option<EnhancedForIteratorPlan> {
+    let ty = crate::types::infer_expr_type(iterable, types);
+    let native_element = EffectiveFacts::new(facts).native_iterable_element_type(&ty);
+    let resolved = if native_element.is_some() {
+        None
+    } else {
+        Some(crate::resolve::resolve_source_call_with_types(
+            Some(iterable),
+            "iterator",
+            &[],
+            current_type,
+            symbols,
+            types,
+            facts,
+        )?)
+    };
+    let element_type = if let Some(element) = native_element {
+        element
+    } else {
+        let call = resolved.as_ref()?;
+        let JavaType::Named { name, args } = &call.return_type else {
+            return None;
+        };
+        if !matches!(
+            crate::stdlib::canonical_external_receiver_type_key(name)
+                .rsplit('.')
+                .next(),
+            Some("Iterator" | "CloseableIterator" | "ListIterator")
+        ) || args.len() != 1
+            || java_type_owner_is_parsed_source(name, types, facts)
+        {
+            return None;
+        }
+        crate::types::generic_read_type(&args[0])
+    };
+    Some(EnhancedForIteratorPlan {
+        call: Expr::Call {
+            type_args: Vec::new(),
+            receiver: Some(Box::new(iterable.clone())),
+            name: "iterator".to_string(),
+            args: Vec::new(),
+            resolved,
+        },
+        element_type,
+    })
+}
 use crate::conversion_plan::{
     LoweredSlotExprConversionPlan, LoweredType, Slot, argument_slot, index_slot,
     plan_lowered_slot_conversion, receiver_method_autoref_satisfies_optional_slot,
@@ -580,6 +662,62 @@ pub enum NativeCollectionMethod {
 }
 
 impl NativeCollectionMethod {
+    /// (Java call argument, receiver generic child). This is physical storage,
+    /// not overload selection: callers use the already selected native method.
+    pub(crate) fn stored_argument_children(self) -> &'static [(usize, usize)] {
+        match self {
+            Self::MapInsert | Self::MapPutIfAbsent => &[(0, 0), (1, 1)],
+            Self::ListInsert | Self::ListSet => &[(1, 0)],
+            Self::ListAdd
+            | Self::SetInsert
+            | Self::PriorityQueueAdd
+            | Self::ArrayBlockingQueueAdd
+            | Self::ArrayBlockingQueueOffer
+            | Self::ArrayBlockingQueueTimedOffer
+            | Self::ArrayBlockingQueuePut => &[(0, 0)],
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn result_child(self) -> Option<usize> {
+        match self {
+            Self::MapGet
+            | Self::MapGetOrDefault
+            | Self::MapRemove
+            | Self::MapInsert
+            | Self::MapPutIfAbsent => Some(1),
+            Self::ListGet
+            | Self::ListSet
+            | Self::ListRemoveIndex
+            | Self::QueueElement
+            | Self::QueueLastElement
+            | Self::QueuePeek
+            | Self::QueuePoll
+            | Self::QueueRemove
+            | Self::QueueLastRemove
+            | Self::ArrayBlockingQueueTake
+            | Self::ArrayBlockingQueueTimedPoll => Some(0),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn for_bulk_collection_name(name: &str) -> Option<Self> {
+        Some(match name {
+            "addAll" => Self::AddAll,
+            "removeAll" | "remove_all" => Self::RemoveAll,
+            "containsAll" | "contains_all" => Self::ContainsAll,
+            "retainAll" | "retain_all" => Self::RetainAll,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn is_bulk_collection_operation(self) -> bool {
+        matches!(
+            self,
+            Self::AddAll | Self::RemoveAll | Self::ContainsAll | Self::RetainAll
+        )
+    }
+
     pub(crate) fn mutates_receiver(self) -> bool {
         match self {
             NativeCollectionMethod::ListAdd
@@ -679,6 +817,19 @@ pub enum NativeCollectionStaticMethod {
     EnumSetComplementOf,
 }
 
+impl NativeCollectionStaticMethod {
+    /// Selected factory operands that become owned elements of its result.
+    /// Unlike a content query, this boundary cannot borrow a generic payload.
+    pub(crate) fn stored_argument_children(self) -> &'static [(usize, usize)] {
+        match self {
+            Self::CollectionsSingleton | Self::CollectionsSingletonList => &[(0, 0)],
+            Self::CollectionsSingletonMap => &[(0, 0), (1, 1)],
+            Self::CollectionsNCopies => &[(1, 0)],
+            _ => &[],
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NativeJavaInstanceMethod {
     StringLen,
@@ -688,6 +839,9 @@ pub enum NativeJavaInstanceMethod {
     StringToUppercase,
     StringToString,
     ObjectToString,
+    /// Open dispatch on an unbounded Java type parameter; unlike the known
+    /// native implementation, this method may return null or throw.
+    VirtualObjectToString,
     SourceObjectToString,
     SourceHashCode,
     StringContains,
@@ -990,6 +1144,25 @@ pub fn native_collection_lowered_type(
     }
 }
 
+/// The Rust carrier of the selected object-string implementation, independent
+/// of conservative Java effects attached to its spelling or declaring owner.
+pub(crate) fn intrinsic_call_result_abi(target: &CallTargetPlan<'_>) -> Option<ResultAbi> {
+    match target {
+        CallTargetPlan::NativeJavaInstance {
+            method: NativeJavaInstanceMethod::VirtualObjectToString,
+            ..
+        } => Some(ResultAbi::ResultWrapped),
+        CallTargetPlan::NativeJavaInstance {
+            method:
+                NativeJavaInstanceMethod::ObjectToString
+                | NativeJavaInstanceMethod::SourceObjectToString
+                | NativeJavaInstanceMethod::StringToString,
+            ..
+        } => Some(ResultAbi::Plain),
+        _ => None,
+    }
+}
+
 pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<LoweredType> {
     if matches!(
         target,
@@ -1133,7 +1306,9 @@ pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<Lowe
             PrimitiveType::Boolean,
         ))),
         CallTargetPlan::NativeJavaInstance {
-            method: NativeJavaInstanceMethod::ReaderReadLine,
+            method:
+                NativeJavaInstanceMethod::ReaderReadLine
+                | NativeJavaInstanceMethod::VirtualObjectToString,
             ..
         } => Some(LoweredType::from_java(crate::types::optional_java_type(
             JavaType::String,
@@ -2884,6 +3059,7 @@ pub fn plan_call_statement<'a>(
         name,
         args,
         resolved,
+        ..
     } = expr
     else {
         return None;
@@ -2893,6 +3069,22 @@ pub fn plan_call_statement<'a>(
     }
     if let Some(plan) = plan_native_arrays_statement(receiver.as_deref(), name, args) {
         return Some(plan);
+    }
+    if name == "sort"
+        && let [comparator] = args.as_slice()
+        && let Some(target) = receiver.as_deref()
+    {
+        let ty = infer_expr_type(target, types);
+        let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+        if crate::stdlib::java_collection_kind_for_type(&ty)
+            == Some(crate::stdlib::JavaCollectionKind::List)
+            && !matches!(&ty, JavaType::Named { name, .. } if java_type_owner_is_parsed_source(name, types, facts))
+        {
+            return Some(CallStatementPlan::NativeCollectionsSort {
+                target,
+                comparator: Some(comparator),
+            });
+        }
     }
     if let Some(plan) = plan_native_collections_statement(
         receiver.as_deref(),
@@ -3074,14 +3266,34 @@ fn plan_native_arrays_statement<'a>(
     }
 }
 
-fn plan_native_collections_statement<'a>(
-    receiver: Option<&'a Expr>,
-    name: &str,
-    args: &'a [Expr],
+fn native_collections_static_owner(
+    receiver: Option<&Expr>,
     resolved: Option<&ResolvedCall>,
     types: &TypeEnv,
     facts: &FactSet,
-) -> Option<CallStatementPlan<'a>> {
+) -> Option<()> {
+    native_utility_static_owner(receiver, resolved, types, facts, "Collections")
+}
+
+pub(crate) fn native_comparator_static_owner(
+    receiver: &Expr,
+    resolved: Option<&ResolvedCall>,
+    operation: crate::stdlib::NativeComparatorOperation,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> bool {
+    operation.static_owners().iter().any(|owner| {
+        native_utility_static_owner(Some(receiver), resolved, types, facts, owner).is_some()
+    })
+}
+
+fn native_utility_static_owner(
+    receiver: Option<&Expr>,
+    resolved: Option<&ResolvedCall>,
+    types: &TypeEnv,
+    facts: &FactSet,
+    native_owner: &str,
+) -> Option<()> {
     let written_owner = match receiver? {
         Expr::Var(owner) => owner.clone(),
         receiver => crate::stdlib::qualified_static_owner_java_name(receiver)?,
@@ -3093,13 +3305,72 @@ fn plan_native_collections_statement<'a>(
     let receiver_name = types
         .static_type_alias(&written_owner)
         .unwrap_or(&written_owner);
-    if !native_static_owner_matches(receiver_name, "Collections")
-        || java_type_owner_is_parsed_source(receiver_name, types, facts)
-        || resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Collections", types)
-        || static_type_alias_shadows_native_owner(&written_owner, "Collections", types)
-    {
+    (native_static_owner_matches(receiver_name, native_owner)
+        && !java_type_owner_is_parsed_source(receiver_name, types, facts)
+        && !resolved_static_owner_shadows_native_owner(
+            resolved,
+            receiver_name,
+            native_owner,
+            types,
+        )
+        && !static_type_alias_shadows_native_owner(&written_owner, native_owner, types))
+    .then_some(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum NativeOrderingOperation {
+    Sort,
+    Min,
+    Max,
+}
+
+/// The comparator is invoked by this operation, not retained by it. Share the
+/// selected native boundary between lowering and callable-effect analysis.
+pub(crate) fn native_ordering_consumer<'a>(
+    expr: &'a Expr,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<(NativeOrderingOperation, &'a Expr, &'a Expr)> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
         return None;
-    }
+    };
+    let operation = match name.as_str() {
+        "sort" => {
+            return match plan_call_statement(expr, facts, types)? {
+                CallStatementPlan::NativeCollectionsSort {
+                    target,
+                    comparator: Some(comparator),
+                } => Some((NativeOrderingOperation::Sort, target, comparator)),
+                _ => None,
+            };
+        }
+        "min" => NativeOrderingOperation::Min,
+        "max" => NativeOrderingOperation::Max,
+        _ => return None,
+    };
+    let [target, comparator] = args.as_slice() else {
+        return None;
+    };
+    native_collections_static_owner(receiver.as_deref(), resolved.as_ref(), types, facts)?;
+    Some((operation, target, comparator))
+}
+
+fn plan_native_collections_statement<'a>(
+    receiver: Option<&'a Expr>,
+    name: &str,
+    args: &'a [Expr],
+    resolved: Option<&ResolvedCall>,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<CallStatementPlan<'a>> {
+    native_collections_static_owner(receiver, resolved, types, facts)?;
     match (name, args) {
         ("sort", [target]) => Some(CallStatementPlan::NativeCollectionsSort {
             target,
@@ -3244,7 +3515,8 @@ fn plan_call_target_with_external_index_impl<'a>(
         return target;
     }
 
-    if let Some(target) = plan_native_collection_static_call(receiver, name, resolved, types) {
+    if let Some(target) = plan_native_collection_static_call(receiver, name, resolved, types, facts)
+    {
         return target;
     }
 
@@ -3589,6 +3861,15 @@ fn plan_java_object_to_string_fallback<'a>(
     facts: &FactSet,
     types: &TypeEnv,
 ) -> Option<CallTargetPlan<'a>> {
+    if matches!(name, "toString" | "to_string")
+        && arg_count == 0
+        && types.is_unbounded_object_type_parameter(&infer_expr_type(receiver, types))
+    {
+        return Some(CallTargetPlan::NativeJavaInstance {
+            receiver,
+            method: NativeJavaInstanceMethod::VirtualObjectToString,
+        });
+    }
     if matches!(name, "toString" | "to_string")
         && arg_count == 0
         && receiver_declared_source_object_type(receiver, facts, types).is_some()
@@ -4437,18 +4718,29 @@ fn is_static_constant_member(member: &str) -> bool {
             .all(|ch| ch == '_' || ch.is_ascii_uppercase() || ch.is_ascii_digit())
 }
 
-fn plan_native_collection_static_call<'a>(
+pub(crate) fn plan_native_collection_static_call<'a>(
     receiver: Option<&'a Expr>,
     name: &str,
     resolved: Option<&ResolvedCall>,
     types: &TypeEnv,
+    facts: &FactSet,
 ) -> Option<CallTargetPlan<'a>> {
-    let Some(Expr::Var(receiver_name)) = receiver else {
-        return None;
+    let receiver = receiver?;
+    let written_owner = match receiver {
+        Expr::Var(name) => name.clone(),
+        receiver => crate::stdlib::qualified_static_owner_java_name(receiver)?,
     };
+    let root = written_owner.split('.').next()?;
+    if types.local_type(root).is_some() || types.field_type(root).is_some() {
+        return None;
+    }
+    let receiver_name = types
+        .static_type_alias(&written_owner)
+        .unwrap_or(&written_owner);
     let receiver_key = crate::stdlib::canonical_external_receiver_type_key(receiver_name);
-    if receiver_key == "Arrays" {
-        if resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Arrays", types)
+    if native_static_owner_matches(receiver_name, "Arrays") {
+        if java_type_owner_is_parsed_source(receiver_name, types, facts)
+            || resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Arrays", types)
             || static_type_alias_shadows_native_owner(receiver_name, "Arrays", types)
         {
             return None;
@@ -4470,8 +4762,14 @@ fn plan_native_collection_static_call<'a>(
         };
         return Some(CallTargetPlan::NativeCollectionStatic { method });
     }
-    if receiver_key == "Collections" {
-        if resolved_static_owner_shadows_native_owner(resolved, receiver_name, "Collections", types)
+    if native_static_owner_matches(receiver_name, "Collections") {
+        if java_type_owner_is_parsed_source(receiver_name, types, facts)
+            || resolved_static_owner_shadows_native_owner(
+                resolved,
+                receiver_name,
+                "Collections",
+                types,
+            )
             || static_type_alias_shadows_native_owner(receiver_name, "Collections", types)
         {
             return None;
@@ -4508,7 +4806,8 @@ fn plan_native_collection_static_call<'a>(
         return Some(CallTargetPlan::NativeCollectionStatic { method });
     }
     if receiver_key == "EnumSet" {
-        if resolved_static_owner_shadows_native_owner(resolved, receiver_name, "EnumSet", types)
+        if java_type_owner_is_parsed_source(receiver_name, types, facts)
+            || resolved_static_owner_shadows_native_owner(resolved, receiver_name, "EnumSet", types)
             || static_type_alias_shadows_native_owner(receiver_name, "EnumSet", types)
         {
             return None;
@@ -4697,32 +4996,18 @@ pub(crate) fn plan_native_collection_receiver_call_for_type<'a>(
             NativeCollectionMethod::ListRemoveObject
         }
         (crate::stdlib::JavaCollectionKind::List, "contains") => NativeCollectionMethod::Contains,
-        (crate::stdlib::JavaCollectionKind::List, "containsAll" | "contains_all") => {
-            NativeCollectionMethod::ContainsAll
+        (kind, name)
+            if (kind == crate::stdlib::JavaCollectionKind::List || kind.is_set_like())
+                && NativeCollectionMethod::for_bulk_collection_name(name).is_some() =>
+        {
+            NativeCollectionMethod::for_bulk_collection_name(name)?
         }
         (kind, "hashCode" | "hash_code") if kind.is_set_like() => {
             NativeCollectionMethod::SetHashCode
         }
         (kind, "contains") if kind.is_set_like() => NativeCollectionMethod::Contains,
-        (kind, "containsAll" | "contains_all") if kind.is_set_like() => {
-            NativeCollectionMethod::ContainsAll
-        }
         (kind, "add") if kind.is_set_like() => NativeCollectionMethod::SetInsert,
         (kind, "remove") if kind.is_set_like() => NativeCollectionMethod::SetRemove,
-        (crate::stdlib::JavaCollectionKind::List, "addAll") => NativeCollectionMethod::AddAll,
-        (crate::stdlib::JavaCollectionKind::List, "removeAll" | "remove_all") => {
-            NativeCollectionMethod::RemoveAll
-        }
-        (crate::stdlib::JavaCollectionKind::List, "retainAll" | "retain_all") => {
-            NativeCollectionMethod::RetainAll
-        }
-        (kind, "addAll") if kind.is_set_like() => NativeCollectionMethod::AddAll,
-        (kind, "removeAll" | "remove_all") if kind.is_set_like() => {
-            NativeCollectionMethod::RemoveAll
-        }
-        (kind, "retainAll" | "retain_all") if kind.is_set_like() => {
-            NativeCollectionMethod::RetainAll
-        }
         (kind, "hashCode" | "hash_code") if kind.is_map_like() => {
             NativeCollectionMethod::MapHashCode
         }
@@ -5413,7 +5698,7 @@ fn static_type_alias_shadows_native_owner(
         .is_some_and(|alias| !native_static_owner_matches(alias, native_owner))
 }
 
-fn native_static_owner_matches(owner: &str, native_owner: &str) -> bool {
+pub(crate) fn native_static_owner_matches(owner: &str, native_owner: &str) -> bool {
     let owner_key = crate::stdlib::canonical_external_receiver_type_key(owner);
     let owner_key =
         crate::javalibs::native_java_static_owner_alias(&owner_key).unwrap_or(owner_key.as_str());
@@ -5435,6 +5720,7 @@ fn native_static_owner_qualified_names(native_owner: &str) -> &'static [&'static
     match native_owner {
         "Arrays" => &["java.util.Arrays"],
         "Collections" => &["java.util.Collections"],
+        "Comparator" => &["java.util.Comparator"],
         "Objects" => &["java.util.Objects"],
         "Math" => &[
             "java.lang.Math",
@@ -6265,8 +6551,8 @@ fn external_method_arities_for(
         .iter()
         .filter_map(|fact| {
             let fact_receiver = fact.receiver_type.as_deref()?;
-            if !external_method_receiver_matches(fact_receiver, receiver_type)
-                || !external_method_name_matches(&fact.method_name, method_name)
+            if !external_method_name_matches(&fact.method_name, method_name)
+                || !external_method_receiver_matches(fact_receiver, receiver_type)
             {
                 return None;
             }
@@ -6466,8 +6752,13 @@ fn enum_map_constructor_class_token(ty: &JavaType, arg: &Expr, types: &TypeEnv) 
 
 fn native_collection_constructor_kind_with_facts(
     ty: &JavaType,
-    _facts: &FactSet,
+    facts: &FactSet,
 ) -> Option<crate::stdlib::JavaCollectionKind> {
+    if let JavaType::Named { name, .. } | JavaType::Unknown(name) = ty
+        && java_type_owner_is_parsed_source(name, &TypeEnv::default(), facts)
+    {
+        return None;
+    }
     crate::stdlib::native_collection_constructor_kind_for_type(ty)
 }
 
@@ -7008,6 +7299,30 @@ pub fn plan_call_arguments_with_facts_and_args(
     types: &TypeEnv,
 ) -> ArgumentLoweringPlan {
     let arg_count = args.len();
+    if let Some(receiver) = receiver {
+        let ty = crate::types::infer_expr_type(receiver, types);
+        let base = crate::types::optional_element_type(&ty).unwrap_or(ty);
+        let effective = crate::effective_facts::EffectiveFacts::new(facts);
+        if let JavaType::Named {
+            args: type_args, ..
+        } = &base
+            && let Some(functional) = effective.native_functional_carrier(&base)
+            && functional.method() == name
+            && functional.inputs().len() == arg_count
+            && let Some(inputs) = functional.input_types(type_args)
+        {
+            return ArgumentLoweringPlan::Shaped(
+                inputs
+                    .into_iter()
+                    .map(|ty| {
+                        crate::shape_projection::storage_arg_shape_with_effective_facts(
+                            ty, &effective,
+                        )
+                    })
+                    .collect(),
+            );
+        }
+    }
     if let Some(shapes) = native_boxed_primitive_arg_shapes(receiver, name, arg_count, types) {
         return ArgumentLoweringPlan::Shaped(shapes);
     }
@@ -7732,8 +8047,7 @@ fn unresolved_primitive_facade_abi_fallback<'a>(
         return None;
     }
     facts.facade_abi_facts.iter().rev().find(|fact| {
-        external_method_receiver_matches(fact.key.owner_type(), key.owner_type())
-            && fact.key.member_name() == key.member_name()
+        fact.key.member_name() == key.member_name()
             && fact.key.kind() == key.kind()
             && (fact.key.staticness() == key.staticness()
                 || fact.key.staticness() == Staticness::Unknown
@@ -7746,6 +8060,7 @@ fn unresolved_primitive_facade_abi_fallback<'a>(
                 [TypePattern::Exact(type_key)]
                     if matches!(type_key.as_str(), "byte" | "short" | "char" | "int")
             )
+            && external_method_receiver_matches(fact.key.owner_type(), key.owner_type())
     })
 }
 
@@ -8781,6 +9096,75 @@ pub fn plan_constructor_arguments(
 #[cfg(test)]
 mod tests {
     #[test]
+    fn native_collection_factories_share_qualified_owner_and_shadowing_proofs() {
+        use super::*;
+        let qualified = Expr::FieldAccess(
+            Box::new(Expr::FieldAccess(
+                Box::new(Expr::Var("java".to_string())),
+                "util".to_string(),
+            )),
+            "Arrays".to_string(),
+        );
+        let mut types = TypeEnv::default();
+        let facts = FactSet::default();
+        for receiver in [&qualified, &Expr::Var("java.util.Arrays".to_string())] {
+            assert!(matches!(
+                plan_native_collection_static_call(Some(receiver), "asList", None, &types, &facts),
+                Some(CallTargetPlan::NativeCollectionStatic {
+                    method: NativeCollectionStaticMethod::ArraysAsList
+                })
+            ));
+        }
+        let alias = Expr::Var("arrays".to_string());
+        types.insert_static_type_alias("arrays", "java.util.Arrays");
+        assert!(
+            plan_native_collection_static_call(Some(&alias), "asList", None, &types, &facts)
+                .is_some()
+        );
+        types.insert_static_type_alias("arrays", "other.Arrays");
+        assert!(
+            plan_native_collection_static_call(Some(&alias), "asList", None, &types, &facts)
+                .is_none()
+        );
+        types.insert_local("java", JavaType::String);
+        assert!(
+            plan_native_collection_static_call(Some(&qualified), "asList", None, &types, &facts)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn bulk_collection_name_metadata_matches_native_receiver_planning() {
+        use super::*;
+        let receiver = Expr::Var("target".to_string());
+        let args = [Expr::Var("source".to_string())];
+        for name in [
+            "addAll",
+            "removeAll",
+            "remove_all",
+            "containsAll",
+            "contains_all",
+            "retainAll",
+            "retain_all",
+        ] {
+            let expected = NativeCollectionMethod::for_bulk_collection_name(name).unwrap();
+            for owner in ["List", "HashSet"] {
+                let ty = JavaType::Named {
+                    name: owner.to_string(),
+                    args: vec![JavaType::String],
+                };
+                assert!(matches!(
+                    plan_native_collection_receiver_call_for_type(&receiver, name, Some(&args), &ty, &TypeEnv::default()),
+                    Some(CallTargetPlan::NativeCollectionMethod { method, .. }) if method == expected
+                ));
+            }
+        }
+        for name in ["add", "contains", "size", "putAll", "add_all"] {
+            assert!(NativeCollectionMethod::for_bulk_collection_name(name).is_none());
+        }
+    }
+
+    #[test]
     fn source_generic_null_specialization_preserves_the_solved_carrier() {
         use super::{ArgumentLoweringPlan, specialize_resolved_source_call_argument_plan};
         use crate::java_ir::{
@@ -8801,6 +9185,7 @@ mod tests {
             "java.util.TreeMap<Key, Integer>",
         ));
         let call = ResolvedCall {
+            type_args: Vec::new(),
             declaring_type: "Use".into(),
             rust_name: "accept".into(),
             kind: CallKind::Static,
@@ -9035,6 +9420,7 @@ mod tests {
 
     fn resolved_instance_call(owner: &str, rust_name: &str) -> ResolvedCall {
         ResolvedCall {
+            type_args: Vec::new(),
             declaring_type: owner.to_string(),
             rust_name: rust_name.to_string(),
             kind: CallKind::Instance,
@@ -9047,6 +9433,7 @@ mod tests {
     #[test]
     fn native_system_print_statement_refuses_source_resolved_owner() {
         let call = Expr::Call {
+            type_args: Vec::new(),
             receiver: Some(Box::new(Expr::FieldAccess(
                 Box::new(Expr::Var("System".to_string())),
                 "out".to_string(),
@@ -9065,6 +9452,7 @@ mod tests {
     #[test]
     fn native_system_print_statement_keeps_jdk_print_stream_owner() {
         let call = Expr::Call {
+            type_args: Vec::new(),
             receiver: Some(Box::new(Expr::FieldAccess(
                 Box::new(Expr::Var("System".to_string())),
                 "out".to_string(),
@@ -9097,6 +9485,7 @@ mod tests {
     #[test]
     fn unresolved_system_print_statement_uses_the_declared_stream_contract() {
         let call = Expr::Call {
+            type_args: Vec::new(),
             receiver: Some(Box::new(Expr::FieldAccess(
                 Box::new(Expr::Var("System".to_string())),
                 "err".to_string(),
@@ -9805,6 +10194,63 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    #[test]
+    fn open_and_native_object_string_plans_have_distinct_result_contracts() {
+        let receiver = Expr::Var("value".to_string());
+        let mut types = TypeEnv::new();
+        types.insert_type_param_declaration("T", None);
+        types.insert_local(
+            "value",
+            JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            },
+        );
+        let facts = FactSet::default();
+        let open = plan_call_target_with_facts(Some(&receiver), "toString", None, &facts, &types);
+        assert_eq!(
+            intrinsic_call_result_abi(&open),
+            Some(ResultAbi::ResultWrapped)
+        );
+        assert!(matches!(
+            open,
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::VirtualObjectToString,
+                ..
+            }
+        ));
+        assert!(
+            native_java_call_lowered_type(&open)
+                .unwrap()
+                .into_slot_shape()
+                .optional_element_type()
+                .is_some()
+        );
+        types.insert_local(
+            "value",
+            JavaType::Named {
+                name: "StringBuilder".to_string(),
+                args: Vec::new(),
+            },
+        );
+        let native = plan_call_target_with_facts(Some(&receiver), "toString", None, &facts, &types);
+        assert_eq!(intrinsic_call_result_abi(&native), Some(ResultAbi::Plain));
+        assert!(matches!(
+            native,
+            CallTargetPlan::NativeJavaInstance {
+                method: NativeJavaInstanceMethod::ObjectToString,
+                ..
+            }
+        ));
+        assert!(
+            native_java_call_lowered_type(&native)
+                .unwrap()
+                .into_slot_shape()
+                .optional_element_type()
+                .is_none()
+        );
     }
 
     #[test]

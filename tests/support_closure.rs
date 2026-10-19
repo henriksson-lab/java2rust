@@ -2,6 +2,193 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+#[test]
+fn prelude_stripping_handles_empty_impls_split_headers_and_private_state() {
+    let dir = temp_dir("prelude_private_state");
+    let module = dir.join("00001_Owner.rs");
+    let shared = dir.join("shared-types.tsv");
+    fs::write(&shared, "Shared\nSharedTrait\n").unwrap();
+    fs::write(
+        &module,
+        r#"
+pub struct Shared;
+impl Eq for Shared {}
+trait SharedTrait { fn discarded_trait(&self); }
+impl<T> Shared
+where T: Clone
+{
+    fn discarded() {}
+}
+#[derive(Clone, Copy)]
+enum State { Ready }
+pub(crate) struct Internal { state: State }
+pub struct Owner {}
+pub fn keep_source_helper() {}
+"#,
+    )
+    .unwrap();
+    let runner = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh"),
+    )
+    .unwrap();
+    let function = runner
+        .split("strip_shared_support_items() {")
+        .nth(1)
+        .unwrap()
+        .split("\nstrip_source_type_facade_stubs() {")
+        .next()
+        .unwrap();
+    let command = format!(
+        "strip_shared_support_items() {{{function}\nstrip_shared_support_items \"$1\" \"$2\"\n"
+    );
+    let output = Command::new("bash")
+        .args(["-c", &command, "strip_probe"])
+        .arg(&module)
+        .arg(&shared)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = fs::read_to_string(module).unwrap();
+    assert!(!result.contains("Shared"), "{result}");
+    assert!(!result.contains("discarded"), "{result}");
+    assert!(!result.contains("SharedTrait"), "{result}");
+    assert!(
+        result.contains("#[derive(Clone, Copy)]\nenum State"),
+        "{result}"
+    );
+    assert!(result.contains("pub(crate) struct Internal"), "{result}");
+    assert!(result.contains("pub struct Owner"), "{result}");
+    assert!(result.contains("pub fn keep_source_helper"), "{result}");
+}
+
+#[test]
+fn source_restoration_does_not_duplicate_promoted_static_storage() {
+    let dir = temp_dir("promoted_static_storage");
+    let module = dir.join("00001_Owner.rs");
+    let shared = dir.join("shared.rs");
+    fs::write(
+        &module,
+        "static COUNTER: i32 = 0;\nstatic LOCAL: i32 = 1;\n",
+    )
+    .unwrap();
+    fs::write(&shared, "pub(crate) static COUNTER: i32 = 0;\n").unwrap();
+    let runner = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh"),
+    )
+    .unwrap();
+    let function = runner
+        .split("deduplicate_generated_coherence_items() {")
+        .nth(1)
+        .unwrap()
+        .split("\nrestore_missing_source_type_items() {")
+        .next()
+        .unwrap();
+    let command = format!(
+        "deduplicate_generated_coherence_items() {{{function}\ndeduplicate_generated_coherence_items \"$1\" \"$2\" \"$3\"\n"
+    );
+    let output = Command::new("bash")
+        .args(["-c", &command, "storage_probe"])
+        .arg(&module)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts"))
+        .arg(&shared)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = fs::read_to_string(module).unwrap();
+    assert!(!result.contains("COUNTER"), "{result}");
+    assert!(result.contains("static LOCAL"), "{result}");
+}
+
+#[test]
+fn replacing_a_seed_representation_does_not_resurrect_its_inherent_impls() {
+    let dir = temp_dir("seed_representation_contract");
+    let generated = dir.join("generated");
+    let raw = dir.join("raw");
+    fs::create_dir_all(&generated).unwrap();
+    fs::create_dir_all(&raw).unwrap();
+    let support = r#"
+pub struct Cursor<T> {
+    slots: Vec<Option<T>>,
+    index: usize,
+    consumed: usize,
+}
+impl<T> Cursor<T> {
+    pub fn new(values: Vec<T>) -> Self {
+        Self { slots: values.into_iter().map(Some).collect(), index: 0, consumed: 0 }
+    }
+    pub fn take(&mut self) -> Option<T> {
+        let value = self.slots.get_mut(self.index)?.take();
+        self.index += 1;
+        self.consumed += 1;
+        value
+    }
+}
+"#;
+    for (file, owner) in [("00001_First.rs", "First"), ("00002_Second.rs", "Second")] {
+        fs::write(raw.join(file), format!("{support}\npub struct {owner};\n")).unwrap();
+        fs::write(generated.join(file), format!("pub struct {owner};\n")).unwrap();
+    }
+    fs::write(
+        dir.join("shared.rs"),
+        r#"
+pub struct Cursor<T> {
+    items: Vec<T>,
+    index: usize,
+}
+impl<T: Clone> Cursor<T> {
+    pub fn new(values: Vec<T>) -> Self { Self { items: values, index: 0 } }
+    pub fn take(&mut self) -> Option<T> {
+        let value = self.items.get(self.index).cloned();
+        self.index += 1;
+        value
+    }
+    pub fn obsolete_seed_only(&self) -> usize { self.items.len() }
+}
+"#,
+    )
+    .unwrap();
+    fs::write(dir.join("shared-types.tsv"), "Cursor\n").unwrap();
+    let (shared_path, _) = run_merger(&dir);
+    let shared = fs::read_to_string(&shared_path).unwrap();
+    assert!(!shared.contains("obsolete_seed_only"), "{shared}");
+    assert!(!shared.contains("impl<T: Clone> Cursor"), "{shared}");
+    assert_eq!(shared.matches("pub fn take(").count(), 1, "{shared}");
+    let probe = dir.join("probe.rs");
+    fs::write(
+        &probe,
+        format!(
+            "{shared}\nstruct NonClone(i32);\nfn main() {{ let mut cursor = Cursor::new(vec![NonClone(7)]); assert_eq!(cursor.take().unwrap().0, 7); assert!(cursor.take().is_none()); }}\n"
+        ),
+    )
+    .unwrap();
+    let executable = dir.join("probe");
+    let output = Command::new("rustc")
+        .args([
+            "--edition=2024",
+            "--crate-name",
+            "seed_representation_probe",
+        ])
+        .arg(&probe)
+        .arg("-o")
+        .arg(&executable)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(Command::new(executable).status().unwrap().success());
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!(
         "new_java2rust_{label}_{}_{}",
@@ -60,6 +247,159 @@ pub struct Owner;
         "{module}"
     );
     assert!(!module.contains("stale facade"), "{module}");
+}
+
+#[test]
+fn shared_merger_preserves_lifetime_qualified_borrowed_impls() {
+    let dir = temp_dir("borrowed_impl_targets");
+    let generated = dir.join("generated");
+    fs::create_dir_all(&generated).unwrap();
+    let support = r#"
+pub struct Carrier<T> { pub values: Vec<T> }
+impl<T> IntoIterator for Carrier<T> {
+    type Item = T;
+    type IntoIter = std::vec::IntoIter<T>;
+    fn into_iter(self) -> Self::IntoIter { self.values.into_iter() }
+}
+impl<'a, T> IntoIterator for &'a Carrier<T> {
+    type Item = &'a T;
+    type IntoIter = std::slice::Iter<'a, T>;
+    fn into_iter(self) -> Self::IntoIter { self.values.iter() }
+}
+impl<'a, T> IntoIterator for &'a mut Carrier<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::slice::IterMut<'a, T>;
+    fn into_iter(self) -> Self::IntoIter { self.values.iter_mut() }
+}
+"#;
+    for (file, owner) in [("00001_First.rs", "First"), ("00002_Second.rs", "Second")] {
+        fs::write(
+            generated.join(file),
+            format!("{support}\npub struct {owner};\n"),
+        )
+        .unwrap();
+    }
+    let (shared, _) = run_merger(&dir);
+    let merged = fs::read_to_string(&shared).unwrap();
+    for header in [
+        "IntoIterator for Carrier<T>",
+        "IntoIterator for &'a Carrier<T>",
+        "IntoIterator for &'a mut Carrier<T>",
+    ] {
+        assert_eq!(merged.matches(header).count(), 1, "{header}: {merged}");
+    }
+    let harness = dir.join("harness.rs");
+    fs::write(
+        &harness,
+        format!(
+            r#"
+{merged}
+#[test]
+fn all_iteration_modes_survive_assembly() {{
+    let mut values = Carrier {{ values: vec![1, 2] }};
+    assert_eq!((&values).into_iter().copied().sum::<i32>(), 3);
+    for value in &mut values {{ *value += 1; }}
+    assert_eq!(values.into_iter().sum::<i32>(), 5);
+}}
+"#
+        ),
+    )
+    .unwrap();
+    let binary = dir.join("harness");
+    let compiled = Command::new("rustc")
+        .arg("--test")
+        .arg("--edition=2024")
+        .arg(&harness)
+        .arg("-o")
+        .arg(&binary)
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    let run = Command::new(&binary).output().unwrap();
+    assert!(
+        run.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&run.stdout),
+        String::from_utf8_lossy(&run.stderr)
+    );
+}
+
+#[test]
+fn copied_resume_rebases_paths_and_validates_before_writing() {
+    let dir = temp_dir("portable_resume_paths");
+    let output = dir.join("copy");
+    let generated = output.join("generated-crate/src/generated");
+    let raw = output.join("generated-raw-before-support-strip");
+    fs::create_dir_all(&generated).unwrap();
+    fs::create_dir_all(&raw).unwrap();
+    let original = dir.join("original/00001_Owner.rs");
+    fs::create_dir_all(original.parent().unwrap()).unwrap();
+    fs::write(&original, "original canary").unwrap();
+    fs::write(raw.join("00001_Owner.rs"), "pub struct Owner;\n").unwrap();
+    let status = output.join("status.tsv");
+    let manifest = output.join("batch-manifest.tsv");
+    let old_status = format!(
+        "source\trust_path\ttranslate_status\nOwner.java\t{}\tok\n",
+        original.display()
+    );
+    fs::write(&status, &old_status).unwrap();
+    fs::write(
+        &manifest,
+        format!("index\trust_path\n1\t{}\n", original.display()),
+    )
+    .unwrap();
+    let run = || {
+        Command::new("python3")
+            .arg(
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("scripts/rebase-focused-resume-artifacts.py"),
+            )
+            .arg(&status)
+            .arg(&manifest)
+            .arg(&generated)
+            .arg(&raw)
+            .output()
+            .unwrap()
+    };
+    let result = run();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let expected = generated.join("00001_Owner.rs").display().to_string();
+    for metadata in [&status, &manifest] {
+        let text = fs::read_to_string(metadata).unwrap();
+        assert!(text.contains(&expected), "{text}");
+        assert!(!text.contains(&original.display().to_string()), "{text}");
+    }
+    assert_eq!(fs::read_to_string(&original).unwrap(), "original canary");
+    fs::write(&status, &old_status).unwrap();
+    fs::write(&manifest, "index\trust_path\n1\t/missing/unknown.rs\n").unwrap();
+    let result = run();
+    assert!(!result.status.success());
+    assert_eq!(
+        fs::read_to_string(&status).unwrap(),
+        old_status,
+        "a later invalid artifact must not partially rewrite earlier metadata"
+    );
+    assert_eq!(fs::read_to_string(&original).unwrap(), "original canary");
+    let runner = fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/translate-focused-package.sh"),
+    )
+    .unwrap();
+    let resume = runner
+        .split("raw_resume_dir=\"$out_dir/generated-raw-before-support-strip\"")
+        .nth(1)
+        .unwrap();
+    assert!(
+        resume.find("rebase-focused-resume-artifacts.py").unwrap()
+            < resume.find("find \"$generated_dir\"").unwrap()
+    );
 }
 
 fn run_merger(dir: &Path) -> (PathBuf, PathBuf) {

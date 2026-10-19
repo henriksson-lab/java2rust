@@ -67,6 +67,7 @@ pub struct ShapeEnv {
     shared_native_map_locals: HashSet<BindingId>,
     shared_native_map_fields: HashSet<String>,
     live_native_map_entry_locals: HashSet<BindingId>,
+    native_map_entry_tuple_locals: HashSet<BindingId>,
     unmodifiable_collection_view_sources: HashMap<String, Expr>,
     unmodifiable_collection_view_sources_by_binding: HashMap<BindingId, Expr>,
     immutable_collection_view_locals: HashMap<String, ImmutableCollectionViewMutationProfile>,
@@ -129,6 +130,7 @@ impl ShapeEnv {
 
     pub(crate) fn mark_live_native_map_entry_local(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
+            self.native_map_entry_tuple_locals.remove(binding);
             self.live_native_map_entry_locals.insert(binding.clone());
         }
     }
@@ -137,6 +139,13 @@ impl ShapeEnv {
         self.binding_ids
             .get(name)
             .is_some_and(|binding| self.live_native_map_entry_locals.contains(binding))
+    }
+
+    pub(crate) fn mark_native_map_entry_tuple_local(&mut self, name: &str) {
+        if let Some(binding) = self.binding_ids.get(name) {
+            self.live_native_map_entry_locals.remove(binding);
+            self.native_map_entry_tuple_locals.insert(binding.clone());
+        }
     }
 
     pub(crate) fn insert_map_key_set_view_receiver(
@@ -328,6 +337,7 @@ impl ShapeEnv {
     fn clear_local_side_facts(&mut self, name: &str) {
         if let Some(binding) = self.binding_ids.get(name) {
             self.proven_non_null_locals.remove(binding);
+            self.native_map_entry_tuple_locals.remove(binding);
             self.repeated_materialized_argument_locals.remove(binding);
             self.map_key_set_view_receivers_by_binding.remove(binding);
             self.map_values_view_receivers_by_binding.remove(binding);
@@ -715,6 +725,14 @@ impl ShapeEnv {
 
     pub fn insert_type_param_bound(&mut self, name: impl Into<String>, bound: JavaType) {
         self.types.insert_type_param_bound(name, bound);
+    }
+
+    pub(crate) fn insert_type_param_declaration(
+        &mut self,
+        name: impl Into<String>,
+        bound: Option<JavaType>,
+    ) {
+        self.types.insert_type_param_declaration(name, bound);
     }
 
     pub fn insert_field_shape(&mut self, name: impl Into<String>, shape: RustSlotShape) {
@@ -1536,12 +1554,47 @@ pub fn infer_expr_shape_with_context(
     infer_expr_shape_with_context_and_external_index(expr, env, ctx, external_index.as_ref())
 }
 
+/// Physical tuple components are loans of the map's stored key/value carrier.
+/// Admission comes from native-map iteration, not the spelling `Entry`.
+pub(crate) fn native_map_entry_accessor_shape(
+    receiver: &Expr,
+    name: &str,
+    env: &ShapeEnv,
+) -> Option<(usize, RustSlotShape)> {
+    let Expr::Var(name_of_entry) = receiver else {
+        return None;
+    };
+    let binding = env.binding_ids.get(name_of_entry)?;
+    if !env.native_map_entry_tuple_locals.contains(binding) {
+        return None;
+    }
+    let index = crate::call_plan::native_map_entry_accessor_index(name)?;
+    let parent = env.local_shape(name_of_entry)?;
+    let child = RustSlotShape::native_child_type_at_path(&parent.java_ty, &[index])?;
+    let mut shape = crate::shape_projection::borrowed_sequence_element_shape(
+        crate::types::generic_read_type_preserving_optional(&child),
+    );
+    shape.inherit_native_collection_child(parent, index);
+    Some((index, shape))
+}
+
 fn infer_expr_shape_with_context_and_external_index(
     expr: &Expr,
     env: &ShapeEnv,
     ctx: ExprShapeContext<'_>,
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> RustSlotShape {
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && args.is_empty()
+        && let Some((_, shape)) = native_map_entry_accessor_shape(receiver, name, env)
+    {
+        return shape;
+    }
     match expr {
         Expr::Literal(lit) => RustSlotShape::conservative(crate::types::literal_type(lit)),
         Expr::Var(name) => env
@@ -1557,11 +1610,38 @@ fn infer_expr_shape_with_context_and_external_index(
             .or_else(|| planned_member_access_shape(receiver, field, env, ctx))
             .unwrap_or_else(|| RustSlotShape::conservative(infer_expr_type(expr, env.type_env()))),
         Expr::ArrayAccess(array, _) => infer_indexed_expr_shape(array, env, ctx, external_index),
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Assign,
+            left,
+            right,
+        } => {
+            if matches!(left.as_ref(), Expr::ArrayAccess(..)) {
+                // Indexed assignment returns the converted RHS temporary,
+                // not a read borrowing the stored element. The write-slot
+                // projection carries its nullable/dispatch storage ABI.
+                return infer_assignment_target_shape_with_context(left, env, ctx)
+                    .unwrap_or_else(|| infer_expr_shape_with_context(left, env, ctx));
+            }
+            let target = infer_expr_shape_with_context(left, env, ctx);
+            let value = infer_expr_shape_with_context(right, env, ctx);
+            // Local assignment lowering deliberately keeps a proven-present
+            // RHS outside nullable local storage and returns that reference.
+            if target
+                .optional_element_type()
+                .is_some_and(|element| element == value.java_ty)
+                && value.optional_element_type().is_none()
+            {
+                value
+            } else {
+                target
+            }
+        }
         Expr::Call {
             receiver,
             name,
             args,
             resolved: Some(call),
+            ..
         } => {
             resolved_external_call_expr_shape(
                 receiver.as_deref(),
@@ -1619,6 +1699,7 @@ fn infer_expr_shape_with_context_and_external_index(
             name,
             args,
             resolved: None,
+            ..
         } => unresolved_source_call_expr_shape(
             receiver.as_deref(),
             name,
@@ -1649,10 +1730,20 @@ fn infer_expr_shape_with_context_and_external_index(
         Expr::Cast { ty, expr } => {
             let mut target = value_shape_or_conservative(ctx, ty.clone());
             if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) {
-                crate::shape_projection::preserve_reference_cast_nullability(
-                    &infer_expr_shape_with_context(expr, env, ctx),
-                    &mut target,
-                );
+                let actual = infer_expr_shape_with_context(expr, env, ctx);
+                crate::shape_projection::preserve_reference_cast_nullability(&actual, &mut target);
+                if let Some(facts) = ctx.facts() {
+                    crate::shape_projection::preserve_owned_interface_upcast(
+                        &actual,
+                        &mut target,
+                        facts,
+                    );
+                    crate::shape_projection::project_native_iterable_list_view(
+                        &actual,
+                        &mut target,
+                        facts,
+                    );
+                }
             }
             target
         }
@@ -1846,7 +1937,33 @@ fn native_java_call_expr_shape(
         && let Some(lowered) =
             crate::call_plan::native_collection_lowered_type(receiver, *method, env.type_env())
     {
-        return Some(lowered.into_slot_shape());
+        let mut shape = lowered.into_slot_shape();
+        if let Some(child) = method.result_child() {
+            let parent = infer_expr_shape_with_context_and_external_index(
+                receiver,
+                env,
+                ctx,
+                external_index,
+            );
+            shape.inherit_native_collection_child(&parent, child);
+            if shape.native_allocation.shared()
+                && matches!(
+                    method,
+                    crate::call_plan::NativeCollectionMethod::ListGet
+                        | crate::call_plan::NativeCollectionMethod::ListSet
+                        | crate::call_plan::NativeCollectionMethod::ListRemoveIndex
+                )
+                && let Some(element) =
+                    RustSlotShape::native_child_type_at_path(&parent.java_ty, &[child])
+            {
+                // Checked Java list access throws for an absent index. Its
+                // successful value is the stored handle (possibly nullable),
+                // not Rust Vec::get's additional Option<&payload> carrier.
+                shape.java_ty = element;
+                shape.ownership = crate::slot_shape::OwnershipShape::Owned;
+            }
+        }
+        return Some(shape);
     }
     crate::call_plan::native_java_call_lowered_type(&target)
         .map(|lowered| lowered.into_slot_shape())
@@ -2057,10 +2174,13 @@ fn seed_type_param_bounds(
     type_params: &[String],
     type_param_bounds: &[Option<JavaType>],
 ) {
-    for (name, bound) in type_params.iter().zip(type_param_bounds.iter()) {
-        if let Some(bound) = bound {
-            env.insert_type_param_bound(name.clone(), bound.clone());
-        }
+    for (index, name) in type_params.iter().enumerate() {
+        // Register unbounded binders as well: an unbounded method T shadows
+        // an outer bounded T rather than inheriting its unrelated bound.
+        env.insert_type_param_declaration(
+            name.clone(),
+            type_param_bounds.get(index).cloned().flatten(),
+        );
     }
 }
 
@@ -2478,6 +2598,7 @@ fn infer_field_access_shape(
         }
     }
     let receiver_ty = infer_expr_type(receiver, env.type_env());
+    let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
     let name = match &receiver_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
         _ => return None,
@@ -2644,6 +2765,92 @@ mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
     use crate::slot_shape::{DispatchShape, OwnershipShape};
+
+    #[test]
+    fn reference_array_assignment_results_use_owned_storage_not_indexed_reads() {
+        let mut env = ShapeEnv::new();
+        env.insert_local("items", JavaType::Array(Box::new(JavaType::String)));
+        let target = Expr::ArrayAccess(
+            Box::new(Expr::Var("items".to_string())),
+            Box::new(Expr::Literal(crate::java_ir::Literal::Int(0))),
+        );
+        assert_eq!(
+            infer_expr_shape(&target, &env).ownership,
+            OwnershipShape::SharedBorrow
+        );
+        assert_eq!(
+            crate::conversion_plan::assignment_statement_plan_for_target(
+                &target,
+                &Expr::Literal(crate::java_ir::Literal::Null),
+                &env,
+                ExprShapeContext::default(),
+            ),
+            crate::conversion_plan::AssignmentStatementPlan::AssignValue,
+        );
+        for value in [
+            Expr::Literal(crate::java_ir::Literal::Null),
+            Expr::Literal(crate::java_ir::Literal::String("present".to_string())),
+        ] {
+            let assignment = Expr::Binary {
+                op: crate::java_ir::BinaryOp::Assign,
+                left: Box::new(target.clone()),
+                right: Box::new(value),
+            };
+            let actual = infer_expr_shape(&assignment, &env);
+            assert_eq!(actual.ownership, OwnershipShape::Owned);
+            assert_eq!(actual.optional_element_type(), Some(JavaType::String));
+        }
+    }
+
+    #[test]
+    fn native_entry_components_require_tuple_proof_and_keep_child_storage() {
+        let mut env = ShapeEnv::new();
+        let mut entry = crate::shape_projection::borrowed_sequence_element_shape(
+            crate::parser::parse_hierarchy_type("java.util.Map.Entry<String, List<String>>"),
+        );
+        entry.require_native_allocation_at(
+            &[1],
+            crate::storage_strategy::StoragePlacement::new(true, true, false),
+        );
+        env.insert_local_shape("entry", entry.clone());
+        let receiver = Expr::Var("entry".into());
+        assert!(native_map_entry_accessor_shape(&receiver, "getValue", &env).is_none());
+        env.mark_native_map_entry_tuple_local("entry");
+        let (index, value) = native_map_entry_accessor_shape(&receiver, "getValue", &env).unwrap();
+        assert_eq!(index, 1);
+        assert!(value.native_allocation.shared());
+        assert_eq!(value.ownership, OwnershipShape::SharedBorrow);
+        assert_eq!(
+            native_map_entry_accessor_shape(&receiver, "getKey", &env)
+                .unwrap()
+                .0,
+            0
+        );
+        let expression = crate::parser::parse_expr(
+            "entry.getValue().stream().collect(Collectors.joining(\",\"))",
+        );
+        let facts = FactSet::default();
+        let plan = crate::stream::build_stream_plan_with_shape_context(
+            &expression,
+            &env,
+            ExprShapeContext::new(None, None, Some(&facts)),
+            &facts,
+        )
+        .unwrap();
+        assert_eq!(
+            plan.source().iteration(),
+            crate::stream::StreamSourceIteration::Borrowed,
+            "method syntax must not make a physical entry-field loan owned"
+        );
+        env.mark_live_native_map_entry_local("entry");
+        assert!(native_map_entry_accessor_shape(&receiver, "getValue", &env).is_none());
+        env.mark_native_map_entry_tuple_local("entry");
+        env.insert_local_shape("entry", entry);
+        assert!(
+            native_map_entry_accessor_shape(&receiver, "getValue", &env).is_none(),
+            "shadowing must discard the physical tuple proof"
+        );
+    }
 
     fn int_plan_with_ownership(ownership: OwnershipShape) -> LocalPlan {
         let java_ty = JavaType::Primitive(PrimitiveType::Int);
@@ -3064,6 +3271,7 @@ mod tests {
                 name: "self".to_string(),
                 source_name: "self".to_string(),
                 initializer: Some(Expr::Call {
+                    type_args: Vec::new(),
                     receiver: Some(Box::new(Expr::Var("map".to_string()))),
                     name: name.to_string(),
                     args: Vec::new(),

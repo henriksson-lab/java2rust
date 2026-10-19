@@ -168,6 +168,21 @@ pub fn analyze_program_with_config(
     collect_usage_dispatch_requirement_facts(&usage, &mut facts);
     let field_nullability_iterations =
         collect_field_nullability_facts(program, &mut facts, &mut diagnostics);
+    // Field writes are not restricted to methods of the declaring class.
+    // Reuse the scope-resolved usage identities (including shadowing and
+    // inheritance), rather than matching foreign fields by spelling.
+    let null_written_fields: HashSet<_> = usage
+        .method_entries()
+        .map(|(_, usage)| usage)
+        .chain(usage.constructor_entries().map(|(_, usage)| usage))
+        .flat_map(|usage| usage.null_assigned_source_fields().iter())
+        .collect();
+    for field in &mut facts.field_nullability_facts {
+        if null_written_fields.contains(&field.field) {
+            field.state = NullabilityState::MaybeNull;
+            field.provenance = FieldNullabilityProvenance::MethodAssignment;
+        }
+    }
     if config.external_api_guesses_enabled() {
         collect_external_api_effect_facts(program, &mut facts, &config, &mut diagnostics);
         collect_java_platform_api_argument_effect_facts(&mut facts);
@@ -2027,6 +2042,7 @@ fn collect_external_api_effects_from_expr_with_env(
             name,
             args,
             resolved,
+            ..
         } = expr
         {
             seed_chained_external_receiver_effects(
@@ -2263,6 +2279,7 @@ fn seed_returned_external_call_effect(
         name,
         args,
         resolved,
+        ..
     } = expr
     else {
         return;
@@ -2353,6 +2370,7 @@ fn seed_typed_external_call_effect(
         name,
         args,
         resolved,
+        ..
     } = expr
     else {
         return;
@@ -2627,6 +2645,7 @@ fn seed_chained_external_receiver_effects(
         name,
         args,
         resolved,
+        ..
     }) = receiver
     else {
         return;
@@ -3322,9 +3341,17 @@ fn collect_method_effect_facts(program: &Program, usage: &UsageFacts, facts: &mu
     // every method body. Build that immutable lookup once, collect effects
     // separately, and append them only after the lookup borrow ends.
     let hierarchy_index = facts.hierarchy_lookup_index();
+    let callbacks = crate::source_callbacks::SourceCallbackPlan::build(program, facts);
     let mut method_effects = Vec::new();
     for ty in &program.types {
-        collect_type_method_effect_facts(ty, usage, facts, &hierarchy_index, &mut method_effects);
+        collect_type_method_effect_facts(
+            ty,
+            usage,
+            facts,
+            &hierarchy_index,
+            &callbacks,
+            &mut method_effects,
+        );
     }
     facts.method_effect_facts.extend(method_effects);
 }
@@ -3448,12 +3475,14 @@ fn collect_type_method_effect_facts(
     usage: &UsageFacts,
     facts: &FactSet,
     hierarchy_index: &HierarchyFactLookupIndex<'_>,
+    callbacks: &crate::source_callbacks::SourceCallbackPlan,
     method_effects: &mut Vec<MethodEffectFact>,
 ) {
     for member in &ty.members {
         match member {
             Member::Method(method) => {
-                let mut thrown = method_thrown_exception_types(method, facts, hierarchy_index);
+                let mut thrown =
+                    method_thrown_exception_types(method, facts, hierarchy_index, Some(callbacks));
                 for external_throw in
                     external_api_thrown_exception_types(ty, method, facts, hierarchy_index)
                 {
@@ -3495,6 +3524,7 @@ fn collect_type_method_effect_facts(
                 usage,
                 facts,
                 hierarchy_index,
+                callbacks,
                 method_effects,
             ),
             _ => {}
@@ -3686,6 +3716,7 @@ fn collect_external_api_thrown_exception_types_from_exprs(
             name,
             args,
             resolved,
+            ..
         } = expr
         else {
             return;
@@ -3868,12 +3899,14 @@ fn merge_return_nullability_states(states: &[NullabilityState]) -> NullabilitySt
 struct ThrownExceptionScanContext<'a> {
     facts: &'a FactSet,
     hierarchy_index: &'a HierarchyFactLookupIndex<'a>,
+    callbacks: Option<&'a crate::source_callbacks::SourceCallbackPlan>,
 }
 
 fn method_thrown_exception_types(
     method: &MethodDecl,
     facts: &FactSet,
     hierarchy_index: &HierarchyFactLookupIndex<'_>,
+    callbacks: Option<&crate::source_callbacks::SourceCallbackPlan>,
 ) -> Vec<JavaType> {
     let mut thrown = Vec::new();
     for ty in &method.throws {
@@ -3887,6 +3920,7 @@ fn method_thrown_exception_types(
             ThrownExceptionScanContext {
                 facts,
                 hierarchy_index,
+                callbacks,
             },
             &mut thrown,
         );
@@ -3990,9 +4024,12 @@ fn collect_thrown_exception_types_from_stmt(
         Stmt::LocalType(ty) => {
             for member in &ty.members {
                 if let Member::Method(method) = member {
-                    for ty in
-                        method_thrown_exception_types(method, facts.facts, facts.hierarchy_index)
-                    {
+                    for ty in method_thrown_exception_types(
+                        method,
+                        facts.facts,
+                        facts.hierarchy_index,
+                        facts.callbacks,
+                    ) {
                         push_unique_java_type(thrown, ty);
                     }
                 }
@@ -4087,14 +4124,25 @@ fn collect_thrown_exception_types_from_expr(
             receiver,
             name,
             args,
+            resolved,
             ..
         } => {
             if let Some(receiver) = receiver {
                 collect_thrown_exception_types_from_expr(receiver, exception_env, facts, thrown);
             }
-            for arg in args {
+            for (index, arg) in args.iter().enumerate() {
                 if let Expr::Lambda { body, .. } = arg {
-                    if !call_captures_lambda_for_deferred_throw_projection(name) {
+                    let may_invoke = resolved
+                        .as_ref()
+                        .and_then(|call| {
+                            facts
+                                .callbacks
+                                .and_then(|plan| plan.invocation_for_call(call, index))
+                        })
+                        .unwrap_or_else(|| {
+                            !call_captures_lambda_for_deferred_throw_projection(name)
+                        });
+                    if may_invoke {
                         collect_thrown_exception_types_from_lambda_body(
                             body,
                             exception_env,
@@ -7031,6 +7079,60 @@ pub(crate) fn walk_block_exprs(block: &Block, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
+/// Walk statements in one callable, without treating nested classes' or
+/// lambdas' returns as returns from the enclosing callable.
+pub(crate) fn walk_block_stmts(block: &Block, visit: &mut impl FnMut(&Stmt)) {
+    walk_stmts(&block.statements, visit);
+}
+
+fn walk_stmts(statements: &[Stmt], visit: &mut impl FnMut(&Stmt)) {
+    for stmt in statements {
+        visit(stmt);
+        match stmt {
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                walk_block_stmts(then_block, visit);
+                if let Some(block) = else_block {
+                    walk_block_stmts(block, visit);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::EnhancedFor { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => walk_block_stmts(body, visit),
+            Stmt::For { init, body, .. } => {
+                walk_stmts(init, visit);
+                walk_block_stmts(body, visit);
+            }
+            Stmt::Switch { cases, .. } => {
+                for case in cases {
+                    walk_stmts(&case.statements, visit);
+                }
+            }
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                walk_stmts(resources, visit);
+                walk_block_stmts(body, visit);
+                for catch in catches {
+                    walk_block_stmts(&catch.body, visit);
+                }
+                if let Some(block) = finally_block {
+                    walk_block_stmts(block, visit);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 pub(crate) fn walk_expr(expr: &Expr, visit: &mut impl FnMut(&Expr)) {
     visit(expr);
     match expr {
@@ -7177,6 +7279,45 @@ mod tests {
     }
 
     #[test]
+    fn source_callback_throw_projection_uses_execution_contracts_not_call_names() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.function.IntPredicate;
+            class Routes {
+                static boolean invoke(IntPredicate predicate) { return predicate.test(1); }
+                static boolean forward(IntPredicate predicate) { return invoke(predicate); }
+                static boolean unused(IntPredicate predicate) { return true; }
+                static boolean unusedForward(IntPredicate predicate) { return unused(predicate); }
+                static boolean submit(IntPredicate predicate) { return predicate.test(1); }
+                static boolean ignored() { return unused(value -> { throw new IllegalArgumentException(); }); }
+                static boolean forwardedIgnored() { return unusedForward(value -> { throw new IllegalArgumentException(); }); }
+                static boolean executed() { return forward(value -> { throw new IllegalArgumentException(); }); }
+                static boolean misleadingName() { return submit(value -> { throw new IllegalArgumentException(); }); }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let semantic = analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+        for (method, expected) in [
+            ("ignored", false),
+            ("forwardedIgnored", false),
+            ("executed", true),
+            ("misleadingName", true),
+        ] {
+            let throws = semantic
+                .facts
+                .method_effect_for("Routes", method)
+                .is_some_and(|effect| !effect.thrown.is_empty());
+            assert_eq!(throws, expected, "{method}");
+        }
+    }
+
+    #[test]
     fn thrown_exception_scan_sees_qualified_new_receiver() {
         let expr = qualified_new_expr(
             Expr::New {
@@ -7202,6 +7343,7 @@ mod tests {
             ThrownExceptionScanContext {
                 facts: &facts,
                 hierarchy_index: &hierarchy_index,
+                callbacks: None,
             },
             &mut thrown,
         );

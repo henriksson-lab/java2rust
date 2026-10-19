@@ -345,6 +345,8 @@ pub enum Expr {
     Call {
         receiver: Option<Box<Expr>>,
         name: String,
+        /// Explicit Java method type witnesses, kept separate from value args.
+        type_args: Vec<JavaType>,
         args: Vec<Expr>,
         resolved: Option<ResolvedCall>,
     },
@@ -577,6 +579,8 @@ pub struct ResolvedCall {
     pub declaring_type: String,
     pub rust_name: String,
     pub kind: CallKind,
+    /// Explicit witnesses belonging to the selected generic method binder.
+    pub type_args: Vec<JavaType>,
     pub return_type: JavaType,
     pub arg_target_types: Vec<JavaType>,
     pub arg_coercions: Vec<JavaCoercionEvidence>,

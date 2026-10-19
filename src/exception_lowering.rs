@@ -242,6 +242,39 @@ impl std::fmt::Display for InputStream {
     }
 }
 
+// Fallible intermediate stream operators retain lazy traversal and preserve
+// errors as items until a short-circuiting terminal consumes them. Keep source
+// callbacks outside generated binding scopes (and infer their input types from
+// these bounds), rather than injecting temporary names into their bodies.
+pub fn java_stream_try_filter<I, F, E>(items: I, mut predicate: F)
+    -> impl Iterator<Item = Result<I::Item, E>>
+where I: Iterator, F: FnMut(&I::Item) -> Result<bool, E> {
+    items.filter_map(move |item| match predicate(&item) {
+        Ok(true) => Some(Ok(item)),
+        Ok(false) => None,
+        Err(error) => Some(Err(error)),
+    })
+}
+
+pub fn java_stream_try_filter_result<I, T, F, E>(items: I, mut predicate: F)
+    -> impl Iterator<Item = Result<T, E>>
+where I: Iterator<Item = Result<T, E>>, F: FnMut(&T) -> Result<bool, E> {
+    items.filter_map(move |item| match item {
+        Err(error) => Some(Err(error)),
+        Ok(item) => match predicate(&item) {
+            Ok(true) => Some(Ok(item)),
+            Ok(false) => None,
+            Err(error) => Some(Err(error)),
+        },
+    })
+}
+
+pub fn java_stream_try_map_result<I, T, U, F, E>(items: I, mut mapper: F)
+    -> impl Iterator<Item = Result<U, E>>
+where I: Iterator<Item = Result<T, E>>, F: FnMut(T) -> Result<U, E> {
+    items.map(move |item| item.and_then(&mut mapper))
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JavaException {
     class_name: &'static str,
@@ -902,6 +935,28 @@ fn wrap_ok_return_in_some(stmt: RustStmt) -> RustStmt {
             condition,
             body: wrap_ok_returns_in_some(body),
         },
+        RustStmt::WhileLet {
+            label,
+            pattern,
+            expr,
+            body,
+        } => RustStmt::WhileLet {
+            label,
+            pattern,
+            expr,
+            body: wrap_ok_returns_in_some(body),
+        },
+        RustStmt::For {
+            label,
+            pattern,
+            iterable,
+            body,
+        } => RustStmt::For {
+            label,
+            pattern,
+            iterable,
+            body: wrap_ok_returns_in_some(body),
+        },
         RustStmt::Loop { label, body } => RustStmt::Loop {
             label,
             body: wrap_ok_returns_in_some(body),
@@ -1523,6 +1578,13 @@ fn rust_expr_definitely_terminates(expr: &RustExpr) -> bool {
         | RustExpr::PostfixComment { expr, .. } => rust_expr_definitely_terminates(expr),
         _ => false,
     }
+}
+
+pub(crate) fn java_null_pointer_exception_expr() -> RustExpr {
+    new_exception_expr(
+        "NullPointerException",
+        crate::coercion::rust_string_literal_projection("Java null receiver"),
+    )
 }
 
 pub(crate) fn new_exception_expr(class_name: &str, message: RustExpr) -> RustExpr {

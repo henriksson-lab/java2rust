@@ -148,6 +148,17 @@ fn remove_scope_bindings_declared_at(scope: &mut ScopeMap, decl: usize) {
 }
 
 impl LivenessAnalysis {
+    /// A nested declaration with the same spelling must not invalidate a
+    /// provenance fact about a binding supplied by the enclosing scope.
+    pub(crate) fn body_assigns_outer_binding(body: &Block, name: &str) -> bool {
+        let mut analysis = Self::default();
+        analysis.record_scopes_block(body, &mut ScopeMap::new());
+        analysis.pass = Pass::Writes;
+        analysis
+            .block_live_in(body, &HashSet::new(), None)
+            .contains(&Binding::new(name, OUTER_DECL))
+    }
+
     /// Analyze a callable body. Nothing is live on normal exit.
     pub(crate) fn for_body(body: &Block) -> Self {
         let mut analysis = Self::default();
@@ -246,6 +257,13 @@ impl LivenessAnalysis {
     pub(crate) fn binding_is_mutated_after(&self, stmt: &Stmt, name: &str) -> Option<bool> {
         let bindings = self.mutated_after.get(&stmt_id(stmt))?;
         Some(bindings.contains(&self.binding_at(stmt, name)))
+    }
+
+    /// Declaration identity at this program point. The token is only for
+    /// matching declarations in the same analyzed tree, never dereferenced.
+    pub(crate) fn declaration_site_at(&self, stmt: &Stmt, name: &str) -> Option<usize> {
+        let declaration = self.binding_at(stmt, name).decl;
+        (declaration != OUTER_DECL).then_some(declaration)
     }
 
     /// The binding a name refers to at `stmt`.

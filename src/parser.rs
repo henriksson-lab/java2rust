@@ -2237,6 +2237,11 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
                 Box::new(receiver)
             });
             Expr::Call {
+                type_args: named_children(node)
+                    .into_iter()
+                    .find(|child| child.kind() == "type_arguments")
+                    .map(|args| parse_type_arguments_node(args, source))
+                    .unwrap_or_default(),
                 receiver,
                 name: field_text(node, "name", source).unwrap_or_else(|| "unknown".to_string()),
                 args: node

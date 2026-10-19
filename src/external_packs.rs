@@ -30506,6 +30506,26 @@ pub fn java_platform_api_argument_effect_facts() -> Vec<ExternalApiArgumentEffec
             provenance: FactProvenance::BuiltinExternalModel,
         })
         .collect::<Vec<_>>();
+    for receiver_type in ["Comparator", "java.util.Comparator", "JavaUtilComparator"] {
+        for method_name in [
+            "comparingInt",
+            "comparing_int",
+            "thenComparingInt",
+            "then_comparing_int",
+        ] {
+            facts.push(ExternalApiArgumentEffectFact {
+                method_name: method_name.to_string(),
+                receiver_type: Some(receiver_type.to_string()),
+                arg_count: Some(1),
+                parameter_index: 0,
+                parameter_type: None,
+                parameter_nullability: NullabilityState::DefinitelyNonNull,
+                argument_mutability: ReceiverMutabilityFact::ReadOnly,
+                alias_policy: ExternalArgumentAliasPolicy::Escapes,
+                provenance: FactProvenance::BuiltinExternalModel,
+            });
+        }
+    }
     for receiver_type in ["Pattern", "JavaUtilRegexPattern", "java.util.regex.Pattern"] {
         facts.push(ExternalApiArgumentEffectFact {
             method_name: "matcher".to_string(),
@@ -31006,6 +31026,27 @@ struct BuiltinExternalPackLookupIndex {
     unique_qualified_api_receiver_by_simple: HashMap<String, String>,
 }
 
+fn index_builtin_argument_effect(
+    index: &mut BuiltinExternalPackLookupIndex,
+    fact: &ExternalApiArgumentEffectFact,
+) {
+    if let Some(receiver_type) = &fact.receiver_type {
+        for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
+            for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
+                index
+                    .api_argument_effects
+                    .entry((
+                        receiver_alias.clone(),
+                        method_alias,
+                        fact.arg_count,
+                        fact.parameter_index,
+                    ))
+                    .or_insert_with(|| fact.clone());
+            }
+        }
+    }
+}
+
 fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupIndex {
     static INDEX: OnceLock<BuiltinExternalPackLookupIndex> = OnceLock::new();
     INDEX.get_or_init(|| {
@@ -31094,21 +31135,7 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                 }
             }
             for fact in facts.external_api_argument_effect_facts.iter().rev() {
-                if let Some(receiver_type) = &fact.receiver_type {
-                    for receiver_alias in external_receiver_lookup_aliases(receiver_type) {
-                        for method_alias in external_method_name_lookup_aliases(&fact.method_name) {
-                            index
-                                .api_argument_effects
-                                .entry((
-                                    receiver_alias.clone(),
-                                    method_alias,
-                                    fact.arg_count,
-                                    fact.parameter_index,
-                                ))
-                                .or_insert_with(|| fact.clone());
-                        }
-                    }
-                }
+                index_builtin_argument_effect(&mut index, fact);
             }
             for fact in facts.unsupported_external_api_facts.iter().rev() {
                 for receiver_alias in external_receiver_lookup_aliases(&fact.receiver_type) {
@@ -31262,6 +31289,11 @@ fn builtin_external_pack_lookup_index() -> &'static BuiltinExternalPackLookupInd
                         .push(fact.clone());
                 }
             }
+        }
+        // Platform argument contracts are also built-ins. Direct indexed
+        // queries must agree with a program that materialized these facts.
+        for fact in java_platform_api_argument_effect_facts() {
+            index_builtin_argument_effect(&mut index, &fact);
         }
         index
     })

@@ -52,10 +52,12 @@ fn fallback_facts(source_owner: Option<&str>) -> FactSet {
 
 fn values_call(resolved: bool, element: JavaType) -> Expr {
     Expr::Call {
+        type_args: Vec::new(),
         receiver: Some(Box::new(Expr::Var("bucket".to_string()))),
         name: "values".to_string(),
         args: vec![],
         resolved: resolved.then(|| ResolvedCall {
+            type_args: Vec::new(),
             declaring_type: "neutral.Bucket".to_string(),
             rust_name: "values".to_string(),
             kind: CallKind::Instance,

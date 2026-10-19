@@ -5,6 +5,47 @@ use crate::shape_projection::iteration_element_shape_with_effective_facts;
 use crate::slot_shape::RustSlotShape;
 use crate::types::{TypeEnv, infer_expr_type, optional_element_type, stream_element_type};
 
+/// Immediate stream creation and terminal traversal are different effects.
+/// The same typed source classification also supplies cursor capabilities.
+pub(crate) fn visit_retained_stream_sources(
+    expr: &Expr,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    mut visit: impl FnMut(&Expr, RustSlotShape, bool),
+) {
+    let Some(facts) = ctx.facts() else {
+        return;
+    };
+    crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
+        if let Some(plan) =
+            crate::stream::build_stream_plan_with_shape_context(node, env, ctx, facts)
+        {
+            let source = plan.source().expr();
+            let parent = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+            if crate::call_plan::retained_native_iteration_element_type(&parent, facts).is_some() {
+                visit(source, parent, true);
+            }
+        }
+        if let Expr::Call {
+            receiver: Some(source),
+            name,
+            args,
+            ..
+        } = node
+            && args.is_empty()
+            && matches!(
+                name.as_str(),
+                "stream" | "parallelStream" | "parallel_stream"
+            )
+        {
+            let parent = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+            if crate::call_plan::retained_native_iteration_element_type(&parent, facts).is_some() {
+                visit(source, parent, false);
+            }
+        }
+    });
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamSourceCapabilityPolicy {
     capability_element: Option<JavaType>,
@@ -86,13 +127,67 @@ pub fn infer_stream_source_element_shape_with_facts(
     infer_stream_source_element_shape_with_effective_facts(source, env, &effective_facts)
 }
 
+/// A solved source slot can refine element nullability without changing the
+/// Java collection's declared type. Preserve that physical element contract
+/// before planning callbacks, rather than repairing it in individual renderers.
+pub(crate) fn infer_stream_source_element_shape_with_context(
+    source: &Expr,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    facts: &FactSet,
+) -> Option<RustSlotShape> {
+    let source_shape = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+    if let Some(element) = crate::shape_projection::retained_iteration_element_shape(
+        &source_shape,
+        facts,
+        ctx.representations(),
+    ) {
+        return Some(element);
+    }
+    let declared = infer_stream_source_element_shape_with_facts(source, env.type_env(), facts)?;
+    let effective_facts = EffectiveFacts::new(facts);
+    if let Some(element) = stream_array_element_shape(&source_shape, &effective_facts) {
+        return Some(element);
+    }
+    let source_ty = source_shape
+        .optional_element_type()
+        .unwrap_or_else(|| source_shape.java_ty.clone());
+    let physical_element = stream_element_type(&source_ty)
+        .or_else(|| stream_source_capability_policy(&source_ty, facts).into_capability_element());
+    let mut element = match physical_element {
+        Some(element) if element != declared.java_ty => {
+            crate::shape_projection::iteration_element_shape(element, facts)
+        }
+        _ => declared,
+    };
+    element.inherit_native_collection_child(&source_shape, 0);
+    Some(element)
+}
+
 pub fn infer_stream_source_element_shape_with_effective_facts(
     source: &Expr,
     env: &TypeEnv,
     facts: &EffectiveFacts,
 ) -> Option<RustSlotShape> {
+    let source_shape = RustSlotShape::for_storage(infer_expr_type(source, env));
+    if let Some(element) = stream_array_element_shape(&source_shape, facts) {
+        return Some(element);
+    }
     stream_source_element_type_with_effective_facts(source, env, facts)
         .map(|ty| iteration_element_shape_with_effective_facts(ty, facts))
+}
+
+fn stream_array_element_shape(
+    source: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> Option<RustSlotShape> {
+    let element = source.optional_element_type();
+    let ty = element.as_ref().unwrap_or(&source.java_ty);
+    if matches!(ty, JavaType::Array(_)) {
+        crate::shape_projection::indexed_read_shape_for_access_with_effective_facts(source, facts)
+    } else {
+        None
+    }
 }
 
 fn infer_stream_lambda_call_shape_from_shared_plan(
@@ -106,6 +201,7 @@ fn infer_stream_lambda_call_shape_from_shared_plan(
         name,
         args,
         resolved,
+        ..
     } = expr
     else {
         return None;

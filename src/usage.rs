@@ -28,6 +28,8 @@ pub struct UsageFacts {
 struct UsageAnalysisContext<'a> {
     facts: &'a FactSet,
     external_lookup: ExternalFactLookupIndex<'a>,
+    source_symbols: Option<crate::resolve::SourceSymbols>,
+    source_return_tables: HashMap<String, HashMap<(String, usize), NullabilityState>>,
 }
 
 impl<'a> UsageAnalysisContext<'a> {
@@ -35,6 +37,36 @@ impl<'a> UsageAnalysisContext<'a> {
         Self {
             facts,
             external_lookup: facts.external_lookup_index(),
+            source_symbols: None,
+            source_return_tables: HashMap::new(),
+        }
+    }
+
+    fn source_return_table(
+        &self,
+        owner: &str,
+    ) -> Option<&HashMap<(String, usize), NullabilityState>> {
+        let owner = self
+            .source_symbols
+            .as_ref()
+            .map_or(owner, |symbols| symbols.source_type_name(owner));
+        self.source_return_tables.get(owner)
+    }
+
+    fn collect_source_return_tables(&mut self, ty: &TypeDecl) {
+        let table = source_return_nullability_by_call_name(ty, self);
+        let owner = self
+            .source_symbols
+            .as_ref()
+            .map_or(ty.name.as_str(), |symbols| {
+                symbols.source_type_name(&ty.name)
+            })
+            .to_string();
+        self.source_return_tables.insert(owner, table);
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                self.collect_source_return_tables(nested);
+            }
         }
     }
 }
@@ -52,6 +84,7 @@ pub struct CallGraph {
     nodes: HashSet<CallableKey>,
     edges: Vec<CallGraphEdge>,
     anonymous_methods: HashMap<CallableKey, crate::java_ir::MethodDecl>,
+    callback_bodies: HashMap<CallableKey, (Vec<Param>, Block)>,
 }
 
 impl CallGraph {
@@ -63,8 +96,29 @@ impl CallGraph {
         &self.edges
     }
 
+    #[cfg(test)]
     pub(crate) fn anonymous_methods(&self) -> &HashMap<CallableKey, crate::java_ir::MethodDecl> {
         &self.anonymous_methods
+    }
+
+    /// Bodies outside named declarations still need the same intrinsic-effect
+    /// analysis as source methods (throw, bounds checks, division, casts).
+    pub(crate) fn synthetic_callable_bodies(
+        &self,
+    ) -> impl Iterator<Item = (&CallableKey, &[Param], &Block)> {
+        self.anonymous_methods
+            .iter()
+            .filter_map(|(key, method)| {
+                method
+                    .body
+                    .as_ref()
+                    .map(|body| (key, method.params.as_slice(), body))
+            })
+            .chain(
+                self.callback_bodies
+                    .iter()
+                    .map(|(key, (params, body))| (key, params.as_slice(), body)),
+            )
     }
 
     #[cfg(test)]
@@ -76,6 +130,7 @@ impl CallGraph {
                 .collect(),
             edges,
             anonymous_methods: HashMap::new(),
+            callback_bodies: HashMap::new(),
         }
     }
 
@@ -84,6 +139,7 @@ impl CallGraph {
             nodes: nodes.into_iter().collect(),
             edges: Vec::new(),
             anonymous_methods: HashMap::new(),
+            callback_bodies: HashMap::new(),
         }
     }
 }
@@ -104,6 +160,11 @@ pub enum CallableKey {
     Lambda {
         owner: Box<CallableKey>,
         ordinal: usize,
+    },
+    /// A declaration-scoped SAM contract, not a lexical lambda ordinal.
+    CallbackParameter {
+        owner: Box<CallableKey>,
+        index: usize,
     },
     #[non_exhaustive]
     AnonymousMethod {
@@ -283,6 +344,9 @@ impl CallableKey {
             CallableKey::Lambda { owner, ordinal } => {
                 format!("{}#lambda{ordinal}", owner.diagnostic_label())
             }
+            CallableKey::CallbackParameter { owner, index } => {
+                format!("{}#callback{index}", owner.diagnostic_label())
+            }
             CallableKey::AnonymousMethod {
                 owner,
                 ordinal,
@@ -343,6 +407,7 @@ pub enum CallGraphEdgeKind {
     AnonymousClassConstructor,
     AnonymousClassMethod,
     AnonymousOverrideContract,
+    CallbackContractEquality,
     LambdaBody,
     HandledExceptionBoundary,
     UnresolvedExternalMethodCall,
@@ -458,7 +523,19 @@ pub struct MethodUsageFacts {
     call_sites: Vec<CallSiteUse>,
     constructor_call_sites: Vec<ConstructorCallSiteUse>,
     returned_call_results: Vec<ReturnedCallResultUse>,
+    assigned_call_results: Vec<AssignedCallResultUse>,
+    native_collection_storage_flows:
+        Vec<(NativeCollectionStorageSlot, NativeCollectionStorageSlot)>,
+    nullable_collection_storage_flows:
+        Vec<(NativeCollectionStorageSlot, NativeCollectionStorageSlot)>,
+    native_collection_retention_requirements: Vec<NativeCollectionStorageSlot>,
+    native_list_projection_slots: Vec<NativeCollectionStorageSlot>,
+    native_map_entry_backing_storage: HashMap<BindingId, NativeCollectionStorageSlot>,
+    null_assigned_source_fields: Vec<crate::facts::FieldKey>,
     field_uses: Vec<FieldUse>,
+    // Shared once per owner across callable facts. Static storage still
+    // contributes field constraints, but never mutates an instance receiver.
+    static_field_names: std::sync::Arc<HashSet<String>>,
     self_argument_uses: Vec<SelfArgumentUse>,
     mutates_self: bool,
     uses_receiver: bool,
@@ -705,6 +782,16 @@ fn contains_aliased_resolved_source_method_key(
 }
 
 impl MethodUsageFacts {
+    pub(crate) fn null_assigned_source_fields(&self) -> &[crate::facts::FieldKey] {
+        &self.null_assigned_source_fields
+    }
+
+    pub(crate) fn native_collection_retention_requirements(
+        &self,
+    ) -> &[NativeCollectionStorageSlot] {
+        &self.native_collection_retention_requirements
+    }
+
     /// Whether evaluating the body reads the enclosing instance, including
     /// field reads which do not participate in a specialized FieldUse flow.
     pub(crate) fn uses_receiver(&self) -> bool {
@@ -741,6 +828,13 @@ impl MethodUsageFacts {
 
     pub fn mutates_self(&self) -> bool {
         self.mutates_self
+    }
+
+    fn field_is_static(&self, name: &str) -> bool {
+        self.static_field_names.contains(name)
+            || self
+                .static_field_names
+                .contains(&crate::parser::to_snake_case(name))
     }
 
     pub(crate) fn self_passes_unknown_boundary(&self) -> bool {
@@ -1125,6 +1219,8 @@ pub enum BindingUse {
     StoredInField {
         field_name: String,
     },
+    /// A selected call retains the argument in its result or other storage.
+    RetainedByCall,
     Returned,
     ReturnedNullableSequenceElements,
     CastTarget {
@@ -1201,6 +1297,52 @@ pub enum CallArgumentBoundary {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum CollectionArgumentOrigin {
+    MethodReturn(ResolvedCall),
+    Field { owner: String, name: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum NativeCollectionStorageRoot {
+    Binding(BindingId),
+    Return,
+    Origin(CollectionArgumentOrigin),
+    MethodArgument {
+        call: ResolvedCall,
+        index: usize,
+    },
+    ConstructorArgument {
+        call: ResolvedConstructor,
+        index: usize,
+    },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct NativeCollectionStorageSlot {
+    pub root: NativeCollectionStorageRoot,
+    pub path: Vec<usize>,
+    pub ty: JavaType,
+}
+
+impl MethodUsageFacts {
+    pub(crate) fn native_list_projection_slots(&self) -> &[NativeCollectionStorageSlot] {
+        &self.native_list_projection_slots
+    }
+
+    pub(crate) fn nullable_collection_storage_flows(
+        &self,
+    ) -> &[(NativeCollectionStorageSlot, NativeCollectionStorageSlot)] {
+        &self.nullable_collection_storage_flows
+    }
+
+    pub(crate) fn native_collection_storage_flows(
+        &self,
+    ) -> &[(NativeCollectionStorageSlot, NativeCollectionStorageSlot)] {
+        &self.native_collection_storage_flows
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CallSiteUse {
     name: String,
     arg_count: usize,
@@ -1212,11 +1354,16 @@ pub struct CallSiteUse {
     nullable_source_call_arg_indices: Vec<usize>,
     argument_bindings: Vec<(usize, BindingId)>,
     argument_self_fields: Vec<(usize, String)>,
+    collection_argument_origins: Vec<(usize, CollectionArgumentOrigin)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedCall>,
 }
 
 impl CallSiteUse {
+    pub(crate) fn collection_argument_origins(&self) -> &[(usize, CollectionArgumentOrigin)] {
+        &self.collection_argument_origins
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1274,11 +1421,16 @@ pub struct ConstructorCallSiteUse {
     nullable_source_call_arg_indices: Vec<usize>,
     argument_bindings: Vec<(usize, BindingId)>,
     argument_self_fields: Vec<(usize, String)>,
+    collection_argument_origins: Vec<(usize, CollectionArgumentOrigin)>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedConstructor>,
 }
 
 impl ConstructorCallSiteUse {
+    pub(crate) fn collection_argument_origins(&self) -> &[(usize, CollectionArgumentOrigin)] {
+        &self.collection_argument_origins
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1319,6 +1471,18 @@ pub struct ReturnedCallResultUse {
     receiver_type: Option<JavaType>,
     boundary: CallArgumentBoundary,
     resolved: Option<ResolvedCall>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct AssignedCallResultUse {
+    pub binding: BindingId,
+    pub call: CallResultBoundaryPolicy,
+}
+
+impl MethodUsageFacts {
+    pub(crate) fn assigned_call_results(&self) -> &[AssignedCallResultUse] {
+        &self.assigned_call_results
+    }
 }
 
 impl ReturnedCallResultUse {
@@ -1422,7 +1586,11 @@ pub fn analyze_usage(program: &Program) -> UsageFacts {
 }
 
 pub fn analyze_usage_with_facts(program: &Program, semantic_facts: &FactSet) -> UsageFacts {
-    let semantic_facts = UsageAnalysisContext::new(semantic_facts);
+    let mut semantic_facts = UsageAnalysisContext::new(semantic_facts);
+    semantic_facts.source_symbols = Some(crate::resolve::source_symbols_from_program(program));
+    for ty in &program.types {
+        semantic_facts.collect_source_return_tables(ty);
+    }
     let mut facts = UsageFacts::default();
     for ty in &program.types {
         analyze_type_usage(program, ty, &mut facts, &semantic_facts);
@@ -1881,10 +2049,36 @@ pub fn build_call_graph(program: &Program) -> CallGraph {
 }
 
 pub fn build_call_graph_with_facts(program: &Program, facts: &FactSet) -> CallGraph {
-    let mut graph = CallGraph::default();
+    build_call_graph_with_optional_source_callbacks(program, facts, None)
+}
+
+#[cfg(test)]
+pub(crate) fn build_call_graph_with_source_callbacks(
+    program: &Program,
+    facts: &FactSet,
+    callbacks: &crate::source_callbacks::SourceCallbackPlan,
+) -> CallGraph {
+    build_call_graph_with_optional_source_callbacks(program, facts, Some(callbacks))
+}
+
+fn build_call_graph_with_optional_source_callbacks(
+    program: &Program,
+    facts: &FactSet,
+    callbacks: Option<&crate::source_callbacks::SourceCallbackPlan>,
+) -> CallGraph {
     let source_symbols = crate::resolve::source_symbols_from_program(program);
+    build_call_graph_with_source_callback_symbols(program, facts, callbacks, &source_symbols)
+}
+
+pub(crate) fn build_call_graph_with_source_callback_symbols(
+    program: &Program,
+    facts: &FactSet,
+    callbacks: Option<&crate::source_callbacks::SourceCallbackPlan>,
+    source_symbols: &crate::resolve::SourceSymbols,
+) -> CallGraph {
+    let mut graph = CallGraph::default();
     for ty in &program.types {
-        build_type_call_graph(ty, program, &source_symbols, &mut graph, facts);
+        build_type_call_graph(ty, program, source_symbols, &mut graph, facts, callbacks);
     }
     graph
 }
@@ -1897,7 +2091,15 @@ fn analyze_type_usage(
 ) {
     let internal_methods = internal_method_names(ty);
     let same_type_method_arg_targets = same_type_method_arg_targets(ty);
-    let source_return_nullability = source_return_nullability_by_call_name(ty, semantic_facts);
+    let fallback_return_nullability;
+    let source_return_nullability = match semantic_facts.source_return_table(&ty.name) {
+        Some(table) => table,
+        None => {
+            fallback_return_nullability =
+                source_return_nullability_by_call_name(ty, semantic_facts);
+            &fallback_return_nullability
+        }
+    };
     let mut field_names = field_names(ty, program);
     let mut field_types = field_types(ty, program);
     for field in
@@ -1911,10 +2113,18 @@ fn analyze_type_usage(
         }
     }
     let current_super_type = ty.extends.as_deref();
+    let static_field_names = std::sync::Arc::new(
+        semantic_facts
+            .source_symbols
+            .as_ref()
+            .map(|symbols| symbols.source_static_field_names(&ty.name))
+            .unwrap_or_default(),
+    );
     for member in &ty.members {
         match member {
             Member::Method(method) => {
                 let mut method_facts = MethodUsageFacts::default();
+                method_facts.static_field_names = std::sync::Arc::clone(&static_field_names);
                 method_facts.same_type_method_arg_targets = same_type_method_arg_targets.clone();
                 method_facts.type_params_in_scope =
                     usage_type_params_in_scope(&ty.type_params, &method.type_params);
@@ -1974,6 +2184,7 @@ fn analyze_type_usage(
             }
             Member::Constructor(ctor) => {
                 let mut ctor_facts = MethodUsageFacts::default();
+                ctor_facts.static_field_names = std::sync::Arc::clone(&static_field_names);
                 ctor_facts.same_type_method_arg_targets = same_type_method_arg_targets.clone();
                 ctor_facts.type_params_in_scope =
                     usage_type_params_in_scope(&ty.type_params, &ctor.type_params);
@@ -2073,6 +2284,7 @@ fn build_type_call_graph(
     source_symbols: &crate::resolve::SourceSymbols,
     graph: &mut CallGraph,
     facts: &FactSet,
+    callbacks: Option<&crate::source_callbacks::SourceCallbackPlan>,
 ) {
     let internal_methods = all_method_names(ty);
     let callable_env = |params: &[Param], type_params: &[String], bounds: &[Option<JavaType>]| {
@@ -2112,6 +2324,21 @@ fn build_type_call_graph(
                             &method.type_param_bounds,
                         ),
                     );
+                    context.source_callbacks = callbacks;
+                    for (index, param) in method.params.iter().enumerate() {
+                        if callbacks.is_some_and(|plan| plan.is_inline(ty, method, index)) {
+                            let key = CallableKey::CallbackParameter {
+                                owner: Box::new(context.current_callable.clone()),
+                                index,
+                            };
+                            graph.nodes.insert(key.clone());
+                            for name in [&param.name, &param.source_name] {
+                                context
+                                    .callback_parameters
+                                    .insert(name.clone(), (key.clone(), param.ty.clone()));
+                            }
+                        }
+                    }
                     collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
             }
@@ -2127,11 +2354,12 @@ fn build_type_call_graph(
                         source_symbols,
                         callable_env(&ctor.params, &ctor.type_params, &ctor.type_param_bounds),
                     );
+                    context.source_callbacks = callbacks;
                     collect_call_graph_edges_from_block(body, graph, &mut context, facts);
                 }
             }
             Member::Type(nested) => {
-                build_type_call_graph(nested, program, source_symbols, graph, facts)
+                build_type_call_graph(nested, program, source_symbols, graph, facts, callbacks)
             }
             _ => {}
         }
@@ -2145,6 +2373,8 @@ struct CallGraphBuildContext<'a> {
     current_callable: CallableKey,
     program: &'a Program,
     source_symbols: &'a crate::resolve::SourceSymbols,
+    source_callbacks: Option<&'a crate::source_callbacks::SourceCallbackPlan>,
+    callback_parameters: HashMap<String, (CallableKey, JavaType)>,
     type_env: TypeEnv,
     consumed_callback_bodies: HashSet<SourceLambdaBodyKey>,
     anonymous_super_type: Option<&'a TypeDecl>,
@@ -2169,6 +2399,8 @@ impl<'a> CallGraphBuildContext<'a> {
             current_callable,
             program,
             source_symbols,
+            source_callbacks: None,
+            callback_parameters: HashMap::new(),
             type_env,
             consumed_callback_bodies: HashSet::new(),
             anonymous_super_type: None,
@@ -2186,6 +2418,8 @@ impl<'a> CallGraphBuildContext<'a> {
             current_callable,
             program: self.program,
             source_symbols: self.source_symbols,
+            source_callbacks: self.source_callbacks,
+            callback_parameters: self.callback_parameters.clone(),
             type_env: self.type_env.clone(),
             consumed_callback_bodies: self.consumed_callback_bodies.clone(),
             anonymous_super_type: self.anonymous_super_type,
@@ -2333,6 +2567,45 @@ fn collect_call_graph_edges_from_stmt(
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
             collect_call_graph_edges_from_expr(iterable, graph, context, facts);
+            if let Some(plan) = crate::call_plan::plan_enhanced_for_iterator(
+                iterable,
+                &context.type_env,
+                &context.current_type,
+                context.source_symbols,
+                facts,
+            ) {
+                if let Expr::Call {
+                    receiver,
+                    name,
+                    args,
+                    resolved,
+                    ..
+                } = &plan.call
+                {
+                    let (callee, kind) = call_graph_method_target(
+                        receiver.as_deref(),
+                        name,
+                        args,
+                        resolved,
+                        context,
+                        facts,
+                    );
+                    add_call_graph_edge(graph, context, callee, kind, facts);
+                }
+                for operation in crate::stdlib::IteratorProtocolOperation::ALL {
+                    add_call_graph_edge(
+                        graph,
+                        context,
+                        CallableKey::external_method(
+                            Some("Iterator"),
+                            operation.checked_method(),
+                            0,
+                        ),
+                        CallGraphEdgeKind::UnresolvedExternalMethodCall,
+                        facts,
+                    );
+                }
+            }
             collect_call_graph_edges_from_block(body, graph, context, facts);
         }
         Stmt::Switch { selector, cases } => {
@@ -2393,11 +2666,164 @@ fn collect_call_graph_edges_from_stmt(
                 collect_call_graph_edges_from_expr(arg, graph, context, facts);
             }
         }
-        Stmt::LocalType(ty) => {
-            build_type_call_graph(ty, context.program, context.source_symbols, graph, facts)
-        }
+        Stmt::LocalType(ty) => build_type_call_graph(
+            ty,
+            context.program,
+            context.source_symbols,
+            graph,
+            facts,
+            context.source_callbacks,
+        ),
         Stmt::Block(block) | Stmt::LabeledBlock { body: block, .. } => {
             collect_call_graph_edges_from_block(block, graph, context, facts)
+        }
+    }
+}
+
+/// Connect actual callback bodies to the declaring formal contract. Merely
+/// constructing a callback does not execute it: the invocation edge is added
+/// separately where the formal's SAM is called.
+fn collect_source_callback_arguments(
+    call: &ResolvedCall,
+    args: &[Expr],
+    graph: &mut CallGraph,
+    context: &mut CallGraphBuildContext<'_>,
+    facts: &FactSet,
+) {
+    let Some(callbacks) = context.source_callbacks else {
+        return;
+    };
+    let Some((owner, method)) = crate::java_signature::resolved_source_method_decl(
+        context.program,
+        &context.current_type,
+        call,
+    ) else {
+        return;
+    };
+    for (index, (argument, param)) in args.iter().zip(&method.params).enumerate() {
+        if !callbacks.is_inline(owner, method, index) {
+            continue;
+        }
+        let ty = call.arg_target_types.get(index).unwrap_or(&param.ty);
+        let JavaType::Named {
+            name,
+            args: type_args,
+        } = ty
+        else {
+            continue;
+        };
+        let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
+        let Some(shape) = crate::stdlib::functional_interface_shape(&canonical) else {
+            continue;
+        };
+        let Some(inputs) = shape.input_types(type_args) else {
+            continue;
+        };
+        let formal = CallableKey::CallbackParameter {
+            owner: Box::new(CallableKey::source_method_for_type(owner, method)),
+            index,
+        };
+        let contract = context.child_for(formal.clone());
+        match argument {
+            Expr::Var(name) if context.callback_parameters.contains_key(name) => {
+                if let Some((source, _)) = context.callback_parameters.get(name) {
+                    add_call_graph_edge(
+                        graph,
+                        &contract,
+                        source.clone(),
+                        CallGraphEdgeKind::CallbackContractEquality,
+                        facts,
+                    );
+                }
+            }
+            Expr::Lambda { params, body } if params.len() == inputs.len() => {
+                if !context
+                    .consumed_callback_bodies
+                    .insert(SourceLambdaBodyKey::for_lambda(body))
+                {
+                    continue;
+                }
+                let lambda = context.next_lambda();
+                add_call_graph_edge(
+                    graph,
+                    &contract,
+                    lambda.clone(),
+                    CallGraphEdgeKind::LambdaBody,
+                    facts,
+                );
+                let mut child = context.child_for(lambda.clone());
+                let mut typed_params = Vec::new();
+                for (param, input) in params.iter().zip(inputs) {
+                    for name in [&param.name, &param.source_name] {
+                        child.type_env.insert_local(name.clone(), input.clone());
+                        child.callback_parameters.remove(name);
+                    }
+                    typed_params.push(Param {
+                        name: param.name.clone(),
+                        source_name: param.source_name.clone(),
+                        ty: input,
+                        is_varargs: false,
+                        binding: None,
+                    });
+                }
+                let body = match body {
+                    LambdaBody::Expr(expr) => {
+                        collect_call_graph_edges_from_expr(expr, graph, &mut child, facts);
+                        Block {
+                            statements: vec![Stmt::Return(Some((**expr).clone()))],
+                        }
+                    }
+                    LambdaBody::Block(block) => {
+                        collect_call_graph_edges_from_block(block, graph, &mut child, facts);
+                        block.clone()
+                    }
+                };
+                graph.callback_bodies.insert(lambda, (typed_params, body));
+            }
+            Expr::MethodReference { target, method } => {
+                if let Some(call) = crate::resolve::resolve_source_method_reference_with_input_types(
+                    target,
+                    method,
+                    &inputs,
+                    &context.current_type,
+                    context.source_symbols,
+                    &context.type_env,
+                    facts,
+                ) {
+                    add_call_graph_edge(
+                        graph,
+                        &contract,
+                        resolved_method_call_graph_key(&call, context),
+                        CallGraphEdgeKind::DirectMethodCall,
+                        facts,
+                    );
+                    context
+                        .consumed_callback_bodies
+                        .insert(SourceLambdaBodyKey::Expr(argument));
+                }
+            }
+            _ => {
+                // An existing native functional value has the checked SAM
+                // ABI regardless of which lambda/source object produced it.
+                // Link its invocation effect to the formal, not to argument
+                // evaluation: unused and lazy callbacks must stay lazy.
+                if crate::effective_facts::EffectiveFacts::new(facts)
+                    .native_functional_carrier(ty)
+                    .is_some()
+                {
+                    add_call_graph_edge(
+                        graph,
+                        &contract,
+                        CallableKey::external_method(
+                            Some(name),
+                            shape.result_method_name(),
+                            inputs.len(),
+                        ),
+                        CallGraphEdgeKind::UnresolvedExternalMethodCall,
+                        facts,
+                    );
+                }
+            }
         }
     }
 }
@@ -2408,16 +2834,64 @@ fn collect_call_graph_edges_from_expr(
     context: &mut CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) {
+    if matches!(expr, Expr::MethodReference { .. })
+        && context
+            .consumed_callback_bodies
+            .contains(&SourceLambdaBodyKey::Expr(expr))
+    {
+        return;
+    }
     match expr {
         Expr::Call {
             receiver,
             name,
             args,
             resolved,
+            ..
         } => {
             let (callee, edge_kind) =
                 call_graph_method_target(receiver.as_deref(), name, args, resolved, context, facts);
             add_call_graph_edge(graph, context, callee, edge_kind, facts);
+            if let Some(call) = resolved {
+                collect_source_callback_arguments(call, args, graph, context, facts);
+            }
+            if let Some((_, _, comparator)) =
+                crate::call_plan::native_ordering_consumer(expr, facts, &context.type_env)
+            {
+                if let Expr::Var(callback) = comparator
+                    && let Some((key, _)) = context.callback_parameters.get(callback)
+                {
+                    add_call_graph_edge(
+                        graph,
+                        context,
+                        key.clone(),
+                        CallGraphEdgeKind::DirectMethodCall,
+                        facts,
+                    );
+                } else {
+                    // Lowering adapts each consumed value to the native
+                    // checked Comparator contract. That contract also applies
+                    // to source implementors and target-typed factory/lambda
+                    // expressions, not just expressions already typed as the
+                    // facade. Attribute invocation here, never at creation.
+                    let owner = "Comparator";
+                    let ty = JavaType::Named {
+                        name: owner.to_string(),
+                        args: Vec::new(),
+                    };
+                    if let Some(sam) = crate::effective_facts::EffectiveFacts::new(facts)
+                        .native_functional_carrier(&ty)
+                    {
+                        add_call_graph_edge(
+                            graph,
+                            context,
+                            CallableKey::external_method(Some(owner), sam.result_method_name(), 2),
+                            CallGraphEdgeKind::UnresolvedExternalMethodCall,
+                            facts,
+                        );
+                    }
+                }
+            }
             if let Some(stream) = crate::stream::build_stream_plan(expr, &context.type_env, facts) {
                 stream.visit_consumed_callbacks(&mut |lambda, input| {
                     let body_key = match lambda.body() {
@@ -2751,6 +3225,17 @@ fn call_graph_method_target(
     context: &CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) -> (CallableKey, CallGraphEdgeKind) {
+    if let Some(Expr::Var(receiver)) = receiver
+        && let Some((key, JavaType::Named { name: owner, .. })) =
+            context.callback_parameters.get(receiver)
+        && let Some(shape) = crate::stdlib::functional_interface_shape(
+            &crate::stdlib::canonical_external_receiver_type_key(owner),
+        )
+        && shape.method() == name
+        && shape.inputs().len() == args.len()
+    {
+        return (key.clone(), CallGraphEdgeKind::DirectMethodCall);
+    }
     if matches!(receiver, Some(Expr::Super)) {
         if let Some(base) = context.anonymous_super_type
             && let Some(target) =
@@ -2764,6 +3249,25 @@ fn call_graph_method_target(
         );
     }
     if let Some(resolved) = resolved {
+        if let Some(sam) = crate::stdlib::functional_interface_shape(
+            &crate::stdlib::canonical_external_receiver_type_key(&resolved.declaring_type),
+        ) && sam.method() == name
+            && sam.inputs().len() == args.len()
+            && !crate::call_plan::java_type_owner_is_parsed_source(
+                &resolved.declaring_type,
+                &context.type_env,
+                facts,
+            )
+        {
+            return (
+                CallableKey::external_method(
+                    Some(&resolved.declaring_type),
+                    sam.result_method_name(),
+                    args.len(),
+                ),
+                CallGraphEdgeKind::DirectMethodCall,
+            );
+        }
         return (
             resolved_method_call_graph_key(resolved, context),
             CallGraphEdgeKind::DirectMethodCall,
@@ -2795,6 +3299,29 @@ fn call_graph_method_target(
             CallGraphEdgeKind::DirectMethodCall,
         );
     }
+    if let Some(receiver) = receiver {
+        let ty = crate::resolve::infer_source_expr_type_with_facts(
+            receiver,
+            &context.current_type,
+            context.source_symbols,
+            &context.type_env,
+            facts,
+        );
+        let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+        if let JavaType::Named { name: owner, .. } = ty
+            && let Some(sam) = crate::stdlib::functional_interface_shape(
+                &crate::stdlib::canonical_external_receiver_type_key(&owner),
+            )
+            && sam.method() == name
+            && sam.inputs().len() == args.len()
+            && !crate::call_plan::java_type_owner_is_parsed_source(&owner, &context.type_env, facts)
+        {
+            return (
+                CallableKey::external_method(Some(owner), sam.result_method_name(), args.len()),
+                CallGraphEdgeKind::UnresolvedExternalMethodCall,
+            );
+        }
+    }
     (
         CallableKey::external_method(
             receiver.and_then(expr_call_graph_type_name),
@@ -2814,25 +3341,13 @@ fn resolved_method_call_graph_key(
     resolved: &ResolvedCall,
     context: &CallGraphBuildContext<'_>,
 ) -> CallableKey {
-    let Some(owner) = crate::inherited_members::find_type_decl_for_owner_context(
+    let Some((owner, method)) = crate::java_signature::resolved_source_method_decl(
         context.program,
         &context.current_type,
-        &resolved.declaring_type,
+        resolved,
     ) else {
         return CallableKey::resolved_method(resolved);
     };
-    let mut candidates = owner.members.iter().filter_map(|member| match member {
-        Member::Method(method) if source_method_rust_name(method) == resolved.rust_name => {
-            Some(method)
-        }
-        _ => None,
-    });
-    let Some(method) = candidates.next() else {
-        return CallableKey::resolved_method(resolved);
-    };
-    if candidates.next().is_some() {
-        return CallableKey::resolved_method(resolved);
-    }
     CallableKey::source_method_for_type(owner, method)
 }
 
@@ -3087,6 +3602,7 @@ fn callable_checked_exception_types(callee: &CallableKey, facts: &FactSet) -> Ve
             .unwrap_or_default(),
         CallableKey::ExternalConstructor { .. }
         | CallableKey::Lambda { .. }
+        | CallableKey::CallbackParameter { .. }
         | CallableKey::AnonymousMethod { .. } => Vec::new(),
     };
     thrown
@@ -3312,6 +3828,102 @@ fn analyze_stmt(
                 });
             }
             if let Some(initializer) = initializer {
+                if let Some(binding) = binding
+                    && has_projectable_native_value_domain(initializer)
+                {
+                    record_native_value_domain_storage(
+                        initializer,
+                        NativeCollectionStorageSlot {
+                            root: NativeCollectionStorageRoot::Binding(binding.clone()),
+                            path: vec![],
+                            ty: ty.clone(),
+                        },
+                        facts,
+                        current_type,
+                        type_env,
+                        semantic_facts,
+                    );
+                }
+                if crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+                    .native_iterable_element_type(ty)
+                    .is_some()
+                {
+                    let storage_types = native_storage_type_env(
+                        &[initializer],
+                        facts,
+                        current_type,
+                        type_env,
+                        semantic_facts,
+                    );
+                    let source_ty = native_storage_expr_type(
+                        initializer,
+                        facts,
+                        current_type,
+                        &storage_types,
+                        semantic_facts,
+                    );
+                    if native_storage_value_type(&source_ty, &storage_types, semantic_facts)
+                        && let Some(mut source) = native_collection_storage_slot(
+                            initializer,
+                            facts,
+                            current_type,
+                            &storage_types,
+                            semantic_facts,
+                        )
+                    {
+                        // A retained view needs the source allocation even
+                        // when its origin is a field or a method result rather
+                        // than a lexical binding. Reuse canonical origin IDs.
+                        source.ty = source_ty;
+                        facts.native_collection_retention_requirements.push(source);
+                    }
+                }
+                if native_storage_value_type(ty, type_env, semantic_facts)
+                    || crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+                        .native_iterable_element_type(ty)
+                        .is_some()
+                {
+                    let storage_types = native_storage_type_env(
+                        &[initializer],
+                        facts,
+                        current_type,
+                        type_env,
+                        semantic_facts,
+                    );
+                    if let Some(binding) = binding {
+                        record_native_factory_storage(
+                            initializer,
+                            NativeCollectionStorageSlot {
+                                root: NativeCollectionStorageRoot::Binding(binding.clone()),
+                                path: vec![],
+                                ty: ty.clone(),
+                            },
+                            facts,
+                            current_type,
+                            &storage_types,
+                            semantic_facts,
+                        );
+                    }
+                    if let Some(binding) = binding
+                        && let Some(source) = native_collection_storage_slot(
+                            initializer,
+                            facts,
+                            current_type,
+                            &storage_types,
+                            semantic_facts,
+                        )
+                        && !source.path.is_empty()
+                    {
+                        facts.native_collection_storage_flows.push((
+                            source,
+                            NativeCollectionStorageSlot {
+                                root: NativeCollectionStorageRoot::Binding(binding.clone()),
+                                path: vec![],
+                                ty: ty.clone(),
+                            },
+                        ));
+                    }
+                }
                 if let Some(actual_type) =
                     assigned_subtype_local_actual_type(initializer, ty, type_env, semantic_facts)
                 {
@@ -3346,6 +3958,12 @@ fn analyze_stmt(
                     semantic_facts,
                     type_env,
                 ) {
+                    if let Some(binding) = binding.as_ref() {
+                        facts.assigned_call_results.push(AssignedCallResultUse {
+                            binding: binding.clone(),
+                            call: policy.clone(),
+                        });
+                    }
                     facts.record_declared_binding_use(
                         source_name,
                         binding.as_ref(),
@@ -3371,9 +3989,95 @@ fn analyze_stmt(
             }
         }
         Stmt::Assign { target, value } => {
+            record_null_source_field_assignment(
+                target,
+                value,
+                facts,
+                current_type,
+                type_env,
+                semantic_facts,
+            );
+            if has_projectable_native_value_domain(value) {
+                let storage_types = native_storage_type_env(
+                    &[target],
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+                if let Some(destination) = native_collection_storage_slot(
+                    target,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                ) {
+                    record_native_value_domain_storage(
+                        value,
+                        destination,
+                        facts,
+                        current_type,
+                        &storage_types,
+                        semantic_facts,
+                    );
+                }
+            }
+            if native_storage_value_type(
+                &native_storage_expr_type(value, facts, current_type, type_env, semantic_facts),
+                type_env,
+                semantic_facts,
+            ) {
+                let storage_types = native_storage_type_env(
+                    &[target, value],
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+                if let Some(destination) = native_collection_storage_slot(
+                    target,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                ) {
+                    record_native_factory_storage(
+                        value,
+                        destination,
+                        facts,
+                        current_type,
+                        &storage_types,
+                        semantic_facts,
+                    );
+                }
+                if native_storage_value_type(
+                    &crate::types::infer_expr_type(value, &storage_types),
+                    &storage_types,
+                    semantic_facts,
+                ) && let Some(source) = native_collection_storage_slot(
+                    value,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                ) && let Some(target_slot) = native_collection_storage_slot(
+                    target,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                ) && (!source.path.is_empty() || !target_slot.path.is_empty())
+                {
+                    facts
+                        .native_collection_storage_flows
+                        .push((source, target_slot));
+                }
+            }
             if let Expr::Var(name) = target {
                 if is_unshadowed_field_name(facts, field_names, name) {
-                    facts.mutates_self = true;
+                    if !facts.field_is_static(name) {
+                        facts.mutates_self = true;
+                    }
                     for policy in call_result_boundary_policies_with_context(
                         value,
                         internal_methods,
@@ -3456,6 +4160,12 @@ fn analyze_stmt(
                         semantic_facts,
                         type_env,
                     ) {
+                        if let Some(binding) = facts.visible_binding_id_for_name(name) {
+                            facts.assigned_call_results.push(AssignedCallResultUse {
+                                binding,
+                                call: policy.clone(),
+                            });
+                        }
                         record_use(
                             facts,
                             name,
@@ -3469,7 +4179,7 @@ fn analyze_stmt(
                 }
             }
             if let Expr::FieldAccess(_, field_name) = target {
-                if target_is_this_field(target) {
+                if target_is_this_field(target) && !facts.field_is_static(field_name) {
                     facts.mutates_self = true;
                 }
                 for policy in call_result_boundary_policies_with_context(
@@ -3535,6 +4245,58 @@ fn analyze_stmt(
             );
         }
         Stmt::Return(Some(expr)) => {
+            if let Some(target) = declared_return_type {
+                record_native_value_domain_storage(
+                    expr,
+                    NativeCollectionStorageSlot {
+                        root: NativeCollectionStorageRoot::Return,
+                        path: vec![],
+                        ty: target.clone(),
+                    },
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+            }
+            if let Some(ty) = declared_return_type
+                && (native_storage_value_type(ty, type_env, semantic_facts)
+                    || crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+                        .native_iterable_element_type(ty)
+                        .is_some())
+            {
+                let storage_types =
+                    native_storage_type_env(&[expr], facts, current_type, type_env, semantic_facts);
+                record_native_factory_storage(
+                    expr,
+                    NativeCollectionStorageSlot {
+                        root: NativeCollectionStorageRoot::Return,
+                        path: vec![],
+                        ty: ty.clone(),
+                    },
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                );
+                if let Some(source) = native_collection_storage_slot(
+                    expr,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                ) && !source.path.is_empty()
+                {
+                    facts.native_collection_storage_flows.push((
+                        source,
+                        NativeCollectionStorageSlot {
+                            root: NativeCollectionStorageRoot::Return,
+                            path: vec![],
+                            ty: ty.clone(),
+                        },
+                    ));
+                }
+            }
             let forwarded_array =
                 stream_of_forwarded_array_source(expr, facts, field_names, field_types, type_env);
             let returned_storage = forwarded_array.unwrap_or(expr);
@@ -3856,6 +4618,82 @@ fn analyze_stmt(
             binding,
             ..
         } => {
+            if let Some(binding) = binding
+                && let Expr::Call {
+                    receiver: Some(map),
+                    name,
+                    args,
+                    ..
+                } = iterable
+                && args.is_empty()
+                && matches!(name.as_str(), "entrySet" | "entry_set")
+            {
+                let types =
+                    native_storage_type_env(&[map], facts, current_type, type_env, semantic_facts);
+                let ty = native_storage_expr_type(map, facts, current_type, &types, semantic_facts);
+                if native_storage_value_type(&ty, &types, semantic_facts)
+                    && crate::stdlib::java_collection_kind_for_type(&ty)
+                        .is_some_and(|kind| kind.is_map_like())
+                    && let Some(slot) = native_collection_storage_slot(
+                        map,
+                        facts,
+                        current_type,
+                        &types,
+                        semantic_facts,
+                    )
+                    && !crate::liveness::LivenessAnalysis::body_assigns_outer_binding(
+                        body,
+                        source_var_name,
+                    )
+                {
+                    facts
+                        .native_map_entry_backing_storage
+                        .insert(binding.clone(), slot);
+                }
+            }
+            if native_storage_value_type(var_type, type_env, semantic_facts)
+                && let Some(binding) = binding
+            {
+                // Resolve the iterable in the enclosing scope: the loop
+                // declaration may shadow the very binding being iterated.
+                let storage_types = native_storage_type_env(
+                    &[iterable],
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+                let source_ty = native_storage_expr_type(
+                    iterable,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                );
+                if (native_storage_value_type(&source_ty, &storage_types, semantic_facts)
+                    || crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+                        .native_iterable_element_type(&source_ty)
+                        .is_some())
+                    && let Some(mut source) = native_collection_storage_slot(
+                        iterable,
+                        facts,
+                        current_type,
+                        &storage_types,
+                        semantic_facts,
+                    )
+                {
+                    source.path.push(0);
+                    source.ty = var_type.clone();
+                    facts.native_collection_storage_flows.push((
+                        source,
+                        NativeCollectionStorageSlot {
+                            root: NativeCollectionStorageRoot::Binding(binding.clone()),
+                            path: vec![],
+                            ty: var_type.clone(),
+                        },
+                    ));
+                }
+            }
             analyze_expr(
                 iterable,
                 facts,
@@ -4048,10 +4886,16 @@ fn analyze_stmt(
                 nullable_source_call_arg_indices: nullable_source_call_arg_indices(
                     args,
                     source_return_nullability,
+                    semantic_facts,
                 ),
                 argument_bindings: call_argument_bindings(args, facts),
                 argument_self_fields: call_argument_self_fields(args, facts, field_names),
                 boundary: policy.boundary,
+                collection_argument_origins: collection_argument_origins(
+                    args,
+                    type_env,
+                    semantic_facts,
+                ),
                 resolved: resolved.clone(),
             });
             for (arg_index, arg) in args.iter().enumerate() {
@@ -4121,6 +4965,7 @@ fn call_result_boundary_policy_with_context(
             name,
             args,
             resolved,
+            ..
         } => {
             let receiver_type = receiver.as_deref().and_then(|receiver| {
                 call_result_receiver_type_with_context(
@@ -4492,6 +5337,679 @@ fn call_argument_self_fields(
         .collect()
 }
 
+/// Enrich only the expressions under inspection, using lexical binding facts
+/// rather than copying every callable local or guessing names across scopes.
+fn native_storage_expr_type(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> JavaType {
+    match expr {
+        Expr::Var(name) => agreed_binding_java_type(facts, name)
+            .or_else(|| {
+                context
+                    .source_symbols
+                    .as_ref()?
+                    .source_field_identity(owner, name)
+                    .map(|(_, _, ty)| ty)
+            })
+            .unwrap_or_else(|| crate::types::infer_expr_type(expr, types)),
+        Expr::This => JavaType::Named {
+            name: owner.into(),
+            args: vec![],
+        },
+        Expr::FieldAccess(receiver, field) => {
+            let ty = native_storage_expr_type(receiver, facts, owner, types, context);
+            let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+            usage_java_type_name(&ty)
+                .and_then(|owner| {
+                    context
+                        .source_symbols
+                        .as_ref()?
+                        .source_field_identity(owner, field)
+                })
+                .map(|(_, _, ty)| ty)
+                .unwrap_or_else(|| crate::types::infer_expr_type(expr, types))
+        }
+        _ => crate::types::infer_expr_type(expr, types),
+    }
+}
+
+fn native_storage_type_env(
+    expressions: &[&Expr],
+    facts: &MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> TypeEnv {
+    let mut types = types.clone();
+    for expr in expressions {
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+            if let Expr::Var(name) = expr {
+                if let Some(ty) = agreed_binding_java_type(facts, name) {
+                    types.insert_local(name, ty);
+                } else if let Some((_, _, ty)) = context
+                    .source_symbols
+                    .as_ref()
+                    .and_then(|symbols| symbols.source_field_identity(owner, name))
+                {
+                    types.insert_field(name, ty);
+                }
+            }
+        });
+    }
+    if context.source_symbols.is_some() {
+        for expr in expressions {
+            crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+                if let Expr::FieldAccess(receiver, field) = expr {
+                    let ty = native_storage_expr_type(expr, facts, owner, &types, context);
+                    if matches!(receiver.as_ref(), Expr::This) {
+                        types.insert_field(field, ty);
+                    } else {
+                        let receiver_ty =
+                            native_storage_expr_type(receiver, facts, owner, &types, context);
+                        let receiver_ty = crate::types::optional_element_type(&receiver_ty)
+                            .unwrap_or(receiver_ty);
+                        if let Some(owner) = usage_java_type_name(&receiver_ty) {
+                            types.insert_type_field(owner, field, ty);
+                        }
+                    }
+                }
+            });
+        }
+    }
+    types
+}
+
+fn native_storage_value_type(
+    ty: &JavaType,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> bool {
+    let ty = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+    matches!(ty, JavaType::Array(_))
+        || (crate::stdlib::java_collection_kind_for_type(&ty).is_some()
+            && usage_java_type_name(&ty).is_some_and(|name| {
+                crate::stdlib::is_known_java_platform_subtype(name, "Collection")
+                    || crate::stdlib::is_known_java_platform_subtype(name, "Map")
+            })
+            && !usage_java_type_name(&ty).is_some_and(|name| {
+                crate::call_plan::java_type_owner_is_parsed_source(name, types, context.facts)
+            }))
+}
+
+fn native_storage_method(
+    receiver: &Expr,
+    name: &str,
+    args: &[Expr],
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> Option<crate::call_plan::NativeCollectionMethod> {
+    let ty = crate::types::infer_expr_type(receiver, types);
+    native_storage_method_for_type(receiver, name, args, &ty, types, context)
+}
+
+fn native_storage_method_for_type(
+    receiver: &Expr,
+    name: &str,
+    args: &[Expr],
+    ty: &JavaType,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> Option<crate::call_plan::NativeCollectionMethod> {
+    if !native_storage_value_type(ty, types, context) {
+        return None;
+    }
+    match crate::call_plan::plan_native_collection_receiver_call_for_type(
+        receiver,
+        name,
+        Some(args),
+        ty,
+        types,
+    )? {
+        crate::call_plan::CallTargetPlan::NativeCollectionMethod { method, .. } => Some(method),
+        _ => None,
+    }
+}
+
+fn record_null_source_field_assignment(
+    target: &Expr,
+    value: &Expr,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) {
+    if !matches!(value, Expr::Literal(Literal::Null)) {
+        return;
+    }
+    let storage_types = native_storage_type_env(&[target], facts, owner, types, context);
+    if let Some(slot) =
+        native_collection_storage_slot(target, facts, owner, &storage_types, context)
+        && slot.path.is_empty()
+        && let NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { owner, name }) =
+            slot.root
+    {
+        let field = crate::facts::FieldKey::named(owner, name);
+        if !facts.null_assigned_source_fields.contains(&field) {
+            facts.null_assigned_source_fields.push(field);
+        }
+    }
+}
+
+fn has_projectable_native_value_domain(expr: &Expr) -> bool {
+    matches!(
+        expr,
+        Expr::Var(_)
+            | Expr::FieldAccess(..)
+            | Expr::Lambda { .. }
+            | Expr::Call {
+                receiver: Some(_),
+                ..
+            }
+            | Expr::ArrayAccess(..)
+            | Expr::Cast { .. }
+    )
+}
+
+fn record_native_value_domain_storage(
+    expr: &Expr,
+    destination: NativeCollectionStorageSlot,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) {
+    if matches!(expr, Expr::Call { name, args, .. } if name == "collect" && args.len() == 1)
+        && native_storage_value_type(&destination.ty, types, context)
+    {
+        let storage_types = native_storage_type_env(&[expr], facts, owner, types, context);
+        if let Some(stream) = crate::stream::build_stream_plan(expr, &storage_types, context.facts)
+            && matches!(stream.terminal(), crate::stream::StreamTerminal::Collect(_))
+            && stream.forwards_source_reference_domain()
+            && let Some(mut source) = native_collection_storage_slot(
+                stream.source().expr(),
+                facts,
+                owner,
+                &storage_types,
+                context,
+            )
+            && let Some(element) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+            && let Some(target_element) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0])
+        {
+            let mut target = destination;
+            source.path.push(0);
+            source.ty = element.clone();
+            target.path.push(0);
+            target.ty = target_element;
+            // Collect creates a different outer allocation. Only values flow
+            // forward; nullable writes to the copy must not widen the input.
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), target.clone()));
+            if native_storage_value_type(&element, &storage_types, context) {
+                // Copied child references still denote their original Java
+                // allocations; never make an outer allocation alias here.
+                facts
+                    .native_collection_storage_flows
+                    .push((source.clone(), target.clone()));
+                facts.native_collection_storage_flows.push((target, source));
+            }
+            return;
+        }
+    }
+    if let Expr::Cast { ty, expr: source } = expr {
+        let storage_types = native_storage_type_env(&[source], facts, owner, types, context);
+        let actual = native_storage_expr_type(source, facts, owner, &storage_types, context);
+        let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+        if let Some(element) = effective.native_iterable_list_projection_element(&actual, ty)
+            && effective
+                .native_iterable_list_projection_element(&actual, &destination.ty)
+                .is_some()
+            && let Some(mut source) =
+                native_collection_storage_slot(source, facts, owner, &storage_types, context)
+        {
+            facts.native_list_projection_slots.push(destination.clone());
+            // A reference cast preserves Java null without equating the
+            // Iterable and List view's ownership/dispatch/storage contracts.
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), destination.clone()));
+            let mut target = destination;
+            source.path.push(0);
+            source.ty = element.clone();
+            target.path.push(0);
+            target.ty = element.clone();
+            // The view and its receiver expose the same element references,
+            // but not the same physical outer Rust carrier. Do not lift the
+            // Iterable itself to a native allocation handle.
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), target.clone()));
+            facts
+                .nullable_collection_storage_flows
+                .push((target.clone(), source.clone()));
+            if native_storage_value_type(&element, &storage_types, context) {
+                facts
+                    .native_collection_storage_flows
+                    .push((source.clone(), target.clone()));
+                facts.native_collection_storage_flows.push((target, source));
+            }
+            return;
+        }
+    }
+    let Expr::Lambda { body, params } = expr else {
+        if !has_projectable_native_value_domain(expr) {
+            return;
+        }
+        let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+        if !native_storage_value_type(&destination.ty, types, context)
+            && effective
+                .native_iterable_element_type(&destination.ty)
+                .is_none()
+        {
+            return;
+        }
+        let storage_types = native_storage_type_env(&[expr], facts, owner, types, context);
+        if let Some(mut source) =
+            native_collection_storage_slot(expr, facts, owner, &storage_types, context)
+        {
+            let child = |ty: &JavaType| {
+                crate::types::sequence_element_type(ty)
+                    .or_else(|| effective.native_iterable_element_type(ty))
+            };
+            if source.path.is_empty()
+                && (effective.native_iterable_element_type(&source.ty).is_some()
+                    || effective
+                        .native_iterable_element_type(&destination.ty)
+                        .is_some())
+                && let (Some(source_element), Some(target_element)) =
+                    (child(&source.ty), child(&destination.ty))
+                && source_element == target_element
+            {
+                let mut target = destination;
+                source.path.push(0);
+                source.ty = source_element;
+                target.path.push(0);
+                target.ty = target_element;
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source.clone(), target.clone()));
+                facts
+                    .nullable_collection_storage_flows
+                    .push((target, source));
+                return;
+            }
+            if source.path.is_empty() {
+                // An array field retains the same allocation as a
+                // local alias. Preserve that edge just as for structural
+                // children; do not force unrelated local-only values or
+                // collection value-domain transfers shared.
+                if matches!(
+                    crate::types::optional_element_type(&source.ty)
+                        .unwrap_or_else(|| source.ty.clone()),
+                    JavaType::Array(_)
+                ) && (matches!(
+                    source.root,
+                    NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { .. })
+                ) || matches!(
+                    destination.root,
+                    NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { .. })
+                )) {
+                    facts
+                        .native_collection_storage_flows
+                        .push((source, destination));
+                }
+                return;
+            }
+            // Reading a structural child transfers its value domain to the
+            // destination. This is directional, not allocation aliasing.
+            facts
+                .nullable_collection_storage_flows
+                .push((source, destination));
+        }
+        return;
+    };
+    let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+    let Some(functional) = effective.native_functional_carrier(&destination.ty) else {
+        return;
+    };
+    let Some(crate::stdlib::FunctionalTypeSource::TypeArgument(index)) = functional.returns()
+    else {
+        return;
+    };
+    let target = crate::types::optional_element_type(&destination.ty)
+        .unwrap_or_else(|| destination.ty.clone());
+    let JavaType::Named { args, .. } = target else {
+        return;
+    };
+    let Some(result) = functional.return_type(&args) else {
+        return;
+    };
+    let Some(inputs) = functional.input_types(&args) else {
+        return;
+    };
+    if inputs.len() != params.len() {
+        return;
+    }
+    let mut lambda_types = types.clone();
+    for (param, ty) in params.iter().zip(inputs) {
+        lambda_types.insert_local(param.name.clone(), ty.clone());
+        lambda_types.insert_local(param.source_name.clone(), ty);
+    }
+    let mut target = destination;
+    target.path.push(index);
+    target.ty = result;
+    let mut callback_bindings = params
+        .iter()
+        .flat_map(|param| [param.name.clone(), param.source_name.clone()])
+        .collect::<HashSet<_>>();
+    if let LambdaBody::Block(block) = body {
+        crate::semantic_analysis::walk_block_stmts(block, &mut |stmt| {
+            if let Stmt::VarDecl {
+                name, source_name, ..
+            } = stmt
+            {
+                callback_bindings.insert(name.clone());
+                callback_bindings.insert(source_name.clone());
+            }
+        });
+    }
+    let mut record = |source: &Expr| {
+        // Record a directional value-domain edge, not an allocation alias.
+        // Canonical binding identities keep captures separate from fields or
+        // same-named declarations in other scopes.
+        // This edge represents a capture of an enclosing canonical slot.
+        // Callback-local bindings need their own result-flow identities; do
+        // not accidentally resolve one to a same-named enclosing capture.
+        let mut callback_local = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(source, &mut |expr| {
+            callback_local |= matches!(expr, Expr::Var(name) if callback_bindings.contains(name));
+        });
+        if callback_local {
+            return;
+        }
+        let storage_types =
+            native_storage_type_env(&[source], facts, owner, &lambda_types, context);
+        if let Some(source) =
+            native_collection_storage_slot(source, facts, owner, &storage_types, context)
+        {
+            facts
+                .nullable_collection_storage_flows
+                .push((source, target.clone()));
+        }
+    };
+    match body {
+        LambdaBody::Expr(source) => record(source),
+        LambdaBody::Block(block) => {
+            crate::semantic_analysis::walk_block_stmts(block, &mut |stmt| {
+                if let Stmt::Return(Some(source)) = stmt {
+                    record(source);
+                }
+            })
+        }
+    }
+}
+
+fn record_native_factory_storage(
+    expr: &Expr,
+    destination: NativeCollectionStorageSlot,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return;
+    };
+    let Some(crate::call_plan::CallTargetPlan::NativeCollectionStatic { method }) =
+        crate::call_plan::plan_native_collection_static_call(
+            receiver.as_deref(),
+            name,
+            resolved.as_ref(),
+            types,
+            context.facts,
+        )
+    else {
+        return;
+    };
+    if matches!(
+        method,
+        crate::call_plan::NativeCollectionStaticMethod::CollectionsEmptyList
+            | crate::call_plan::NativeCollectionStaticMethod::CollectionsEmptySet
+            | crate::call_plan::NativeCollectionStaticMethod::CollectionsSingletonList
+            | crate::call_plan::NativeCollectionStaticMethod::CollectionsSingleton
+    ) {
+        // Immutability is observable even for a unique reference. Keep the
+        // factory's runtime policy instead of degrading its result to Vec/Set.
+        facts
+            .native_collection_retention_requirements
+            .push(destination.clone());
+    }
+    for (argument, child) in method.stored_argument_children() {
+        let Some(arg) = args.get(*argument) else {
+            continue;
+        };
+        let Some(ty) =
+            crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[*child])
+        else {
+            continue;
+        };
+        if !native_storage_value_type(&ty, types, context) {
+            continue;
+        }
+        let mut stored = destination.clone();
+        stored.path.push(*child);
+        stored.ty = ty;
+        record_native_factory_storage(arg, stored.clone(), facts, owner, types, context);
+        if let Some(value) = native_collection_storage_slot(arg, facts, owner, types, context) {
+            facts.native_collection_storage_flows.push((stored, value));
+        }
+    }
+}
+
+fn native_collection_storage_slot(
+    expr: &Expr,
+    facts: &MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> Option<NativeCollectionStorageSlot> {
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && args.is_empty()
+        && let Expr::Var(entry) = receiver.as_ref()
+        && let Some(index) = crate::call_plan::native_map_entry_accessor_index(name)
+        && let Some(binding) = facts.visible_binding_id_for_name(entry)
+        && let Some(origin) = facts.native_map_entry_backing_storage.get(&binding)
+    {
+        let mut slot = origin.clone();
+        slot.path.push(index);
+        slot.ty = crate::types::generic_read_type_preserving_optional(
+            &crate::slot_shape::RustSlotShape::native_child_type_at_path(&origin.ty, &[index])?,
+        );
+        return Some(slot);
+    }
+    let root = match expr {
+        Expr::Var(name) => {
+            if let Some(binding) = facts.visible_binding_id_for_name(name) {
+                return Some(NativeCollectionStorageSlot {
+                    root: NativeCollectionStorageRoot::Binding(binding),
+                    path: vec![],
+                    ty: crate::types::infer_expr_type(expr, types),
+                });
+            }
+            let (owner, name, _) = context
+                .source_symbols
+                .as_ref()?
+                .source_field_identity(owner, name)?;
+            NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { owner, name })
+        }
+        Expr::FieldAccess(receiver, field) => {
+            let ty = crate::types::infer_expr_type(receiver, types);
+            let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+            let owner = if matches!(receiver.as_ref(), Expr::This) {
+                owner
+            } else {
+                usage_java_type_name(&ty)?
+            };
+            let (owner, name, _) = context
+                .source_symbols
+                .as_ref()?
+                .source_field_identity(owner, field)?;
+            NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { owner, name })
+        }
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if crate::effective_facts::EffectiveFacts::new(context.facts)
+            .native_functional_carrier(&native_storage_expr_type(
+                receiver, facts, owner, types, context,
+            ))
+            .is_some_and(|functional| {
+                functional.method() == name && functional.inputs().len() == args.len()
+            }) =>
+        {
+            let ty = native_storage_expr_type(receiver, facts, owner, types, context);
+            let functional = crate::effective_facts::EffectiveFacts::new(context.facts)
+                .native_functional_carrier(&ty)?;
+            let crate::stdlib::FunctionalTypeSource::TypeArgument(child) = functional.returns()?
+            else {
+                return None;
+            };
+            let mut slot = native_collection_storage_slot(receiver, facts, owner, types, context)?;
+            slot.path.push(child);
+            slot.ty = crate::types::infer_expr_type(expr, types);
+            return Some(slot);
+        }
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if native_storage_method(receiver, name, args, types, context)
+            .and_then(|method| method.result_child())
+            .is_some() =>
+        {
+            let child =
+                native_storage_method(receiver, name, args, types, context)?.result_child()?;
+            let mut slot = native_collection_storage_slot(receiver, facts, owner, types, context)?;
+            slot.path.push(child);
+            slot.ty = crate::types::infer_expr_type(expr, types);
+            return Some(slot);
+        }
+        Expr::Call {
+            resolved: Some(call),
+            ..
+        } => NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::MethodReturn(
+            call.clone(),
+        )),
+        Expr::ArrayAccess(array, _) => {
+            let mut slot = native_collection_storage_slot(array, facts, owner, types, context)?;
+            slot.path.push(0);
+            slot.ty = crate::types::infer_expr_type(expr, types);
+            return Some(slot);
+        }
+        Expr::Cast { expr, .. } => {
+            return native_collection_storage_slot(expr, facts, owner, types, context);
+        }
+        _ => return None,
+    };
+    Some(NativeCollectionStorageSlot {
+        root,
+        path: vec![],
+        ty: crate::types::infer_expr_type(expr, types),
+    })
+}
+
+fn collection_argument_origins(
+    args: &[Expr],
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) -> Vec<(usize, CollectionArgumentOrigin)> {
+    fn visit(
+        expr: &Expr,
+        index: usize,
+        types: &TypeEnv,
+        context: &UsageAnalysisContext<'_>,
+        out: &mut Vec<(usize, CollectionArgumentOrigin)>,
+    ) {
+        match expr {
+            Expr::Cast { expr, .. } => {
+                visit(expr, index, types, context, out);
+                return;
+            }
+            Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => {
+                visit(then_expr, index, types, context, out);
+                visit(else_expr, index, types, context, out);
+                return;
+            }
+            _ => {}
+        }
+        let (origin, ty) = match expr {
+            Expr::Call {
+                resolved: Some(call),
+                ..
+            } => (
+                CollectionArgumentOrigin::MethodReturn(call.clone()),
+                call.return_type.clone(),
+            ),
+            Expr::FieldAccess(receiver, field) => {
+                let owner = crate::types::infer_expr_type(receiver, types);
+                let owner = crate::types::optional_element_type(&owner).unwrap_or(owner);
+                let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = owner else {
+                    return;
+                };
+                let Some((owner, name, ty)) = context
+                    .source_symbols
+                    .as_ref()
+                    .and_then(|symbols| symbols.source_field_identity(&name, field))
+                else {
+                    return;
+                };
+                (CollectionArgumentOrigin::Field { owner, name }, ty)
+            }
+            _ => return,
+        };
+        let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+        if crate::stdlib::java_collection_kind_for_type(&ty).is_none() {
+            return;
+        }
+        if let JavaType::Named { name, .. } | JavaType::Unknown(name) = &ty
+            && crate::call_plan::java_type_owner_is_parsed_source(name, types, context.facts)
+        {
+            return;
+        }
+        out.push((index, origin));
+    }
+    let mut out = Vec::new();
+    for (index, arg) in args.iter().enumerate() {
+        visit(arg, index, types, context, &mut out);
+    }
+    out
+}
+
 fn expr_is_null_literal(expr: &Expr) -> bool {
     matches!(expr, Expr::Literal(crate::java_ir::Literal::Null))
 }
@@ -4499,11 +6017,12 @@ fn expr_is_null_literal(expr: &Expr) -> bool {
 fn nullable_source_call_arg_indices(
     args: &[Expr],
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Vec<usize> {
     args.iter()
         .enumerate()
         .filter_map(|(index, arg)| {
-            source_call_arg_nullability(arg, source_return_nullability)
+            source_call_arg_nullability(arg, source_return_nullability, semantic_facts)
                 .is_some_and(|state| {
                     matches!(
                         state,
@@ -4518,6 +6037,7 @@ fn nullable_source_call_arg_indices(
 fn source_call_arg_nullability(
     arg: &Expr,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
+    semantic_facts: &UsageAnalysisContext<'_>,
 ) -> Option<NullabilityState> {
     if matches!(arg, Expr::Literal(crate::java_ir::Literal::Null)) {
         return Some(NullabilityState::DefinitelyNull);
@@ -4528,16 +6048,18 @@ fn source_call_arg_nullability(
         ..
     } = arg
     {
-        let then_state = source_call_arg_nullability(then_expr, source_return_nullability)
-            .unwrap_or(NullabilityState::DefinitelyNonNull);
-        let else_state = source_call_arg_nullability(else_expr, source_return_nullability)
-            .unwrap_or(NullabilityState::DefinitelyNonNull);
+        let then_state =
+            source_call_arg_nullability(then_expr, source_return_nullability, semantic_facts)
+                .unwrap_or(NullabilityState::DefinitelyNonNull);
+        let else_state =
+            source_call_arg_nullability(else_expr, source_return_nullability, semantic_facts)
+                .unwrap_or(NullabilityState::DefinitelyNonNull);
         return Some(crate::lattice::field_nullability_join(
             then_state, else_state,
         ));
     }
     if let Expr::Cast { expr, .. } = arg {
-        return source_call_arg_nullability(expr, source_return_nullability);
+        return source_call_arg_nullability(expr, source_return_nullability, semantic_facts);
     }
     let Expr::Call {
         receiver,
@@ -4549,6 +6071,11 @@ fn source_call_arg_nullability(
     else {
         return None;
     };
+    if let Some(call) = resolved
+        && let Some(table) = semantic_facts.source_return_table(&call.declaring_type)
+    {
+        return table.get(&(call.rust_name.clone(), args.len())).copied();
+    }
     if !matches!(
         receiver.as_deref(),
         None | Some(Expr::This) | Some(Expr::Super)
@@ -4590,7 +6117,15 @@ fn source_return_nullability_by_call_name(
                     }
                     _ => None,
                 })
-                .reduce(crate::lattice::field_nullability_join)?;
+                .reduce(crate::lattice::field_nullability_join)
+                .or_else(|| {
+                    // An abstract reference-returning API does not promise a
+                    // non-null value. Preserve its Java value domain in
+                    // containers even when no implementation body is present.
+                    (method.body.is_none()
+                        && !matches!(method.return_type, JavaType::Void | JavaType::Primitive(_)))
+                    .then_some(NullabilityState::MaybeNull)
+                })?;
             Some((source_method_rust_name(method), method.params.len(), state))
         })
         .flat_map(|(rust_name, arity, state)| {
@@ -4611,6 +6146,195 @@ fn source_return_nullability_by_call_name(
         .collect()
 }
 
+/// Feed deferred source invocations into the ordinary source-call constraint
+/// propagation. Nullable callback inputs are not literal null arguments and
+/// do not execute at reference creation, but the eventual callee must accept
+/// the complete input domain.
+fn record_stream_collection_element_transfers(
+    stream: &crate::stream::StreamPlan<'_>,
+    usage: &mut MethodUsageFacts,
+    owner: &str,
+    context: &UsageAnalysisContext<'_>,
+    types: &TypeEnv,
+) {
+    fn forwards_reference(expr: &Expr, param: &str) -> bool {
+        match expr {
+            Expr::Var(name) => name == param,
+            Expr::Cast { ty, expr } if !matches!(ty, JavaType::Primitive(_)) => {
+                forwards_reference(expr, param)
+            }
+            _ => false,
+        }
+    }
+    // Only identity-preserving pipelines retain the source element domain.
+    // Non-null filters discharge this root-nullability obligation. Arbitrary
+    // maps and flat maps instead have their own result domains.
+    if !stream.forwards_source_reference_domain() {
+        return;
+    }
+    let crate::stream::StreamTerminal::ForEach(lambda) = stream.terminal() else {
+        return;
+    };
+    let Some(mut source) =
+        native_collection_storage_slot(stream.source().expr(), usage, owner, types, context)
+    else {
+        return;
+    };
+    let Some(element) =
+        crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+    else {
+        return;
+    };
+    source.path.push(0);
+    source.ty = element;
+    let mut transfers = Vec::new();
+    let mut visit = |expr: &Expr| {
+        let Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } = expr
+        else {
+            return;
+        };
+        let receiver_types = native_storage_type_env(&[receiver], usage, owner, types, context);
+        let Some(method) = native_storage_method(receiver, name, args, &receiver_types, context)
+        else {
+            return;
+        };
+        for (argument, child) in method.stored_argument_children() {
+            if !args
+                .get(*argument)
+                .is_some_and(|arg| forwards_reference(arg, lambda.param_name()))
+            {
+                continue;
+            }
+            let Some(mut target) =
+                native_collection_storage_slot(receiver, usage, owner, &receiver_types, context)
+            else {
+                continue;
+            };
+            let Some(ty) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&target.ty, &[*child])
+            else {
+                continue;
+            };
+            target.path.push(*child);
+            target.ty = ty;
+            transfers.push((source.clone(), target));
+        }
+    };
+    match lambda.body() {
+        crate::stream::StreamLambdaBody::Expr(expr) => {
+            crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut visit)
+        }
+        crate::stream::StreamLambdaBody::Block(block) => {
+            crate::semantic_analysis::walk_block_exprs(block, &mut visit)
+        }
+        crate::stream::StreamLambdaBody::MethodReference { target, method } => {
+            let call = Expr::Call {
+                receiver: Some(Box::new(crate::parser::parse_expr(target))),
+                name: method.to_string(),
+                type_args: Vec::new(),
+                args: vec![Expr::Var(lambda.param_name().to_string())],
+                resolved: None,
+            };
+            visit(&call);
+        }
+    }
+    usage.nullable_collection_storage_flows.extend(transfers);
+}
+
+fn record_nullable_source_callback_calls(
+    expr: &Expr,
+    usage: &mut MethodUsageFacts,
+    current_type: &str,
+    context: &UsageAnalysisContext<'_>,
+    types: &TypeEnv,
+) {
+    let Some(source) = crate::stream::stream_chain_source_expression(expr) else {
+        return;
+    };
+    let source_types = native_storage_type_env(&[source], usage, current_type, types, context);
+    let types = &source_types;
+    let Some(stream) = crate::stream::build_stream_plan(expr, types, context.facts) else {
+        return;
+    };
+    record_stream_collection_element_transfers(&stream, usage, current_type, context, types);
+    let Some(symbols) = context.source_symbols.as_ref() else {
+        return;
+    };
+    let reference_argument = |ty: &JavaType| !matches!(ty, JavaType::Primitive(_) | JavaType::Void);
+    let mut record = |name: &str, call: ResolvedCall, indices: Vec<usize>| {
+        if indices.is_empty() {
+            return;
+        }
+        usage.call_sites.push(CallSiteUse {
+            name: name.to_string(),
+            arg_count: call.arg_target_types.len(),
+            result_returned: false,
+            receiver_is_self: false,
+            receiver_targets_self_field: false,
+            receiver_type: Some(JavaType::Named {
+                name: call.declaring_type.clone(),
+                args: Vec::new(),
+            }),
+            null_arg_indices: Vec::new(),
+            nullable_source_call_arg_indices: indices,
+            argument_bindings: Vec::new(),
+            argument_self_fields: Vec::new(),
+            collection_argument_origins: Vec::new(),
+            boundary: CallArgumentBoundary::Unknown,
+            resolved: Some(call),
+        });
+    };
+    stream.visit_callbacks(&mut |lambda, input| {
+        let Some(payload) = input.optional_element_type() else { return; };
+        if let crate::stream::StreamLambdaBody::MethodReference { target, method } = lambda.body() {
+            if let Some(call) = crate::resolve::resolve_single_input_source_method_reference(
+                target, method, &payload, current_type, symbols, types, context.facts,
+            ) {
+                if call.arg_target_types.len() == 1 && reference_argument(&call.arg_target_types[0]) {
+                    record(method, call, vec![0]);
+                }
+            }
+            return;
+        }
+        let mut callback_types = types.clone();
+        callback_types.insert_local(lambda.param_name(), payload.clone());
+        callback_types.insert_local(lambda.rust_param_name(), payload.clone());
+        let mut visit = |expr: &Expr| {
+            let Expr::Call { receiver, name, args, resolved, .. } = expr else { return; };
+            // Lambda parameter types are contextual, so the initial resolver
+            // may not yet have selected a source overload. Resolve with the
+            // pipeline's input type, using the ordinary applicability rules.
+            let contextual_call = resolved.as_ref().filter(|call| {
+                crate::call_plan::java_type_owner_is_parsed_source(
+                    &call.declaring_type, &callback_types, context.facts,
+                )
+            }).cloned().or_else(|| {
+                let arg_types = args.iter().map(|arg| crate::types::infer_expr_type(arg, &callback_types)).collect::<Vec<_>>();
+                crate::resolve::resolve_source_call_with_types(
+                    receiver.as_deref(), name, &arg_types, current_type, symbols,
+                    &callback_types, context.facts,
+                )
+            });
+            let Some(call) = contextual_call else { return; };
+            let indices = args.iter().enumerate().filter_map(|(index, arg)| {
+                (matches!(arg, Expr::Var(name) if name == lambda.param_name() || name == lambda.rust_param_name())
+                    && call.arg_target_types.get(index).is_some_and(reference_argument)).then_some(index)
+            }).collect();
+            record(name, call, indices);
+        };
+        match lambda.body() {
+            crate::stream::StreamLambdaBody::Expr(expr) => crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut visit),
+            crate::stream::StreamLambdaBody::Block(block) => crate::semantic_analysis::walk_block_exprs(block, &mut visit),
+            crate::stream::StreamLambdaBody::MethodReference { .. } => unreachable!(),
+        }
+    });
+}
+
 fn analyze_expr_with_context(
     expr: &Expr,
     facts: &mut MethodUsageFacts,
@@ -4624,6 +6348,24 @@ fn analyze_expr_with_context(
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
     result_returned: bool,
 ) {
+    if let Expr::Binary {
+        op: BinaryOp::Assign,
+        left,
+        right,
+    } = expr
+    {
+        record_null_source_field_assignment(
+            left,
+            right,
+            facts,
+            current_type,
+            type_env,
+            semantic_facts,
+        );
+    }
+    if matches!(expr, Expr::Call { .. }) {
+        record_nullable_source_callback_calls(expr, facts, current_type, semantic_facts, type_env);
+    }
     if matches!(expr, Expr::This | Expr::Super)
         || self_field_name(expr, facts, field_names).is_some()
     {
@@ -4667,6 +6409,28 @@ fn analyze_expr_with_context(
             resolved,
             ..
         } => {
+            if let Some(call) = resolved {
+                for (index, (arg, ty)) in args.iter().zip(&call.arg_target_types).enumerate() {
+                    if !has_projectable_native_value_domain(arg) {
+                        continue;
+                    }
+                    record_native_value_domain_storage(
+                        arg,
+                        NativeCollectionStorageSlot {
+                            root: NativeCollectionStorageRoot::MethodArgument {
+                                call: call.clone(),
+                                index,
+                            },
+                            path: vec![],
+                            ty: ty.clone(),
+                        },
+                        facts,
+                        current_type,
+                        type_env,
+                        semantic_facts,
+                    );
+                }
+            }
             let policy = call_argument_boundary_policy(receiver.as_deref(), name, internal_methods);
             let receiver_type = call_receiver_java_type_with_context(
                 receiver.as_deref(),
@@ -4708,9 +6472,34 @@ fn analyze_expr_with_context(
                 result_returned,
             );
             let argument_bindings = call_argument_bindings(args, facts);
+            if !receiver.as_deref().is_some_and(|receiver| matches!(receiver, Expr::Var(name) if facts.visible_binding_id_for_name(name).is_some()))
+                && let Some(crate::call_plan::CallTargetPlan::NativeCollectionStatic { method }) =
+                crate::call_plan::plan_native_collection_static_call(
+                    receiver.as_deref(),
+                    name,
+                    resolved.as_ref(),
+                    type_env,
+                    semantic_facts.facts,
+                )
+            {
+                for (index, binding) in &argument_bindings {
+                    if method.stored_argument_children().iter().any(|(argument, _)| argument == index) {
+                        if let Some(name) = facts
+                            .binding_facts_for_declaration_id(binding)
+                            .map(|binding| binding.name().to_string())
+                        {
+                            facts.record_declared_binding_use(
+                                &name,
+                                Some(binding),
+                                BindingUse::RetainedByCall,
+                            );
+                        }
+                    }
+                }
+            }
             let non_null_arg_indices = non_null_argument_indices(args, facts);
             let nullable_source_call_arg_indices =
-                nullable_source_call_arg_indices(args, source_return_nullability);
+                nullable_source_call_arg_indices(args, source_return_nullability, semantic_facts);
             facts.call_sites.push(CallSiteUse {
                 name: name.clone(),
                 arg_count: args.len(),
@@ -4724,9 +6513,132 @@ fn analyze_expr_with_context(
                 nullable_source_call_arg_indices: nullable_source_call_arg_indices.clone(),
                 argument_bindings: argument_bindings.clone(),
                 argument_self_fields: call_argument_self_fields(args, facts, field_names),
+                collection_argument_origins: collection_argument_origins(
+                    args,
+                    type_env,
+                    semantic_facts,
+                ),
                 boundary: call_boundary,
                 resolved: usage_resolved.clone(),
             });
+            // Stream traversal transfers Java references, not copies of the
+            // child collection's contents. Seed the same canonical storage
+            // graph used by enhanced-for and collection argument flow.
+            if args.is_empty()
+                && matches!(
+                    name.as_str(),
+                    "stream" | "parallelStream" | "parallel_stream"
+                )
+                && let Some(receiver) = receiver.as_deref()
+                && let receiver_ty = native_storage_expr_type(
+                    receiver,
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                )
+                && crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+                    .retained_native_collection_kind(&receiver_ty)
+                    .is_some()
+                && let Some(child_ty) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(&receiver_ty, &[0])
+                && native_storage_value_type(&child_ty, type_env, semantic_facts)
+            {
+                let storage_types = native_storage_type_env(
+                    &[receiver],
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+                if let Some(mut source) = native_collection_storage_slot(
+                    receiver,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                ) {
+                    source.path.push(0);
+                    source.ty = child_ty;
+                    facts.native_collection_retention_requirements.push(source);
+                }
+            }
+            // Reject scalar/non-storage operations before enriching nested
+            // expression types. This must not turn every call in a deep
+            // expression into another full subtree traversal.
+            if let Some(receiver) = receiver.as_deref()
+                && let receiver_ty = native_storage_expr_type(
+                    receiver,
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                )
+                && let Some(method) = native_storage_method_for_type(
+                    receiver,
+                    name,
+                    args,
+                    &receiver_ty,
+                    type_env,
+                    semantic_facts,
+                )
+                && method.stored_argument_children().iter().any(|(_, child)| {
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &receiver_ty,
+                        &[*child],
+                    )
+                    .is_some_and(|ty| native_storage_value_type(&ty, type_env, semantic_facts))
+                })
+            {
+                let storage_types =
+                    native_storage_type_env(&[expr], facts, current_type, type_env, semantic_facts);
+                if let Some(method) =
+                    native_storage_method(receiver, name, args, &storage_types, semantic_facts)
+                    && let Some(container) = native_collection_storage_slot(
+                        receiver,
+                        facts,
+                        current_type,
+                        &storage_types,
+                        semantic_facts,
+                    )
+                {
+                    for (argument, child) in method.stored_argument_children() {
+                        let Some(child_ty) =
+                            crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                                &container.ty,
+                                &[*child],
+                            )
+                        else {
+                            continue;
+                        };
+                        if !native_storage_value_type(&child_ty, &storage_types, semantic_facts) {
+                            continue;
+                        }
+                        let Some(value) = args.get(*argument) else {
+                            continue;
+                        };
+                        if !native_storage_value_type(
+                            &crate::types::infer_expr_type(value, &storage_types),
+                            &storage_types,
+                            semantic_facts,
+                        ) {
+                            continue;
+                        }
+                        if let Some(value) = native_collection_storage_slot(
+                            value,
+                            facts,
+                            current_type,
+                            &storage_types,
+                            semantic_facts,
+                        ) {
+                            let mut stored = container.clone();
+                            stored.path.push(*child);
+                            stored.ty = child_ty;
+                            facts.native_collection_storage_flows.push((stored, value));
+                        }
+                    }
+                }
+            }
             if is_content_read_method(name)
                 && let Some(receiver) = receiver
                 && let Expr::Var(binding) = receiver.as_ref()
@@ -5156,6 +7068,28 @@ fn analyze_expr_with_context(
         Expr::New {
             ty, args, resolved, ..
         } => {
+            if let Some(call) = resolved {
+                for (index, (arg, param)) in args.iter().zip(&call.params).enumerate() {
+                    if !has_projectable_native_value_domain(arg) {
+                        continue;
+                    }
+                    record_native_value_domain_storage(
+                        arg,
+                        NativeCollectionStorageSlot {
+                            root: NativeCollectionStorageRoot::ConstructorArgument {
+                                call: call.clone(),
+                                index,
+                            },
+                            path: vec![],
+                            ty: param.ty.clone(),
+                        },
+                        facts,
+                        current_type,
+                        type_env,
+                        semantic_facts,
+                    );
+                }
+            }
             facts.constructor_call_sites.push(ConstructorCallSiteUse {
                 name: "new".to_string(),
                 arg_count: args.len(),
@@ -5163,10 +7097,16 @@ fn analyze_expr_with_context(
                 nullable_source_call_arg_indices: nullable_source_call_arg_indices(
                     args,
                     source_return_nullability,
+                    semantic_facts,
                 ),
                 argument_bindings: call_argument_bindings(args, facts),
                 argument_self_fields: call_argument_self_fields(args, facts, field_names),
                 boundary: constructor_invocation_boundary_policy_for_expr(resolved.as_ref()),
+                collection_argument_origins: collection_argument_origins(
+                    args,
+                    type_env,
+                    semantic_facts,
+                ),
                 resolved: resolved.clone(),
             });
             for (arg_index, arg) in args.iter().enumerate() {
@@ -5538,7 +7478,7 @@ fn record_call_arg_use(
             });
         }
         Expr::Var(name) if is_unshadowed_field_name(facts, field_names, name) => {
-            if mutates_argument {
+            if mutates_argument && !facts.field_is_static(name) {
                 facts.mutates_self = true;
             }
             facts.field_uses.push(FieldUse::PassedToCall {
@@ -5567,7 +7507,7 @@ fn record_call_arg_use(
             );
         }
         Expr::FieldAccess(receiver, field_name) if matches!(receiver.as_ref(), Expr::This) => {
-            if mutates_argument {
+            if mutates_argument && !facts.field_is_static(field_name) {
                 facts.mutates_self = true;
             }
             facts.field_uses.push(FieldUse::PassedToCall {
@@ -5771,6 +7711,28 @@ fn call_argument_effect_mutates_argument(
     arg_count: usize,
     arg_index: usize,
 ) -> bool {
+    if let Some(receiver_key) = receiver_type.and_then(java_type_name_for_usage)
+        && !facts.model_fact_applies_to_owner(
+            receiver_key,
+            crate::facts::FactProvenance::BuiltinExternalModel,
+        )
+    {
+        // A source definition overrides the platform owner, including the
+        // legacy unscoped method-name fallback below. Explicit non-built-in
+        // argument facts can still describe an intentional source boundary.
+        return facts
+            .external_api_argument_effect_for_receiver_with_arity(
+                Some(receiver_key),
+                call_name,
+                Some(arg_count),
+                arg_index,
+            )
+            .is_some_and(|effect| {
+                effect.provenance != crate::facts::FactProvenance::BuiltinExternalModel
+                    && effect.argument_mutability
+                        == crate::facts::ReceiverMutabilityFact::MutatesReceiver
+            });
+    }
     if let Some(receiver_key) = receiver_type.and_then(java_type_name_for_usage)
         && (facts
             .external_api_argument_effect_for_receiver_with_arity(
@@ -6117,6 +8079,7 @@ fn trivial_getter_self_field(
         name,
         args,
         resolved,
+        ..
     } = expr
     else {
         return None;
@@ -6177,9 +8140,11 @@ fn array_expr_targets_self_field(
     field_names: &HashSet<String>,
 ) -> bool {
     match expr {
-        Expr::Var(name) => is_unshadowed_field_name(facts, field_names, name),
-        Expr::FieldAccess(receiver, _) => {
-            matches!(receiver.as_ref(), Expr::This | Expr::Super)
+        Expr::Var(name) => {
+            is_unshadowed_field_name(facts, field_names, name) && !facts.field_is_static(name)
+        }
+        Expr::FieldAccess(receiver, field) => {
+            matches!(receiver.as_ref(), Expr::This | Expr::Super) && !facts.field_is_static(field)
         }
         Expr::ArrayAccess(array, _) => array_expr_targets_self_field(array, facts, field_names),
         _ => false,
@@ -6422,6 +8387,27 @@ fn expr_mutates_self_field(
     field_types: &HashMap<String, JavaType>,
     semantic_facts: &UsageAnalysisContext<'_>,
 ) -> bool {
+    // Do not conflate mutation of class storage with mutation of `this`.
+    // Keep ordinary field-use recording intact for nullable/static storage.
+    let target = match expr {
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Assign,
+            left,
+            ..
+        } => Some(left.as_ref()),
+        Expr::Unary { expr, .. } => Some(expr.as_ref()),
+        Expr::Call {
+            receiver: Some(receiver),
+            ..
+        } => Some(receiver.as_ref()),
+        _ => None,
+    };
+    if target
+        .and_then(|target| self_field_name(target, facts, field_names))
+        .is_some_and(|name| facts.field_is_static(name))
+    {
+        return false;
+    }
     match expr {
         Expr::Binary {
             op: crate::java_ir::BinaryOp::Assign,
@@ -6694,6 +8680,579 @@ mod tests {
     use crate::java_ir::{PrimitiveType, TypeKind};
 
     #[test]
+    fn native_entry_storage_projects_backing_children_but_not_unknown_or_rebound_entries() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class EntryFlows {
+                static void read(Map<String, List<String>> map) {
+                    for (Map.Entry<String, List<String>> entry : map.entrySet()) {
+                        List<String> alias = entry.getValue(); Iterable<String> retained = alias;
+                    }
+                }
+                static void unknown(Map.Entry<String, List<String>> entry) {
+                    List<String> alias = entry.getValue(); Iterable<String> retained = alias;
+                }
+                static void rebound(Map<String, List<String>> map, Map.Entry<String, List<String>> replacement) {
+                    for (Map.Entry<String, List<String>> entry : map.entrySet()) {
+                        entry = replacement;
+                        List<String> alias = entry.getValue(); Iterable<String> retained = alias;
+                    }
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+            if method.name == "read" {
+                assert_eq!(usage.native_map_entry_backing_storage.len(), 1);
+                assert!(usage.native_collection_storage_flows.iter().any(|(source, target)|
+                    source.path == vec![1] && target.path.is_empty()
+                    && matches!(&source.root, NativeCollectionStorageRoot::Binding(id) if id.name() == "map")
+                    && matches!(&target.root, NativeCollectionStorageRoot::Binding(id) if id.name() == "alias")));
+            } else {
+                assert!(
+                    usage.native_map_entry_backing_storage.is_empty(),
+                    "{}",
+                    method.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn stored_native_values_link_checked_effects_only_at_callback_invocation() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.function.IntSupplier;
+class InlineValues {
+    static IntSupplier stored;
+    static int invoke(IntSupplier callback) { return callback.getAsInt(); }
+    static int unused(IntSupplier callback) { return 1; }
+    static int run() { return unused(stored) + invoke(stored); }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let callbacks =
+            crate::source_callbacks::SourceCallbackPlan::build(&resolved.program, &resolved.facts);
+        let graph =
+            build_call_graph_with_source_callbacks(&resolved.program, &resolved.facts, &callbacks);
+        let owner = &resolved.program.types[0];
+        let method_key = |name: &str| {
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == name => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            CallableKey::source_method_for_type(owner, method)
+        };
+        let formal = CallableKey::CallbackParameter {
+            owner: Box::new(method_key("invoke")),
+            index: 0,
+        };
+        assert!(
+            graph.edges().iter().any(|edge| {
+                edge.caller() == &formal
+                    && edge
+                        .callee()
+                        .external_method_parts()
+                        .is_some_and(|(_, method, arity)| method == "getAsInt_result" && arity == 0)
+            }),
+            "{graph:#?}"
+        );
+        assert!(
+            graph
+                .edges()
+                .iter()
+                .any(|edge| { edge.caller() == &method_key("invoke") && edge.callee() == &formal }),
+            "{graph:#?}"
+        );
+        assert!(
+            !graph.edges().iter().any(|edge| {
+                edge.caller() == &method_key("unused")
+                    && matches!(edge.callee(), CallableKey::CallbackParameter { .. })
+            }),
+            "{graph:#?}"
+        );
+    }
+
+    #[test]
+    fn native_callback_fields_retain_the_checked_runtime_call_graph_entry() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.function.IntSupplier;
+class Holder {
+    private IntSupplier callback;
+    static int invoke(Holder holder) { return holder.callback.getAsInt(); }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let graph = build_call_graph_with_facts(&resolved.program, &FactSet::default());
+        assert!(
+            graph.edges().iter().any(|edge| {
+                edge.callee()
+                    .external_method_parts()
+                    .is_some_and(|(owner, method, arity)| {
+                        owner.is_some_and(|owner| owner.rsplit('.').next() == Some("IntSupplier"))
+                            && method == "getAsInt_result"
+                            && arity == 0
+                    })
+            }),
+            "{graph:#?}"
+        );
+    }
+
+    #[test]
+    fn collector_reference_domains_are_directional_and_stop_at_non_null_filters() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.*;
+import java.util.stream.Collectors;
+class CollectorDomains {
+    static Set<String> copy(List<String> source) {
+        return source.stream().collect(Collectors.toSet());
+    }
+    static Set<String> nonNull(List<String> source) {
+        return source.stream().filter(Objects::nonNull).collect(Collectors.toSet());
+    }
+    static Set<String> nullableCopy(List<String> source) {
+        Set<String> result = source.stream().collect(Collectors.toSet());
+        Iterable<String> retained = result;
+        result.add(null);
+        return result;
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+            let signature = signatures.method_signature(owner, method).unwrap();
+            assert_eq!(
+                signature.params()[0].shape().sequence_element_type(),
+                Some(JavaType::String),
+                "{}",
+                method.name
+            );
+            if method.name == "copy" {
+                let flows = usage.nullable_collection_storage_flows();
+                assert_eq!(flows.len(), 1, "{flows:?}");
+                assert_eq!(flows[0].0.path, vec![0]);
+                assert_eq!(flows[0].1.path, vec![0]);
+                assert!(matches!(
+                    flows[0].1.root,
+                    NativeCollectionStorageRoot::Return
+                ));
+                assert!(usage.native_collection_storage_flows().is_empty());
+            } else if method.name == "nonNull" {
+                assert!(usage.nullable_collection_storage_flows().is_empty());
+            } else {
+                assert!(
+                    signature
+                        .return_shape()
+                        .unwrap()
+                        .sequence_element_type()
+                        .is_some_and(|element| crate::types::optional_element_type(&element)
+                            == Some(JavaType::String))
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn list_view_cast_nullability_does_not_equate_outer_storage_contracts() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.List;
+class CastContracts {
+    static <T> List<T> cast(Iterable<T> source) { return (List<T>) source; }
+    static List<String> identity(List<String> source) {
+        List<String> alias = source;
+        return alias;
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+            if method.name == "cast" {
+                assert!(
+                    !usage
+                        .all_binding_facts()
+                        .into_iter()
+                        .any(|binding| binding.uses().contains(&BindingUse::Returned))
+                );
+                let flows = usage.nullable_collection_storage_flows();
+                assert_eq!(flows.len(), 3, "{flows:?}");
+                assert!(flows.iter().any(|(source, target)| source.path.is_empty()
+                    && target.path.is_empty()
+                    && matches!(target.root, NativeCollectionStorageRoot::Return)));
+                assert!(!flows.iter().any(|(source, target)| source.path.is_empty()
+                    && target.path.is_empty()
+                    && matches!(source.root, NativeCollectionStorageRoot::Return)));
+            } else {
+                assert!(usage.nullable_collection_storage_flows().is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn stored_sam_result_flows_use_canonical_destination_slots() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/fixtures/stored_nullable_callback_results.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let owner = &resolved.program.types[1];
+        let mut checked = 0;
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if !matches!(
+                method.name.as_str(),
+                "construct" | "local" | "assigned" | "forwarded" | "stored" | "function"
+            ) {
+                continue;
+            }
+            let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+            let flows = usage.nullable_collection_storage_flows();
+            assert_eq!(flows.len(), 1, "{}: {flows:?}", method.name);
+            let (source, target) = &flows[0];
+            assert!(matches!(
+                source.root,
+                NativeCollectionStorageRoot::Binding(_)
+            ));
+            assert!(source.path.is_empty());
+            assert_eq!(target.path, vec![usize::from(method.name == "function")]);
+            assert!(
+                match method.name.as_str() {
+                    "construct" => matches!(
+                        target.root,
+                        NativeCollectionStorageRoot::ConstructorArgument { index: 0, .. }
+                    ),
+                    "forwarded" => matches!(
+                        target.root,
+                        NativeCollectionStorageRoot::MethodArgument { index: 0, .. }
+                    ),
+                    "stored" => matches!(
+                        target.root,
+                        NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { .. })
+                    ),
+                    _ => matches!(target.root, NativeCollectionStorageRoot::Binding(_)),
+                },
+                "{}: {target:?}",
+                method.name
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 6);
+    }
+
+    #[test]
+    fn native_sam_result_qualifiers_use_result_argument_paths_and_capture_identities() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.*;
+import java.util.function.*;
+class Captures<T> {
+    List<T> values = new ArrayList<>();
+    static <T> Supplier<Iterable<T>> supplier(List<T> values) {
+        values.add(null); return () -> values;
+    }
+    static <T> Function<String, Iterable<T>> function(List<T> values) {
+        values.add(null); return ignored -> values;
+    }
+    Function<List<String>, Iterable<String>> shadow() {
+        values.add(null); return values -> values;
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let usage = semantic.usage.source_method_usage(owner, method).unwrap();
+            let signature = signatures.method_signature(owner, method).unwrap();
+            if method.name == "shadow" {
+                assert!(usage.nullable_collection_storage_flows().is_empty());
+                continue;
+            }
+            assert_eq!(usage.nullable_collection_storage_flows().len(), 1);
+            let result_index = if method.name == "supplier" { 0 } else { 1 };
+            let shape = signature.return_shape().unwrap();
+            let ty = crate::types::optional_element_type(&shape.java_ty)
+                .unwrap_or_else(|| shape.java_ty.clone());
+            let JavaType::Named { args, .. } = ty else {
+                panic!("{shape:?}");
+            };
+            let JavaType::Named {
+                args: iterable_args,
+                ..
+            } = &args[result_index]
+            else {
+                panic!("{shape:?}");
+            };
+            assert!(
+                crate::types::optional_element_type(&iterable_args[0]).is_some(),
+                "{}: {shape:?}",
+                method.name
+            );
+        }
+    }
+
+    #[test]
+    fn nullable_stream_destinations_do_not_widen_source_element_domains() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.*;
+class DirectedTransfers {
+    static void copy(List<String> source, List<String> target) {
+        target.add(null);
+        source.stream().forEach(target::add);
+    }
+    static void bulk(List<String> source, List<String> target) {
+        target.add(null);
+        target.addAll(source);
+    }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let ty = &resolved.program.types[0];
+        for method in ty.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let signature = signatures.method_signature(ty, method).unwrap();
+            assert_eq!(
+                signature.params()[0].shape().sequence_element_type(),
+                Some(JavaType::String),
+                "{}: {:?}",
+                method.name,
+                signature.params()[0].shape()
+            );
+            assert!(
+                matches!(signature.params()[1].shape().sequence_element_type(), Some(JavaType::Named { name, .. }) if name == "Optional"),
+                "{}: {:?}",
+                method.name,
+                signature.params()[1].shape()
+            );
+        }
+    }
+
+    #[test]
+    fn stream_reference_transfers_keep_nullable_elements_in_destination_storage() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/fixtures/stream_generic_values.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let ty = &resolved.program.types[0];
+        let method = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "copyAll" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let facts = semantic.usage.source_method_usage(ty, method).unwrap();
+        assert_eq!(
+            facts.nullable_collection_storage_flows().len(),
+            1,
+            "{:?}",
+            method.body
+        );
+        let non_null = ty
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "copyNonNull" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            semantic
+                .usage
+                .source_method_usage(ty, non_null)
+                .unwrap()
+                .nullable_collection_storage_flows()
+                .is_empty()
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let signature = signatures.method_signature(ty, method).unwrap();
+        assert!(
+            matches!(signature.params()[0].shape().sequence_element_type(), Some(JavaType::Named { name, .. }) if name == "Optional"),
+            "{:?}",
+            signature.params()[0].shape()
+        );
+    }
+
+    #[test]
+    fn nullable_callback_input_flows_to_source_calls_but_not_past_non_null_filter() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.Arrays;
+            import java.util.Iterator;
+            import java.util.Objects;
+            class Contracts {
+                static boolean accepts(String value) { return true; }
+                static boolean accepts(int value) { return false; }
+                static boolean reference(String[] values) {
+                    return Arrays.stream(values).anyMatch(Contracts::accepts);
+                }
+                static boolean lambda(String[] values) {
+                    return Arrays.stream(values).anyMatch(value -> accepts(value));
+                }
+                static boolean block(String[] values) {
+                    return Arrays.stream(values).anyMatch(value -> { return accepts(value); });
+                }
+                static Iterator<Boolean> deferred(String[] values) {
+                    return Arrays.stream(values).map(Contracts::accepts).iterator();
+                }
+                static boolean filtered(String[] values) {
+                    return Arrays.stream(values).filter(Objects::nonNull).anyMatch(Contracts::accepts);
+                }
+            }
+        "#,
+        );
+        assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let owner = &resolved.program.types[0];
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            if method.name == "accepts" {
+                continue;
+            }
+            let calls = usage
+                .source_method_usage(owner, method)
+                .unwrap()
+                .call_sites();
+            let nullable_calls = calls
+                .iter()
+                .filter(|call| {
+                    call.nullable_source_call_arg_indices() == [0]
+                        && call
+                            .resolved
+                            .as_ref()
+                            .is_some_and(|resolved| resolved.arg_target_types == [JavaType::String])
+                })
+                .count();
+            assert_eq!(
+                nullable_calls > 0,
+                method.name != "filtered",
+                "{}: {calls:#?}",
+                method.name
+            );
+        }
+    }
+
+    #[test]
     fn qualified_collection_static_owner_preserves_argument_effects_without_binding_shadowing() {
         let receiver = Expr::FieldAccess(
             Box::new(Expr::FieldAccess(
@@ -6720,6 +9279,25 @@ mod tests {
             1,
             0,
         ));
+        let parsed = crate::parser::parse_java_source("class Collections {}");
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut source_facts = resolved.facts;
+        source_facts
+            .external_api_argument_effect_facts
+            .extend(platform_facts.external_api_argument_effect_facts.clone());
+        assert!(
+            !call_argument_effect_mutates_argument(
+                &source_facts,
+                Some(&JavaType::Named {
+                    name: "Collections".to_string(),
+                    args: Vec::new()
+                }),
+                "sort",
+                2,
+                0,
+            ),
+            "parsed source must not inherit platform mutation effects"
+        );
         insert_binding_use_facts(
             &mut usage,
             "java".to_string(),
@@ -6794,6 +9372,7 @@ mod tests {
 
     fn resolved_instance_call(declaring_type: &str) -> ResolvedCall {
         ResolvedCall {
+            type_args: Vec::new(),
             declaring_type: declaring_type.to_string(),
             rust_name: "read".to_string(),
             kind: crate::java_ir::CallKind::Instance,
@@ -6979,6 +9558,43 @@ class Standards<T extends Mid> {
                 } if field_name == "lines" && element_name == "Base" && actual_name == "Mid"
             )
         }));
+    }
+
+    #[test]
+    fn static_storage_updates_do_not_mutate_instance_receiver() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class StaticUsageBase { static int inheritedCount; }
+class StaticUsage extends StaticUsageBase {
+    static int totalCount;
+    int value;
+    int unary() { totalCount++; inheritedCount++; return value; }
+    void assign() { totalCount = 3; this.totalCount = 4; }
+    void instance() { value++; }
+    int shadowed() { int totalCount = 0; totalCount++; return totalCount; }
+}
+class HidesStatic extends StaticUsageBase {
+    int inheritedCount;
+    void instance() { inheritedCount++; }
+}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        for name in ["unary", "assign", "shadowed"] {
+            let key = UsageMethodKey::current_rust_method_name("StaticUsage", name);
+            assert!(
+                !usage.method_usage_by_key(&key).unwrap().mutates_self(),
+                "{name}"
+            );
+        }
+        for owner in ["StaticUsage", "HidesStatic"] {
+            let key = UsageMethodKey::current_rust_method_name(owner, "instance");
+            assert!(
+                usage.method_usage_by_key(&key).unwrap().mutates_self(),
+                "{owner}"
+            );
+        }
     }
 
     #[test]
@@ -8340,6 +10956,7 @@ class TernaryPatternUsageScope {
                                         binding: Some("s".to_string()),
                                     })],
                                     value: Expr::Call {
+                                        type_args: Vec::new(),
                                         receiver: Some(Box::new(Expr::Var("s".to_string()))),
                                         name: "trim".to_string(),
                                         args: Vec::new(),
@@ -8357,6 +10974,7 @@ class TernaryPatternUsageScope {
                         binding: None,
                     },
                     Stmt::Expr(Expr::Call {
+                        type_args: Vec::new(),
                         receiver: Some(Box::new(Expr::Var("s".to_string()))),
                         name: "toString".to_string(),
                         args: Vec::new(),

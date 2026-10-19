@@ -97,6 +97,49 @@ class Concrete implements Item {
     }
 
     #[test]
+    fn local_native_sam_conversions_require_shared_mutable_source_storage() {
+        assert_eq!(
+            strategy_of(
+                include_str!("../tests/fixtures/native_functional_alias.java"),
+                "LocalCounter",
+            ),
+            StorageStrategy::SharedLocal
+        );
+        assert_eq!(
+            strategy_of(
+                include_str!("../tests/fixtures/checked_iterable.java"),
+                "MutableIterable"
+            ),
+            StorageStrategy::SharedLocal,
+        );
+    }
+
+    #[test]
+    fn inherited_platform_sam_value_contract_preserves_source_identity() {
+        assert_eq!(
+            strategy_of(
+                include_str!("../tests/fixtures/source_list_projection.java"),
+                "ProjectedSourceList"
+            ),
+            StorageStrategy::SharedLocal,
+        );
+        assert_eq!(
+            strategy_of(
+                "import java.util.*; class UnusedList extends AbstractList<Integer> { public int size() { return 1; } public Integer get(int index) { return 3; } }",
+                "UnusedList"
+            ),
+            StorageStrategy::Value,
+        );
+        assert_eq!(
+            strategy_of(
+                "class AbstractList {} class OtherList extends AbstractList { int n; void set() { n++; } } class Use { Iterable<Integer> values; }",
+                "OtherList"
+            ),
+            StorageStrategy::Value,
+        );
+    }
+
+    #[test]
     fn inherited_interface_implementor_gets_mutable_shared_handle() {
         assert_eq!(
             strategy_of(
@@ -174,6 +217,10 @@ pub struct TypeStorageFacts {
     escape: Escape,
     /// `T b = a;` with `a` a bare handle — the shape that makes lowering clone.
     locally_aliased: bool,
+    /// A mutating Java object protocol is invoked through a shared reference
+    /// (`&dyn Any`). Its canonical carrier must provide interior access even
+    /// when the program has not introduced a second local alias yet.
+    borrowed_object_dispatch: bool,
     /// Any field write through a value of the type, or a method that writes
     /// through its receiver.
     mutated: bool,
@@ -213,6 +260,7 @@ impl Default for TypeStorageFacts {
         Self {
             escape: Escape::default(),
             locally_aliased: false,
+            borrowed_object_dispatch: false,
             mutated: false,
             threaded: false,
             // Absence of mutation is assumed provable until the walk meets a
@@ -299,6 +347,7 @@ impl TypeStorageFacts {
     pub fn join(&mut self, other: TypeStorageFacts) {
         self.escape = self.escape.max(other.escape);
         self.locally_aliased |= other.locally_aliased;
+        self.borrowed_object_dispatch |= other.borrowed_object_dispatch;
         self.mutated |= other.mutated;
         self.threaded |= other.threaded;
         self.mutation_provably_absent &= other.mutation_provably_absent;
@@ -330,9 +379,14 @@ impl TypeStorageFacts {
     /// Each is an inference step, not a case in a table:
     /// reachable-from-two-places implies `shared`; mutated-after-sharing implies
     /// `interior_mutable`; reachable-from-a-static-or-a-thread implies `sync`.
+    fn requires_shared_storage(&self) -> bool {
+        matches!(self.escape, Escape::Stored | Escape::UnknownBoundary)
+            || self.locally_aliased
+            || self.borrowed_object_dispatch
+    }
+
     pub fn placement(&self) -> StoragePlacement {
-        let shared =
-            matches!(self.escape, Escape::Stored | Escape::UnknownBoundary) || self.locally_aliased;
+        let shared = self.requires_shared_storage();
         StoragePlacement::new(
             shared,
             // `SharedImmutable` must be *proved*, not merely unobserved: a
@@ -356,8 +410,7 @@ impl TypeStorageFacts {
     }
 
     pub fn strategy(&self) -> StorageStrategy {
-        let shared =
-            matches!(self.escape, Escape::Stored | Escape::UnknownBoundary) || self.locally_aliased;
+        let shared = self.requires_shared_storage();
         if !shared {
             return StorageStrategy::Value;
         }
@@ -677,9 +730,92 @@ fn plan_storage_strategies_with_facts(
     for ty in &program.types {
         collect_interface_type_names(ty, &mut interfaces);
     }
-    let interface_value_types = source_interfaces_used_as_value_types(program, &interfaces);
+    // A modeled SAM facade holds an implementing object just as a source
+    // interface object does. Local conversions can create aliases even when
+    // no factory/parameter escape supplies independent sharing evidence.
+    fn collect_native_interfaces(
+        ty: &TypeDecl,
+        program: &Program,
+        facts: Option<&FactSet>,
+        into: &mut BTreeSet<String>,
+    ) {
+        for edge in ty.implements.iter().chain(ty.extends.iter()) {
+            let parsed = crate::parser::parse_hierarchy_type(edge);
+            let JavaType::Named { name, .. } = &parsed else {
+                continue;
+            };
+            if source_type_decl_for_owner_context(program, &ty.name, name).is_none()
+                && facts.map_or_else(
+                    || crate::stdlib::functional_interface_shape(name).is_some(),
+                    |facts| {
+                        crate::effective_facts::EffectiveFacts::new(facts)
+                            .native_functional_carrier(&parsed)
+                            .is_some()
+                    },
+                )
+            {
+                into.insert(name.clone());
+            }
+        }
+        for member in &ty.members {
+            match member {
+                Member::Type(nested) => collect_native_interfaces(nested, program, facts, into),
+                Member::Field(field) => {
+                    collect_native_interface_value_type(&field.ty, program, facts, into)
+                }
+                Member::Method(method) => {
+                    collect_native_interface_value_type(&method.return_type, program, facts, into);
+                    for param in &method.params {
+                        collect_native_interface_value_type(&param.ty, program, facts, into);
+                    }
+                }
+                Member::Constructor(constructor) => {
+                    for param in &constructor.params {
+                        collect_native_interface_value_type(&param.ty, program, facts, into);
+                    }
+                }
+                Member::Unsupported { .. } => {}
+            }
+        }
+    }
+    for ty in &program.types {
+        collect_native_interfaces(ty, program, facts, &mut interfaces);
+    }
+    // Usage already indexes local/parameter bindings throughout nested bodies.
+    // Native interfaces can be used without appearing on a direct source
+    // inheritance edge (e.g. a source subclass of AbstractList as Iterable).
+    for callable in usage.method_usages().chain(usage.constructor_usages()) {
+        for binding in callable.all_binding_facts() {
+            collect_native_interface_value_type(binding.java_ty(), program, facts, &mut interfaces);
+        }
+    }
+    let mut interface_value_types = source_interfaces_used_as_value_types(program, &interfaces);
     for ty in &program.types {
         collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
+    }
+    if let Some(facts) = facts {
+        for owner in &facts.captures.owners {
+            let owner_name = match &owner.origin {
+                crate::facts::CaptureOrigin::Method { type_name, .. }
+                | crate::facts::CaptureOrigin::Constructor { type_name }
+                | crate::facts::CaptureOrigin::Type { type_name } => type_name,
+            };
+            for capture in &owner.captures {
+                if let Some(name) = declared_type_name(&capture.ty, owner_name, &interfaces) {
+                    // Interfaces are excluded from concrete storage facts.
+                    // Preserve a captured receiver's identity in its concrete
+                    // implementors using the existing interface-value path.
+                    interface_value_types.insert(name);
+                } else if let Some(name) = declared_type_name(&capture.ty, owner_name, &declared)
+                    && let Some(storage) = types.get_mut(&name)
+                {
+                    // Capturing a Java reference retains that same object.
+                    // Payload cloning cannot implement either a lambda alias
+                    // or a bound method reference, even for a read-only SAM.
+                    storage.locally_aliased = true;
+                }
+            }
+        }
     }
     mark_source_interface_implementors_as_aliasable(program, &interface_value_types, &mut types);
     mark_external_input_stream_subclasses_as_aliasable(program, &mut types);
@@ -769,18 +905,25 @@ fn mark_source_interface_implementors_as_aliasable(
         if !seen.insert(ty.name.clone()) {
             return false;
         }
-        if ty.implements.iter().any(|implemented| {
-            interfaces.iter().any(|interface| {
-                implemented == interface || simple_name(implemented) == simple_name(interface)
+        ty.implements
+            .iter()
+            .chain(ty.extends.iter())
+            .any(|implemented| {
+                let parsed = crate::parser::parse_hierarchy_type(implemented);
+                let name = match &parsed {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name) => name.as_str(),
+                    _ => implemented,
+                };
+                if let Some(super_ty) = source_type_decl_for_owner_context(program, &ty.name, name)
+                {
+                    return interfaces.contains(&super_ty.name)
+                        || reaches_source_interface(super_ty, program, interfaces, seen);
+                }
+                interfaces.iter().any(|interface| {
+                    source_type_decl_for_owner_context(program, &ty.name, interface).is_none()
+                        && crate::stdlib::is_known_java_platform_subtype(name, interface)
+                })
             })
-        }) {
-            return true;
-        }
-        ty.extends.as_deref().is_some_and(|super_name| {
-            source_type_decl_for_owner_context(program, &ty.name, super_name).is_some_and(
-                |super_ty| reaches_source_interface(super_ty, program, interfaces, seen),
-            )
-        })
     }
 
     fn visit(
@@ -804,6 +947,48 @@ fn mark_source_interface_implementors_as_aliasable(
 
     for ty in &program.types {
         visit(ty, program, interfaces, types);
+    }
+}
+
+/// Discover native SAM value contracts, preserving source name precedence and
+/// walking generic arguments (e.g. Supplier<Iterable<T>>) without enumerating
+/// another list of functional-interface names.
+fn collect_native_interface_value_type(
+    ty: &JavaType,
+    program: &Program,
+    facts: Option<&FactSet>,
+    into: &mut BTreeSet<String>,
+) {
+    match ty {
+        JavaType::Named { name, args } => {
+            // The effective-fact authority already performs indexed source
+            // precedence checks. Do not resolve every ordinary local's type
+            // by traversing the whole source program again.
+            if facts.map_or_else(
+                || {
+                    crate::stdlib::functional_interface_shape(name).is_some()
+                        && !source_type_decl(program, name)
+                            .is_some_and(|source| !name.contains('.') || source.name == *name)
+                },
+                |facts| {
+                    crate::effective_facts::EffectiveFacts::new(facts)
+                        .native_functional_carrier(ty)
+                        .is_some()
+                },
+            ) {
+                into.insert(name.clone());
+            }
+            for arg in args {
+                collect_native_interface_value_type(arg, program, facts, into);
+            }
+        }
+        JavaType::Array(element)
+        | JavaType::Wildcard(Some(
+            WildcardBound::Extends(element) | WildcardBound::Super(element),
+        )) => {
+            collect_native_interface_value_type(element, program, facts, into);
+        }
+        _ => {}
     }
 }
 
@@ -1041,6 +1226,7 @@ fn block_calls_inner_constructing_self_method(
             name,
             args,
             resolved,
+            ..
         } = expr
         else {
             return;
@@ -1123,6 +1309,20 @@ fn propagate_inherited_receiver_mutation(
             // An inherited method therefore mutates the subclass allocation,
             // even when the subclass declares no mutating method of its own.
             facts.mutated = true;
+        }
+        let inherited_object_dispatch = source_type_decl(program, subtype).is_some_and(|decl| {
+            crate::inherited_members::inherited_instance_method_refs_for_type(decl, program)
+                .into_iter()
+                .any(|inherited| {
+                    crate::stdlib::source_method_is_java_to_string(inherited.method())
+                        && usage.source_method_or_alias_mutates(
+                            inherited.declaring_ty(),
+                            inherited.method(),
+                        )
+                })
+        });
+        if inherited_object_dispatch && let Some(facts) = types.get_mut(subtype) {
+            facts.borrowed_object_dispatch = true;
         }
     }
 }
@@ -1562,6 +1762,9 @@ fn collect_type_facts(
                     && let Some(facts) = into.get_mut(&ty.name)
                 {
                     facts.mutated = true;
+                    if crate::stdlib::source_method_is_java_to_string(method) {
+                        facts.borrowed_object_dispatch = true;
+                    }
                 }
                 if let Some(method_usage) = usage.source_method_usage(ty, method) {
                     collect_unknown_boundary_escapes(method_usage, ty, declared, into);
@@ -1852,11 +2055,19 @@ fn collect_stmt_facts(
             // clone, which is why it is the alias signal rather than a general
             // "two references exist" query.
             if let Some(initializer) = initializer
-                && expr_is_bare_handle(initializer)
-                && let Some(name) = declared_type_name(ty, &owner.name, declared)
-                && let Some(facts) = into.get_mut(&name)
+                && expr_reuses_handle(initializer, owner, locals)
             {
-                facts.locally_aliased = true;
+                // An upcast/erased target does not change which object was
+                // aliased. Preserve its concrete source carrier as well as
+                // any declared target carrier; never charge Object itself.
+                for name in declared_type_name(ty, &owner.name, declared)
+                    .into_iter()
+                    .chain(handle_type_name(initializer, owner, declared, locals))
+                {
+                    if let Some(facts) = into.get_mut(&name) {
+                        facts.locally_aliased = true;
+                    }
+                }
             }
             locals.insert(name.clone(), ty.clone());
             if let Some(initializer) = initializer {
@@ -1873,7 +2084,7 @@ fn collect_stmt_facts(
         Stmt::Assign { target, value } => {
             collect_anonymous_body_facts_from_expr(target, owner, program, declared, locals, into);
             collect_anonymous_body_facts_from_expr(value, owner, program, declared, locals, into);
-            if expr_is_bare_handle(value) {
+            if expr_reuses_handle(value, owner, locals) {
                 match target {
                     // `this.f = x` stores an alias *of `f`'s declared type*.
                     // Charging the **owner** instead — which is what this did,
@@ -1915,10 +2126,13 @@ fn collect_stmt_facts(
                             facts.escape = facts.escape.max(Escape::Stored);
                         }
                     }
-                    // An array element's type is not available in this local
-                    // environment, so retain the conservative owner charge.
+                    // Charge a retained source reference to its actual type.
+                    // Assignment results may be fresh at their inner store,
+                    // but this outer store creates another reference to it.
                     Expr::ArrayAccess(..) => {
-                        if let Some(facts) = into.get_mut(&owner.name) {
+                        let retained = handle_type_name(value, owner, declared, locals)
+                            .unwrap_or_else(|| owner.name.clone());
+                        if let Some(facts) = into.get_mut(&retained) {
                             facts.escape = facts.escape.max(Escape::Stored);
                         }
                     }
@@ -2115,7 +2329,7 @@ fn collect_stmt_facts(
             // result, it is not merely a value moving out of the method.
             // Reuse the same bare-handle/type proof as local aliasing; this
             // includes `return this` without a method-name special case.
-            if expr_is_bare_handle(expr)
+            if expr_reuses_handle(expr, owner, locals)
                 && let Some(name) = handle_type_name(expr, owner, declared, locals)
                 && let Some(facts) = into.get_mut(&name)
             {
@@ -2313,7 +2527,7 @@ fn collect_anonymous_body_facts_from_expr(
                                 locals,
                                 into,
                             );
-                            if expr_is_bare_handle(initializer)
+                            if expr_reuses_handle(initializer, owner, locals)
                                 && let Some(name) =
                                     declared_type_name(&field.ty, &owner.name, declared)
                                 && let Some(facts) = into.get_mut(&name)
@@ -2815,10 +3029,38 @@ fn mark_captures_in_expr(
     }
 }
 
-/// Whether an expression is a bare reference to an existing object, as opposed
-/// to something that produces a fresh one.
-fn expr_is_bare_handle(expr: &Expr) -> bool {
+/// Existing references and assignment results may already be reachable from
+/// another place. A fresh constructor alone does not establish sharing, but
+/// `a[i] = new Node()` both stores and returns the reference to that object.
+fn expr_reuses_handle(expr: &Expr, owner: &TypeDecl, locals: &BTreeMap<String, JavaType>) -> bool {
     matches!(expr, Expr::Var(_) | Expr::FieldAccess(..) | Expr::This)
+        || (matches!(
+            expr,
+            Expr::Binary {
+                op: crate::java_ir::BinaryOp::Assign,
+                ..
+            }
+        ) && !matches!(
+            assignment_result_java_type(expr, owner, locals),
+            JavaType::Primitive(_) | JavaType::Void
+        ))
+}
+
+fn assignment_result_java_type(
+    expr: &Expr,
+    owner: &TypeDecl,
+    locals: &BTreeMap<String, JavaType>,
+) -> JavaType {
+    let mut env = crate::types::TypeEnv::new();
+    for member in &owner.members {
+        if let Member::Field(field) = member {
+            env.insert_field(field.name.clone(), field.ty.clone());
+        }
+    }
+    for (name, ty) in locals {
+        env.insert_local(name.clone(), ty.clone());
+    }
+    crate::types::infer_expr_type(expr, &env)
 }
 
 /// The declared type a handle refers to, when that is cheap to see.
@@ -2836,6 +3078,14 @@ fn handle_type_name(
         Expr::FieldAccess(receiver, field) if matches!(receiver.as_ref(), Expr::This) => {
             field_type_name(owner, field, declared)
         }
+        Expr::Binary {
+            op: crate::java_ir::BinaryOp::Assign,
+            ..
+        } => declared_type_name(
+            &assignment_result_java_type(expr, owner, locals),
+            &owner.name,
+            declared,
+        ),
         _ => None,
     }
 }
@@ -3248,6 +3498,30 @@ mod constructor_mutation_tests {
     use super::*;
     use crate::parser::parse_java_source;
 
+    #[test]
+    fn mutating_object_protocol_requires_a_handle_without_inventing_local_aliases() {
+        let source = r#"
+class Mutable { int calls; public String toString() { calls++; return "x"; } }
+class Child extends Mutable {}
+class ReadOnly { public String toString() { return "x"; } }
+"#;
+        assert_eq!(strategy_of(source, "Mutable"), StorageStrategy::SharedLocal);
+        assert_eq!(strategy_of(source, "Child"), StorageStrategy::SharedLocal);
+        assert_eq!(strategy_of(source, "ReadOnly"), StorageStrategy::Value);
+        let facts = facts_of(source, "Mutable");
+        assert!(facts.borrowed_object_dispatch);
+        assert!(!facts.locally_aliased);
+    }
+
+    #[test]
+    fn erased_local_alias_retains_the_concrete_source_identity() {
+        let source = "class Value {} class Use { void retain(Value original) { Object erased = original; } }";
+        assert_eq!(
+            strategy_of(source, "Value"),
+            StorageStrategy::SharedImmutable
+        );
+    }
+
     /// Resolves first, because nested type names are qualified during
     /// resolution and the plan is keyed by the qualified name — the same
     /// program the lowering pipeline hands it.
@@ -3266,6 +3540,25 @@ mod constructor_mutation_tests {
             .facts(type_name)
             .unwrap_or_else(|| panic!("missing storage facts for {type_name}"))
             .clone()
+    }
+
+    #[test]
+    fn chained_reference_assignment_results_require_canonical_mutable_storage() {
+        assert_eq!(
+            strategy_of(
+                include_str!("../tests/fixtures/chained_reference_assignments.java"),
+                "AssignmentNode"
+            ),
+            StorageStrategy::SharedLocal,
+        );
+        let source = "class StoredNode { int value; } class Owner { static void fill(StoredNode[] cells) { cells[0] = cells[1] = new StoredNode(); } static void update(StoredNode value) { value.value = 7; } }";
+        assert_eq!(
+            strategy_of(source, "StoredNode"),
+            StorageStrategy::SharedLocal
+        );
+        assert_eq!(strategy_of(source, "Owner"), StorageStrategy::Value);
+        let primitive = "class Owner { static int fill() { int[] cells = new int[2]; int value = (cells[0] = cells[1] = 7); return value; } }";
+        assert_eq!(strategy_of(primitive, "Owner"), StorageStrategy::Value);
     }
 
     #[test]
@@ -3794,6 +4087,7 @@ class CapturedMutableAnonymousReader {
     static Reader make(Node node) {
         return new Reader() { public int read() { return node.value; } };
     }
+
     static int run() {
         Node node = new Node(3);
         Reader reader = make(node);
@@ -3813,6 +4107,23 @@ class CapturedMutableAnonymousReader {
             "the caller mutates the captured node: {facts:?}"
         );
         assert_eq!(facts.strategy(), StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn captured_interface_shares_implementors_not_the_abstract_payload() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.function.IntSupplier;
+interface Reader { int read(); }
+class Counter implements Reader { int value; public int read() { return value++; } }
+class Factory { static IntSupplier capture(Reader reader) { return reader::read; } }
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let plan = plan_storage_strategies_from_facts(&resolved.program, &usage, &resolved.facts);
+        assert!(plan.facts("Reader").is_none());
+        assert!(plan.facts("Counter").unwrap().locally_aliased());
     }
 
     #[test]

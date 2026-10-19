@@ -1457,7 +1457,9 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
 
     let crate_mapped_actual = RustSlotShape {
         java_ty: crate_mapped_ty.clone(),
-        nested_collection_views: Vec::new(),
+        native_allocation: Default::default(),
+        nested_native_allocations: Default::default(),
+        nested_collection_views: Default::default(),
         ownership: OwnershipShape::SharedBorrow,
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
@@ -1466,7 +1468,9 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
     let crate_mapped_target = RustSlotShape::conservative(crate_mapped_ty);
     let source_actual = RustSlotShape {
         java_ty: source_helper_ty.clone(),
-        nested_collection_views: Vec::new(),
+        native_allocation: Default::default(),
+        nested_native_allocations: Default::default(),
+        nested_collection_views: Default::default(),
         ownership: OwnershipShape::SharedBorrow,
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,

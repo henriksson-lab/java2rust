@@ -11,6 +11,37 @@ use crate::java_ir::PrimitiveType;
 use crate::rust_ir::{RustExpr, RustExprShape};
 use crate::slot_shape::RustSlotShape;
 
+pub(crate) fn apply_fallible_optional_receiver_slot_projection(
+    lowered: RustExpr,
+    projection: OptionalReceiverProjection,
+    element_shape: Option<&RustSlotShape>,
+    conversion_plan: Option<&LoweredSlotExprConversionPlan>,
+) -> RustExpr {
+    let projected = crate::coercion::fallible_optional_receiver_projection(lowered, projection);
+    let projected = if let Some(element_shape) = element_shape {
+        let mut produced = element_shape.clone();
+        produced.ownership = match projection {
+            OptionalReceiverProjection::Shared | OptionalReceiverProjection::SharedUnchecked => {
+                crate::slot_shape::OwnershipShape::SharedBorrow
+            }
+            OptionalReceiverProjection::Mutable | OptionalReceiverProjection::MutableUnchecked => {
+                crate::slot_shape::OwnershipShape::MutableBorrow
+            }
+            OptionalReceiverProjection::Borrowed => element_shape.ownership,
+        };
+        RustExpr::shaped_as(RustExprShape::OptionalProjected, Some(produced), projected)
+    } else {
+        projected
+    };
+    let Some(conversion_plan) = conversion_plan else {
+        return projected;
+    };
+    apply_lowered_slot_expr_conversion(
+        LoweredExpr::new(projected, conversion_plan.actual().clone()),
+        conversion_plan,
+    )
+}
+
 pub(crate) fn apply_cast_conversion(expr: RustExpr, plan: &CastConversionPlan) -> RustExpr {
     if let JavaCastSemanticsPolicy::PrimitiveNumericCast { from, to, .. } = plan.semantics() {
         let (from, to) = (*from, *to);

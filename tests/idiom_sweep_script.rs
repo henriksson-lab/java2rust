@@ -27,6 +27,65 @@ fn unique_temp_dir(name: &str) -> PathBuf {
     dir
 }
 
+#[test]
+fn shared_support_lexical_summaries_are_content_keyed_and_immutable() {
+    let script_dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts");
+    let output = Command::new("python3")
+        .arg("-c")
+        .arg(r#"
+import runpy, sys
+sys.path.insert(0, sys.argv[1])
+module = runpy.run_path(sys.argv[1] + '/merge-shared-support-facades.py')
+text = 'fn first() { helper::<Key>(); /* Marker */ let s = "Word"; }'
+names = module['identifier_names']
+expected = set(module['IDENTIFIER_RE'].findall(text))
+summary = names(text)
+assert isinstance(summary, frozenset)
+assert summary == expected
+assert names(text) is summary
+for candidates in [{'helper', 'Key'}, {'first', 'Marker', 'Word', 'absent'}, set()]:
+    for result in [module['referenced_function_names'](text, candidates),
+                   module['referenced_nominal_names']([text, text], candidates)]:
+        assert result == expected.intersection(candidates)
+        result.clear()
+    assert module['referenced_function_names'](text, candidates) == expected.intersection(candidates)
+changed = text.replace('Key', 'Other')
+assert 'Other' in names(changed) and 'Key' not in names(changed)
+assert names(text) is summary
+impl = '''impl Thing {
+    pub const LIMIT: i32 = 2;
+    pub fn new() -> Self { Self }
+    pub const fn value(&self) -> i32 { 2 }
+}
+'''
+methods = module['extract_methods'](impl)
+assert isinstance(methods, tuple) and all(isinstance(item, tuple) for item in methods)
+assert [name for name, _ in methods] == ['new', 'value']
+assert module['extract_methods'](impl) is methods
+assert module['extract_consts'](impl) == (('LIMIT', 'pub const LIMIT: i32 = 2;'),)
+assert '3' in module['extract_methods'](impl.replace('{ 2 }', '{ 3 }'))[1][1]
+assert '2' in methods[1][1]
+trait = '''pub trait Thing {
+    fn first(&self);
+    fn second(&self) -> i32 { 2 }
+}
+'''
+trait_methods = module['extract_trait_methods'](trait)
+assert isinstance(trait_methods, tuple)
+assert [name for name, _ in trait_methods] == ['first', 'second']
+assert module['extract_trait_methods'](trait) is trait_methods
+print('content-keyed lexical summaries: ok')
+"#)
+        .arg(script_dir)
+        .output()
+        .expect("test shared support lexical summaries");
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 fn run_idiom_sweep(root: &Path) -> HashMap<String, usize> {
     run_idiom_sweep_with_extra(root, &[])
 }
@@ -167,15 +226,36 @@ fn focused_package_reconciles_source_surfaces_before_indexing_and_after_final_re
     let script = fs::read_to_string(script_path).unwrap();
     let invocation = "restore_missing_source_type_items \"$rust_path\" \"$raw_generated_backup_dir/$(basename \"$rust_path\")\"";
 
-    assert_eq!(script.matches(invocation).count(), 2, "{script}");
+    // Restoration is shared by both boundary passes. Follow the helper calls
+    // rather than requiring its implementation to be copied into each loop.
+    assert_eq!(script.matches(invocation).count(), 1, "{script}");
+    let restore_helper = script
+        .find("restore_generated_module_dependencies() {")
+        .expect("shared restoration helper");
+    let restore_body = script[restore_helper..]
+        .split_once("\n}")
+        .expect("restoration helper body")
+        .0;
+    assert!(restore_body.contains(invocation), "{restore_body}");
+    let finalize_helper = script
+        .find("finalize_generated_module_dependencies() {")
+        .expect("final restoration helper");
+    let finalize_body = script[finalize_helper..]
+        .split_once("\n}")
+        .expect("finalization helper body")
+        .0;
+    assert!(
+        finalize_body.contains("restore_generated_module_dependencies \"$rust_path\""),
+        "{finalize_body}"
+    );
     let merge = script
         .find("python3 \"$repo_root/scripts/merge-shared-support-facades.py\"")
         .expect("shared facade merge invocation");
     let first_reconcile = script
-        .find(invocation)
+        .find("assembly_stage_start_job restore_generated_module_dependencies \"$rust_path\"")
         .expect("source reconciliation invocation");
     let final_reconcile = script
-        .rfind(invocation)
+        .find("assembly_stage_start_job finalize_generated_module_dependencies \"$rust_path\"")
         .expect("final source reconciliation invocation");
     let module_index = script
         .find("print module \"\\t\" name")
@@ -566,6 +646,75 @@ impl<O: 'static, __JavaBoxed: Distribution<O> + ?Sized> Distribution<O> for std:
         1,
         "{restored}"
     );
+}
+
+#[test]
+fn source_restore_keeps_nested_trait_companions_before_the_primary_declaration() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let script = fs::read_to_string(root.join("scripts/translate-focused-package.sh")).unwrap();
+    let tail = &script[script
+        .find("restore_missing_source_type_items() {")
+        .unwrap()..];
+    let end = tail
+        .find("\n}\n\nif grep -R -q '^pub struct JavaException'")
+        .unwrap()
+        + 3;
+    let dir = unique_temp_dir("nested_trait_companion_restore");
+    let harness = dir.join("restore.sh");
+    fs::write(
+        &harness,
+        format!(
+            "{}\nrestore_missing_source_type_items \"$1\" \"$2\" \"$3\" \"$4\" \"$5\"\n",
+            &tail[..end],
+        ),
+    )
+    .unwrap();
+    let current = dir.join("00001_Container.rs");
+    let raw = dir.join("raw.rs");
+    let shared_types = dir.join("shared-types.txt");
+    let shared = dir.join("shared.rs");
+    let declarations = "pub trait Container_View<T> { fn clone_box(&self) -> Box<dyn Container_View<T>>; }\npub struct Container;\n";
+    fs::write(&current, declarations).unwrap();
+    fs::write(
+        &raw,
+        r#"
+pub struct Prelude;
+impl Clone for Prelude { fn clone(&self) -> Self { Prelude } }
+pub trait Container_View<T> { fn clone_box(&self) -> Box<dyn Container_View<T>>; }
+impl<T> Clone for Box<dyn Container_View<T>> {
+    fn clone(&self) -> Self { Container_View::<T>::clone_box(&**self) }
+}
+pub struct Container;
+"#,
+    )
+    .unwrap();
+    fs::write(&shared_types, "").unwrap();
+    fs::write(&shared, "").unwrap();
+    for _ in 0..2 {
+        let output = Command::new("bash")
+            .arg(&harness)
+            .arg(&current)
+            .arg(&raw)
+            .arg(&shared_types)
+            .arg(&shared)
+            .arg(root.join("scripts"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    let restored = fs::read_to_string(current).unwrap();
+    assert_eq!(
+        restored
+            .matches("Clone for Box<dyn Container_View<T>>")
+            .count(),
+        1,
+        "{restored}"
+    );
+    assert!(!restored.contains("Clone for Prelude"), "{restored}");
 }
 
 #[test]

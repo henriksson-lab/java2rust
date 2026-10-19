@@ -3904,11 +3904,39 @@ public class Sorter {
     );
     assert!(
         sorter.rust().contains("java_collection_sort_by_result")
+            && sorter.rust().contains(".compare_result(")
             && sorter
                 .rust()
-                .contains("__java_comparator.compare(a.clone(), b.clone())"),
+                .contains("__java_native_sam_argument_0.as_str()")
+            && sorter
+                .rust()
+                .contains("__java_native_sam_argument_1.as_str()"),
         "{}",
         sorter.rust()
+    );
+    cargo_test_generated_modules(
+        "batch_concrete_source_comparator",
+        vec![
+            GeneratedCrateModule {
+                name: "comparator",
+                rust: comparator.rust().to_string(),
+                tests: "",
+            },
+            GeneratedCrateModule {
+                name: "sorter",
+                rust: format!(
+                    "use super::comparator::LetterComparator;\n{}",
+                    sorter.rust()
+                ),
+                tests: r#"
+#[test]
+fn checked_adapter_uses_the_source_comparator() {
+    let values = vec!["c".to_string(), "a".to_string(), "b".to_string()];
+    assert_eq!(Sorter::new().sort(values).unwrap(), vec!["a", "b", "c"]);
+}
+"#,
+            },
+        ],
     );
 }
 

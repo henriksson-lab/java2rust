@@ -10,6 +10,107 @@ use crate::types::{
     contains_wildcard_type, is_known_raw_generic_type, is_optional_or_result_type,
     is_raw_generic_counterpart, is_unchecked_generic_counterpart,
 };
+use std::{cell::RefCell, ops::Range, rc::Rc};
+
+#[derive(Default)]
+struct TypeFactLookupSession {
+    facts_address: usize,
+    capabilities: Option<crate::facts::ExternalTypeNameLookupIndex>,
+    hierarchy: Option<crate::facts::ExternalTypeNameLookupIndex>,
+    parsed_source_names: Option<std::collections::HashSet<String>>,
+}
+
+thread_local! {
+    static TYPE_FACT_LOOKUP_SESSION: RefCell<Option<TypeFactLookupSession>> = const {
+        RefCell::new(None)
+    };
+}
+
+/// Keep indexes only while the selected FactSet is immutably borrowed. The
+/// session owns names and row numbers, never references or dereferenced raw
+/// pointers. Other FactSets still use the ordinary scan. Nesting and unwinding
+/// restore the previous session, so allocation reuse cannot leak old facts.
+pub(crate) fn with_type_fact_lookup_session<R>(facts: &FactSet, f: impl FnOnce() -> R) -> R {
+    TYPE_FACT_LOOKUP_SESSION.with(|slot| {
+        let previous = slot.replace(Some(TypeFactLookupSession {
+            facts_address: std::ptr::from_ref(facts) as usize,
+            ..Default::default()
+        }));
+        struct Restore<'a> {
+            slot: &'a RefCell<Option<TypeFactLookupSession>>,
+            previous: Option<TypeFactLookupSession>,
+        }
+        impl Drop for Restore<'_> {
+            fn drop(&mut self) {
+                self.slot.replace(self.previous.take());
+            }
+        }
+        let _restore = Restore { slot, previous };
+        f()
+    })
+}
+
+#[derive(Clone, Copy)]
+enum TypeFactKind {
+    Capabilities,
+    Hierarchy,
+}
+
+struct TypeFactCandidates {
+    indices: Option<Rc<[usize]>>,
+    range: Range<usize>,
+}
+
+impl Iterator for TypeFactCandidates {
+    type Item = usize;
+    fn next(&mut self) -> Option<usize> {
+        let index = self.range.next()?;
+        Some(
+            self.indices
+                .as_ref()
+                .map_or(index, |indices| indices[index]),
+        )
+    }
+}
+
+fn type_fact_candidates(facts: &FactSet, kind: TypeFactKind, name: &str) -> TypeFactCandidates {
+    let indices = TYPE_FACT_LOOKUP_SESSION.with(|slot| {
+        let mut session = slot.borrow_mut();
+        let session = session
+            .as_mut()
+            .filter(|session| session.facts_address == std::ptr::from_ref(facts) as usize)?;
+        let index = match kind {
+            TypeFactKind::Capabilities => session.capabilities.get_or_insert_with(|| {
+                crate::facts::ExternalTypeNameLookupIndex::new(
+                    facts
+                        .type_capability_overrides
+                        .iter()
+                        .map(|fact| fact.type_name.as_str()),
+                )
+            }),
+            TypeFactKind::Hierarchy => session.hierarchy.get_or_insert_with(|| {
+                crate::facts::ExternalTypeNameLookupIndex::new(
+                    facts
+                        .hierarchy_overrides
+                        .iter()
+                        .map(|fact| fact.type_name.as_str()),
+                )
+            }),
+        };
+        Some(index.matching_indices(name))
+    });
+    let count = indices.as_ref().map_or_else(
+        || match kind {
+            TypeFactKind::Capabilities => facts.type_capability_overrides.len(),
+            TypeFactKind::Hierarchy => facts.hierarchy_overrides.len(),
+        },
+        |indices| indices.len(),
+    );
+    TypeFactCandidates {
+        indices,
+        range: 0..count,
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct EffectiveFacts<'a> {
@@ -210,6 +311,13 @@ impl<'a> EffectiveFacts<'a> {
 
     pub fn hierarchy_overrides(&self) -> &'a [HierarchyOverride] {
         &self.facts.hierarchy_overrides
+    }
+
+    pub(crate) fn allows_platform_hierarchy_fallback(&self, name: &str) -> bool {
+        !self.has_parsed_source_type_capability_for_name(name)
+            && !self
+                .hierarchy_overrides_for_name(name)
+                .any(|fact| fact.provenance == FactProvenance::UserOverride)
     }
 
     pub fn external_library_pack_for_type(
@@ -430,18 +538,43 @@ impl<'a> EffectiveFacts<'a> {
     pub fn has_object_representation_facts(&self, java_ty: &JavaType) -> bool {
         self.object_safe_trait_fact_for(java_ty).is_some()
             || capability_type_name(java_ty).is_some_and(|type_name| {
-                self.facts.hierarchy_overrides.iter().any(|override_fact| {
-                    type_name_matches(&override_fact.type_name, type_name)
-                        && !fallback_override_conflicts_with_parsed_source(
+                self.hierarchy_overrides_for_name(type_name)
+                    .any(|override_fact| {
+                        !fallback_override_conflicts_with_parsed_source(
                             override_fact,
                             type_name,
                             self.facts,
                         )
-                }) || self.closed_hierarchy_fact_for_name(type_name).is_some()
+                    })
+                    || self.closed_hierarchy_fact_for_name(type_name).is_some()
             })
     }
 
     pub fn has_parsed_source_type_capability_for_name(&self, type_name: &str) -> bool {
+        if let Some(found) = TYPE_FACT_LOOKUP_SESSION.with(|slot| {
+            let mut session = slot.borrow_mut();
+            let session = session.as_mut().filter(|session| {
+                session.facts_address == std::ptr::from_ref(self.facts) as usize
+            })?;
+            let names = session.parsed_source_names.get_or_insert_with(|| {
+                self.facts
+                    .type_capability_overrides
+                    .iter()
+                    .filter(|capability| capability.provenance == FactProvenance::ParsedSource)
+                    .flat_map(|capability| {
+                        [
+                            capability.type_name.clone(),
+                            crate::java_naming::rust_name_for_java_named_type(
+                                &capability.type_name,
+                            ),
+                        ]
+                    })
+                    .collect()
+            });
+            Some(names.contains(type_name))
+        }) {
+            return found;
+        }
         self.facts
             .type_capability_overrides
             .iter()
@@ -470,11 +603,14 @@ impl<'a> EffectiveFacts<'a> {
         &self,
         java_ty: &JavaType,
     ) -> Option<&'a HierarchyStrategy> {
+        // Modeled functional interfaces have a concrete runtime facade whose
+        // Rc-backed callable performs dispatch. Derived open-hierarchy facts
+        // must not erase that ABI merely because source implementors exist.
+        if self.native_functional_carrier(java_ty).is_some() {
+            return Some(&HierarchyStrategy::ConcreteStruct);
+        }
         let type_name = capability_type_name(java_ty)?;
-        self.facts
-            .hierarchy_overrides
-            .iter()
-            .filter(|override_fact| type_name_matches(&override_fact.type_name, type_name))
+        self.hierarchy_overrides_for_name(type_name)
             .filter(|override_fact| {
                 !fallback_override_conflicts_with_parsed_source(
                     override_fact,
@@ -489,6 +625,95 @@ impl<'a> EffectiveFacts<'a> {
                 )
             })
             .map(|override_fact| &override_fact.strategy)
+    }
+
+    pub(crate) fn native_functional_carrier(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<crate::stdlib::FunctionalInterfaceShape> {
+        let name = capability_type_name(java_ty)?;
+        // Most queried types are not SAMs. Reject them before any source or
+        // override lookup, retaining the cheap path for ordinary slot queries.
+        let shape = crate::stdlib::functional_interface_shape(
+            &crate::stdlib::canonical_external_receiver_type_key(name),
+        )?;
+        if self.has_parsed_source_type_capability_for_name(name)
+            || self.hierarchy_overrides_for_name(name).any(|fact| {
+                fact.provenance == FactProvenance::UserOverride
+                    && fact.strategy != HierarchyStrategy::ConcreteStruct
+            })
+        {
+            return None;
+        }
+        Some(shape)
+    }
+
+    pub(crate) fn native_iterable_element_type(&self, java_ty: &JavaType) -> Option<JavaType> {
+        let effective =
+            crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        let JavaType::Named { name, args } = &effective else {
+            return None;
+        };
+        if crate::stdlib::canonical_external_receiver_type_key(name) != "Iterable"
+            || args.len() != 1
+        {
+            return None;
+        }
+        self.native_functional_carrier(&effective)?;
+        Some(crate::types::generic_read_type(&args[0]))
+    }
+
+    pub(crate) fn native_iterable_list_projection_element(
+        &self,
+        actual: &JavaType,
+        target: &JavaType,
+    ) -> Option<JavaType> {
+        let element = self.native_iterable_element_type(actual)?;
+        let target = crate::types::optional_element_type(target).unwrap_or_else(|| target.clone());
+        let JavaType::Named { name, args } = &target else {
+            return None;
+        };
+        if crate::stdlib::canonical_external_receiver_type_key(name) != "List"
+            || self.parsed_source_controls_native_carrier(&target)
+            || !(args.is_empty()
+                || (args.len() == 1 && {
+                    let target = crate::types::generic_read_type(&args[0]);
+                    target == element
+                        || crate::types::optional_element_type(&element).as_ref() == Some(&target)
+                }))
+        {
+            return None;
+        }
+        Some(element)
+    }
+
+    /// Common authority for the native payloads implemented by the retained
+    /// collection runtime, preserving parsed source precedence.
+    pub(crate) fn retained_native_collection_kind(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<crate::stdlib::JavaCollectionKind> {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        if self.parsed_source_controls_native_carrier(&ty) {
+            return None;
+        }
+        let kind = crate::stdlib::java_collection_kind_for_type(&ty)?;
+        matches!(
+            kind,
+            crate::stdlib::JavaCollectionKind::List
+                | crate::stdlib::JavaCollectionKind::Set
+                | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+        )
+        .then_some(kind)
+    }
+
+    fn hierarchy_overrides_for_name(
+        &self,
+        type_name: &str,
+    ) -> impl Iterator<Item = &'a HierarchyOverride> {
+        type_fact_candidates(self.facts, TypeFactKind::Hierarchy, type_name)
+            .map(|index| &self.facts.hierarchy_overrides[index])
+            .filter(move |override_fact| type_name_matches(&override_fact.type_name, type_name))
     }
 
     pub fn owned_recovery_capability_for(&self, java_ty: &JavaType) -> OwnedRecoveryCapability {
@@ -568,14 +793,7 @@ impl<'a> EffectiveFacts<'a> {
         &self,
         java_ty: &JavaType,
     ) -> Option<EffectiveFact<bool>> {
-        let type_name = capability_type_name(java_ty);
-        self.facts
-            .type_capability_overrides
-            .iter()
-            .filter(|override_fact| {
-                type_name
-                    .is_some_and(|type_name| type_name_matches(&override_fact.type_name, type_name))
-            })
+        self.type_capability_overrides_for(java_ty)
             .filter_map(|override_fact| {
                 override_fact
                     .clone
@@ -612,9 +830,12 @@ impl<'a> EffectiveFacts<'a> {
         java_ty: &JavaType,
     ) -> impl Iterator<Item = &'a TypeCapabilityOverride> {
         let type_name = capability_type_name(java_ty);
-        self.facts
-            .type_capability_overrides
-            .iter()
+        let candidates = type_name
+            .map(|name| type_fact_candidates(self.facts, TypeFactKind::Capabilities, name));
+        candidates
+            .into_iter()
+            .flatten()
+            .map(|index| &self.facts.type_capability_overrides[index])
             .filter(move |override_fact| {
                 type_name
                     .is_some_and(|type_name| type_name_matches(&override_fact.type_name, type_name))
@@ -704,10 +925,278 @@ fn fallback_override_conflicts_with_parsed_source(
     facts: &FactSet,
 ) -> bool {
     override_fact.is_source_fallback()
-        && facts.type_capability_overrides.iter().any(|capability| {
+        && type_fact_candidates(facts, TypeFactKind::Capabilities, query_type_name).any(|index| {
+            let capability = &facts.type_capability_overrides[index];
             capability.provenance == FactProvenance::ParsedSource
                 && type_name_matches(&capability.type_name, query_type_name)
         })
+}
+
+#[cfg(test)]
+mod type_fact_lookup_session_tests {
+    use super::*;
+
+    #[test]
+    fn parsed_source_name_index_retains_exact_emitted_identity_and_provenance() {
+        let mut facts = facts_for(false);
+        let mut source = facts.type_capability_overrides[0].clone();
+        source.provenance = FactProvenance::ParsedSource;
+        for name in [
+            "Character",
+            "other.Token",
+            "Outer.Inner",
+            "Outer$Inner",
+            "Result",
+        ] {
+            source.type_name = name.to_string();
+            facts.type_capability_overrides.push(source.clone());
+        }
+        source.type_name = "ExternalOnly".to_string();
+        source.provenance = FactProvenance::UserOverride;
+        facts.type_capability_overrides.push(source);
+        let names = [
+            "Character",
+            "java.lang.Character",
+            "other.Token",
+            "Token",
+            "OtherToken",
+            "Outer.Inner",
+            "Outer_Inner",
+            "Outer$Inner",
+            "Inner",
+            "Result",
+            "JavaResult",
+            "ExternalOnly",
+            "Missing",
+        ];
+        let expected = names.map(|name| {
+            EffectiveFacts::new(&facts).has_parsed_source_type_capability_for_name(name)
+        });
+        with_type_fact_lookup_session(&facts, || {
+            for (name, expected) in names.into_iter().zip(expected) {
+                assert_eq!(
+                    EffectiveFacts::new(&facts).has_parsed_source_type_capability_for_name(name),
+                    expected,
+                    "{name}"
+                );
+            }
+            assert!(TYPE_FACT_LOOKUP_SESSION.with(|slot| {
+                slot.borrow()
+                    .as_ref()
+                    .unwrap()
+                    .parsed_source_names
+                    .is_some()
+            }));
+        });
+        for capability in &mut facts.type_capability_overrides {
+            if capability.type_name == "Character" {
+                capability.type_name = "Changed".to_string();
+            }
+        }
+        with_type_fact_lookup_session(&facts, || {
+            assert!(
+                !EffectiveFacts::new(&facts)
+                    .has_parsed_source_type_capability_for_name("Character")
+            );
+            assert!(
+                EffectiveFacts::new(&facts).has_parsed_source_type_capability_for_name("Changed")
+            );
+        });
+    }
+
+    #[test]
+    fn native_functional_carriers_keep_source_and_user_precedence() {
+        let mut facts = facts_for(false);
+        for name in ["IntSupplier", "Comparator", "BiFunction", "Runnable"] {
+            let ty = JavaType::Named {
+                name: name.to_string(),
+                args: Vec::new(),
+            };
+            facts.hierarchy_overrides.push(HierarchyOverride {
+                type_name: name.to_string(),
+                strategy: HierarchyStrategy::ErasedObject,
+                provenance: FactProvenance::CorpusAnalysis,
+            });
+            let effective = EffectiveFacts::new(&facts);
+            assert!(effective.native_functional_carrier(&ty).is_some());
+            assert_eq!(
+                effective.object_representation_override_strategy_for(&ty),
+                Some(&HierarchyStrategy::ConcreteStruct)
+            );
+            facts.hierarchy_overrides.push(HierarchyOverride {
+                type_name: name.to_string(),
+                strategy: HierarchyStrategy::ErasedObject,
+                provenance: FactProvenance::UserOverride,
+            });
+            let effective = EffectiveFacts::new(&facts);
+            assert!(effective.native_functional_carrier(&ty).is_none());
+            assert_eq!(
+                effective.object_representation_override_strategy_for(&ty),
+                Some(&HierarchyStrategy::ErasedObject)
+            );
+            facts.hierarchy_overrides.pop();
+            let mut source = facts.type_capability_overrides[1].clone();
+            source.type_name = name.to_string();
+            facts.type_capability_overrides.push(source);
+            assert!(
+                EffectiveFacts::new(&facts)
+                    .native_functional_carrier(&ty)
+                    .is_none()
+            );
+            facts.type_capability_overrides.pop();
+        }
+    }
+
+    fn facts_for(copy: bool) -> FactSet {
+        let mut facts = FactSet::default();
+        for (type_name, provenance) in [
+            ("example.Token", FactProvenance::ConservativeFallback),
+            ("example.Token", FactProvenance::ParsedSource),
+            ("other.Token", FactProvenance::ExternalLibraryPack),
+            ("example.Token", FactProvenance::UserOverride),
+        ] {
+            facts
+                .type_capability_overrides
+                .push(TypeCapabilityOverride {
+                    type_name: type_name.to_string(),
+                    copy: Some(copy),
+                    clone: Some(true),
+                    string_like: None,
+                    sequence_like: None,
+                    implements: Vec::new(),
+                    extends: None,
+                    final_type: None,
+                    object_safe_trait: None,
+                    provenance,
+                });
+        }
+        for (strategy, provenance) in [
+            (
+                HierarchyStrategy::ErasedObject,
+                FactProvenance::BuiltinExternalModel,
+            ),
+            (
+                HierarchyStrategy::ConcreteStruct,
+                FactProvenance::ParsedSource,
+            ),
+            (
+                HierarchyStrategy::DynTrait {
+                    trait_name: "TokenView".to_string(),
+                },
+                FactProvenance::UserOverride,
+            ),
+            (
+                HierarchyStrategy::DynTrait {
+                    trait_name: "LastTokenView".to_string(),
+                },
+                FactProvenance::UserOverride,
+            ),
+        ] {
+            facts.hierarchy_overrides.push(HierarchyOverride {
+                type_name: "example.Token".to_string(),
+                strategy,
+                provenance,
+            });
+        }
+        facts
+    }
+
+    fn snapshot(
+        facts: &FactSet,
+        name: &str,
+    ) -> (
+        Vec<TypeCapabilityOverride>,
+        TypeCapabilities,
+        Option<HierarchyStrategy>,
+        bool,
+    ) {
+        let effective = EffectiveFacts::new(facts);
+        let ty = JavaType::Named {
+            name: name.to_string(),
+            args: Vec::new(),
+        };
+        (
+            effective
+                .type_capability_overrides_for(&ty)
+                .cloned()
+                .collect(),
+            effective.type_capabilities_for(&ty),
+            effective
+                .object_representation_override_strategy_for(&ty)
+                .cloned(),
+            effective.has_parsed_source_type_capability_for_name(name),
+        )
+    }
+
+    #[test]
+    fn scoped_type_fact_index_matches_ordered_scan_and_precedence() {
+        let facts = facts_for(false);
+        let names = [
+            "example.Token",
+            "Token",
+            "example_token",
+            "other.Token",
+            "Missing",
+        ];
+        let expected = names.map(|name| snapshot(&facts, name));
+        with_type_fact_lookup_session(&facts, || {
+            for (name, expected) in names.into_iter().zip(&expected) {
+                assert_eq!(&snapshot(&facts, name), expected, "{name}");
+                assert!(
+                    type_fact_candidates(&facts, TypeFactKind::Capabilities, name)
+                        .indices
+                        .is_some()
+                );
+            }
+            assert_eq!(
+                snapshot(&facts, "example.Token").2,
+                Some(HierarchyStrategy::DynTrait {
+                    trait_name: "LastTokenView".to_string()
+                })
+            );
+        });
+        assert!(TYPE_FACT_LOOKUP_SESSION.with(|slot| slot.borrow().is_none()));
+    }
+
+    #[test]
+    fn scoped_type_fact_index_restores_nested_sessions_and_does_not_cache_mutations() {
+        let mut outer = facts_for(false);
+        let inner = facts_for(true);
+        let original = snapshot(&outer, "Token");
+        let other = snapshot(&inner, "Token");
+        with_type_fact_lookup_session(&outer, || {
+            assert_eq!(snapshot(&outer, "Token"), original);
+            assert_eq!(snapshot(&inner, "Token"), other);
+            let panic = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                with_type_fact_lookup_session(&inner, || {
+                    assert_eq!(snapshot(&inner, "Token"), other);
+                    assert_eq!(snapshot(&outer, "Token"), original);
+                    panic!("test session restoration");
+                });
+            }));
+            assert!(panic.is_err());
+            assert_eq!(snapshot(&outer, "Token"), original);
+            assert!(
+                type_fact_candidates(&outer, TypeFactKind::Capabilities, "Token")
+                    .indices
+                    .is_some()
+            );
+            assert!(
+                type_fact_candidates(&inner, TypeFactKind::Capabilities, "Token")
+                    .indices
+                    .is_none()
+            );
+        });
+        assert!(TYPE_FACT_LOOKUP_SESSION.with(|slot| slot.borrow().is_none()));
+        outer.type_capability_overrides[0].type_name = "Changed".to_string();
+        outer.type_capability_overrides[3].copy = Some(true);
+        outer
+            .type_capability_overrides
+            .push(outer.type_capability_overrides[3].clone());
+        let changed = snapshot(&outer, "Token");
+        assert_ne!(original, changed);
+        with_type_fact_lookup_session(&outer, || assert_eq!(snapshot(&outer, "Token"), changed));
+    }
 }
 
 fn object_safety_type_name_matches(fact_type_name: &str, query_type_name: &str) -> bool {

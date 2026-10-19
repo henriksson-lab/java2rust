@@ -29,6 +29,11 @@ Options:
   --resume-assembly                   Reuse a completed translation in --out and resume crate assembly.
   --help                              Show this help.
 
+Environment:
+  NEW_JAVA2RUST_BIN                    Use a prebuilt translator instead of building release.
+  NEW_JAVA2RUST_BUILD_PROFILE          Optional prebuilt profile label (e.g. release or debug).
+                                      Recorded as caller-declared; omitted labels remain unknown.
+
 Output:
   <out-dir>/generated-crate/Cargo.toml
   <out-dir>/generated-crate/src/generated/*.rs
@@ -443,12 +448,18 @@ RUST
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/focused-parse-failures.sh"
+source "$repo_root/scripts/focused-provenance.sh"
 if [[ -n "${NEW_JAVA2RUST_BIN:-}" ]]; then
   binary="$NEW_JAVA2RUST_BIN"
   build_profile_args=()
+  producer_profile="${NEW_JAVA2RUST_BUILD_PROFILE:-unknown-prebuilt}"
+  producer_profile_source=caller-declared
+  [[ -n "${NEW_JAVA2RUST_BUILD_PROFILE:-}" ]] || producer_profile_source=unknown
 else
   binary="$repo_root/target/release/new-java2rust"
   build_profile_args=("--release")
+  producer_profile=release
+  producer_profile_source=runner-release-build
 fi
 crate_dir="$out_dir/generated-crate"
 generated_dir="$crate_dir/src/generated"
@@ -481,6 +492,10 @@ else
     echo "--resume-assembly requires completed translation artifacts in: $out_dir" >&2
     exit 1
   fi
+  if ! python3 "$repo_root/scripts/rebase-focused-resume-artifacts.py" \
+    "$status_path" "$batch_manifest_path" "$generated_dir" "$raw_resume_dir"; then
+    exit 1
+  fi
   find "$generated_dir" -type f -name '*.rs' -delete
   cp "$raw_resume_dir"/*.rs "$generated_dir"/
   printf "assembly_resume\trunning\t0\t%s\n" "$out_dir" >> "$phase_events_path"
@@ -503,6 +518,15 @@ else
   translator_build_elapsed_ms="$(elapsed_ms_since "$translator_build_start_ms")"
   printf "translator_build\tok\t%s\t%s\n" "$translator_build_elapsed_ms" "$binary" >> "$phase_events_path"
 fi
+
+# Preserve the actual translation producer, not a different CLI used later to
+# resume assembly or count markers. Legacy outputs remain explicitly unknown.
+producer_snapshot_path="$out_dir/translation-producer.tsv"
+if [[ "$resume_assembly" -eq 0 ]]; then
+  focused_record_translation_producer "$binary" "$producer_snapshot_path" \
+    "$producer_profile" "$producer_profile_source" || exit 1
+fi
+focused_load_translation_producer "$producer_snapshot_path" || exit 1
 
 external_dependency_lines=""
 if [[ "${#manifest_paths[@]}" -gt 0 ]]; then
@@ -904,6 +928,7 @@ if [[ "${#emit_java_files[@]}" -gt 0 ]]; then
   java_files=("${emit_java_files[@]}")
 fi
 translation_elapsed_ms="$(elapsed_ms_since "$translation_start_ms")"
+focused_verify_translation_producer "$binary" "$translation_producer_sha256" || exit 1
 printf "translation\tok\t%s\t%s files\n" "$translation_elapsed_ms" "${#java_files[@]}" >> "$phase_events_path"
 else
   printf "translation_reuse\tok\t0\t%s files\n" "${#java_files[@]}" >> "$phase_events_path"
@@ -994,14 +1019,17 @@ strip_shared_support_items() {
       shared[$1] = 1
       next
     }
-    BEGIN { in_prelude = 1; pending = ""; skip_depth = 0; copy_depth = 0 }
+    BEGIN { in_prelude = 1; pending = ""; skip_depth = 0; skip_waiting_body = 0; copy_depth = 0 }
     copy_depth > 0 {
       print
       copy_depth += gsub(/\{/, "{")
       copy_depth -= gsub(/\}/, "}")
       next
     }
-    skip_depth > 0 {
+    skip_depth > 0 || skip_waiting_body {
+      if ($0 ~ /\{/) {
+        skip_waiting_body = 0
+      }
       skip_depth += gsub(/\{/, "{")
       skip_depth -= gsub(/\}/, "}")
       next
@@ -1011,18 +1039,14 @@ strip_shared_support_items() {
         skip_depth = 0
         skip_depth += gsub(/\{/, "{")
         skip_depth -= gsub(/\}/, "}")
-        if (skip_depth < 1) {
-          skip_depth = 1
-        }
+        skip_waiting_body = ($0 !~ /\{/)
         next
       }
       if ($0 ~ /^impl[[:space:]]*<[^{}]+>[[:space:]]+JavaIterator[[:space:]]*</) {
         skip_depth = 0
         skip_depth += gsub(/\{/, "{")
         skip_depth -= gsub(/\}/, "}")
-        if (skip_depth < 1) {
-          skip_depth = 1
-        }
+        skip_waiting_body = ($0 !~ /\{/)
         next
       }
       if ($0 ~ /^impl([[:space:]]*<[^{}]+>)?[[:space:]]+(dyn[[:space:]]+)?[A-Za-z_][A-Za-z0-9_]*(<[^{}]+>)?[[:space:]]*(\{|where([[:space:]]|$))/) {
@@ -1033,9 +1057,7 @@ strip_shared_support_items() {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")
-          if (skip_depth < 1) {
-            skip_depth = 1
-          }
+          skip_waiting_body = ($0 !~ /\{/)
           next
         }
         print
@@ -1069,9 +1091,7 @@ strip_shared_support_items() {
           skip_depth = 0
           skip_depth += gsub(/\{/, "{")
           skip_depth -= gsub(/\}/, "}")
-          if (skip_depth < 1) {
-            skip_depth = 1
-          }
+          skip_waiting_body = ($0 !~ /\{/)
           next
         }
         print
@@ -1084,9 +1104,12 @@ strip_shared_support_items() {
         pending = pending $0 "\n"
         next
       }
-      if ($0 ~ /^pub[[:space:]]+(struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
-        name = $3
-        sub(/[=;{(<:].*/, "", name)
+      # Private state carriers are required even when there is only one
+      # translated source and the merger has no reason to promote them.
+      if ($0 ~ /^(pub(\(crate\))?[[:space:]]+)?(struct|enum|trait|type)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*/) {
+        name = $0
+        sub(/^(pub(\(crate\))?[[:space:]]+)?(struct|enum|trait|type)[[:space:]]+/, "", name)
+        sub(/[[:space:]=;{(<:].*/, "", name)
         if (name == "JavaException" || name == "JavaClass" || name == "FileSystem" || name == "Path" || name == "URI" || name == "File" || name == "URL" || name == "URLConnection" || name == "JarURLConnection" || name == "JarFile" || name == "JarEntry" || name == "Manifest" || name == "Attributes" || name == "AttributesName" || name == "Enumeration" || name == "JavaIterator" || name == "IOUtils" || (shared[name] && name != source_type)) {
           pending = ""
           skip_depth = 0
@@ -1629,7 +1652,7 @@ path = Path(sys.argv[1])
 lines = path.read_text().splitlines(keepends=True)
 shared_support_path = Path(sys.argv[3]) if len(sys.argv) > 3 and sys.argv[3] else None
 static_re = re.compile(
-    r"^(?:(?:pub\s+)?static\s+|std::thread_local!\s*\{\s*static\s+)"
+    r"^(?:(?:pub(?:\(crate\))?\s+)?static\s+|std::thread_local!\s*\{\s*static\s+)"
     r"([A-Za-z_][A-Za-z0-9_]*)\b"
 )
 
@@ -1711,6 +1734,10 @@ seen = set()
 # `ObservationBound for ObservationDiscrete<E>` after its earlier guard ran.
 if shared_support_path and shared_support_path.exists():
     for shared_line in shared_support_path.read_text().splitlines():
+        if match := static_re.match(shared_line):
+            # Promoted storage has one crate-wide identity too. Source
+            # restoration must not recreate a module-local copy after merge.
+            seen.add(("static", match.group(1)))
         parts = impl_header_parts(shared_line)
         if parts is not None and parts[0] is not None:
             seen.add(("trait_impl", parts[0], parts[1]))
@@ -2069,8 +2096,10 @@ def all_trait_impl_keys(lines: list[str]) -> set[tuple[str, str]]:
 # a flattened nested class belongs to this source module. Reconcile the source
 # surface from the raw translator output at the end: support assembly may
 # deduplicate facades, but it must never discard methods or trait impls emitted
-# for a real source type. Only post-primary fallback impls are considered here;
-# pre-primary inherent impls include deliberately weak facade variants.
+# for a real source type. Inherent methods remain post-primary-only because
+# pre-primary inherent impls include deliberately weak facade variants. Trait
+# companions use the source-ownership predicate on either side of that boundary:
+# a nested source interface and its boxed Clone can precede the primary type.
 current_lines_for_surface = current.splitlines(keepends=True)
 existing_methods = inherent_method_names(current_lines_for_surface, surface_owned_names)
 existing_traits = trait_impl_keys(current_lines_for_surface, surface_owned_names)
@@ -2118,7 +2147,7 @@ while index < len(raw_lines):
                 )
         index = end
         continue
-    parts = impl_header_parts(line) if raw_after_primary else None
+    parts = impl_header_parts(line)
     if parts is not None and parts[0] is not None:
         target = parts[1]
         key = (parts[0], target)
@@ -3702,7 +3731,7 @@ total_files="${#assembly_java_files[@]}"
 translated_failed="$(awk -F '\t' 'NR > 1 && $3 == "errors" { count++ } END { print count + 0 }' "$status_path")"
 diagnostic_files="$(awk -F '\t' 'NR > 1 && $4 > 0 { count++ } END { print count + 0 }' "$status_path")"
 invalid_pattern_files="$(awk -F '\t' 'NR > 1 && $5 > 0 { count++ } END { print count + 0 }' "$status_path")"
-compile_error_count="$(grep -E 'error(\[[A-Z0-9]+\])?:' "$compile_log" | wc -l | tr -d ' ')"
+compile_error_count="$(compiler_diagnostic_error_count "$compile_log")"
 cargo_failure_kind="none"
 if [[ "$compile_status" != "ok" ]]; then
   if grep -E -q 'failed to get .* as a dependency|failed to download|no matching package named|download of .* failed|Unable to update registry|could not resolve|offline mode|attempting to make an HTTP request' "$compile_log"; then
@@ -3721,7 +3750,7 @@ invalid_scan_elapsed_ms="$(elapsed_ms_since "$invalid_scan_start_ms")"
 printf "invalid_pattern_scan\tok\t%s\t%s\n" "$invalid_scan_elapsed_ms" "$invalid_patterns_path" >> "$phase_events_path"
 {
   printf "count\terror\n"
-  grep -E '^error(\[[A-Z0-9]+\])?:' "$compile_log" \
+  compiler_diagnostic_error_headers "$compile_log" \
     | sed 's/[[:space:]]\+/ /g' \
     | sort \
     | uniq -c \
@@ -3771,6 +3800,11 @@ printf "total\tok\t%s\t%s\n" "$total_elapsed_ms" "$out_dir" >> "$phase_events_pa
   printf "out_dir\t%s\n" "$out_dir"
   printf "generated_crate\t%s\n" "$crate_dir"
   printf "translator_binary\t%s\n" "$binary"
+  printf "translation_producer_binary\t%s\n" "$translation_producer_binary"
+  printf "translation_producer_sha256\t%s\n" "$translation_producer_sha256"
+  printf "translation_producer_bytes\t%s\n" "$translation_producer_bytes"
+  printf "translation_producer_build_profile\t%s\n" "$translation_producer_build_profile"
+  printf "translation_producer_profile_source\t%s\n" "$translation_producer_profile_source"
   printf "translator_build_elapsed_ms\t%s\n" "$translator_build_elapsed_ms"
   printf "cargo_target_dir\t%s\n" "${CARGO_TARGET_DIR:-}"
   printf "files\t%s\n" "$total_files"

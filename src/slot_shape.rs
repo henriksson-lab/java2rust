@@ -4,6 +4,14 @@ use crate::types::{is_final_by_default, optional_element_type, sequence_element_
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RustSlotShape {
     pub java_ty: JavaType,
+    /// Physical allocation identity for native containers, independent of
+    /// whether this slot owns a handle or borrows one. Nominal source-object
+    /// placement remains owned by the existing type-wide storage plan.
+    pub native_allocation: crate::storage_strategy::StoragePlacement,
+    /// Physical requirements at generic/array child positions, independent of
+    /// the child's spelling (Map<Set<T>, Set<T>> has two distinct slots).
+    /// Internal optional wrappers do not consume a path component.
+    pub nested_native_allocations: Vec<(Vec<usize>, crate::storage_strategy::StoragePlacement)>,
     pub ownership: OwnershipShape,
     pub view: ViewShape,
     pub dispatch: DispatchShape,
@@ -25,6 +33,8 @@ pub enum OwnershipShape {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ViewShape {
     Native,
+    /// Identity-preserving List interface operations, independent of payload storage.
+    ListInterface,
     /// Native hash collection using Java key equality instead of Rust Eq/Hash.
     JavaSemanticHash,
     Str,
@@ -70,6 +80,48 @@ pub struct TypeCapabilities {
 }
 
 impl RustSlotShape {
+    pub(crate) fn native_child_type_at_path(ty: &JavaType, path: &[usize]) -> Option<JavaType> {
+        let mut ty = ty.clone();
+        for index in path {
+            ty = optional_element_type(&ty).unwrap_or(ty);
+            ty = match ty {
+                JavaType::Array(element) if *index == 0 => *element,
+                JavaType::Named { args, .. } => args.get(*index)?.clone(),
+                _ => return None,
+            };
+        }
+        Some(ty)
+    }
+
+    pub(crate) fn require_native_allocation_at(
+        &mut self,
+        path: &[usize],
+        placement: crate::storage_strategy::StoragePlacement,
+    ) {
+        if path.is_empty() {
+            self.native_allocation = self.native_allocation.join(placement);
+        } else if let Some((_, current)) = self
+            .nested_native_allocations
+            .iter_mut()
+            .find(|(key, _)| key == path)
+        {
+            *current = current.join(placement);
+        } else {
+            self.nested_native_allocations
+                .push((path.to_vec(), placement));
+            self.nested_native_allocations.sort_by(|a, b| a.0.cmp(&b.0));
+        }
+    }
+
+    pub(crate) fn inherit_native_collection_child(&mut self, parent: &Self, index: usize) {
+        self.inherit_nested_collection_views(parent);
+        for (path, placement) in &parent.nested_native_allocations {
+            if path.first() == Some(&index) {
+                self.require_native_allocation_at(&path[1..], *placement);
+            }
+        }
+    }
+
     /// Project a child slot from a solved container without rediscovering its
     /// carrier from a context-free Java spelling.
     pub(crate) fn inherit_nested_collection_views(&mut self, parent: &Self) {
@@ -119,7 +171,9 @@ impl RustSlotShape {
 
     pub fn conservative(java_ty: JavaType) -> Self {
         Self {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             ownership: conservative_ownership(&java_ty),
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,
@@ -130,7 +184,9 @@ impl RustSlotShape {
 
     pub fn for_storage(java_ty: JavaType) -> Self {
         Self {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             ownership: conservative_ownership(&java_ty),
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,

@@ -6891,9 +6891,9 @@ class NullableIdentityRegexArgument {
     let translation = translate_source_with_facts(source, &facts);
     assert!(
         translation.rust.contains("java_string_replace_first")
-            && translation.rust.contains("pattern.ok_or_else(")
+            && translation.rust.contains("pattern.as_ref().ok_or_else(")
             && !translation.rust.contains(
-                "java_string_replace_first(&JavaString::intern(\"axa\"), pattern.as_ref()"
+                "java_string_replace_first(&JavaString::intern(\"axa\"), pattern.as_ref(),"
             ),
         "{}",
         translation.rust
@@ -6910,6 +6910,8 @@ fn nullable_regex_storage_is_projected_to_string_content() {
             .as_str(),
         "aa"
     );
+    let error = NullableIdentityRegexArgument::run(&[None]).unwrap_err();
+    assert!(error.is_instance(&["NullPointerException"]));
 }
 "#,
     );
@@ -6930,7 +6932,7 @@ class NullableIdentityStringReplaceArgument {
     let translation = translate_source_with_facts(source, &facts);
     assert!(
         translation.rust.contains(".replace(")
-            && translation.rust.contains("pattern.ok_or_else(")
+            && translation.rust.contains("pattern.as_ref().ok_or_else(")
             && !translation.rust.contains("replace(pattern.as_ref(),"),
         "{}",
         translation.rust
@@ -6947,6 +6949,8 @@ fn nullable_replace_pattern_is_projected_to_string_content() {
             .as_str(),
         "aa"
     );
+    let error = NullableIdentityStringReplaceArgument::run(&[None]).unwrap_err();
+    assert!(error.is_instance(&["NullPointerException"]));
 }
 "#,
     );
@@ -7875,7 +7879,7 @@ fn compares_string_slots() {
 }
 
 #[test]
-fn java_string_identity_fails_loudly_until_identity_representation_exists() {
+fn java_string_identity_slots_select_reference_representation() {
     let translation = translate_source(
         r#"
 class StringIdentitySlots {
@@ -7895,13 +7899,9 @@ class StringIdentitySlots {
     );
 
     assert!(
-        translation
-            .rust
-            .matches(
-                "compile_error!(\"unsupported Java String reference identity comparison requires string identity representation\")"
-            )
-            .count()
-            == 3,
+        translation.rust.contains("pub struct JavaString")
+            && !translation.rust.contains("compile_error!")
+            && translation.rust.contains("java_identity_eq"),
         "{}",
         translation.rust
     );
@@ -7911,14 +7911,27 @@ class StringIdentitySlots {
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
 
-    cargo_check_generated_modules_fails_with(
+    cargo_test_generated_modules(
         "java_string_identity",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn strings_in_array_slots_keep_reference_identity_and_nulls() {
+    let shared = JavaString::fresh("Chrom");
+    let other = JavaString::fresh("Chrom");
+    assert!(StringIdentitySlots::first_is(&[Some(shared.clone())], shared.clone()).unwrap());
+    assert!(!StringIdentitySlots::first_is(&[Some(other.clone())], shared.clone()).unwrap());
+    assert!(!StringIdentitySlots::first_is(&[None], shared.clone()).unwrap());
+    assert!(StringIdentitySlots::literal_is(JavaString::intern("Chrom")));
+    assert!(!StringIdentitySlots::literal_is(shared.clone()));
+    assert!(StringIdentitySlots::sorted_same(&[Some(shared.clone())], &[Some(shared)]).unwrap());
+    assert!(!StringIdentitySlots::sorted_same(&[Some(other)], &[None]).unwrap());
+    assert!(StringIdentitySlots::sorted_same(&[None], &[None]).unwrap());
+}
+"#,
         }],
-        "unsupported Java String reference identity comparison requires string identity representation",
     );
 }
 
@@ -14459,10 +14472,10 @@ fn documents_java_collection_api_gap() {
     assert!(
         translation
             .rust
-            .contains("let mut values: Vec<String> = Vec::<String>::new();")
+            .contains("let mut values: Vec<String> = Vec::new();")
             && translation
                 .rust
-                .contains("values.extend(vec![\"a\".to_string(), \"b\".to_string()]);")
+                .contains("__java_call_receiver.extend(__java_call_argument_0.iter().cloned());")
             && translation.rust.contains("return values.len() as i32;")
             && !translation.rust.contains(".add_all(")
             && !translation.rust.contains(".size()")
@@ -14471,12 +14484,12 @@ fn documents_java_collection_api_gap() {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "collection_add_all_and_size",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: "#[test] fn bulk_add_size() { assert_eq!(CollectionAddAllAndSize::new().count(), 2); }",
         }],
     );
 }
@@ -14591,18 +14604,18 @@ class NestedWildcardListFlattenUse {
         translation.rust.contains("pub fn flatten<T: Clone>")
             && translation
                 .rust
-                .contains("values.extend(group.iter().cloned())")
+                .contains("__java_call_receiver.extend(__java_call_argument_0.iter().cloned())")
             && !translation.rust.contains("downcast::<List>")
             && !translation.rust.contains("invalid Java cast"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "static_nested_wildcard_list_add_all",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: "#[test] fn flattens_nested_wildcards() { assert_eq!(NestedWildcardListFlatten::flatten(&[vec![1, 2], vec![3]]), vec![1, 2, 3]); }",
         }],
     );
 }
@@ -14664,19 +14677,19 @@ fn arrays_as_list_single_string_array_spreads_for_add_all() {
     assert!(
         translation
             .rust
-            .contains("fields.extend(java_string_split(&filter_string, \",\", 0).into_iter().map(|value| value.expect(\"Java null array element\")));")
+            .contains("__java_call_receiver.extend(__java_call_argument_0.iter().cloned().into_iter().map(|value| value.expect(\"Java null array element\")));")
             && !translation.rust.contains("extend(vec![java_string_split")
             && !translation.rust.contains(".add_all("),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "arrays_as_list_split_add_all",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: "#[test] fn bulk_split_spreads_elements() { assert_eq!(ArraysAsListSplitAddAll::new().fields(\"a,b\"), vec![\"a\", \"b\"]); }",
         }],
     );
 }
@@ -14717,18 +14730,25 @@ class MapKeySetSize {
     );
 
     assert!(
-        translation.rust.contains("return Ok(values.len() as i32);")
+        translation.rust.contains("return values.len() as i32;")
             && !translation.rust.contains("values.keys().cloned()")
             && !translation.rust.contains(".size()"),
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_key_set_size",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn count_does_not_copy_map_values() {
+    let mut values: std::collections::HashMap<String, Box<dyn std::any::Any>> = std::collections::HashMap::new();
+    values.insert("key".to_string(), Box::new(7_i32));
+    assert_eq!(MapKeySetSize::new().count(&values), 1);
+}
+"#,
         }],
     );
 }
@@ -14752,9 +14772,9 @@ class MapKeySetReturnSet {
         translation.rust.contains("pub fn keys(&self, values:")
             && translation
                 .rust
-                .contains(") -> Result<std::collections::HashSet<String>, JavaException>")
+                .contains(") -> std::collections::HashSet<String>")
             && translation.rust.contains(
-                "return Ok(values.keys().cloned().collect::<std::collections::HashSet<_>>());"
+                "return values.keys().cloned().collect::<std::collections::HashSet<String>>();"
             )
             && !translation
                 .rust
@@ -14763,12 +14783,21 @@ class MapKeySetReturnSet {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_key_set_return_set",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn initial_key_contents_do_not_copy_map_values() {
+    let mut values: std::collections::HashMap<String, Box<dyn std::any::Any>> = std::collections::HashMap::new();
+    values.insert("key".to_string(), Box::new(7_i32));
+    let keys = MapKeySetReturnSet::new().keys(&values);
+    assert_eq!(keys.len(), 1);
+    assert!(keys.contains("key"));
+}
+"#,
         }],
     );
 }
@@ -14789,23 +14818,29 @@ class MapValuesReturnCollection {
     );
 
     assert!(
-        translation
-            .rust
-            .contains(") -> Result<Vec<String>, JavaException>")
+        translation.rust.contains(") -> Vec<String>")
             && translation
                 .rust
-                .contains("return Ok(values.values().cloned().collect::<Vec<_>>());")
+                .contains("return values.values().cloned().collect::<Vec<_>>();")
             && !translation.rust.contains("return values.values();"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_values_return_collection",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn initial_value_contents_preserve_duplicates() {
+    let mut values = std::collections::HashMap::new();
+    values.insert("first".to_string(), "same".to_string());
+    values.insert("second".to_string(), "same".to_string());
+    assert_eq!(MapValuesReturnCollection::new().values(&values), vec!["same".to_string(), "same".to_string()]);
+}
+"#,
         }],
     );
 }
@@ -14819,7 +14854,7 @@ import java.util.Set;
 
 class MapValuesReturnSet {
     Set<String> values(HashMap<String, String> values) {
-        return values.values();
+        return new java.util.HashSet<String>(values.values());
     }
 }
 "#,
@@ -14828,9 +14863,9 @@ class MapValuesReturnSet {
     assert!(
         translation
             .rust
-            .contains(") -> Result<std::collections::HashSet<String>, JavaException>")
+            .contains(") -> std::collections::HashSet<String>")
             && translation.rust.contains(
-                "return Ok(values.values().cloned().collect::<std::collections::HashSet<_>>());"
+                "return values.values().cloned().collect::<std::collections::HashSet<String>>();"
             )
             && !translation
                 .rust
@@ -14840,12 +14875,22 @@ class MapValuesReturnSet {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_values_return_set",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn explicit_value_set_copy_removes_duplicates() {
+    let mut values = std::collections::HashMap::new();
+    values.insert("first".to_string(), "same".to_string());
+    values.insert("second".to_string(), "same".to_string());
+    let set = MapValuesReturnSet::new().values(&values);
+    assert_eq!(set.len(), 1);
+    assert!(set.contains("same"));
+}
+"#,
         }],
     );
 }
@@ -14860,16 +14905,20 @@ import java.util.LinkedHashSet;
 
 class MapValuesReturnHashSet {
     HashSet<String> values(HashMap<String, String> values) {
-        return values.values();
+        return new HashSet<String>(values.values());
     }
 
     HashSet<String> localValues(String key, String value) {
         HashMap<String, String> values = new HashMap<String, String>();
         values.put(key, value);
-        return values.values();
+        return new HashSet<String>(values.values());
     }
 
     HashSet<String> linkedValues(HashMap<String, String> values) {
+        return new LinkedHashSet<String>(values.values());
+    }
+
+    LinkedHashSet<String> orderedValues(HashMap<String, String> values) {
         return new LinkedHashSet<String>(values.values());
     }
 }
@@ -14882,7 +14931,10 @@ class MapValuesReturnHashSet {
         translation
             .rust
             .contains(") -> std::collections::HashSet<String>")
-            && translation.rust.matches(hashset_collect).count() == 3
+            && translation.rust.matches(hashset_collect).count() == 2
+            && translation
+                .rust
+                .contains("collect::<JavaLinkedHashSet<String>>()")
             && !translation
                 .rust
                 .contains("return Ok(values.values().cloned().collect::<Vec<_>>());")
@@ -14891,12 +14943,28 @@ class MapValuesReturnHashSet {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_values_return_hashset",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn explicit_value_set_copies_preserve_the_selected_carrier() {
+    let mut values = std::collections::HashMap::new();
+    values.insert("first".to_string(), "same".to_string());
+    values.insert("second".to_string(), "same".to_string());
+    let fixture = MapValuesReturnHashSet::new();
+    assert_eq!(fixture.values(&values).len(), 1);
+    assert!(fixture.local_values("key".to_string(), "value".to_string()).contains("value"));
+    let linked: std::collections::HashSet<String> = fixture.linked_values(&values);
+    assert_eq!(linked.len(), 1);
+    assert!(linked.contains("same"));
+    let ordered: JavaLinkedHashSet<String> = fixture.ordered_values(&values);
+    assert_eq!(ordered.len(), 1);
+    assert!(ordered.contains(&"same".to_string()));
+}
+"#,
         }],
     );
 }
@@ -14920,7 +14988,7 @@ class MapEntrySetConstructorHashSet {
     assert!(
         translation
             .rust
-            .contains(") -> Result<std::collections::HashSet<(String, String)>, JavaException>")
+            .contains(") -> std::collections::HashSet<(String, String)>")
             && translation.rust.contains(".iter().map(|(key, value)|")
             && translation
                 .rust
@@ -14930,12 +14998,21 @@ class MapEntrySetConstructorHashSet {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "map_entry_set_constructor_hashset",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test]
+fn entry_snapshot_contains_the_original_pair() {
+    let mut values = std::collections::HashMap::new();
+    values.insert("key".to_string(), "value".to_string());
+    let entries = MapEntrySetConstructorHashSet::new().entries(&values);
+    assert_eq!(entries.len(), 1);
+    assert!(entries.contains(&("key".to_string(), "value".to_string())));
+}
+"#,
         }],
     );
 }
@@ -15430,13 +15507,13 @@ fn bulk_add_all_borrowed_generated_rust_preserves_behavior() {
             .contains("pub fn merge(&self, values: &mut Vec<String>, other: &[String])")
             && translation
                 .rust
-                .contains("values.extend(other.iter().cloned());")
+                .contains("__java_call_receiver.extend(__java_call_argument_0.iter().cloned());")
             && !translation.rust.contains("other: Vec<String>"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "bulk_add_all_borrowed",
         vec![GeneratedCrateModule {
             name: "bulk_add_all_borrowed",
@@ -17088,25 +17165,34 @@ class CollectionRemoveAllReturn {
     assert!(
         translation
             .rust
-            .contains("let __java_remove_all_before = lines.len();")
+            .contains("let __java_remove_all_before = __java_call_receiver.len();")
+            && translation.rust.contains(
+                "__java_call_receiver.retain(|value| !__java_remove_all_values.contains(value));"
+            )
             && translation
                 .rust
-                .contains("lines.retain(|value| !__java_remove_all_values.contains(value));")
-            && translation
-                .rust
-                .contains("lines.len() != __java_remove_all_before")
+                .contains("__java_call_receiver.len() != __java_remove_all_before")
             && !translation.rust.contains(".remove_all(")
             && !translation.rust.contains(".removeAll("),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "collection_remove_all_return",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test] fn removal_changes_only_matching_elements() {
+    let fixture = CollectionRemoveAllReturn::new();
+    let mut values = ["a".to_string(), "b".to_string()].into_iter().collect();
+    let removed = ["b".to_string()].into_iter().collect::<std::collections::HashSet<_>>();
+    assert!(fixture.remove(&mut values, removed.clone()));
+    assert_eq!(values, ["a".to_string()].into_iter().collect());
+    assert!(!fixture.remove(&mut values, removed));
+}
+"#,
         }],
     );
 }
@@ -17133,8 +17219,8 @@ class CollectionRemoveAllSelfAlias {
     assert!(
         translation
             .rust
-            .contains("let __java_remove_all_before = lines.len();")
-            && translation.rust.contains("lines.clear();")
+            .contains("let __java_remove_all_before = __java_call_receiver.len();")
+            && translation.rust.contains("__java_call_receiver.clear();")
             && translation.rust.contains("__java_remove_all_before != 0")
             && !translation
                 .rust
@@ -17146,12 +17232,23 @@ class CollectionRemoveAllSelfAlias {
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "collection_remove_all_self_alias",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test] fn self_removal_clears_and_reports_change() {
+    let fixture = CollectionRemoveAllSelfAlias::new();
+    let mut values = vec!["a".to_string()];
+    assert!(fixture.remove(&mut values));
+    assert!(values.is_empty());
+    assert!(!fixture.remove(&mut values));
+    values.push("b".to_string());
+    fixture.clear(&mut values);
+    assert!(values.is_empty());
+}
+"#,
         }],
     );
 }
@@ -17174,19 +17271,27 @@ class CollectionContainsAllReturn {
     assert!(
         translation
             .rust
-            .contains(".iter().all(|value| lines.contains(value))")
+            .contains(".iter().all(|value| __java_call_receiver.contains(value))")
             && !translation.rust.contains(".contains_all(")
             && !translation.rust.contains(".containsAll("),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "collection_contains_all_return",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test] fn contains_all_observes_both_collections() {
+    let fixture = CollectionContainsAllReturn::new();
+    let values = vec!["a".to_string(), "b".to_string()];
+    assert!(fixture.contains(&values, &["b".to_string()]));
+    assert!(!fixture.contains(&values, &["c".to_string()]));
+    assert!(fixture.contains(&[], &[]));
+}
+"#,
         }],
     );
 }
@@ -17209,28 +17314,37 @@ class CollectionRetainAllReturn {
     assert!(
         translation
             .rust
-            .contains("let __java_retain_all_values = keep;")
+            .contains("let __java_retain_all_values = __java_call_argument_0;")
             && translation
                 .rust
-                .contains("let __java_retain_all_before = lines.len();")
+                .contains("let __java_retain_all_before = __java_call_receiver.len();")
+            && translation.rust.contains(
+                "__java_call_receiver.retain(|value| __java_retain_all_values.contains(value));"
+            )
             && translation
                 .rust
-                .contains("lines.retain(|value| __java_retain_all_values.contains(value));")
-            && translation
-                .rust
-                .contains("lines.len() != __java_retain_all_before")
+                .contains("__java_call_receiver.len() != __java_retain_all_before")
             && !translation.rust.contains(".retain_all(")
             && !translation.rust.contains(".retainAll("),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "collection_retain_all_return",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test] fn retention_reports_change_and_preserves_membership() {
+    let fixture = CollectionRetainAllReturn::new();
+    let mut values = ["a".to_string(), "b".to_string()].into_iter().collect();
+    let kept = ["b".to_string()].into_iter().collect::<std::collections::HashSet<_>>();
+    assert!(fixture.retain(&mut values, kept.clone()));
+    assert_eq!(values, kept);
+    assert!(!fixture.retain(&mut values, kept));
+}
+"#,
         }],
     );
 }
@@ -20778,7 +20892,7 @@ class PriorityQueueComparatorLocalUse {
     );
     assert!(
         translation.rust.contains(
-            "let comparator = Comparator::from_fn(move |left: i32, right: i32| right - left);"
+            "Comparator::from_fallible_fn(move |left: i32, right: i32| Ok((right).wrapping_sub(left)))"
         ) && translation
             .rust
             .contains("JavaPriorityQueue::with_comparator")
@@ -34489,7 +34603,7 @@ class StringIdentityCollection {
             && translation.rust.contains("JavaString::intern(\"x\")")
             && translation
                 .rust
-                .contains("__java_left.java_identity_eq(&fresh)"),
+                .contains("__java_left.java_identity_eq(&__java_right)"),
         "{}",
         translation.rust
     );
@@ -43427,8 +43541,10 @@ class SourceIterableConsumer {
     );
 
     assert!(
-        translation.rust.contains("for value in owner.iterator()")
-            && !translation.rust.contains("for value in owner.iter()"),
+        translation.rust.contains("owner.iterator()")
+            && translation.rust.contains(".has_next_result()")
+            && translation.rust.contains(".next_result()")
+            && !translation.rust.contains("owner.iter()"),
         "{}",
         translation.rust
     );
@@ -62197,18 +62313,18 @@ class ReturnedSupplierLambda {
     );
 
     assert!(
-        translation.rust.contains("Supplier::from_fn")
+        translation.rust.contains("Supplier::from_fallible_fn")
             && !translation.rust.contains("expected `Supplier"),
         "{}",
         translation.rust
     );
 
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "returned_supplier_lambda",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: "#[test] fn supplier_value_is_deferred_and_callable() { assert_eq!(ReturnedSupplierLambda::new().wrap().get_result().unwrap(), \"x\"); }",
         }],
     );
 }
@@ -69669,7 +69785,13 @@ class NullableNestedListFlatten<T> {
                 .rust
                 .contains("list.as_ref().expect(\"Java null receiver\").iter().cloned()")
             || (translation.rust.contains("list.as_ref().ok_or_else(")
-                && translation.rust.contains(")?.iter().cloned()")))
+                && translation.rust.contains(")?.iter().cloned()"))
+            || (translation
+                .rust
+                .contains("__java_call_argument_0.as_ref().unwrap()")
+                && translation
+                    .rust
+                    .contains("__java_call_argument_0.iter().cloned()")))
             && !translation.rust.contains("list.iter().cloned()"),
         "{}",
         translation.rust
@@ -69690,6 +69812,9 @@ class NullableNestedListFlatten<T> {
                 || translation.rust.contains(
                     "self.identity(list.as_ref().expect(\"Java null receiver\").to_vec()"
                 )
+                || translation.rust.contains(
+                    "self.identity(std::clone::Clone::clone(list.as_ref().expect(\"Java null receiver\"))"
+                )
                 || (translation
                     .rust
                     .contains("self.identity(list.as_ref().ok_or_else(")
@@ -69697,12 +69822,19 @@ class NullableNestedListFlatten<T> {
         "{}",
         translation.rust
     );
-    cargo_check_generated_modules(
+    cargo_test_generated_modules(
         "add_all_nullable_nested_list_element",
         vec![GeneratedCrateModule {
             name: "fixture",
             rust: translation.rust,
-            tests: "",
+            tests: r#"
+#[test] fn nullable_nested_carriers_project_once() {
+    let mut fixture = NullableNestedListFlatten::<i32>::new();
+    fixture.lists = Some(vec![Some(vec![1, 2]), Some(vec![3])]);
+    assert_eq!(fixture.flat(), vec![1, 2, 3]);
+    assert_eq!(fixture.pass_nested_element(), vec![1, 2]);
+}
+"#,
         }],
     );
 }

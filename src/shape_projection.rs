@@ -5,6 +5,36 @@ use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{optional_element_type, optional_java_type};
 
+pub(crate) fn project_native_iterable_list_view(
+    actual: &RustSlotShape,
+    target: &mut RustSlotShape,
+    facts: &FactSet,
+) -> bool {
+    let Some(element) = EffectiveFacts::new(facts)
+        .native_iterable_list_projection_element(&actual.java_ty, &target.java_ty)
+    else {
+        return false;
+    };
+    let optional = target.optional_element_type().is_some();
+    let mut base = target
+        .optional_element_type()
+        .unwrap_or_else(|| target.java_ty.clone());
+    if let JavaType::Named { args, .. } = &mut base {
+        *args = vec![element];
+    }
+    target.java_ty = if optional {
+        optional_java_type(base)
+    } else {
+        base
+    };
+    target.view = ViewShape::ListInterface;
+    target.ownership = OwnershipShape::Owned;
+    target.native_allocation = Default::default();
+    target.nested_native_allocations = actual.nested_native_allocations.clone();
+    target.inherit_nested_collection_views(actual);
+    true
+}
+
 /// Reference casting changes the nominal type, not the Java null value.
 /// Primitive targets are unboxing/numeric operations and retain their own
 /// required-value checks instead of acquiring an Option result.
@@ -18,6 +48,39 @@ pub(crate) fn preserve_reference_cast_nullability(
         && target.optional_element_type().is_none()
     {
         target.java_ty = optional_java_type(target.java_ty.clone());
+    }
+}
+
+/// An owned concrete value widened to a source interface must remain owned.
+/// Borrowing a temporary here creates a dangling trait view and disagrees with
+/// the owned interface slot used by returns, locals and call arguments.
+pub(crate) fn preserve_owned_interface_upcast(
+    actual: &RustSlotShape,
+    target: &mut RustSlotShape,
+    facts: &FactSet,
+) {
+    if actual.ownership != OwnershipShape::Owned {
+        return;
+    }
+    let DispatchShape::DynTrait { trait_name } = &target.dispatch else {
+        return;
+    };
+    let target_type =
+        optional_element_type(&target.java_ty).unwrap_or_else(|| target.java_ty.clone());
+    let actual_type =
+        optional_element_type(&actual.java_ty).unwrap_or_else(|| actual.java_ty.clone());
+    let JavaType::Named { name, .. } = &target_type else {
+        return;
+    };
+    if facts.object_safe_trait_fact_for_name(name) == Some(true)
+        && facts
+            .hierarchy_subtype_policy(&actual_type, &target_type)
+            .reaches()
+    {
+        target.dispatch = DispatchShape::BoxedDynTrait {
+            trait_name: trait_name.clone(),
+        };
+        target.ownership = OwnershipShape::Owned;
     }
 }
 
@@ -454,6 +517,28 @@ pub fn project_java_value_shape(
         apply_dispatch_projection(&mut shape, DispatchShape::ErasedObject);
     }
     shape
+}
+
+/// Checked cursors transfer owned Java references, preserving the physical
+/// child carrier of the source allocation rather than a nominal borrowed view.
+pub(crate) fn retained_iteration_element_shape(
+    parent: &RustSlotShape,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> Option<RustSlotShape> {
+    let element = crate::call_plan::retained_native_iteration_element_type(parent, facts)?;
+    // A cursor reads a covariant slot as its upper bound, not as an erased
+    // existential. Keep solver-added nullability around that read domain.
+    // Contravariant/unbounded wildcards remain governed by generic_read_type.
+    let element = crate::types::generic_read_type_preserving_optional(&element);
+    let mut shape = project_java_value_shape(representations, element);
+    shape.ownership = if shape.capabilities().is_copy() {
+        OwnershipShape::CopyValue
+    } else {
+        OwnershipShape::Owned
+    };
+    shape.inherit_native_collection_child(parent, 0);
+    Some(shape)
 }
 
 fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
@@ -927,6 +1012,7 @@ pub fn indexed_read_shape_with_effective_facts(
     let ownership = policy.ownership();
     let mut element_shape = RustSlotShape::conservative(policy.into_element_ty());
     element_shape.ownership = ownership;
+    element_shape.inherit_native_collection_child(array_shape, 0);
     if matches!(element_shape.java_ty, JavaType::Array(_)) {
         apply_required_view(&mut element_shape, ViewShape::Slice);
     }
@@ -934,12 +1020,20 @@ pub fn indexed_read_shape_with_effective_facts(
     // receiver itself is non-null. Keep that carrier in the read shape so
     // argument lowering can project `Option<&T>` rather than borrow an
     // `Option<T>` container as though it were a `T`.
-    let optional_array_ty = optional_element_type(&array_shape.java_ty);
-    let array_ty = optional_array_ty.as_ref().unwrap_or(&array_shape.java_ty);
-    if let JavaType::Array(element_ty) = array_ty
-        && java_array_element_needs_nullable_access_carrier(element_ty)
+    element_shape.java_ty =
+        array_storage_element_java_type(&array_shape.java_ty, element_shape.java_ty);
+
+    if array_shape.native_allocation.shared()
+        && !matches!(ownership, OwnershipShape::CopyValue)
+        && !matches!(
+            optional_element_type(&element_shape.java_ty)
+                .unwrap_or_else(|| element_shape.java_ty.clone()),
+            JavaType::Array(_)
+        )
     {
-        element_shape.java_ty = optional_java_type(element_shape.java_ty);
+        // A reference into a Ref/MutexGuard cannot escape the checked-read
+        // block. Java copies the stored reference value, not the array.
+        element_shape.ownership = OwnershipShape::Owned;
     }
 
     element_shape
@@ -985,12 +1079,34 @@ pub fn indexed_assignment_shape_with_effective_facts(
     array_shape: &RustSlotShape,
     facts: &EffectiveFacts,
 ) -> Option<RustSlotShape> {
-    sequence_element_projection_policy_with_effective_facts(&array_shape.java_ty, facts)
+    let container_ty =
+        optional_element_type(&array_shape.java_ty).unwrap_or_else(|| array_shape.java_ty.clone());
+    sequence_element_projection_policy_with_effective_facts(&container_ty, facts)
         .into_element_ty()
-        .map(RustSlotShape::for_storage)
+        .map(|element| {
+            let mut shape =
+                RustSlotShape::for_storage(array_storage_element_java_type(&container_ty, element));
+            shape.inherit_native_collection_child(array_shape, 0);
+            shape
+        })
 }
 
-fn java_array_element_needs_nullable_access_carrier(element_ty: &JavaType) -> bool {
+pub(crate) fn array_storage_element_java_type(
+    container_ty: &JavaType,
+    element_ty: JavaType,
+) -> JavaType {
+    let optional_container = optional_element_type(container_ty);
+    let container_ty = optional_container.as_ref().unwrap_or(container_ty);
+    if matches!(container_ty, JavaType::Array(_))
+        && java_array_element_needs_nullable_storage(&element_ty)
+    {
+        optional_java_type(element_ty)
+    } else {
+        element_ty
+    }
+}
+
+pub(crate) fn java_array_element_needs_nullable_storage(element_ty: &JavaType) -> bool {
     !matches!(
         element_ty,
         JavaType::Primitive(_) | JavaType::Void | JavaType::Array(_)
@@ -1122,6 +1238,28 @@ mod tests {
         let mut index = RustSlotShape::for_storage(parse("int"));
         index.inherit_nested_collection_views(&parent);
         assert!(index.nested_collection_views.is_empty());
+    }
+
+    #[test]
+    fn retained_iteration_projects_only_covariant_read_bounds() {
+        let parse = crate::parser::parse_hierarchy_type;
+        let facts = FactSet::default();
+        for (source, expected) in [
+            ("Set<? extends T>", "T"),
+            ("Set<Optional<? extends T>>", "Optional<T>"),
+            ("Set<? super T>", "? super T"),
+            ("Set<?>", "?"),
+        ] {
+            let mut parent = RustSlotShape::for_storage(parse(source));
+            parent.native_allocation =
+                crate::storage_strategy::StoragePlacement::new(true, true, false);
+            let element = retained_iteration_element_shape(&parent, &facts, None).unwrap();
+            assert_eq!(element.java_ty, parse(expected), "{source}");
+            if source.contains("extends") {
+                assert_eq!(element.dispatch, DispatchShape::Concrete, "{source}");
+            }
+            assert_eq!(element.ownership, OwnershipShape::Owned, "{source}");
+        }
     }
 
     #[test]

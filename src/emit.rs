@@ -1646,6 +1646,18 @@ mod tests {
             }),
             "impl FnMut() -> String"
         );
+        assert_eq!(
+            emit_type(&RustType::Ref {
+                mutable: true,
+                lifetime: None,
+                inner: Box::new(RustType::DynFnTrait {
+                    trait_name: "FnMut".to_string(),
+                    params: vec![RustType::I32],
+                    return_type: Some(Box::new(RustType::Bool)),
+                }),
+            }),
+            "&mut dyn FnMut(i32) -> bool"
+        );
     }
 
     #[test]
@@ -1807,13 +1819,26 @@ pub fn emit_type(ty: &RustType) -> String {
             trait_name,
             params,
             return_type,
+        }
+        | RustType::DynFnTrait {
+            trait_name,
+            params,
+            return_type,
         } => {
+            let kind = if matches!(ty, RustType::DynFnTrait { .. }) {
+                "dyn"
+            } else {
+                "impl"
+            };
             let params = params.iter().map(emit_type).collect::<Vec<_>>().join(", ");
             match return_type {
                 Some(return_type) => {
-                    format!("impl {trait_name}({params}) -> {}", emit_type(return_type))
+                    format!(
+                        "{kind} {trait_name}({params}) -> {}",
+                        emit_type(return_type)
+                    )
                 }
-                None => format!("impl {trait_name}({params})"),
+                None => format!("{kind} {trait_name}({params})"),
             }
         }
         RustType::DynTrait(trait_name) => format!("dyn {trait_name}"),

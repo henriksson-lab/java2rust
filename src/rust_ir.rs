@@ -101,6 +101,11 @@ pub enum RustType {
         params: Vec<RustType>,
         return_type: Option<Box<RustType>>,
     },
+    DynFnTrait {
+        trait_name: String,
+        params: Vec<RustType>,
+        return_type: Option<Box<RustType>>,
+    },
     DynTrait(String),
     ImplTrait(String),
     Named(String),
@@ -337,6 +342,9 @@ pub struct RustMatchArm {
 /// the answer; recording it here is what stops the consumer from guessing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RustExprShape {
+    /// A completed Java value whose operand effects have already been lowered.
+    /// It is not a Rust Result, even if evaluating its operands can throw.
+    PlainValue,
     /// A slot conversion completed without producing a more specific view.
     ///
     /// This carries the resulting `RustSlotShape` so a later (for example,
@@ -379,6 +387,21 @@ pub enum RustExprShape {
 }
 
 impl RustExpr {
+    pub(crate) fn is_plain_value(&self) -> bool {
+        match self {
+            Self::Shaped {
+                shape: RustExprShape::PlainValue,
+                ..
+            } => true,
+            Self::Grouped(expr)
+            | Self::Cast { expr, .. }
+            | Self::Unary { expr, .. }
+            | Self::PostfixComment { expr, .. }
+            | Self::MarkedBlock { expr, .. } => expr.is_plain_value(),
+            _ => false,
+        }
+    }
+
     /// Whether this expression propagates an error into its enclosing callable.
     /// A nested closure owns its own `?` boundary, even when immediately called.
     /// Raw leaves deliberately provide no evidence of structured effects.

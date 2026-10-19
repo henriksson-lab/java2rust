@@ -81,6 +81,9 @@ pub struct RepresentationPlan {
     /// representations: these edges are represented only for the concrete,
     /// statically constructed leaf shape recorded below.
     concretely_lowered_hierarchy_edges: BTreeSet<(String, String)>,
+    /// Native SAMs dispatch through their callable facade rather than a Rust
+    /// source trait. Remember the modeled boundary for hierarchy diagnostics.
+    native_functional_interfaces: BTreeSet<String>,
     diagnostics: Vec<RepresentationDiagnostic>,
     /// Source classes anonymously subclassed somewhere in the translated
     /// program. Unlike a named subtype, an anonymous subtype cannot appear as
@@ -291,6 +294,15 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
             primary_provenance,
             &effective_facts,
         );
+        if effective_facts
+            .native_functional_carrier(&JavaType::Named {
+                name: root.clone(),
+                args: Vec::new(),
+            })
+            .is_some()
+        {
+            plan.native_functional_interfaces.insert(root.clone());
+        }
         plan.types.insert(
             root.clone(),
             TypeRepresentation {
@@ -485,7 +497,9 @@ fn collect_raw_generic_arguments(
     raw_generic_arguments: &mut HashMap<String, Vec<JavaType>>,
 ) {
     fn visit(ty: &TypeDecl, out: &mut HashMap<String, Vec<JavaType>>) {
-        if !ty.type_params.is_empty() {
+        // Keep zero-arity declarations too: absence is not evidence that a
+        // same-leaf generic peer owns this declaration's raw arguments.
+        {
             let erased = ty
                 .type_params
                 .iter()
@@ -684,27 +698,17 @@ fn record_statically_constructed_concrete_leaf_hierarchy_edges(
     program: &Program,
     plan: &mut RepresentationPlan,
 ) {
-    let statically_constructed_types = all_types(program)
-        .into_iter()
-        .flat_map(|ty| &ty.members)
-        .filter_map(|member| match member {
-            Member::Field(field) if field.modifiers.contains(&Modifier::Static) => {
-                let JavaType::Named { name: field_ty, .. } = &field.ty else {
-                    return None;
-                };
-                let Some(Expr::New {
-                    ty: JavaType::Named { name: new_ty, .. },
-                    body: None,
-                    ..
-                }) = field.initializer.as_ref()
-                else {
-                    return None;
-                };
-                crate::facts::external_type_name_matches(field_ty, new_ty).then(|| field_ty.clone())
-            }
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
+    let mut statically_constructed_types = BTreeSet::new();
+    crate::semantic_analysis::walk_program_exprs(program, &mut |expr| {
+        if let Expr::New {
+            ty: JavaType::Named { name, .. },
+            body: None,
+            ..
+        } = expr
+        {
+            statically_constructed_types.insert(name.clone());
+        }
+    });
 
     for subtype in all_types(program) {
         let Some(super_name) = subtype.extends.as_deref() else {
@@ -712,7 +716,17 @@ fn record_statically_constructed_concrete_leaf_hierarchy_edges(
         };
         if subtype.kind != TypeKind::Class
             || !subtype.implements.is_empty()
-            || !subtype.members.is_empty()
+            || !subtype.static_init_blocks.is_empty()
+            || !subtype.members.iter().all(|member| {
+                // A constructor-only leaf adds no state or virtual overrides.
+                // Its explicit super delegation is handled by the same source
+                // constructor flattening used for the implicit empty leaf.
+                matches!(member, Member::Constructor(ctor) if ctor.body.as_ref().is_some_and(|body|
+                    matches!(body.statements.as_slice(), [Stmt::ConstructorInvocation {
+                        kind: crate::java_ir::ConstructorInvocationKind::Super, ..
+                    }])
+                ))
+            })
             || !statically_constructed_types
                 .iter()
                 .any(|name| crate::facts::external_type_name_matches(name, &subtype.name))
@@ -1966,6 +1980,15 @@ fn representation_for_strategy_with_external_final_facade_policy(
     provenance: FactProvenance,
     facts: &EffectiveFacts<'_>,
 ) -> ObjectRepresentation {
+    if facts
+        .native_functional_carrier(&JavaType::Named {
+            name: type_name.to_string(),
+            args: Vec::new(),
+        })
+        .is_some()
+    {
+        return ObjectRepresentation::ConcreteStruct;
+    }
     if matches!(representation, ObjectRepresentation::ErasedObject)
         && provenance == FactProvenance::ExternalLibraryPack
         && external_final_facade_should_keep_concrete_dispatch(
@@ -2008,13 +2031,8 @@ impl RepresentationPlan {
         self.raw_generic_arguments
             .get(type_name)
             .or_else(|| {
-                let simple = type_name.rsplit('.').next().unwrap_or(type_name);
-                let mut matches = self
-                    .raw_generic_arguments
-                    .iter()
-                    .filter(|(name, _)| name.rsplit('.').next() == Some(simple));
-                let (_, args) = matches.next()?;
-                matches.next().is_none().then_some(args)
+                let declaration = self.type_representation(type_name)?;
+                self.raw_generic_arguments.get(declaration.java_name())
             })
             .map(Vec::as_slice)
     }
@@ -2468,9 +2486,11 @@ impl RepresentationPlan {
     }
 
     fn hierarchy_type_is_represented(&self, type_name: &str) -> bool {
-        self.type_representation(type_name).is_some_and(|entry| {
-            object_hierarchy_edge_representation_policy(entry.representation.clone()).represented()
-        })
+        self.native_functional_interfaces.contains(type_name)
+            || self.type_representation(type_name).is_some_and(|entry| {
+                object_hierarchy_edge_representation_policy(entry.representation.clone())
+                    .represented()
+            })
     }
 
     fn hierarchy_type_is_user_closed_enum(&self, type_name: &str) -> bool {
@@ -5675,6 +5695,21 @@ mod tests {
     use crate::java_ir::{MethodDecl, PrimitiveType, TypeKind};
 
     #[test]
+    fn raw_generic_arguments_preserve_non_generic_peer_identity() {
+        let mut parsed = crate::parser::parse_java_source("class Generic<T> {} class Plain {}");
+        parsed.program.types[0].name = "a.Item".to_string();
+        parsed.program.types[1].name = "b.Item".to_string();
+        let plan = plan_representations(&parsed.program, &FactSet::default());
+        assert_eq!(plan.raw_generic_arguments_for("a.Item").unwrap().len(), 1);
+        assert_eq!(
+            plan.raw_generic_arguments_for("b.Item"),
+            Some([].as_slice())
+        );
+        assert!(plan.raw_generic_arguments_for("Item").is_none());
+        assert!(plan.raw_generic_arguments_for("missing.Item").is_none());
+    }
+
+    #[test]
     fn inherited_nested_enum_path_ignores_child_facade_shadow() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -6267,6 +6302,7 @@ class PlainFieldMap {
                 modifiers: Vec::new(),
                 body: Some(Block {
                     statements: vec![Stmt::Expr(Expr::Call {
+                        type_args: Vec::new(),
                         receiver: Some(Box::new(Expr::This)),
                         name: "touch".to_string(),
                         args: Vec::new(),

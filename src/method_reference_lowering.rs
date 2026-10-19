@@ -157,7 +157,10 @@ pub(crate) fn single_input_method_reference_body_expr(
             let rust_owner = method_reference_owner_rust_path(type_name.as_str());
             function_call_projection(
                 owner_associated_path_projection(&rust_owner, "new"),
-                vec![receiver],
+                // The callback input is a constructor argument, not an
+                // instance receiver. In particular, forwarding null must not
+                // manufacture a dereference before the constructor runs.
+                vec![value_expr],
             )
         }
         MethodReferencePlan::AssociatedFunction { owner, method } => {
@@ -348,6 +351,17 @@ mod tests {
     use crate::java_ir::JavaType;
     use crate::method_reference_plan::plan_method_reference;
     use crate::types::optional_java_type;
+
+    #[test]
+    fn constructor_reference_forwards_value_without_instance_receiver_projection() {
+        let body = single_input_method_reference_body_expr(
+            &plan_method_reference("Factory", "new"),
+            RustExpr::Try(Box::new(RustExpr::Var("required_receiver".to_string()))),
+            RustExpr::Var("nullable_value".to_string()),
+        );
+        assert_eq!(emit_expr(&body), "Factory::new(nullable_value)");
+        assert!(!body.has_unbound_try());
+    }
 
     #[test]
     fn typed_single_input_callback_helper_stays_structured() {

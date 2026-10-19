@@ -4,6 +4,87 @@ use crate::method_reference_plan::{MethodReferencePlan, plan_method_reference};
 use crate::slot_shape::RustSlotShape;
 use crate::types::TypeEnv;
 
+/// Resolve the two legal interpretations of a type-qualified unary reference
+/// using the same source signatures for rendering and callback effects.
+pub(crate) fn source_unbound_or_static_reference_signature<'a>(
+    target: &str,
+    method: &str,
+    input: &RustSlotShape,
+    env: &TypeEnv,
+    signatures: &'a crate::signature::SignaturePlan,
+    facts: Option<&FactSet>,
+) -> Option<(String, String, &'a crate::signature::MethodSignaturePlan)> {
+    let owner = env.static_type_alias(target).unwrap_or(target);
+    let unbound = signatures
+        .method_signature_by_base_name_accepting_arity(owner, method, 0)
+        .filter(|(_, signature)| signature.receiver() != crate::signature::ReceiverPlan::None)
+        .map(|(name, signature)| (owner.to_string(), name, signature));
+    let args = std::slice::from_ref(&input.java_ty);
+    let static_call = facts
+        .and_then(|facts| {
+            signatures
+                .method_signature_by_base_name_and_arg_types_with_facts(owner, method, args, facts)
+        })
+        .or_else(|| signatures.method_signature_by_base_name_and_arg_types(owner, method, args))
+        .filter(|(_, signature)| signature.receiver() == crate::signature::ReceiverPlan::None)
+        .map(|(name, signature)| (owner.to_string(), name, signature));
+    match (unbound, static_call) {
+        (Some(selected), None) | (None, Some(selected)) => Some(selected),
+        _ => None,
+    }
+}
+
+pub(crate) fn single_input_reference_has_nullable_receiver(
+    target: &str,
+    method: &str,
+    input: &RustSlotShape,
+    env: &crate::expr_shape::ShapeEnv,
+    signatures: &crate::signature::SignaturePlan,
+    facts: &FactSet,
+) -> bool {
+    if input.optional_element_type().is_none()
+        || method == "new"
+        || matches!(target, "this" | "self")
+        || crate::method_reference_plan::bound_method_reference_receiver(target, env).is_some()
+    {
+        return false;
+    }
+    if let Some((_, _, signature)) = source_unbound_or_static_reference_signature(
+        target,
+        method,
+        input,
+        env.type_env(),
+        signatures,
+        Some(facts),
+    ) {
+        return signature.receiver() != crate::signature::ReceiverPlan::None;
+    }
+    let Some(receiver_ty) = method_reference_receiver_type_for_call_plan_with_context(
+        target,
+        method,
+        Some(input),
+        facts,
+        env.type_env(),
+    ) else {
+        return false;
+    };
+    let mut types = env.type_env().clone();
+    let name = "__java_method_ref_receiver";
+    types.insert_local(name.to_string(), receiver_ty);
+    let receiver = Expr::Var(name.to_string());
+    matches!(
+        crate::call_plan::plan_call_target_with_facts_and_arity(
+            Some(&receiver),
+            method,
+            0,
+            None,
+            facts,
+            &types,
+        ),
+        crate::call_plan::CallTargetPlan::NativeJavaInstance { .. }
+    )
+}
+
 pub(crate) fn infer_single_input_method_reference_output_shape_with_context(
     target: &str,
     method: &str,
@@ -35,11 +116,12 @@ fn infer_method_reference_output_shape_from_call_plan(
         "__java_method_ref_value".to_string(),
         input_shape.java_ty.clone(),
     );
-    if let Some(receiver_ty) = method_reference_receiver_type_for_call_plan_with_facts(
+    if let Some(receiver_ty) = method_reference_receiver_type_for_call_plan_with_context(
         target,
         method,
         Some(input_shape),
         facts,
+        env,
     ) {
         lambda_env.insert_local("__java_method_ref_value".to_string(), receiver_ty);
         let receiver = Expr::Var("__java_method_ref_value".to_string());
@@ -126,14 +208,53 @@ pub(crate) fn method_reference_receiver_type_for_call_plan_with_facts(
     input_shape: Option<&RustSlotShape>,
     facts: &FactSet,
 ) -> Option<JavaType> {
-    method_reference_receiver_type_for_call_plan(target, input_shape).or_else(|| {
-        facade_abi_receiver_type_for_method_reference(target, method, facts)
-            .or_else(|| external_api_receiver_type_for_method_reference(target, method, facts))
-            .map(|name| JavaType::Named {
-                name,
+    method_reference_receiver_type_for_call_plan_with_context(
+        target,
+        method,
+        input_shape,
+        facts,
+        &TypeEnv::new(),
+    )
+}
+
+pub(crate) fn method_reference_receiver_type_for_call_plan_with_context(
+    target: &str,
+    method: &str,
+    input_shape: Option<&RustSlotShape>,
+    facts: &FactSet,
+    types: &TypeEnv,
+) -> Option<JavaType> {
+    method_reference_receiver_type_for_call_plan(target, input_shape)
+        .or_else(|| {
+            let input = input_shape?;
+            let ty = input
+                .optional_element_type()
+                .unwrap_or_else(|| input.java_ty.clone());
+            // Only a scoped generic declaration is evidence for open Object
+            // dispatch. A matching nominal spelling alone must not activate
+            // external getter heuristics for an otherwise unknown owner.
+            (matches!(&ty, JavaType::Named { name, .. } if name == target)
+                && types.is_unbounded_object_type_parameter(&ty))
+            .then(|| input.java_ty.clone())
+        })
+        .or_else(|| {
+            let input = input_shape?;
+            let effective = crate::effective_facts::EffectiveFacts::new(facts);
+            effective.retained_native_collection_kind(&JavaType::Named {
+                name: target.to_string(),
                 args: Vec::new(),
-            })
-    })
+            })?;
+            effective.retained_native_collection_kind(&input.java_ty)?;
+            Some(input.java_ty.clone())
+        })
+        .or_else(|| {
+            facade_abi_receiver_type_for_method_reference(target, method, facts)
+                .or_else(|| external_api_receiver_type_for_method_reference(target, method, facts))
+                .map(|name| JavaType::Named {
+                    name,
+                    args: Vec::new(),
+                })
+        })
 }
 
 fn facade_abi_receiver_type_for_method_reference(
@@ -193,9 +314,7 @@ fn object_method_reference_receiver_type(
     target: &str,
     input_shape: &RustSlotShape,
 ) -> Option<JavaType> {
-    if crate::stdlib::canonical_external_receiver_type_key(target) == "Object"
-        && matches!(target, "Object" | "java.lang.Object")
-    {
+    if matches!(target, "Object" | "java.lang.Object") {
         Some(input_shape.java_ty.clone())
     } else {
         None
@@ -281,6 +400,25 @@ mod tests {
 
     #[test]
     fn method_reference_output_shape_uses_native_accessors_and_external_facts() {
+        let mut generic_env = TypeEnv::new();
+        generic_env.insert_type_param_declaration("T", None);
+        let generic_input =
+            RustSlotShape::for_storage(crate::types::optional_java_type(JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            }));
+        let generic_result = infer_single_input_method_reference_output_shape_with_context(
+            "T",
+            "toString",
+            &generic_input,
+            &generic_env,
+            &FactSet::default(),
+        )
+        .expect("unbound generic references must use the selected virtual call contract");
+        assert_eq!(
+            generic_result.optional_element_type(),
+            Some(JavaType::String)
+        );
         assert_eq!(
             infer_single_input_method_reference_output_shape_with_context(
                 "Integer",

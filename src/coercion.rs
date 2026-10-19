@@ -74,6 +74,9 @@ pub enum JavaDisplayPlan {
     CollectionValue,
     SetValue,
     MapValue,
+    OptionalCollectionValue {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
     FormatValue,
     ErasedObject,
     BorrowedErasedObject,
@@ -258,11 +261,15 @@ impl UnsupportedCoercionMessagePolicy {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coercion {
+    NativeIterableListView,
     /// Java prints a concatenated `double`/`float` with a decimal point.
     ToJavaFloatStringForConcat {
         double: bool,
     },
     Identity,
+    UnsupportedNativeAllocation {
+        message: String,
+    },
     WidenPrimitive {
         from: PrimitiveType,
         to: PrimitiveType,
@@ -272,6 +279,9 @@ pub enum Coercion {
     CollectionToJavaDisplayString,
     SetToJavaDisplayString,
     MapToJavaDisplayString,
+    OptionalCollectionToJavaDisplayString {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
     ErasedObjectToJavaDisplayString,
     OptionalErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
@@ -411,6 +421,9 @@ impl SyntaxSlotCoercionPolicy {
             SyntaxSlotCoercionPolicy::MapToJavaDisplayString => {
                 vec![Coercion::MapToJavaDisplayString]
             }
+            SyntaxSlotCoercionPolicy::OptionalCollectionToJavaDisplayString { kind } => {
+                vec![Coercion::OptionalCollectionToJavaDisplayString { kind: *kind }]
+            }
             SyntaxSlotCoercionPolicy::ToJavaFloatStringForConcat { double } => {
                 vec![Coercion::ToJavaFloatStringForConcat { double: *double }]
             }
@@ -452,6 +465,11 @@ pub fn plan_shape_coercion_with_facts(
 
 impl ShapeCoercionPlan {
     pub fn coercions(&self) -> Vec<Coercion> {
+        if let Some(diagnostic) = self.native_allocation().unsupported_diagnostic() {
+            return vec![Coercion::UnsupportedNativeAllocation {
+                message: diagnostic.message().to_string(),
+            }];
+        }
         let mut plan = Vec::new();
         let optional_coercions = self.optional().clone().coercions();
         if !optional_coercions.is_empty() {
@@ -721,6 +739,9 @@ impl DispatchCoercionPolicy {
     pub fn coercions(&self) -> Vec<Coercion> {
         match self {
             DispatchCoercionPolicy::NoDispatchChange => Vec::new(),
+            DispatchCoercionPolicy::NativeIterableListView { .. } => {
+                vec![Coercion::NativeIterableListView]
+            }
             DispatchCoercionPolicy::WrapClosedEnum {
                 enum_name,
                 variant_name,
@@ -984,6 +1005,9 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
     }) {
         return expr;
     }
+    if let Some(diagnostic) = plan.native_allocation().unsupported_diagnostic() {
+        return crate::unsupported::compile_error_expr(diagnostic.message());
+    }
     if expr.recorded_shape() == Some(RustExprShape::OptionalConstructed)
         && matches!(plan.dispatch(), DispatchCoercionPolicy::EraseObject)
     {
@@ -1100,6 +1124,34 @@ pub fn apply_shape_coercion_plan(expr: RustExpr, plan: &ShapeCoercionPlan) -> Ru
     if let Some(projected) = apply_collection_carrier_conversion(expr.clone(), plan) {
         return projected;
     }
+    // A plain local has no syntactic `&`, even when its solved source slot is
+    // borrowed. Preserve that evidence for qualified Clone recovery: cloning
+    // `&local` would otherwise clone the reference rather than its payload.
+    // Do not relabel an already-adapted expression or an intermediate created
+    // by a dispatch/view conversion with the original source ownership.
+    let expr = if matches!(
+        plan.ownership(),
+        OwnershipCoercionPolicy::RecoverOwnedWithClone { .. }
+    ) && matches!(plan.dispatch(), DispatchCoercionPolicy::NoDispatchChange)
+        && matches!(plan.view(), ViewCoercionPolicy::NoViewChange)
+        && expr.recorded_slot_shape().is_none()
+        && !rust_expr_has_clone_recovery(&expr)
+        && matches!(expr.unshaped(), RustExpr::Var(_))
+    {
+        match plan.actual().ownership {
+            OwnershipShape::SharedBorrow => {
+                RustExpr::shaped_as(RustExprShape::Borrowed, Some(plan.actual().clone()), expr)
+            }
+            OwnershipShape::MutableBorrow => RustExpr::shaped_as(
+                RustExprShape::MutBorrowed,
+                Some(plan.actual().clone()),
+                expr,
+            ),
+            _ => expr,
+        }
+    } else {
+        expr
+    };
     let coerced = apply_coercions(expr, &plan.coercions());
     record_view_coercion_target_shape(coerced, plan)
 }
@@ -1309,7 +1361,14 @@ fn apply_collection_carrier_conversion(
     expr: RustExpr,
     plan: &ShapeCoercionPlan,
 ) -> Option<RustExpr> {
-    if !matches!(plan.target().ownership, OwnershipShape::Owned)
+    // This adapter converts value-backed payloads, not allocation handles.
+    // Retained collections keep their equality/ordering witness inside the
+    // shared runtime allocation; collecting that handle would both discard
+    // Java identity and attempt to iterate Rc/Arc rather than its payload.
+    // Placement changes are checked separately before reaching this adapter.
+    if plan.actual().native_allocation.shared()
+        || plan.target().native_allocation.shared()
+        || !matches!(plan.target().ownership, OwnershipShape::Owned)
         || plan.actual().optional_element_type().is_some()
         || plan.target().optional_element_type().is_some()
     {
@@ -1378,13 +1437,7 @@ fn apply_collection_carrier_conversion(
     })
 }
 
-pub(crate) fn set_collect_type_for_kind(
-    kind: crate::stdlib::JavaCollectionKind,
-) -> Option<&'static str> {
-    set_collect_type_for_kind_and_equality(kind, false)
-}
-
-fn set_collect_type_for_kind_and_equality(
+pub(crate) fn set_collect_type_for_kind_and_equality(
     kind: crate::stdlib::JavaCollectionKind,
     semantic_equality: bool,
 ) -> Option<&'static str> {
@@ -1405,11 +1458,25 @@ fn borrowed_map_cloned_iter(expr: RustExpr) -> RustExpr {
         "map",
         vec![single_param_closure_expr(
             "(key, value)",
-            RustExpr::Tuple(vec![
-                zero_arg_method_projection(RustExpr::Var("key".to_string()), "clone"),
-                zero_arg_method_projection(RustExpr::Var("value".to_string()), "clone"),
-            ]),
+            cloned_borrowed_map_entry_projection(),
         )],
+    )
+}
+
+fn cloned_borrowed_map_entry_projection() -> RustExpr {
+    RustExpr::Tuple(
+        ["key", "value"]
+            .into_iter()
+            .map(|name| {
+                // Iterator bindings have type &K / &V. Qualify Rust Clone and recover
+                // the payload, not an additional reference (or a Java clone method).
+                apply_clone_projection(RustExpr::Unary {
+                    op: "*".to_string(),
+                    expr: Box::new(RustExpr::Var(name.to_string())),
+                })
+                .into_unshaped()
+            })
+            .collect(),
     )
 }
 
@@ -2227,7 +2294,8 @@ pub(crate) fn force_mutable_borrow_projection(expr: RustExpr) -> RustExpr {
 }
 
 pub(crate) fn propagate_result_projection(expr: RustExpr) -> RustExpr {
-    if expr.recorded_shape() == Some(RustExprShape::Borrowed)
+    if expr.is_plain_value()
+        || expr.recorded_shape() == Some(RustExprShape::Borrowed)
         || expr_is_result_propagated(&expr)
         || rust_expr_is_result_panic_recovered(&expr)
         || matches!(
@@ -2968,6 +3036,67 @@ pub(crate) fn unwrap_optional_shared_value(expr: RustExpr) -> RustExpr {
 
 pub(crate) fn unwrap_java_null_receiver_projection(expr: RustExpr) -> RustExpr {
     method_expect_projection(expr, "Java null receiver")
+}
+
+/// The catchable counterpart of receiver projection, shared by ordinary and
+/// deferred callback calls. Build the Try before choosing a callback carrier.
+pub(crate) fn fallible_optional_receiver_projection(
+    lowered: RustExpr,
+    projection: OptionalReceiverProjection,
+) -> RustExpr {
+    let receiver = match projection {
+        OptionalReceiverProjection::Shared | OptionalReceiverProjection::SharedUnchecked => {
+            receiver_method_call_projection_exact(lowered, "as_ref", Vec::new())
+        }
+        OptionalReceiverProjection::Mutable | OptionalReceiverProjection::MutableUnchecked => {
+            receiver_method_call_projection_exact(lowered, "as_mut", Vec::new())
+        }
+        OptionalReceiverProjection::Borrowed => lowered,
+    };
+    propagate_result_projection(receiver_method_call_projection_exact(
+        receiver,
+        "ok_or_else",
+        vec![RustExpr::Closure {
+            is_move: false,
+            params: Vec::new(),
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(
+                crate::exception_lowering::java_null_pointer_exception_expr(),
+            )),
+        }],
+    ))
+}
+
+/// Evaluate a Java receiver and its arguments before a required-receiver
+/// projection. A single tuple initializer keeps generated bindings out of
+/// scope while evaluating every source operand, so source names cannot be
+/// shadowed by these temporaries.
+pub(crate) fn staged_instance_call_projection(
+    receiver: RustExpr,
+    args: Vec<RustExpr>,
+    call: impl FnOnce(RustExpr, Vec<RustExpr>) -> RustExpr,
+) -> RustExpr {
+    let receiver_name = "__java_call_receiver";
+    let arg_names = (0..args.len())
+        .map(|index| format!("__java_call_argument_{index}"))
+        .collect::<Vec<_>>();
+    let names = std::iter::once(receiver_name.to_string())
+        .chain(arg_names.iter().cloned())
+        .collect::<Vec<_>>();
+    let operands = std::iter::once(receiver).chain(args).collect();
+    let body = call(
+        RustExpr::Var(receiver_name.to_string()),
+        arg_names.into_iter().map(RustExpr::Var).collect(),
+    );
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: format!("({},)", names.join(", ")),
+            ty: None,
+            value: Some(RustExpr::Tuple(operands)),
+        }],
+        tail: Some(Box::new(body)),
+    }
 }
 
 pub(crate) fn typed_none_projection(rust_ty: &str) -> RustExpr {
@@ -6127,10 +6256,25 @@ pub(crate) fn owned_map_values_set_projection_for_target(
     receiver: RustExpr,
     target: &RustType,
 ) -> RustExpr {
+    owned_map_view_set_projection_for_target(receiver, "values", target)
+}
+
+pub(crate) fn owned_map_keys_set_projection_for_target(
+    receiver: RustExpr,
+    target: &RustType,
+) -> RustExpr {
+    owned_map_view_set_projection_for_target(receiver, "keys", target)
+}
+
+fn owned_map_view_set_projection_for_target(
+    receiver: RustExpr,
+    method: &str,
+    target: &RustType,
+) -> RustExpr {
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
         typed_collect_projection(
-            zero_arg_method_projection(zero_arg_method_projection(receiver, "values"), "cloned"),
+            zero_arg_method_projection(zero_arg_method_projection(receiver, method), "cloned"),
             &crate::emit::emit_type(target),
         ),
     )
@@ -6140,22 +6284,7 @@ pub(crate) fn owned_map_entries_set_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
         typed_collect_projection(
-            receiver_method_call_projection_exact(
-                receiver_method_call_projection_exact(receiver, "iter", Vec::new()),
-                "map",
-                vec![RustExpr::Closure {
-                    is_move: false,
-                    params: vec![RustClosureParam {
-                        pattern: "(key, value)".to_string(),
-                        ty: None,
-                    }],
-                    return_type: None,
-                    body: RustClosureBody::Expr(Box::new(RustExpr::Tuple(vec![
-                        apply_clone_projection(RustExpr::Var("key".to_string())).into_unshaped(),
-                        apply_clone_projection(RustExpr::Var("value".to_string())).into_unshaped(),
-                    ]))),
-                }],
-            ),
+            borrowed_map_cloned_iter(receiver),
             "std::collections::HashSet<_>",
         ),
     )
@@ -6164,33 +6293,12 @@ pub(crate) fn owned_map_entries_set_projection(receiver: RustExpr) -> RustExpr {
 pub(crate) fn owned_map_entries_vec_projection(receiver: RustExpr) -> RustExpr {
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
-        typed_collect_projection(
-            receiver_method_call_projection_exact(
-                receiver_method_call_projection_exact(receiver, "iter", Vec::new()),
-                "map",
-                vec![RustExpr::Closure {
-                    is_move: false,
-                    params: vec![RustClosureParam {
-                        pattern: "(key, value)".to_string(),
-                        ty: None,
-                    }],
-                    return_type: None,
-                    body: RustClosureBody::Expr(Box::new(RustExpr::Tuple(vec![
-                        apply_clone_projection(RustExpr::Var("key".to_string())).into_unshaped(),
-                        apply_clone_projection(RustExpr::Var("value".to_string())).into_unshaped(),
-                    ]))),
-                }],
-            ),
-            "Vec<_>",
-        ),
+        typed_collect_projection(borrowed_map_cloned_iter(receiver), "Vec<_>"),
     )
 }
 
 pub(crate) fn owned_map_entries_erased_object_array_projection(receiver: RustExpr) -> RustExpr {
-    let boxed_entry = erased_object_box_projection(RustExpr::Tuple(vec![
-        apply_clone_projection(RustExpr::Var("key".to_string())).into_unshaped(),
-        apply_clone_projection(RustExpr::Var("value".to_string())).into_unshaped(),
-    ]));
+    let boxed_entry = erased_object_box_projection(cloned_borrowed_map_entry_projection());
     RustExpr::shaped(
         RustExprShape::OwnedRecovery,
         typed_collect_projection(
@@ -6497,6 +6605,10 @@ pub(crate) fn java_iterator_from_collection_projection(receiver: RustExpr) -> Ru
         RustExpr::path(["JavaIterator", "new"]),
         vec![sequence_iter_cloned_projection(receiver)],
     )
+}
+
+pub(crate) fn java_iterator_from_owned_collection_projection(receiver: RustExpr) -> RustExpr {
+    function_call_projection(RustExpr::path(["JavaIterator", "new"]), vec![receiver])
 }
 
 pub(crate) fn java_iterator_from_erased_object_collection_projection(
@@ -9284,6 +9396,127 @@ pub(crate) fn sequence_iteration_source_projection_with_result_context(
     }
 }
 
+/// Clone a Java allocation reference without copying its payload or consuming
+/// a borrowed nullable handle. Shared by ordinary invocation staging and
+/// deferred stream capture.
+pub(crate) fn clone_native_allocation_reference_for_evaluation(
+    value: RustExpr,
+    shape: &RustSlotShape,
+) -> RustExpr {
+    let payload_clone = if shape.native_allocation.sync() {
+        RustExpr::path(["std", "sync", "Arc", "clone"])
+    } else {
+        RustExpr::path(["std", "rc", "Rc", "clone"])
+    };
+    clone_reference_carrier_for_evaluation(value, shape, payload_clone)
+}
+
+pub(crate) fn clone_reference_carrier_for_evaluation(
+    value: RustExpr,
+    shape: &RustSlotShape,
+    payload_clone: RustExpr,
+) -> RustExpr {
+    if shape.optional_element_type().is_some()
+        && matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+    {
+        // Parameters can lend Option<&Handle> while indexed reads lend
+        // &Option<Handle>. An explicit Rc/Arc clone accepts either reborrow
+        // without cloning RefCell or dereferencing Java null early.
+        return receiver_method_call_projection_exact(
+            receiver_method_call_projection_exact(value, "as_ref", Vec::new()),
+            "map",
+            vec![RustExpr::Closure {
+                is_move: false,
+                params: vec![RustClosureParam {
+                    pattern: "__java_handle".into(),
+                    ty: None,
+                }],
+                return_type: None,
+                body: RustClosureBody::Expr(Box::new(function_call_projection(
+                    payload_clone,
+                    vec![RustExpr::Var("__java_handle".into())],
+                ))),
+            }],
+        );
+    }
+    let value = if matches!(
+        shape.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) {
+        force_shared_borrow_projection(value)
+    } else {
+        value
+    };
+    function_call_projection(
+        RustExpr::path(["std", "clone", "Clone", "clone"]),
+        vec![value],
+    )
+}
+
+/// Capture a retained Java reference now, but bind its iterator on first pull.
+/// Callback argument evaluation may mutate the collection before traversal.
+pub(crate) fn retained_native_stream_projection(
+    mut source: RustExpr,
+    shape: &RustSlotShape,
+    propagate_java_exceptions: bool,
+) -> RustExpr {
+    if shape.native_allocation.sync() {
+        return crate::unsupported::compile_error_expr(
+            "unsupported synchronized retained collection stream",
+        );
+    }
+    source = clone_native_allocation_reference_for_evaluation(source, shape);
+    if shape.optional_element_type().is_some() {
+        source = if propagate_java_exceptions {
+            fallible_optional_receiver_projection(source, OptionalReceiverProjection::Borrowed)
+        } else {
+            project_optional_receiver(source, OptionalReceiverProjection::Borrowed)
+        };
+    }
+    let handle = "__java_stream_source";
+    RustExpr::Block {
+        stmts: vec![RustStmt::Let {
+            mutable: false,
+            name: handle.into(),
+            ty: None,
+            value: Some(source),
+        }],
+        tail: Some(Box::new(function_call_projection(
+            RustExpr::path(["JavaStream", "from_factory_result"]),
+            vec![RustExpr::Closure {
+                is_move: true,
+                params: Vec::new(),
+                return_type: None,
+                body: RustClosureBody::Expr(Box::new(receiver_method_call_projection_exact(
+                    function_call_projection(
+                        RustExpr::path(["java_native_collection_iterator_result"]),
+                        vec![force_shared_borrow_projection(RustExpr::Var(handle.into()))],
+                    ),
+                    "map",
+                    vec![RustExpr::Closure {
+                        is_move: false,
+                        params: vec![RustClosureParam {
+                            pattern: "__java_cursor".into(),
+                            ty: None,
+                        }],
+                        return_type: None,
+                        body: RustClosureBody::Expr(Box::new(
+                            receiver_method_call_projection_exact(
+                                RustExpr::Var("__java_cursor".into()),
+                                "into_results",
+                                Vec::new(),
+                            ),
+                        )),
+                    }],
+                ))),
+            }],
+        ))),
+    }
+}
+
 pub(crate) fn checked_optional_borrowed_receiver_projection(
     source: RustExpr,
     projection: OptionalSequenceReceiverProjection,
@@ -9320,7 +9553,7 @@ pub(crate) fn stream_bound_receiver_capture_projection(
 ) -> RustExpr {
     // The iterator can outlive this binding block. Own the checked reference
     // in the callback instead of borrowing the local holding that reference.
-    if let RustExpr::MethodCall { args, .. } = &mut result
+    if let RustExpr::MethodCall { args, .. } | RustExpr::Call { args, .. } = &mut result
         && let Some(RustExpr::Closure { is_move, .. }) = args.last_mut()
     {
         *is_move = true;
@@ -9490,16 +9723,47 @@ pub(crate) fn stream_join_terminal_projection(
     item_display: RustExpr,
     delimiter: RustExpr,
 ) -> RustExpr {
+    stream_join_terminal_projection_with_result_context(
+        receiver,
+        item_display,
+        delimiter,
+        false,
+        false,
+    )
+}
+
+pub(crate) fn stream_join_terminal_projection_with_result_context(
+    receiver: RustExpr,
+    item_display: RustExpr,
+    delimiter: RustExpr,
+    input_is_result: bool,
+    propagate_java_exceptions: bool,
+) -> RustExpr {
+    let display = if input_is_result {
+        method_call_projection(
+            RustExpr::Var("item".into()),
+            "map",
+            vec![single_param_closure_expr("item", item_display)],
+        )
+    } else {
+        item_display
+    };
     let mapped = method_call_projection(
         receiver,
         "map",
-        vec![single_param_closure_expr("item", item_display)],
+        vec![single_param_closure_expr("item", display)],
     );
-    method_call_projection(
-        typed_collect_projection(mapped, "Vec<_>"),
-        "join",
-        vec![delimiter],
-    )
+    let values = if input_is_result {
+        let collected = typed_collect_projection(mapped, "Result<Vec<_>, JavaException>");
+        if propagate_java_exceptions {
+            propagate_result_projection(collected)
+        } else {
+            unwrap_result_or_panic_uncaught_java_exception(collected)
+        }
+    } else {
+        typed_collect_projection(mapped, "Vec<_>")
+    };
+    method_call_projection(values, "join", vec![delimiter])
 }
 
 /// Keep collector arguments eager while iterator operations remain lazy.
@@ -9510,6 +9774,24 @@ pub(crate) fn staged_stream_join_terminal_projection(
     item_display: RustExpr,
     delimiter: RustExpr,
     affixes: Option<(RustExpr, RustExpr)>,
+) -> RustExpr {
+    staged_stream_join_terminal_projection_with_result_context(
+        receiver,
+        item_display,
+        delimiter,
+        affixes,
+        false,
+        false,
+    )
+}
+
+pub(crate) fn staged_stream_join_terminal_projection_with_result_context(
+    receiver: RustExpr,
+    item_display: RustExpr,
+    delimiter: RustExpr,
+    affixes: Option<(RustExpr, RustExpr)>,
+    input_is_result: bool,
+    propagate_java_exceptions: bool,
 ) -> RustExpr {
     let binding = |name: &str, value: RustExpr, mutable| RustStmt::Let {
         mutable,
@@ -9524,10 +9806,12 @@ pub(crate) fn staged_stream_join_terminal_projection(
         string_value(delimiter),
         false,
     )];
-    let joined = stream_join_terminal_projection(
+    let joined = stream_join_terminal_projection_with_result_context(
         var("__java_join_stream"),
         item_display,
         shared_borrow_expr(var("__java_join_delimiter")),
+        input_is_result,
+        propagate_java_exceptions,
     );
     let result = if let Some((prefix, suffix)) = affixes {
         stmts.push(binding("__java_join_text", string_value(prefix), true));
@@ -9785,6 +10069,90 @@ pub(crate) fn stream_filter_op_projection(
             }],
             body: RustClosureBody::Expr(Box::new(predicate)),
         }],
+    )
+}
+
+/// Preserve errors as iterator items, without running a predicate on an error
+/// or turning a rejected item into an error. The consuming terminal owns
+/// short-circuiting; no intermediate operation eagerly traverses the source.
+pub(crate) fn fallible_stream_filter_op_projection(
+    receiver: RustExpr,
+    param_pattern: &str,
+    predicate: RustExpr,
+    input_is_result: bool,
+    move_closure: bool,
+) -> RustExpr {
+    function_call_projection(
+        RustExpr::path([if input_is_result {
+            "java_stream_try_filter_result"
+        } else {
+            "java_stream_try_filter"
+        }]),
+        vec![
+            receiver,
+            RustExpr::Closure {
+                is_move: move_closure,
+                params: vec![RustClosureParam {
+                    pattern: param_pattern.to_string(),
+                    ty: None,
+                }],
+                return_type: None,
+                body: RustClosureBody::Expr(Box::new(function_call_projection(
+                    RustExpr::generic_path(
+                        ["Ok"],
+                        vec![RustType::Bool, RustType::Named("JavaException".to_string())],
+                        None::<String>,
+                    ),
+                    vec![predicate],
+                ))),
+            },
+        ],
+    )
+}
+
+/// Lift an ordinary callback into an existing Result item domain. The callback
+/// is invoked only on success, so later maps never observe failed Java calls.
+pub(crate) fn stream_result_map_op_projection(
+    receiver: RustExpr,
+    param: RustClosureParam,
+    result_body: RustExpr,
+) -> RustExpr {
+    function_call_projection(
+        RustExpr::path(["java_stream_try_map_result"]),
+        vec![
+            receiver,
+            RustExpr::Closure {
+                is_move: false,
+                params: vec![param],
+                return_type: None,
+                body: RustClosureBody::Expr(Box::new(result_body)),
+            },
+        ],
+    )
+}
+
+pub(crate) fn fallible_stream_non_null_filter_projection(
+    receiver: RustExpr,
+    borrowed: bool,
+) -> RustExpr {
+    let item = RustExpr::Var("__java_non_null_item".to_string());
+    let payload = if borrowed {
+        zero_arg_method_projection(item, "as_ref")
+    } else {
+        item
+    };
+    let selected = method_call_projection(
+        RustExpr::Var("__java_non_null_result".to_string()),
+        "map",
+        vec![single_param_closure_expr("__java_non_null_item", payload)],
+    );
+    method_call_projection(
+        receiver,
+        "filter_map",
+        vec![single_param_closure_expr(
+            "__java_non_null_result",
+            zero_arg_method_projection(selected, "transpose"),
+        )],
     )
 }
 
@@ -10778,6 +11146,9 @@ fn parenthesize_raw_deref_operand(expr: RustExpr) -> RustExpr {
 }
 
 pub(crate) fn unwrap_result_or_panic_uncaught_java_exception(expr: RustExpr) -> RustExpr {
+    if expr.is_plain_value() {
+        return expr;
+    }
     let panic_recovery = ".unwrap_or_else(|ex| panic!(\"uncaught Java exception: {:?}\", ex))";
     if let Some(expr) = recover_nested_result_try_operator(expr.clone(), panic_recovery) {
         return expr;
@@ -12016,14 +12387,55 @@ pub(crate) fn java_concat_display_plan(java_ty: &crate::java_ir::JavaType) -> Ja
         }
         crate::java_ir::JavaType::Named { .. } | crate::java_ir::JavaType::Unknown(_) => {
             match crate::stdlib::java_collection_kind_for_type(java_ty) {
-                Some(kind) if kind.is_map_like() => JavaDisplayPlan::MapValue,
-                Some(kind) if kind.is_set_like() => JavaDisplayPlan::SetValue,
-                Some(_) => JavaDisplayPlan::CollectionValue,
+                Some(kind) => collection_display_plan(kind),
                 None => JavaDisplayPlan::ConcatValue,
             }
         }
         _ => JavaDisplayPlan::ConcatValue,
     }
+}
+
+fn collection_display_plan(kind: crate::stdlib::JavaCollectionKind) -> JavaDisplayPlan {
+    if kind.is_map_like() {
+        JavaDisplayPlan::MapValue
+    } else if kind.is_set_like() {
+        JavaDisplayPlan::SetValue
+    } else {
+        JavaDisplayPlan::CollectionValue
+    }
+}
+
+pub(crate) fn generic_object_string_result_projection(
+    expr: RustExpr,
+    shape: &RustSlotShape,
+    borrowed_native_storage: bool,
+) -> RustExpr {
+    let receiver = if shape.optional_element_type().is_some() {
+        let method = if !borrowed_native_storage
+            && matches!(
+                shape.ownership,
+                OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+            ) {
+            "as_deref"
+        } else {
+            "as_ref"
+        };
+        receiver_method_call_projection_exact(expr, method, Vec::new())
+    } else {
+        let value = if matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        ) {
+            expr
+        } else {
+            shared_borrow_expr(expr)
+        };
+        function_call_projection(RustExpr::path(["Some"]), vec![value])
+    };
+    function_call_projection(
+        RustExpr::path(["java_generic_object_string_result"]),
+        vec![receiver],
+    )
 }
 
 pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExpr {
@@ -12052,6 +12464,25 @@ pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExp
         JavaDisplayPlan::MapValue => {
             let entries = zero_arg_method_projection(grouped_display_method_receiver(expr), "iter");
             function_call_projection(RustExpr::path(["java_map_to_string"]), vec![entries])
+        }
+        JavaDisplayPlan::OptionalCollectionValue { kind } => {
+            let borrowed = zero_arg_method_projection(
+                parenthesize_raw_method_receiver(recover_optional_display_receiver(expr)),
+                "as_ref",
+            );
+            let present = apply_java_display_plan(
+                RustExpr::Var("value".to_string()),
+                collection_display_plan(kind),
+            );
+            method_call_projection(
+                method_call_projection(
+                    borrowed,
+                    "map",
+                    vec![single_value_closure_projection(present)],
+                ),
+                "unwrap_or_else",
+                vec![null_string_closure_expr()],
+            )
         }
         JavaDisplayPlan::FormatValue => {
             let display_operand = java_display_operand_projection(expr);
@@ -12084,25 +12515,31 @@ pub fn apply_java_display_plan(expr: RustExpr, plan: JavaDisplayPlan) -> RustExp
             vec![expr],
         ),
         JavaDisplayPlan::OptionalErasedObject => optional_erased_object_display_projection(expr),
-        JavaDisplayPlan::OptionalString => method_call_projection(
+        // This boundary consumes a nullable string and produces a completed
+        // display view, never a fresh Result. Keep that producer proof even
+        // when a checked source call occurs inside the nullable operand.
+        JavaDisplayPlan::OptionalString => RustExpr::shaped(
+            RustExprShape::PlainValue,
             method_call_projection(
-                zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
-                "map",
-                vec![RustExpr::Closure {
-                    is_move: false,
-                    return_type: None,
-                    params: vec![RustClosureParam {
-                        pattern: "value".to_string(),
-                        ty: None,
+                method_call_projection(
+                    zero_arg_method_projection(parenthesize_raw_method_receiver(expr), "as_ref"),
+                    "map",
+                    vec![RustExpr::Closure {
+                        is_move: false,
+                        return_type: None,
+                        params: vec![RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        }],
+                        body: RustClosureBody::Expr(Box::new(function_call_projection(
+                            as_ref_str_path_projection(),
+                            vec![RustExpr::Var("value".to_string())],
+                        ))),
                     }],
-                    body: RustClosureBody::Expr(Box::new(function_call_projection(
-                        as_ref_str_path_projection(),
-                        vec![RustExpr::Var("value".to_string())],
-                    ))),
-                }],
+                ),
+                "unwrap_or",
+                vec![RustExpr::Literal("\"null\"".to_string())],
             ),
-            "unwrap_or",
-            vec![RustExpr::Literal("\"null\"".to_string())],
         ),
         JavaDisplayPlan::OptionalValue => optional_value_display_projection(expr),
         JavaDisplayPlan::OptionalDisplayValue => optional_to_string_value_display_projection(expr),
@@ -14466,6 +14903,8 @@ fn strip_terminal_optional_mut_borrow_projection(expr: RustExpr) -> RustExpr {
 
 fn slot_shapes_match_ignoring_identity(actual: &RustSlotShape, target: &RustSlotShape) -> bool {
     actual.java_ty == target.java_ty
+        && actual.native_allocation == target.native_allocation
+        && actual.nested_native_allocations == target.nested_native_allocations
         && actual.ownership == target.ownership
         && actual.view == target.view
         && actual.dispatch == target.dispatch
@@ -14616,6 +15055,7 @@ fn required_borrowed_element_already_matches_target(
     policy: &BorrowedElementSlotAdapterPolicy,
 ) -> bool {
     policy.element_shape().java_ty == policy.target().java_ty
+        && policy.element_shape().native_allocation == policy.target().native_allocation
         && policy.element_shape().ownership == policy.target().ownership
         && policy.element_shape().view == policy.target().view
         && policy.element_shape().dispatch == policy.target().dispatch
@@ -15987,6 +16427,9 @@ fn recover_as_str_receiver_projection(expr: RustExpr) -> RustExpr {
 fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
     match coercion {
         Coercion::Identity => expr,
+        Coercion::UnsupportedNativeAllocation { message } => {
+            crate::unsupported::compile_error_expr(message)
+        }
         Coercion::IndexToUsize => index_to_usize_cast_projection(expr),
         Coercion::ToStringForConcat => apply_java_display_plan(expr, JavaDisplayPlan::ConcatValue),
         Coercion::CollectionToJavaDisplayString => {
@@ -15998,6 +16441,10 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
         Coercion::MapToJavaDisplayString => {
             apply_java_display_plan(expr, JavaDisplayPlan::MapValue)
         }
+        Coercion::OptionalCollectionToJavaDisplayString { kind } => apply_java_display_plan(
+            expr,
+            JavaDisplayPlan::OptionalCollectionValue { kind: *kind },
+        ),
         Coercion::ToJavaFloatStringForConcat { double } => {
             apply_java_display_plan(expr, JavaDisplayPlan::ConcatFloatValue { double: *double })
         }
@@ -16135,6 +16582,9 @@ fn apply_one(expr: RustExpr, coercion: &Coercion) -> RustExpr {
             trait_name,
             mutable,
         } => borrow_boxed_as_dyn_trait_with_mutability(expr, trait_name, *mutable),
+        Coercion::NativeIterableListView => unwrap_result_or_panic_uncaught_java_exception(
+            receiver_method_call_projection_exact(expr, "list_view_result", Vec::new()),
+        ),
         Coercion::BorrowConcreteFacade { target_type } => {
             if is_structural_borrow_facade_target(target_type) {
                 ensure_borrow_projection(expr, None, None, BorrowProjectionUse::Argument)
@@ -16629,6 +17079,10 @@ fn escaped_literal_end(raw: &str, start: usize, quote: char) -> usize {
 
 fn is_structural_borrow_facade_target(target_type: &str) -> bool {
     crate::stdlib::java_collection_kind_for_name(target_type).is_some()
+        || crate::stdlib::functional_interface_shape(
+            &crate::stdlib::canonical_external_receiver_type_key(target_type),
+        )
+        .is_some()
         || matches!(target_type, "Entry" | "Map_Entry" | "Map.Entry")
 }
 
@@ -16649,6 +17103,10 @@ mod native_collection_borrow_target_tests {
             "LinkedHashMap",
             "TreeMap",
             "java.util.LinkedHashSet",
+            "Iterable",
+            "java.lang.Iterable",
+            "Supplier",
+            "java.util.function.Function",
         ] {
             let borrowed = apply_one(
                 RustExpr::Var("source".to_string()),
@@ -17373,6 +17831,152 @@ mod tests {
     use crate::rust_ir::RustPattern;
 
     use super::*;
+
+    #[test]
+    fn native_allocation_mismatch_cannot_be_hidden_by_shape_markers_or_snapshot_recovery() {
+        let facts = FactSet::default();
+        let inline = RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::String)));
+        let mut shared = inline.clone();
+        shared.native_allocation =
+            crate::storage_strategy::StoragePlacement::new(true, true, false);
+        for (actual, target) in [(&inline, &shared), (&shared, &inline)] {
+            let plan =
+                crate::conversion_plan::shape_coercion_plan_with_facts(actual, target, &facts);
+            assert!(
+                plan.unsupported_diagnostics()
+                    .iter()
+                    .any(|diagnostic| diagnostic.code()
+                        == "native_allocation_conversion_requires_adapter")
+            );
+            let input = RustExpr::shaped_as(
+                RustExprShape::SlotAdapted,
+                Some(actual.clone()),
+                RustExpr::Var("value".to_string()),
+            );
+            let output = emit::emit_expr(&apply_shape_coercion_plan(input, &plan));
+            assert!(output.contains("compile_error!"), "{output}");
+            assert!(!output.contains("to_vec"), "{output}");
+            assert!(matches!(
+                plan.coercions().as_slice(),
+                [Coercion::UnsupportedNativeAllocation { .. }]
+            ));
+        }
+    }
+
+    #[test]
+    fn native_allocation_borrowed_views_adapt_handles_not_slices() {
+        let facts = FactSet::default();
+        let mut owned = RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::String)));
+        owned.native_allocation = crate::storage_strategy::StoragePlacement::new(true, true, false);
+        let mut borrowed = owned.clone();
+        borrowed.ownership = OwnershipShape::SharedBorrow;
+        borrowed.view = ViewShape::Slice;
+        for (actual, target) in [(&owned, &borrowed), (&borrowed, &owned)] {
+            let plan =
+                crate::conversion_plan::shape_coercion_plan_with_facts(actual, target, &facts);
+            assert!(plan.unsupported_diagnostics().is_empty());
+            assert_eq!(plan.actual().view, ViewShape::Native);
+            assert_eq!(plan.target().view, ViewShape::Native);
+            let output = emit::emit_expr(&apply_shape_coercion_plan(
+                RustExpr::Var("value".to_string()),
+                &plan,
+            ));
+            assert!(!output.contains("slice"), "{output}");
+            assert!(!output.contains("to_vec"), "{output}");
+            assert!(!output.contains("TODO"), "{output}");
+        }
+    }
+
+    #[test]
+    fn borrowed_local_clone_recovers_payload_once() {
+        for ownership in [OwnershipShape::SharedBorrow, OwnershipShape::MutableBorrow] {
+            let mut actual = RustSlotShape::conservative(JavaType::Named {
+                name: "T".to_string(),
+                args: Vec::new(),
+            });
+            actual.ownership = ownership;
+            let mut target = actual.clone();
+            target.ownership = OwnershipShape::Owned;
+            let plan = ShapeCoercionPlan::new(
+                actual,
+                target.clone(),
+                DispatchCoercionPolicy::NoDispatchChange,
+                ViewCoercionPolicy::NoViewChange,
+                OptionalShapeCoercionPolicy::NoChange,
+                OwnershipCoercionPolicy::RecoverOwnedWithClone {
+                    policy: CloneRecoveryPolicy::AuditRequired,
+                },
+                None,
+            );
+            let recovered = apply_shape_coercion_plan(RustExpr::Var("value".to_string()), &plan);
+            let rendered = crate::emit::emit_expr(&recovered);
+            assert!(rendered.contains("Clone::clone(value)"), "{rendered}");
+            assert_eq!(recovered.recorded_slot_shape(), Some(&target));
+            assert_eq!(
+                crate::emit::emit_expr(&apply_shape_coercion_plan(recovered, &plan)),
+                rendered
+            );
+            // Stream/callback lowering can already have projected a borrowed
+            // local's payload. The source slot does not describe that produced
+            // dereference; qualified Clone must borrow its value normally.
+            let projected = RustExpr::Unary {
+                op: "*".to_string(),
+                expr: Box::new(RustExpr::Var("value".to_string())),
+            };
+            let projected = apply_shape_coercion_plan(projected, &plan);
+            let rendered = crate::emit::emit_expr(&projected);
+            assert!(rendered.contains("Clone::clone(&*value)"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn map_entry_snapshots_clone_the_borrowed_payloads() {
+        let receiver = RustExpr::Var("values".to_string());
+        for projection in [
+            owned_map_entries_set_projection(receiver.clone()),
+            owned_map_entries_vec_projection(receiver.clone()),
+            owned_map_entries_erased_object_array_projection(receiver),
+        ] {
+            let rendered = crate::emit::emit_expr(&projection);
+            assert!(
+                rendered.contains("std::clone::Clone::clone(&*key)"),
+                "{rendered}"
+            );
+            assert!(
+                rendered.contains("std::clone::Clone::clone(&*value)"),
+                "{rendered}"
+            );
+            assert!(!rendered.contains("Clone::clone(&key)"), "{rendered}");
+        }
+    }
+
+    #[test]
+    fn bound_stream_capture_moves_callbacks_passed_to_runtime_adapters() {
+        let callback = RustExpr::Closure {
+            is_move: false,
+            params: vec![RustClosureParam {
+                pattern: "value".to_string(),
+                ty: None,
+            }],
+            return_type: None,
+            body: RustClosureBody::Expr(Box::new(RustExpr::Var(
+                "__java_bound_receiver".to_string(),
+            ))),
+        };
+        let result = stream_bound_receiver_capture_projection(
+            RustExpr::Var("source".to_string()),
+            RustExpr::Var("checked_receiver".to_string()),
+            function_call_projection(
+                RustExpr::path(["java_stream_try_filter"]),
+                vec![RustExpr::Var("__java_bound_stream".to_string()), callback],
+            ),
+        );
+        let rendered = crate::emit::emit_expr(&result);
+        assert!(
+            rendered.contains("move |value| __java_bound_receiver"),
+            "{rendered}"
+        );
+    }
 
     #[test]
     fn optional_element_vec_adapter_preserves_consumed_result_marker() {
@@ -26946,8 +27550,9 @@ mod tests {
             emit::emit_expr(&expr),
             "name.as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\")"
         );
+        assert!(expr.is_plain_value());
         assert_eq!(
-            expr,
+            expr.unshaped().clone(),
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
@@ -26989,8 +27594,9 @@ mod tests {
             emit::emit_expr(&raw_optional_string),
             "(left + right).as_ref().map(|value| std::convert::AsRef::<str>::as_ref(value)).unwrap_or(\"null\")"
         );
+        assert!(raw_optional_string.is_plain_value());
         assert_eq!(
-            raw_optional_string,
+            raw_optional_string.unshaped().clone(),
             RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
                     receiver: Box::new(RustExpr::MethodCall {
@@ -30088,6 +30694,9 @@ mod tests {
         let twice = propagate_result_projection(once.clone());
         assert_eq!(emit::emit_expr(&twice), "call()?");
         assert_eq!(once, twice);
+        let displayed = apply_java_display_plan(once.clone(), JavaDisplayPlan::OptionalString);
+        assert!(displayed.is_plain_value());
+        assert_eq!(propagate_result_projection(displayed.clone()), displayed);
         let cast = RustExpr::Cast {
             expr: Box::new(once.clone()),
             ty: "f32".to_string(),
@@ -30116,6 +30725,32 @@ mod tests {
                 if shape == RustExprShape::ResultPropagated
                     && matches!(expr.as_ref(), RustExpr::Try(inner)
                         if matches!(inner.as_ref(), RustExpr::Raw(raw) if raw == "call()"))
+        ));
+    }
+
+    #[test]
+    fn completed_value_metadata_does_not_discharge_a_new_result_call() {
+        let value = RustExpr::shaped(
+            RustExprShape::PlainValue,
+            RustExpr::Match {
+                expr: Box::new(RustExpr::Var("input".to_string())),
+                arms: vec![crate::rust_ir::RustMatchArm {
+                    pattern: "_".to_string(),
+                    body: RustExpr::Literal("false".to_string()),
+                }],
+            },
+        );
+        assert_eq!(propagate_result_projection(value.clone()), value);
+        assert_eq!(
+            unwrap_result_or_panic_uncaught_java_exception(value.clone()),
+            value
+        );
+        let grouped = RustExpr::Grouped(Box::new(value.clone()));
+        assert_eq!(propagate_result_projection(grouped.clone()), grouped);
+        let call = function_call_projection(RustExpr::path(["fallible"]), vec![value]);
+        assert!(matches!(
+            propagate_result_projection(call).unshaped(),
+            RustExpr::Try(_)
         ));
     }
 

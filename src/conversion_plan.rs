@@ -95,6 +95,10 @@ pub enum AssignmentStatementPlan {
     AssignValue,
 }
 
+pub(crate) fn assignment_target_is_direct_optional_place(target: &Expr) -> bool {
+    matches!(target, Expr::Var(_) | Expr::FieldAccess(..))
+}
+
 pub fn assignment_statement_plan_for_target(
     target: &Expr,
     value: &Expr,
@@ -102,6 +106,7 @@ pub fn assignment_statement_plan_for_target(
     ctx: ExprShapeContext<'_>,
 ) -> AssignmentStatementPlan {
     if matches!(value, Expr::Literal(crate::java_ir::Literal::Null))
+        && assignment_target_is_direct_optional_place(target)
         && infer_assignment_target_shape_with_context(target, env, ctx)
             .is_some_and(|shape| shape.optional_element_type().is_some())
     {
@@ -151,6 +156,9 @@ pub enum SyntaxSlotCoercionPolicy {
     CollectionToJavaDisplayString,
     SetToJavaDisplayString,
     MapToJavaDisplayString,
+    OptionalCollectionToJavaDisplayString {
+        kind: crate::stdlib::JavaCollectionKind,
+    },
     ErasedObjectToJavaDisplayString,
     OptionalErasedObjectToJavaDisplayString,
     OptionalToJavaDisplayString,
@@ -405,6 +413,9 @@ pub enum DispatchCoercionFallbackPolicy {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DispatchCoercionPolicy {
     NoDispatchChange,
+    NativeIterableListView {
+        invalid_cast: InvalidCastPolicy,
+    },
     WrapClosedEnum {
         enum_name: String,
         variant_name: String,
@@ -484,6 +495,7 @@ impl DispatchCoercionPolicy {
     /// across Java cast semantics and callable exception planning.
     fn checked_cast_failure_policy(&self) -> Option<&InvalidCastPolicy> {
         match self {
+            Self::NativeIterableListView { invalid_cast } => Some(invalid_cast),
             Self::DowncastClosedEnum { invalid_cast, .. }
             | Self::DowncastDynTrait { invalid_cast, .. }
             | Self::DowncastBoxedDynTrait { invalid_cast, .. }
@@ -1683,11 +1695,58 @@ pub fn ownership_coercion_policy_with_effective_facts(
     target: &RustSlotShape,
     facts: &EffectiveFacts,
 ) -> OwnershipCoercionPolicy {
+    if actual.ownership == OwnershipShape::Owned
+        && target.ownership == OwnershipShape::Owned
+        && matches!(actual.dispatch, DispatchShape::Concrete)
+        && (matches!(target.dispatch, DispatchShape::ErasedObject)
+            || (crate::shape_projection::java_type_is_erased_object_storage(&target.java_ty)
+                && !facts.parsed_source_controls_native_carrier(&target.java_ty)))
+        && let JavaType::Named { name, .. } = &actual.java_ty
+        && facts.parsed_source_controls_native_carrier(&actual.java_ty)
+        && {
+            let placement = facts.storage_placement_for(name);
+            placement.shared() && placement.is_implemented()
+        }
+    {
+        // Erasure introduces another owning Java reference. Clone the proven
+        // Rc/Arc carrier before boxing, not its payload, even though both
+        // outer slots are nominally Owned. Moving the handle consumes a Java
+        // local which may still observe the same object afterward.
+        return OwnershipCoercionPolicy::RecoverOwnedWithClone {
+            policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: actual.java_ty.clone(),
+            },
+        };
+    }
     if actual.ownership == target.ownership {
         return OwnershipCoercionPolicy::NoOwnershipChange;
     }
-    if actual.ownership == OwnershipShape::Owned
-        && target.ownership == OwnershipShape::SharedBorrow
+    if actual.native_allocation.shared()
+        && !facts.parsed_source_controls_native_carrier(&actual.java_ty)
+        && (matches!(actual.java_ty, JavaType::Array(_))
+            || crate::stdlib::java_collection_kind_for_type(&actual.java_ty).is_some())
+        && actual.native_allocation == target.native_allocation
+        && (actual.java_ty == target.java_ty
+            || shared_native_collection_abi_matches(actual, target, facts))
+        && actual.dispatch == target.dispatch
+        && actual.view == target.view
+        && matches!(
+            actual.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        )
+        && target.ownership == OwnershipShape::Owned
+    {
+        // The clone capability belongs to Rc/Arc, not Vec<T> or its elements.
+        return OwnershipCoercionPolicy::RecoverOwnedWithClone {
+            policy: CloneRecoveryPolicy::ProvenCloneCapability {
+                java_ty: actual.java_ty.clone(),
+            },
+        };
+    }
+    if matches!(
+        actual.ownership,
+        OwnershipShape::Owned | OwnershipShape::CopyValue
+    ) && target.ownership == OwnershipShape::SharedBorrow
         && (actual.view == target.view
             || owned_native_matrix_matches_borrowed_matrix_view(actual, target))
         && actual.dispatch == target.dispatch
@@ -1994,12 +2053,18 @@ pub(crate) fn optional_element_slot_shape_with_facts(
         // erases that distinction and leaves the outer `Option` to be cast as
         // though it were itself a trait object.
         element_shape.java_ty = element_ty;
-        if matches!(element_shape.dispatch, DispatchShape::BoxedDynTrait { .. }) {
-            // `Box<dyn Trait>` is itself the owned payload. The outer Option's
-            // access ownership may be borrowed while planning a field write,
-            // but that must not turn `Option<Box<dyn Trait>>` into a request
-            // for `&dyn Trait` immediately before constructing `Some`.
-            element_shape.ownership = OwnershipShape::Owned;
+        if matches!(
+            element_shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        ) && let DispatchShape::BoxedDynTrait { trait_name } = &element_shape.dispatch
+        {
+            // Match signature rendering: a borrowed optional interface is
+            // Option<&[mut] dyn Trait>, not an optional owned Box. Storage
+            // construction must request owned element ownership explicitly.
+            element_shape.dispatch = DispatchShape::DynTrait {
+                trait_name: trait_name.clone(),
+            };
+            element_shape.view = ViewShape::DynTraitView;
         }
     } else if let JavaType::Named { name, .. } = &element_ty
         && facts.object_safe_trait_fact_for_name(name) == Some(true)
@@ -2412,6 +2477,18 @@ pub fn dispatch_coercion_policy_with_facts(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> DispatchCoercionPolicy {
+    if target.view == ViewShape::ListInterface
+        && EffectiveFacts::new(facts)
+            .native_iterable_list_projection_element(&actual.java_ty, &target.java_ty)
+            .is_some()
+    {
+        return DispatchCoercionPolicy::NativeIterableListView {
+            invalid_cast: InvalidCastPolicy::Panic,
+        };
+    }
+    if shared_native_collection_abi_matches(actual, target, &EffectiveFacts::new(facts)) {
+        return DispatchCoercionPolicy::NoDispatchChange;
+    }
     if matches!(
         actual.ownership,
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
@@ -3255,6 +3332,43 @@ fn java_collection_conversion_policy(
     })
 }
 
+/// Native retained sets share one physical carrier even when the Java
+/// declaration names a different set interface/implementation. Equality and
+/// encounter order belong to the allocation, not a value conversion at an
+/// assignment boundary. Keep list/set families distinct and preserve source
+/// precedence through the same authority used by slot rendering.
+fn shared_native_collection_abi_matches(
+    actual: &RustSlotShape,
+    target: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+) -> bool {
+    if !actual.native_allocation.shared()
+        || actual.native_allocation != target.native_allocation
+        || actual.dispatch != DispatchShape::Concrete
+        || target.dispatch != DispatchShape::Concrete
+        || actual.optional_element_type().is_some()
+        || target.optional_element_type().is_some()
+    {
+        return false;
+    }
+    let (Some(actual_kind), Some(target_kind)) = (
+        facts.retained_native_collection_kind(&actual.java_ty),
+        facts.retained_native_collection_kind(&target.java_ty),
+    ) else {
+        return false;
+    };
+    let (Some(actual_name), Some(target_name)) = (
+        java_type_name_for_dispatch(&actual.java_ty),
+        java_type_name_for_dispatch(&target.java_ty),
+    ) else {
+        return false;
+    };
+    crate::stdlib::is_known_java_platform_subtype(actual_name, target_name)
+        && (actual_kind == target_kind || (actual_kind.is_set_like() && target_kind.is_set_like()))
+        && crate::types::sequence_element_type(&actual.java_ty)
+            == crate::types::sequence_element_type(&target.java_ty)
+}
+
 fn unsupported_dispatch_coercion_policy_with_fallback(
     actual: &RustSlotShape,
     target: &RustSlotShape,
@@ -3276,6 +3390,30 @@ pub struct ShapeCoercionPlan {
     optional: OptionalShapeCoercionPolicy,
     ownership: OwnershipCoercionPolicy,
     primitive_widening: Option<PrimitiveWideningPolicy>,
+    native_allocation: NativeAllocationCoercionPolicy,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NativeAllocationCoercionPolicy {
+    Preserve,
+    UnsupportedPlacementChange {
+        actual: crate::storage_strategy::StoragePlacement,
+        target: crate::storage_strategy::StoragePlacement,
+    },
+}
+
+impl NativeAllocationCoercionPolicy {
+    pub fn unsupported_diagnostic(&self) -> Option<ConversionDiagnostic> {
+        match self {
+            Self::Preserve => None,
+            Self::UnsupportedPlacementChange { actual, target } => Some(ConversionDiagnostic::new(
+                "native_allocation_conversion_requires_adapter",
+                format!(
+                    "native allocation conversion requires an identity-preserving adapter: {actual:?} -> {target:?}"
+                ),
+            )),
+        }
+    }
 }
 
 pub fn shape_coercion_plan_with_facts(
@@ -3283,6 +3421,45 @@ pub fn shape_coercion_plan_with_facts(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> ShapeCoercionPlan {
+    // A legacy slice preference cannot change the payload of a shared
+    // allocation. Canonicalize before selecting ownership/view conversions,
+    // just as signature solving and type rendering do.
+    fn canonical<'a>(
+        shape: &'a RustSlotShape,
+        facts: &FactSet,
+    ) -> std::borrow::Cow<'a, RustSlotShape> {
+        let effective = EffectiveFacts::new(facts);
+        let base = shape
+            .optional_element_type()
+            .unwrap_or_else(|| shape.java_ty.clone());
+        let native_sam = effective.native_functional_carrier(&base).is_some()
+            || shape.view == ViewShape::ListInterface;
+        let retained_view = matches!(shape.view, ViewShape::Slice | ViewShape::JavaSemanticHash)
+            && effective
+                .retained_native_collection_kind(&shape.java_ty)
+                .is_some();
+        if shape.native_allocation.shared()
+            && (shape.view == ViewShape::Slice || retained_view || native_sam)
+        {
+            let mut shape = shape.clone();
+            if shape.view == ViewShape::Slice || retained_view {
+                shape.view = ViewShape::Native;
+            }
+            if native_sam {
+                // Native SAM values already own their shared callback handle.
+                // Propagated allocation requirements constrain its captured
+                // source, not a second outer handle or a different SAM ABI.
+                shape.native_allocation = Default::default();
+            }
+            std::borrow::Cow::Owned(shape)
+        } else {
+            std::borrow::Cow::Borrowed(shape)
+        }
+    }
+    let actual = canonical(actual, facts);
+    let target = canonical(target, facts);
+    let actual = actual.as_ref();
+    let target = target.as_ref();
     ShapeCoercionPlan::new(
         actual.clone(),
         target.clone(),
@@ -3317,6 +3494,16 @@ impl ShapeCoercionPlan {
         ownership: OwnershipCoercionPolicy,
         primitive_widening: Option<PrimitiveWideningPolicy>,
     ) -> Self {
+        let native_allocation = if actual.native_allocation == target.native_allocation
+            || (!actual.native_allocation.shared() && !target.native_allocation.shared())
+        {
+            NativeAllocationCoercionPolicy::Preserve
+        } else {
+            NativeAllocationCoercionPolicy::UnsupportedPlacementChange {
+                actual: actual.native_allocation,
+                target: target.native_allocation,
+            }
+        };
         Self {
             actual,
             target,
@@ -3325,6 +3512,7 @@ impl ShapeCoercionPlan {
             optional,
             ownership,
             primitive_widening,
+            native_allocation,
         }
     }
 
@@ -3356,6 +3544,10 @@ impl ShapeCoercionPlan {
         self.primitive_widening
     }
 
+    pub fn native_allocation(&self) -> &NativeAllocationCoercionPolicy {
+        &self.native_allocation
+    }
+
     pub(crate) fn with_ownership(mut self, ownership: OwnershipCoercionPolicy) -> Self {
         self.ownership = ownership;
         self
@@ -3363,6 +3555,7 @@ impl ShapeCoercionPlan {
 
     pub fn unsupported_diagnostics(&self) -> Vec<ConversionDiagnostic> {
         let mut diagnostics = Vec::new();
+        diagnostics.extend(self.native_allocation.unsupported_diagnostic());
         diagnostics.extend(self.dispatch.unsupported_diagnostics());
         diagnostics.extend(self.ownership.unsupported_diagnostics());
         diagnostics.extend(self.optional.unsupported_diagnostics());
@@ -3751,6 +3944,15 @@ pub fn plan_instanceof_check_with_facts(
     target: &RustSlotShape,
     facts: &FactSet,
 ) -> InstanceOfCheck {
+    if EffectiveFacts::new(facts)
+        .native_iterable_list_projection_element(&actual.java_ty, &target.java_ty)
+        .is_some()
+    {
+        return InstanceOfCheck::ExternalCapabilityMethod {
+            method: "list_type_test_known".into(),
+            optional: actual.optional_element_type().is_some(),
+        };
+    }
     if is_java_serializable_marker_type(&target.java_ty) {
         return InstanceOfCheck::JavaSerializableMarker;
     }
@@ -4457,7 +4659,10 @@ pub fn plan_cast_conversion_from_actual(
     crate::shape_projection::preserve_reference_cast_nullability(&actual, &mut target);
     let default_facts = FactSet::default();
     let facts = ctx.facts().unwrap_or(&default_facts);
-    if reifiable_raw_collection_runtime_target(target_ty).is_some() {
+    crate::shape_projection::preserve_owned_interface_upcast(&actual, &mut target, facts);
+    let list_projection =
+        crate::shape_projection::project_native_iterable_list_view(&actual, &mut target, facts);
+    if !list_projection && reifiable_raw_collection_runtime_target(target_ty).is_some() {
         target.dispatch = DispatchShape::Concrete;
         target.view = ViewShape::Native;
         target.ownership = OwnershipShape::Owned;
@@ -4564,6 +4769,15 @@ fn slot_conversion_plan_by_value(
     slot: &Slot,
     facts: &FactSet,
 ) -> SlotConversionPlan {
+    if matches!(slot, Slot::StringConcatSegment | Slot::DisplaySegment)
+        && let Some(kind) = nullable_native_collection_display_kind(actual, facts)
+    {
+        return SlotConversionPlan::Syntax(SyntaxCoercionPlan::new(
+            actual.java_ty.clone(),
+            slot.clone(),
+            SyntaxSlotCoercionPolicy::OptionalCollectionToJavaDisplayString { kind },
+        ));
+    }
     match slot {
         Slot::Assignment(target) | Slot::Return(target) | Slot::Argument(target) => {
             SlotConversionPlan::Shape(shape_coercion_plan_with_facts(actual, target, facts))
@@ -4612,6 +4826,17 @@ fn slot_conversion_plan_by_value(
             facts,
         )),
     }
+}
+
+pub(crate) fn nullable_native_collection_display_kind(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<crate::stdlib::JavaCollectionKind> {
+    let element = shape.optional_element_type()?;
+    if EffectiveFacts::new(facts).parsed_source_controls_native_carrier(&element) {
+        return None;
+    }
+    crate::stdlib::java_collection_kind_for_type(&element)
 }
 
 pub(crate) fn optional_display_value_uses_java_helper(
@@ -4690,6 +4915,13 @@ fn cast_target_shape_preserving_inner_ownership(
 ) -> RustSlotShape {
     let mut target_shape = project_java_value_shape(ctx.representations(), target_ty);
     crate::shape_projection::preserve_reference_cast_nullability(inner_shape, &mut target_shape);
+    if let Some(facts) = ctx.facts() {
+        crate::shape_projection::preserve_owned_interface_upcast(
+            inner_shape,
+            &mut target_shape,
+            facts,
+        );
+    }
     if !matches!(
         (&inner_shape.java_ty, &target_shape.java_ty),
         (JavaType::Primitive(_), _) | (_, JavaType::Primitive(_))
@@ -4868,13 +5100,16 @@ pub fn lowered_slot_conversion_plan_with_facts(
             },
             Slot::StringConcatSegment | Slot::DisplaySegment,
         ) => {
-            let policy = if optional_borrowed_element_is_nullable_string(&element_shape.java_ty) {
-                SyntaxSlotCoercionPolicy::OptionalBorrowedOptionalStringToJavaDisplayString
-            } else if optional_display_value_uses_java_helper(&element_shape.java_ty, facts) {
-                SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
-            } else {
-                SyntaxSlotCoercionPolicy::OptionalBorrowedToDisplayValue
-            };
+            let policy =
+                if let Some(kind) = nullable_native_collection_display_kind(option_shape, facts) {
+                    SyntaxSlotCoercionPolicy::OptionalCollectionToJavaDisplayString { kind }
+                } else if optional_borrowed_element_is_nullable_string(&element_shape.java_ty) {
+                    SyntaxSlotCoercionPolicy::OptionalBorrowedOptionalStringToJavaDisplayString
+                } else if optional_display_value_uses_java_helper(&element_shape.java_ty, facts) {
+                    SyntaxSlotCoercionPolicy::OptionalBorrowedToJavaDisplayValue
+                } else {
+                    SyntaxSlotCoercionPolicy::OptionalBorrowedToDisplayValue
+                };
             SlotConversionPlan::Syntax(SyntaxCoercionPlan::new(
                 option_shape.java_ty.clone(),
                 slot.clone(),
@@ -5069,11 +5304,111 @@ fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shared_source_erasure_copies_the_reference_even_between_owned_slots() {
+        use super::*;
+        let mut facts = FactSet::default();
+        facts
+            .type_capability_overrides
+            .push(crate::facts::TypeCapabilityOverride {
+                type_name: "Payload".into(),
+                copy: None,
+                clone: None,
+                string_like: None,
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: None,
+                final_type: Some(true),
+                object_safe_trait: None,
+                provenance: crate::facts::FactProvenance::ParsedSource,
+            });
+        let actual = RustSlotShape::for_storage(JavaType::Named {
+            name: "Payload".into(),
+            args: Vec::new(),
+        });
+        let mut target = RustSlotShape::for_storage(JavaType::Named {
+            name: "Object".into(),
+            args: Vec::new(),
+        });
+        assert_eq!(
+            ownership_coercion_policy(&actual, &target, &facts),
+            OwnershipCoercionPolicy::NoOwnershipChange
+        );
+        facts.storage_strategies.insert(
+            "Payload".into(),
+            crate::storage_strategy::TypeStorageFacts::default()
+                .with_locally_aliased(true)
+                .with_mutated(true),
+        );
+        for dispatch in [DispatchShape::Concrete, DispatchShape::ErasedObject] {
+            target.dispatch = dispatch;
+            let plan = shape_coercion_plan_with_facts(&actual, &target, &facts);
+            assert!(matches!(
+                plan.ownership(),
+                OwnershipCoercionPolicy::RecoverOwnedWithClone {
+                    policy: CloneRecoveryPolicy::ProvenCloneCapability { .. }
+                }
+            ));
+            if matches!(target.dispatch, DispatchShape::ErasedObject) {
+                assert!(matches!(
+                    plan.dispatch(),
+                    DispatchCoercionPolicy::EraseObject
+                ));
+                assert!(matches!(
+                    plan.coercions().as_slice(),
+                    [
+                        crate::coercion::Coercion::CloneRecovery { .. },
+                        crate::coercion::Coercion::EraseObject
+                    ]
+                ));
+            }
+        }
+    }
+
+    #[test]
+    fn native_sam_allocation_requirements_do_not_add_an_outer_storage_handle() {
+        use super::*;
+        let actual = RustSlotShape::for_storage(JavaType::Named {
+            name: "java.lang.Iterable".into(),
+            args: vec![JavaType::String],
+        });
+        let mut target = actual.clone();
+        target.native_allocation =
+            crate::storage_strategy::StoragePlacement::new(true, true, false);
+        let plan = shape_coercion_plan_with_facts(&actual, &target, &FactSet::default());
+        assert_eq!(
+            plan.native_allocation(),
+            &NativeAllocationCoercionPolicy::Preserve
+        );
+        let mut optional_actual = actual;
+        optional_actual.java_ty = crate::types::optional_java_type(optional_actual.java_ty);
+        let mut optional_target = target;
+        optional_target.java_ty = crate::types::optional_java_type(optional_target.java_ty);
+        let optional_plan =
+            shape_coercion_plan_with_facts(&optional_actual, &optional_target, &FactSet::default());
+        assert_eq!(
+            optional_plan.native_allocation(),
+            &NativeAllocationCoercionPolicy::Preserve
+        );
+    }
+
     use super::*;
     use crate::facts::ReceiverAbi;
     use crate::object_model::ObjectRepresentation;
     use crate::representation::{RepresentationProvenance, TypeRepresentation};
     use crate::shape_projection::borrowed_string_content_shape;
+
+    #[test]
+    fn copy_value_argument_can_satisfy_a_shared_borrow_slot() {
+        let actual = RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int));
+        assert_eq!(actual.ownership, OwnershipShape::CopyValue);
+        let mut target = actual.clone();
+        target.ownership = OwnershipShape::SharedBorrow;
+        assert_eq!(
+            ownership_coercion_policy(&actual, &target, &FactSet::default()),
+            OwnershipCoercionPolicy::BorrowOwnedValue,
+        );
+    }
 
     #[test]
     fn same_closed_carrier_with_different_generic_details_keeps_dispatch() {
@@ -5179,6 +5514,42 @@ mod tests {
             element_plan.ownership(),
             &OwnershipCoercionPolicy::BorrowOwnedValue
         );
+    }
+
+    #[test]
+    fn optional_interface_payload_preserves_boundary_ownership() {
+        let ty = JavaType::Named {
+            name: "Readable".to_string(),
+            args: Vec::new(),
+        };
+        for ownership in [
+            OwnershipShape::Owned,
+            OwnershipShape::SharedBorrow,
+            OwnershipShape::MutableBorrow,
+        ] {
+            let mut option =
+                RustSlotShape::for_storage(crate::types::optional_java_type(ty.clone()));
+            option.ownership = ownership;
+            option.view = ViewShape::DynTraitView;
+            option.dispatch = DispatchShape::BoxedDynTrait {
+                trait_name: "Readable".to_string(),
+            };
+            let payload =
+                optional_element_slot_shape_with_facts(&option, ty.clone(), &FactSet::default());
+            assert_eq!(payload.ownership, ownership);
+            assert_eq!(
+                payload.dispatch,
+                if ownership == OwnershipShape::Owned {
+                    DispatchShape::BoxedDynTrait {
+                        trait_name: "Readable".to_string(),
+                    }
+                } else {
+                    DispatchShape::DynTrait {
+                        trait_name: "Readable".to_string(),
+                    }
+                }
+            );
+        }
     }
 
     #[test]
@@ -5314,6 +5685,59 @@ mod tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn nullable_collection_display_policy_preserves_native_kind_and_source_precedence() {
+        let facts = FactSet::default();
+        for (source, kind) in [
+            ("List<String>", crate::stdlib::JavaCollectionKind::List),
+            (
+                "LinkedHashSet<String>",
+                crate::stdlib::JavaCollectionKind::InsertionOrderedSet,
+            ),
+            (
+                "LinkedHashMap<String, Integer>",
+                crate::stdlib::JavaCollectionKind::InsertionOrderedMap,
+            ),
+        ] {
+            let mut shape = RustSlotShape::for_storage(crate::types::optional_java_type(
+                crate::parser::parse_hierarchy_type(source),
+            ));
+            for ownership in [
+                OwnershipShape::Owned,
+                OwnershipShape::SharedBorrow,
+                OwnershipShape::MutableBorrow,
+            ] {
+                shape.ownership = ownership;
+                for slot in [Slot::StringConcatSegment, Slot::DisplaySegment] {
+                    let plan = slot_conversion_plan_with_facts(&shape, &slot, &facts);
+                    assert!(
+                        matches!(plan, SlotConversionPlan::Syntax(ref syntax) if syntax.policy() == &SyntaxSlotCoercionPolicy::OptionalCollectionToJavaDisplayString { kind }),
+                        "{source}"
+                    );
+                }
+            }
+        }
+        let shape = RustSlotShape::for_storage(crate::types::optional_java_type(
+            crate::parser::parse_hierarchy_type("List<String>"),
+        ));
+        let mut source = facts.clone();
+        source
+            .type_capability_overrides
+            .push(crate::facts::TypeCapabilityOverride {
+                type_name: "List".into(),
+                copy: None,
+                clone: Some(true),
+                string_like: None,
+                sequence_like: None,
+                implements: Vec::new(),
+                extends: None,
+                final_type: Some(true),
+                object_safe_trait: None,
+                provenance: crate::facts::FactProvenance::ParsedSource,
+            });
+        assert!(nullable_native_collection_display_kind(&shape, &source).is_none());
     }
 
     #[test]

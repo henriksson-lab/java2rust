@@ -282,6 +282,12 @@ fn line_contains_outside_literals(line: &str, pattern: &str) -> bool {
 }
 
 fn line_count_outside_literals(line: &str, pattern: &str) -> usize {
+    // Most generated lines contain no marker at all. A byte-search rejection
+    // avoids re-lexing every character once per marker without changing the
+    // literal-aware scan for candidate lines (including overlapping matches).
+    if !line.contains(pattern) {
+        return 0;
+    }
     let mut count = 0usize;
     let mut in_string = false;
     let mut in_char = false;
@@ -779,6 +785,32 @@ pub fn count_compile_error_markers(rust: &str) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn marker_search_prefilter_preserves_literal_and_overlap_semantics() {
+        assert_eq!(
+            line_count_outside_literals("ordinary generated code", "missing"),
+            0
+        );
+        assert_eq!(line_count_outside_literals("aaaa", "aa"), 3);
+        assert_eq!(line_count_outside_literals("ααα", "αα"), 2);
+        assert_eq!(
+            line_count_outside_literals(
+                r###""marker" marker 'm' r##"marker"## marker"###,
+                "marker"
+            ),
+            2
+        );
+        assert_eq!(
+            line_count_outside_literals(r#""escaped \" marker" marker"#, "marker"),
+            1
+        );
+        // Markers in comments are deliberately visible to these counters.
+        assert_eq!(
+            line_count_outside_literals("/* marker */ // marker", "marker"),
+            2
+        );
+    }
 
     #[test]
     fn marker_names_are_unique() {

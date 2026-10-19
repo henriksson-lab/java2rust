@@ -243,6 +243,32 @@ fn rust_type_for_slot_with_effective_facts_and_representations(
     effective_facts: EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> RustType {
+    if let Some(rendered) =
+        list_interface_slot_rust_type(shape, &effective_facts, Some((facts, representations)))
+    {
+        return rendered;
+    }
+    if !shape.nested_native_allocations.is_empty() {
+        let mut outer = shape.clone();
+        outer.nested_native_allocations.clear();
+        let rendered = rust_type_for_slot_with_effective_facts_and_representations(
+            &outer,
+            facts,
+            effective_facts,
+            representations,
+        );
+        return project_nested_native_allocations(shape, &effective_facts, rendered);
+    }
+    if let Some(rendered) = native_allocation_slot_rust_type(shape, &effective_facts, |payload| {
+        rust_type_for_slot_with_effective_facts_and_representations(
+            payload,
+            facts,
+            effective_facts,
+            representations,
+        )
+    }) {
+        return rendered;
+    }
     let effective_facts =
         effective_facts.with_nested_collection_views(&shape.nested_collection_views);
     let rendered = rust_type_for_slot_with_facts_and_representations_unwrapped(
@@ -506,7 +532,7 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 )
             }
         }
-        (_, DispatchShape::BoxedDynTrait { trait_name }) if matches!(&shape.java_ty, JavaType::Named { args, .. } if !args.is_empty()) => {
+        (_, DispatchShape::BoxedDynTrait { trait_name }) if matches!(nominal_dispatch_type(&shape.java_ty), JavaType::Named { args, .. } if !args.is_empty()) => {
             rust_boxed_dyn_trait_type(parameterized_dyn_trait_path(
                 trait_name,
                 &shape.java_ty,
@@ -514,7 +540,7 @@ fn rust_type_for_slot_with_facts_and_representations_unwrapped(
                 representations,
             ))
         }
-        (_, DispatchShape::DynTrait { trait_name }) if matches!(&shape.java_ty, JavaType::Named { args, .. } if !args.is_empty()) => {
+        (_, DispatchShape::DynTrait { trait_name }) if matches!(nominal_dispatch_type(&shape.java_ty), JavaType::Named { args, .. } if !args.is_empty()) => {
             RustType::DynTrait(parameterized_dyn_trait_path(
                 trait_name,
                 &shape.java_ty,
@@ -558,6 +584,20 @@ pub fn rust_type_for_slot_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> RustType {
+    if let Some(rendered) = list_interface_slot_rust_type(shape, facts, None) {
+        return rendered;
+    }
+    if !shape.nested_native_allocations.is_empty() {
+        let mut outer = shape.clone();
+        outer.nested_native_allocations.clear();
+        let rendered = rust_type_for_slot_with_effective_facts(&outer, facts);
+        return project_nested_native_allocations(shape, facts, rendered);
+    }
+    if let Some(rendered) = native_allocation_slot_rust_type(shape, facts, |payload| {
+        rust_type_for_slot_with_effective_facts(payload, facts)
+    }) {
+        return rendered;
+    }
     let scoped_facts = (*facts).with_nested_collection_views(&shape.nested_collection_views);
     let facts = &scoped_facts;
     if let Some(element_ty) = shape.optional_element_type() {
@@ -625,7 +665,200 @@ pub(crate) fn semantic_hash_collection_base(ty: &JavaType) -> Option<&'static st
     }
 }
 
+/// Overlay solved physical child slots on the canonical rendered payload. Keep
+/// its nullability, dispatch and equality carriers instead of rebuilding child
+/// types from Java spellings without representation context.
+fn project_nested_native_allocations(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    rendered: RustType,
+) -> RustType {
+    fn wrap_child(
+        shape: &RustSlotShape,
+        facts: &EffectiveFacts<'_>,
+        rendered: RustType,
+    ) -> RustType {
+        if let RustType::Option(inner) = rendered {
+            let mut element = shape.clone();
+            element.java_ty = shape
+                .optional_element_type()
+                .unwrap_or_else(|| shape.java_ty.clone());
+            return RustType::Option(Box::new(wrap_child(&element, facts, *inner)));
+        }
+        native_allocation_slot_rust_type(shape, facts, |_| rendered.clone()).unwrap_or(rendered)
+    }
+    if shape.nested_native_allocations.is_empty() {
+        return rendered;
+    }
+    let java_ty = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
+    // Optional/reference/storage wrappers are transparent to child positions.
+    match rendered {
+        RustType::Option(inner) => {
+            let mut element = shape.clone();
+            element.java_ty = java_ty;
+            return RustType::Option(Box::new(project_nested_native_allocations(
+                &element, facts, *inner,
+            )));
+        }
+        RustType::Ref {
+            mutable,
+            lifetime,
+            inner,
+        } => {
+            return RustType::Ref {
+                mutable,
+                lifetime,
+                inner: Box::new(project_nested_native_allocations(shape, facts, *inner)),
+            };
+        }
+        RustType::Generic { ref base, .. }
+            if matches!(
+                base.as_str(),
+                "std::rc::Rc" | "std::sync::Arc" | "std::cell::RefCell" | "std::sync::Mutex"
+            ) =>
+        {
+            let RustType::Generic { base, args } = rendered else {
+                unreachable!()
+            };
+            return RustType::Generic {
+                base,
+                args: args
+                    .into_iter()
+                    .map(|inner| project_nested_native_allocations(shape, facts, inner))
+                    .collect(),
+            };
+        }
+        _ => {}
+    }
+    if facts.parsed_source_controls_native_carrier(&java_ty) {
+        return rendered;
+    }
+    let children = match &java_ty {
+        JavaType::Array(element) => vec![(**element).clone()],
+        JavaType::Named { args, .. }
+            if crate::stdlib::java_collection_kind_for_type(&java_ty).is_some()
+                || facts.native_iterable_element_type(&java_ty).is_some() =>
+        {
+            args.clone()
+        }
+        _ => return rendered,
+    };
+    let project = |index: usize, child: RustType| {
+        let Some(java_child) = children.get(index) else {
+            return child;
+        };
+        let mut slot = RustSlotShape::for_storage(crate::types::generic_read_type(java_child));
+        slot.inherit_native_collection_child(shape, index);
+        let child = project_nested_native_allocations(&slot, facts, child);
+        wrap_child(&slot, facts, child)
+    };
+    match rendered {
+        RustType::Vec(element) => RustType::Vec(Box::new(project(0, *element))),
+        RustType::Slice(element) => RustType::Slice(Box::new(project(0, *element))),
+        RustType::Generic { base, args } if args.len() == children.len() => RustType::Generic {
+            base,
+            args: args
+                .into_iter()
+                .enumerate()
+                .map(|(index, child)| project(index, child))
+                .collect(),
+        },
+        other => other,
+    }
+}
+
+/// A native allocation's handle is its physical value, not a view of its
+/// payload. In particular, a borrowed slot is `&Rc<RefCell<Vec<T>>>`, not a
+/// long-lived `&[T]` which would keep a borrow active during callback writes.
+fn native_allocation_slot_rust_type(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    render_payload: impl FnOnce(&RustSlotShape) -> RustType,
+) -> Option<RustType> {
+    if !shape.native_allocation.shared()
+        || shape.optional_element_type().is_some()
+        || facts.parsed_source_controls_native_carrier(&shape.java_ty)
+        || !(matches!(shape.java_ty, JavaType::Array(_))
+            || crate::stdlib::java_collection_kind_for_type(&shape.java_ty).is_some())
+    {
+        return None;
+    }
+    let mut payload = shape.clone();
+    payload.native_allocation = StoragePlacement::default();
+    payload.ownership = OwnershipShape::Owned;
+    if payload.view == ViewShape::Slice {
+        payload.view = ViewShape::Native;
+    }
+    let rendered_payload = render_payload(&payload);
+    let payload_type = if facts
+        .retained_native_collection_kind(&payload.java_ty)
+        .is_some()
+    {
+        let element = match rendered_payload {
+            RustType::Vec(element) => *element,
+            RustType::Generic { mut args, .. } if args.len() == 1 => args.remove(0),
+            _ => return None,
+        };
+        rust_generic_type("JavaNativeCollection", vec![element])
+    } else {
+        rendered_payload
+    };
+    let rendered = storage_placement_type(shape.native_allocation, payload_type);
+    Some(match shape.ownership {
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow => RustType::Ref {
+            mutable: shape.ownership == OwnershipShape::MutableBorrow,
+            lifetime: None,
+            inner: Box::new(rendered),
+        },
+        _ => rendered,
+    })
+}
+
 /// Wraps an **owned** slot of a shared type in its handle (0002/0002b).
+fn list_interface_slot_rust_type(
+    shape: &RustSlotShape,
+    facts: &EffectiveFacts<'_>,
+    source_context: Option<(&FactSet, &RepresentationPlan)>,
+) -> Option<RustType> {
+    if shape.view != ViewShape::ListInterface {
+        return None;
+    }
+    let optional = shape.optional_element_type();
+    let base = optional.as_ref().unwrap_or(&shape.java_ty);
+    let element = crate::types::sequence_element_type(base)?;
+    let mut child = source_context.map_or_else(
+        || RustSlotShape::for_storage(element.clone()),
+        |(_, representations)| {
+            crate::shape_projection::storage_shape_for_java_type(representations, element.clone())
+        },
+    );
+    child.inherit_native_collection_child(shape, 0);
+    let element = source_context.map_or_else(
+        || rust_type_for_slot_with_effective_facts(&child, facts),
+        |(base_facts, representations)| {
+            rust_type_for_slot_with_facts_and_representations(&child, base_facts, representations)
+        },
+    );
+    let mut ty = rust_generic_type("JavaListView", vec![element]);
+    if matches!(
+        shape.ownership,
+        OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+    ) {
+        ty = RustType::Ref {
+            mutable: false,
+            lifetime: None,
+            inner: Box::new(ty),
+        };
+    }
+    Some(if optional.is_some() {
+        RustType::Option(Box::new(ty))
+    } else {
+        ty
+    })
+}
+
 fn shared_handle_slot_rust_type(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
@@ -977,6 +1210,15 @@ pub fn default_expr_for_slot_with_effective_facts(
 ) -> RustExpr {
     let rendered =
         slot_default_policy_expr(&slot_default_policy_with_effective_facts(shape, facts));
+    if shape.native_allocation.shared()
+        && shape.optional_element_type().is_none()
+        && matches!(
+            shape.ownership,
+            OwnershipShape::Owned | OwnershipShape::CopyValue
+        )
+    {
+        return storage_placement_construction_expr(shape.native_allocation, rendered);
+    }
     shared_handle_construction_expr(shape, facts, rendered)
 }
 
@@ -1479,6 +1721,16 @@ fn rust_type_for_java_type_with_effective_facts_and_representations(
             ),
         ));
     }
+    if let Some(element) = effective_facts.native_iterable_element_type(ty) {
+        return rust_generic_type(
+            "Iterable",
+            vec![rust_type_for_java_generic_arg_with_representations(
+                &element,
+                &effective_facts,
+                representations,
+            )],
+        );
+    }
     if let JavaType::Named { name, args } = ty
         && effective_facts.parsed_source_controls_native_carrier(ty)
     {
@@ -1915,6 +2167,18 @@ pub fn native_java_rust_type_policy_with_effective_facts(
     ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> NativeJavaRustTypePolicy {
+    if optional_element_type(ty).is_none()
+        && let Some(element) = facts.native_iterable_element_type(ty)
+    {
+        return NativeJavaRustTypePolicy::Direct {
+            ty: rust_generic_type(
+                "Iterable",
+                vec![rust_type_for_java_generic_arg_with_effective_facts(
+                    &element, facts,
+                )],
+            ),
+        };
+    }
     if let JavaType::Named { name, args } = ty
         && facts.parsed_source_controls_native_carrier(ty)
     {
@@ -2926,6 +3190,19 @@ fn rust_type_for_representation_dispatch(
 /// while slot types retain the arguments (`Value<T>`). Keeping this projection
 /// here prevents declarations, parameters, fields, and returns from inventing
 /// their own carrier generic spelling.
+fn nominal_dispatch_type(mut java_ty: &JavaType) -> &JavaType {
+    // Dispatch has already selected a carrier from this bound. Retain its
+    // complete nominal identity when rendering, without changing wildcard
+    // variance or claiming that arbitrary reads/writes are permitted.
+    while let JavaType::Wildcard(Some(
+        crate::java_ir::WildcardBound::Extends(bound) | crate::java_ir::WildcardBound::Super(bound),
+    )) = java_ty
+    {
+        java_ty = bound;
+    }
+    java_ty
+}
+
 pub(crate) fn parameterized_closed_enum_type_name(enum_name: &str, java_ty: &JavaType) -> String {
     parameterized_closed_enum_type_name_with_arg_renderer(enum_name, java_ty, |arg| {
         crate::emit::emit_type(&rust_type_for_java_type(arg))
@@ -2952,6 +3229,7 @@ fn parameterized_closed_enum_type_name_with_effective_representations(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> String {
+    let java_ty = nominal_dispatch_type(java_ty);
     if representations
         .existential_interface_carrier_for(java_ty)
         .is_some()
@@ -3011,6 +3289,7 @@ fn parameterized_closed_enum_type_name_with_arg_renderer(
     java_ty: &JavaType,
     mut render_arg: impl FnMut(&JavaType) -> String,
 ) -> String {
+    let java_ty = nominal_dispatch_type(java_ty);
     let JavaType::Named { args, .. } = java_ty else {
         return enum_name.to_string();
     };
@@ -3046,6 +3325,7 @@ pub(crate) fn parameterized_dyn_trait_path(
     facts: &EffectiveFacts<'_>,
     representations: &RepresentationPlan,
 ) -> String {
+    let java_ty = nominal_dispatch_type(java_ty);
     let trait_path = dyn_trait_rust_path_with_effective_facts(trait_name, facts);
     let JavaType::Named { name, args } = java_ty else {
         return trait_path;
@@ -3100,6 +3380,7 @@ fn parameterized_dyn_trait_path_with_effective_facts(
     java_ty: &JavaType,
     facts: &EffectiveFacts<'_>,
 ) -> String {
+    let java_ty = nominal_dispatch_type(java_ty);
     let trait_path = dyn_trait_rust_path_with_effective_facts(trait_name, facts);
     let JavaType::Named { name, args } = java_ty else {
         return trait_path;
@@ -3364,6 +3645,89 @@ mod tests {
     use super::*;
 
     #[test]
+    fn retained_native_collection_allocation_payloads_share_the_runtime_without_erasing_elements() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        for name in [
+            "java.util.List",
+            "java.util.HashSet",
+            "java.util.LinkedHashSet",
+        ] {
+            let mut shape = RustSlotShape::for_storage(JavaType::Named {
+                name: name.into(),
+                args: vec![JavaType::Primitive(PrimitiveType::Int)],
+            });
+            shape.native_allocation = StoragePlacement::new(true, true, false);
+            let expected = "std::rc::Rc<std::cell::RefCell<JavaNativeCollection<i32>>>";
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn native_allocation_slots_keep_sized_payloads_and_outer_nullability() {
+        let facts = FactSet::default();
+        let representations = RepresentationPlan::default();
+        let mut shape = RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Int,
+        ))));
+        let element = shape.java_ty.clone();
+        for (ownership, nullable, sync, expected) in [
+            (
+                OwnershipShape::Owned,
+                false,
+                false,
+                "std::rc::Rc<std::cell::RefCell<Vec<i32>>>",
+            ),
+            (
+                OwnershipShape::SharedBorrow,
+                false,
+                false,
+                "&std::rc::Rc<std::cell::RefCell<Vec<i32>>>",
+            ),
+            (
+                OwnershipShape::MutableBorrow,
+                true,
+                false,
+                "Option<&mut std::rc::Rc<std::cell::RefCell<Vec<i32>>>>",
+            ),
+            (
+                OwnershipShape::Owned,
+                true,
+                true,
+                "Option<std::sync::Arc<std::sync::Mutex<Vec<i32>>>>",
+            ),
+        ] {
+            shape.native_allocation = StoragePlacement::new(true, true, sync);
+            shape.ownership = ownership;
+            shape.view = ViewShape::Slice;
+            shape.java_ty = if nullable {
+                crate::types::optional_java_type(element.clone())
+            } else {
+                element.clone()
+            };
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, &facts)),
+                expected
+            );
+            assert_eq!(
+                crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                    &shape,
+                    &facts,
+                    &representations,
+                )),
+                expected
+            );
+        }
+    }
+
+    #[test]
     fn nested_native_collection_ignores_conservative_erased_hierarchy_entry() {
         let facts = FactSet::default();
         let mut representations = RepresentationPlan::default();
@@ -3592,6 +3956,54 @@ mod tests {
     }
 
     #[test]
+    fn bounded_wildcard_dispatch_preserves_nominal_generic_identity() {
+        let facts = FactSet::default();
+        let reps = RepresentationPlan::default();
+        for source in ["? super Port<String>", "? extends Port<String>"] {
+            let ty = crate::parser::parse_hierarchy_type(source);
+            for (dispatch, ownership, expected) in [
+                (
+                    DispatchShape::BoxedDynTrait {
+                        trait_name: "Port".into(),
+                    },
+                    OwnershipShape::Owned,
+                    "Box<dyn Port<String>>",
+                ),
+                (
+                    DispatchShape::DynTrait {
+                        trait_name: "Port".into(),
+                    },
+                    OwnershipShape::SharedBorrow,
+                    "&dyn Port<String>",
+                ),
+            ] {
+                let mut shape = RustSlotShape::for_storage(ty.clone());
+                shape.dispatch = dispatch;
+                shape.ownership = ownership;
+                for view in [ViewShape::Native, ViewShape::DynTraitView] {
+                    shape.view = view;
+                    assert_eq!(
+                        crate::emit::emit_type(&rust_type_for_slot_with_facts(&shape, &facts)),
+                        expected,
+                        "{source}"
+                    );
+                    assert_eq!(
+                        crate::emit::emit_type(&rust_type_for_slot_with_facts_and_representations(
+                            &shape, &facts, &reps
+                        )),
+                        expected,
+                        "{source}"
+                    );
+                }
+            }
+            assert_eq!(
+                parameterized_closed_enum_type_name("PortValue", &ty),
+                "PortValue<String>"
+            );
+        }
+    }
+
+    #[test]
     fn shared_external_index_preserves_representation_aware_slot_rendering() {
         let facts = FactSet::default();
         let external_index = facts.external_lookup_index();
@@ -3649,7 +4061,9 @@ class ConcreteReader extends Reader<Item> {}
         let representations =
             crate::representation::plan_representations(&parsed.program, &FactSet::default());
         let shape = RustSlotShape {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             java_ty: JavaType::Named {
                 name: "Reader".to_string(),
                 args: Vec::new(),
@@ -3710,7 +4124,9 @@ class ConcreteReader extends Reader<Item> {}
                 .with_mutated(true),
         );
         let shape = RustSlotShape {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             java_ty: JavaType::Named {
                 name: "Hmm".to_string(),
                 args: vec![JavaType::Wildcard(None)],
@@ -4120,7 +4536,9 @@ class ConcreteReader extends Reader<Item> {}
     #[test]
     fn nullable_unqualified_boxed_primitive_slot_renders_as_optional_scalar() {
         let shape = RustSlotShape {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             java_ty: crate::types::optional_java_type(JavaType::Named {
                 name: "Integer".to_string(),
                 args: Vec::new(),
@@ -4144,7 +4562,9 @@ class ConcreteReader extends Reader<Item> {}
     #[test]
     fn nullable_borrowed_boxed_trait_storage_renders_as_trait_view() {
         let shape = RustSlotShape {
-            nested_collection_views: Vec::new(),
+            native_allocation: Default::default(),
+            nested_native_allocations: Default::default(),
+            nested_collection_views: Default::default(),
             java_ty: crate::types::optional_java_type(JavaType::Named {
                 name: "BlockData".to_string(),
                 args: Vec::new(),

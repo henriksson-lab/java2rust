@@ -56,6 +56,9 @@ pub(crate) fn bound_method_reference_receiver(
             target.to_string(),
         ));
     }
+    if env.type_env().static_type_alias(target).is_some() {
+        return None;
+    }
     let normalized = crate::parser::to_snake_case(target);
     if normalized == target {
         return None;
@@ -126,6 +129,33 @@ fn source_owner_key(target: &str) -> JavaOwnerKey {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn type_owner_is_not_a_normalized_lexical_binding() {
+        let mut env = crate::expr_shape::ShapeEnv::new();
+        let worker = crate::java_ir::JavaType::Named {
+            name: "Worker".to_string(),
+            args: Vec::new(),
+        };
+        env.insert_local("worker", worker.clone());
+        env.insert_static_type_alias("Worker", "Worker");
+        assert_eq!(super::bound_method_reference_receiver("Worker", &env), None);
+        assert_eq!(
+            super::bound_method_reference_receiver("worker", &env),
+            Some(super::BoundMethodReferenceReceiver::Local(
+                "worker".to_string()
+            ))
+        );
+        // Java permits capitalized variable names. Exact lexical binding has
+        // precedence over the type owner, unlike a normalized near-match.
+        env.insert_local("Worker", worker);
+        assert_eq!(
+            super::bound_method_reference_receiver("Worker", &env),
+            Some(super::BoundMethodReferenceReceiver::Local(
+                "worker".to_string()
+            ))
+        );
+    }
+
     use super::{JavaOwnerKey, MethodReferencePlan, plan_method_reference};
 
     #[test]

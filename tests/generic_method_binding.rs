@@ -8,6 +8,150 @@ use new_java2rust::{
 mod common;
 use common::{GeneratedCrateModule, cargo_test_generated_modules};
 
+#[test]
+fn explicit_static_witnesses_survive_chaining_and_exception_binder_erasure() {
+    let translation = new_java2rust::translate_source(
+        r#"
+class ExplicitStaticWitness {
+    static <Value, Unused> Value keep(Value value) { return value; }
+    static <Failure extends RuntimeException, Value, Unused> Value checked(Value value) throws Failure { return value; }
+    static int run() {
+        return ExplicitStaticWitness.<String, Integer>keep("ok").length()
+            + ExplicitStaticWitness.<IllegalArgumentException, String, Integer>checked("abc").length();
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    cargo_test_generated_modules(
+        "explicit_static_witness",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test] fn explicit_unused_witness_and_erased_throwable_binder_match_the_emitted_signature() {
+    assert_eq!(ExplicitStaticWitness::run().unwrap(), 5);
+}
+"#,
+        }],
+    );
+}
+
+#[test]
+fn source_result_nullability_is_not_copied_from_generic_argument() {
+    use new_java2rust::{facts::FactSet, representation, semantic_analysis, signature};
+    let parsed = parse_java_source(include_str!("fixtures/source_result_contract.java"));
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    let semantic =
+        semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &FactSet::default());
+    let representations = representation::plan_representations(&resolved.program, &semantic.facts);
+    let signatures = signature::solve_signatures_with_facts(
+        &resolved.program,
+        &representations,
+        &semantic.usage,
+        &semantic.facts,
+    );
+    let owner = &resolved.program.types[0];
+    for (name, nullable_return) in [("reject", false), ("maybe", true)] {
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == name => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let signature = signatures.required_method_signature(owner, method);
+        assert!(
+            signature.params()[0]
+                .shape()
+                .optional_element_type()
+                .is_some()
+        );
+        assert_eq!(
+            signature
+                .return_shape()
+                .unwrap()
+                .optional_element_type()
+                .is_some(),
+            nullable_return
+        );
+    }
+    let translation =
+        new_java2rust::translate_source(include_str!("fixtures/source_result_contract.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    cargo_test_generated_modules(
+        "source_result_contract",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+trait ProbeString { fn value(self) -> String; }
+impl ProbeString for String { fn value(self) -> String { self } }
+impl<E: std::fmt::Debug> ProbeString for Result<String, E> { fn value(self) -> String { self.unwrap() } }
+#[test] fn source_result_contract_matches_java() { assert_eq!(CheckedResults::run().value(), "ok:null:chosen:caught:null:0"); }
+"#,
+        }],
+    );
+}
+
+#[test]
+fn emitted_source_return_contract_beats_conflicting_external_nullability() {
+    use new_java2rust::facts::{
+        ExternalApiEffectFact, ExternalApiRole, FactProvenance, FactSet, NullabilityState,
+        ReceiverMutabilityFact,
+    };
+    let mut facts = FactSet::default();
+    for (name, arity, nullability) in [
+        ("value", 0, NullabilityState::MaybeNull),
+        ("optional", 1, NullabilityState::DefinitelyNonNull),
+    ] {
+        facts.external_api_effect_facts.push(ExternalApiEffectFact {
+            method_name: name.into(),
+            receiver_type: Some("DeclaredResults".into()),
+            arg_count: Some(arity),
+            parameter_patterns: None,
+            role: ExternalApiRole::Getter,
+            receiver_mutability: ReceiverMutabilityFact::ReadOnly,
+            return_type: Some(JavaType::String),
+            return_nullability: nullability,
+            thrown: Vec::new(),
+            provenance: FactProvenance::ExternalLibraryPack,
+        });
+    }
+    let translation = new_java2rust::translate_source_with_facts(
+        r#"
+class DeclaredResults {
+    static String value() { return "source"; }
+    static String optional(boolean missing) { if (missing) { return null; } return "present"; }
+    static String run() { String nonNull = value(); String missing = optional(true); return nonNull + ":" + missing; }
+}
+"#,
+        &facts,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    cargo_test_generated_modules(
+        "source_external_return_contract",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"#[test] fn source_contract_wins() { assert_eq!(DeclaredResults::run(), "source:null"); }"#,
+        }],
+    );
+}
+
 fn returned_call(source: &str) -> ResolvedCall {
     let parsed = parse_java_source(source);
     assert!(!parsed.diagnostics.has_errors(), "{:?}", parsed.diagnostics);
@@ -39,6 +183,66 @@ fn returned_call(source: &str) -> ResolvedCall {
         panic!("expected resolved return call");
     };
     call.clone()
+}
+
+#[test]
+fn explicit_method_witness_types_a_null_argument_and_shadows_owner_binders() {
+    let call = returned_call(
+        r#"
+class Box<T> { <T> T echo(T value) { return value; } }
+class Use { String make(Box<Integer> box) { return box.<String>echo(null); } }
+"#,
+    );
+    assert_eq!(call.type_args, vec![JavaType::String]);
+    assert_eq!(call.arg_target_types, vec![JavaType::String]);
+    assert_eq!(call.return_type, JavaType::String);
+}
+
+#[test]
+fn explicit_witnesses_preserve_overload_choice_and_non_generic_precedence() {
+    let prefix = r#"
+class Factory {
+    static <T> String choose(T value) { return "generic"; }
+    static String choose(String value) { return "string"; }
+}
+"#;
+    let generic = returned_call(&format!(
+        "{prefix} class Use {{ String make() {{ return Factory.<Integer>choose(3); }} }}"
+    ));
+    assert_eq!(
+        generic.type_args,
+        vec![new_java2rust::parser::parse_type("Integer")]
+    );
+    let specific = returned_call(&format!(
+        "{prefix} class Use {{ String make() {{ return Factory.<String>choose(\"x\"); }} }}"
+    ));
+    assert!(specific.type_args.is_empty());
+    assert_ne!(generic.rust_name, specific.rust_name);
+}
+
+#[test]
+fn explicit_witnesses_are_checked_against_bounds_arity_and_value_arguments() {
+    for call in [
+        "Factory.<String>echo(null)",
+        "Factory.<Good, Good>echo(null)",
+        "Factory.<Good>echo(\"bad\")",
+    ] {
+        let source = format!(
+            r#"
+class Bound {{}}
+class Good extends Bound {{}}
+class Factory {{ static <T extends Bound> T echo(T value) {{ return value; }} }}
+class Use {{ Object make() {{ return {call}; }} }}
+"#
+        );
+        let parsed = parse_java_source(&source);
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            resolved.diagnostics.has_errors(),
+            "{call}: {:?}",
+            resolved.diagnostics
+        );
+    }
 }
 
 #[test]
@@ -448,5 +652,44 @@ class Use<N> { String make(Owner<Integer> owner, N value) { return owner.choose(
         matches!(&call.arg_target_types[0], JavaType::Named { name, .. }
         if name == "Object"),
         "{call:?}"
+    );
+}
+#[test]
+fn exact_bounded_source_calls_keep_declaration_binders() {
+    let translation =
+        new_java2rust::translate_source(include_str!("fixtures/exact_bounded_source_calls.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    common::cargo_test_generated_modules(
+        "exact_bounded_source_calls",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+trait ProbeInt { fn value(self) -> i32; }
+impl ProbeInt for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> ProbeInt for Result<i32,E> { fn value(self) -> i32 { self.unwrap() } }
+fn use_owned_sink<T>(mut sink: Box<dyn ValueSink<T>>, value: T) -> bool { sink.put(value) }
+#[derive(Clone)] struct BorrowedSink;
+impl<'a> ValueSink<&'a str> for BorrowedSink {
+    fn put(&mut self, _: &'a str) -> bool { true }
+    fn first(&self) -> Option<&'a str> { None }
+    fn count(&self) -> i32 { 0 }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn clone_box(&self) -> Box<dyn ValueSink<&'a str>> { Box::new(self.clone()) }
+}
+fn use_borrowed_argument<'a>(value: &'a str) -> bool {
+    use_owned_sink::<&'a str>(Box::new(BorrowedSink), value)
+}
+#[test] fn exact_capture_matches_java() {
+    assert_eq!(ExactBoundedSourceCalls::run().value(), 23);
+    let local = String::from("not static");
+    assert!(use_borrowed_argument(&local));
+}
+"#,
+        }],
     );
 }

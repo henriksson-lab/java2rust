@@ -397,6 +397,13 @@ fn apply_native_java_instance_method(
         NativeJavaInstanceMethod::ObjectToString => {
             apply_java_display_plan(receiver, JavaDisplayPlan::ErasedObject)
         }
+        NativeJavaInstanceMethod::VirtualObjectToString => function_call_projection(
+            RustExpr::path(["java_generic_object_string_result"]),
+            vec![function_call_projection(
+                RustExpr::path(["Some"]),
+                vec![force_shared_borrow_projection(receiver)],
+            )],
+        ),
         NativeJavaInstanceMethod::SourceObjectToString => {
             receiver_method_call_projection(receiver, "to_string", args)
         }
@@ -3146,7 +3153,9 @@ fn apply_native_collection_retain_all(receiver: RustExpr, mut args: Vec<RustExpr
 }
 
 fn collection_bulk_source_aliases_receiver(source: &RustExpr, receiver: &RustExpr) -> bool {
-    if source == receiver {
+    // Identical rendered calls are not identical Java objects: each call must
+    // execute, and can return a different collection or throw independently.
+    if source == receiver && collection_bulk_receiver_is_stable_place(receiver) {
         return true;
     }
     match source {
@@ -3157,7 +3166,21 @@ fn collection_bulk_source_aliases_receiver(source: &RustExpr, receiver: &RustExp
             receiver: clone_receiver,
             method,
             args,
-        } if method == "clone" && args.is_empty() => clone_receiver.as_ref() == receiver,
+        } if method == "clone" && args.is_empty() => {
+            clone_receiver.as_ref() == receiver
+                && collection_bulk_receiver_is_stable_place(receiver)
+        }
+        _ => false,
+    }
+}
+
+fn collection_bulk_receiver_is_stable_place(expr: &RustExpr) -> bool {
+    match expr {
+        RustExpr::Var(_) => true,
+        RustExpr::Field(receiver, _) => collection_bulk_receiver_is_stable_place(receiver),
+        RustExpr::Shaped { expr, .. }
+        | RustExpr::PostfixComment { expr, .. }
+        | RustExpr::Grouped(expr) => collection_bulk_receiver_is_stable_place(expr),
         _ => false,
     }
 }
@@ -3995,6 +4018,26 @@ fn native_collection_new_target_kind(
 mod tests {
     use super::*;
     use crate::emit;
+
+    #[test]
+    fn bulk_collection_alias_proof_requires_a_stable_local() {
+        let local = RustExpr::Var("items".to_string());
+        assert!(collection_bulk_source_aliases_receiver(&local, &local));
+        let field = RustExpr::Field(Box::new(local), "items".to_string());
+        assert!(collection_bulk_source_aliases_receiver(&field, &field));
+        let call = function_call_projection(RustExpr::path(["next_collection"]), Vec::new());
+        assert!(!collection_bulk_source_aliases_receiver(&call, &call));
+        let cloned_call = receiver_method_call_projection_exact(call.clone(), "clone", Vec::new());
+        assert!(!collection_bulk_source_aliases_receiver(
+            &cloned_call,
+            &call
+        ));
+        let field_of_call = RustExpr::Field(Box::new(call), "items".to_string());
+        assert!(!collection_bulk_source_aliases_receiver(
+            &field_of_call,
+            &field_of_call
+        ));
+    }
 
     #[test]
     fn class_literal_token_application_stays_structured() {

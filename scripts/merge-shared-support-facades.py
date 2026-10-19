@@ -510,6 +510,16 @@ def parse_items(
     depth = 0
     index = 0
     after_primary = False
+    redeclared_after_primary = prelude_types_redeclared_after_primary(path)
+
+    def owns_source_name(name: str) -> bool:
+        # Ownership belongs to the concrete source item, not to an earlier
+        # facade with the same name. Preserve post-primary source declarations
+        # while allowing their stale prelude shadows to be removed.
+        return name in source_owned_nested_types and (
+            after_primary or name not in redeclared_after_primary
+        )
+
     while index < len(lines):
         line = lines[index]
         if depth == 0:
@@ -529,7 +539,7 @@ def parse_items(
                         "end": end,
                         "text": "".join(lines[start:end]),
                         "prelude": not after_primary,
-                        "source_owned_nested": name in source_owned_nested_types,
+                        "source_owned_nested": owns_source_name(name),
                     }
                 )
                 index = end
@@ -545,6 +555,7 @@ def parse_items(
                         "end": end,
                         "text": "".join(lines[start:end]),
                         "prelude": not after_primary,
+                        "source_owned_nested": owns_source_name(trait_decl_match.group(1)),
                     }
                 )
                 index = end
@@ -566,8 +577,7 @@ def parse_items(
                         "end": index + 1,
                         "text": line,
                         "prelude": not after_primary,
-                        "source_owned_nested": alias_target
-                        in source_owned_nested_types,
+                        "source_owned_nested": owns_source_name(alias_target),
                     }
                 )
                 index += 1
@@ -599,19 +609,19 @@ def parse_items(
                 ) or any(
                     impl_target_wraps_type(raw_target, owned_type)
                     for owned_type in source_owned_nested_types
+                    if owns_source_name(owned_type)
                 )
                 source_owned_nested = (
-                    target_name in source_owned_nested_types
-                    or trait_impl_name(raw_trait) in source_owned_nested_types
+                    owns_source_name(target_name)
+                    or owns_source_name(trait_impl_name(raw_trait))
                     or (
                         from_match is not None
-                        and impl_target_name(from_match.group(1))
-                        in source_owned_nested_types
+                        and owns_source_name(impl_target_name(from_match.group(1)))
                     )
                 )
                 if from_match and (
-                    impl_target_name(from_match.group(1)) in source_owned_nested_types
-                    or target_name in source_owned_nested_types
+                    owns_source_name(impl_target_name(from_match.group(1)))
+                    or owns_source_name(target_name)
                 ):
                     depth += brace_delta(line)
                     index += 1
@@ -647,7 +657,7 @@ def parse_items(
                         "end": end,
                         "text": "".join(lines[index:end]),
                         "prelude": not after_primary,
-                        "source_owned_nested": name in source_owned_nested_types,
+                        "source_owned_nested": owns_source_name(name),
                     }
                 )
                 index = end
@@ -906,6 +916,18 @@ def value_item_end(lines: list[str], start: int) -> int:
     return len(lines)
 
 
+@cache
+def identifier_names(text: str) -> frozenset[str]:
+    """Pure lexical summary shared by identical support items across modules.
+
+    Cache immutable text, not paths or the changing set of candidate names.
+    Callers still apply their current candidate set and receive their own set.
+    This deliberately retains the existing regex's conservative treatment of
+    comments/string contents; it is not a new dependency-matching policy.
+    """
+    return frozenset(IDENTIFIER_RE.findall(text))
+
+
 def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
     # Scan the source once.  Compiling and searching one regex per candidate
     # made package assembly O(source bytes * facade names) and took many
@@ -913,7 +935,7 @@ def referenced_function_names(text: str, candidate_names: set[str]) -> set[str]:
     # helper can be called normally, called with turbofish syntax, or passed
     # as a function value, so identifier intersection is the complete
     # dependency relation here.
-    return candidate_names.intersection(IDENTIFIER_RE.findall(text))
+    return candidate_names.intersection(identifier_names(text))
 
 
 def referenced_nominal_names(texts: list[str], candidate_names: set[str]) -> set[str]:
@@ -922,7 +944,7 @@ def referenced_nominal_names(texts: list[str], candidate_names: set[str]) -> set
     # the dependency-closure pass from O(bytes * candidates) to O(bytes).
     referenced = set()
     for text in texts:
-        referenced.update(IDENTIFIER_RE.findall(text))
+        referenced.update(identifier_names(text))
     return candidate_names.intersection(referenced)
 
 
@@ -1165,7 +1187,8 @@ def remove_duplicate_inherent_methods(path: Path) -> None:
     path.write_text("".join(line for line_index, line in enumerate(lines) if not remove[line_index]))
 
 
-def extract_methods(impl_text: str) -> list[tuple[str, str]]:
+@cache
+def extract_methods(impl_text: str) -> tuple[tuple[str, str], ...]:
     lines = impl_text.splitlines(keepends=True)
     methods = []
     index = 1
@@ -1189,10 +1212,11 @@ def extract_methods(impl_text: str) -> list[tuple[str, str]]:
                 break
         if saw_body:
             methods.append((match.group(1), "".join(lines[start:index]).strip()))
-    return methods
+    return tuple(methods)
 
 
-def extract_trait_methods(trait_text: str) -> list[tuple[str, str]]:
+@cache
+def extract_trait_methods(trait_text: str) -> tuple[tuple[str, str], ...]:
     lines = trait_text.splitlines(keepends=True)
     methods = []
     index = 1
@@ -1217,7 +1241,7 @@ def extract_trait_methods(trait_text: str) -> list[tuple[str, str]]:
                 break
             index += 1
         methods.append((match.group(1), "".join(lines[start:index]).strip()))
-    return methods
+    return tuple(methods)
 
 
 def merge_trait_declarations(name: str, declarations: list[str]) -> str:
@@ -1252,14 +1276,15 @@ def merge_trait_declarations(name: str, declarations: list[str]) -> str:
     return "\n".join(lines)
 
 
-def extract_consts(impl_text: str) -> list[tuple[str, str]]:
+@cache
+def extract_consts(impl_text: str) -> tuple[tuple[str, str], ...]:
     lines = impl_text.splitlines(keepends=True)
     consts = []
     for line in lines[1 : max(1, len(lines) - 1)]:
         match = CONST_RE.match(line)
         if match:
             consts.append((match.group(1), line.strip()))
-    return consts
+    return tuple(consts)
 
 
 def normalize_const_for_impl_target(
@@ -2185,7 +2210,7 @@ def main() -> int:
     # require the shared `java.lang.Double` facade.
     source_owned_nested_alias_shared_collisions = (
         source_owned_nested_alias_names
-        & (existing_shared_types | set(candidates_by_type))
+        & (existing_shared_declared_type_names | set(candidates_by_type))
     )
     # The structural generic alias belongs beside its nested declaration.  A
     # stale assembly seed with the same simple name must be removed from
@@ -2253,8 +2278,22 @@ def main() -> int:
         for variants in alias_candidates_by_name.values()
         for _path, target in variants
     )
+    source_owned_nested_types_by_filename = {
+        path.name: prelude_source_owned_nested_types(path)
+        | {
+            target
+            for alias, target in prelude_aliases(path)
+            if alias in existing_shared_types
+            and target in prelude_support_types(path)
+            and target not in primary_output_types
+        }
+        for path in merge_input_paths
+    }
     merge_item_catalogs = {
-        path: parse_items(path, catalog_names) for path in merge_input_paths
+        path: parse_items(
+            path, catalog_names, source_owned_nested_types_by_filename[path.name]
+        )
+        for path in merge_input_paths
     }
 
     # A boxed interface conversion may own a private adapter found in just
@@ -2380,18 +2419,6 @@ def main() -> int:
     trait_impls = defaultdict(list)
     inherent_methods = defaultdict(list)
     inherent_consts = defaultdict(list)
-    source_owned_nested_types_by_filename = {
-        path.name: prelude_source_owned_nested_types(path)
-        | {
-            target
-            for alias, target in prelude_aliases(path)
-            if alias in existing_shared_types
-            and target in prelude_support_types(path)
-            and target not in primary_output_types
-        }
-        for path in merge_input_paths
-    }
-
     for path in merge_input_paths:
         items = [
             item
@@ -2490,6 +2517,13 @@ def main() -> int:
     } | {type_name for type_name, _const_name in inherent_consts}
     for item in existing_shared_items:
         if item["kind"] != "inherent_impl" or item["name"] not in generated_inherent_names:
+            continue
+        if item["name"] in replaced_shared_decl_names:
+            # The selected declaration replaces this seed's physical layout.
+            # Do not reinsert obsolete methods into the candidate inventory:
+            # different generic impl headers evade per-method deduplication
+            # and can resurrect constructors/field accesses for the old state.
+            # The replacement declaration and its impls are one ABI contract.
             continue
         impl_header = item["text"].split("{", 1)[0].rstrip()
         for method_name, method_text in extract_methods(item["text"]):
@@ -2928,7 +2962,7 @@ def main() -> int:
     for item in existing_shared_macro_items:
         if item["kind"] == "macro_invocation":
             existing_macro_invocation_identifiers.update(
-                IDENTIFIER_RE.findall(item["text"])
+                identifier_names(item["text"])
             )
     for name in sorted(selected_macro_names):
         definitions = []

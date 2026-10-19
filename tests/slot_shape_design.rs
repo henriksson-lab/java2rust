@@ -8979,6 +8979,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
 
     let receiver = Expr::Var("helper".to_string());
     let resolved_static = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Owner".to_string(),
         rust_name: "make".to_string(),
         return_type: JavaType::Primitive(PrimitiveType::Int),
@@ -9013,6 +9014,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         } if owner == "Owner" && rust_name == "make"
     ));
     let resolved_snake_static = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "g_a_t_k_genomics_d_b_utils".to_string(),
         rust_name: "get_protobuf_vid_mapping_from_json_file".to_string(),
         return_type: JavaType::Unknown("GenomicsDBVidMapProto.VidMappingPB".to_string()),
@@ -9052,6 +9054,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         } if owner == "GenomicsDBColumn" && rust_name == "new_builder"
     ));
     let resolved_instance = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Helper".to_string(),
         rust_name: "read_name".to_string(),
         return_type: JavaType::String,
@@ -9132,6 +9135,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
     );
 
     let resolved_println = ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "PrintStream".to_string(),
         rust_name: "println".to_string(),
         kind: CallKind::Instance,
@@ -10023,6 +10027,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         }
     );
     let resolved_equals = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Value".to_string(),
         rust_name: "equals".to_string(),
         kind: new_java2rust::java_ir::CallKind::Instance,
@@ -10193,6 +10198,7 @@ fn call_plan_owns_call_and_new_target_selection_before_argument_lowering() {
         }
     );
     let capacity_arg = Expr::Call {
+        type_args: Vec::new(),
         receiver: Some(Box::new(Expr::Var("names".to_string()))),
         name: "size".to_string(),
         args: Vec::new(),
@@ -10810,6 +10816,7 @@ class Uses {
         })
         .unwrap();
     let call = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Uses".to_string(),
         rust_name: echo.rust_name.clone().unwrap(),
         return_type: JavaType::String,
@@ -14346,13 +14353,14 @@ class UsesUnimportedExternalStaticFactory {
             Stmt::VarDecl {
                 initializer:
                     Some(Expr::Call {
+                        type_args,
                         receiver,
                         name,
                         args,
                         resolved,
                     }),
                 ..
-            } => Some((
+            } if type_args.is_empty() => Some((
                 receiver.as_deref(),
                 name.as_str(),
                 args.len(),
@@ -14931,6 +14939,7 @@ class ParsedFacadeNames {
 fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     let receiver = Expr::Var("other".to_string());
     let resolved_getter = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Bean".to_string(),
         rust_name: "get_value".to_string(),
         return_type: JavaType::Primitive(PrimitiveType::Int),
@@ -14939,6 +14948,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
         arg_coercions: Vec::new(),
     };
     let resolved_setter = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Bean".to_string(),
         rust_name: "set_value".to_string(),
         return_type: JavaType::Void,
@@ -14982,7 +14992,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: None,
                 name: "setValue".to_string(),
                 args: vec![Expr::Literal(Literal::Int(7))],
@@ -14998,6 +15008,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     let for_each_receiver = Expr::Var("names".to_string());
     let for_each_body = Expr::Call {
+        type_args: Vec::new(),
         receiver: None,
         name: "emit".to_string(),
         args: vec![Expr::Var("name".to_string())],
@@ -15005,7 +15016,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     };
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: Some(Box::new(for_each_receiver)),
                 name: "forEach".to_string(),
                 args: vec![Expr::Lambda {
@@ -15028,6 +15039,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     let two_param_for_each_body = LambdaBody::Block(Block {
         statements: vec![Stmt::Expr(Expr::Call {
+            type_args: Vec::new(),
             receiver: Some(Box::new(Expr::Var("dest".to_string()))),
             name: "put".to_string(),
             args: vec![Expr::Var("name".to_string()), Expr::Var("item".to_string())],
@@ -15036,7 +15048,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     });
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: Some(Box::new(Expr::Var("source".to_string()))),
                 name: "forEach".to_string(),
                 args: vec![Expr::Lambda {
@@ -15067,7 +15079,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: Some(Box::new(Expr::Var("Arrays".to_string()))),
                 name: "sort".to_string(),
                 args: vec![Expr::Var("values".to_string())],
@@ -15084,7 +15096,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: Some(Box::new(Expr::Var("Arrays".to_string()))),
                 name: "sort".to_string(),
                 args: vec![
@@ -15105,7 +15117,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: Some(Box::new(Expr::Var("Collections".to_string()))),
                 name: "sort".to_string(),
                 args: vec![Expr::Var("values".to_string())],
@@ -15121,7 +15133,7 @@ fn call_plan_owns_trivial_accessor_call_selection_before_lowering() {
     ));
     assert!(matches!(
         plan_call_statement(
-            &Expr::Call {
+            &Expr::Call { type_args: Vec::new(),
                 receiver: Some(Box::new(Expr::Var("Collections".to_string()))),
                 name: "sort".to_string(),
                 args: vec![
@@ -18496,6 +18508,7 @@ class Dog implements Animal {}
 #[test]
 fn conversion_plan_uses_target_slot_shape_for_unresolved_unknown_calls() {
     let unresolved_call = Expr::Call {
+        type_args: Vec::new(),
         receiver: None,
         name: "defaultNames".to_string(),
         args: Vec::new(),
@@ -26811,6 +26824,7 @@ class MethodElemUse {
 fn resolved_external_print_stream_uses_arity_name_before_generic_receiver_plan() {
     let receiver = Expr::Var("out".to_string());
     let resolved_println = ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "PrintStream".to_string(),
         rust_name: "println".to_string(),
         kind: CallKind::Instance,
@@ -29592,7 +29606,7 @@ fn indexed_assignment_target_shape_projects_storage_element_shape() {
 
     assert_eq!(projected_target_shape, target_shape);
     assert_eq!(read_shape.ownership, OwnershipShape::SharedBorrow);
-    assert_eq!(target_shape.java_ty(), JavaType::String);
+    assert_eq!(target_shape.optional_element_type(), Some(JavaType::String));
     assert_eq!(target_shape.ownership, OwnershipShape::Owned);
     assert_eq!(target_shape.view, ViewShape::Native);
     assert_eq!(target_shape.mutability, MutabilityShape::Mutable);
@@ -29885,6 +29899,7 @@ class Reader {
         "{rendered}"
     );
     let resolved_throwing_call = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Reader".to_string(),
         rust_name: "read".to_string(),
         kind: new_java2rust::java_ir::CallKind::Instance,
@@ -29913,6 +29928,7 @@ class Reader {
         CallExceptionPropagationPlan::PropagateResult
     );
     let resolved_camel_throwing_call = new_java2rust::java_ir::ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Reader".to_string(),
         rust_name: "read_header_from_path".to_string(),
         kind: new_java2rust::java_ir::CallKind::Instance,
@@ -40534,6 +40550,7 @@ fn stdlib_signature_facts_drive_string_pattern_argument_shape() {
         name,
         args,
         resolved: _,
+        ..
     })) = &method.body.as_ref().unwrap().statements[0]
     else {
         panic!("expected return haystack.contains(needle)");
@@ -40591,6 +40608,7 @@ fn stdlib_signature_facts_drive_string_index_argument_slot() {
         name,
         args,
         resolved: _,
+        ..
     })) = &method.body.as_ref().unwrap().statements[0]
     else {
         panic!("expected return value.charAt(index)");
@@ -40645,6 +40663,7 @@ fn stdlib_signature_facts_drive_string_regex_argument_shape() {
         name,
         args,
         resolved: _,
+        ..
     })) = &method.body.as_ref().unwrap().statements[0]
     else {
         panic!("expected return value.split(regex, -1)");
@@ -40704,6 +40723,7 @@ fn stdlib_signature_facts_drive_string_index_of_argument_shape() {
         name,
         args,
         resolved: _,
+        ..
     })) = &method.body.as_ref().unwrap().statements[0]
     else {
         panic!("expected return value.indexOf(needle, from)");
@@ -40769,6 +40789,7 @@ fn stdlib_signature_facts_drive_numeric_parse_argument_shape() {
             name,
             args,
             resolved: _,
+            ..
         })) = &method.body.as_ref().unwrap().statements[0]
         else {
             panic!("expected return {expected_receiver}.{expected_name}(value)");
@@ -40861,6 +40882,7 @@ fn stdlib_signature_facts_drive_static_math_argument_shapes() {
             name,
             args,
             resolved: _,
+            ..
         })) = &method.body.as_ref().unwrap().statements[0]
         else {
             panic!("expected return {expected_receiver}.{expected_name}(value)");
@@ -40927,6 +40949,7 @@ fn stdlib_signature_facts_drive_objects_null_predicate_argument_shapes() {
             name,
             args,
             resolved: _,
+            ..
         })) = &method.body.as_ref().unwrap().statements[0]
         else {
             panic!("expected return Objects.{expected_name}(value)");
@@ -41220,6 +41243,7 @@ fn resolved_source_static_owner_shadows_native_jdk_static_owner() {
         Expr::Var("right".to_string()),
     ];
     let resolved_source_math = ResolvedCall {
+        type_args: Vec::new(),
         declaring_type: "Math".to_string(),
         rust_name: "floor_div".to_string(),
         kind: CallKind::Static,
@@ -41376,6 +41400,7 @@ fn stdlib_signature_facts_drive_jdk_files_exists_borrowed_path_shape() {
         name,
         args,
         resolved: _,
+        ..
     })) = &method.body.as_ref().unwrap().statements[0]
     else {
         panic!("expected return Files.exists(path)");
@@ -41461,6 +41486,7 @@ fn stdlib_signature_facts_drive_jdk_files_read_all_lines_borrowed_path_shape() {
         name,
         args,
         resolved: _,
+        ..
     })) = &method.body.as_ref().unwrap().statements[0]
     else {
         panic!("expected return Files.readAllLines(path)");
@@ -44519,10 +44545,28 @@ fn stream_joining_delimiter_uses_slot_conversion_for_optional_string_field() {
 
     assert_eq!(
         emit::emit_expr(&lowered.expr()),
-        "names.iter().map(|item| item.to_string()).collect::<Vec<_>>().join(self.delimiter.as_ref().expect(\"Java null receiver\").as_str())"
+        "match names.iter() { __java_join_stream => { let __java_join_delimiter = self.delimiter.as_ref().expect(\"Java null receiver\").as_str().to_string(); __java_join_stream.map(|item| item.to_string()).collect::<Vec<_>>().join(&__java_join_delimiter) } }"
     );
+    // Nonliteral collector arguments are staged before traversal. Their
+    // nullable-string slot conversion must remain in that eager binding.
+    let RustExpr::Match { expr, arms } = lowered.expr() else {
+        panic!("expected staged joining");
+    };
     assert!(matches!(
-        lowered.expr(),
+        expr.as_ref(),
+        RustExpr::MethodCall { method, .. } if method == "iter"
+    ));
+    assert_eq!(arms.len(), 1);
+    let RustExpr::Block {
+        stmts,
+        tail: Some(tail),
+    } = &arms[0].body
+    else {
+        panic!("expected staged collector body");
+    };
+    assert_eq!(stmts.len(), 1);
+    assert!(matches!(
+        tail.as_ref(),
         RustExpr::MethodCall { method, args, .. }
             if method == "join" && args.len() == 1
     ));

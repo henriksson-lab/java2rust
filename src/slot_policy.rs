@@ -248,6 +248,10 @@ pub fn borrowed_content_type_policy_with_effective_facts(
     let capability = borrowed_content_capability_policy_with_effective_facts(java_ty, facts);
     let policy = if capability.string_content() {
         Some(BorrowedContentPolicy::string_like_view())
+    } else if facts.native_functional_carrier(java_ty).is_some() {
+        // A callable/iterable value owns a lazy protocol, not contiguous
+        // collection storage that can be replaced by a borrowed Rust slice.
+        None
     } else if crate::stdlib::java_collection_kind_for_type(java_ty)
         .is_some_and(|kind| kind != crate::stdlib::JavaCollectionKind::List)
     {

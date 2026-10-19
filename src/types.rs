@@ -11,7 +11,7 @@ pub struct TypeEnv {
     comparator_object_fields: HashSet<String>,
     fields: HashMap<String, JavaType>,
     type_fields: HashMap<(String, String), JavaType>,
-    type_param_bounds: HashMap<String, JavaType>,
+    type_param_bounds: HashMap<String, Option<JavaType>>,
     static_type_aliases: HashMap<String, String>,
     // Shared across lexical environment clones: emission ownership is a
     // batch invariant, not a per-expression map to rebuild or deep-copy.
@@ -102,6 +102,14 @@ impl TypeEnv {
     }
 
     pub fn insert_type_param_bound(&mut self, name: impl Into<String>, bound: JavaType) {
+        self.insert_type_param_declaration(name, Some(bound));
+    }
+
+    pub(crate) fn insert_type_param_declaration(
+        &mut self,
+        name: impl Into<String>,
+        bound: Option<JavaType>,
+    ) {
         self.type_param_bounds.insert(name.into(), bound);
     }
 
@@ -179,7 +187,21 @@ impl TypeEnv {
     }
 
     pub fn type_param_bound(&self, name: &str) -> Option<&JavaType> {
-        self.type_param_bounds.get(name)
+        self.type_param_bounds.get(name).and_then(Option::as_ref)
+    }
+
+    pub(crate) fn is_unbounded_object_type_parameter(&self, ty: &JavaType) -> bool {
+        let ty = optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        let name = match &ty {
+            JavaType::Named { name, args } if args.is_empty() => name,
+            JavaType::Unknown(name) => name,
+            _ => return false,
+        };
+        self.type_param_bounds.get(name).is_some_and(|bound| {
+            bound.as_ref().is_none_or(|bound| matches!(bound,
+                JavaType::Named { name, args } if args.is_empty() && matches!(name.as_str(), "Object" | "java.lang.Object")
+            ))
+        })
     }
 
     pub fn static_type_alias(&self, name: &str) -> Option<&str> {
@@ -299,6 +321,7 @@ pub fn infer_expr_type(expr: &Expr, env: &TypeEnv) -> JavaType {
             name,
             args,
             resolved,
+            ..
         } => {
             if let Some(call) = resolved {
                 call.return_type.clone()
@@ -439,6 +462,12 @@ pub fn sequence_element_type(java_ty: &JavaType) -> Option<JavaType> {
     match java_ty {
         JavaType::Array(inner) => Some((**inner).clone()),
         JavaType::Named { name, args }
+            if crate::stdlib::canonical_external_receiver_type_key(name) == "Iterable"
+                && args.len() == 1 =>
+        {
+            Some(args[0].clone())
+        }
+        JavaType::Named { name, args }
             if crate::stdlib::java_collection_kind_for_name(name)
                 .is_some_and(|kind| !kind.is_map_like())
                 && args.len() == 1 =>
@@ -466,6 +495,26 @@ pub fn sequence_mutation_element_type(java_ty: &JavaType) -> Option<JavaType> {
 pub fn generic_read_type(ty: &JavaType) -> JavaType {
     match ty {
         JavaType::Wildcard(Some(WildcardBound::Extends(bound))) => bound.as_ref().clone(),
+        _ => ty.clone(),
+    }
+}
+
+/// Read a generic reference slot without discarding its solved null carrier.
+/// Shared by ordinary iteration, retained cursors and native entry projections.
+pub(crate) fn generic_read_type_preserving_optional(ty: &JavaType) -> JavaType {
+    if let Some(element_ty) = optional_element_type(ty) {
+        optional_java_type(generic_read_type(&element_ty))
+    } else {
+        generic_read_type(ty)
+    }
+}
+
+/// A value supplied to an input-only `? super T` contract may have type T.
+/// Do not apply the dual extends projection here: `? extends T` does not
+/// permit arbitrary T values to be written through its existential slot.
+pub fn generic_input_type(ty: &JavaType) -> JavaType {
+    match ty {
+        JavaType::Wildcard(Some(WildcardBound::Super(bound))) => bound.as_ref().clone(),
         _ => ty.clone(),
     }
 }
@@ -1333,6 +1382,33 @@ mod primitive_widening_tests {
         assert!(
             primitive_widening_steps(Char, Int).unwrap()
                 < primitive_widening_steps(Char, Double).unwrap()
+        );
+    }
+
+    #[test]
+    fn unbounded_binder_registration_shadows_bounds_without_guessing_type_names() {
+        let mut outer = TypeEnv::new();
+        let ty = crate::parser::parse_hierarchy_type("T");
+        assert!(!outer.is_unbounded_object_type_parameter(&ty));
+        outer.insert_type_param_bound("T", crate::parser::parse_hierarchy_type("Runnable"));
+        assert!(!outer.is_unbounded_object_type_parameter(&ty));
+        let mut method_scope = outer.clone();
+        method_scope.insert_type_param_declaration("T", None);
+        assert!(method_scope.is_unbounded_object_type_parameter(&ty));
+        assert!(method_scope.is_unbounded_object_type_parameter(&optional_java_type(ty.clone())));
+        assert!(outer.type_param_bound("T").is_some());
+        assert!(method_scope.type_param_bound("T").is_none());
+        assert!(
+            !method_scope.is_unbounded_object_type_parameter(&JavaType::Named {
+                name: "pkg.T".into(),
+                args: Vec::new(),
+            })
+        );
+        method_scope
+            .insert_type_param_bound("U", crate::parser::parse_hierarchy_type("java.lang.Object"));
+        assert!(
+            method_scope
+                .is_unbounded_object_type_parameter(&crate::parser::parse_hierarchy_type("U"))
         );
     }
 }

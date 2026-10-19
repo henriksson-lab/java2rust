@@ -2,6 +2,62 @@
 mod common;
 
 #[test]
+fn fallible_void_defaults_share_method_completion_and_exception_rules() {
+    let translation =
+        new_java2rust::translate_source(include_str!("fixtures/default_void_fallibility.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    common::cargo_test_generated_modules(
+        "default_void_fallibility",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[derive(Clone)]
+struct Step {
+    calls: std::rc::Rc<std::cell::Cell<i32>>,
+    fail: bool,
+}
+impl FallibleStep for Step {
+    fn execute(&self) -> Result<(), JavaException> {
+        self.calls.set(self.calls.get() + 1);
+        if self.fail { Err(JavaException::new("Exception", "step".to_string())) }
+        else { Ok(()) }
+    }
+    fn as_any(&self) -> &dyn std::any::Any { self }
+    fn clone_box(&self) -> Box<dyn FallibleStep> { Box::new(self.clone()) }
+}
+#[test]
+fn defaults_complete_successfully_and_preserve_exception_paths() {
+    for fail in [false, true] {
+        let calls = std::rc::Rc::new(std::cell::Cell::new(0));
+        let step: Box<dyn FallibleStep> = Box::new(Step { calls: calls.clone(), fail });
+        assert_eq!(step.run().is_err(), fail);
+        assert_eq!(calls.get(), 1);
+        assert!(step.guarded(false).is_ok());
+        assert_eq!(calls.get(), 1);
+        assert_eq!(step.guarded(true).is_err(), fail);
+        assert_eq!(calls.get(), 2);
+        assert!(step.branches(false).is_err());
+        assert_eq!(calls.get(), 2);
+        assert_eq!(step.branches(true).is_err(), fail);
+        assert_eq!(calls.get(), 3);
+        assert!(step.recovered().is_ok());
+        assert_eq!(calls.get(), 4);
+        assert_eq!(step.__java_default_run().is_err(), fail);
+        assert_eq!(step.__java_default_fallible_step_run().is_err(), fail);
+        assert_eq!(calls.get(), 6);
+    }
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn nested_generic_defaults_resolve_inherited_calls_in_their_lexical_owner() {
     let translation = new_java2rust::translate_source(
         r#"

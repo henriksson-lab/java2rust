@@ -2,6 +2,31 @@ use crate::java_ir::{
     CallKind, ConstructorDecl, JavaType, MethodDecl, Modifier, Param, Program, TypeDecl,
 };
 
+/// Recover the exact source declaration behind a resolved Rust member name.
+/// Shared by invocation graphs and source callback contracts: lexical owner
+/// lookup must not select a same-leaf declaration from another package.
+pub(crate) fn resolved_source_method_decl<'a>(
+    program: &'a Program,
+    current_owner: &str,
+    call: &crate::java_ir::ResolvedCall,
+) -> Option<(&'a TypeDecl, &'a MethodDecl)> {
+    let owner = crate::inherited_members::find_type_decl_for_owner_context(
+        program,
+        current_owner,
+        &call.declaring_type,
+    )?;
+    let mut methods = owner.members.iter().filter_map(|member| match member {
+        crate::java_ir::Member::Method(method)
+            if source_method_rust_name(method) == call.rust_name =>
+        {
+            Some(method)
+        }
+        _ => None,
+    });
+    let method = methods.next()?;
+    methods.next().is_none().then_some((owner, method))
+}
+
 /// Return the Rust member name used to emit a source constructor.
 ///
 /// Resolved primary declarations normally cache this name on the IR, while

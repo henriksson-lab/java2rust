@@ -24,7 +24,8 @@ def impl_target_name(raw_target: str) -> str:
     ``Comparator``.
     """
     target = raw_target.strip()
-    target = target.removeprefix("&mut ").removeprefix("&")
+    while target.startswith("&"):
+        target = re.sub(r"^&\s*(?:'[A-Za-z_][A-Za-z0-9_]*\s+)?(?:mut\s+)?", "", target).lstrip()
     target = target.removeprefix("dyn ")
     outer_type = target.split("<", 1)[0].strip()
     return outer_type.rsplit("::", 1)[-1]

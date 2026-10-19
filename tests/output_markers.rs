@@ -17,6 +17,9 @@
 //! because it reports success. See
 //! `claude_audits/0018-the-compile-error-metric-cannot-see-silent-failures.md`.
 
+#[path = "common/mod.rs"]
+mod common;
+
 use new_java2rust::call_lowering::apply_call_target;
 use new_java2rust::call_plan::CallTargetPlan;
 use new_java2rust::facts::{
@@ -260,11 +263,25 @@ fn inner_capture_routes_shared_outer_handle_companion() {
         translation.diagnostics.iter().collect::<Vec<_>>()
     );
     assert!(
-        translation.rust.contains(
-            "__java_outer_result = InnerCapture::compute_with_outer(__java_outer_receiver.clone())"
-        ) && !translation.rust.contains(".borrow_mut().compute()"),
+        translation
+            .rust
+            .contains("__java_outer_result = InnerCapture::compute_with_outer(")
+            && !translation.rust.contains(".borrow_mut().compute()"),
         "{}",
         translation.rust
+    );
+    common::cargo_test_generated_modules(
+        "marker_inner_capture",
+        vec![common::GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test]
+fn inner_observes_outer_mutation_without_reentrant_borrow() {
+    assert_eq!(InnerCapture::run(), "21");
+}
+"#,
+        }],
     );
 }
 

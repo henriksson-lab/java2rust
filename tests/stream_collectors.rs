@@ -5,6 +5,41 @@ mod common;
 use common::{GeneratedCrateModule, cargo_test_generated_modules};
 
 #[test]
+fn checked_joining_preserves_eager_arguments_errors_and_retained_nested_sources() {
+    let translation = translate_source(include_str!("fixtures/checked_stream_joining.java"));
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    cargo_test_generated_modules(
+        "checked_stream_joining",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+trait ProbeString { fn value(self) -> String; }
+impl ProbeString for String { fn value(self) -> String { self } }
+impl<E: std::fmt::Debug> ProbeString for Result<String,E> { fn value(self) -> String { self.unwrap() } }
+#[test] fn checked_joining_matches_java() {
+    assert_eq!(CheckedStreamJoining::run(false).value(), "[a,b]:12344");
+    assert_eq!(CheckedStreamJoining::run(true).value(), "caught:12344");
+    assert_eq!(CheckedStreamJoining::empty().value(), "[]:123");
+    assert_eq!(CheckedStreamJoining::simple().value(), "a,b:44");
+    assert_eq!(CheckedStreamJoining::nested().value(), "g[ga,gb]:12344");
+    assert_eq!(CheckedStreamJoining::argument_failure().value(), "argument:5");
+    assert_eq!(CheckedStreamJoining::argument_mutation().value(), "[a,b]:144");
+    assert_eq!(CheckedStreamJoining::fixed_list_policy().value(), "z:2");
+    assert_eq!(CheckedStreamJoining::plain_nested().value(), "g[ga,gb]:12344");
+    assert_eq!(CheckedStreamJoining::null_nested().value(), "null:0");
+    assert_eq!(CheckedStreamJoining::alias_nested_list().value(), "z");
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn wildcard_imported_ordered_collector_preserves_the_native_owner() {
     let translation = translate_source(
         r#"
