@@ -2382,6 +2382,9 @@ pub enum CaptureSource {
     Local,
     Parameter,
     ThisField,
+    /// A lambda or bound reference retains its lexical Java receiver, not a
+    /// snapshot of that receiver's current fields.
+    This,
     OuterThis,
 }
 

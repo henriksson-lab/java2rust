@@ -3647,7 +3647,7 @@ class JavaIteratorCursorOverList {
                 .rust
                 .contains("pub fn copy(input: &[String]) -> Vec<String>")
             && translation.rust.contains("i.for_each_remaining(|value|")
-            && translation.rust.contains("out.push(value);")
+            && translation.rust.contains(".add_result(__java_collection_arg_0)")
             && !translation.rust.contains("let mut i: Iterator")
             && !translation.rust.contains(".iterator()"),
         "{}",
@@ -3804,13 +3804,18 @@ class JavaListIteratorPreviousCatch {
     assert!(
         translation
             .rust
-            .contains("let mut iter: JavaListIterator<String> = JavaListIterator::new(values.iter().cloned());")
+            .contains("let mut iter: JavaListIterator<String> =")
+            && translation
+                .rust
+                .contains("java_native_collection_list_iterator_result(")
             && translation.rust.contains("iter.next_result()?")
             && translation.rust.contains("iter.previous_result()?")
             && translation
                 .rust
                 .contains("Err(ex) if ex.is_instance(&[\"NoSuchElementException\"])")
-            && !translation.rust.contains("let mut iter: ListIterator<String>")
+            && !translation
+                .rust
+                .contains("let mut iter: ListIterator<String>")
             && !translation.rust.contains(".list_iterator("),
         "{}",
         translation.rust
@@ -3866,7 +3871,8 @@ class JavaListIteratorIndexCatch {
     assert!(
         translation
             .rust
-            .contains("JavaListIterator::new_at_result(values.iter().cloned(), index)?")
+            .contains("java_native_collection_list_iterator_result(")
+            && translation.rust.contains("__java_collection_arg_0 = index")
             && !translation
                 .rust
                 .contains("JavaListIterator::new(values.iter().cloned())")
@@ -3887,10 +3893,10 @@ mod generated_tests {
 
     #[test]
     fn indexed_cursor_bounds_are_catchable() {
-        assert_eq!(JavaListIteratorIndexCatch::run(0), "start");
-        assert_eq!(JavaListIteratorIndexCatch::run(1), "a");
-        assert_eq!(JavaListIteratorIndexCatch::run(2), "bounds");
-        assert_eq!(JavaListIteratorIndexCatch::run(-1), "bounds");
+        assert_eq!(JavaListIteratorIndexCatch::run(0).unwrap(), "start");
+        assert_eq!(JavaListIteratorIndexCatch::run(1).unwrap(), "a");
+        assert_eq!(JavaListIteratorIndexCatch::run(2).unwrap(), "bounds");
+        assert_eq!(JavaListIteratorIndexCatch::run(-1).unwrap(), "bounds");
     }
 }
 "#,
@@ -32145,15 +32151,9 @@ class SuperMethodCall {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMethodCall_Base::base(&SuperMethodCall_Base")
-            && translation
-                .rust
-                .contains("label: self.label.clone()/* TODO(translation): validate added clone */"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_method_call_base_base",
     );
     assert!(!translation.rust.contains("unsupported Java super call"));
     assert!(!translation.rust.contains("(0i32).wrapping_add(5)"));
@@ -32284,13 +32284,9 @@ class InheritedSuperScope {
 "#,
     );
 
-    assert!(
-        translation
-            .rust
-            .contains("InheritedSuperScope_RootLine::base(&InheritedSuperScope_RootLine")
-            && !translation.rust.contains("unsupported Java super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_inherited_super_scope_root_line_base",
     );
 
     cargo_check_generated_modules(
@@ -32443,6 +32439,19 @@ class CloneHierarchyChild extends CloneHierarchyBase {}
     );
 }
 
+// Super implementations operate on the existing concrete receiver. Structural
+// assertions must not require the old temporary-parent/copyback strategy;
+// the per-fixture generated runtime assertions below still check all effects.
+fn assert_source_lexical_super_helper(rust: &str, helper: &str) {
+    assert!(rust.contains(&format!("fn {helper}(")), "{rust}");
+    assert!(rust.contains(&format!("self.{helper}(")), "{rust}");
+    assert!(!rust.contains("let mut __java_super ="), "{rust}");
+    assert!(
+        !rust.contains("unsupported Java mutating super call"),
+        "{rust}"
+    );
+}
+
 #[test]
 fn source_mutating_super_method_call_uses_copyback_for_field_local_body() {
     let source = r#"
@@ -32461,20 +32470,7 @@ class SuperMutate {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("let mut __java_super = SuperMutate_Base { n: self.n };")
-            && translation
-                .rust
-                .contains("SuperMutate_Base::bump(&mut __java_super);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
-    );
+    assert_source_lexical_super_helper(&translation.rust, "__java_super_super_mutate_base_bump");
 
     cargo_test_generated_modules_for_translation(
         "source_mutating_super_method_call",
@@ -32510,16 +32506,9 @@ class SuperMutateReturn {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation.rust.contains(
-            "let __java_super_result = SuperMutateReturn_Base::add(&mut __java_super, value);"
-        ) && translation.rust.contains("self.n = __java_super.n;")
-            && translation.rust.contains("__java_super_result")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_return_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32557,16 +32546,9 @@ class SuperMutateTemp {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateTemp_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_temp_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32606,16 +32588,9 @@ class SuperMutateConditional {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateConditional_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_conditional_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32655,16 +32630,9 @@ class SuperMutateAssignedLocal {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateAssignedLocal_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_assigned_local_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32702,16 +32670,9 @@ class SuperMutateTernaryLocal {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateTernaryLocal_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_ternary_local_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32751,16 +32712,9 @@ class SuperMutateArrayAccess {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateArrayAccess_Base::add(&mut __java_super, values);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_array_access_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32770,8 +32724,8 @@ class SuperMutateArrayAccess {
 #[test]
 fn mutating_super_call_with_array_access_copies_inherited_field_changes_back() {
     let mut value = SuperMutateArrayAccess_Derived { n: 0 };
-    value.add(&[2, 4, 6]);
-    value.add(&[1]);
+    value.add(&std::rc::Rc::new(std::cell::RefCell::new(vec![2, 4, 6]))).unwrap();
+    value.add(&std::rc::Rc::new(std::cell::RefCell::new(vec![1]))).unwrap();
     assert_eq!(value.n, 33);
 }
 "#,
@@ -32799,15 +32753,9 @@ class SuperMutateParameterArrayWrite {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation.rust.contains(
-            "SuperMutateParameterArrayWrite_Base::add(&mut __java_super, values, value);"
-        ) && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_parameter_array_write_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32817,12 +32765,12 @@ class SuperMutateParameterArrayWrite {
 #[test]
 fn mutating_super_call_with_parameter_array_write_updates_array_and_copies_back() {
     let mut value = SuperMutateParameterArrayWrite_Derived { n: 0 };
-    let mut values = vec![0];
-    value.add(values.as_mut_slice(), 4);
-    assert_eq!(values[0], 4);
+    let values = std::rc::Rc::new(std::cell::RefCell::new(vec![0]));
+    value.add(&values, 4).unwrap();
+    assert_eq!(values.borrow()[0], 4);
     assert_eq!(value.n, 14);
-    value.add(values.as_mut_slice(), 2);
-    assert_eq!(values[0], 2);
+    value.add(&values, 2).unwrap();
+    assert_eq!(values.borrow()[0], 2);
     assert_eq!(value.n, 26);
 }
 "#,
@@ -32850,16 +32798,9 @@ class SuperMutateLocalArray {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateLocalArray_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_local_array_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32900,16 +32841,9 @@ class SuperMutateLocalArrayWrite {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateLocalArrayWrite_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_local_array_write_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -32949,16 +32883,9 @@ class SuperMutateLocalArrayUnary {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateLocalArrayUnary_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_local_array_unary_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33007,17 +32934,13 @@ class SuperMutateLocalArrayForUpdate {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation.rust.contains(
-            "SuperMutateLocalArrayForUpdate_Base::add_with_unary(&mut __java_super, value);"
-        ) && translation.rust.contains(
-            "SuperMutateLocalArrayForUpdate_Base::add_with_assignment(&mut __java_super, value);"
-        ) && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_local_array_for_update_base_add_with_unary",
+    );
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_local_array_for_update_base_add_with_assignment",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33061,16 +32984,9 @@ class SuperMutateIfElseAssignedLocal {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateIfElseAssignedLocal_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_if_else_assigned_local_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33108,16 +33024,9 @@ class SuperMutateUnaryField {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateUnaryField_Base::bump(&mut __java_super);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_unary_field_base_bump",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33156,16 +33065,9 @@ class SuperMutateUnaryLocal {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateUnaryLocal_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_unary_local_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33203,16 +33105,9 @@ class SuperMutateUnaryParam {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateUnaryParam_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_unary_param_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33252,16 +33147,9 @@ class SuperMutateWhileLoop {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateWhileLoop_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_while_loop_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33301,16 +33189,9 @@ class SuperMutateDoWhileLoop {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateDoWhileLoop_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_do_while_loop_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33350,16 +33231,9 @@ class SuperMutateEnhancedFor {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateEnhancedFor_Base::add(&mut __java_super, values);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_enhanced_for_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33369,8 +33243,8 @@ class SuperMutateEnhancedFor {
 #[test]
 fn mutating_super_call_with_enhanced_for_loop_copies_inherited_field_changes_back() {
     let mut value = SuperMutateEnhancedFor_Derived { n: 0 };
-    value.add(&[1, 2, 3]);
-    value.add(&[4]);
+    value.add(&std::rc::Rc::new(std::cell::RefCell::new(vec![1, 2, 3])));
+    value.add(&std::rc::Rc::new(std::cell::RefCell::new(vec![4])));
     assert_eq!(value.n, 30);
 }
 "#,
@@ -33399,16 +33273,9 @@ class SuperMutateForLoop {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateForLoop_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_for_loop_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33457,17 +33324,13 @@ class SuperMutateForAssignmentUpdate {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation.rust.contains(
-            "SuperMutateForAssignmentUpdate_Base::add_with_local_update(&mut __java_super, value);"
-        ) && translation.rust.contains(
-            "SuperMutateForAssignmentUpdate_Base::add_with_param_update(&mut __java_super, value);"
-        ) && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_for_assignment_update_base_add_with_local_update",
+    );
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_for_assignment_update_base_add_with_param_update",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33524,19 +33387,13 @@ class SuperMutateLoopControl {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateLoopControl_Base::add_with_break(&mut __java_super, value);")
-            && translation.rust.contains(
-                "SuperMutateLoopControl_Base::add_with_continue(&mut __java_super, value);"
-            )
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_loop_control_base_add_with_break",
+    );
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_loop_control_base_add_with_continue",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33601,17 +33458,13 @@ class SuperMutateLabeledLoopControl {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation.rust.contains(
-            "SuperMutateLabeledLoopControl_Base::add_with_labeled_break(&mut __java_super, value);"
-        ) && translation.rust.contains(
-            "SuperMutateLabeledLoopControl_Base::add_with_labeled_continue(&mut __java_super, value);"
-        ) && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_labeled_loop_control_base_add_with_labeled_break",
+    );
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_labeled_loop_control_base_add_with_labeled_continue",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33658,16 +33511,9 @@ class SuperMutateSwitch {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateSwitch_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_switch_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33715,16 +33561,9 @@ class SuperMutateSwitchAssignedLocal {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateSwitchAssignedLocal_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_switch_assigned_local_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33762,16 +33601,9 @@ class SuperMutateMathCall {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("SuperMutateMathCall_Base::add(&mut __java_super, value);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_math_call_base_add",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33811,19 +33643,9 @@ class SuperMutateInheritedField {
 "#;
     let translation = translate_source(source);
 
-    assert!(
-        translation
-            .rust
-            .contains("let mut __java_super = SuperMutateInheritedField_Base { n: self.n };")
-            && translation
-                .rust
-                .contains("SuperMutateInheritedField_Base::bump(&mut __java_super);")
-            && translation.rust.contains("self.n = __java_super.n;")
-            && !translation
-                .rust
-                .contains("unsupported Java mutating super call"),
-        "{}",
-        translation.rust
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_inherited_field_base_bump",
     );
 
     cargo_test_generated_modules_for_translation(
@@ -33875,12 +33697,6 @@ class SuperMutateHiddenField {
         translation
             .rust
             .contains("__java_hidden_super_mutate_hidden_field_base_n: i32")
-            && translation.rust.contains(
-                "SuperMutateHiddenField_Base { n: self.__java_hidden_super_mutate_hidden_field_base_n }"
-            )
-            && translation.rust.contains(
-                "self.__java_hidden_super_mutate_hidden_field_base_n = __java_super.n;"
-            )
             && translation
                 .rust
                 .contains("return self.__java_hidden_super_mutate_hidden_field_base_n;")
@@ -33889,6 +33705,10 @@ class SuperMutateHiddenField {
                 .contains("unsupported Java mutating super call"),
         "{}",
         translation.rust
+    );
+    assert_source_lexical_super_helper(
+        &translation.rust,
+        "__java_super_super_mutate_hidden_field_base_bump",
     );
     cargo_test_generated_modules_for_translation(
         "mutating_super_copyback_hidden_superclass_field",

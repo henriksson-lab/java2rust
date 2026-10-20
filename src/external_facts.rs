@@ -873,6 +873,7 @@ fn parse_capture_source(value: &str) -> Option<CaptureSource> {
         "local" => Some(CaptureSource::Local),
         "parameter" => Some(CaptureSource::Parameter),
         "this-field" => Some(CaptureSource::ThisField),
+        "this" => Some(CaptureSource::This),
         "outer-this" => Some(CaptureSource::OuterThis),
         _ => None,
     }

@@ -648,6 +648,52 @@ impl<'a> EffectiveFacts<'a> {
         Some(shape)
     }
 
+    /// Modeled cursors own shared operation/state handles internally; cloning
+    /// preserves cursor identity without an outer allocation wrapper.
+    pub(crate) fn native_list_cursor_element_type(&self, java_ty: &JavaType) -> Option<JavaType> {
+        self.native_cursor_element_type_for_names(
+            java_ty,
+            &["ListIterator", "java.util.ListIterator", "JavaListIterator"],
+        )
+    }
+
+    /// Cursor element domains flow independently of the cursor's own handle.
+    pub(crate) fn native_cursor_element_type(&self, java_ty: &JavaType) -> Option<JavaType> {
+        self.native_cursor_element_type_for_names(
+            java_ty,
+            &[
+                "Iterator",
+                "java.util.Iterator",
+                "JavaIterator",
+                "ListIterator",
+                "java.util.ListIterator",
+                "JavaListIterator",
+            ],
+        )
+    }
+
+    fn native_cursor_element_type_for_names(
+        &self,
+        java_ty: &JavaType,
+        names: &[&str],
+    ) -> Option<JavaType> {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        let JavaType::Named { name, args } = ty else {
+            return None;
+        };
+        if args.len() != 1
+            || !names.contains(&crate::stdlib::canonical_external_receiver_type_key(&name).as_str())
+            || self.has_parsed_source_type_capability_for_name(&name)
+            || self.hierarchy_overrides_for_name(&name).any(|fact| {
+                fact.provenance == FactProvenance::UserOverride
+                    && fact.strategy != HierarchyStrategy::ConcreteStruct
+            })
+        {
+            return None;
+        }
+        Some(args[0].clone())
+    }
+
     pub(crate) fn native_iterable_element_type(&self, java_ty: &JavaType) -> Option<JavaType> {
         let effective =
             crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
@@ -705,6 +751,48 @@ impl<'a> EffectiveFacts<'a> {
                 | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
         )
         .then_some(kind)
+    }
+
+    /// These sequence values carry concrete factory policy (null acceptance,
+    /// List membership and iteration behavior), even in an unaliased local.
+    /// Queue alone is not enough: priority/blocking backends remain distinct.
+    pub(crate) fn native_collection_requires_runtime_policy(&self, java_ty: &JavaType) -> bool {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        self.retained_native_collection_kind(&ty).is_some()
+            && matches!(&ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
+                if matches!(crate::stdlib::canonical_external_receiver_type_key(name).rsplit('.').next().unwrap_or(name),
+                    "Deque" | "ArrayDeque" | "LinkedList"))
+    }
+
+    /// Map payloads have two child domains; they are not the one-element
+    /// collection runtime. Hash/linked maps can share a canonical retained
+    /// map ABI while retaining insertion order. Sorted/comparator backends
+    /// keep their separate contract until explicitly supported.
+    pub(crate) fn retained_native_map_kind(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<crate::stdlib::JavaCollectionKind> {
+        let ty = crate::types::optional_element_type(java_ty).unwrap_or_else(|| java_ty.clone());
+        if self.parsed_source_controls_native_carrier(&ty) {
+            return None;
+        }
+        let kind = crate::stdlib::java_collection_kind_for_type(&ty)?;
+        matches!(
+            kind,
+            crate::stdlib::JavaCollectionKind::Map
+                | crate::stdlib::JavaCollectionKind::InsertionOrderedMap
+        )
+        .then_some(kind)
+    }
+
+    /// Allocation retention is shared policy; payload rendering and operations
+    /// still distinguish one-element collections from two-element maps.
+    pub(crate) fn retained_native_container_kind(
+        &self,
+        java_ty: &JavaType,
+    ) -> Option<crate::stdlib::JavaCollectionKind> {
+        self.retained_native_collection_kind(java_ty)
+            .or_else(|| self.retained_native_map_kind(java_ty))
     }
 
     fn hierarchy_overrides_for_name(
@@ -1045,6 +1133,101 @@ mod type_fact_lookup_session_tests {
             );
             facts.type_capability_overrides.pop();
         }
+    }
+
+    #[test]
+    fn deque_runtime_policy_preserves_source_precedence_and_backend_boundaries() {
+        let mut facts = facts_for(false);
+        let ty = |name: &str| JavaType::Named {
+            name: name.into(),
+            args: vec![JavaType::String],
+        };
+        for name in ["Deque", "java.util.ArrayDeque", "LinkedList"] {
+            assert!(
+                EffectiveFacts::new(&facts).native_collection_requires_runtime_policy(&ty(name))
+            );
+        }
+        for name in ["Queue", "PriorityQueue", "ArrayBlockingQueue", "ArrayList"] {
+            assert!(
+                !EffectiveFacts::new(&facts).native_collection_requires_runtime_policy(&ty(name))
+            );
+        }
+        let mut source = facts.type_capability_overrides[1].clone();
+        source.type_name = "ArrayDeque".into();
+        facts.type_capability_overrides.push(source);
+        assert!(
+            !EffectiveFacts::new(&facts)
+                .native_collection_requires_runtime_policy(&ty("ArrayDeque"))
+        );
+    }
+
+    #[test]
+    fn native_list_cursor_contract_preserves_source_and_user_precedence() {
+        let mut facts = facts_for(false);
+        let ty = JavaType::Named {
+            name: "ListIterator".into(),
+            args: vec![JavaType::String],
+        };
+        assert_eq!(
+            EffectiveFacts::new(&facts).native_list_cursor_element_type(&ty),
+            Some(JavaType::String)
+        );
+        let mut source = facts.type_capability_overrides[1].clone();
+        source.type_name = "ListIterator".into();
+        facts.type_capability_overrides.push(source);
+        assert!(
+            EffectiveFacts::new(&facts)
+                .native_list_cursor_element_type(&ty)
+                .is_none()
+        );
+        facts.type_capability_overrides.pop();
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "ListIterator".into(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::UserOverride,
+        });
+        assert!(
+            EffectiveFacts::new(&facts)
+                .native_list_cursor_element_type(&ty)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn read_only_cursor_contract_keeps_qualified_elements_and_source_precedence() {
+        let mut facts = facts_for(false);
+        let ty = JavaType::Named {
+            name: "Iterator".into(),
+            args: vec![crate::types::optional_java_type(JavaType::String)],
+        };
+        assert_eq!(
+            EffectiveFacts::new(&facts).native_cursor_element_type(&ty),
+            Some(crate::types::optional_java_type(JavaType::String))
+        );
+        assert!(
+            EffectiveFacts::new(&facts)
+                .native_list_cursor_element_type(&ty)
+                .is_none()
+        );
+        let mut source = facts.type_capability_overrides[1].clone();
+        source.type_name = "Iterator".into();
+        facts.type_capability_overrides.push(source);
+        assert!(
+            EffectiveFacts::new(&facts)
+                .native_cursor_element_type(&ty)
+                .is_none()
+        );
+        facts.type_capability_overrides.pop();
+        facts.hierarchy_overrides.push(HierarchyOverride {
+            type_name: "Iterator".into(),
+            strategy: HierarchyStrategy::ErasedObject,
+            provenance: FactProvenance::UserOverride,
+        });
+        assert!(
+            EffectiveFacts::new(&facts)
+                .native_cursor_element_type(&ty)
+                .is_none()
+        );
     }
 
     fn facts_for(copy: bool) -> FactSet {

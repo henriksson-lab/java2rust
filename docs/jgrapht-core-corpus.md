@@ -15,6 +15,37 @@ products. Generated Rust must not be manually repaired.
 
 ## Current checkpoint
 
+The active goal changed on 2026-10-20: finish the current general fix batch,
+freeze and measure this 104-file slice once, then select and support a smaller
+headless corpus after a feasibility audit. JGraphT remains an incomplete stress
+target; its full completion is no longer the active goal's blocking milestone.
+The acceptance requirements below remain the requirements for claiming actual
+JGraphT support, not claims that it has been achieved.
+
+Latest measured candidate: **V152**, 104 translated files, zero translator or
+generated-parse failures, **1054 diagnostics (978 typed + 76 untyped)**,
+38 allocation guards and 74 registry markers across 31 files. This is not a
+passing or promoted corpus. Current source closes retained deque construction,
+aliasing, endpoints and two-layer Result/Option null checking: its runtime
+oracle passes. V12 full library1606/0 and production assembly2/0 pass. V13
+follow-through closes generic static-owner and unresolved inherited-binder
+regressions: constructor3/0, map7/0 and lexical-super4/0 pass. A catalog-proven
+qualified/local owner alias follow-through passes its focused control. V14
+verification passes: library1608/0, deque1/0, constructor3/0, map7/0 and
+lexical-super4/0. The current V14 release built successfully in 105s and is
+frozen as `.tmp/new-java2rust-v152-retained-deque-contracts` (22,423,696 bytes,
+SHA256 `7692d388eb4fc976b3bb0f526a301474dffc84a8b57c558c77051167336b1e81`).
+Its isolated V152 checkpoint is complete (319.334s total: translation229.072s,
+assembly71.063s, cargo check13.777s, sweep4.706s). V151 had1150 diagnostics:
+144 header/file occurrences removed and48 added, net-96. Marker counts rose
+64to74 and allocation guards23to38; this is not a uniformly improving or
+accepted candidate. Generic static-owner rendering exposes24 JavaMapKey
+requirements, and source/allocation contracts remain incomplete. These are
+diagnostic occurrences, not distinct bugs. Measurements are unpaired; no
+performance improvement is claimed. JGraphT is now parked as a stress target.
+See the final checkpoint for exact paths and process handles;
+the chronology below retains older evidence.
+
 The latest accepted incremental full-slice checkpoint is **v101, release**: all 104 files
 parse/translate without translator or generated parse failures, but the crate
 still has 1,867 actual Rust diagnostics (1,784 typed + 83 untyped), versus
@@ -87,7 +118,7 @@ virtual-string result and the two extra try operators on BoyerMyrvold display
 views. The final related gate passes 1,523 library tests and 32 integrations,
 plus 15 historical identity and 11 selected Java differential cases. V109 is
 still not a clean or promoted checkpoint; v101 remains accepted.
-The latest measured candidate is **v110**, with **1,730 diagnostics
+V110 has **1,730 diagnostics
 (1,652 typed + 78 untyped)**, zero translator/generated parse failures and the
 same 76 markers across 41 files. It removes eight header/file occurrences
 versus v109 and exposes one additional shared-field array borrowing error.
@@ -99,8 +130,117 @@ gates and controlled pre-existing failures documented below. V110 is not
 promoted. Prioritize shared-field array mutation/guard lifetimes and the
 remaining nullable formatting consumers; the separate escaping mapped-stream
 gap remains unfinished.
+V111 has **1,718 diagnostics
+(1,639 typed + 79 untyped)**, 77 markers across 41 files and 43 allocation
+guards. All 104 files translate with zero translator/generated parse failures.
+It removes 24 header/file occurrences and adds 12 versus v110, including removal
+of 16 BoyerMyrvold temporary-borrow errors. The additions expose nested erased
+array-row copying, a reflective array producer's allocation boundary and one
+additional generic capability diagnostic. V111 is not promoted. Complete the
+array allocation contracts before the formatting follow-up; see the stored
+source-array section for the measured delta and next batch.
+The preceding measured candidate is **v112**, with **1,714 diagnostics
+(1,635 typed + 79 untyped)**. All 104 files translate with no translator or
+generated parse failures; markers remain 77 across 41 files and allocation
+guards remain 43. It removes 12 header/file occurrences and adds eight versus
+v111: ten erased row-payload Clone errors and two signed-index errors are gone;
+eight optional-erased source-argument mismatches are exposed in FloydWarshall.
+The independent row-copy control now compiles. V112 is not promoted.
+The preceding measured candidate is **v113**, with **1,692 diagnostics
+(1,613 typed + 79 untyped)**. It removes 22 header/file occurrences and adds
+none versus v112: all ten remaining Floyd erased-element Clone errors, all
+eight exposed optional-erased forwarding mismatches, and four DefaultEdge/
+DefaultWeightedEdge borrowed-data escapes disappear. All 104 files translate;
+translator/generated parse failures remain zero, markers remain 77 across 41
+files and native allocation guards remain 43. Both independent frozen nullable
+forwarding controls now compile. This candidate is not promoted over accepted
+v101; see the full batch evidence below.
+The latest measured candidate is **v125**, with **1,539 diagnostics
+(1,455 typed + 84 untyped)**, 75 markers in 32 files and 38 allocation guards
+(32 plain-to-shared, six shared-to-plain). All 104 files translate with zero
+translator/generated parse failures. Versus v124 it removes 82 diagnostic
+header/file occurrences and adds 171, net +89. All five targeted moved-graph
+errors disappear, but newly retained maps expose unimplemented allocation-aware
+consumers; throwing source constructors also expose repeated result projection
+through Iterable adapters. The focused batch passes 1,550 library tests,
+12 integrations and its Java oracle, but the corpus delta is **not accepted**.
+Complete the shared map/view/result consumer contracts next. This candidate is
+not clean or promoted; v101 remains the accepted incremental checkpoint.
+The previous measured candidate is **v124**, with **1,450 diagnostics
+(1,381 typed + 69 untyped)**, 66 markers in 29 files and 27 allocation guards
+(21 plain-to-shared, six shared-to-plain). All 104 files translate with zero
+translator/generated parse failures. Versus v123 it removes 30 full-header/
+first-primary-file diagnostic occurrences and adds one: 26 structural Eq/Hash
+requirements and four set-materialization mismatches disappear. The added
+FloydWarshall mutable-loan move is independently reproduced with frozen v123
+and comes from Objects.requireNonNull staging, not from the new set carrier.
+The batch passes 1,549 library tests, 11 integrations and its Java oracle.
+Total runtime is 427.921s with the separate resolver benchmark deliberately
+skipped; translation is 307.872s and assembly 89.794s. Variable host load and
+unpaired runs do not establish a translator speedup or regression. This is not
+acceptance or completion; v101 remains the accepted incremental checkpoint.
+The previous measured candidate is **v123**, with **1,479 diagnostics
+(1,410 typed + 69 untyped)**, 66 markers in 29 files and 27 allocation guards
+(21 plain-to-shared, six shared-to-plain). All 104 files translate with zero
+translator/generated parse failures. The full-header/first-primary-file diff
+versus v122 removes 12 and adds 10: six GraphWalk guards, one unsupported cursor
+operation and two reverse-method errors disappear, while downstream ownership,
+lifetime and set-materialization constraints become visible. Two source cursor
+ambiguities become typed ABI mismatches rather than established fixes. Runtime
+is 412.871s, comparable to v122's 409.245s. This is neither acceptance nor
+completion; v101 remains the accepted incremental checkpoint.
+The previous measured candidate is **v122**, with **1,481 diagnostics
+(1,405 typed + 76 untyped)**, 71 markers in 29 files and 33 native allocation
+guards (27 plain-to-shared, six shared-to-plain). All 104 files translate with
+zero translator/generated parse failures. Versus v121, the full-header/first-
+primary-file multiset removes 32 and adds 26: 14 allocation guards disappear
+through AbstractGraph/inherited copies, while eight new guards and seven new
+unsupported retained operations become visible, concentrated in GraphWalk.
+Total runtime is 409.245s, translation 237.415s and assembly 101.496s; unpaired
+measurements do not establish a performance gain. This is not acceptance or
+completion.
+The previous measured candidate is **v121**, with **1,487 diagnostics
+(1,412 typed + 75 untyped)**, 74 markers in 40 files and 39 native allocation
+guards (33 plain-to-shared, six shared-to-plain). All 104 files translate with
+zero translator/generated parse failures. The raw header/first-primary-file
+multiset removes 45 and adds 24 versus v120; 17 entries on each side reflect
+the new native storage type's expanded spelling. The substantive typed changes
+remove 12 captured-value moves, six erased-iterator failures, five signed-index
+failures, four ambiguous-method entries and one E: JavaMapKey requirement;
+one mutable-loan failure and six guards become visible. The lower total
+does not establish acceptance, and the corpus remains incomplete.
+The previous measured candidate v120 had **1,508 diagnostics
+(1,439 typed + 69 untyped)**, 68 markers in 38 files and 33 native allocation
+guards (six shared-to-plain, 27 plain-to-shared). All 104 files translate with
+zero translator/generated parse failures. Compared with v119 it removes 104
+header/first-primary-file entries and adds 62, a net reduction of 42. New
+retained producer/consumer gaps remain; this is not acceptance or completion.
+The previous measured candidate v119 had **1,550 diagnostics
+(1,471 typed + 79 untyped)**. Its handle-companion consumer batch removes
+58 header/first-primary-file diagnostics and adds none versus v118: 24 Clone,
+24 JavaMapKey, seven finally-related moved-value, and three matrix temporary
+lifetime errors. All 104 files translate, with zero translator/generated parse
+failures; 77 markers across 41 files and 43 allocation guards remain. This is
+not a passing or accepted corpus translation. The previous candidate v118 had **1,608 diagnostics
+(1,529 typed + 79 untyped)**, versus v117/v116's 1,620 and v114's 1,659. All 104 files translate
+without translator or generated parse failures; markers remain 77 across 41
+files and native guards remain 43. V116's header/first-primary-file multiset
+removes 43 and adds four versus v114. Two malformed bounded-interface arities,
+four G: Clone failures and six optional mutable-borrow Clone failures disappear.
+The additions are two erased wildcard-bound incompatibilities in the graph
+builders and two static-constant inference entries in Floyd–Warshall. One
+malformed arity remained in AbstractBaseGraph's shared-handle conversion path.
+V117 removes the final malformed arity, replacing it and one mismatch with
+a shared-handle interface bound failure and an argument mismatch. It does
+not close inherited unqualified static string constants. Neither candidate
+is promoted. V118's shared-handle loan/lexical static-owner batch removes
+57 header/file diagnostics and adds 45: most static-owner inference entries
+disappear, while handle-companion capability/liveness/loan consumers become
+visible. That coherent consumer batch is now under focused verification;
+the wildcard variance contract still needs proper capture handling.
+See the sections below for controls and evidence.
 Also pending are bounded source-interface interoperability, the remaining
-42 native allocation guards (39 shared-to-plain, three plain-to-shared),
+43 native allocation guards (39 shared-to-plain, four plain-to-shared),
 nullable/view boundaries and pending source-List projections. Do not remove the guards by
 snapshotting aliased collections or manually repairing generated Rust.
 
@@ -10937,10 +11077,3125 @@ as well. Formatting and `git diff --check` pass. V919 builds the frozen release
 candidate for the single full-slice measurement after this related batch.
 Logs are `.tmp/shared-field-arrays-v91{4,5,6,7,8}-*.log`.
 
-No new full-slice measurement or promotion has been made for this batch yet.
-Generated Rust and pinned corpus Java remain untouched.
+V919's release build passes in 1m32s. Frozen v111 is
+`.tmp/new-java2rust-v111-retained-source-array-places`, 21,249,424 bytes,
+SHA-256 `f71d9bebd1a826f0e7e8f95d4c7a9f7674f21ccdb3d9675101612b3128c3bb46`.
+The quiet full-slice run is
+`.tmp/jgrapht-core-1.5.3-focused-v111-retained-source-array-places`, with log
+`.tmp/jgrapht-v111-retained-source-array-places-run.log`. The runner exits 1 for
+generated Rust check failures, not a timeout. It translates all 104 files with
+zero translator/generated parse failures and reports **1,718 actual diagnostics
+(1,639 typed + 79 untyped)**, **77 markers across 41 files**, and **43 native
+allocation guards** (39 shared-to-plain, four plain-to-shared).
+
+The header/primary-source-file multiset removes **24** occurrences and adds
+**12** versus v110. BoyerMyrvold loses 16 E0716, five mismatches, two
+`Option<V>: Clone` errors and one wrong-arity error. It gains one allocation
+guard at the reflective array initialization passed through a generic source
+cast. FloydWarshall gains ten `dyn Any: Clone` occurrences: copying the outer
+array handle is now correct, but reading a nested row still clones the plain
+`Vec<Option<Box<dyn Any>>>` payload. Such a row is a Java reference, not a
+deep-copyable value. The minimized frozen-binary control
+`.tmp/retained-erased-array-rows-v111-control.java` independently reproduces one
+and only one Rust error, `dyn Any: Clone`, for a simple `Object[1][1]` field read
+and null test; its complete generated Rust, translation log and rustc log are
+preserved alongside. No debug translator rebuild was needed for this control.
+BreadthFirstIterator gains one `V: JavaMapKey` occurrence
+at a forwarded source call; other occurrences of that family predate v111.
+These additions are not accepted merely because the total decreases.
+
+Elapsed time is **287.308 seconds**: preflight 40.297, translation 166.467,
+assembly 63.621, Rust checking 12.717. Emission is 109.062 seconds and signature
+saturation is 4.252 seconds. Against v110's unpaired 284.635-second correctness
+run this does not establish a performance change. No competing compiler/test
+workload ran during the measurement.
+
+The next allocation batch must preserve nested row-reference identity and
+physical child-allocation contracts through creation, indexed reads/writes,
+aliases, calls and shallow clones. Reuse existing nested allocation paths and
+nullable-row machinery; do not clone a row payload to satisfy a Rust borrow or
+Clone bound. Cover erased leaf inspection too: a null predicate must not
+require cloning an erased object solely to release a row guard. The solution
+must distinguish reference retention from a completed consumer that can run
+inside the guard's lexical scope. Separately establish the reflective array producer's physical
+carrier through generic source forwarding before attempting its conversion.
+The remaining generic capability forwarding belongs to a later coherent
+capability-bound batch unless the array work proves a shared cause. Keep the
+nullable formatting and escaping mapped-stream gaps on the backlog.
+Generated Rust and pinned corpus Java remain untouched. No promotion occurs;
+the full selected-slice objective remains incomplete.
+
+## Nested retained array-row batch (v112)
+
+The row-copy control is addressed through the existing physical allocation
+graph, not by cloning erased payloads. Array-field constraints now retain
+nested row allocations at their structural paths, stopping at the existing
+primitive rectangular/view backend. Creation builds each row independently
+with its solved child slot, evaluates dimensions once, checks all dimensions
+before allocation (including an inner negative dimension when the outer size
+is zero), and collects fallible row construction through a scoped Result
+closure. Typed initializers preserve the same child allocation metadata.
+
+Java array clone transfers child-reference allocation facts without joining
+the two outer allocation roots. Erased leaf-array clones reuse the existing
+erased reference-copy runtime rather than requiring `Box<dyn Any>: Clone`.
+Reads share one guarded executor with consumer projections: null inspection
+finishes while the guard is alive, rather than cloning an erased element to
+return a boolean. Null inspection consults fact-aware indexed storage shapes,
+not a separate type-only approximation. Canonical indexed-read shapes describe
+retained rows as owned native handles when the parent is guarded and borrowed
+native handles when a plain outer array still owns the row slot.
+
+Source array references now retain their allocation facts through fields,
+returns, arguments and structural row arguments. Receiverless resolved source
+calls participate just like explicit receivers. This remains distinct from
+collection value-domain transfer and does not join an array clone's new outer
+allocation to the original. The qualifier propagation is reused rather than
+replaced with local lowering repairs.
+
+The construction exposed an independent shared recovery bug:
+`unwrap_result_or_panic_uncaught_java_exception` descended into callback
+closures and changed their `?` instead of discharging the enclosing operation's
+Result. Recovery now respects closure error boundaries, as the existing
+`has_unbound_try` contract already specifies. The focused structural regression
+passes. The v923/v924 retained-stream gates each pass all 12 tests; existing
+captured-array, chained-reference, shared-field-array and native-allocation
+gates also pass, but the new complete row probe initially exposes forwarding
+and physical indexed-read mismatches. They are not counted as passing gates.
+
+New regression artifacts are `tests/fixtures/retained_array_rows.java`,
+`tests/retained_array_rows.rs` and
+`tests/corpus/construction/RetainedArrayRowsOracle.java`. The independent Java
+oracle passes erased null inspection, nullable rows/catchable null dereference,
+row aliases, shallow outer/leaf clones, mutation through source arguments and
+returned rows, distinct row allocations and checked negative dimensions.
+V925 narrows the remaining failures to owned nullable-handle readback and an
+extra reference conversion at a row argument. Both are addressed in the common
+indexed-read projection policy. V926 passes all **38 related integration
+tests**, including the full row probe and its independently passing Java
+oracle, and **1,528/1,529 library tests**. The sole library failure assumes
+returned arrays do not already require retention. Its late-propagation test
+now introduces a genuinely late **sync** requirement and retains every
+positive propagation and unrelated-method negative assertion, with an added
+check that the requirement is absent initially. The product code is unchanged
+after v926; the corrected exact unit check is v928 (v927's short exact filter
+matches zero tests and is not verification). Logs are
+`.tmp/retained-array-rows-v92*-*.log`.
+V928 passes that exact unit test. Thus the complete library evidence is the
+1,528 unchanged passing v926 tests plus the corrected late-requirement test,
+not a claim that v926 itself was green. All 38 related integrations and the
+expanded Java oracle pass. V929 starts the fresh release build; the next quiet
+full-slice measurement will assess the entire related row-allocation batch,
+not each individual seam correction.
+V929 finishes the release build in **1m42s**. Frozen v112 is
+`.tmp/new-java2rust-v112-retained-array-row-contracts`, 21,276,704 bytes,
+SHA-256 `301f2ec20092c139f986056079dcfc9e4067a7d88147f2c2e1fbe184ea8e76bf`.
+It was frozen only after the build's terminal success was collected. The quiet
+full-slice run is `.tmp/jgrapht-core-1.5.3-focused-v112-retained-array-row-contracts`,
+with log `.tmp/jgrapht-v112-retained-array-row-contracts-run.log`. The runner
+exits 1 for generated Rust failures, not a timeout. All 104 files translate;
+translator/generated parse failures remain zero. There are **1,714 actual
+diagnostics (1,635 typed + 79 untyped)**, **77 markers across 41 files**, and
+**43 allocation guards** (unchanged: 39 shared-to-plain, four plain-to-shared).
+
+The header/primary-source-file multiset removes **12** occurrences and adds
+**eight** versus v111, all in FloydWarshall. All ten newly exposed erased
+row-payload Clone errors disappear, as do two signed-index errors. The eight
+added mismatches are specifically the source cast/forwarding arguments at
+lines 179, 203, 243, 255, 268, 281, 457 and 488: `Option<Box<dyn Any>>` is
+expected, but the indexed erased element is re-boxed into a non-optional
+`Box<dyn Any>`. This family has zero occurrences in v111 and eight in v112;
+other FloydWarshall mismatches predate the batch. Wrapping that outer box in
+Some would still erase the wrong payload and is not the semantic fix.
+
+The original minimized `.tmp/retained-erased-array-rows-v111-control.java`
+now translates with frozen v112 and passes standalone rustc with zero errors;
+the fresh Rust and both logs are preserved as
+`.tmp/retained-erased-array-rows-v112-control.*`. The positive control is not
+limited to a fixture whose additional row aliases might force allocation
+qualifiers accidentally.
+
+Elapsed time is **325.611 seconds**: preflight 53.168, translation 179.686
+(emission 123.466), assembly 75.656, checking 13.054; saturation is 4.270.
+No competing compiler or tests ran during measurement. This is slower than
+v111's unpaired 287.308-second correctness run; it does not establish a
+performance attribution. Saturation is still not the dominant cost.
+
+Two further corpus-neutral frozen controls establish the next boundary work:
+`.tmp/erased-index-forward-v112-control.java` and
+`.tmp/erased-index-nullable-forward-v112-control.java`, with complete emitted
+Rust and translation/rustc logs alongside. The latter forces an Object
+parameter nullable via a separate literal-null call and independently
+reproduces **both** erased-leaf Clone and optional-erased re-boxing failures.
+Without that literal-null seed, the former additionally shows source argument
+nullability being lost and a null comparison folded to `false?`. The Java
+oracle `.tmp/ErasedIndexForwardOracle.java` compiles both and passes `true:true`.
+
+Code inspection identifies the common representation gap: indexed element
+shapes are built with conservative Concrete dispatch even for physically
+erased Object storage. Retained value reads also use ordinary Clone where an
+erased reference-copy protocol is required. Reuse the existing fact-aware
+storage/erasure policies and erased-reference-copy helpers, preserve the
+nullable carrier through source parameters/returns, and mark completed scalar
+consumers correctly. Do not merely box the Option or add an outer Some around
+the wrong erased value. Cover unseeded nullable source arguments as well as
+already-nullable parameters, null/non-null elements, rank-one and nested reads,
+and evaluation/alias identity. Batch this producer-to-consumer repair before
+another expensive corpus run. Reflective array creation and generic capability
+forwarding remain pending. No promotion or full-goal completion is claimed.
+
+## Erased array-element forwarding batch (v113)
+
+The next batch closes the producer-to-consumer contract identified by v112's
+eight new Floyd optional-erased argument mismatches. Indexed read/write shapes
+now reuse fact-aware storage dispatch for platform Object (including its
+qualified name), preserving the physical nullable erased carrier. Parsed source
+types retain precedence. Retained erased-element reads copy the Java reference
+through the existing erased-copy protocol inside the allocation guard; closure
+parameters carry their proven borrowed shape instead of acquiring another `&`.
+Explicit/constructor argument plans reuse ordinary array slot lowering rather
+than bypassing nullable ownership recovery. Reference-array reads also seed
+source-call/constructor argument nullability without requiring an unrelated
+literal-null call; primitive reads remain outside that rule.
+
+The executable alias probe exposed a second end of the same contract: erased
+copy registration knew `Rc<T>`/`Arc<T>` but omitted the actual mutable source
+carrier. It now uses the existing effective storage-placement policy and wrapper
+renderer shared with signatures/lowering, registering canonical RefCell/Mutex
+handles as well. It clones the handle, not the Java payload. A library regression
+covers all four shared placements. Nullable comparison predicates discharge
+operand Results before constructing a completed boolean. Constant-folded
+non-null comparisons still evaluate the operand, including effects/exceptions,
+without moving an ordinary Java local.
+
+New regressions are `tests/erased_array_forwarding.rs`,
+`tests/erased_array_shapes.rs`, and `tests/array_argument_nullability.rs`.
+The independent Java oracle is
+`tests/corpus/construction/ErasedArrayForwardingOracle.java`, using the unchanged
+fixture in `tests/fixtures/erased_array_forwarding.java`; it passes
+`true:true:true:7:1:3:22`, including the asserted throwing-comparison case.
+The Rust runtime probe covers unseeded/seeded null arguments, rank-one/nested
+reads, generic calls, constructor calls, primitive negatives, alias mutation,
+and both nonthrowing and throwing comparison operand effects.
+
+V932 passes all **1,530 library tests**, including the new handle registry test,
+and **24 integration tests**, including the new forwarding runtime/shape probes,
+retained rows, shared field arrays, nested nullable strings, checked/virtual
+strings, native allocation shapes and array exception effects. Its usage test initially selected
+a constructor by class name even though call sites record `new`; the assertion
+now selects the resolved declaring type instead. V933 reruns only that test and
+passes, for **25 passing integrations** in the composite gate. The passing
+library/runtime evidence is reused without another full build. Logs are
+`.tmp/erased-array-forwarding-v932-batch-gate.log` and
+`.tmp/erased-array-forwarding-v933-usage-gate.log`.
+
+V934 finishes the release build in **1m30s**. The frozen binary is
+`.tmp/new-java2rust-v113-erased-array-forwarding`, **21,282,448 bytes**, SHA-256
+`4a4c3ab9024704f04ce98c5498c87912aba460516ac448b9ddb1f21764ff2451`.
+It was copied only after terminal build success and compared byte-for-byte with
+the release artifact. The quiet 104-file run is
+`.tmp/jgrapht-core-1.5.3-focused-v113-erased-array-forwarding`, with outer log
+`.tmp/jgrapht-v113-erased-array-forwarding-run.log`. Its terminal exit is 1
+because generated Rust still fails cargo check, not because translation failed.
+All 104 files translate with zero translator/generated parse failures. Actual
+compiler diagnostics are **1,692 (1,613 typed + 79 untyped)**. Markers remain
+**77 across 41 files**, native allocation guards remain **43** (39 shared-to-
+plain, four plain-to-shared). No invalid placeholders were suppressed.
+
+The diagnostic multiset keyed by complete header and first primary source file
+removes **22 occurrences and adds zero** versus v112: ten `dyn Any: Clone`
+errors and eight type mismatches in FloydWarshall, plus two borrowed-data
+escapes each in DefaultEdge and DefaultWeightedEdge. The ten Clone failures
+are leaf-element copies, distinct from the row-payload errors closed by v112.
+This verifies the intended repair without promoting the entire candidate over
+accepted v101 or claiming clean translation.
+
+Both original independent frozen controls now pass standalone rustc with no
+errors using v113: `.tmp/erased-index-forward-v113-control.*` and
+`.tmp/erased-index-nullable-forward-v113-control.*`. The first has no literal-
+null seed: its generated load returns `Result<Option<Box<dyn Any>>>` and the
+caller evaluates that Result before `is_none()`, not `false?`. The already-
+nullable control forwards the same carrier rather than boxing the Option.
+
+Elapsed time is **279.421 seconds**: preflight 39.368, translation 162.184
+(emission 105.941), assembly 61.583, checking 12.314; signature saturation is
+4.145. No competing builds/tests ran during measurement. This is faster than
+v112's unpaired 325.611-second run, not an attributed optimization result.
+The next batch should address a complete remaining producer/consumer contract,
+not rerun this passing gate. Generic reference-cast return nullability and the
+unmodeled reflective array factory remain independently established gaps;
+generic capabilities, native guards, nullable/view and source-List projections
+also remain pending. The corpus and full goal remain incomplete.
+
+## Nullable generic reference-cast batch (v114)
+
+The next producer/consumer batch addresses the existing TypeUtil-style generic
+cast ABI: `(T) value` preserves null, but returning it did not connect the
+parameter's solved nullable carrier to the generic result. Ordinary returned
+binding edges cannot be reused wholesale: Object erasure/ownership must not
+become T's representation. Reference casts now feed the existing directional
+nullable-storage graph, including local initialization, assignment, return,
+source arguments and conditional cast branches. The specialized List-view
+handler retains its existing root/child edges without a duplicate generic root
+edge. Primitive/unboxing casts are not nullable reference-copy edges.
+
+The same Java reference-array read value-domain policy now serves source
+argument inference and typed return inference, including nested reads. This
+does not force the physical array backend's rows nullable indiscriminately.
+Generic producers with no argument witness for their result binder use the
+destination's physical Rust carrier as an inference witness *before* erasure;
+their own solved outer nullability remains authoritative. This avoids both
+unconstrained Rust T and boxing an Option<T> as an object. The completed result
+is tagged so a later return consumer cannot apply `?` to the Option itself.
+
+Owned erased downcasts need Any but do not need T: Clone. Capability inference
+now distinguishes them from borrowed source-interface downcasts, which retain
+their payload-copy requirement. Runtime preparation handles an Object
+instantiation of T by preserving the erased reference itself, then reuses the
+ordinary concrete downcast/catchable ClassCastException path. A plain binding
+assignment no longer counts as a read of its killed value; field/index stores
+still read their receiver/index. Exact structural Vec-to-slice compatibility
+also reaches ordinary call borrowing for nested reference arrays.
+
+Direct platform Object.equals now reuses the solved nullable equality path at
+both expression entry points rather than a name-based facade fallback. A parsed
+source Object stays on the source-method path. The erased receiver and argument
+are evaluated in Java order before the receiver null check; existing local
+references are borrowed rather than consumed. This consumer is tested with a
+nullable inferred generic producer, a non-null producer, a catchable null
+receiver and an argument effect that must happen before that exception.
+
+New artifacts are `tests/nullable_reference_casts.rs`,
+`tests/nullable_reference_cast_shapes.rs`,
+`tests/fixtures/nullable_reference_casts.java`, and
+`tests/corpus/construction/NullableReferenceCastsOracle.java`. The Java oracle
+passes all cases, including direct/local/assigned/conditional/null/non-null
+generic results, inferred Object results, rank-one/nested array reads, an
+invalid concrete cast, null receiver order and a primitive negative case.
+The signature probe verifies nullable *generic* results without Object dispatch
+or native allocation leakage. A capability unit separates owning erased casts,
+borrowed interface casts and a parsed source Object negative; a liveness unit
+checks binding stores versus receiver/index reads.
+
+V938's broad gate passes 1,530/1,531 library tests and 52 integrations. It is
+**not** counted as green: its library failure is the duplicate List-view root
+edge, and its new runtime fixture has two nullable equals consumer errors.
+The follow-up removes the duplicate edge at the producer, adds the liveness
+unit, and uses physical platform-Object evidence before facade fallback.
+V939 builds library/selected integration executables once. V940 reruns the
+corrected List-view unit, new read-count unit and four equality units directly
+from that built library executable: all six pass. It reuses unchanged passing
+broad evidence instead of repeating all library tests. All **12 selected
+runtime/shape integrations pass**, including the complete new runtime fixture,
+generic Clone capabilities, erased array forwarding, array exceptions and
+virtual Object strings. Together with unchanged broad gates this is **56
+distinct passing integrations**. Library evidence is composite: the 1,530
+unchanged v938 passes plus the corrected List-view and new liveness units
+cover 1,532 distinct tests; this is not a claim that v938 was green or that a
+new full-library run occurred after the final follow-up. Exact unit and runtime
+logs are `.tmp/nullable-reference-casts-v940-{list-view,read-count,equals,runtime}-gate.log`.
+
+V941 finishes the release build in **1m34s**. The frozen candidate is
+`.tmp/new-java2rust-v114-nullable-reference-casts`, **21,278,584 bytes**, SHA-256
+`b0bde5e6c9c14f8fe3aef9ce2b126491bce14e254a0052a1f239f1868fef683d`.
+It was copied only after terminal build success and compared with the release
+artifact. The quiet full-slice run is
+`.tmp/jgrapht-core-1.5.3-focused-v114-nullable-reference-casts`, with outer log
+`.tmp/jgrapht-v114-nullable-reference-casts-run.log`. Its terminal exit is 1
+because generated Rust still fails cargo check. All 104 files translate with
+zero translator/generated parse failures. The actual compiler count is
+**1,659 (1,580 typed + 79 untyped)**; markers remain **77 across 41 files** and
+native allocation guards remain **43**. The shared support retains the new
+generic cast runtime preparation helper; there is no missing-helper assembly
+failure. TypeUtil now emits
+`unchecked_cast<T: Any>(Option<Box<dyn Any>>) -> Result<Option<T>, JavaException>`
+and its old return incompatibility disappears.
+
+Versus v113 the full-header/first-primary-file multiset removes **103** and adds
+**70** occurrences. These are not independent bug counts. Added occurrences
+include 26 old generic hash-code failures now on `&V`, five equality failures
+now on `Option<&V>`, fourteen old map-operation/capability failures now with
+optional intrusive edge values, and six old intrusive field-access failures
+now through borrowed/optional IE carriers. The other nineteen are three
+generic arities, seven Result/nullable type incompatibilities, three argument
+type failures and six other mismatches. Do not call these all newly discovered
+bugs, or treat the 33 lower total as acceptance.
+
+The three arities in AbstractBaseGraph/AbstractGraphBuilder/GraphBuilder are
+genuine emitted regressions: an old two-argument
+`Graph<Box<dyn Any>, Box<dyn Any>>` argument becomes a one-argument nested
+`Graph<Box<dyn Graph<...>>>`. This requires tracing source generic argument
+substitution and the nullable/borrowed consumer boundary, not changing pinned
+Java or patching generated Rust. The new mismatches also cluster in Graphs,
+WeakChordalityInspector, BellmanFord and intrusive edge specifics. Prioritize
+this coherent source-generic consumer/substitution batch next; the reflective
+array producer remains pending afterward. V101 remains the accepted incremental
+baseline and v114 remains an unaccepted measured candidate.
+
+A minimal independent `.tmp/nullable-generic-cast-seed-control.java` confirms
+the cast repair without graph context: frozen v113 fails standalone rustc with
+one T/Option<T> return error, while frozen v114 compiles with zero errors.
+Both Rust outputs and translation/rustc logs are retained as
+`.tmp/nullable-generic-cast-seed-v11{3,4}-control.*`. Translating the untouched
+pinned TypeUtil source alone produces a non-null parameter without its package
+call-site seed, and both versions compile in that context; those
+`.tmp/typeutil-v11{3,4}-control.*` runs must not be described as a reproduction
+of the package nullable-return failure. A first facade-free bounded-interface
+control, `.tmp/bounded-interface-forward-v114-control.*`, retains the correct
+two generic arguments but exposes an older missing G: Clone requirement. It
+does not yet reproduce the three malformed package arities; more producer/
+consumer context is needed for that minimization.
+
+Elapsed time is **307.330 seconds**: preflight 39.865, translation 171.355
+(emission 110.687), assembly 79.189, checking 12.884; saturation is 4.238.
+No competing builds/tests ran during measurement. This is slower than v113's
+unpaired 279.421-second run; no optimization attribution is made. Formatting
+and `git diff --check` pass. The corpus and full goal remain incomplete.
+
+## Source-generic argument batch (v116)
+
+The next coherent batch follows the nullable generic argument from inference
+through trait ABI rendering, borrow projection and final field-copy recovery.
+Selected-signature inference now aligns matching constructors and arities,
+peeling a nullable carrier only when its payload matches the opposite
+constructor. Whole type binders and real Optional constructors remain intact;
+source-supertype projection and known native JDK subtype inference remain
+available. Nine trait conversion policies reuse the existing nullable-aware
+ABI renderer rather than independently extracting argument positions.
+
+Nullable generic-bound upcasts borrow/map the payload without requiring its
+Clone implementation, preserve the parameterized trait path, and reborrow
+already-borrowed optional parameters. Dyn casts reuse proven borrows instead
+of introducing an extra reference. The persistent non-Clone runtime fixture
+is `tests/fixtures/nullable_bounded_interfaces.java`, with its Rust harness
+and independent Java oracle. It exercises nullable parameter forwarding and
+repeated field-backed forwarding; the trait clone operation deliberately
+panics. The expanded Java oracle passes (`true:false:true`).
+
+The v948 focused unit gates pass: 18 selected units, 29 conversion-plan units
+and all 156 coercion units. Its runtime gates pass generic interface
+construction (3), generic method binding (26), native allocation shapes (12)
+and nullable reference casts (1). The expanded field-backed probe fails:
+the final field-copy reconciler clones the completed `Option<&dyn Network>`.
+That reconciler only recognized a direct Rust reference as borrowed. The
+follow-up makes its shared ABI predicate also recognize an optional reference.
+The v949 expanded field runtime gate passes (42.07-second build, 11.81-second
+test); `.tmp/source-generic-arguments-v949-field-gate.log` records the result.
+The failed v948 probe remains evidence of the missing final reconciliation
+boundary, not a passing run.
+
+Frozen v115 is a control-only candidate, not a corpus measurement:
+`.tmp/new-java2rust-v115-source-generic-arguments`, 21,273,144 bytes,
+SHA-256 `58482ba9f7bc8f1b0f8f3650eaf0c73ecda45bcd5089b43b2e0660148593847e`.
+The nullable-parameter reproducer compiles under v115 but fails under v114.
+The older required-field reproducer exposes an extra borrow under v115;
+the idempotent dyn-cast follow-up is not in that frozen binary. Keep the
+original `.tmp/bounded-interface-forward-v114-control.java` distinct from
+the separately preserved contravariant experiment. The older nested set
+controls also reproduce under v114: one harness assumes nonnullable elements,
+and another has four retained native-collection iterator failures. They are
+documented pre-existing failures, not green gates or batch regressions.
+
+The complete frozen candidate is v116:
+`.tmp/new-java2rust-v116-source-generic-arguments`, 21,273,480 bytes,
+SHA-256 `d818e20cf1698584cf777c7592095dc5d8b23010dba1f5c1099c0cc6cae459f0`.
+It compiles the original required-field control with standalone rustc (zero
+errors), closing v115's extra-borrow failure without adding G: Clone.
+The v949 release attempt failed at link when the workspace filesystem filled;
+five regenerable debug executables were moved recoverably to
+`/tmp/new-java2rust-build-artifacts.Sinj2x`, with symlinks at their original
+paths. The v950 retry reuses the compiled release library and succeeds in
+3.59 seconds. Neither event is a translator source failure.
+
+The v116 full-slice measurement terminates with exit 1 from generated Rust
+checking, with outer log `.tmp/jgrapht-v116-source-generic-arguments-run.log`
+and root `.tmp/jgrapht-core-1.5.3-focused-v116-source-generic-arguments`.
+All 104 files translate; translator/generated parse failures are zero.
+Diagnostics are **1,620 = 1,541 typed + 79 untyped**; markers remain 77 across
+41 files, and allocation guards remain 43 (39 shared-to-plain, four
+plain-to-shared). This is not a clean or accepted corpus gate.
+
+The complete-header/first-primary-file multiset removes 43 and adds four
+versus v114. Removals: two malformed builder trait arities, four builder
+G: Clone errors, six Option<&mut dyn Graph>: Clone errors (WeakChordality and
+NeighborCache), and 31 mismatched-type entries across ten files. Additions:
+two G: Graph<BoxAny, BoxAny> bounds in the builders, where the callee's
+contravariant wildcard contract is erased rather than retaining the source
+bound; and two Floyd–Warshall inference entries for static constants on
+BaseShortestPathAlgorithm. Four such static-constant sites exist in v116;
+two already had the same diagnostic in v114. Do not count these four added
+entries as four independent new bugs. The third malformed Graph arity remains
+in AbstractBaseGraph.clone's separate shared-handle conversion path.
+
+Next batch: trace contravariant source-interface bounds and the remaining
+shared-handle trait projection through the final ABI, reusing the constructor
+alignment and canonical trait renderer. Include generic static-owner
+qualification when its existing witness machinery can be shared. The
+reflective Array.newInstance producer remains pending afterward. No generated
+Rust or pinned Java was repaired, and no failing tests were removed.
+
+The quiet measurement takes **296.710 seconds**: preflight 42.563,
+translation 171.357 (emission 111.912), assembly 65.315, Rust checking 13.368,
+and idiom sweep 3.427. Translation is effectively unchanged from v114;
+the lower total versus 307.330 seconds comes mainly from assembly and is not
+an optimization claim. No competing builds/tests ran during measurement.
+The fresh full-library v951 gate, run after the terminal measurement, passes
+**all 1,539 tests**, zero failures, in 80.24 seconds (test execution only).
+Its log is `.tmp/source-generic-arguments-v951-library-gate.log`. Formatting
+and `git diff --check` also pass. V101 remains the accepted incremental
+checkpoint, and the full goal remains incomplete.
+
+## Canonical trait/static owner rendering (v117) and handle-loan follow-up
+
+V117 moves nullable dispatch-constructor selection into the common trait path
+renderer (representation-aware and fact-only), rather than duplicating it in
+conversion planning. Selected Optional traits retain their own arguments;
+outer null carriers do not become the selected trait's generic arguments.
+The static field getter, setter and associated-constant paths reuse the raw
+source owner renderer already used by static method calls, including the
+structured associated-path projector for turbofish syntax.
+
+Frozen candidate: `.tmp/new-java2rust-v117-canonical-trait-static-owners`,
+21,274,040 bytes, SHA-256
+`bb59d8879b4075d2451bd1d61a68543cc170079af053580e3cfef9f84be47930`.
+The v954 release build succeeds in 1m36s. Focused gates pass 33 slot renderer,
+29 conversion-plan and 156 coercion units (v953), 81 static-filtered library
+tests (v954), and the explicit generic static-field runtime and existing
+non-Clone nullable-bound runtime tests (v953). The frozen independent
+`.tmp/generic-static-owner-control.java` fails rustc under v116 (one inference
+error) and compiles under v117 (zero errors). This is an explicit-owner
+control; it does not reproduce inherited unqualified string constants.
+
+The complete v117 measurement terminates with generated-Rust cargo-check
+failure: root `.tmp/jgrapht-core-1.5.3-focused-v117-canonical-trait-static-owners`,
+outer log `.tmp/jgrapht-v117-canonical-trait-static-owners-run.log`.
+All 104 files translate, with zero translator/generated parse failures.
+Diagnostics remain **1,620 = 1,541 typed + 79 untyped**; markers remain 77
+across 41 files; native allocation guards remain 43. The full-header/first
+primary-file multiset removes two and adds two, all in AbstractBaseGraph:
+the last malformed Graph arity and one mismatch disappear, exposing an
+Rc<RefCell<AbstractBaseGraph>> to erased-argument Graph bound failure and
+an incorrect-function-arguments entry. The canonical arity repair is not
+the underlying variance/handle conversion repair.
+
+Quiet runtime is 305.774 seconds: preflight 42.711, translation 174.857
+(emission 113.384), assembly 69.413, Rust check 14.014, idiom sweep 4.102.
+No competing builds/tests ran during this measurement; no speedup attribution
+is made. Source-only follow-up edits began after the binary was frozen and
+are not included in v117.
+
+The independent `.tmp/shared-nullable-interface-control.java` fails under
+frozen v116 with two trait errors: the nullable copy projects &RefCell instead
+of borrowing the Rc interface implementor, while passing `this` uses &Self
+instead of the canonical handle. Persistent fixture/harness:
+`tests/fixtures/shared_nullable_interfaces.java` and
+`tests/shared_nullable_interfaces.rs`. The follow-up borrows a physically
+owned optional shared handle at a dynamic interface boundary, without changing
+concrete payload-borrow ABI. Shared `this` interface loans use the existing
+handle-aware companion; body comparison and the existing identity-use proof
+then suppress the invalid borrowed entry point. V955 passes this runtime
+probe and the prior nullable-bound probe. It tests alias mutation, distinct
+copy identity, copy independence and reentrant interface reads. The independent
+Java oracle passes (`true:6:5`).
+
+V117 also reveals that inherited bare string constants bypass the
+primitive-only lexical constant resolver. The follow-up extends that existing
+resolver to strings and reuses the same static owner renderer for lexical
+and static-import owners, as well as static string initializers. The static
+runtime regression now includes an inherited unqualified string constant.
+Fresh combined v956 gates pass: **all 1,540 library tests** (73.85 seconds
+execution), **27 generic-method integrations** (14.40 seconds), and both
+nullable-interface runtime probes (11.04 and 11.27 seconds). The combined
+build takes 51.81 seconds; the log is
+`.tmp/shared-interface-static-owner-v956-gates.log`. Formatting and
+`git diff --check` pass. The v957 release build succeeds in 2m01s, logged at
+`.tmp/shared-interface-static-owner-v957-release-build.log`. Frozen v118 is
+`.tmp/new-java2rust-v118-shared-interface-static-owners`, 21,275,976 bytes,
+SHA-256 `2e856dedb21acf4cec798cffdc66cda038b1656a7b3f70f5cb3ee98b61b55fa0`.
+Its full-slice measurement terminates with generated-Rust checking failure under
+`.tmp/jgrapht-core-1.5.3-focused-v118-shared-interface-static-owners`, with
+outer log `.tmp/jgrapht-v118-shared-interface-static-owners-run.log`.
+The v118 totals are **1,608 = 1,529 typed + 79 untyped**, with all 104 files
+translated, zero translator/generated parse failures, 77 markers across 41
+files, and 43 allocation guards. V118 is not an accepted or clean checkpoint.
+The full-header/first-primary-file multiset removes 57 and adds 45 versus
+v117: 44 inference entries, seven mismatches and six missing borrowed
+`iterables` methods disappear; additions are 24 Clone and 12 JavaMapKey
+requirements in handle-companion/interface consumers, seven moved-value `e`
+entries through finally, and two additional Floyd–Warshall matrix guard
+lifetime entries (three such sites total). These are clustered root causes,
+not 45 independent bugs.
+
+Quiet runtime is 326.260 seconds: preflight 51.217, translation 193.252
+(emission 132.302), assembly 63.330, checking 13.834, idiom sweep 3.955.
+No competing builds/tests ran during measurement. It is slower than v117's
+305.774 seconds; no performance improvement is claimed.
+Wider `? super T`
+arguments remain a real capture/variance problem: unconditionally rendering
+them as T would incorrectly reject valid Java supertype inputs.
+
+## Handle companion consumer follow-up after v118 (in progress)
+
+Keep the producer repair and its exposed consumers in one coherent batch:
+
+- Existing source-interface implementation capability queries now receive
+  the lexical owner for bare `this`, instead of rejecting Unknown("this").
+  The same selected-interface Clone/JavaMapKey planner supplies the bounds;
+  no blanket payload Clone policy is introduced.
+- The finally abrupt-completion floor used to be recomputed with empty exit
+  state after normal analysis, overwriting its per-statement live-out sets.
+  Compute that floor first so the real normal continuation remains
+  authoritative. A unit asserts that a finally read retains a binding used
+  after the try, while the final return still has no live-out.
+- Retained rectangular matrix reads capture an owned allocation handle before
+  borrowing data, reusing slot-directed owned-handle recovery. They evaluate
+  and check the row before evaluating the column, release the row-check loan
+  before callbacks, and retain the original allocation if a column callback
+  rebinds the owner's field. This avoids extending a temporary RefCell owner
+  guard into a later statement.
+
+Persistent runtime probes are in `tests/handle_companion_consumers.rs`, with
+fixtures `this_interface_capabilities.java`, `finally_retained_result.java`,
+and `shared_matrix_read_scope.java`. The independent combined Java oracle
+passes **`2:5:12:0:1`**, including row-failure-before-column and nullable
+array row-index side effects. Frozen v118 controls reproduce the gaps:
+the value-equals interface fixture has four missing Clone/JavaMapKey bounds
+(`.tmp/this-interface-capabilities-value-equals-v118-control.*`), and the
+finally fixture has one moved-value error. The initial capability variant
+used native List.contains and also exposed an unrelated missing PartialEq;
+the persistent fixture uses the existing generic value-equals protocol to
+isolate the intended implementation-capability obligation. Both controls
+are preserved, not reported as the same source.
+
+The frozen matrix control initially lacks ndarray in standalone rustc;
+compiling against the exact v118 production shim reproduces three E0716
+and three E0502 errors. Log:
+`.tmp/shared_matrix_read_scope-v118-control.rustc-with-ndarray.log`.
+The persistent matrix runtime uses the existing production batch assembly
+and its own shim, not a hand-edited generated module or a replacement matrix.
+
+V958 builds product code but fails the new test helper's &'static str
+requirement; the helper is corrected without changing the product. V959
+passes eight integrations: three generic interface construction tests,
+the capability and finally probes, retained rows, shared field arrays, and
+the shared nullable interface probe. Its matrix test fails on the missing
+test-only dependency and an ungrouped closure call in the new error path.
+The error closure is grouped structurally and the production matrix harness
+is used. V960 compiles the library/new runtime executables in 1m02s.
+
+V961 passes **all 1,541 library tests**, including the new liveness unit,
+zero failures in 99.30 seconds. Its matrix production crate now compiles,
+but execution catches a second shared-owner bug: rewriting an expression-
+generated `count++` leaves the RHS read loan alive while acquiring the write
+loan. The follow-up receiver rewrite uses the existing ordered-assignment
+block for direct self-field writes whose rewritten RHS mentions the owner.
+It does not reorder arbitrary nested field receivers. A structural regression
+asserts that this value is staged before the assignment. Keep the matrix
+callback test intact; do not hide this failure by changing the Java increment.
+
+V962 builds the follow-up library and runtime executables in 54.21 seconds,
+logged at `.tmp/handle-consumers-v962-build.log`. V963 then passes **all 336
+lowering units**, including the new assignment-rewrite unit, in 55.34 seconds,
+and the **matrix production-assembly/runtime probe** in 38.81 seconds. Logs:
+`.tmp/handle-consumers-v963-lowering-gate.log` and
+`.tmp/handle-consumers-v963-matrix-gate.log`. This is composite evidence with
+the unaffected v959 runtime and v961 full-library gates; do not call it a
+fresh single full-library run of 1,542 tests. The final increment fix does not
+change the Java fixture or discard its failing callback case.
+
+The v964 release build completed in 2m03s, logged at
+`.tmp/handle-consumers-v964-release-build.log`. Frozen v119 is
+`.tmp/new-java2rust-v119-handle-companion-consumers`, 21,286,880 bytes,
+SHA-256 `a12c56d723b572492592827f32f6f31ab25628f7c7342ca06c6db4c543747e7c`.
+The completed measurement is under
+`.tmp/jgrapht-core-1.5.3-focused-v119-handle-companion-consumers`.
+It reports 1,550 diagnostics (1,471 typed, 79 untyped), 58 removed and none
+added versus v118 by header/first-primary-file multiset. The removals are
+24 Clone, 24 JavaMapKey, seven moved `e`, and three E0716 matrix lifetime
+entries. All 104 files translate with zero parse failures, but 77 markers in
+41 files and 43 native allocation guards remain. Total time is 368.620s:
+resolver 51.737s, translation 234.839s (emission 166.676s), assembly 62.298s,
+Rust check 15.404s and sweep 3.635s. This unpaired run is slower than v118's
+326.260s; no competing builds/tests were running, but causal attribution is
+not established. Do not claim a speed improvement or corpus acceptance.
+
+A separate next-batch candidate is the native collection allocation graph:
+`record_native_value_domain_storage` retains arrays across source boundaries
+but not ordinary native collections, and only arrays get child-reference
+alias edges. Frozen v118 fails `.tmp/native-set-boundary-control.java` with
+two allocation guards; translation/Rust/rustc logs are retained. The control
+exercises source method and constructor boundaries, a set retrieved from a
+list, alias mutation, and a fresh independent set copy. No allocation graph
+change had been made at that checkpoint. The subsequent batch distinguishes
+reference-transfer compatibility edges from mandatory retention: ordinary
+source boundaries propagate existing allocation requirements without retaining
+unrelated outer collections. Native child retrieval retains the child; query
+arguments share physical requirements without asserting alias storage or
+retention-by-call. Selected retained list/set carriers use JavaMapKey value
+equality, not pointer equality or blanket payload PartialEq/Clone bounds.
+
+V968 focused gates pass three usage units, the late-allocation and source-call
+SCC units, all 12 native-allocation shape tests, generic collection returns,
+and the new default-stack logical-chain behavior probe. Iterative associative
+logical lowering addresses a debugger-confirmed stack overflow in repeated
+binary lowering while preserving lazy order, exceptions and binding-pattern
+scope. The combined native-boundary runtime probe still fails: a fresh set
+copy inherits the source's root allocation metadata. V969 is checking the
+follow-up that clears only fresh-copy root placement and reads a retained
+source into fresh element storage; element reference carriers are preserved.
+Snapshots are allowed for Java's explicit copy constructor, not as an adapter
+for ordinary aliased collection transfers. Logs are
+`.tmp/native-container-boundaries-v968-{unit,runtime}-gate.log` and
+`.tmp/native-container-boundaries-v969-runtime-gate.log`. No full corpus has
+been rerun for this unfinished batch.
+
+V969 passes both runtime integrations: native collection boundaries (13.08s)
+and generic collection returns (13.85s), following a 48.09s build. The fresh
+copy fix clears only root allocation metadata; retained source elements are
+read and cloned into a new outer container before the ordinary selected
+constructor projection. Independent javac/java execution of the unchanged
+boundary and logical-chain fixtures returns **2** and **1**, respectively.
+Formatting and `git diff --check` pass. V970 starts a full library gate,
+followed only on success by the release build; logs are
+`.tmp/native-container-boundaries-v970-library-gate.log` and
+`.tmp/native-container-boundaries-v970-release-build.log`. Collect terminal
+results before freezing or measuring a new corpus candidate.
+
+V970's full library gate completed: **all 1,545 tests pass**, zero failures,
+84.08s execution after a 54.85s build. The chained release build is now
+running (exec session 21143). Collect its terminal result, freeze candidate
+v120, then measure the complete native-boundary/logical-chain batch once.
+The latest full corpus remains v119; passing these regressions does not
+establish corpus acceptance or completion.
+
+V970's release build completed successfully in **1m44s**. Frozen candidate
+v120 is `.tmp/new-java2rust-v120-native-collection-boundaries`, **21,246,960
+bytes**, SHA-256
+`68593bec8fbd2c085cffe62b14452cee7ed096f6de34ad96957c4f02061fbbc4`.
+The single batch measurement is running under exec session **13693**, root
+`.tmp/jgrapht-core-1.5.3-focused-v120-native-collection-boundaries`, outer log
+`.tmp/jgrapht-v120-native-collection-boundaries-run.log`. Timing uses the
+usual release runner, 10 jobs, with no competing builds/tests. Collect this
+specific process rather than restarting the measurement.
+
+The v120 process completed with expected generated-Rust failure (exit 1), not
+a translator failure. All 104 files translate; parse failures are zero.
+There are **1,508 diagnostics = 1,439 typed + 69 untyped**, **68 markers in
+38 files**, and **33 native allocation guards** (six shared-to-plain,
+27 plain-to-shared). The full-header/first-primary-file multiset removes
+**104 entries and adds 62** versus v119. Removals include 34 shared-to-plain
+guards, 32 mismatches, ten E: Eq, ten E: Hash and six nullable-element iterator
+ABI failures. Additions include 23 plain-to-shared guards, 12 mismatches,
+ten captured-vertex moves, eight borrowed-data escapes, three retained `retain`
+calls and two retained `stream` calls. Lower totals do not establish acceptance.
+
+Total time is **412.991s**: resolver/preflight 58.393s, translation 235.655s,
+assembly 91.938s, cargo check 19.270s, sweep 6.960s. Emission is 158.768s,
+global signature fixpoint 5.535s, signature-plan build 6.360s. Translation is
+close to v119 (234.839s); assembly is slower than its 62.298s. These unpaired
+measurements do not establish a causal performance change. No competing
+builds/tests ran during the measurement. Read-only diagnosis and preparation/
+formatting of the next null-probe follow-up occurred while it ran; that source
+follow-up is not in frozen v120.
+
+The next prepared follow-up reuses checked borrowed sequence reads for
+`list.get(i) == null`, converts Java indices at the physical slice boundary,
+and selects the native ListGet operation before taking indexed-read shortcuts.
+It preserves exception propagation without cloning the probed payload. New
+`nullable_list_probe` controls cover side-effectful indices, both comparison
+orientations, negative/too-large indices and a source-defined List.get that
+must not be captured by native lowering. V971's focused gate is running:
+`.tmp/nullable-list-probe-v971-runtime-gate.log`, exec session 71248; it also
+includes the native-boundary and logical-chain integrations. Formatting and
+diff checks pass. Do not claim the new probes pass until collecting results.
+
+The 27 plain-to-shared guards are not all ordinary fresh factories: several
+are `Arrays.asList(existingArray)` views, whose array backing must be preserved,
+and one is a generic cast forwarding reflective Array.newInstance. Reuse the
+existing backed ListView/array mechanisms rather than wrapping snapshots to
+hide these guards. The remaining retained bulk/stream consumers also need
+their normal argument/callback contracts, not emitted-text repairs.
+
+V971 completes: the native-boundary and logical-chain runtimes still pass,
+but both new null-probe controls fail compilation. The native probe exposes
+negative-literal inference (`(-1) as usize`); the source-shadow control shows
+the central call planner selecting native ListGet before source ownership,
+so a local guard alone is insufficient. Follow-up v972 anchors negative index
+literals to signed Java int in both shared usize-conversion mechanisms and
+uses EffectiveFacts' existing parsed-source/native-carrier authority in the
+central native collection call selection. It reuses the already-inferred
+receiver type rather than performing duplicate type inference on every call.
+The focused rerun is `.tmp/nullable-list-probe-v972-runtime-gate.log`, exec
+session **70425**. The independent Java null-probe oracle returns **215**.
+
+V972 completes successfully: **both new runtime probes pass**, covering the
+native signed-index/null/exception contract and the selected source List.get
+contract. See the same runtime log for build and execution timings. Session
+70425 is terminal and reaped. The v971 logical-chain and native-boundary
+passes remain applicable; do not repeat the full corpus for this small
+follow-up before the next coherent producer/consumer batch. The null-probe
+follow-up is not included in frozen v120, and no new corpus total is claimed.
+
+Read-only diagnosis for the next callback batch: expression lambdas in
+`lower_callback_lambda_expr_with_shapes` inherit enclosing liveness, while
+block lambdas use loop-body liveness. Loop-body Return/Throw deliberately
+clears live-out because a Java loop return exits its callable; that rule is
+not sufficient for a reusable callback whose captures survive each invocation.
+Do not simply normalize expression lambdas into blocks or indiscriminately
+clone every variable. Model callback capture lifetime explicitly, preserve
+fresh/rebound lambda parameters and block locals, and propagate only necessary
+payload Clone capabilities through the existing assembly requirement logic.
+No callback lifetime implementation has been changed in this follow-up.
+
+## Reusable callback capture batch after v120 (in progress)
+
+The selected next root cause is invocation lifetime: captured values remain
+available after a callback returns, but callback parameters and body locals
+are fresh. `LivenessAnalysis::for_callback_body` reuses loop analysis and adds
+a binding-identity-aware read floor only for captures. Expression callbacks
+get a synthetic expression statement for that analysis without changing their
+return/Result lowering policy; block callbacks use the same callback boundary.
+The new liveness unit proves capture survival, fresh parameters, ordinary loop
+return behavior and exclusion of same-named local declarations.
+
+Assembly capability inference inspects physical capture carriers and selected
+owned argument boundaries rather than requiring Clone for every captured
+generic. Read-only probes and callbacks returning their fresh parameter must
+remain usable with a Rust payload that has no Clone implementation.
+Persistent evidence is `tests/reusable_callbacks.rs`, its Java fixture and
+`tests/corpus/construction/ReusableCallbacksOracle.java`. The independent Java
+oracle returns **22**. Frozen v120 translation of the same fixture has exactly
+three E0507 captured-`value` moves in expression, block-return and direct-return
+suppliers; artifacts are `.tmp/reusable-callbacks-v120-control.{rs,stderr}` and
+`.tmp/reusable-callbacks-v120-control-rustc.log`.
+
+V973 builds the library and new/follow-up runtime executables in 2m06s.
+V974 passes the new liveness unit and both null-probe runtimes but still fails
+the reusable callback runtime with the same three moves. The shape/argument
+diagnostic in v976 establishes that receiverless generic `consume(value)`
+inside the lambda remains unresolved at this stage and receives an Unshaped
+argument plan, although the emitted generic source method consumes T by value.
+The initial capability scan incorrectly skipped this boundary. Also, direct
+returns did not enter the argument move-recovery mechanism at all.
+
+The coherent follow-up recognizes owned unshaped arguments using their actual
+carriers and routes a still-live owned local return through existing physical
+owned-transfer recovery. Ordinary returns with no later read are unchanged;
+borrowed and fresh callback values do not acquire blanket clones. The public
+contract probe retains signature/binding assertions, not diagnostic printing.
+V975 was only a test diagnostic build using a private walker; v976 corrects
+the probe to inspect public source contracts without changing product behavior.
+
+V977's runtime gate is running, exec session **63318**, log
+`.tmp/reusable-callbacks-v977-runtime-gate.log`. It checks reusable captures,
+the no-Clone controls, live Iterable suppliers and the existing handle-companion
+consumers (including finally continuation and shared matrix callbacks).
+Collect its terminal result; do not claim this batch passes yet. Logs for the
+earlier gates are `.tmp/reusable-callbacks-v973-build.log`,
+`.tmp/reusable-callbacks-v974-{unit,runtime}-gate.log` and
+`.tmp/reusable-callbacks-v976-contracts.log`. Formatting/diff checks pass.
+No full corpus has been repeated since v120. Its 1,508 diagnostics remain the
+latest measured total, not a count for this unfinished batch.
+
+V977 completes successfully after the 1m28s build: **all six integration
+tests pass**, including the reusable supplier/no-Clone controls and signature
+contract probe (26.95s), live Iterable supplier (21.23s), and all three
+handle-companion controls (34.26s: capability, finally result, shared matrix
+callback/index order). Session 63318 is terminal and reaped. Both new null
+probes also passed v974. The initial three move failures are fixed without
+changing the Java fixture, removing the repeated calls or adding Clone to the
+read-only/fresh-parameter control types.
+
+One broader batch gate is now running: full library plus
+`source_callback_contracts`, `retained_callback_state` and
+`native_functional_objects`, exec session **82512**, log
+`.tmp/reusable-callbacks-v978-broad-gate.log`. Collect terminal results before
+claiming the batch broadly passes. No release build or full corpus run has
+been started for this callback batch. Continue the producer/view work from
+the tested physical contracts rather than rerunning v120 after small edits.
+
+The native producer/view batch remains subsequent work. In particular
+Arrays.asList(existingArray) is not a fresh standalone collection; its shared
+backing and fixed-size mutation policy must survive source callable boundaries.
+The current native Collection parameter can also receive sets, so blindly
+selecting a List-only carrier or snapshotting the array is not a valid fix.
+Reuse/generalize the existing operation-view and retained-iterator contracts.
+Trait-default callbacks capturing `self` also still need owned interface
+reference handling; copying vertex captures alone does not prove those lazy
+suppliers can escape a borrowed Rust receiver.
+
+V978 completes successfully and session 82512 is reaped: **1,546 library
+tests pass** (116.23s), plus **11 integrations**: two native functional object
+controls (24.04s), two retained callback-state controls (19.20s), and seven
+source-callback contract controls (16.12s). There are no failures in that gate.
+This verifies captured local values and their scoped capabilities; it is not
+evidence that trait-default borrowed `self` can escape into a supplier.
+
+## Array-backed native collection boundary batch (in progress)
+
+New persistent control:
+`tests/fixtures/array_backed_collection_boundaries.java`, integration
+`tests/array_backed_collection_boundaries.rs`, and Java oracle
+`tests/corpus/collection/ArrayBackedCollectionBoundariesOracle.java`.
+Independent javac/java returns **127**. It exercises a List view and Collection
+alias crossing generic source callable boundaries, writes from both sides,
+an iterator observing later array replacement, fixed-size iterator/add/remove/
+clear policy, a missing-element remove, and a Set through the same Collection
+callable. Frozen v120 fails this control with two generic T: Clone errors and
+one HashSet.as_slice error. Artifacts are
+`.tmp/array-backed-collection-boundaries-v120-control.{rs,stderr}` and
+`.tmp/array-backed-collection-boundaries-v120-control-rustc.log`.
+
+The implementation generalizes the existing native carrier, not the Java
+corpus or generated output. `JavaNativeCollectionStorage<T, B>` shares the
+existing operation/mutation/iterator protocol. Local and synchronized backing
+tiers are separate concrete aliases, so adding an Rc-backed array view cannot
+make synchronized collections non-Send. Local views can also read synchronized
+arrays. View construction and replacement require no T: Clone; an owned read/
+snapshot requires Clone only when an operation actually copies element carriers.
+The iterator reads through backing storage on each next(), and fixed-size
+mutation policy remains attached to the view allocation.
+
+Usage records the view's backing-array retention and bidirectional element
+storage compatibility without transferring source-array outer nullability to
+the non-null factory result. Signature saturation reuses the existing scoped
+native-allocation and nullable-element transfer graph. Factory/constructor
+lowering and type rendering reuse storage placement to choose local versus
+synchronized runtime aliases. Explicit copy constructors and bulk snapshots
+use owned reads rather than borrowing references out of a transient guard.
+
+List/Set upcasts to Collection preserve one physical native carrier while
+retaining the allocation's runtime kind. Collection add/remove/contains dispatch
+through that policy, including a set's selected equality witness. List and Set
+themselves remain distinct; these changes do not permit an unchecked Set-to-List
+cast. Parsed source precedence remains under EffectiveFacts authority.
+
+A **sub-second standalone smoke check passes** for the mechanically rendered
+production runtime kernel, local/synchronized backing writes and reads,
+no-Clone payload construction/replacement, set equality policy, and the Rust
+Send + Sync bound on synchronized native collections. Source harness:
+`.tmp/array-backed-runtime-smoke.rs`; rendered kernel
+`.tmp/array-backed-native-kernel.rs`; log `.tmp/array-backed-runtime-smoke.log`.
+This is an isolated production-runtime check with minimal exception/equality
+scaffolding, not a manual fix to any translated Java output. The persistent
+stdlib runtime control contains the same new invariants plus live iteration.
+
+V979 is now building library/new runtime executables, exec session **20706**,
+log `.tmp/array-backed-boundaries-v979-build.log`. Targets are the full library
+test executable and `array_backed_collection_boundaries`,
+`native_collection_boundaries`, `native_allocation_shapes` (no-run only).
+Collect the build result, then run the focused carrier, runtime and allocation
+isolation gates before another broad run. Formatting and diff checks pass.
+No full corpus has been rerun; v120 remains the measured baseline. The new
+backed-view integration is not yet claimed to pass.
+
+V979 completed successfully in **1m39s** and session 20706 is reaped. V980
+passes **all 12 allocation-isolation tests** (6.11s) and the original native
+collection boundary runtime (27.26s). The new backed-view runtime fails with
+one mismatch: the source is Rc<RefCell<Vec<Option<String>>>> but the view
+claims JavaNativeCollection<String>. Array element nullability is intrinsic
+to canonical indexed storage, not necessarily an explicit node constraint;
+the initial new edge recorded only nominal String and therefore missed it.
+The upcast unit separately fails the qualified Collection case because the
+initial predicate compared canonical receiver keys without stripping the
+platform package. Its chain stopped there, not at a runtime-support failure.
+
+The follow-up reuses and exposes the existing canonical subtype-name helper,
+projects the backing element through the existing indexed-assignment shape,
+and transfers intrinsic optional storage domains through the same scoped
+nullable-value graph. It does not unwrap/snapshot the array or change the
+Java fixture to hide the mismatch. A cheap signature contract regression now
+checks shared placement and the nullable view-element carrier before rustc.
+
+The unchanged v979 test executable independently passes the extended native
+Iterable/runtime protocol in **16.92s** (including array backing, no-Clone,
+comparator witness, and Send + Sync controls), logged at
+`.tmp/array-backed-boundaries-v980-runtime-support-control.log`, and the
+local/synchronized carrier unit in **0.06s**, logged at
+`.tmp/array-backed-boundaries-v980-carrier-control.log`. These are deliberate
+reuse of applicable runtime/carrier evidence, not results for the subsequent
+signature changes.
+
+The strengthened Java fixture also checks primitive-array varargs (one array
+element, not a view of its primitive components) and null-array rejection.
+Its independent oracle still returns **127**. Fixed-size varargs factories
+retain their policy, and native-container varargs elements retain their own
+allocations. Fresh inline reference arrays acquire the same intrinsic element
+domain even when there is no existing source binding node. The original
+frozen v120 control predates these additional cases; it is evidence for the
+original mixed list/set/backing core, not for every strengthened case.
+
+V981 is building the combined follow-up, exec session **22137**, log
+`.tmp/array-backed-boundaries-v981-build.log`. Targets are the library test
+executable, `array_backed_collection_boundaries`, `native_allocation_shapes`,
+and `retained_streams` (no-run). Collect the build result before running the
+upcast/carrier units, both backed-view probes, allocation isolation and the
+focused filtered-stream/null-domain controls. Formatting/diff checks pass.
+The full corpus remains v120; no new total or broad acceptance is claimed.
+
+V981 completes successfully in **1m12s**, session 22137 reaped. V982 passes
+the qualified upcast unit, nullable backing/view signature contract (**4.24s**),
+and full strengthened Java behavior control (**28.05s**, result 127), session
+3736 reaped. All **12 allocation-isolation tests** pass again (6.50s), as do
+the generic stream/null/identity-cast control (38.08s) and the nullable-target/
+non-null-source isolation control (26.55s). This verifies that the intrinsic
+carrier propagation does not erase the tested filtered-source distinction.
+
+V983 passes **all 1,547 library tests**, zero failures, in 121.59s, session
+64997 reaped. The v982 production retained-stream assembly control nevertheless
+fails with two E0599 entries after assembly: inherent methods declared on the
+local runtime alias were widened to `impl<T, B> JavaNativeCollectionStorage<T, B>`
+without the backing bound or fixed local backing argument. The library/runtime
+generation is valid; assembly loses the alias specialization. Failed original
+fixture remains under
+`.tmp/test-tmp/new_java2rust_batch_retained_stream_assembly_1792434631189648709`.
+
+The general assembly fix expands alias targets using shared structural helpers
+in `scripts/rust_item_utils.py`, preserving original impl binders, bounds,
+applied target arguments and multiline where clauses. Both methods and constants
+are grouped by the applied impl header, so separate specializations may retain
+distinct same-named constants. Unsupported alias syntax keeps its original impl
+instead of broadening it. No runtime-type-name special case or generated-Rust
+repair is used. Fast independent controls live in
+`scripts/test_rust_item_aliases.py`, with a persistent Cargo-script-suite wrapper.
+They compile/run unrelated Store/Local/Remote aliases, distinct constants and
+bound-dependent constructors, and check generic/lifetime-shaped header parsing.
+The two fast controls pass in **0.302s**; log
+`.tmp/array-backed-boundaries-v984-alias-controls.log`.
+
+V984 reuses an unmodified copy of the failed raw translation and resumes only
+production assembly under `.tmp/array-backed-boundaries-v984-resumed-assembly`.
+The original failure is untouched. Assembly now passes cargo check with **zero
+errors**, assembly time **11.920s**, with **zero translation time** for the
+resumed run; it avoids repeating the original 62.324s translation. The separate
+consumer `.tmp/array-backed-boundaries-v984-probe` passes all **12 original
+retained-stream behavior assertions** without editing generated Rust. Logs:
+`.tmp/array-backed-boundaries-v984-resumed-assembly.log` and
+`.tmp/array-backed-boundaries-v984-behavior-probe.log`. Sessions 9668 and 33969
+are terminal and reaped. This is resumed assembly plus behavior evidence, not
+a fresh translation timing claim.
+
+V985 passes **all 49 shared-support assembly regressions** (39 unrelated tests
+filtered out), zero failures, in 0.46s; session 20239 reaped, log
+`.tmp/array-backed-boundaries-v985-assembly-regressions.log`. Formatting and
+diff checks pass. No fresh full-library rerun is needed after these script-only
+follow-ups; the applicable v983 library evidence remains intact.
+
+V986 release build is running, exec session **45337**, log
+`.tmp/array-backed-boundaries-v986-release-build.log`. Collect terminal result,
+freeze candidate v121, and measure the accumulated callback/null-probe/backed-
+collection/alias-assembly batch once against the untouched 104-file slice.
+Do not claim a new corpus total, acceptance or goal completion before measurement.
+
+V986 completed successfully in **2m27s**, session 45337 reaped. Frozen v121:
+`.tmp/new-java2rust-v121-array-backed-collection-boundaries`, **21,339,192 bytes**,
+SHA-256 `004169129577c870698b825879e9db7a2f16c1db5ae541104bd25635d5d26275`.
+The single complete batch measurement is running under exec session **81197**,
+root `.tmp/jgrapht-core-1.5.3-focused-v121-array-backed-collection-boundaries`,
+outer log `.tmp/jgrapht-v121-array-backed-collection-boundaries-run.log`, usual
+release runner and 10 jobs, with no competing builds/tests. Collect this
+specific process, do not restart it from an observation timeout. V120 remains
+the latest completed corpus measurement until this result is collected.
+
+V121 completes with expected generated-Rust failure (exit 1), session 81197
+reaped. All **104 files translate**, with **zero translator/generated parse
+failures**. There are **1,487 diagnostics = 1,412 typed + 75 untyped**, **74
+markers across 40 files**, and **39 allocation guards** (33 plain-to-shared,
+six shared-to-plain). Versus v120, the full-header/first-primary-file multiset
+removes **45** and adds **24**, net -21. Seventeen removed/added entries are
+corresponding native storage type spelling changes (the new alias's expanded
+underlying type), not fixed failures. Substantive removals are ten captured
+`vertex` and two captured `v` moves, six `dyn Any` iterator failures, five i32
+slice-index failures, four ambiguous-method entries and one E: JavaMapKey.
+Additions are six plain-to-shared guards and one mutable-loan failure in the
+maximum-cardinality iterator. Do not equate these counts with distinct bugs.
+
+Total run time is **503.751s**, versus v120's 412.991s: resolver/preflight
+68.908s, translation 297.242s, assembly 106.899s, Rust check 20.715s and sweep
+9.069s. Emission is 203.569s, global signature fixpoint 7.107s and signature-
+plan build 16.511s. Emission/assembly, not fixpoint iteration, dominate this
+measurement. No other builds/tests competed inside this work session; these
+unpaired measurements alone do not establish causal attribution. Candidate
+is not promoted or accepted.
+
+The next producer gap is now concrete: factory retention is recorded at
+declarations, stores and returns, but inline factory arguments enter the
+separate value-domain recorder and omit the factory contract. Thus the
+Array-backed runtime is available and its focused oracle passes, yet inline
+`removeAllEdges(Arrays.asList(edges))` still has the old plain-to-shared guard
+through AbstractGraph and its inherited copies. Centralize factory recording
+at the existing value-transfer boundary and reuse it for method/constructor
+arguments; remove duplicate declaration/store/return recording rather than
+adding independent call-site heuristics. Cover a class-generic/wildcard inline
+call and constructor boundary before another full measurement.
+
+The six newly visible guards involve source ArrayUnenforcedSet-derived values
+in four files (factory, directed/undirected specifics and AsUndirectedGraph).
+They require preserving source collection operations/identity, not replacing
+the co-translated class with a deduplicating native set or a snapshot. Keep
+that source-interface operation-view issue explicit when planning subsequent
+work. Trait-default callbacks capturing borrowed `self` remain separate from
+the now-tested reusable local capture fix.
+
+### Inline factory argument storage follow-up (v987–v989)
+
+Factory storage recording now lives in `record_native_value_domain_storage`,
+the existing transfer path shared by declarations, assignments, returns,
+resolved method arguments and constructor arguments. The three separate
+statement-level factory calls were removed, avoiding duplicate recording.
+`inline_array_factory_boundaries` covers class-generic methods, a wildcard
+Collection consumer and a generic holder constructor. Its independent Java
+oracle passes with result **1**.
+
+V987 builds the inline and prior backed-array test executables together in
+**1m06s** (`.tmp/inline-factory-v987-build.log`, session 42389 reaped zero).
+V988's cheap signature regression passes in **5.44s**: the source array
+parameters of `fromArray`, `make` and `read` all have retained allocation
+storage (`.tmp/inline-factory-v988-shapes.log`, session 28342 reaped zero).
+V989's generated runtime test fails with one allocation-conversion guard,
+before execution (`.tmp/inline-factory-v989-runtime.log`, session 25229
+reaped 101). Preserve its generated evidence at
+`.tmp/test-tmp/new_java2rust_inline_array_factory_boundaries_1792436668301199187`.
+All three entry points emit backed-array factories correctly, but the caller
+for `factory.fromArray(values)` loses its shared return carrier.
+
+The follow-up fixes receiver-generic return specialization to reuse the
+existing solved-shape specialization, instead of constructing a fresh shape
+from the substituted Java type and discarding allocation/nested-view metadata.
+V990 builds the four affected integration targets together in **1m15s**
+(`.tmp/inline-factory-v990-build.log`, session 6486 reaped zero). V991 reuses
+that build (Cargo reports **0.05s**) and passes **32 tests**: two backed-array
+boundaries, one generic collection-return contract, 27 generic method binding
+tests, and both new inline factory tests. The new generated test executes and
+matches the independent Java result **1**; the former allocation-conversion
+guard is gone. Evidence: `.tmp/inline-factory-v991-regressions.log`, session
+9444 reaped zero. This gate ran serially; outside isolated performance
+measurements, modest test concurrency should avoid serializing independent
+generated-code tests. Do not restart a running gate merely to change cadence.
+
+V121 remains the latest complete corpus measurement. A release build for the
+next frozen producer is running under session **29197**, log
+`.tmp/inline-factory-v992-release-build.log`; collect its terminal result
+before freezing/measuring v122. No generated Rust or pinned Java was repaired.
+
+V992 completes in **2m06s**, session 29197 reaped zero. Frozen v122 is
+`.tmp/new-java2rust-v122-inline-factory-boundaries`, **21,338,584 bytes**,
+SHA-256 `edc124d6dac716f34346ec07ef8f8dbfbe685d3279650553078c90e7c67aee5c`.
+The next 104-file corpus run (session **72015**) uses the usual release runner with 10 jobs,
+root `.tmp/jgrapht-core-1.5.3-focused-v122-inline-factory-boundaries` and log
+`.tmp/jgrapht-v122-inline-factory-boundaries-run.log`. No competing test/build
+work is being run during this measurement. V121 remains the latest completed
+measurement until this process is collected.
+
+V122 completes with expected generated-Rust failure (exit 1), session 72015
+reaped. All **104 files translate**, with **zero translator/generated parse
+failures**. The result is **1,481 diagnostics = 1,405 typed + 76 untyped**,
+**71 markers across 29 files**, and **33 allocation guards** (27 plain-to-shared,
+six shared-to-plain). Versus v121, the full-header/first-primary-file multiset
+removes **32** and adds **26**, net -6. It removes **14 allocation guards**
+through AbstractGraph and inherited copies, but adds **eight** (six GraphWalk,
+two BipartitePartitioning). Seven newly unsupported retained operations are
+in GraphWalk, alongside newly exposed shared-list iterator/reverse consumers.
+Some typed pairs merely change physical carrier spelling; these are not
+distinct fixed bugs. Candidate remains unaccepted.
+
+Runtime is **409.245s**: resolver/preflight **48.774s**, translation **237.415s**,
+assembly **101.496s**, Rust check **15.950s** and sweep **4.910s**. Emission is
+**151.729s**. Signature fixpoint is **8.619s**, collection **25.892s**, and plan
+build **7.415s**. No competing builds/tests ran in this work session during the
+measurement, but these unpaired timings do not establish causal improvement.
+
+Read-only follow-up found two distinct consumer families. Source
+ArrayUnenforcedSet lacks its ArrayList superclass storage/constructor lowering
+as well as an identity-preserving operation-view adapter; substituting a native
+deduplicating set is incorrect. Separately, GraphWalk exposes incomplete
+retained-native-list consumer lowering (factories into nullable constructor
+slots, constructor delegation, display/hash, list iteration, copies and
+reversal). The legacy removeIf lambda shortcut also bypasses shape/call
+planning and emits plain `.retain` against shared handles. Plan coherent
+producer/consumer changes with minimized semantic tests, not guard suppression.
+
+### Nullable/delegating constructor transfer batch (in progress, v993–v999)
+
+`new`, `this(...)` and `super(...)` now share constructor argument value-domain
+recording. Retained collection factories are selected against the full solved
+argument slot before nullable/sequence shortcuts in both explicit and shaped
+argument lowering. The new `retained_constructor_boundaries` fixture covers
+array-backed delegation, nullable collection constructor parameters, static
+generic empty/singleton factories, immutable mutation failures, typed null and
+field forwarding. Its independent Java oracle passes with result **7**.
+
+V993 builds the three collection integration targets in **1m15s**, session
+76738 reaped zero (`.tmp/retained-constructors-v993-build.log`). V994 passes
+the cheap array/list constructor storage check, but the generated-runtime test
+stops on a resolver error before Rust generation (`.tmp/retained-constructors-
+v994-focused.log`, session 4536 reaped 101). The `.tmp/inspect-retained-
+constructors.rs` diagnostic helper links the already-built library, avoiding
+another translator rebuild. Its output `.tmp/retained-constructors-v995-
+resolved.log` identifies field forwarding: `Holder<String>.items` incorrectly
+has the declaration type `List<T>` during constructor selection.
+
+Source field inference now projects actual receiver arguments into the field's
+declaring owner through existing supertype projection and owner substitution.
+Usage/storage analysis shares this lookup, not a second nominal field rule.
+V996 builds four affected integration targets in **1m07s**, session 19140
+reaped zero (`.tmp/retained-constructors-v996-build.log`). V997's new inherited-
+field regression passes its valid reordered-frame case, but exposes acceptance
+of an invalid invariant generic argument through single-constructor recovery
+(`.tmp/retained-constructors-v997-fields.log`). V998 passes the storage test,
+then reaches generated Rust with one remaining allocation guard in typed-null
+constructor delegation (`.tmp/retained-constructors-v998-focused.log`, session
+99283 reaped 101). Preserve its evidence at `.tmp/test-tmp/new_java2rust_
+retained_constructor_boundaries_1792438251791404930`.
+
+The follow-up adds existing generic/wildcard argument compatibility to scoped
+constructor validation, so its fallback cannot accept a known invariant
+mismatch. Chains of reference casts of literal null now use the destination's
+ordinary null lowering; their static type still participates in resolution,
+and primitive/unboxing casts are not removed. These last edits are **unverified**;
+the combined library/four-target build (session **10855**) is logged at
+`.tmp/retained-constructors-v999-build.log`. Collect its process before running the new focused tests, then
+reuse those executables for relevant broader checks. V122 remains the latest
+complete corpus measurement. No pinned Java/generated Rust was repaired.
+
+V999 completes in **1m17s**, session 10855 reaped zero, producing one library
+and four integration executables. V1000's valid/invalid inherited-field frame
+control passes in **0.23s** (`.tmp/retained-constructors-v1000-fields.log`).
+V1001 passes both new constructor tests in **17.70s**, including generated Rust
+execution matching independent Java result **7**; session 28500 reaped zero,
+log `.tmp/retained-constructors-v1001-focused.log`. The prior typed-null
+allocation guard is gone; immutable empty/singleton behavior and array alias
+writes are exercised, not just compilation.
+
+The combined broader gate (session **76683**) reuses this build with eight test threads, log
+`.tmp/retained-constructors-v1002-regressions.log`. Collect its terminal result;
+the library and existing integration regressions are not yet claimed passing
+for these edits. Do not rerun the corpus until this related batch is ready.
+
+V1002 completes successfully, session 76683 reaped zero. **All 1,547 library
+tests and 34 integrations pass**: two backed-array tests, 28 generic method
+binding tests (including the valid/invalid inherited field frame control), two
+inline factory tests, and two nullable/delegating constructor tests. The reused
+Cargo build takes **0.05s**. Library runtime is **246.48s** with eight threads;
+the integration groups take **15.65s**, **16.45s**, **17.78s** and **16.29s**.
+The generic binding group previously took 168.94s serially. Eight threads help
+these generated-code integrations, but the library gate is slower than its
+previous roughly 122s default-concurrency run. The host reports 40 processors.
+Future reused-executable gates should keep the library's normal concurrency
+and use bounded concurrency for generated-code integration tests separately;
+do not impose one low thread limit on both. These unpaired runs establish the
+elapsed costs, not an isolated causal benchmark.
+
+V122 remains the latest corpus measurement; do not infer a new corpus count
+from the focused results. Continue the retained-native-list consumer batch
+before another expensive whole-slice gate. Read-only inspection also found
+`java_list_hash_code` currently returns only list length, so implementing a
+retained list hash route must not reuse that stub as though it were the Java
+ordered hash. Reuse/generalize the existing Java element-hash protocol with
+correct capability propagation and reentrancy, alongside list cursor/copy/
+reversal handling. Platform collection subclass storage remains a separate
+architectural gap. No processes from v993–v1002 remain running.
+
+### Retained list cursor/reversal batch (in progress, v1003 onward)
+
+The snapshot-only `JavaListIterator` is being generalized to shared operation
+callbacks, following the existing JavaIterator/JavaListView pattern. A retained
+native list cursor keeps index, last-returned position and expected modCount
+with its source allocation. Aliases share cursor state; next/previous and
+remove/set/add enforce operation-specific exception ordering, release all
+allocation guards before returning, and preserve nonstructural replacements.
+Native reversal writes the original backing without a Clone requirement or a
+structural modification. Existing immutable empty/singleton no-ops remain.
+
+Usage/signature flows now retain ListIterator backing allocations and join
+their read/write child domains (including literal-null writes). Facade argument
+planning consumes the cursor's stored child. The expanded fixture covers array
+backing, cursor aliases, index probes, mutations, concurrent modifications,
+bounds, copied-list independence and immutable lists. Its independent Java
+oracle returns **23**. Generated Rust probes also exercise an operation cursor
+and backed reversal whose payload does not implement Clone.
+
+V1003 builds the library/five affected integration targets in **1m16s**,
+session 96354 reaped zero, log `.tmp/retained-list-operations-v1003-build.log`.
+V1004's cheap storage regression passes in **2.66s**, session 87673 reaped zero,
+log `.tmp/retained-list-operations-v1004-shapes.log`. V1005 stops before Rust
+compilation on `observable_alias`: alias analysis still classifies the old
+snapshot cursor as a value copy (session 17722 reaped 101, log
+`.tmp/retained-list-operations-v1005-runtime.log`). This is not a passing
+runtime result.
+
+The follow-up adds one source/user-aware native cursor carrier authority in
+EffectiveFacts, used by alias verification and call/slot planning. Its new unit
+control excludes parsed-source lookalikes and user-erased carriers. Cursor
+reads/writes project nested allocation metadata through existing child slots,
+and storage origins for next/previous point at the cursor's child rather than
+an invented method-return allocation. The fixture now also covers an array
+reference read/written through a cursor and a nullable cursor result assigned
+to a local; Java still returns **23**. Existing indexed/previous iterator tests
+retain their behavior assertions while selecting the live factory instead of
+the obsolete snapshot renderer.
+
+These follow-up edits remain **unverified**. Combined rebuild session **6248**
+is logged in `.tmp/retained-list-operations-v1006-build.log`. Collect this
+process, then run the new shape/precedence controls before generated-runtime
+tests. V122 remains the latest complete corpus measurement. No pinned Java or
+generated Rust was manually repaired.
+
+V1006 completes in **2m10s**, session 6248 reaped zero. V1007's cursor carrier
+source/user precedence unit passes (`.tmp/retained-list-operations-v1007-
+precedence.log`), and V1008's expanded storage check passes in **5.63s**,
+session 41986 reaped zero (`.tmp/retained-list-operations-v1008-shapes.log`).
+V1009 reaches Rust compilation and fails with **three errors**: the generic
+copy constructor loses nullable child transfer and its Clone bound, and nested
+array allocation metadata is solved but not rendered in the cursor's generic
+argument. Runtime has not executed yet; session 89128 reaped 101, log
+`.tmp/retained-list-operations-v1009-runtime.log`, evidence at
+`.tmp/test-tmp/new_java2rust_retained_list_operations_1792440466329382275`.
+
+V1010's three existing iterator controls pass previous/exhaustion behavior but
+fail two harness expectations (session 33261 reaped 101, log
+`.tmp/retained-list-operations-v1010-iterator-controls.log`). The classic
+Iterator callback test still expects `out.push(value)` although its callback
+captures the retained output allocation; frozen v122 independently emits that
+same retained callback, proved by `.tmp/java-list-iterator-v122-control.java`,
+`.rs` and `.log` (session 3333 reaped zero). This is a pre-existing stale
+rendering assertion, not an observed cursor regression. The indexed cursor
+test now needs to unwrap its Result-returning outer ABI while retaining all
+four bounds/result assertions.
+
+The next edits add copy-constructor child-domain edges without joining outer
+allocations, reusing the selected native constructor plan. Clone requirements
+for copies and cursor creation reuse the physical child capability pass, so a
+shared child handle need not impose its payload's Clone bound. Slot rendering
+projects nested placements for the modeled cursor using the common overlay.
+Cursor write nullability reuses the existing source-value nullability analysis
+(including casts), and skips environment cloning for non-cursor mutations.
+The interior-state cursor runtime/facade ABI uses shared Rust receiver loans
+while preserving Java mutation effects; the fixture now includes
+`cursor.set(cursor.next())` and a typed-null write. The independent Java oracle
+still returns **23**. These last edits are **unverified**. The combined
+library/six-integration build is session **99730**, log
+`.tmp/retained-list-operations-v1011-build.log`; collect this process next.
+
+V1011 completes in **1m37s**, session 99730 reaped zero, producing the library
+and six affected integration executables. V1012's expanded storage check passes
+in **3.97s**, session 87909 reaped zero, log
+`.tmp/retained-list-operations-v1012-shapes.log`; V1013's source/user carrier
+precedence control also passes, log `.tmp/retained-list-operations-v1013-precedence.log`.
+
+V1014's generated runtime fixture **passes** in **29.33s**, session 80479 reaped
+zero, log `.tmp/retained-list-operations-v1014-runtime.log`. It executes the
+Java-matched result **23**, shared cursor aliases, backing replacements,
+nonstructural reversal, mutation/state/version/index exceptions, immutable
+policies, distinct outer copies, nested array reference sharing, nullable
+results, typed-null writes, same-cursor argument evaluation, and the Rust
+no-Clone operation-cursor/reversal probe. V1015 passes all **three existing
+iterator controls** in **25.01s**, session 3816 reaped zero, log
+`.tmp/retained-list-operations-v1015-iterator-controls.log`. All four indexed
+bounds/results and previous/exhaustion behavior assertions remain enforced.
+
+Broader verification is running from the same build: library session **6583**,
+log `.tmp/retained-list-operations-v1016-library.log`, with normal test
+concurrency; five collection integration targets in session **7333**, log
+`.tmp/retained-list-operations-v1017-integrations.log`, with eight test threads.
+These checks are not performance measurements. Collect both processes before
+freezing a release for the combined constructor/cursor batch. V122 remains the
+latest corpus measurement; no new diagnostic totals are claimed yet. Display
+and correct ordered hashing remain separate retained-list consumers, and
+source collection subclass storage remains an architectural gap.
+
+V1016 finishes with **1,547 library tests passing and one failing** in
+**106.85s**, session 6583 reaped 101. The failure is the isolated native Iterable
+support test: its common kernel now refers to `JavaListIterator`, which is
+deliberately not imported into an Iterable-only scope. V1017 passes both
+backed-array tests and the generic collection-return test, then stops on the
+inline factory runtime test with the same two missing-type errors (session
+7333 reaped 101). Constructor/list tests after that failed target did not run
+in this broader command. Do not count this as a passing broad gate.
+
+The fix decouples the common allocation/cursor operation kernel from the
+concrete facade. Its factory now accepts an operation-carrier builder and
+returns the builder's generic result. Call lowering supplies
+`JavaListIterator::from_fallible_operations` only where that cursor is actually
+used. This preserves self-contained Iterable support and avoids emitting or
+importing unrelated cursor facades; neither generated Rust nor the isolated
+test's import list was repaired. These edits are **unverified**; combined
+rebuild session **74034**, log `.tmp/retained-list-operations-v1018-build.log`. Recheck the failed
+isolation gate and relevant cursor/collection integrations from that one build;
+the other 1,547 library results remain useful evidence rather than grounds to
+rerun the entire library immediately.
+
+V1018 completes in **1m27s**, session 74034 reaped zero. V1019's previously
+failed isolated Iterable support test **passes** in **22.07s**, session 47594
+reaped zero (`.tmp/retained-list-operations-v1019-isolation.log`). Together
+with the applicable 1,547 passing V1016 library results, this clears the
+identified missing-dependency regression; it is not a second full-library run.
+V1021 passes all **three iterator controls** in **23.77s**, session 92404 reaped
+zero (`.tmp/retained-list-operations-v1021-iterator-controls.log`).
+
+V1020's five collection integration targets are running in session **64940**,
+log `.tmp/retained-list-operations-v1020-integrations.log`, reusing the V1018
+build. Backed-array (two), generic collection-return (one), and inline factory
+(two) tests already pass; collect the constructor/list targets too. The release
+build is overlapped with these checks to reduce elapsed time, session **49493**,
+log `.tmp/retained-list-operations-v1022-release-build.log`. Its elapsed time
+will not be an isolated performance measurement. Only after both processes
+finish successfully, freeze the combined constructor/cursor candidate as v123
+and measure the untouched 104-file corpus with no competing builds/tests.
+V122 remains the latest complete corpus result.
+
+V1020 completes successfully, session 64940 reaped zero: **all nine collection
+integration tests pass**. Group times are 26.15s (backed arrays), 26.43s
+(generic collection returns), 24.17s (inline factories), 24.64s (nullable/
+delegating constructors), and 29.99s (live retained-list operations). These
+times include overlapping verification/release-build work and are not isolated
+benchmarks. Together with V1019's corrected isolation test and V1021's three
+iterator controls, the identified runtime support dependency regression is
+cleared. Release build session **49493 remains running**; collect it before
+freezing v123. No other test processes from V1016–V1021 remain running.
+
+V1022 completes successfully in **2m56s**, session 49493 reaped zero. Its
+initial overlap with collection checks means this is not an isolated build
+timing. Frozen v123 is `.tmp/new-java2rust-v123-retained-constructor-cursors`,
+**21,376,776 bytes**, SHA-256
+`98c32131b163254f78875a74c5c28175e61bb355589ef70cc605d6dadcab08ee`.
+The combined constructor/cursor batch (session **78546**) is now being measured with the usual
+release runner and 10 jobs, root
+`.tmp/jgrapht-core-1.5.3-focused-v123-retained-constructor-cursors`, log
+`.tmp/jgrapht-v123-retained-constructor-cursors-run.log`. All prior builds/tests
+have finished; no competing verification is being run during corpus timing.
+V122 remains the latest complete measurement until this result is collected.
+
+V123 completes with expected generated-Rust failure (exit 1), session 78546
+reaped. All **104 files translate**, with **zero translator/generated parse
+failures**. There are **1,479 diagnostics = 1,410 typed + 69 untyped**, **66
+markers in 29 files**, and **27 allocation guards** (21 plain-to-shared, six
+shared-to-plain). The full-header/first-primary-file multiset diff against v122
+removes **12** and adds **10**, net -2. Removed: six GraphWalk allocation guards,
+one unsupported retained cursor operation, two reverse-method failures, one
+VertexToIntegerMapping Clone requirement, and two DoublyLinkedList previous-
+method ambiguities. The last two now become Result<Option<E>> versus erased
+Result<Box<dyn Any>> ABI mismatches; do not claim them as completed fixes.
+Other additions are four generic set Eq/Hash requirements (ChordalityInspector
+and WeakChordalityInspector), three GraphWalk ownership moves and one staged
+receiver lifetime error. Counts are symptoms, not distinct bugs.
+
+Total runtime is **412.871s** versus v122's **409.245s**. Preflight/resolver is
+**86.075s**, translation **245.992s**, assembly **63.434s**, Rust check
+**13.210s**, sweep **3.407s**. Emission is **140.015s**, global semantic
+analysis **22.826s**, representation **11.099s**, signature collection
+**26.734s**, fixpoint **8.924s**, and plan build **11.688s**. Both runs have
+**3,881 signature slots**, **16,441 dependency nodes** and **13 fixpoint
+iterations**; edges grow only from 20,911 to 20,960. Preflight's hierarchy
+worklist is unchanged (142 processed/inserted facts, 94,176 domain slots), and
+all 104 files resolve without parser/resolver errors. Its semantic diagnostics
+remain 167. No competing builds/tests ran during this measurement, but these
+unpaired timings do not prove a causal performance change or algorithmic
+blow-up. Preflight repeats analysis also done by batch translation; use the
+existing `--skip-resolver-bench` option for lowering-only iterations when this
+preflight evidence remains applicable, retaining fresh preflight at resolver
+changes or acceptance boundaries. Do not confuse omitted benchmark work with
+a faster translator algorithm.
+
+Next coherent root-cause batch: **set materialization must consume the selected
+physical equality carrier**. V123's ChordalityInspector already declares
+`cycle_vertices: JavaSemanticHashSet<Option<V>>` and has `V: JavaMapKey`, yet
+its initializer collects twice through `std::collections::HashSet<_>`, adding
+unnecessary Rust Eq/Hash requirements before reaching that selected carrier.
+This is not evidence that Java vertices should gain Rust Eq/Hash bounds, nor
+that a new equality framework is needed. Reuse the existing JavaMapKey
+capability reachability, semantic set selection and source precedence; trace
+constructor/copy/nullability adapters together so none reintroduces a temporary
+HashSet. A generic floating-point set-copy oracle with NaNs and signed zero can
+exercise this naturally (Rust f64 lacks Eq/Hash, Java Double has defined boxed
+equality), alongside distinct copy identity and source-override controls.
+Retained list display/correct ordered hashing and source collection superclass
+storage remain separate documented gaps. No v123 process remains running.
+
+## Semantic collection materialization batch (in progress)
+
+The v123 set-materialization symptom traces to multiple consumers dropping an
+already-selected semantic equality view. Constructor planning now reuses the
+signature planner's scoped semantic-collection projection, expression shapes
+carry that view, and native set/map constructors honor it. Copy-result shapes
+retain source element metadata but take the new constructor's carrier view.
+The common owned-value projection preserves semantic equality through copy
+sources, nullable-element adapters, borrowed-argument recovery and retained
+construction, rather than rebuilding intermediate Rust HashSet/HashMap values.
+The explicit reference-array-to-set adapter collects into the rendered actual
+carrier and uses the ordinary destination conversion.
+
+The new `semantic_set_copy` runtime regression exercises generic collection/set
+and map copies, canonical NaN equality, distinct signed zeros, null insertion,
+and independent mutations. Its unchanged Java fixture and separate oracle pass
+with result **0**, including the later map-copy addition. A second runtime
+control checks a source-defined HashSet constructor and size method. Concrete
+floating-key slots now select the existing JavaMapKey-backed carrier via the
+shared signature policy; they must not fall back to Rust Eq/Hash. Parsed source
+collection/key precedence remains guarded. Fresh Arrays.asList varargs use the
+ordinary owned argument boundary, and capability inference reuses native
+factory planning and the rendered child Clone predicate. A shape-based size
+fallback no longer overrides a parsed source collection's own size method.
+
+V1023's existing generic collection-return regression passes; its new regression
+fails, exposing copy-source view loss, a borrowed generic varargs element and a
+concrete floating-key caller. V1024 passes all five existing collection-return,
+constructor and retained-list regressions but fails both new controls: the
+copy-source issue remains for sets/maps, the varargs element is still borrowed,
+and source precedence exposes size rewriting plus a missing Clone requirement.
+These failures motivated the combined corrections above, not weaker tests.
+V1025 stops on a missing `..` in a Rust Call pattern; corrected before V1026.
+V1026 is the focused verification of the combined follow-up (semantic set/map
+copy plus inline/backed-array boundaries), session **6389**, log
+`.tmp/semantic-set-copy-v1026.log`. V1025 session **61627** is reaped with exit
+101. No new corpus result or acceptance is claimed: v123 remains the latest
+measurement. Reuse that preflight for lowering-only follow-ups; defer another
+full corpus cycle until this coherent batch passes focused verification.
+
+V1026 completes successfully, session **6389 reaped zero**: **all six focused
+tests pass**, including generated execution. Backed-array boundaries pass two
+tests in 75.60s, inline-factory boundaries pass two in 58.71s, and semantic
+set/map copy plus parsed-source precedence pass two in 63.45s. The independent
+Java oracle also passes with result 0. The new owned-carrier metadata unit test
+has not yet been run; include it in the next library gate. V1026's reported
+6m20s build includes waiting for the V1025 build lock. During compilation the
+host reported load 173.78 on 40 available CPUs and CPU pressure some avg10
+96.35%, while memory/I/O pressure was low. This is evidence of heavy host CPU
+contention, not an isolated translator or compile-time benchmark. No agents or
+additional verification workloads from this thread were competing with the
+corrected build. Whole-repository formatting also added avoidable work; format
+only changed files during follow-ups and retain the final formatting check.
+
+The combined batch now has focused execution evidence, but **no v124 corpus
+measurement, broad library gate, promotion or completion is claimed**. Next:
+verify the shared projection/capability/source-precedence changes with a
+coherent relevant library/collection gate using one build, then freeze a release
+candidate and measure the untouched 104-file corpus. Reuse applicable existing
+preflight evidence rather than repeating the resolver benchmark on lowering-
+only iterations. No V1023–V1026 build/test process remains running.
+
+V1027's combined gate (session **12862**, log
+`.tmp/semantic-carrier-v1027-gate.log`) passes **all 1,549 library tests** in
+117.54s, including the owned semantic-carrier metadata test. Its initial build
+takes 1m52s. The existing collection-return, constructor and retained-list
+integration checks are still running. Release build V1028 is started after the
+library gate succeeds, overlapping only the remaining integrations to reduce
+elapsed work; session **35638**, log
+`.tmp/semantic-carrier-v1028-release-build.log`. Collect both terminal results
+before freezing or measuring v124. Neither build time nor overlapping test
+times are isolated performance measurements.
+
+The pinned runner now explicitly accepts `--skip-resolver-bench`, forwarding
+only that option to the generic wrapper. Default behavior still includes the
+benchmark, and commit/clean-source/count validation, byte-identical staging,
+production translation/global analysis, assembly and cargo check are unchanged.
+Shell syntax and help checks pass; unknown flags reject with exit 2. The next
+lowering-only iteration can reuse v123's applicable resolver evidence and skip
+the separate duplicated benchmark. This saves work; it is not a faster
+translator algorithm. Keep a fresh preflight at resolver changes/acceptance.
+
+Review of the prior diagnostic sources also confirms that many generic `==`
+errors are actual Java reference comparisons: GraphMetrics.java:326/342 and
+BergeGraphInspector.java:146/152/459 and other sites. Do not add PartialEq or
+replace these with JavaMapKey value equality. They need preserved reference
+identity across generic instantiation, iteration and cloning, reusing existing
+identity/carrier machinery. This is a distinct later root cause, not grounds
+for weakening this batch or claiming that all generic equality is fixed.
+
+V1027 completes successfully, session **12862 reaped zero**. In addition to
+all 1,549 library tests, all five integrations pass: generic collection returns
+(one, 39.35s), nullable/delegating constructors (two, 35.57s), retained list
+operations (two, 40.27s). Combined with V1026, this verifies **11 integrations**
+against the unchanged Rust batch. The release build overlaps some of these
+checks, so their timings are not isolated. Release session **35638** remains
+running; keep the source unchanged and collect it before freezing the candidate.
+
+V1028 release build completes successfully in **4m33s**, session **35638
+reaped zero**. Its initial integration overlap and variable host load make this
+an unpaired build timing. Frozen v124 is
+`.tmp/new-java2rust-v124-semantic-collection-materialization`, **21,376,896
+bytes**, SHA-256
+`5d3613d6fec0b8faf84097bfb8b77092381a126a3eb577da36fa29b742222ae4`;
+byte comparison against the completed release binary passes. V1029 now measures
+this candidate on the unchanged pinned 104-file closure, using 10 jobs and
+`--skip-resolver-bench`, root
+`.tmp/jgrapht-core-1.5.3-focused-v124-semantic-collection-materialization`, log
+`.tmp/jgrapht-v124-semantic-collection-materialization-run.log`. All build/test
+sessions have finished; no competing work from this thread is being run during
+the corpus measurement. V123 remains the latest completed corpus result until
+V1029 is collected. Compare translation/assembly/check phases separately from
+the intentionally omitted resolver benchmark; do not attribute its omission
+to a faster translator algorithm.
+
+V1029/v124 completes with expected generated-Rust failure (exit 1), session
+**3747 reaped**. All **104 files translate**, with **zero translator/generated
+parse failures**. There are **1,450 Rust diagnostics = 1,381 typed + 69
+untyped**, **66 markers in 29 files**, and **27 allocation guards** (21
+plain-to-shared, six shared-to-plain). The complete-header/first-primary-file
+multiset diff against v123 removes **30** and adds **one**. Removed: 26 V Eq/Hash
+requirements across GraphMetrics, GraphTests, ChordalityInspector,
+WeakChordalityInspector, BipartitePartitioning, FloydWarshall, GraphMeasurer,
+ComplementGraphGenerator and MaximumCardinalityIterator; and four type
+mismatches in ChordalityInspector/WeakChordalityInspector. In the actual
+Chordality output, cycle_vertices now collects directly into
+JavaSemanticHashSet<Option<V>>, without an intermediate structural HashSet.
+Counts describe diagnostics, not independent bugs.
+
+The single added diagnostic is FloydWarshall's borrowed graph being moved by
+the named value temporary in Objects.requireNonNull, then reused. That staging
+statement is identical in frozen v123 output; the previous erroneous generic
+HashSet collection prevented the same borrow-check error from surfacing there.
+An independent untouched Java control translated by **frozen v123** proves the
+older defect: `.tmp/non-null-reborrow-v123-control.java` (MutableCounter
+interface, mutating implementation, discarded requireNonNull followed by bump
+and size). Its unmodified generated Rust fails rustc with **only E0382**, borrow
+of moved counter; session **13566 reaped exit 1**, logs
+`.tmp/non-null-reborrow-v123-control-{translate,rustc}.log`, generated Rust
+`.tmp/non-null-reborrow-v123-control.rs`. No generated code was repaired.
+This is an exposed pre-existing gap, not a demonstrated new regression.
+
+V124 total runtime is **427.921s**, with resolver benchmark **skipped/0ms**,
+translation **307.872s**, assembly **89.794s**, cargo check **21.369s**, and
+sweep **8.090s**. Global semantic analysis is **26.994s**, representation
+**14.291s**, signature collection **32.969s**, fixpoint **9.952s**, plan build
+**13.745s**, and emission **180.195s**. Signature slots **3,881**, dependency
+nodes **16,441**, edges **20,960**, and fixpoint iterations **13** are unchanged
+from v123. The benchmark omission works and removes duplicated work, but the
+remaining phases are slower in this unpaired run under variable host load.
+Do not claim a causal speed improvement/regression or an algorithmic blow-up;
+keep phase-level evidence and use a controlled comparison if new runtime
+optimization becomes necessary. There were no competing builds/tests from this
+thread during the corpus run.
+
+Next coherent batch: **borrow-preserving null-check identity boundaries**.
+The same requireNonNull staging defect already appears in GraphTests and
+Planarity as well as FloydWarshall. Use the existing argument-shape/reborrow
+and result/nullability mechanisms, preserving Java evaluation order, catchable
+null errors and aliases. Do not clone the Java object or move a Rust mutable
+loan merely to evaluate it once. Cover discarded calls, stored/returned results,
+nullable and non-null inputs, receiver mutation after checking, message
+evaluation order and source overrides in one regression batch. Keep generic
+reference == and source collection superclass storage as separate unresolved
+architectural gaps. No V1027–V1029 process remains running; this candidate is
+neither clean, promoted nor complete.
+
+## Checked-identity loan/nullability batch (in progress)
+
+The independent frozen-v123 non-null mutable-interface control established
+that named requireNonNull staging moves a Rust loan. The new durable fixture
+is `tests/fixtures/null_checked_borrows.java`, with generated execution in
+`tests/null_checked_borrows.rs` and independent Java oracle
+`tests/corpus/construction/NullCheckedBorrowsOracle.java` (result **0**).
+It covers nullable/non-null discarded and chained calls, mutation during
+message evaluation, effectful value-before-message order, throwing-message
+precedence over the null check, array aliases through locals/returns, empty
+Optional, returned/local interface-object aliases, and an outer Java catch
+around a checked-array helper. A separate source-defined Objects factory must
+keep its distinct-copy contract (expected 37), not become a native identity.
+
+The batch reuses the guarded native call planner as the checked-source
+authority for native allocation/value-domain analysis. Stored/returned native
+checked identities retain their allocation and share child domains, without
+equating the nullable source root with the proven-non-null result. Optional
+result projection now retains the original loan/allocation/carrier metadata.
+Checked non-null mutable arguments use the existing explicit reborrow
+projection, guarded by the rendered Rust reference ABI. The optional boxed
+interface adapter honors mutable targets instead of always creating &dyn.
+
+V1031 builds in 1m12s and passes the source override but exposes E0499 when a
+message mutates the checked object. The follow-up delays a mutable loan only
+for a stable local reference, with no message-side reassignment of that local;
+arbitrary value producers retain Java evaluation order. It uses existing
+assignment/read analysis, fresh-name generation and argument-temporary
+wrapping. V1032 builds in 1m15s and the fixture compiles, but its outer Java
+catch exposes a Rust panic from a nullable checked-array helper. It also passes
+the source override. Both sessions **59745/83532** are terminal/reaped 101.
+The V1032 test binary predates the final returned-interface alias controls;
+do not attribute coverage of those controls to it.
+
+The next correction adds the checked-null effect to the existing shaped,
+catch-aware callable fallibility framework, including synthetic callables.
+Argument lowering, result inference and effects now share one null-carrier
+predicate, preserving semantic Optional.empty as a valid non-null Java object.
+A focused effect unit test checks solved nullable/non-null shapes and caught
+NPEs. V1033 verifies the full updated fixture plus nullable-cast and constructor
+boundaries, session **95274**, log `.tmp/null-checked-borrows-v1033.log`.
+No new corpus count or completed gate is claimed yet; v124 remains latest.
+
+V1033 completes successfully, session **95274 reaped zero**, build **47.06s**:
+**all five focused tests pass** (checked identities/source override two in
+21.51s, nullable-cast domain one in 2.43s, constructor boundaries two in
+12.23s). The compiled test binary was checked to include the final returned-
+object alias controls, so coverage is not attributed to a stale fixture.
+The full updated Java oracle returns 0. This verifies native/reference aliases,
+mutation during message evaluation, value-before-message order, throwing-message
+precedence, semantic Optional and catchable helper-propagated null failures.
+No generated Rust repairs were used.
+
+V1034 is the combined library/collection gate, session **90781**, log
+`.tmp/null-checked-borrows-v1034-gate.log`: library plus semantic set copy,
+collection returns, retained-list operations and inline-factory boundaries,
+bounded at 16 test threads for this run. It includes the new catch-aware
+checked-null effect unit test. Collect its terminal result before freezing
+another candidate. No full corpus cycle has been repeated during the small
+follow-ups; v124 remains the latest corpus measurement.
+
+V1034 completes successfully, session **90781 reaped zero**: **1,550 library
+tests pass** in 110.11s (build 53.46s), including the checked-null effect unit.
+All seven integrations pass: collection returns one (15.41s), inline factory
+boundaries two (14.97s), retained-list operations two (17.15s), semantic set
+copy/source override two (15.80s). Combined with V1033, **12 integration tests
+and the Java oracle pass** for the unchanged Rust batch. Release V1035 starts
+after the library succeeds, overlaps only the final integration checks, and
+finishes in **1m38s**, session **2838 reaped zero**. These overlapping/unpaired
+timings are not isolated benchmarks.
+
+Changed-file rustfmt --check and git diff --check pass. Frozen v125 is
+`.tmp/new-java2rust-v125-null-checked-borrows`, **21,438,024 bytes**, SHA-256
+`afa2ce12ac663036c6e4a157646fa1e05135604719f14eedec8660559cdebdd3`,
+byte-identical to the completed release binary (freeze session **27582 reaped
+zero**). V1036 now measures this binary on the same pinned 104-file closure,
+10 jobs, separate resolver benchmark skipped, root
+`.tmp/jgrapht-core-1.5.3-focused-v125-null-checked-borrows`, log
+`.tmp/jgrapht-v125-null-checked-borrows-run.log`. No build/test from this batch
+remains active or competes with this measurement. V124 remains the latest full
+corpus count until this result is collected. The checked-identity batch does
+not establish exact supplied-message text or lazy Supplier-overload behavior;
+its oracle proves loan/alias, evaluation-order and exception-channel contracts.
+
+V1036/v125 completes with expected generated-Rust failure (exit 1), session
+**20426 reaped**. All **104 files translate**, with **zero translator/generated
+parse failures**. Diagnostics are **1,539 = 1,455 typed + 84 untyped**, markers
+**75 in 32 files**, allocation guards **38** (32 plain-to-shared, six shared-to-
+plain). Against v124's 1,450 diagnostics / 66 markers / 27 guards, the full
+header/first-primary-file multiset removes **82** and adds **171**, net +89.
+All five moved-graph errors disappear (GraphTests three, Planarity one,
+FloydWarshall one). Many previous map/constructor type mismatches disappear,
+but replacements are not established fixes. This is an unaccepted candidate;
+green focused tests are not sufficient evidence of corpus readiness.
+
+Most additions cluster around two producer/consumer contracts:
+
+- **Retained map consumers.** BaseIntrusiveEdgesSpecifics's edgeMap constructor
+  already stores `Objects.requireNonNull(edgeMap)`. It now correctly shares
+  `Rc<RefCell<JavaSemanticHashMap<...>>>`, but emitted get/containsKey/insert
+  still target the handle itself. The existing `expr_is_shared_native_map`
+  predicate in lower.rs consults only manually seeded environment flags;
+  `seed_live_native_map_instance_fields` seeds those from representation-plan
+  live-map flags, not the newly solved per-slot allocation. Reuse/generalize
+  that live-map path around canonical slot carriers, rather than adding a
+  second map framework. Map construction and source-call return/copy boundaries
+  also need the existing allocation wrappers: 11 plain-to-shared guards are
+  added across shortest-path and FastLookupGraphSpecificsStrategy producers.
+  Follow value-result/nullable/generic-bound child shapes as well; the intrusive
+  edge family exposes new field-access, instanceof, null-comparison and lock
+  errors. Do not suppress these by discarding required map identity.
+
+- **Fallible source constructors through view adapters.** LiveIterableWrapper's
+  checked supplier now correctly makes its constructor fallible. GraphIterables
+  and DefaultGraphIterables discharge that Result before allocating the wrapper,
+  then create Iterable, but enclosing source-expression propagation applies `?`
+  again to the Iterable value. Related shortest-path constructor adapters show
+  the same result-projection issue. Reuse existing ResultPropagated/panic-recovery
+  metadata preservation (`wrap_*` storage/conversion helpers already carry it)
+  so adapters discharge the producer exactly once and retain that fact through
+  representation conversion. Do not make actually-throwing constructors
+  infallible to hide the mismatch.
+
+V125 runtime is **323.243s**, resolver benchmark skipped, translation
+**242.246s**, assembly **63.058s**, cargo check **13.798s**, sweep **3.432s**.
+Global analysis is **66.900s**: semantic **13.711s**, representation **9.406s**,
+signature **36.500s** (collection **19.155s**, fixpoint **6.275s**, plan build
+**9.957s**); emission **161.504s**. Slots **3,881**, graph nodes **16,441**,
+iterations **13** are unchanged; edges grow 20,960 -> **20,990**. Variable host
+load and unpaired runs preclude a causal performance conclusion. No competing
+build/test from this thread ran during corpus measurement.
+
+Next coherent batch: complete these **canonical allocation/view/result
+consumer contracts**, beginning with retained maps where the dominant new
+family has a reusable existing implementation. Add small runtime controls for
+checked map parameters/fields/aliases, reads and writes, copy boundaries,
+generic keys/value handles, and source overrides; pair them with a throwing
+Iterable-factory control for constructor Result metadata. Batch the coherent
+producer-to-consumer edits and compile together before another full corpus
+cycle. V1033–V1036 processes are all terminal/reaped. Goal remains incomplete;
+no promotion, clean gate, manual generated repair or scope expansion is claimed.
+
+## Generated-rewrite audit supersedes the next-batch recommendation
+
+The required representative audit is now recorded in
+[jgrapht-generated-rewrite-audit.md](jgrapht-generated-rewrite-audit.md).
+It finds that map borrow projections and Result metadata alone are insufficient:
+the emitted edge key set is a snapshot rather than a live unmodifiable view;
+generic edge fields lack bound capabilities and identity-preserving reference
+contracts; deferred interface callbacks capture borrowed self; inherited builder
+return ABIs disagree; and ArrayUnenforcedSet lacks native superclass storage.
+Six isolated Rust mechanism experiments pass and a borrowed-self callback
+control fails E0521 as expected. These are diagnostic experiments, not generated
+repairs, translator regressions or an integrated feasibility proof. No corpus
+rerun or candidate promotion occurred. The audit replaces the local next-batch
+recommendation above with dependency-ordered reference/ABI, map/view,
+callback/effect and superclass/dispatch contract milestones. Goal remains active.
+
+The reference/ABI milestone has progressed through generic bound field
+capabilities and canonical generic-carrier borrowing. The current unrepaired
+minimized reference-boundary output has one rustc error, generic reference
+identity comparison, versus six at the field-contract checkpoint (and 20 in
+v125). This is not a remaining-error count for JGraphT. The expanded
+generic-carrier oracle also exposed source-SAM exception propagation; a typed
+effect-graph connection now preserves catchable Java callback exceptions.
+See the audit's canonical-carrier section for verification and limits. The
+latest full-corpus measurement remains v125, unaccepted; there is no promotion
+or expansion based on these minimized probes.
+
+The identity batch now makes both maintained generic-reference runtime fixtures
+pass, including expanded superclass/erasure crossings, retained alias mutation,
+string identity and catchable callback exceptions. The final batch gate passes
+1,558 library tests and six focused integrations, plus shared-assembly controls.
+Release/104-file measurement **v126**, session **24477**, is collected terminal
+exit 1: all 104 files translate, zero generated-parse failures, **1,430
+diagnostics** (1,350 typed / 80 untyped), **73 markers in 31 files**, 38 allocation
+guards. Against v125, the header/file multiset removes 136 and adds 27, net -109.
+The additions are 21 scoped identity-capability bounds and six retained bulk
+result/guard lifetime errors. Runtime is 276.930s, not an isolated performance
+comparison. The audit records exact evidence and the next scoped-capability /
+owned-result follow-up. This remains an unaccepted candidate with no expansion.
+
+The scoped-capability/owned-bulk-result follow-up now passes 1,563 library tests,
+three identity/scoped-contract integrations, two retained-list integrations and
+one retained-array integration, plus the expanded independent Java oracle.
+Runtime checks exposed and drove general fixes for lexical capability scopes,
+retained array iteration/rebinding/null contracts, destination-typed null
+arguments, and unmodifiable native collection views whose live backing and
+mutation policy survive source calls. The audit records intermediate failures,
+exact gate logs and remaining limits; this is not a claim that map key views
+or all reference contracts are solved.
+
+Release/104-file chain **v127**, session **58896**, is now pending. Build log
+`.tmp/jgrapht-v127-scoped-reference-contracts-build.log`, run log
+`.tmp/jgrapht-v127-scoped-reference-contracts-run.log`, output root
+`.tmp/jgrapht-core-1.5.3-focused-v127-scoped-reference-contracts`. Collect that
+exact process; no competing tests/builds remain. V126 is still the latest
+collected corpus measurement, with no new diagnostic total or promotion yet.
+
+V127 is now collected terminal **1** (generated Rust): all 104 translate, zero
+parse failures, **1,406 diagnostics** (1,313 typed / 93 untyped), **86 invalid
+markers in 41 files**, **33 allocation guards**. Raw diagnostic comparison
+against v126 removes 118 and adds 94, net -24. Markers increased; this is not
+acceptance. Total runtime 261.863s is an unpaired observation, not a demonstrated
+optimization. The audit records exact evidence, additions/removals and the
+selected next map/live-key-view contract batch. Its new maintained minimized
+fixture has a passing Java oracle and failing frozen-v127 Rust baseline, plus
+an explicit signature-saturation warning to diagnose. The new integration is
+not yet verified; prior passing gates do not include it. No process remains live
+and no production scope has expanded.
+
+The new map/view fixture's solver precondition is now fixed generally: carrier
+consensus retains monotone evidence instead of oscillating between Map and
+LinkedHashMap. It reaches a fixpoint in **4 iterations instead of exhausting
+397**, with no saturation diagnostic. All 142 signature tests, the focused
+convergence integration and the existing native collection boundary runtime
+pass. The actual map/live-view generated-runtime integration remains unresolved
+and enabled; this is not a passing map/view batch or a new corpus measurement.
+The audit records the implementation constraints for completing that batch.
+
+The live map-key backend now passes its generated Rust mechanism controls and
+the three prior identity/scoped integrations. It retains the backing map,
+distinguishes structural edits from value replacement, supports removable key
+views and strict unmodifiable wrappers, and preserves reference keys without
+requiring map values or key payloads to be Clone. Allocation graph wiring,
+source constructors, canonical map carriers, short-loan child operations and
+key-view factory lowering are implemented. The strengthened qualified key/value
+nullability planner test passes among 143 signature tests. V4's source-level
+map/view integration now passes both tests, including the generated runtime
+oracle. All three reference-identity integrations and 13 projection units also
+pass. Erased/source-handle comparison reuses the existing allocation-identity
+protocol. The broader library gate passes all **1,566 tests** (75.26s). This
+candidate has now been measured as frozen V128: all 104 files translate with
+zero translator/parse failures, but cargo check fails with **1,336 diagnostics**
+(versus 1,406 in V127). Exact comparison removes 136 and adds 66; markers are
+85 across 39 files, allocation guards 22. Total runtime is 263.335s. New failures
+expose canonical query/current-this borrows, nested Pair carriers, capability
+propagation and missing retained-map putIfAbsent/values. A minimized Java oracle
+for the canonical-borrow follow-up passes, and its generated Rust now passes
+alongside the prior map/view regression and all three identity integrations.
+It keeps nullable queries separate from nullable stored keys, borrows canonical
+generic carriers/current-self handles, and preserves a shared receiver when
+staging that same reference as an argument. Its broader library gate passes
+1,565 tests but exposes one immediate-key-view alias bypass. The fix and
+strengthened runtime controls now pass all three map/query integrations; 337
+lowering units pass, with one assertion corrected to inspect source code rather
+than unrelated runtime helper text (test-only scope edit awaits the next combined
+build). These follow-ups have not
+yet been measured on the whole slice.
+The next retained-map batch now passes all four map/query integrations,
+including the Java-matched live `values()` / `putIfAbsent` fixture and a generic
+API control with non-Clone keys and equality-less values. It reuses live local/
+sync projections, maps value qualifiers separately from keys, keeps null
+replacement nonstructural, and preserves physical child/result metadata through
+source forwarding and logical comparisons. Fourteen runtime carrier units,
+144 signature tests, six focused operator tests and three identity integrations
+pass. The broad library run passes 1,566 tests; its two legacy raw-map text
+assertions have been corrected and pass in the nine-test values-alias gate.
+Frozen V129 has now finished: all 104 translate without translator/parse
+failures, but cargo check still fails with **1,324 diagnostics**, versus 1,336
+in V128 (17 removed, five added). Markers are 80 in 38 files; allocation guards
+remain 22. Total runtime is 256.306s. The audit records exact additions/removals
+and timings. The next minimized Java oracle exposes a missing shared-container
+element-domain edge across factory/map/return aliases. A graph-level fix passes
+144 signature tests, 76 usage tests and the four prior map/query integrations;
+it removes four of six minimized compiler errors. The remaining generic
+constructor copy capability fix now passes the maintained nested Java-runtime
+oracle, all five map/query integrations and all three identity integrations.
+The broader library gate now passes **all 1,568 tests** (74.98s). Frozen V130
+has finished: all 104 files translate without translator/parse failures, but
+cargo check fails with **1,286 diagnostics** (57 removed, 19 added versus V129).
+Markers are 81 in 39 files; allocation guards rise to 23. Total runtime is
+253.009s. Additions include an unmodifiable-map shared-to-plain carrier guard
+and double-unboxed retained-list indices, which require follow-through rather
+than acceptance based on the lower total. The separate original Pair key
+issue remains unresolved.
+The bounded follow-up fixes ownership recovery re-unboxing completed Copy-value
+arguments. Its new Java-matched boxed-index/source-call runtime test passes,
+alongside all three retained-list integrations, 338 lowering units, five
+map/query integrations and three identity integrations. No corpus rerun for
+this small follow-up; V130 remains the measured baseline. The next capability
+batch must cover emitted source dispatch and forwarding contracts together.
+That batch now passes all **1,569 library tests**, four identity integrations,
+five map/query integrations and three retained-list integrations. It reuses
+receiver-specific inherited specialization and selected interface forwarding
+requirements; inherited slot keys are compared after owner substitution rather
+than confusing renamed generic overrides with overloads. The new Java-matched
+runtime regression also proves a count-only interface does not inherit unrelated
+identity/Clone bounds. Frozen V131 now finishes at **1,251 diagnostics**:
+39 removed and four added versus V130. All 104 files translate without
+translator/parse failures; markers remain 81/39 files, allocation guards 23.
+The four additions expose missing capability propagation into interface-typed
+collection elements. Runtime increases to 352.249s from 253.009s, localized to
+semantic/representation analysis; emission and assembly are roughly unchanged.
+The next bounded batch must cover collection destinations and reuse completed
+program-scoped capability analysis. No corpus acceptance or expansion is claimed.
+That follow-through now passes all **1,571 library tests**, four identity
+integrations, five map/query integrations and three retained-list integrations.
+It reuses native insertion-child metadata for interface conversion witnesses
+and immutable-program-scoped completed identity requirements for semantic and
+storage analysis. The new list/map runtime controls observe mutation through
+the original alias; source lookalikes and cache isolation have negative controls.
+Performance and the four corpus additions remain unverified until frozen V132
+measurement. No goal completion is claimed.
+V132 has now finished: **1,247 diagnostics**, exactly four removed and none
+added versus V131; all 104 translate without translator/parse failures. Markers
+remain 81/39 files, guards 23. Total time improves to 308.898s, but semantic and
+representation analysis remain above V130. A bounded follow-up now filters
+identity-analysis requests to types the caller actually uses before traversing
+source bodies, preserving full completed cache entries. Its combined build and
+115 focused assembly/storage/semantic units pass, alongside four identity,
+five map/query and three retained-list integrations. A release build for V133
+measurement is running; no new corpus result or completion is claimed.
+V133 now confirms exact diagnostic parity (**1,247**) and byte-identical
+assembled generated source versus V132. Total time is 251.291s; semantic/
+representation fall to 10.578s/4.818s. The bounded performance follow-through
+is finished. Next is native-container identity/value comparison planning:
+a maintained Java-matched fixture exposes 12 compiler errors plus a latent
+structural comparison of distinct fresh allocations. The slice remains
+incomplete; no acceptance or expansion is claimed.
+No goal completion is claimed. Map constructor coverage and
+other retained map operation families remain incomplete. See the generated
+rewrite audit for candidate logs and limitations. No new corpus run or
+completion is claimed.
+
+### Native collection comparison checkpoint (V134 candidate)
+
+The representative rewrite audit now has a passing maintained integration:
+native Set/List/Map allocation identity reuses the reference-identity protocol,
+while List/Set/Map value equality reuses the semantic key protocol. Retention,
+generic capabilities, nullable map-child borrowing and argument-before-null-
+receiver evaluation are handled along the whole path. Independent Java returns
+zero; all **1,573 library tests** and **13 relevant integrations** pass. Erased
+boxed key equality delegates to the existing Object equality kernel; unsupported
+erased runtime targets retain their explicit guard, not a fabricated result.
+
+V134's isolated 104-file measurement is collected: all selected files translate,
+with zero translator/generated parse failures. Assembled cargo check still
+fails with **1,225 diagnostics** (23 removed, one added versus V133),
+**81 markers in 39 files**, and **23 allocation guards**. Total time is
+**250.576s**, stable versus V133. The new diagnostic exposes plain collection
+`containsAll` consuming a retained source as if it were directly iterable;
+mixed-carrier bulk membership is the next whole-path audit, not a generated
+repair. See `jgrapht-generated-rewrite-audit.md` for exact logs and verification
+scope. This batch is not corpus acceptance.
+
+### Mixed-carrier membership checkpoint (V135 candidate)
+
+ContainsAll/RetainAll now share the existing checked live-iteration and
+RemoveAll filtering mechanisms, covering plain/retained operands in either
+direction. Nullable receiver/source checks are staged before implementation
+callbacks, after Java operand evaluation. Generic equality and iteration
+capabilities use native planning and solved storage shapes. A shared membership
+body handles independent nullable element domains without an extra untyped
+closure boundary; closure postfix precedence is also fixed generally.
+
+All **1,575 library tests** and **14 relevant integrations** pass, including
+the expanded Java-matched bulk fixture, partial mutation, reentrant nonstructural
+source updates, fail-fast structural changes and short-circuit behavior. V135
+now measures **1,218 diagnostics**, seven removed and none added; invalid
+markers fall **81 -> 76** in 39 files, allocation guards remain 23. All 104
+files translate with zero translator/generated parse failures; assembled cargo
+check still fails. Total runtime is **250.734s**, stable versus V134. See
+the generated rewrite audit for exact handles and logs. No selected-slice
+acceptance, scope expansion or goal completion is claimed.
+
+### Java hashing batch (in progress, not measured)
+
+The next shared root cause includes retained hash markers, generic Object hash
+calls and incorrect existing length/RustHash fallbacks. The new maintained Java
+hash fixture independently returns zero and requires real Java exception
+propagation for a throwing override. Checked runtime hashing, shared operation
+classification, and source-call/inherited-field hash capability propagation now
+pass three focused gates. Primitive/string leaf kernels and the existing live
+iterator/capability machinery are reused; arrays are not misclassified as List
+value hashes merely because both can use Vec storage.
+
+Checked lowering, concrete source implementations, exception planning and shared
+source-key/carrier integration now execute the expanded Java-matched hash fixture,
+including mutation, generic null receivers and immutable default identity.
+Primitive wrapper factories are covered by a second independent Java-matched
+fixture. V5 passes both integrations and 89 focused storage/assembly/model units;
+broader library and neighboring gates now pass: **1,579 library tests** and
+**16 relevant integrations** in total. Mutable source hashing reuses
+the borrowed-Object storage rule; generic identity retention reuses a generalized
+program-scoped reference-requirement cache. No generated output was repaired.
+
+V136 has now been frozen and measured: **1,160 diagnostics**, 64 removed and
+six added versus V135; invalid markers fall **76/39 files -> 59/28 files** and
+allocation guards remain 23. All 104 selected files translate with zero
+translator/generated parse failures. Total runtime is **259.430s**, with analysis
+stable and most of the increase in emission. Assembled cargo check still fails.
+
+The six additions require nullable field borrowing and selected hierarchy
+forwarding capabilities, not blanket payload Clone bounds. A new Java-verified
+inherited hash fixture also exposes root/child generic binder leakage and the
+remaining direct-source Rust-hash fallback. The generated rewrite audit records
+concrete required rewrites for the next coherent batch. Direct default-object
+fallbacks, erased/closed hierarchy dispatch and retained map-entry callback
+semantics remain explicit follow-through work; passing these fixtures is not
+full corpus or general hashing acceptance. V136 is the latest frozen result.
+
+The receiver/hierarchy follow-through candidate now passes **1,582 library
+tests** and **17 relevant integrations**, including inherited generic hash
+overrides, nullable fields, checked exceptions and a non-Clone field control.
+It reuses shared payload lookup, ancestor substitutions and selected-method
+capability queries; no blanket Clone bounds or emitted-code repairs. Release
+build **42038** is running, log
+`.tmp/jgrapht-hash-hierarchy-release-v137.log`. Source edits are frozen until
+the V137 104-file measurement is collected. V136 remains the measured baseline;
+these fixture gates do not establish selected-slice acceptance.
+
+V137 is now frozen and measured: **1,151 diagnostics**, **16 removed / seven
+added** versus V136. All six V136 additions motivating the follow-through are
+removed. All 104 files translate with zero translator/parse failures; markers
+remain **59 in 28 files**, allocation guards **23**, and assembled cargo check
+still fails. The additions expose nested source map-key capability obligations
+and the already-missing external AbstractSet inherited hash protocol; see
+`docs/jgrapht-generated-rewrite-audit.md` for the required producer/consumer
+rewrites and next batch. Total **263.127s** (translation 180.343s, assembly
+64.544s, check 13.805s), comparable to V136. Frozen binary
+`.tmp/new-java2rust-v137-hash-hierarchy`, SHA-256
+`98fb3d67354474fd47d127bab6e71958e8af9b7f5ef8873bfb0151d767dbc958`;
+run **48269** is terminal and collected. V137 is the latest measured result,
+not selected-slice acceptance or full-goal completion.
+
+### Nested source map-key requirements (V138 candidate)
+
+The next coherent batch shares structured selected-method frames between
+hierarchy bound emission and map-key capability propagation. Generic keys'
+selected equals requirements now flow through native get/remove/contains and
+source forwarding, without demanding Clone for size-only access. The maintained
+Java-matched fixture exercises both Clone and hash obligations; all **1,583
+library tests** and **14 relevant integrations** pass. Three context-free
+wrappers now used only by unit tests are cfg(test); release build **62189** is
+running at `.tmp/nested-key-capabilities-release-v138.log`, which verifies the
+production cfg surface. Collect this build, freeze and measure on the untouched
+104-file corpus before judging diagnostic progress or choosing the next batch.
+V137 remains the latest measured result. Full goal remains active/incomplete.
+
+V138 is now frozen and measured: **1,134 diagnostics**, **25 removed / eight
+added** versus V137. All six targeted fast-lookup key-protocol bound errors
+are gone; additions expose the old Pair key-domain mismatch and double-wrapped
+source carrier map results. See the generated rewrite audit for concrete
+expected rewrites and the next source-carrier map-boundary audit. All 104 files
+translate, with zero translator/parse failures; markers remain **59 in 28
+files**, allocation guards **23**, assembled cargo check still fails.
+Total **260.176s** (translation 178.445s, assembly 64.144s, check 13.218s),
+stable against V137. Frozen `.tmp/new-java2rust-v138-nested-key`, **21,848,712
+bytes**, SHA-256 `fe8186fdbc846b70ac8afb7789a1be7cecbbc3c0b8e3df546652d15c1710ce8f`.
+Release **62189** and corpus **84747** are terminal and collected. V138 is the
+latest measured result, not selected-slice acceptance or goal completion.
+
+### Source-carrier collection reads and virtual calls (V139 candidate)
+
+The next batch reuses representation-aware storage projection for collection
+reads, propagates base sharing to subclass payloads, and retains virtual source
+dispatch for carrier setters. Checked receiver staging reuses materialized read
+shapes and preserves receiver/argument evaluation order, including borrowed
+argument temporaries. A maintained independent Java oracle covers get/put/remove
+identity, mutation, overrides, null and bounds behavior through map/list values.
+All **1,585 library tests** and **21 relevant integrations** pass. Release
+**87389** is live, `.tmp/source-carrier-map-release-v139.log`; collect, freeze
+and measure the untouched 104-file slice before judging the broad result.
+V138 remains authoritative for corpus counts. The Pair<Option<V>,V> key-domain
+mismatch and external inherited AbstractSet protocols are still outstanding.
+
+Release **87389** passed (1m33s). Frozen producer
+`.tmp/new-java2rust-v139-source-carrier-map`, **21,884,696 bytes**, SHA-256
+`9784ac192500d80571dc06dd0a4c5227ab48eadc15c329576362bafa27386a92`.
+V139 104-file runner **74890** is live, log
+`.tmp/jgrapht-core-v139-source-carrier-map-run.log`. Collect before claiming
+corpus improvement; no competing tests/builds are running. Goal remains active.
+
+V139 has been collected: **1,126 diagnostics**, **eight removed / zero added**
+versus V138. All 104 files translate with zero translator/parse failures;
+markers remain **59 in 28 files**, allocation guards **23**. Assembled cargo
+check still fails. Total **257.292s**, translation 175.571s, assembly 64.029s,
+check 13.313s. Runner **74890** is terminal; no processes remain live.
+
+Next batch selection has been refreshed against the full slice: deferred
+Iterable adapters account for **30 of 36** non-Try propagation errors. A new
+Java-verified minimized input combines checked construction, source default
+dispatch, deferred mutable receiver access and live returned collections;
+frozen V139 fails it with 11 diagnostics. The rewrite audit records the complete
+producer/capture/return/consumer contract required before implementation.
+Pair key domains and external inherited AbstractSet behavior remain queued.
+V139 is the latest measured result; the full objective is still incomplete.
+
+### Deferred source views (V140 candidate)
+
+The whole-path deferred-view batch now passes **1,587 library tests** and
+**31 relevant integrations**. The independent minimized Java oracle returns
+zero. Changes cover native-SAM lambda resolution, lexical receiver capture,
+owned receiver companions, discharged adapter construction effects, structural
+nullable callback-result paths, checked parameter-to-field transfers, and
+invocation result projection. Runtime coverage checks deferred effects, live
+replacement collections, receiver identity, nullable results and checked null
+failures; no pinned Java or generated Rust is repaired.
+
+Release is building at `.tmp/deferred-views-release-v140.log`. Freeze and
+measure the candidate on the untouched 104-file slice before claiming broad
+improvement. V139 remains the latest measured corpus result.
+
+Release **95353** has passed (1m35s). Frozen producer
+`.tmp/new-java2rust-v140-deferred-views`, **21,907,792 bytes**, SHA-256
+`1b34815e4165d2d2b79fa13e0fc204299e079fa527e6b13ceecfc98c8370a26e`.
+Isolated corpus runner **52019** is live, log
+`.tmp/jgrapht-core-v140-deferred-views-run.log`; collect before selecting the
+next batch. No competing tests/builds are running; goal remains incomplete.
+
+V140 has been collected: **1,086 diagnostics** (**74 removed / 34 added**
+versus V139), all 104 files translated with zero translator/parse failures.
+All 30 targeted deferred-adapter non-Try errors are gone. Markers fall to
+**57 in 27 files**, allocation guards to **20**. Total **266.734s**, translation
+184.975s, assembly 64.135s, cargo check 13.243s. Cargo check still fails; no
+graph acceptance or expansion is claimed. No processes remain live.
+
+The rewrite audit records concrete additions and next batch: distinguish
+bound field-value method references from lexical receiver captures, and carry
+qualified callback/cursor results through source signatures and interface
+contracts. Pair key-domain mismatches remain, now explicitly qualified by
+Option; external inherited AbstractSet protocols are still outstanding.
+V140 is the latest frozen measured result, not completion.
+
+### Bound receiver values and qualified cursor contracts (V141 candidate)
+
+The follow-through distinguishes a method reference's evaluated field value
+from a lambda's lexical receiver, including nested reference construction.
+Cursor creation/forwarding and source-to-native SAM adapters now propagate
+the selected method's qualified result contract. Native Iterable callbacks
+join descendant element storage domains while keeping outer nullability
+directional and cursor/collection allocations distinct. Bound receiver null
+failures reuse checked Java exception projection.
+
+Both maintained Java oracles return zero. **1,589 library tests** and **36
+relevant integrations** pass. The expanded regressions cover nullable generic
+elements through concrete and interface cursors, field replacement timing,
+shadowing and construction-time versus invocation-time exceptions. Release
+is building at `.tmp/callback-cursor-release-v141.log`; freeze and measure
+before claiming corpus improvement. V140 remains the latest measured result.
+
+Release **24595** passed (1m32s). Frozen producer
+`.tmp/new-java2rust-v141-callback-cursor-contracts`, **21,900,344 bytes**, SHA-256
+`0e1a510021701864268f782b5b7f3954c6d0e7eaa8a96c83c766e0de110e8045`.
+Corpus runner **75875** is live, log
+`.tmp/jgrapht-core-v141-callback-cursor-contracts-run.log`; no competing builds
+or tests. Collect before selecting more work. V140 remains authoritative.
+
+V141 has been collected: **1,086 diagnostics**, unchanged total (**12 removed /
+12 added**), zero translator/parse failures across 104 files. The targeted
+LiveIterableWrapper cursor mismatch and all four missing AsSubgraph borrowed
+method errors are gone. Markers **58 in 27 files**, allocation guards **22**;
+some old invalid borrowed bodies are visible again and must be fixed, not
+suppressed. Total **263.062s** (translation 181.343s, assembly 63.865s, check
+13.481s). Cargo check still fails; no graph acceptance or expansion is claimed.
+
+Next batch is grounded in the inspected delta: use physical iterator result
+shapes for enhanced-for bindings (four new double-Option errors), and stage
+nested source receiver/argument calls with short loans and Java evaluation
+order. The rewrite audit records required rewrites and oracle coverage.
+V141 is the latest frozen corpus result; no processes remain live. Full goal
+stays active and incomplete.
+
+### Physical iteration, receiver snapshots and checked effects (V142 candidate)
+
+The batch projects foreach values from the selected iterator's physical result
+while preserving positively inferred retained collection allocations. Owned
+source-interface receivers are snapshotted before ordered argument evaluation;
+borrowed self conflicts stage the full argument list. Source-interface field
+reads copy canonical references rather than moving fields. Lazy native-SAM
+conversion reuses escaping-storage facts to retain source parameter handles.
+Shaped exception analysis now accounts for nullable field receivers and call
+argument unboxing with Java catch scopes; static calls and deferred creation
+remain negative controls.
+
+The maintained Java oracles verify null elements, field replacement, receiver
+identity, argument ordering and null/argument-exception precedence. Both return
+zero. Fresh full library gate: **1,590 passed**. **38 unique relevant integration
+tests across eleven suites** pass, combining fresh affected-suite runs with
+applicable unchanged-product results. Retained map identity, bounds-before-
+arguments, live cursor and scoped capability controls pass. Release is building
+at `.tmp/iteration-call-staging-release-v142.log`; freeze and measure before
+claiming corpus improvement. V141 remains the latest measured result.
+
+Release **34007** passed (1m43s). Frozen producer
+`.tmp/new-java2rust-v142-iteration-call-staging`, **21,909,128 bytes**, SHA-256
+`801cfca9b17adc32497f4d1a33109d594ee467a0c25b51fc81c16396f02a06e7`.
+Isolated runner **7794** is live, log
+`.tmp/jgrapht-core-v142-iteration-call-staging-run.log`. No competing tests
+or builds; collect before selecting the next batch. Goal remains incomplete.
+
+V142 has been collected: **1,076 diagnostics**, **77 removed / 67 added**
+versus V141. All 104 files translate with zero translator/parse failures.
+All 38 prior mutable-self borrow conflicts and the targeted graph-field
+conflicts are gone, along with double-wrapped loop values. Invalid markers
+fall to **54 in 25 files**, allocation guards to **17**. Cargo check still
+fails; no graph acceptance or expansion is claimed.
+
+Total **387.080s** (translation 240.331s, assembly 112.970s, check 24.502s),
+materially slower than V141 despite only ~0.43% raw / ~4.89% assembled module
+growth. The audit distinguishes a concrete repeated-index lookup path in the
+new null-effect scan from the unexplained slowdown in other phases. Next
+batch is physical staging follow-through (mutable boxed loop loans, owned
+lifetimes for borrowed arguments, nullable collection materialization and
+callback effect scopes), with a bounded investigation of that new cost.
+V142 is the latest frozen measured result. No processes remain live; full
+goal stays active and incomplete.
+
+### Physical call values and retained references (V143 candidate)
+
+The next coherent batch preserves physical ownership for mutable boxed
+foreach bindings, stages owned argument producers before taking their loans,
+materializes sequence reads using the selected source ABI, and retains stored
+collection identity across getters and reentrant iteration. Nullable argument
+flow remains directional and separate from allocation aliasing. Fresh unique
+local returns remain movable rather than acquiring unnecessary shared
+carriers. Native collection copy-source null checks use existing effect
+analysis. That analysis also reuses an external lookup index per shaped pass
+instead of rebuilding it for each call.
+
+The refined candidate passes **1,590 library tests** and **34 integrations in
+ten suites**. Logs: `.tmp/physical-call-values-refined-lib.log` and
+`.tmp/physical-call-values-refined-integrations.log`. The new physical-value
+fixture covers live getter aliases, ordered effects, temporary lifetimes,
+mutable arguments, distinct copies, null exceptions and reentrant CME.
+Its independent Java oracle returns zero. No generated Rust or pinned Java
+repairs. See the generated-rewrite audit for the intermediate failures and
+the retention refinement that preserved the fresh-collection control.
+
+Release build **19248** passed in 1m52s
+(`.tmp/physical-call-values-release-v143.log`). Frozen producer
+`.tmp/new-java2rust-v143-physical-call-values`: **21,935,784 bytes**, SHA-256
+`d2482a6fd5d8b23becc591cab1ab9b471fe006ead02da3db34657a6e69253fce`.
+Isolated runner **91590** wrote
+`.tmp/jgrapht-core-v143-physical-call-values-run.log`; output root is
+`.tmp/jgrapht-core-1.5.3-focused-v143-physical-call-values`. Pinned validation,
+translation, assembly, cargo check and marker checks run normally; only the
+separate resolver benchmark is skipped using applicable prior evidence.
+No competing builds/tests. It finished with a generated-Rust failure:
+**1,078 diagnostics = 1,013 typed + 65 untyped**, versus V142's 1,076.
+Normalized header/first-source multiset comparison records **55 removed /
+57 added** in `.tmp/jgrapht-v142-v143-diagnostic-delta.txt`. Source translation
+and generated-parse failures remain zero for all 104 files. Source invalid
+markers increased **54 → 59**, affecting **26 files** (previously 25);
+emitted allocation guards increased **17 → 18**.
+
+The batch removes all four temporary-lifetime errors and eight mutable boxed
+listener clone errors. New retained-storage consumers require missing boxed
+interface key protocols, constructor placeholder support and retained native
+operations; do not count disappearing typed errors replaced by unsupported
+markers as acceptance. The closure-location identity in the raw delta also
+contains line-number movement, not an independent new downcast defect.
+
+Total **325.738s**: translation **229.849s**, assembly **66.938s**, cargo check
+**20.333s**, sweep **7.970s**. V142 was 387.080s total, with 240.331s translation
+and 112.970s assembly. This is an observed improvement, not attribution of
+every phase to the bounded index reuse change. The next batch is the retained
+collection producer/consumer protocol follow-through documented in the audit.
+V143 is the latest frozen measured result. No build/corpus job remains live;
+full goal incomplete, with no graph acceptance or expansion claimed.
+
+## Post-V143 checked equality follow-through
+
+Unmeasured translator work after V143 now includes retained formatting,
+constructor initialization/static-owner corrections, checked source-hierarchy
+equality, owned/nullable/generic erased-carrier recovery and checked retained/
+mixed bulk-membership consumers. The latest combined library gate passed
+**1,592 / 0** (272.15s, four threads):
+`.tmp/checked-bulk-protocol-library-v1.log`. Latest selected integrations passed
+four hash/equality contracts and one mixed-membership integration, including
+the new source exception/partial-mutation oracle; checked runtime control also
+passed. Prior constructor and call-staging integrations passed **7 / 0** in
+the preceding checked-key gate. Detailed scope/logs and a concrete unrepaired
+boxed-interface Object-contract probe are in
+`docs/jgrapht-generated-rewrite-audit.md`.
+
+These gates do not establish that JGraphT compiles. V143 remains the latest
+frozen measurement, and its counts/markers above are unchanged evidence.
+Remaining boxed-interface identity, virtual Object dispatch, checked ordinary
+set/map consumers and erased interface recovery require a coherent contract
+batch, not identity-only key impls or hand-repaired generated output.
+No build/test/corpus job remains live at this checkpoint.
+
+The following canonical interface-erasure producer batch is also verified:
+source interfaces now provide owned canonical-handle erasure, with shared
+support generation across named/anonymous and forwarding/retarget adapters.
+Selected gates passed **71 representation tests, 120 conversion tests and six
+behavior integrations**, including an independent zero-result Java oracle.
+See the audit's "Canonical owned interface erasure" section for exact evidence
+and remaining virtual Object contract scope. The earlier full-library gate
+predates this producer batch; no new full library/corpus result is claimed.
+
+Concrete checked-key/ordinary-set follow-through is also implemented. It shares
+source equality/hash dispatch, preserves query direction and the separate
+hash/set identity shortcut, and generalizes canonical source parameters and
+guard-scoped primitive field reads across Rc/Arc. The batch's final 13 behavior
+integrations pass, including a real Java static-root Arc/Mutex probe and generic
+non-Clone arguments. The broad library gate had **1,592 passes / one stale
+rendering assertion**, subsequently corrected and verified in its focused
+rerun with production code unchanged. Exact cumulative verification, known open
+contracts and logs are in the audit's "Concrete source equality" section.
+
+Release build **45842** passed (1m46s), log
+`.tmp/concrete-checked-keys-release-v144.log`. Frozen V144 producer:
+`.tmp/new-java2rust-v144-concrete-checked-keys`, **21,986,208 bytes**, SHA-256
+`2bcb2455076270c02f34e5066ec28966d8176e38f11c0e86bf1df694fbf3f328`.
+
+## V144 measurement: assignment-place regression found
+
+Isolated runner **20176** finished, log
+`.tmp/jgrapht-core-v144-concrete-checked-keys-run.log`; output root
+`.tmp/jgrapht-core-1.5.3-focused-v144-concrete-checked-keys`. Pinned source
+validation and all 104 translations completed, but generated Rust has **one
+parse failure** in BoyerMyrvoldPlanarityInspector: `return planar = false`
+lowered its assignment destination through the newly scoped field **read**.
+Consequently `cargo_type_errors_valid=0`; **1,091 diagnostics (1,034 typed /
+57 untyped) are provisional**, not an accepted typed-error baseline.
+
+The normalized header/first-source multiset has **26 removed / 39 added**
+versus V143 (`.tmp/jgrapht-v143-v144-diagnostic-delta.txt`); closure-header
+line movement accounts for some churn. Nine unsupported retained operations
+and seven collection Default errors disappear. Source registry markers fall
+**59 in 26 files → 54 in 25**, allocation guards stay **18**. This is not
+acceptance or evidence that all new errors are independent regressions.
+
+Total **358.700s**: translation **256.122s**, assembly **81.401s**, cargo check
+**16.349s**, sweep **4.104s**, versus V143's 325.738s total. No competing
+build/test jobs ran during the measurement. No new optimization phase is
+justified from this alone; prioritize the concrete correctness regression.
+
+The worktree now routes assignment-expression writes through the existing
+place builder and returns the staged RHS instead of reading back the field.
+Nullable assignment predicates reuse the reference-copy planner. A second
+delta finding concerned primitive reads of captured enclosing fields: the
+current-receiver reader now requires an actual field in that receiver's
+layout, reusing preferred emitted-owner lookup rather than treating duplicate
+context copies as an ambiguous declaration. New independent Java assignment/
+inner-class oracle returns zero. Debug build **48595 / v3** passed (57.91s).
+Runtime **92713** passed the assignment probe (13.89s) and all six checked-key
+contracts (19.92s), including the real Arc/Mutex callback case. Controls
+**21675** passed all 48 assignment-related library tests (10.26s). Logs are
+`.tmp/shared-assignment-values-{build,runtime,controls}-v3.log`.
+The focused untouched BoyerMyrvold source probe **48956** also parses; this is
+single-source syntax evidence, not a corpus typecheck. Raw generated output
+was not repaired. Release **4072** passed (2m14s), log
+`.tmp/shared-assignment-values-release-v145.log`. Frozen V145 producer:
+`.tmp/new-java2rust-v145-shared-assignment-values`, **21,986,728 bytes**, SHA-256
+`6c2958ff25c31d6e9873b8ce5b24aff89d4f47cf63e8f70b8a3dfa9a61973cdd`.
+Isolated corpus runner **12160** finished (exit 1 for cargo-check failures) at
+`.tmp/jgrapht-core-v145-shared-assignment-values-run.log`, output root
+`.tmp/jgrapht-core-1.5.3-focused-v145-shared-assignment-values`. No competing
+build/test workloads; only the separate resolver benchmark is skipped, with
+all pinned validation, translation, assembly, check and scans preserved.
+V145 is now the latest parser-clean baseline: **104 translated, zero translator
+failures, zero generated parse failures**, `cargo_type_errors_valid=1`.
+Cargo check still fails with **1,087 diagnostics = 1,031 typed + 56 untyped**;
+allocation guards remain **18** and registry markers **54 in 25 files**.
+Compared with V144, exactly four diagnostics disappear and none are added:
+the assignment parse error and E0070, and the two wrongly projected enclosing
+fields (`is_induced`, `mod_count`). See
+`.tmp/jgrapht-v144-v145-diagnostic-delta.txt`; the V143 comparison is
+`.tmp/jgrapht-v143-v145-diagnostic-delta.txt`.
+Total **333.740s**: translation **245.476s**, assembly **68.209s**, check
+**15.293s**, sweep **4.036s**. This is not acceptance: markers, compile errors
+and broader Object/inheritance contracts remain. Goal remains incomplete.
+
+Next diagnostic probe: `tests/fixtures/inherited_self_calls.java` exercises
+direct and explicit-this calls to inherited methods whose bodies require a
+canonical receiver handle, with an escaping inner view observing later writes.
+Current-this companion selection searches direct declarations and private
+inherited helpers, unlike explicit receiver selection which also searches
+ordinary inherited members. Trace emitted receiver owner, declaration owner
+(especially exception ABI), generic specialization and transitive handle need
+together before changing the common selector; do not synthesize borrowed
+fallbacks for methods deliberately emitted only as handle companions.
+
+This follow-through is now implemented and has two passing runtime probes,
+including a renamed-generic-binder variant. It shares inherited selection and
+transitive handle requirements, separates emitted child ownership from the
+declaration's exception ABI, shares ordinary capture-type rendering between
+field assembly and constructors, and generalizes physical field-wise Clone
+requirements to generic hierarchy enums. Both independent Java oracles return
+zero. V4 debug build **22522** and runtime **62569** pass. Fresh full library
+**87383** passes **1,593 / 0** (175.70s); neighbors **86697** pass **14 / 0**,
+at `.tmp/inherited-self-calls-{library,neighbors}-v4.log`. Release **59197**
+passed (1m39s), log `.tmp/inherited-self-calls-release-v146.log`. V146 is frozen:
+`.tmp/new-java2rust-v146-inherited-self-contracts`, **21,980,368 bytes**, SHA-256
+`215dedda97bdfd7b3d4d9ac9c969634bb14b3e245b2940d0f4516d97592720d9`.
+Isolated corpus **10199** finished (exit 1 for cargo-check errors) at
+`.tmp/jgrapht-core-v146-inherited-self-contracts-run.log`, output
+`.tmp/jgrapht-core-1.5.3-focused-v146-inherited-self-contracts`. Collect this
+only the separate resolver benchmark was skipped, retaining all pinned checks,
+assembly, cargo check and scans.
+
+V146 is the latest parser-clean measurement: **104 translated, zero translator
+or generated parse failures**, `cargo_type_errors_valid=1`. Cargo check still
+fails: **1,082 diagnostics = 1,024 typed + 58 untyped**. Guards **18 → 20**,
+registry markers **54 → 56**, still in **25 files**. The added guard occurrences
+repeat the same existing `edges_of` allocation gaps in newly inlined
+FastLookupDirectedSpecifics companion code; they are not new adapter kinds.
+Other added diagnostics still need root-cause classification; no blanket
+claim of no regressions is justified.
+
+Normalized comparison `.tmp/jgrapht-v145-v146-diagnostic-delta.txt` records
+**39 removed / 34 added** entries (closure-header line moves account for
+some churn). The inherited event-factory missing-method family and four bare
+generic hierarchy names disappear. Newly visible `GraphBuilder.self__`
+companion errors share an existing borrowed-call failure: current-object
+lookup rejects a concrete override when resolver metadata names its base
+declaration. Reversed-node accessor overrides show the same pattern. Next
+follow-through must select the Java virtual slot in the concrete receiver's
+generic frame, retaining exact selected exception and value ABIs.
+
+Total **292.158s**: translation **200.202s**, assembly **70.403s**, check
+**16.485s**, sweep **4.390s**. V145 total was 333.740s. No competing builds/tests
+ran; this one observation is not a stable performance benchmark. The slice
+still fails acceptance and graph oracle gates remain outstanding.
+
+The unfrozen worktree is now newer than V146: virtual self-return follow-through
+seeds missing polymorphic receiver-return requirements, selects overrides by
+specialized Java slots, retains concrete receiver ownership in transitive
+analysis and adapts selected companion values. Build **83200 / v1** passed;
+controls **16024** passed **35 / 0**, but runtime **91960** is **3 passed /
+2 failed**, not acceptance. The raw probes expose remaining multi-carrier
+covariant forwarding, unspecialized F-bounded trait impl contracts and a missing
+PlainValue boundary on identity comparison. The audit's "Virtual self-return
+follow-through" section records exact artifacts and the next coherent changes.
+Those v1 handles are terminal. The follow-through is now newer: instantiated
+source-class bound contracts, covariant forwarding, completed-value effects,
+alias-safe shared companions, deferred iterator cleanup and canonical receiver
+staging are implemented together. V6's five probes passed; V8's additional
+iterator cleanup probe passes. V9 debug build **55354** passes. Fresh gates are
+running at `.tmp/virtual-self-dispatch-{runtime,neighbors,library}-v9.log`:
+six runtime probes **93651** finished **6 / 0** (33.89s); twenty neighbors
+**9288** finished **20 / 0**, and full library **62864** finished
+**1,594 / 0** (185.86s). Release **13934** finished successfully (2m11s),
+log `.tmp/virtual-self-dispatch-release-v147.log`; its handle is now absent.
+The frozen V147 binary is `.tmp/new-java2rust-v147-virtual-self-contracts`,
+**22,055,176 bytes**, SHA-256
+`8201112fd404389d52c6062696b7aa1543d806b771dffaff2f4f4b967e1641d3`.
+Isolated corpus **36753** finished (exit 1 for generated-Rust errors), log
+`.tmp/jgrapht-core-v147-virtual-self-contracts-run.log`, output
+`.tmp/jgrapht-core-1.5.3-focused-v147-virtual-self-contracts`.
+Only the separate resolver benchmark is skipped; pinned checks, assembly,
+cargo check and scans remain.
+The audit tail records precise intermediate failures and scope; no acceptance
+or current-worktree corpus diagnostic count is claimed.
+
+V147 is now the latest completed measurement: **104 translated, zero translator
+or generated parse failures**, `cargo_type_errors_valid=1`, but **1,229
+diagnostics = 1,164 typed + 65 untyped**. Allocation guards **20 → 23**;
+registry invalid markers **56 → 63**, still **25 files**. Normalized delta
+`.tmp/jgrapht-v146-v147-diagnostic-delta.txt` records **74 removed / 221 added**.
+The targeted GraphBuilder self-method family and 24 DoublyLinkedList enum
+downcast/is errors disappear. Of the additions, **167** repeat a header/file
+already failing in V146; **54** have a new header/file identity (including
+line-sensitive closure headers). All seven added untyped marker occurrences
+repeat existing header/file failures in newly emitted paths. This does not
+prove the remaining additions harmless; new ABI/ownership cases need audit.
+
+Total **398.093s**: translation **268.311s**, assembly **102.867s**, check
+**20.674s**, sweep **5.143s**. No competing builds/tests ran. Translation's
+emission phase grew **131.410 → 185.376s**, while global analysis stayed near
+54–55s. The newly retained handle-aware bodies add work and expose failures;
+do not restore unsafe guarded delegation merely to reduce counts or runtime.
+This observation warrants focused selection/emission-cost investigation,
+not an open-ended optimization phase.
+
+Nullable covariance is not established by the six passing probes. A new
+maintained `nullable_virtual_self_dispatch.java` probe exercises root and
+intermediate dispatch, null/non-null returns, alias identity and exceptions.
+Its first focused gate **71607** failed with one real E0308: the leaf's
+`return this` returned a non-null handle directly into an optional return slot.
+Java oracle **51500** returned zero. The same-concrete-class handle branch now
+uses the existing element-to-optional slot planner. Covariant forwarding checks
+subtyping on payload Java types, not their optional wrappers. The fixture also
+covers a non-null override behind the nullable base contract; updated Java
+oracle `.tmp/nullable-virtual-self-java-oracle-v2.log` is zero.
+
+A bounded virtual-slot prefilter reuses Java callable-name alias, staticness
+and formal-arity rules before computing ancestor substitutions. A pairwise
+unit compares it with the existing slot-header policy for generic, overloaded,
+snake-case-alias, static and varargs methods. No speedup is claimed yet.
+Combined build **76317** passes (1m14s),
+`.tmp/nullable-virtual-self-build-v2.log`. Runtime **12178** passes **7 / 0**
+(25.19s), `.tmp/nullable-virtual-self-runtime-v2.log`; callable/conversion units
+pass **32 / 0**, `.tmp/nullable-virtual-self-unit-v2.log`. `cargo fmt --check`
+passes. These changes are newer than frozen V147 and have not been corpus
+measured. Next coherent audit targets lexical-super helper discovery/emission,
+generic instantiation and handle-aware calls, not a rollback of alias safety.
+No corpus rerun is live. The full objective remains incomplete.
+
+The worktree is now newer still: lexical-super helper discovery follows actual
+resolved calls, specializes bodies into the concrete receiver frame and reuses
+handle-aware inherited emission. Usage/call-graph analysis preserves resolved
+lexical owners; carrier field reads include inherited fields. A related
+follow-through fixes source-handle reuse before carrier construction and
+instantiated payload returns. The maintained multi-file generic-super and
+aliased-super probes pass **2 / 0**, seven self-call neighbors pass **7 / 0**,
+and independent Java oracles return zero. The audit's "Lexical-super
+implementation contracts" section records exact changes, failed intermediate
+gates and remaining scope. V5 library **84020** passes **1,595 / 0**.
+Mutating controls **24095** pass 24 and fail three at obsolete slice-typed
+test consumers. Updated consumers preserve all effects and pass in follow-up
+**11474**, which finishes **5 / 1**: the hidden-field case is a real runtime
+regression (`"0,11"` instead of `"1,10"`). V6 unifies explicit current-field
+projection with the method environment's lexical field binding. Combined
+build **41215** is live, `.tmp/lexical-super-build-v6.log`; collect it and
+verify the field/lexical/self-call regressions before rebuilding release.
+Release **59061** finished, but was deliberately not frozen due to this
+regression; no corpus measurement is live. Frozen/current comparison **18577**
+proves three specific unrelated controls predate the batch, not all sweep
+failures. This batch has no accepted release/corpus result yet;
+V147 remains the latest corpus measurement and fails acceptance.
+
+V6 builds and fixes the hidden-field runtime result, with **29 / 30** revised
+controls passing, **9 / 9** lexical/self-call probes and **28 / 28** focused
+field/inherited units passing. Its one remaining control exposes constructor
+initializer bindings being treated as method field-storage bindings. V7
+restricts lexical environment precedence to inherited method bodies and leaves
+constructor lowering's existing authority intact. Combined build **51809** is
+live, `.tmp/lexical-super-build-v7.log`. No release/corpus process is live;
+collect this build and verify the constructor and hidden-field cases together.
+
+V7 builds; hidden fields pass, but the constructor still fails. Its nine
+lexical/self-call probes and 28 field units pass. V8 restores the earlier
+declaring-field lookup policy while retaining the inherited method's lexical
+environment binding, isolating the remaining broad lookup change. Build
+**70538** is live, `.tmp/lexical-super-build-v8.log`. Collect it, then run both
+constructor and hidden-field controls; no fixed-result claim is made yet.
+
+V8 builds and the joint constructor/hidden-field/lexical-scope gate **93257**
+passes **3 / 0** (17.56s). Final fresh gates are live: library **96304** at
+`.tmp/lexical-super-library-v8.log`, nine runtime probes **66931** at
+`.tmp/lexical-super-runtime-v8.log`, release **39901** at
+`.tmp/lexical-super-release-v148b.log`, formatting/diff checks **23459**.
+Collect these exact handles. After success, freeze the new release (not V5)
+as `.tmp/new-java2rust-v148-lexical-super-contracts`, record provenance and
+measure in isolation at
+`.tmp/jgrapht-core-1.5.3-focused-v148-lexical-super-contracts`, log
+`.tmp/jgrapht-core-v148-lexical-super-contracts-run.log`.
+No corpus run is live. V147 remains the measured, failing baseline.
+
+Final V8 verification is terminal and green: library **96304** **1,595 / 0**
+(129.94s), runtime **66931** **2 / 0** plus **7 / 0** (83.32s and 34.11s),
+formatting/diff **23459** successful. Durations overlap builds/verification;
+they are not benchmarks. Release **39901** is still live. Frozen V148 binary
+and corpus output paths are absent; collect release, freeze and measure next.
+
+Release **39901** passes (3m11s). Frozen V148:
+`.tmp/new-java2rust-v148-lexical-super-contracts`, **22,026,392 bytes**, SHA-256
+`ab832c20b57471c269db35445f551654ec346997172300a5644d940d31186ee8`.
+Isolated corpus **3177** is live, output
+`.tmp/jgrapht-core-1.5.3-focused-v148-lexical-super-contracts`, log
+`.tmp/jgrapht-core-v148-lexical-super-contracts-run.log`. No competing
+builds/tests run during measurement. Collect this exact handle and compare
+V147/V148 additions/removals, markers and timings before the next batch.
+
+V148 corpus **3177** finished (exit 1 for generated Rust). It translates all
+**104** files, with **zero translator/generated parse failures** and
+`cargo_type_errors_valid=1`, but cargo check still fails: **1,169 diagnostics =
+1,102 typed + 67 untyped**. Allocation guards remain **23**. Registry invalid
+markers remain **63**, now in **24** files (V147: 25).
+
+Normalized delta `.tmp/jgrapht-v147-v148-diagnostic-delta.txt`: **79 removed /
+19 added**. Missing lexical-super helpers disappear across graph views,
+specifics and list views; 12 weighted-edge enum `.lock()` errors also disappear.
+Three added closure headers merely move line numbers. Other additions need
+contract review rather than a blanket no-regression claim. In particular,
+two new iterator-dispatch markers are emitted **inside superclass helpers**:
+`UnmodifiableNodeIterator.getWrapped` returns NodeIterator, but the helper's
+signature incorrectly uses its child's covariant ListNodeIterator slot.
+This exposes the previously noted lexical-implementation ABI gap and takes
+priority over an unrelated next batch.
+
+Total **450.213s**: translation **313.469s**, assembly **102.156s**, check
+**26.670s**, sweep **7.151s**. No competing builds/tests ran. Compared with
+V147, global analysis **55.250 → 79.917s** and emission **185.376 → 211.879s**
+both grow; assembly is roughly unchanged. These are single-run observations,
+not a stable performance benchmark or proof of one bottleneck. The selected
+slice still fails acceptance and graph oracle/expansion gates remain open.
+
+The next ABI gap is minimized in maintained
+`covariant_super_contract.java`. Focused test **2751** fails because its
+parent implementation helper returns the child's `Rc<CovariantLeaf>` ABI;
+the independent Java oracle is zero. Logs
+`.tmp/covariant-super-contract-{runtime-v1,java-oracle}.log`.
+The audit tail records body/shell signature selection, shared specialization
+and super-getter elision as one next contract batch. Production source remains
+frozen V148; the new regression is newer and intentionally still failing.
+No process is live. Keep the full 104-file objective active.
 
 ## Completion and expansion
+
+Declaring-implementation contract batch is implemented but not yet accepted.
+Covariance runtime is green; V4b neighbors pass **7 / 0**, super controls
+**30 / 0**. Its **1596 / 1** library result has one outdated forwarding-form
+assertion, now updated. Expanded callback coverage finds a real stored-vs-
+borrowed callback ABI mismatch in hierarchy carrier shells. V5 shares ordinary
+source callback rendering and authoritative effect analysis with carrier and
+anonymous dispatch signatures. Combined build **57140** is live at
+`.tmp/covariant-super-contract-build-v5.log`; collect it, verify, then freeze
+and measure V149. See the rewrite-audit tail for exact evidence. No release
+or corpus measurement is live; V148 remains the authoritative corpus result.
+
+V5 build **57140** succeeds (1m13s); fresh lexical runtime **30895** passes
+**3 / 0** (83.34s). Full library **96933** remains live at
+`.tmp/covariant-super-contract-library-v5.log`; release **78437** is live at
+`.tmp/covariant-super-contract-release-v149.log`. Collect both, then freeze
+V149 with recorded SHA/size/profile and run the unchanged 104-file gate in
+isolation. No V149 corpus result exists yet.
+
+Full library **96933** finishes green **1597 / 0** (127.62s). Only release
+**78437** remains live; collect that exact handle and proceed to freezing and
+isolated measurement, without repeating completed verification.
+
+Release **78437** passes (3m33s). Frozen V149 producer
+`.tmp/new-java2rust-v149-declaring-implementation-contracts` is **22,007,376
+bytes**, SHA-256
+`4ad84f2aec44d8e4c6be2f56286adb23b6ef11f58dba831fa291a96c13964dc2`.
+Isolated 104-file corpus **56736** is live at
+`.tmp/jgrapht-core-1.5.3-focused-v149-declaring-implementation-contracts`, log
+`.tmp/jgrapht-core-v149-declaring-implementation-contracts-run.log`.
+No competing builds/tests. Collect this exact handle, validate producer
+provenance and compare against V148 before choosing another batch. All scope,
+placeholder, cargo-check and Java-oracle acceptance requirements remain open.
+
+V149 corpus **56736** finishes exit 1 for generated Rust: **104 translated**,
+**0 translator/parse failures**, `cargo_type_errors_valid=1`, **1165 diagnostics
+= 1103 typed + 62 untyped**, guards **23**, registry markers **60 / 24 files**.
+Producer provenance matches the frozen release above. Normalized delta
+`.tmp/jgrapht-v148-v149-diagnostic-delta.txt` is **5 removed / 1 added**:
+both iterator return-contract markers and three standalone-super errors are
+gone. A newly exposed missing helper in a constructor is a real inventory gap,
+not a passing batch: constructor `super.setList` is lowered but only method
+bodies were inventoried for lexical implementation helpers.
+
+General constructor/instance-initializer inventory follow-through and a
+maintained generic runtime probe are implemented; independent Java oracle is
+zero. Build **77370** is live, `.tmp/constructor-super-contract-build-v1.log`.
+Collect it and verify four lexical probes before selecting another coherent
+batch; avoid a separate expensive corpus cycle for this small follow-through.
+Source is newer than V149; no release/corpus run is live. Audit tail records
+the whole-path reasoning and next action.
+
+V149 total **501.756s** (translation **366.014**, assembly **99.566**, check
+**28.594**, sweep **6.796**); global analysis **86.672s**, emission **254.262s**.
+No own competing builds/tests. These are single observations, not stable
+performance conclusions. The selected slice remains incomplete.
+
+Inventory follow-through V1 build **77370** passes; runtime **21890** is
+**3 / 1**. The new probe discovers shared parameter rewriting erases solved
+`Option<U>` when renaming an ancestor binder, while constructor argument
+lowering preserves it. The common rewrite normalizer now reuses optionality-
+preserving slot specialization; a unit explicitly covers nullable/nonnullable
+renaming and retained ownership. Combined library/lexical build **8796** is live
+at `.tmp/constructor-super-contract-build-v2.log`. Collect it and verify fresh
+four-probe runtime plus broad library gates before another batch; see audit
+tail for producer-to-consumer evidence. No release/corpus is live.
+
+V2 build **8796** passes (1m20s). Four lexical runtime probes **90233** and
+fresh **1598**-test library **23097** are live at
+`.tmp/constructor-super-contract-{runtime,library}-v2.log`. Collect these exact
+handles before accepting the constructor/nullability follow-through. Do not
+rebuild or rerun the corpus just to collect these already-started gates.
+
+Collected V2: runtime **90233** passes **4 / 0** (84.59s), library **23097**
+passes **1598 / 0** (128.38s). Constructor/initializer and nullable generic
+parameter follow-through is verified; carry it into the next substantial batch
+without a separate corpus cycle. No process remains live.
+
+Next batch selected from V149: retained native collection display contracts,
+sharing explicit ToString's checked cursor/callback path with implicit display,
+including null/evaluation/exception/guard semantics. Expanded maintained
+`retained_collection_formatting.java` Java oracle passes **0**; its untouched
+current translation fails **8 E0277** errors in
+`.tmp/retained-display-concat-baseline-check.log`. The expanded Rust runtime is
+not yet passing and was not included in the preceding green gates. Full-path
+plan and scope audit (nested/views/maps/sync/generic callback effects) are at
+the rewrite-audit tail. Implement that coherent batch before another expensive
+104-file measurement. V149 remains the authoritative failing corpus result.
+
+Display V1 is implemented across physical runtime, lowering, conversion policy,
+effect seeding and generic capability rendering. Cheap checks and combined build
+pass; fresh library **41841** passes **1598 / 0** (92.66s). Expanded display
+runtime **20490** fails compilation (9 errors); generic neighbor **53832** fails
+(11), nullable neighbor **73065** is **1 / 1** (12 errors). All handles are
+terminal; no process is live. Do not infer acceptance from the green library.
+
+The rewrite-audit tail records the coherent follow-through: generic owner/method
+binder Object dispatch, borrowed-only display without unnecessary Clone,
+canonical borrowed-handle staging, static-vs-instance field identity and static
+retained collection storage, and String.format effect proof. Frozen V149 on
+the same expanded fixture independently reproduces the static identity/storage
+gaps (**25** baseline compiler errors), so they are not new iterator-trait bugs.
+Keep all assertions, including NoClone and the static same-name fields; no
+generated/pinned-source repair or test weakening is authorized. Finish that
+contract batch and focused runtime neighbors before another release/corpus run.
+
+Display V2 generalizes stored-array retention to supported native field
+containers (including nested/static sync domains), preserves solved shapes and
+lexical instance precedence, and fixes canonical handle cloning and generic
+binder display dispatch. Primary **47993** passes **1 / 0** (46.42s). Library
+**70716** is **1598 / 2**; new units pass, and two inline-Vec assertions are
+updated to retain nullable-element and evaluation-order requirements under the
+new carrier. Nullable emitted-Rust metadata gate **41532** passes zero.
+
+String.format effects and native Objects.toString argument staging are now
+implemented; new valueOf/default/null Java oracle checks pass zero. Cheap V5
+check **45350** passes. Combined build **36712** is live at
+`.tmp/retained-display-contract-build-v3.log`. Collect it, then verify new primary,
+nullable, library and relevant runtime neighbors. No release/corpus is live.
+Borrowed generic display's unnecessary Clone/custom leaf-protocol gap remains
+open; all NoClone assertions remain. See the audit tail. Do not freeze this
+batch or rerun the corpus yet.
+
+V3 build **36712** succeeds (1m11s). Live fresh gates: staging **16364**,
+nullable **2237**, library **15247**, checked streams **56671**, lexical-super
+**94089**. Audit tail lists exact logs and next action. Collect rather than
+restart; the borrowed generic NoClone contract remains open. No release/corpus
+measurement is live.
+
+### Retained-display borrowed/typed protocol checkpoint
+
+V3 gates collected: library **1600 / 0**, nullable **2 / 0**, checked streams
+**1 / 0**, lexical-super **4 / 0**. Staging was **3 / 1**: literal-null
+Objects.toString incorrectly reached None.to_string. That branch is corrected.
+
+Borrowed display now consumes references without cloning elements. Collection
+display requires JavaObjectDisplay/Any; retained-cursor reference-copy needs
+are a separate, solved-shape capability propagated through selected source
+calls. Native stored-child projection is shared with lowering, preserving
+Rc/Arc payload shielding. The existing leaf trait gains a checked Object
+operation, with generated source adapters using the existing source Object
+call planner; actual array deep display remains a separate operation.
+
+Borrowed V1 generic runtime passes **1 / 0**, including unchanged NoClone
+customization and expected values. Library **1599 / 1** exposed a runtime
+component-boundary dependency; staging **3 / 1** exposed nullable source text
+returning &str instead of String. Follow-through separates module-level native
+display adapters from standalone iterator support and owns nullable source
+text. No assertions were removed. Expanded generic source-leaf cases check
+ordinary text, null text, and thrown IllegalArgumentException. Independent
+javac/java oracle returns **0**.
+
+Cheap check V3 and combined borrowed V2 build pass (31s / 1m00s). Fresh gates
+are live: staging **65551**, generic **56533**, library **3888**, nullable
+**65770**, logs `.tmp/retained-display-borrow-{runtime,generic,library,nullable}-v2.log`.
+Collect them before accepting this batch or starting a release/corpus cycle.
+V149 remains the latest measured corpus; source is newer and the full goal
+remains incomplete.
+
+Collected borrowed V2 gates all pass: staging **4 / 0** (47.46s), generic
+**1 / 0** (36.14s), nullable **2 / 0** (45.67s), library **1600 / 0**
+(108.50s), checked streams **1 / 0** (31.49s), lexical-super **4 / 0**
+(50.37s). The isolated Iterable component test is green without test changes.
+Neighbor logs are `.tmp/retained-display-borrow-{stream,super}-v2.log`.
+Only release **79784** remains live at
+`.tmp/retained-display-release-v150-build.log`. Collect it and freeze V150,
+record SHA/size/profile, then measure the unchanged 104-file gate in isolation.
+Do not repeat the completed debug verification or infer corpus success from it.
+
+Release **79784** passes (2m12s). Frozen V150 producer
+`.tmp/new-java2rust-v150-retained-display-contracts` is **22,125,760 bytes**,
+SHA-256 `864d62687108779e50819b8c751786a76cfeb1c456c577817e02639911a3bc5f`.
+Pinned checkout revalidated at the required commit, tracked sources unchanged.
+Isolated unchanged 104-file corpus **17532** is live, root
+`.tmp/jgrapht-core-1.5.3-focused-v150-retained-display-contracts`, log
+`.tmp/jgrapht-core-v150-retained-display-contracts-run.log`. No competing own
+builds/tests. Separate resolver benchmark skipped using prior evidence, not
+production translation/assembly/checks. Collect this exact handle, verify
+producer provenance and compare V149 diagnostic multisets, markers and timings
+before selecting the next substantial root-cause batch. V150 has no result yet.
+
+V150 corpus **17532** completes exit **1**, generated-Rust failure. All **104**
+files translate, translator/parse failures **0**, `cargo_type_errors_valid=1`.
+Producer SHA/size/profile match the frozen release. **1088 = 1022 typed + 66
+untyped** diagnostics; guards **23**; registry markers **64 / 25 files**.
+Total **399.164s**: translation **287.863**, assembly **86.604**, check **18.985**,
+sweep **5.006**. Global analysis **69.782s**, emission **195.809s**. No competing
+own builds/tests; single unpaired observations are not a speedup claim.
+
+Delta `.tmp/jgrapht-v149-v150-diagnostic-delta.txt`: **167 removed / 90 added**
+header/file occurrences, including renamed display bounds and closure-location
+changes, not distinct bugs. Retained AsRef display errors disappear, but the
+new shared-access impl loses `type Value = T` during trait promotion, causing
+two E0046 errors. Missing associated definitions can suppress downstream body
+diagnostics: **do not claim the 56 disappearing get_class errors are fixed**;
+the invalid calls remain in emitted code. New bounds, erased Clone errors,
+retained consumers and four retained-operation markers also require work.
+V150 is **not accepted**, despite its lower total and passing minimized gates.
+
+Coherent follow-through written: display-copy capability reuses existing
+retained_callable_shape_context (structural body identity, exact signature and
+inherited specialization) instead of a weaker pointer-only resolver. New
+overloaded/inherited retained-parameter display checks preserve alias identity.
+Assembly selects impls containing associated definitions atomically, preserving
+their coupled method ABI, rather than dropping types/constants while merging
+methods. Actual-merger Python regression compiles/runs this generic contract;
+the three-test Python gate passes. Cheap library check **93675** passes (27s).
+Combined build **48578** is live at
+`.tmp/retained-display-follow-through-build-v1.log`, covering lib, staging,
+generic display, iterator production assembly and script regressions. Java
+oracle **12588** is pending. Collect these, then run the relevant built gates;
+no release/corpus is live. Finish these contracts before another feature batch.
+
+Follow-through combined build **48578** passes (1m04s); expanded Java oracle
+**12588** returns **0**. Associated-contract assembly also preserves whole trait
+declarations when variants differ; the production-merger regression now covers
+distinct declaration texts. Python V2 gate passes **3 / 0**. Built script
+shared_support gate passes (log
+`.tmp/retained-display-follow-through-scripts-v1.log`). Fresh gates are live:
+staging **55716**, generic NoClone **24941**, iterator production assembly
+**10936**, full library **82977**, logs
+`.tmp/retained-display-follow-through-{runtime,generic,iterator,library}-v1.log`.
+Collect these exact handles before further edits/builds. Source is newer than
+V150; that measured candidate remains unaccepted and the full goal incomplete.
+
+Collected follow-through V1: library **82977** passes **1600 / 0** (106.63s),
+generic NoClone **24941** passes **1 / 0** (36.91s). Staging **55716** is
+**3 / 1** (56.27s): new inherited field's explicit toString falls through the
+type-only planner to Rust ToString despite a solved native field shape.
+Iterator assembly **10936** fails only because its handwritten Step test double
+omits the current required clone_any method; the generated library compiles.
+The test double now implements the actual ABI with a cloned Step, retaining
+all behavioral assertions.
+
+Next related contract batch written: explicit collection display first proves
+the solved physical shape/source precedence; retained display-copy needs join
+the common Clone obligation query so forwarding adapters see exactly the same
+requirements as emitted source methods. Object/array display capabilities join
+the existing selected-interface/constructor conversion obligation machinery.
+Rust Display and checked Java display share selection and declaration-frame
+specialization of inherited toString contracts instead of maintaining different
+generic bounds. Borrowed NoClone remains required, not broadened to Clone.
+
+Expanded Java fixture covers overloaded/inherited retained parameter display,
+generic interface conversion/forwarding, inherited toString and throwing source
+leaves; Java oracle **45893** returns **0**. Cheap tests check **44248** passes
+(38.56s). Combined build **3426** is live at
+`.tmp/retained-display-forwarding-build-v1.log` (lib, staging, generic, iterator
+assembly, lexical-super, nullable and streams). The iterator target gains a
+second actual production-assembly runtime probe exercising the entire retained
+display fixture across duplicate support modules; verify binary lists this new
+probe before running it. Collect the build before more changes. No release or
+corpus process is live; V150 is still unaccepted.
+
+Forwarding build **3426** passes (1m00s). Its iterator binary lists both probes,
+including the newly added production-display assembly case. Fresh gates live:
+staging **97788**, generic NoClone **12640**, iterator/retained-display production
+assembly **10782** (two probes), full library **37143**. Logs
+`.tmp/retained-display-forwarding-{runtime,generic,assembly,library}-v1.log`.
+Collect these exact handles. Relevant built super/nullable/stream neighbors
+have not been rerun on this forwarding follow-through yet; reuse built binaries
+at the batch boundary, not a new compile. No release/corpus run is live.
+
+Forwarding V1 collected: library **37143** passes **1600 / 0** (106.35s),
+generic **12640** passes **1 / 0** (41.25s), super **31696** passes **4 / 0**
+(47.77s), nullable **81039** passes **2 / 0** (33.18s), streams **56841** passes
+**1 / 0** (28.75s). Staging **97788** is **3 / 1** (57.73s); production
+assembly **10782** is **1 / 1** (83.98s): old iterator probe now passes,
+expanded display fails. The associated-definition production fix is effective:
+no missing Value errors; production failure has only two compiler diagnostics.
+
+The fixture exposes two metadata/precedence roots and one fallback inventory
+root: Object string lowering runs before the new native-call path; retained
+capability frames omit inherited instance fields; a generic child with only
+inherited methods receives a duplicate Object.toString fallback. Changes now
+move native display proof before the actual Object fallback, share lowering's
+existing inherited-field seeding with callable analysis, and exclude fallback
+generation when the shared effective-toString selector finds an inherited
+implementation. Assertions remain unchanged. This does not claim unrelated
+generic runtime-class calls are fixed.
+
+V2 build **25532** is terminal failed solely for a missing Program import
+(corrected). V3 combined build **94851** is live at
+`.tmp/retained-display-forwarding-build-v3.log` (lib, staging, iterator assembly,
+generic). Collect it, run the expanded standalone/production display first,
+then decide broad gates from those results. Do not repeat passing neighbors
+just to rediscover unchanged evidence. No release/corpus is live.
+
+V3 build **94851** passes (1m02s). Focused gates live: expanded standalone
+display **75979**, expanded two-module production display **64569**, unchanged
+borrowed NoClone **13021**. Logs
+`.tmp/retained-display-forwarding-{runtime,assembly,generic}-v3.log`. Collect
+these before scheduling another broad library gate; the preceding 1600-test
+V1 library and seven neighbor probes already pass. No release/corpus is live.
+
+V3 targeted gates all pass: standalone **75979**, **1 / 0** (24.07s),
+production two-module display assembly **64569**, **1 / 0** (35.51s), unchanged
+NoClone **13021**, **1 / 0** (15.04s). These cover inherited retained parameter
+and field display, overloaded selection, alias identity, generic interface
+conversion/forwarding, inherited toString, null text, thrown leaf exceptions,
+reentrant mutation/CME, and module-level associated-type preservation. No
+generated or pinned source was repaired; no assertions removed.
+
+Final fresh library **71568** and V151 release build **97919** are live. Logs
+`.tmp/retained-display-forwarding-library-v3.log` and
+`.tmp/retained-display-forwarding-release-v151.log`. Collect both, freeze the
+release with provenance, and measure the unchanged 104-file corpus in isolation.
+This is a coherent substantial-batch boundary, not a corpus run after one edit.
+Do not infer get_class fixes from V150's masked diagnostic removals; inspect the
+next measurement and compare both V149 and V150. The full goal remains active.
+
+Final library **71568** collected green **1600 / 0** (89.70s). Only release
+**97919** remains live. Pinned checkout revalidated at the required commit,
+tracked sources unchanged; proposed V151 producer/output paths are unused.
+Collect release, freeze, and measure without repeating the completed gates.
+
+Release **97919** passes (2m29s). Frozen V151 producer
+`.tmp/new-java2rust-v151-display-forwarding-contracts` is **22,088,464 bytes**,
+SHA-256 `40236cc99f3bfdf92f4773e124d561baa2955b715e15025b8075a739afbda631`.
+Unchanged 104-file corpus **32015** is live at
+`.tmp/jgrapht-core-1.5.3-focused-v151-display-forwarding-contracts`; log
+`.tmp/jgrapht-core-v151-display-forwarding-contracts-run.log`. No competing own
+builds/tests. Production translation, assembly, cargo check and sweeps remain
+enabled; only the independent resolver benchmark is skipped using prior evidence.
+Collect this exact handle, verify provenance, and compare diagnostic multisets,
+markers and timing against both V149 and V150. V151 has no corpus result yet;
+do not treat removed V150 get_class diagnostics as established fixes. The full
+translation/graph behavior/expansion acceptance requirements remain open.
+
+V151 corpus **32015** completes exit **1**, generated-Rust failure: **104** files
+translated, translator/parse failures **0**, `cargo_type_errors_valid=1`,
+**1150 = 1084 typed + 66 untyped**, guards **23**, registry markers **64 / 25
+files**. Producer matches frozen SHA/size/profile. Total **402.306s**:
+translation **274.847**, assembly **101.010**, check **20.104**, sweep **5.647**.
+Global analysis **59.549s**, emission **196.317s**. Isolated from own competing
+workloads; single unpaired timings do not establish a performance change.
+
+Delta `.tmp/jgrapht-v150-v151-diagnostic-delta.txt` is **41 removed / 103 added**:
+the two missing associated Value errors and exposed forwarding display/Clone
+bound errors disappear; the **56 generic get_class** errors reappear, proving
+the V150 masking warning was necessary. **30** nullable leaf errors now show
+that V:JavaObjectDisplay does not expose the legacy leaf capability needed for
+Option<V>. Against V149: **102 removed / 87 added**, net -15, in
+`.tmp/jgrapht-v149-v151-diagnostic-delta.txt`. These are diagnostic occurrence
+multisets, not defect counts. No acceptance/promotion is justified.
+
+Nullable protocol closure follow-through now exposes the checked view's
+already-existing legacy leaf/Any contract as supertraits. Every implementation
+already used that blanket contract; this makes generic wrapper composition
+provable instead of adding ad-hoc method bounds or overlapping Option impls.
+Actual checked Object and array-deep operations remain distinct. New controls
+check Option<T>/Option<Option<T>> with only T:JavaObjectDisplay, custom NoClone
+leaves, and present/null entries in a generic retained source-element list.
+Expanded independent Java oracle returns **0**. Combined build **73095** is
+live at `.tmp/retained-display-nullable-closure-build-v1.log` (generic, staging,
+production assembly). Collect and verify targeted gates; carry this small
+follow-through into the next coherent batch without a separate full corpus.
+Generic runtime-class and retained native queue/map consumers remain open.
+
+Nullable closure build **73095** passes (52.76s). Fresh targeted gates live:
+generic/nested-option NoClone **12843**, expanded standalone display **82869**,
+production display assembly **70569**. Logs
+`.tmp/retained-display-nullable-closure-{generic,runtime,assembly}-v1.log`.
+Collect without restarting. V151 remains the authoritative measured failing
+corpus; source is newer. No release/corpus or broad library run is live.
+
+Nullable closure gates collected all green: **12843**, generic/nested-option
+NoClone **1 / 0** (15.65s); **82869**, standalone **1 / 0** (23.47s); **70569**,
+actual production assembly **1 / 0** (34.32s). No process remains live. Carry
+this verified small follow-through into the next batch; do not start a release
+or full corpus cycle solely for it.
+
+Next coherent root batch selected: retained queue/deque allocation consumers.
+V151 BiconnectivityInspector stack.peek/pop and BreadthFirstIterator
+queue.removeFirst still hit unsupported retained-operation markers; push uses
+an inline-storage path on a shared handle. Begin with a maintained neutral
+oracle/translation baseline for a stored generic deque and queue alias, then
+trace constructor policy, child nullability, shared identity, ordered call
+staging, endpoint result ownership, copy capabilities, checked empty/null
+behavior, mutation count and live cursors as one contract. Reuse the existing
+native operation planner/runtime policies; do not just add corpus-specific
+spellings, substitute priority/blocking queue semantics, or misrepresent Vec
+front-removal complexity. General runtime-class metadata remains queued, not
+fixed. The full corpus/graph-behavior/expansion objective remains incomplete.
+
+### Retained queue/deque contract batch (in progress after V151)
+
+Maintained `retained_deque_contracts.java` Java oracle returns **0**. Frozen
+V151 generates it but rustc reports **26** diagnostics: unsupported retained
+endpoints, inline push/addFirst/addLast on retained handles, missing nullable
+child storage and physical returned-reference field access. Baseline artifacts
+`.tmp/retained-deque-v151-baseline.{rs,log}` and
+`.tmp/retained-deque-v151-baseline-check.log`. These are shared contract defects,
+not 26 distinct bugs. The fixture checks generic fields, Queue/Deque aliases,
+endpoint order, object reference identity through mutation, null/empty policy,
+copy allocation vs shared elements, captured cursor invalidation, argument
+reentrancy/order and static/synchronized storage. Pinned sources remain untouched.
+
+Coherent first implementation spans:
+
+- Native QueueInsert metadata for front/back and void/bool methods, including
+  stored-child flow and argument/signature mutability; source guards retained.
+- ArrayDeque construction captures a null witness over the actual stored child,
+  with non-List/snapshot-limit iteration policy retained through aliases.
+  LinkedList keeps nullable List policy. Generic add/addAll consult concrete
+  allocation policy; deque bulk failure preserves accepted prefixes.
+- Checked shared endpoint operations release cell/lock loans before returned
+  references are consumed. Shared physical result projection owns references,
+  flattens missing/stored-null peek/poll, and is reused by shape inference and
+  ordinary/stream lowering. Generic read-copy requirements join the existing
+  retained capability proof; throwing endpoint effects join checked ABI planning.
+- ArrayDeque Object equality/hash use allocation identity rather than the set
+  behavior implied by its non-List flag. Actual Vec front insertion/removal is
+  explicitly O(n), not presented as ring-buffer complexity.
+
+Expanded existing isolated native-runtime component gate checks endpoint/null/
+mutation-count policy, identity equality, prefix failures and sync null rejection.
+New neutral generated-runtime integration is `tests/retained_deque_contracts.rs`.
+Cheap tests check **3435** passes (31.82s). Combined build **36680** is live at
+`.tmp/retained-deque-contract-build-v1.log` (lib, deque, staging, generic display).
+Collect it and run the exact native component test plus new deque runtime first;
+do not run another corpus or broad library gate before these high-information
+probes. Source is newer than V151; no release/corpus measurement is live.
+
+Deque build **36680** passes (58.21s). Exact native component **20341** passes
+**1 / 0** (15.84s); log `.tmp/retained-deque-native-component-v1.log`.
+Generated runtime **62363** is terminal failed (19.92s), six compiler errors,
+`.tmp/retained-deque-contract-runtime-v1.log`. Artifacts:
+`.tmp/test-tmp/new_java2rust_retained_deque_contracts_1792525616352036953`.
+All unsupported endpoint/insert and null-comparison baseline markers are gone
+in this maintained probe, but that is not runtime acceptance.
+
+Remaining coherent contracts, not six independent patches:
+
+1. Source generic queue wrappers return actual Arc<Mutex<DequeItem>> values,
+   but `box.first().value`, `last`, `peek`, and `removeLast` use direct `.value`.
+   `lower_shared_storage_field_access_plain` chooses declared/inferred nominal
+   type before the physical instantiated call shape. Reconcile the selected
+   source-call return contract and field receiver together, not a deque-specific
+   emitted lock insertion.
+2. Nullable peek ownership and source method nullability need full closure.
+   Native results must not leave Option<Option<handle>> or miss Java null
+   checks before lock/borrow. StoredDeque.peek still declares T/unwraps absence,
+   although Queue.peek intrinsically returns Java null when empty. Add a
+   no-caller generic helper signature control: do not rely on a fixture use
+   forcing return widening. The Java fixture now also checks empty box.peek
+   (new assertion18, not included in the preceding failing Rust run).
+3. A local copy `new ArrayDeque<>(alias)` is still emitted as inline
+   Vec<Option<Arc<...>>> rather than the policy-carrying runtime. Its peek has
+   nested optional ownership mismatch; the later `new ArrayDeque<>(linked)`
+   null-source-element assertion14 must reject null even in statement position.
+   Reconcile constructor/local/argument/result allocation policy through the
+   solver; do not repair only the stored-field constructor or attach ad-hoc
+   variable flags. Assess canonical policy-carrying deque representation for
+   all relevant allocations, preserving unsupported priority/blocking boundaries.
+
+No process remains live. Do not repeat a broad suite/full corpus before these
+contracts and the new oracle pass. Nullable-display follow-through remains
+verified and carried forward; V151 stays the measured failing full-slice result.
+
+Deque follow-through checkpoint: the source-guarded concrete-policy query now
+seeds existing signature/local/factory allocation flow; temporary constructors
+use the same policy runtime, raw backing construction is separate, and ordinary
+peek/poll describe owned nullable values. The common map alias adapter has been
+generalized to matching retained native container carriers. Field consumers are
+being reconciled with instantiated source result ABI. Shared generic
+substitution now handles explicit Unknown binders as well as Named binders.
+Full audit and chronological evidence are in
+`docs/jgrapht-generated-rewrite-audit.md`, section "Deque follow-through".
+
+V4 combined build passes74s and full library passes **1604/0** (93.54s), log
+`.tmp/retained-deque-library-v4.log`. V3 constructor3/0 and map-view7/0 gates
+pass. Expanded Java deque oracle returns0. The generated deque probe still
+fails compilation: V4 has seven diagnostics (not seven distinct bugs), in
+`.tmp/retained-deque-contract-runtime-v4.log`; no runtime acceptance. A typed
+null-policy witness and internal source-result/field-consumer regression are
+under V5 verification, build session **22562**,
+`.tmp/retained-deque-build-v5.log`. Collect that build and run the internal
+`lower::tests::generic_nullable_source_endpoint_has_concrete_field_receiver`
+test first; use its physical shape to resolve the gap before another expensive
+full measurement. Do not re-run V4 broad library merely for this small follow-up.
+
+Subsequent checkpoint: V5 build passes68s; internal regression confirms a
+physical Optional<Object>/ErasedObject where the source receiver requires
+Optional<DequeItem>. V6 build passes61s after adding a typed null witness and
+strengthening source-owner binder preservation/native endpoint physical result
+selection. Deque runtime compile now fails **six field-access diagnostics**,
+not constructor/insertion/Clone diagnostics; no runtime acceptance.
+`.tmp/retained-deque-contract-runtime-v6.log` (18.81s), internal failure
+`.tmp/retained-deque-physical-source-v6.log` (3.05s). The source contract gap
+is not yet closed. A diagnostic-rich exact internal gate is running as session
+**62782**, `.tmp/retained-deque-physical-source-v7.log`; collect selected
+signature/direct-result/resolved-call/receiver metadata from that gate before
+another product change. No release or full corpus is running. V4 full-library
+1604/0 is prior evidence, not proof of later follow-through.
+
+Latest deque checkpoint (supersedes pending handles above): V9 build passes78s;
+full library **1605/0** (97.21s), staging4/0 (47.32s), generic display1/0
+(35.04s). All these processes are terminal. V9 generated deque still fails
+**four compile diagnostics** (50.39s), `.tmp/retained-deque-contract-runtime-v9.log`:
+first/last/removeLast chained field reads emit `.lock()` on Option<Arc<...>>,
+and the copied deque's peek field write projects `&mut Arc` as a payload field.
+No generated runtime acceptance and no release/corpus is running.
+
+Source inventory now includes the current compilation unit even without a
+co-emitted batch. A representation-aware return helper now requires positively
+identified Any payloads for erasure; a different Rc/Arc/cell carrier alone is
+not erasure evidence. Read the chronological audit for intermediate failing
+measurements; the V8 internal metadata fix alone did not fix standalone output.
+
+Expanded internal gate now plans storage facts, callable fallibility and
+Propagate mode, checks a rendered nullable source read, and checks the copied
+deque's solved local shape/writable handle projection. It passes **1/0** (3.86s),
+`.tmp/retained-deque-physical-source-v10b.log`; build53.59s. V10's initial test
+build used a private SignaturePlan field; V10b uses the existing public(crate)
+method lookup. **No process remains live.** Production source is still V9;
+V10b changes only the maintained internal regression. The direct helpers pass
+but the actual generated body fails: next diagnose their actual consumer/frame
+or a competing earlier lowering path, rather than repeating the already-green
+helper test or speculating from metadata alone. Instrument/inspect the real
+lowering path with the solved run-local environment and call/result metadata.
+Keep the constructor/alias/nullability changes together; no generated repairs,
+test weakening, full-corpus rerun or goal completion is justified yet.
 
 The selected slice is not yet translated successfully: emitted code still has
 invalid placeholders and compile errors. Representative graph construction,

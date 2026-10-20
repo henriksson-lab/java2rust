@@ -45,7 +45,7 @@ class PortUse {
 #[test]
 fn reborrows_preserve_the_original_storage_and_allow_reuse() {
     assert_eq!(PortUse::run(), "hello");
-    assert_eq!(PortUse::boxed_run(), 5);
+    assert_eq!(PortUse::boxed_run().unwrap(), 5);
 }
 "#,
         }],

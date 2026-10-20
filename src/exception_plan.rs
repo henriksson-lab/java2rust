@@ -60,18 +60,24 @@ pub enum FallibilityReason {
     /// A nullable Java reference was dereferenced as a receiver and can throw
     /// NullPointerException.
     NullReceiverThrow,
+    /// A checked identity rejects a nullable argument with NullPointerException.
+    NullCheckThrow,
     /// A checked reference conversion can throw ClassCastException.
     ClassCastThrow,
     /// Array reads and writes can fail bounds checks even for non-null arrays.
     ArrayBoundsThrow,
+    /// Native array-copy factories have checked size/range/null failures.
+    NativeArrayCopyThrow,
     /// Shared native collections can reject mutation or checked list indices.
     RetainedNativeCollectionThrow,
     /// A retained functional value has an open runtime callback body.
     StoredCallbackThrow,
     /// Implicit Java iteration invokes an open, checked iterator protocol.
     IteratorProtocolThrow,
-    /// Open Java Object.toString dispatch can execute an overriding body.
+    /// Open Java Object dispatch (toString/hashCode) can execute an overriding body.
     VirtualObjectDispatchThrow,
+    /// Semantic set membership invokes the query's potentially throwing equals.
+    SemanticSetKeyThrow,
     /// A Java `throw` statement escapes the callable. Runtime exceptions are
     /// unchecked by javac, but they are still catchable Java control flow.
     DirectThrow,
@@ -750,6 +756,60 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             entry.reasons.push(FallibilityReason::NullReceiverThrow);
         }
     }
+    for key in shaped_immediate_effect_callables(
+        program,
+        facts,
+        signatures,
+        representations,
+        |expr| {
+            matches!(
+                expr,
+                Expr::Call { .. } | Expr::New { .. } | Expr::ArrayAccess(..) | Expr::Cast { .. }
+            )
+        },
+        None,
+        block_has_unhandled_shaped_call_null_check,
+    ) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        if !entry
+            .reasons
+            .contains(&FallibilityReason::NullReceiverThrow)
+        {
+            entry.reasons.push(FallibilityReason::NullReceiverThrow);
+        }
+    }
+    for key in shaped_immediate_effect_callables(
+        program,
+        facts,
+        signatures,
+        representations,
+        |expr| {
+            matches!(expr, Expr::Call { name, args, .. }
+            if args.is_empty() && matches!(name.as_str(), "hashCode" | "hash_code"))
+        },
+        None,
+        block_has_unhandled_checked_hash,
+    ) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        entry
+            .reasons
+            .push(FallibilityReason::VirtualObjectDispatchThrow);
+    }
+    for key in shaped_immediate_effect_callables(
+        program,
+        facts,
+        signatures,
+        representations,
+        |expr| matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "requireNonNull" | "require_non_null")),
+        None,
+        block_has_unhandled_checked_identity_null,
+    ) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        entry.reasons.push(FallibilityReason::NullCheckThrow);
+    }
     for key in checked_cast_throw_callables(program, facts, signatures, representations) {
         let entry = callables.entry(key).or_default();
         entry.returns_result = true;
@@ -760,6 +820,19 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
         entry.returns_result = true;
         entry.reasons.push(FallibilityReason::ArrayBoundsThrow);
     }
+    for key in shaped_immediate_effect_callables(
+        program,
+        facts,
+        signatures,
+        representations,
+        |expr| matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "copyOf" | "copy_of" | "copyOfRange" | "copy_of_range")),
+        None,
+        block_has_unhandled_native_array_copy_effect,
+    ) {
+        let entry = callables.entry(key).or_default();
+        entry.returns_result = true;
+        entry.reasons.push(FallibilityReason::NativeArrayCopyThrow);
+    }
     if signatures.is_some() {
         for key in shaped_immediate_effect_callables(
             program,
@@ -767,8 +840,34 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
             signatures,
             representations,
             |expr| {
-                matches!(expr, Expr::Call { receiver: Some(_), name, .. }
-                if name == "get" || crate::stdlib::native_collection_method_name_mutates_receiver(name))
+                matches!(expr, Expr::Call { receiver: Some(_), name, args, .. }
+                if args.len() == 1 && matches!(name.as_str(), "add" | "remove" | "contains"))
+            },
+            None,
+            block_has_unhandled_semantic_set_effect,
+        ) {
+            let entry = callables.entry(key).or_default();
+            entry.returns_result = true;
+            entry.reasons.push(FallibilityReason::SemanticSetKeyThrow);
+        }
+        for key in shaped_immediate_effect_callables(
+            program,
+            facts,
+            signatures,
+            representations,
+            |expr| {
+                matches!(
+                    expr,
+                    Expr::Binary {
+                        op: BinaryOp::Add,
+                        ..
+                    }
+                ) || matches!(expr, Expr::New { ty, args, body: None, .. }
+                    if args.len() == 1 && crate::effective_facts::EffectiveFacts::new(facts)
+                        .native_collection_requires_runtime_policy(ty))
+                    || matches!(expr, Expr::Call { receiver: Some(_), name, .. }
+                    if matches!(name.as_str(), "get" | "getFirst" | "get_first" | "getLast" | "get_last" | "element" | "toString" | "to_string" | "valueOf" | "value_of" | "format" | "print" | "println")
+                        || crate::stdlib::native_collection_method_name_mutates_receiver(name))
             },
             None,
             block_has_unhandled_retained_native_effect,
@@ -855,6 +954,20 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
         let fallback_signatures = crate::signature::SignaturePlan::default();
         let reasons = [
             (
+                block_has_unhandled_native_array_copy_effect(
+                    body,
+                    &cast_env,
+                    crate::expr_shape::ExprShapeContext::new(
+                        signatures,
+                        representations,
+                        Some(facts),
+                    ),
+                    &[],
+                    signatures.unwrap_or(&fallback_signatures),
+                ),
+                FallibilityReason::NativeArrayCopyThrow,
+            ),
+            (
                 block_has_unhandled_array_bounds(body),
                 FallibilityReason::ArrayBoundsThrow,
             ),
@@ -884,6 +997,20 @@ pub(crate) fn plan_program_fallibility_with_cast_context(
                 !nullable_params.is_empty()
                     && block_has_unhandled_nullable_receiver_deref(body, &nullable_params),
                 FallibilityReason::NullReceiverThrow,
+            ),
+            (
+                block_has_unhandled_checked_identity_null(
+                    body,
+                    &cast_env,
+                    crate::expr_shape::ExprShapeContext::new(
+                        signatures,
+                        representations,
+                        Some(facts),
+                    ),
+                    &[],
+                    signatures.unwrap_or(&fallback_signatures),
+                ),
+                FallibilityReason::NullCheckThrow,
             ),
             (
                 block_has_unhandled_direct_throw(body, facts, &[]),
@@ -1729,7 +1856,7 @@ fn shaped_immediate_effect_callables(
     facts: &FactSet,
     signatures: Option<&crate::signature::SignaturePlan>,
     representations: Option<&crate::representation::RepresentationPlan>,
-    candidate: fn(&Expr) -> bool,
+    candidate: impl Fn(&Expr) -> bool,
     block_candidate: Option<fn(&Block) -> bool>,
     check: fn(
         &Block,
@@ -1746,7 +1873,9 @@ fn shaped_immediate_effect_callables(
     let mut keys = Vec::new();
     let fallback_signatures = crate::signature::SignaturePlan::default();
     let signature_plan = signatures.unwrap_or(&fallback_signatures);
-    let ctx = crate::expr_shape::ExprShapeContext::new(signatures, representations, Some(facts));
+    let external_index = facts.external_lookup_index();
+    let ctx = crate::expr_shape::ExprShapeContext::new(signatures, representations, Some(facts))
+        .with_external_index(&external_index);
     for ty in types {
         for member in &ty.members {
             let body = match member {
@@ -1795,7 +1924,7 @@ fn shaped_immediate_effect_callables(
             let Some(body) = body else {
                 continue;
             };
-            let env = solved_env.unwrap_or_else(|| {
+            let mut env = solved_env.unwrap_or_else(|| {
                 let mut env = crate::expr_shape::ShapeEnv::new();
                 for (index, name) in ty.type_params.iter().enumerate() {
                     env.insert_type_param_declaration(
@@ -1847,6 +1976,49 @@ fn shaped_immediate_effect_callables(
                 }
                 env
             });
+            // Effect analysis uses the same inherited field slots as lowering,
+            // instantiated in the receiver's declaration frame. Own fields
+            // already in the environment retain Java hiding precedence.
+            let mut seen_fields = ty
+                .members
+                .iter()
+                .filter_map(|member| match member {
+                    Member::Field(field) => Some(field.name.clone()),
+                    _ => None,
+                })
+                .collect::<HashSet<_>>();
+            for inherited in
+                crate::inherited_members::inherited_instance_field_refs_for_type(ty, program)
+            {
+                let field = inherited.field();
+                if !seen_fields.insert(field.name.clone()) {
+                    continue;
+                }
+                let Some(declaring_ty) = crate::inherited_members::find_type_decl_for_owner_context(
+                    program,
+                    &ty.name,
+                    inherited.declaring_type(),
+                ) else {
+                    continue;
+                };
+                let bindings = crate::inherited_members::source_ancestor_type_arguments(
+                    program,
+                    ty,
+                    declaring_ty,
+                )
+                .unwrap_or_default();
+                let java_ty =
+                    crate::resolve::substitute_method_type_variables(&field.ty, &bindings);
+                let shape = signature_plan
+                    .field_shape(inherited.declaring_type(), &field.name)
+                    .map(|shape| {
+                        crate::shape_projection::specialize_slot_shape_java_type(shape, &java_ty)
+                    })
+                    .unwrap_or_else(|| {
+                        crate::shape_projection::project_java_value_shape(representations, java_ty)
+                    });
+                env.insert_field_shape(field.name.clone(), shape);
+            }
             if check(body, &env, ctx, locals, signature_plan) {
                 keys.push(key);
             }
@@ -1866,6 +2038,38 @@ pub(crate) fn enhanced_for_iterable_sites(body: &Block) -> HashSet<*const Expr> 
         }
     });
     sites
+}
+
+fn block_has_unhandled_checked_hash(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let Some(facts) = ctx.facts() else {
+        return false;
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
+    };
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+            found |=
+                crate::java_hash_plan::plan_java_hash_call(expr, env.type_env(), facts).is_some();
+        });
+        found
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &|catches| catches_intrinsic_exception(catches, "Throwable"),
+            learn: Some(&learn),
+        },
+    )
 }
 
 fn block_has_unhandled_virtual_object_string(
@@ -2030,6 +2234,145 @@ fn block_has_unhandled_retained_stream(
     })
 }
 
+fn block_has_unhandled_semantic_set_effect(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let Some(representations) = ctx.representations() else {
+        return false;
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
+    };
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+            if found {
+                return;
+            }
+            let Expr::Call {
+                receiver: Some(receiver),
+                name,
+                args,
+                ..
+            } = expr
+            else {
+                return;
+            };
+            if args.len() != 1 || !matches!(name.as_str(), "add" | "remove" | "contains") {
+                return;
+            }
+            let shape = crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
+            if shape.native_allocation.shared() {
+                return;
+            }
+            let Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod { method, .. }) =
+                crate::call_plan::plan_native_collection_receiver_call_for_type(
+                    receiver,
+                    name,
+                    Some(args),
+                    &shape.java_ty,
+                    env.type_env(),
+                )
+            else {
+                return;
+            };
+            found = crate::call_plan::native_set_uses_checked_key_operation(
+                method,
+                &shape.java_ty,
+                representations,
+            );
+        });
+        found
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &|catches| catches_intrinsic_exception(catches, "RuntimeException"),
+            learn: Some(&learn),
+        },
+    )
+}
+
+fn block_has_unhandled_native_array_copy_effect(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    use crate::call_plan::{CallTargetPlan, NativeCollectionStaticMethod};
+    let Some(facts) = ctx.facts() else {
+        return false;
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
+    };
+    for thrown in [
+        "NegativeArraySizeException",
+        "ArrayIndexOutOfBoundsException",
+        "IllegalArgumentException",
+        "NullPointerException",
+    ] {
+        let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+            let mut found = false;
+            crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+                let Expr::Call {
+                    receiver,
+                    name,
+                    args,
+                    resolved,
+                    ..
+                } = expr
+                else {
+                    return;
+                };
+                let Some(CallTargetPlan::NativeCollectionStatic { method }) =
+                    crate::call_plan::plan_native_collection_static_call(
+                        receiver.as_deref(),
+                        name,
+                        resolved.as_ref(),
+                        env.type_env(),
+                        facts,
+                    )
+                else {
+                    return;
+                };
+                let applicable = match method {
+                    NativeCollectionStaticMethod::ArraysCopyOf if args.len() == 2 => matches!(
+                        thrown,
+                        "NegativeArraySizeException" | "NullPointerException"
+                    ),
+                    NativeCollectionStaticMethod::ArraysCopyOfRange if args.len() == 3 => {
+                        thrown != "NegativeArraySizeException"
+                    }
+                    _ => false,
+                };
+                found |= applicable;
+            });
+            found
+        };
+        let handles = |catches: &[CatchClause]| catches_intrinsic_exception(catches, thrown);
+        if block_has_unhandled_expression_effect(
+            body,
+            env,
+            &ExpressionEffect {
+                expression: &expression,
+                handles: &handles,
+                learn: Some(&learn),
+            },
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 fn block_has_unhandled_retained_native_effect(
     body: &Block,
     env: &crate::expr_shape::ShapeEnv,
@@ -2044,11 +2387,59 @@ fn block_has_unhandled_retained_native_effect(
     let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
         crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
     };
-    for thrown in ["UnsupportedOperationException", "IndexOutOfBoundsException"] {
+    for thrown in [
+        "UnsupportedOperationException",
+        "IndexOutOfBoundsException",
+        "RuntimeException",
+        "NoSuchElementException",
+        "NullPointerException",
+    ] {
         let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
             let mut found = false;
             crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
                 if found {
+                    return;
+                }
+                if thrown == "RuntimeException" {
+                    found = crate::conversion_plan::implicit_java_display_operands(
+                        expr,
+                        env.type_env(),
+                        facts,
+                    )
+                    .into_iter()
+                    .any(|operand| {
+                        let shape =
+                            crate::expr_shape::infer_expr_shape_with_context(operand, env, ctx);
+                        crate::conversion_plan::native_collection_display_kind(&shape, facts)
+                            .is_some()
+                            || env
+                                .type_env()
+                                .is_unbounded_object_type_parameter(&shape.java_ty)
+                    });
+                    if found {
+                        return;
+                    }
+                }
+                if thrown == "NullPointerException"
+                    && let Expr::New {
+                        ty,
+                        args,
+                        body: None,
+                        ..
+                    } = expr
+                    && crate::effective_facts::EffectiveFacts::new(facts)
+                        .native_collection_requires_runtime_policy(ty)
+                    && matches!(
+                        crate::call_plan::plan_native_collection_constructor_for_args(
+                            ty,
+                            args,
+                            env.type_env(),
+                            facts
+                        ),
+                        Some(crate::call_plan::NativeCollectionNewTarget::FromSource { .. })
+                    )
+                {
+                    found = true;
                     return;
                 }
                 let Expr::Call {
@@ -2060,11 +2451,14 @@ fn block_has_unhandled_retained_native_effect(
                 else {
                     return;
                 };
+                if thrown == "RuntimeException"
+                    && !matches!(name.as_str(), "toString" | "to_string")
+                {
+                    return;
+                }
                 let shape = crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
-                if !shape.native_allocation.shared()
-                    || crate::effective_facts::EffectiveFacts::new(facts)
-                        .retained_native_collection_kind(&shape.java_ty)
-                        .is_none()
+                if crate::conversion_plan::native_collection_display_kind(&shape, facts).is_none()
+                    || (!shape.native_allocation.shared() && thrown != "RuntimeException")
                 {
                     return;
                 }
@@ -2081,6 +2475,14 @@ fn block_has_unhandled_retained_native_effect(
                 };
                 found = if thrown == "UnsupportedOperationException" {
                     method.mutates_receiver()
+                } else if thrown == "RuntimeException" {
+                    // Collection formatting invokes arbitrary element
+                    // toString code and traverses a live fail-fast cursor.
+                    method == NativeCollectionMethod::ToString
+                } else if thrown == "NoSuchElementException" {
+                    method.is_queue_endpoint() && !method.queue_endpoint_can_be_empty()
+                } else if thrown == "NullPointerException" {
+                    matches!(method, NativeCollectionMethod::QueueInsert { .. })
                 } else {
                     matches!(
                         method,
@@ -2107,6 +2509,216 @@ fn block_has_unhandled_retained_native_effect(
         }
     }
     false
+}
+
+fn block_has_unhandled_shaped_call_null_check(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let Some(facts) = ctx.facts() else {
+        return false;
+    };
+    let fallback_index;
+    let external_index = match ctx.external_index() {
+        Some(index) => index,
+        None => {
+            fallback_index = facts.external_lookup_index();
+            &fallback_index
+        }
+    };
+    let ctx = crate::expr_shape::ExprShapeContext::new(
+        ctx.signatures(),
+        ctx.representations(),
+        Some(facts),
+    )
+    .with_external_index(external_index);
+    let nullable = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::infer_expr_shape_with_context(expr, env, ctx)
+            .optional_element_type()
+            .is_some()
+    };
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
+            if found {
+                return;
+            }
+            let (args, shapes) = match node {
+                Expr::Call {
+                    receiver,
+                    name,
+                    args,
+                    resolved,
+                    ..
+                } => {
+                    if receiver
+                        .as_deref()
+                        .is_some_and(|receiver| nullable(receiver, env))
+                    {
+                        let target =
+                            crate::call_plan::plan_call_target_with_external_index_and_arity(
+                                receiver.as_deref(),
+                                name,
+                                args.len(),
+                                resolved.as_ref(),
+                                facts,
+                                external_index,
+                                env.type_env(),
+                            );
+                        if target.receiver_expr().is_some() {
+                            found = true;
+                            return;
+                        }
+                    }
+                    // No nullable value means no unboxing null check. Avoid
+                    // constructing a complete argument plan for those calls.
+                    if !args.iter().any(|arg| nullable(arg, env)) {
+                        return;
+                    }
+                    let plan = crate::call_plan::plan_call_arguments_with_facts_and_args(
+                        receiver.as_deref(),
+                        name,
+                        resolved.as_ref(),
+                        args,
+                        signatures,
+                        facts,
+                        env.type_env(),
+                    );
+                    let primitive = |shape: crate::slot_shape::RustSlotShape| {
+                        matches!(shape.java_ty, JavaType::Primitive(_))
+                    };
+                    let shapes = match plan {
+                        crate::call_plan::ArgumentLoweringPlan::Shaped(shapes) => {
+                            shapes.into_iter().map(primitive).collect::<Vec<_>>()
+                        }
+                        crate::call_plan::ArgumentLoweringPlan::Slotted(slots) => slots
+                            .into_iter()
+                            .map(|slot| match slot {
+                                crate::conversion_plan::Slot::Argument(shape)
+                                | crate::conversion_plan::Slot::Assignment(shape) => {
+                                    primitive(shape)
+                                }
+                                crate::conversion_plan::Slot::Index
+                                | crate::conversion_plan::Slot::Condition => true,
+                                _ => false,
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (args, shapes)
+                }
+                Expr::New {
+                    ty, args, resolved, ..
+                } => {
+                    if let [source] = args.as_slice()
+                        && (nullable(source, env)
+                            || matches!(source, Expr::Literal(crate::java_ir::Literal::Null)))
+                        && matches!(
+                            crate::call_plan::plan_native_collection_constructor_for_args(
+                                ty,
+                                args,
+                                env.type_env(),
+                                facts
+                            ),
+                            Some(
+                                crate::call_plan::NativeCollectionNewTarget::FromSource { .. }
+                                    | crate::call_plan::NativeCollectionNewTarget::FromSingleArg { .. }
+                            )
+                        )
+                    {
+                        found = true;
+                        return;
+                    }
+                    let Some(call) = resolved else {
+                        return;
+                    };
+                    (
+                        args,
+                        call.params
+                            .iter()
+                            .map(|param| matches!(param.ty, JavaType::Primitive(_)))
+                            .collect(),
+                    )
+                }
+                Expr::ArrayAccess(receiver, _) => {
+                    found = nullable(receiver, env);
+                    return;
+                }
+                Expr::Cast {
+                    ty: JavaType::Primitive(_),
+                    expr,
+                } => {
+                    found = nullable(expr, env);
+                    return;
+                }
+                _ => return,
+            };
+            found = args
+                .iter()
+                .zip(shapes)
+                .any(|(arg, primitive)| primitive && nullable(arg, env));
+        });
+        found
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &catches_null_pointer_exception,
+            learn: Some(&learn),
+        },
+    )
+}
+
+fn block_has_unhandled_checked_identity_null(
+    body: &Block,
+    env: &crate::expr_shape::ShapeEnv,
+    ctx: crate::expr_shape::ExprShapeContext<'_>,
+    locals: &[crate::signature::LocalPlan],
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    let Some(facts) = ctx.facts() else {
+        return false;
+    };
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
+            let Some(value) =
+                crate::call_plan::checked_identity_source_argument(node, env.type_env(), facts)
+            else {
+                return;
+            };
+            let Expr::Call { resolved, .. } = node else {
+                return;
+            };
+            let actual = crate::expr_shape::infer_expr_shape_with_context(value, env, ctx);
+            found |= matches!(value, Expr::Literal(crate::java_ir::Literal::Null))
+                || crate::call_plan::checked_identity_argument_has_null_carrier(
+                    &actual,
+                    resolved.as_ref(),
+                );
+        });
+        found
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(stmt, env, locals, signatures, Some(ctx));
+    };
+    block_has_unhandled_expression_effect(
+        body,
+        env,
+        &ExpressionEffect {
+            expression: &expression,
+            handles: &catches_null_pointer_exception,
+            learn: Some(&learn),
+        },
+    )
 }
 
 fn block_has_unhandled_checked_cast(
@@ -2686,7 +3298,8 @@ fn stmt_has_unhandled_nullable_receiver_deref(stmt: &Stmt, names: &HashSet<Strin
                 || block_has_unhandled_nullable_receiver_deref(body, names)
         }
         Stmt::EnhancedFor { iterable, body, .. } => {
-            expr_has_nullable_receiver_deref(iterable, names)
+            expr_is_nullable_param_ref(iterable, names)
+                || expr_has_nullable_receiver_deref(iterable, names)
                 || block_has_unhandled_nullable_receiver_deref(body, names)
         }
         Stmt::Switch { selector, cases } => {
@@ -3567,6 +4180,152 @@ mod tests {
     use crate::semantic_analysis::analyze_program;
 
     #[test]
+    fn native_array_copy_effects_use_jdk_handlers_and_preserve_source_precedence() {
+        let parsed = parse_java_source(
+            r#"
+import java.util.Arrays;
+class CopyEffects {
+    static byte[] copy(byte[] input, int size) { return Arrays.copyOf(input, size); }
+    static byte[] range(byte[] input, int from, int to) { return Arrays.copyOfRange(input, from, to); }
+    static byte[] caught(byte[] input) {
+        try { return Arrays.copyOfRange(input, -1, 3); }
+        catch (RuntimeException error) { return input; }
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility(&resolved.program, &graph, &resolved.facts);
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let key = CallableKey::source_method_for_type(owner, method);
+            assert_eq!(
+                plan.returns_result(&key),
+                method.name != "caught",
+                "{}: {:?}",
+                method.name,
+                plan.callable(&key)
+            );
+        }
+        let parsed = parse_java_source(
+            r#"
+class Arrays { static byte[] copyOf(byte[] input, int size) { return input; } }
+class CopySource { static byte[] run(byte[] input) { return Arrays.copyOf(input, 1); } }
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility(&resolved.program, &graph, &resolved.facts);
+        let owner = &resolved.program.types[1];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let key = CallableKey::source_method_for_type(owner, method);
+        assert!(
+            !plan
+                .callable(&key)
+                .unwrap()
+                .reasons()
+                .contains(&FallibilityReason::NativeArrayCopyThrow)
+        );
+    }
+
+    #[test]
+    fn inherited_generic_hash_effect_uses_the_childs_field_frame() {
+        let parsed = parse_java_source(
+            r#"
+            class Base<T> { T value; public int hashCode() { return 0; } }
+            class Child<U> extends Base<U> {
+                public int hashCode() { return value.hashCode(); }
+            }
+        "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility(&resolved.program, &graph, &resolved.facts);
+        let owner = &resolved.program.types[1];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "hashCode" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert!(plan.returns_result(&CallableKey::source_method_for_type(owner, method)));
+    }
+
+    #[test]
+    fn checked_identity_null_effect_uses_solved_shape_and_java_catches() {
+        for (body, nullable, expected) in [
+            ("return Objects.requireNonNull(value);", false, false),
+            (
+                "return Objects.requireNonNull(value, \"value\");",
+                true,
+                true,
+            ),
+            (
+                "try { return Objects.requireNonNull(value); } catch (NullPointerException ex) { return \"fallback\"; }",
+                true,
+                false,
+            ),
+        ] {
+            let parsed = parse_java_source(&format!(
+                "import java.util.Objects; class C {{ static String check(String value) {{ {body} }} }}"
+            ));
+            let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+            let method = resolved.program.types[0]
+                .members
+                .iter()
+                .find_map(|member| {
+                    if let Member::Method(method) = member {
+                        Some(method)
+                    } else {
+                        None
+                    }
+                })
+                .unwrap();
+            let mut env = crate::expr_shape::ShapeEnv::new();
+            let ty = if nullable {
+                crate::types::optional_java_type(JavaType::String)
+            } else {
+                JavaType::String
+            };
+            env.insert_param_shape_with_java_type(
+                "value",
+                crate::slot_shape::RustSlotShape::for_storage(ty),
+                JavaType::String,
+            );
+            let signatures = crate::signature::SignaturePlan::default();
+            let ctx = crate::expr_shape::ExprShapeContext::new(
+                Some(&signatures),
+                None,
+                Some(&resolved.facts),
+            );
+            assert_eq!(
+                block_has_unhandled_checked_identity_null(
+                    method.body.as_ref().unwrap(),
+                    &env,
+                    ctx,
+                    &[],
+                    &signatures,
+                ),
+                expected,
+                "{body}, nullable={nullable}"
+            );
+        }
+    }
+
+    #[test]
     fn stored_sam_runtime_effects_use_external_keys_without_shadowing_source_types() {
         for (owner, method, arity) in [
             ("java.util.function.IntSupplier", "getAsInt", 0),
@@ -3726,6 +4485,106 @@ mod tests {
                 method.name
             );
         }
+    }
+
+    #[test]
+    fn enhanced_for_null_receiver_is_an_effect_unless_caught() {
+        let parsed = parse_java_source(
+            r#"
+            class Loops {
+                static int count(Object[] values) {
+                    for (Object value : values) { }
+                    return 1;
+                }
+                static int caught(Object[] values) {
+                    try { for (Object value : values) { } }
+                    catch (NullPointerException expected) { return -1; }
+                    return 1;
+                }
+            }
+        "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility_with_signatures(
+            &resolved.program,
+            &graph,
+            &resolved.facts,
+            None,
+        );
+        let owner = &resolved.program.types[0];
+        for member in &owner.members {
+            if let Member::Method(method) = member {
+                assert_eq!(
+                    plan.returns_result(&CallableKey::source_method_for_type(owner, method)),
+                    method.name == "count",
+                    "{}",
+                    method.name
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn source_sam_bodies_share_effects_without_executing_at_creation() {
+        let parsed = parse_java_source(
+            r#"
+            interface Action<T> { int get(T value); }
+            interface Clean { int get(); }
+            class Routes {
+                static int invoke(Action<String> action) { return action.get("value"); }
+                static int unused(Action<String> action) { return 3; }
+                static int failing() { return invoke(value -> { throw new IllegalArgumentException(); }); }
+                static int plain() { return invoke(value -> value.length()); }
+                static int creationOnly() { return unused(value -> { throw new IllegalArgumentException(); }); }
+                static int constant(String value) { return 4; }
+                static int reference() { return invoke(Routes::constant); }
+                static int clean(Clean action) { return action.get(); }
+                static int cleanUse() { return clean(() -> 4); }
+            }
+        "#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let graph = crate::usage::build_call_graph_with_facts(&resolved.program, &resolved.facts);
+        let plan = plan_program_fallibility_with_signatures(
+            &resolved.program,
+            &graph,
+            &resolved.facts,
+            None,
+        );
+        for owner in &resolved.program.types {
+            for member in &owner.members {
+                let Member::Method(method) = member else {
+                    continue;
+                };
+                let expected = owner.name == "Action"
+                    || matches!(
+                        method.name.as_str(),
+                        "invoke" | "failing" | "plain" | "reference" | "clean" | "cleanUse"
+                    );
+                assert_eq!(
+                    plan.returns_result(&CallableKey::source_method_for_type(owner, method)),
+                    expected,
+                    "{}.{}",
+                    owner.name,
+                    method.name,
+                );
+            }
+        }
+        let bodies: Vec<_> = graph.synthetic_callable_bodies().collect();
+        assert_eq!(bodies.len(), 4);
+        assert_eq!(
+            bodies
+                .iter()
+                .filter(|(key, _, _)| plan.returns_result(key))
+                .count(),
+            3
+        );
     }
 
     #[test]
@@ -4143,6 +5002,97 @@ class Use {
                 }
             }
         }
+    }
+
+    #[test]
+    fn shaped_null_checks_respect_fields_shadowing_catches_and_deferred_bodies() {
+        let parsed = parse_java_source(
+            r#"
+import java.util.function.Supplier;
+interface Counter { int get(); }
+class NullContracts {
+    Counter current;
+    Integer boxed;
+    NullContracts absent;
+    static int primitive(int value) { return value; }
+    static int safe() { return 1; }
+    int bare() { return current.get(); }
+    int explicit() { return this.current.get(); }
+    int caught() { try { return current.get(); } catch (NullPointerException e) { return 0; } }
+    int unbox() { return primitive(boxed); }
+    int caughtUnbox() { try { return primitive(boxed); } catch (NullPointerException e) { return 0; } }
+    Supplier<Integer> delayed() { return () -> current.get(); }
+    int shadow(Counter current) { return current.get(); }
+    int staticCall() { return absent.safe(); }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        let signatures = crate::signature::SignaturePlan::default();
+        let ctx = crate::expr_shape::ExprShapeContext::new(
+            Some(&signatures),
+            None,
+            Some(&resolved.facts),
+        );
+        let mut checked = 0;
+        for member in &resolved.program.types[1].members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            let expected = match method.name.as_str() {
+                "bare" | "explicit" | "unbox" => true,
+                "caught" | "caughtUnbox" | "delayed" | "shadow" | "staticCall" => false,
+                _ => continue,
+            };
+            let mut env = crate::expr_shape::ShapeEnv::new();
+            for (name, ty) in [
+                ("current", "Counter"),
+                ("boxed", "Integer"),
+                ("absent", "NullContracts"),
+            ] {
+                env.insert_field_shape(
+                    name,
+                    crate::slot_shape::RustSlotShape::for_storage(
+                        crate::types::optional_java_type(crate::parser::parse_hierarchy_type(ty)),
+                    ),
+                );
+            }
+            if method.name == "shadow" {
+                env.insert_local_shape(
+                    "current",
+                    crate::slot_shape::RustSlotShape::for_storage(
+                        crate::parser::parse_hierarchy_type("Counter"),
+                    ),
+                );
+            }
+            assert_eq!(
+                block_has_unhandled_shaped_call_null_check(
+                    method.body.as_ref().unwrap(),
+                    &env,
+                    ctx,
+                    &[],
+                    &signatures,
+                ),
+                expected,
+                "{}",
+                method.name
+            );
+            let external_index = resolved.facts.external_lookup_index();
+            assert_eq!(
+                block_has_unhandled_shaped_call_null_check(
+                    method.body.as_ref().unwrap(),
+                    &env,
+                    ctx.with_external_index(&external_index),
+                    &[],
+                    &signatures,
+                ),
+                expected,
+                "indexed {}",
+                method.name,
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 8);
     }
 
     #[test]

@@ -739,7 +739,7 @@ pub(crate) fn is_known_java_platform_subtype(actual: &str, target: &str) -> bool
     platform_name(actual) && platform_name(target) && is_known_java_subtype(actual, target)
 }
 
-fn canonical_subtype_name(name: &str) -> String {
+pub(crate) fn canonical_subtype_name(name: &str) -> String {
     let canonical = canonical_external_receiver_type_key(name);
     canonical
         .rsplit('.')
@@ -1699,6 +1699,8 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
         }
     }
     for owner in ["ListIterator", "java.util.ListIterator", "JavaListIterator"] {
+        // Java mutation effects remain explicit, but the Rust cursor carrier
+        // mutates interior shared state and needs only a shared receiver loan.
         for method in ["next", "next_element", "previous"] {
             let mut effect = jdk_instance_api_fact(
                 owner,
@@ -1760,7 +1762,7 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
                 Vec::new(),
                 FacadeSlot::Owned,
             );
-            abi.receiver = ReceiverAbi::MutBorrowedSelf;
+            abi.receiver = ReceiverAbi::BorrowedSelf;
             facts.facade_abi_facts.push(abi);
         }
         let mut remove_abi = jdk_result_method_abi(
@@ -1771,7 +1773,7 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
             Vec::new(),
             FacadeSlot::Owned,
         );
-        remove_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        remove_abi.receiver = ReceiverAbi::BorrowedSelf;
         facts.facade_abi_facts.push(remove_abi);
         let mut set_abi = jdk_result_method_abi(
             owner,
@@ -1781,8 +1783,45 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
             vec![FacadeSlot::Owned],
             FacadeSlot::Owned,
         );
-        set_abi.receiver = ReceiverAbi::MutBorrowedSelf;
+        set_abi.receiver = ReceiverAbi::BorrowedSelf;
         facts.facade_abi_facts.push(set_abi);
+        let mut add_effect = jdk_instance_api_fact(owner, "add", 1, JavaType::Void);
+        add_effect.role = ExternalApiRole::Mutator;
+        add_effect.receiver_mutability = ReceiverMutabilityFact::MutatesReceiver;
+        add_effect.thrown = vec![JavaType::Named {
+            name: "UnsupportedOperationException".into(),
+            args: vec![],
+        }];
+        facts.external_api_effect_facts.push(add_effect);
+        let mut add_abi = jdk_result_method_abi(
+            owner,
+            "add",
+            1,
+            "JavaListIterator::add_result",
+            vec![FacadeSlot::Owned],
+            FacadeSlot::Owned,
+        );
+        add_abi.receiver = ReceiverAbi::BorrowedSelf;
+        facts.facade_abi_facts.push(add_abi);
+        for (java_name, rust_name) in [
+            ("nextIndex", "next_index"),
+            ("previousIndex", "previous_index"),
+        ] {
+            facts.external_api_effect_facts.push(jdk_instance_api_fact(
+                owner,
+                java_name,
+                0,
+                JavaType::Primitive(PrimitiveType::Int),
+            ));
+            facts.facade_abi_facts.push(rust_stdlib_method_abi(
+                owner,
+                java_name,
+                0,
+                &format!("JavaListIterator::{rust_name}"),
+                vec![],
+                FacadeSlot::Owned,
+            ));
+        }
         for method in ["forEachRemaining", "for_each_remaining"] {
             let mut abi = rust_stdlib_method_abi(
                 owner,
@@ -1792,7 +1831,7 @@ fn add_jdk_iterator_abi_facts(facts: &mut FactSet) {
                 vec![FacadeSlot::Owned],
                 FacadeSlot::Owned,
             );
-            abi.receiver = ReceiverAbi::MutBorrowedSelf;
+            abi.receiver = ReceiverAbi::BorrowedSelf;
             facts.facade_abi_facts.push(abi);
         }
     }
@@ -3667,6 +3706,23 @@ fn native_collection_kind_receiver_mutates(kind: JavaCollectionKind, method_name
                 | "insert"
                 | "extend"
                 | "push"
+                | "pop"
+                | "addFirst"
+                | "add_first"
+                | "addLast"
+                | "add_last"
+                | "offerFirst"
+                | "offer_first"
+                | "offerLast"
+                | "offer_last"
+                | "pollFirst"
+                | "poll_first"
+                | "pollLast"
+                | "poll_last"
+                | "removeFirst"
+                | "remove_first"
+                | "removeLast"
+                | "remove_last"
                 | "retain"
         ),
         JavaCollectionKind::Map
@@ -5551,7 +5607,7 @@ fn known_generic_queue_return_type(
     match (name, arg_count, args) {
         (
             "peek" | "poll" | "remove" | "element" | "getFirst" | "get_first" | "removeFirst"
-            | "remove_first" | "pop",
+            | "remove_first" | "pop" | "getLast" | "get_last" | "removeLast" | "remove_last",
             0,
             [element],
         ) => Some(generic_read_type(element)),
@@ -7368,6 +7424,48 @@ impl<K: Ord, V> JavaMapInsert<K, V> for std::collections::BTreeMap<K, V> {
 
 pub trait JavaMapKey {
     fn java_map_key_eq(&self, other: &Self) -> bool;
+    /// Hash/set membership has a reference-identity shortcut distinct from
+    /// invoking Object.equals, which may itself throw even on the receiver.
+    fn java_map_key_identity_eq(&self, _other: &Self) -> bool { false }
+    fn java_map_key_eq_result(&self, other: &Self) -> Result<bool, JavaException> {
+        Ok(self.java_map_key_eq(other))
+    }
+}
+
+/// Reference identity is independent of equals/hashCode and of the address
+/// of a Rust handle slot. The token identifies the retained Java allocation.
+pub trait JavaReferenceIdentity {
+    fn java_reference_identity(&self) -> *const ();
+}
+
+impl<T: ?Sized> JavaReferenceIdentity for std::rc::Rc<T> {
+    fn java_reference_identity(&self) -> *const () { std::rc::Rc::as_ptr(self) as *const () }
+}
+
+impl<T: ?Sized> JavaReferenceIdentity for std::sync::Arc<T> {
+    fn java_reference_identity(&self) -> *const () { std::sync::Arc::as_ptr(self) as *const () }
+}
+
+impl<T: JavaReferenceIdentity + ?Sized> JavaReferenceIdentity for &T {
+    fn java_reference_identity(&self) -> *const () { T::java_reference_identity(*self) }
+}
+
+impl<T: JavaReferenceIdentity + ?Sized> JavaReferenceIdentity for &mut T {
+    fn java_reference_identity(&self) -> *const () { T::java_reference_identity(*self) }
+}
+
+impl<T: JavaReferenceIdentity + ?Sized> JavaReferenceIdentity for Box<T> {
+    fn java_reference_identity(&self) -> *const () { T::java_reference_identity(self.as_ref()) }
+}
+
+pub fn java_reference_equals<L: JavaReferenceIdentity + ?Sized, R: JavaReferenceIdentity + ?Sized>(
+    left: Option<&L>, right: Option<&R>,
+) -> bool {
+    match (left, right) {
+        (Some(left), Some(right)) => left.java_reference_identity() == right.java_reference_identity(),
+        (None, None) => true,
+        _ => false,
+    }
 }
 
 /// Java value equality, distinct from reference `==`. Borrowing does not
@@ -7388,6 +7486,12 @@ pub fn java_nullable_value_equals<T: JavaMapKey + ?Sized>(
 impl<T: JavaMapKey + ?Sized> JavaMapKey for &T {
     fn java_map_key_eq(&self, other: &Self) -> bool {
         T::java_map_key_eq(*self, *other)
+    }
+    fn java_map_key_eq_result(&self, other: &Self) -> Result<bool, JavaException> {
+        T::java_map_key_eq_result(*self, *other)
+    }
+    fn java_map_key_identity_eq(&self, other: &Self) -> bool {
+        T::java_map_key_identity_eq(*self, *other)
     }
 }
 
@@ -7490,11 +7594,25 @@ impl JavaMapKey for f64 {
 }
 
 impl<T: JavaMapKey> JavaMapKey for Option<T> {
+    fn java_map_key_identity_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Some(left), Some(right)) => left.java_map_key_identity_eq(right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
     fn java_map_key_eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Some(left), Some(right)) => left.java_map_key_eq(right),
             (None, None) => true,
             _ => false,
+        }
+    }
+    fn java_map_key_eq_result(&self, other: &Self) -> Result<bool, JavaException> {
+        match (self, other) {
+            (Some(left), Some(right)) => left.java_map_key_eq_result(right),
+            (None, None) => Ok(true),
+            _ => Ok(false),
         }
     }
 }
@@ -7520,14 +7638,42 @@ impl<T: JavaTreeKey> JavaTreeKey for Option<T> {
     }
 }
 
+/// Normalize borrowed query views without changing the stored key carrier.
+/// In particular Option<&K> is not &Option<K>, and str is not String.
+pub trait JavaMapKeyQuery<K> {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&K>) -> R) -> R;
+}
+impl<K> JavaMapKeyQuery<K> for K {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&K>) -> R) -> R { query(Some(self)) }
+}
+impl<K> JavaMapKeyQuery<K> for &K {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&K>) -> R) -> R { query(Some(*self)) }
+}
+impl JavaMapKeyQuery<String> for &str {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&String>) -> R) -> R { query(Some(&self.to_string())) }
+}
+impl<T> JavaMapKeyQuery<T> for Option<&T> {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&T>) -> R) -> R { query(*self) }
+}
+impl JavaMapKeyQuery<String> for Option<&str> {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&String>) -> R) -> R { query(self.map(str::to_string).as_ref()) }
+}
+impl<T: Clone> JavaMapKeyQuery<Option<T>> for Option<&T> {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&Option<T>>) -> R) -> R { query(Some(&self.cloned())) }
+}
+impl JavaMapKeyQuery<Option<String>> for Option<&str> {
+    fn with_java_map_key<R>(&self, query: impl FnOnce(Option<&Option<String>>) -> R) -> R { query(Some(&self.map(str::to_string))) }
+}
+
 pub struct JavaSemanticHashMap<K, V> {
     entries: Vec<(K, V)>,
     ordering: Option<fn(&K, &K) -> std::cmp::Ordering>,
+    changes: usize,
 }
 
 impl<K: Clone, V: Clone> Clone for JavaSemanticHashMap<K, V> {
     fn clone(&self) -> Self {
-        Self { entries: self.entries.clone(), ordering: self.ordering }
+        Self { entries: self.entries.clone(), ordering: self.ordering, changes: 0 }
     }
 }
 
@@ -7540,13 +7686,35 @@ impl<K: std::fmt::Debug, V: std::fmt::Debug> std::fmt::Debug for JavaSemanticHas
 // Storage traversal does not compare keys. Keep comparison capabilities on
 // the operations that actually search or insert, not on the container itself.
 impl<K, V> JavaSemanticHashMap<K, V> {
-    pub fn new() -> Self { Self { entries: Vec::new(), ordering: None } }
+    pub fn new() -> Self { Self { entries: Vec::new(), ordering: None, changes: 0 } }
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { entries: Vec::with_capacity(capacity), ordering: None }
+        Self { entries: Vec::with_capacity(capacity), ordering: None, changes: 0 }
     }
 }
 
 impl<K: JavaMapKey, V> JavaSemanticHashMap<K, V> {
+    pub fn get_query<Q: JavaMapKeyQuery<K>>(&self, key: Q) -> Option<&V> {
+        key.with_java_map_key(|key| key.and_then(|key| self.get(key)))
+    }
+    pub fn contains_key_query<Q: JavaMapKeyQuery<K>>(&self, key: Q) -> bool {
+        key.with_java_map_key(|key| key.is_some_and(|key| self.contains_key(key)))
+    }
+    pub fn remove_query<Q: JavaMapKeyQuery<K>>(&mut self, key: Q) -> Option<V> {
+        key.with_java_map_key(|key| key.and_then(|key| self.remove(key)))
+    }
+    pub fn put_if_absent_with(&mut self, key: K, value: V,
+        is_null: fn(&V) -> bool, copy: fn(&V) -> V) -> Option<V> {
+        if let Some(index) = self.key_position(&key) {
+            let stored = &mut self.entries[index].1;
+            return Some(if is_null(stored) {
+                // Replacing a null value is nonstructural and retains the
+                // original key allocation and iteration position.
+                std::mem::replace(stored, value)
+            } else { copy(stored) });
+        }
+        self.insert(key, value);
+        None
+    }
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
         let ordering = self.ordering;
         if let Some((_, stored)) = self.entries.iter_mut()
@@ -7562,6 +7730,7 @@ impl<K: JavaMapKey, V> JavaSemanticHashMap<K, V> {
                 })
             });
             self.entries.insert(index, (key, value));
+            self.changes = self.changes.wrapping_add(1);
             None
         }
     }
@@ -7586,7 +7755,12 @@ impl<K: JavaMapKey, V> JavaSemanticHashMap<K, V> {
             .position(|(stored_key, _)| ordering.map_or_else(
                 || stored_key.java_map_key_eq(key),
                 |compare| compare(stored_key, key) == std::cmp::Ordering::Equal))?;
-        Some(self.entries.remove(index).1)
+        self.remove_index(index).map(|(_, value)| value)
+    }
+    pub fn key_position(&self, key: &K) -> Option<usize> {
+        self.entries.iter().position(|(stored, _)| self.ordering.map_or_else(
+            || stored.java_map_key_eq(key),
+            |compare| compare(stored, key) == std::cmp::Ordering::Equal))
     }
     pub fn contains_key(&self, key: &K) -> bool { self.get(key).is_some() }
     pub fn contains_value(&self, value: &V) -> bool where V: PartialEq {
@@ -7603,7 +7777,18 @@ impl<K: JavaMapKey, V> JavaSemanticHashMap<K, V> {
 impl<K, V> JavaSemanticHashMap<K, V> {
     pub fn len(&self) -> usize { self.entries.len() }
     pub fn is_empty(&self) -> bool { self.entries.is_empty() }
-    pub fn clear(&mut self) { self.entries.clear(); }
+    pub fn modification_count(&self) -> usize { self.changes }
+    pub fn clear(&mut self) {
+        self.entries.clear();
+        self.changes = self.changes.wrapping_add(1);
+    }
+    pub fn key_at(&self, index: usize) -> Option<&K> { self.entries.get(index).map(|(key, _)| key) }
+    pub fn remove_index(&mut self, index: usize) -> Option<(K, V)> {
+        if index >= self.entries.len() { return None; }
+        let removed = self.entries.remove(index);
+        self.changes = self.changes.wrapping_add(1);
+        Some(removed)
+    }
     pub fn keys(&self) -> impl Iterator<Item = &K> { self.entries.iter().map(|(key, _)| key) }
     pub fn values(&self) -> impl Iterator<Item = &V> { self.entries.iter().map(|(_, value)| value) }
     pub fn values_mut(&mut self) -> impl Iterator<Item = &mut V> {
@@ -7613,7 +7798,12 @@ impl<K, V> JavaSemanticHashMap<K, V> {
         self.entries.iter().map(|(key, value)| (key, value))
     }
     pub fn retain<F: FnMut(&K, &mut V) -> bool>(&mut self, mut predicate: F) {
-        self.entries.retain_mut(|(key, value)| predicate(key, value));
+        let changes = &mut self.changes;
+        self.entries.retain_mut(|(key, value)| {
+            let keep = predicate(key, value);
+            if !keep { *changes = changes.wrapping_add(1); }
+            keep
+        });
     }
 }
 
@@ -7625,7 +7815,7 @@ impl<K: JavaMapKey, V> JavaSemanticHashMap<K, V> {
 
 impl<K: JavaMapKey + Ord, V> JavaSemanticHashMap<K, V> {
     pub fn new_naturally_ordered() -> Self {
-        Self { entries: Vec::new(), ordering: Some(|left, right| left.cmp(right)) }
+        Self { entries: Vec::new(), ordering: Some(|left, right| left.cmp(right)), changes: 0 }
     }
 }
 
@@ -7634,6 +7824,7 @@ impl<V> JavaSemanticHashMap<String, V> {
         Self {
             entries: Vec::new(),
             ordering: Some(|left, right| left.to_lowercase().cmp(&right.to_lowercase())),
+            changes: 0,
         }
     }
 }
@@ -7696,17 +7887,35 @@ impl<T> JavaSemanticHashSet<T> {
 
 impl<T: JavaMapKey> JavaSemanticHashSet<T> {
     pub fn insert(&mut self, value: T) -> bool {
-        if self.contains(&value) { false } else { self.entries.push(value); true }
+        self.insert_result(value).expect("Java equals threw while inserting a set key")
     }
     pub fn remove(&mut self, value: &T) -> bool {
-        let Some(index) = self.entries.iter().position(|stored| stored.java_map_key_eq(value))
-        else { return false; };
-        self.entries.remove(index);
-        true
+        self.remove_result(value).expect("Java equals threw while removing a set key")
     }
     pub fn contains(&self, value: &T) -> bool {
-        self.entries.iter().any(|stored| stored.java_map_key_eq(value))
+        self.contains_result(value).expect("Java equals threw while searching for a set key")
     }
+    pub fn insert_result(&mut self, value: T) -> Result<bool, JavaException> {
+        if self.contains_result(&value)? { Ok(false) } else { self.entries.push(value); Ok(true) }
+    }
+    pub fn remove_result(&mut self, value: &T) -> Result<bool, JavaException> {
+        if let Some(index) = java_key_position_result(&self.entries, value)? {
+            self.entries.remove(index);
+            Ok(true)
+        } else { Ok(false) }
+    }
+    pub fn contains_result(&self, value: &T) -> Result<bool, JavaException> {
+        Ok(java_key_position_result(&self.entries, value)?.is_some())
+    }
+}
+
+/// Java membership invokes query.equals(stored), not the reverse. No mutation
+/// takes place until the checked comparison has completed successfully.
+fn java_key_position_result<T: JavaMapKey>(entries: &[T], query: &T) -> Result<Option<usize>, JavaException> {
+    for (index, stored) in entries.iter().enumerate() {
+        if query.java_map_key_identity_eq(stored) || query.java_map_key_eq_result(stored)? { return Ok(Some(index)); }
+    }
+    Ok(None)
 }
 
 impl<T> JavaSemanticHashSet<T> {
@@ -7872,6 +8081,11 @@ pub fn java_list_remove_by_map_key<T: JavaMapKey>(values: &mut Vec<T>, needle: &
     };
     values.remove(index);
     true
+}
+
+pub fn java_list_index_of_by_map_key<T: JavaMapKey>(values: &[T], needle: &T) -> i32 {
+    values.iter().position(|stored| needle.java_map_key_eq(stored))
+        .map(|index| index as i32).unwrap_or(-1)
 }
 
 /// Membership over a Java collection whose element carrier cannot implement
@@ -8310,18 +8524,135 @@ pub(crate) fn java_iterator_runtime_support_item() -> crate::rust_ir::RustItem {
     )
 }
 
+/// Object-display adapters are module-level consumers of cursor operations,
+/// not dependencies of a standalone Iterable runtime emitted in another scope.
+pub(crate) fn java_native_collection_display_adapter_support() -> &'static str {
+    r#"impl<T: JavaObjectDisplay + Clone + 'static, B: JavaNativeCollectionBacking<T> + 'static>
+    JavaArraysDeepToStringElement for std::rc::Rc<std::cell::RefCell<JavaNativeCollectionStorage<T, B>>> {
+    fn java_arrays_deep_to_string(&self) -> String { JavaArraysDeepToStringElement::java_object_display_result(self).unwrap_or_else(|error| panic!("uncaught Java exception: {:?}", error)) }
+    fn java_object_display_result(&self) -> Result<String, JavaException> {
+        java_native_collection_to_string_result(self, |value| JavaObjectDisplay::java_object_display_result(&value))
+    }
+}
+impl<T: JavaObjectDisplay + Clone + 'static, B: JavaNativeCollectionBacking<T> + 'static>
+    JavaArraysDeepToStringElement for std::sync::Arc<std::sync::Mutex<JavaNativeCollectionStorage<T, B>>> {
+    fn java_arrays_deep_to_string(&self) -> String { JavaArraysDeepToStringElement::java_object_display_result(self).unwrap_or_else(|error| panic!("uncaught Java exception: {:?}", error)) }
+    fn java_object_display_result(&self) -> Result<String, JavaException> {
+        java_native_collection_to_string_result(self, |value| JavaObjectDisplay::java_object_display_result(&value))
+    }
+}
+impl<K: JavaObjectDisplay + Clone + 'static, V: JavaObjectDisplay + Clone + 'static>
+    JavaArraysDeepToStringElement for std::rc::Rc<std::cell::RefCell<JavaSemanticHashMap<K, V>>> {
+    fn java_arrays_deep_to_string(&self) -> String { JavaArraysDeepToStringElement::java_object_display_result(self).unwrap_or_else(|error| panic!("uncaught Java exception: {:?}", error)) }
+    fn java_object_display_result(&self) -> Result<String, JavaException> {
+        java_native_map_to_string_result(self, |key| JavaObjectDisplay::java_object_display_result(&key), |value| JavaObjectDisplay::java_object_display_result(&value))
+    }
+}
+impl<K: JavaObjectDisplay + Clone + 'static, V: JavaObjectDisplay + Clone + 'static>
+    JavaArraysDeepToStringElement for std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<K, V>>> {
+    fn java_arrays_deep_to_string(&self) -> String { JavaArraysDeepToStringElement::java_object_display_result(self).unwrap_or_else(|error| panic!("uncaught Java exception: {:?}", error)) }
+    fn java_object_display_result(&self) -> Result<String, JavaException> {
+        java_native_map_to_string_result(self, |key| JavaObjectDisplay::java_object_display_result(&key), |value| JavaObjectDisplay::java_object_display_result(&value))
+    }
+}"#
+}
+
 pub(crate) fn java_native_collection_iterator_runtime_support() -> &'static str {
-    r#"/// Read one Java reference at a time; never hold an allocation guard
+    r#"/// Access a shared allocation only inside one physical operation. Never
+/// return a guard or loan that can survive across a translated Java callback.
+pub trait JavaSharedAllocationAccess: Clone {
+    type Value;
+    fn java_read<R>(&self, read: impl FnOnce(&Self::Value) -> R) -> R;
+    fn java_write<R>(&self, write: impl FnOnce(&mut Self::Value) -> R) -> R;
+}
+impl<T> JavaSharedAllocationAccess for std::rc::Rc<std::cell::RefCell<T>> {
+    type Value = T;
+    fn java_read<R>(&self, read: impl FnOnce(&T) -> R) -> R { read(&self.borrow()) }
+    fn java_write<R>(&self, write: impl FnOnce(&mut T) -> R) -> R { write(&mut self.borrow_mut()) }
+}
+impl<T> JavaSharedAllocationAccess for std::sync::Arc<std::sync::Mutex<T>> {
+    type Value = T;
+    fn java_read<R>(&self, read: impl FnOnce(&T) -> R) -> R { read(&self.lock().expect("Java shared object mutex poisoned")) }
+    fn java_write<R>(&self, write: impl FnOnce(&mut T) -> R) -> R { write(&mut self.lock().expect("Java shared object mutex poisoned")) }
+}
+
+fn java_cursor_to_string_result<T: 'static>(
+    mut cursor: JavaIterator<T>,
+    mut display: impl FnMut(T) -> Result<String, JavaException>,
+    open: &str,
+    close: &str,
+) -> Result<String, JavaException> {
+    let mut text = String::from(open);
+    let mut first = true;
+    while cursor.has_next_result()? {
+        let value = cursor.next_result()?;
+        if !first { text.push_str(", "); }
+        first = false;
+        text.push_str(&display(value)?);
+    }
+    text.push_str(close);
+    Ok(text)
+}
+
+/// Read one Java reference at a time; never hold an allocation guard
 /// while invoking Java equality, which can reenter the source collection.
+pub fn java_native_collection_to_string_result<T, B, H>(
+    source: &H,
+    display: impl FnMut(T) -> Result<String, JavaException>,
+) -> Result<String, JavaException>
+where T: Clone + 'static, B: JavaNativeCollectionBacking<T> + 'static,
+      H: JavaSharedAllocationAccess<Value = JavaNativeCollectionStorage<T, B>> + 'static,
+{
+    java_cursor_to_string_result(java_native_collection_iterator_result(source)?, display, "[", "]")
+}
+
+pub fn java_native_map_to_string_result<K, V, H>(
+    source: &H,
+    mut key_display: impl FnMut(K) -> Result<String, JavaException>,
+    mut value_display: impl FnMut(V) -> Result<String, JavaException>,
+) -> Result<String, JavaException>
+where K: Clone + 'static, V: Clone + 'static,
+      H: JavaSharedAllocationAccess<Value = JavaSemanticHashMap<K, V>> + 'static,
+{
+    let (limit, expected) = source.java_read(|map| (map.len(), map.modification_count()));
+    let index = std::rc::Rc::new(std::cell::Cell::new(0usize));
+    let has_index = index.clone();
+    let next_source = source.clone();
+    let cursor = JavaIterator::new_live(
+        move || Ok(has_index.get() < limit),
+        move || next_source.java_read(|map| {
+            if map.modification_count() != expected {
+                return Err(JavaException::new("ConcurrentModificationException", "Map allocation changed".to_string()));
+            }
+            let value = map.entries.get(index.get()).cloned().ok_or_else(||
+                JavaException::new("NoSuchElementException", "Map iterator exhausted".to_string()))?;
+            index.set(index.get() + 1);
+            Ok(value)
+        }),
+        || Err(JavaException::new("UnsupportedOperationException", "Read-only display cursor".to_string())),
+    );
+    java_cursor_to_string_result(cursor,
+        |(key, value)| Ok(format!("{}={}", key_display(key)?, value_display(value)?)), "{", "}")
+}
+
 pub fn java_native_collection_contains_projected_result<T: Clone + 'static, Q>(
     source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
     query: &Q,
     mut equal: impl FnMut(&Q, &T) -> bool,
 ) -> Result<bool, JavaException> {
+    java_native_collection_contains_projected_checked_result(source, query,
+        |query, stored| Ok(equal(query, stored)))
+}
+
+pub fn java_native_collection_contains_projected_checked_result<T: Clone + 'static, Q>(
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    query: &Q,
+    mut equal: impl FnMut(&Q, &T) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
     let mut cursor = java_native_collection_iterator_result(source)?;
     while cursor.has_next_result()? {
         let stored = cursor.next_result()?;
-        if equal(query, &stored) { return Ok(true); }
+        if equal(query, &stored)? { return Ok(true); }
     }
     Ok(false)
 }
@@ -8331,11 +8662,55 @@ pub fn java_native_collection_remove_all_projected_result<T: Clone + 'static, U:
     source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<U>>>,
     mut equal: impl FnMut(&T, &U) -> bool,
 ) -> Result<bool, JavaException> {
+    java_native_collection_remove_all_projected_checked_result(receiver, source,
+        |query, stored| Ok(equal(query, stored)))
+}
+
+pub fn java_native_collection_retain_all_projected_result<T: Clone + 'static, U: Clone + 'static>(
+    receiver: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<U>>>,
+    mut equal: impl FnMut(&T, &U) -> bool,
+) -> Result<bool, JavaException> {
+    java_native_collection_retain_all_projected_checked_result(receiver, source,
+        |query, stored| Ok(equal(query, stored)))
+}
+
+pub fn java_native_collection_remove_all_projected_checked_result<T: Clone + 'static, U: Clone + 'static>(
+    receiver: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<U>>>,
+    equal: impl FnMut(&T, &U) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    java_native_collection_filter_all_projected_checked_result(receiver, source, false, equal)
+}
+
+pub fn java_native_collection_retain_all_projected_checked_result<T: Clone + 'static, U: Clone + 'static>(
+    receiver: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<U>>>,
+    equal: impl FnMut(&T, &U) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    java_native_collection_filter_all_projected_checked_result(receiver, source, true, equal)
+}
+
+fn java_native_collection_filter_all_projected_checked_result<T: Clone + 'static, U: Clone + 'static>(
+    receiver: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<U>>>,
+    keep_matches: bool,
+    mut equal: impl FnMut(&T, &U) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    java_native_collection_filter_membership_result(receiver, keep_matches,
+        |query| java_native_collection_contains_projected_checked_result(source, query, &mut equal))
+}
+
+pub fn java_native_collection_filter_membership_result<T: Clone + 'static>(
+    receiver: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    keep_matches: bool,
+    mut contains: impl FnMut(&T) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
     let mut cursor = java_native_collection_iterator_result(receiver)?;
     let mut changed = false;
     while cursor.has_next_result()? {
         let query = cursor.next_result()?;
-        if java_native_collection_contains_projected_result(source, &query, &mut equal)? {
+        if contains(&query)? != keep_matches {
             cursor.remove_result()?;
             changed = true;
         }
@@ -8343,31 +8718,183 @@ pub fn java_native_collection_remove_all_projected_result<T: Clone + 'static, U:
     Ok(changed)
 }
 
+/// Consume the live source cursor without retaining an allocation guard while
+/// membership invokes Java equality. Short circuit just as Collection does.
+pub fn java_native_collection_all_result<T: Clone + 'static>(
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    mut contains: impl FnMut(&T) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    let mut cursor = java_native_collection_iterator_result(source)?;
+    while cursor.has_next_result()? {
+        let query = cursor.next_result()?;
+        if !contains(&query)? { return Ok(false); }
+    }
+    Ok(true)
+}
+
+pub fn java_collection_all_result<I: IntoIterator>(
+    items: I,
+    mut contains: impl FnMut(I::Item) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    for query in items {
+        if !contains(query)? { return Ok(false); }
+    }
+    Ok(true)
+}
+
+pub fn java_collection_any_result<I: IntoIterator>(
+    items: I,
+    mut matches: impl FnMut(I::Item) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    for item in items {
+        if matches(item)? { return Ok(true); }
+    }
+    Ok(false)
+}
+
 /// Retain in the receiver's own representation, preserving processed removals
 /// and the unprocessed suffix if a checked membership operation fails.
 pub fn java_collection_remove_all_result<T>(
     retain: impl FnOnce(&mut dyn FnMut(&T) -> bool),
+    contains: impl FnMut(&T) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    java_collection_filter_all_result(retain, contains, false)
+}
+
+pub fn java_collection_retain_all_result<T>(
+    retain: impl FnOnce(&mut dyn FnMut(&T) -> bool),
+    contains: impl FnMut(&T) -> Result<bool, JavaException>,
+) -> Result<bool, JavaException> {
+    java_collection_filter_all_result(retain, contains, true)
+}
+
+fn java_collection_filter_all_result<T>(
+    retain: impl FnOnce(&mut dyn FnMut(&T) -> bool),
     mut contains: impl FnMut(&T) -> Result<bool, JavaException>,
+    keep_matches: bool,
 ) -> Result<bool, JavaException> {
     let mut changed = false;
     let mut failure = None;
     retain(&mut |query| {
         if failure.is_some() { return true; }
         match contains(query) {
-            Ok(found) => { changed |= found; !found }
+            Ok(found) => { let keep = found == keep_matches; changed |= !keep; keep }
             Err(error) => { failure = Some(error); true }
         }
     });
     match failure { Some(error) => Err(error), None => Ok(changed) }
 }
 
-pub fn java_native_collection_iterator_result<T0: Clone + 'static>(
-    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T0>>>,
-) -> Result<JavaIterator<T0>, JavaException> {
+/// One cursor shared by every Java alias of a list iterator. Allocation
+/// guards are scoped to individual operations, never to user callbacks.
+pub struct JavaNativeListCursor<T> {
+    source: std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>,
+    index: std::cell::Cell<usize>,
+    last: std::cell::Cell<Option<usize>>,
+    expected: std::cell::Cell<usize>,
+}
+
+impl<T: Clone + 'static> JavaNativeListCursor<T> {
+    fn check(&self, source: &JavaNativeCollection<T>) -> Result<(), JavaException> {
+        if self.expected.get() == source.modification_count() { Ok(()) }
+        else { Err(JavaException::new("ConcurrentModificationException", "List iterator allocation changed".to_string())) }
+    }
+    fn next_result(&self) -> Result<T, JavaException> {
+        let source = self.source.borrow();
+        self.check(&source)?;
+        let position = self.index.get();
+        let value = source.get_cloned(position).ok_or_else(|| JavaException::new("NoSuchElementException", "List iterator exhausted".to_string()))?;
+        self.index.set(position + 1);
+        self.last.set(Some(position));
+        Ok(value)
+    }
+    fn previous_result(&self) -> Result<T, JavaException> {
+        let source = self.source.borrow();
+        self.check(&source)?;
+        let position = self.index.get().checked_sub(1).ok_or_else(|| JavaException::new("NoSuchElementException", "List iterator has no previous element".to_string()))?;
+        let value = source.get_cloned(position).ok_or_else(|| JavaException::new("NoSuchElementException", "List iterator has no previous element".to_string()))?;
+        self.index.set(position);
+        self.last.set(Some(position));
+        Ok(value)
+    }
+    fn remove_result(&self) -> Result<(), JavaException> {
+        let mut source = self.source.borrow_mut();
+        source.require_not_unmodifiable()?;
+        let position = self.last.get().ok_or_else(|| JavaException::new("IllegalStateException", "List iterator remove requires next or previous".to_string()))?;
+        self.check(&source)?;
+        source.list_remove_result(position as i32)?;
+        if position < self.index.get() { self.index.set(self.index.get() - 1); }
+        self.last.set(None);
+        self.expected.set(source.modification_count());
+        Ok(())
+    }
+    fn set_result(&self, value: T) -> Result<(), JavaException> {
+        let mut source = self.source.borrow_mut();
+        source.require_not_unmodifiable()?;
+        let position = self.last.get().ok_or_else(|| JavaException::new("IllegalStateException", "List iterator set requires next or previous".to_string()))?;
+        self.check(&source)?;
+        source.list_set_result(position as i32, value)?;
+        Ok(())
+    }
+    fn add_result(&self, value: T) -> Result<(), JavaException> {
+        let mut source = self.source.borrow_mut();
+        source.require_not_unmodifiable()?;
+        self.check(&source)?;
+        source.list_insert_result(self.index.get() as i32, value)?;
+        self.index.set(self.index.get() + 1);
+        self.last.set(None);
+        self.expected.set(source.modification_count());
+        Ok(())
+    }
+}
+
+/// The allocation kernel supplies operations, not a concrete facade type.
+/// Iterable-only modules must not depend on an unused ListIterator facade.
+pub fn java_native_collection_list_iterator_result<T: Clone + 'static, C>(
+    source: &std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>, index: i32,
+    build: impl FnOnce(
+        Box<dyn Fn() -> bool>, Box<dyn Fn() -> bool>,
+        Box<dyn Fn() -> Result<T, JavaException>>, Box<dyn Fn() -> Result<T, JavaException>>,
+        Box<dyn Fn() -> i32>, Box<dyn Fn() -> Result<(), JavaException>>,
+        Box<dyn Fn(T) -> Result<(), JavaException>>, Box<dyn Fn(T) -> Result<(), JavaException>>,
+    ) -> C,
+) -> Result<C, JavaException> {
+    let expected = {
+        let source = source.borrow();
+        source.require_list()?;
+        if index < 0 || index as usize > source.len() {
+            return Err(JavaException::new("IndexOutOfBoundsException", index.to_string()));
+        }
+        source.modification_count()
+    };
+    let cursor = std::rc::Rc::new(JavaNativeListCursor {
+        source: source.clone(), index: std::cell::Cell::new(index as usize),
+        last: std::cell::Cell::new(None), expected: std::cell::Cell::new(expected),
+    });
+    let has_next = cursor.clone(); let has_previous = cursor.clone();
+    let next = cursor.clone(); let previous = cursor.clone(); let next_index = cursor.clone();
+    let remove = cursor.clone(); let set = cursor.clone();
+    Ok(build(
+        Box::new(move || has_next.index.get() != has_next.source.borrow().len()),
+        Box::new(move || has_previous.index.get() > 0),
+        Box::new(move || next.next_result()), Box::new(move || previous.previous_result()),
+        Box::new(move || next_index.index.get() as i32),
+        Box::new(move || remove.remove_result()), Box::new(move |value| set.set_result(value)),
+        Box::new(move |value| cursor.add_result(value)),
+    ))
+}
+
+pub fn java_native_collection_iterator_result<T0, B, H>(
+    source: &H,
+) -> Result<JavaIterator<T0>, JavaException>
+where T0: Clone + 'static, B: JavaNativeCollectionBacking<T0> + 'static,
+      H: JavaSharedAllocationAccess<Value = JavaNativeCollectionStorage<T0, B>> + 'static,
+{
             let index = std::rc::Rc::new(std::cell::Cell::new(0usize));
-            let limit = std::rc::Rc::new(std::cell::Cell::new(source.borrow().len()));
+            let (length, changes) = source.java_read(|source| (source.len(), source.modification_count()));
+            let limit = std::rc::Rc::new(std::cell::Cell::new(length));
             let last = std::rc::Rc::new(std::cell::Cell::new(None::<usize>));
-            let expected = std::rc::Rc::new(std::cell::Cell::new(source.borrow().modification_count()));
+            let expected = std::rc::Rc::new(std::cell::Cell::new(changes));
             let has_source = source.clone();
             let has_index = index.clone();
             let has_limit = limit.clone();
@@ -8377,28 +8904,25 @@ pub fn java_native_collection_iterator_result<T0: Clone + 'static>(
             let next_expected = expected.clone();
             let remove_source = source.clone();
             Ok(JavaIterator::new_live(
-                move || {
-                    let source = has_source.borrow();
+                move || has_source.java_read(|source| {
                     // ArrayList compares cursor with current size; set
                     // iterators retain their discovered next-node state.
                     // Neither operation performs the next() modCount check.
                     let length = if source.is_list() { source.len() } else { has_limit.get() };
                     Ok(has_index.get() != length)
-                },
-                move || {
-                    let source = next_source.borrow();
+                }),
+                move || next_source.java_read(|source| {
                     if source.modification_count() != next_expected.get() { return Err(JavaException::new("ConcurrentModificationException", "Iterable allocation changed".to_string())); }
                     let position = next_index.get();
-                    let value = source.get(position).cloned().ok_or_else(|| JavaException::new("NoSuchElementException", "Iterable iterator exhausted".to_string()))?;
+                    let value = source.get_cloned(position).ok_or_else(|| JavaException::new("NoSuchElementException", "Iterable iterator exhausted".to_string()))?;
                     next_index.set(position + 1);
                     next_last.set(Some(position));
                     Ok(value)
-                },
-                move || {
-                    let mut source = remove_source.borrow_mut();
+                }),
+                move || remove_source.java_write(|source| {
                     // Singleton/fixed-size iterators reject remove outright;
                     // empty and ordinary iterators first require next().
-                    if matches!(source.mutation, JavaNativeCollectionMutation::FixedSize | JavaNativeCollectionMutation::ImmutableSingleton) { source.require_structural_mutation()?; }
+                    if matches!(source.mutation, JavaNativeCollectionMutation::FixedSize | JavaNativeCollectionMutation::ImmutableSingleton | JavaNativeCollectionMutation::Unmodifiable) { source.require_structural_mutation()?; }
                     let position = last.get().ok_or_else(|| JavaException::new("IllegalStateException", "Iterator.remove requires next".to_string()))?;
                     source.require_structural_mutation()?;
                     if source.modification_count() != expected.get() { return Err(JavaException::new("ConcurrentModificationException", "Iterable allocation changed".to_string())); }
@@ -8408,7 +8932,7 @@ pub fn java_native_collection_iterator_result<T0: Clone + 'static>(
                     if !source.is_list() { limit.set(limit.get() - 1); }
                     expected.set(source.modification_count());
                     Ok(())
-                },
+                }),
             ))
 }"#
 }
@@ -10684,10 +11208,36 @@ impl<T: Default> Enumeration<T> {
         java_iterator_storage_runtime_support(),
         r#"
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JavaListIterator<T> {
-    items: Vec<T>,
-    index: usize,
+    operations: std::rc::Rc<JavaListIteratorOperations<T>>,
+}
+
+pub struct JavaListIteratorOperations<T> {
+    has_next: Box<dyn Fn() -> bool>,
+    has_previous: Box<dyn Fn() -> bool>,
+    next: Box<dyn Fn() -> Result<T, JavaException>>,
+    previous: Box<dyn Fn() -> Result<T, JavaException>>,
+    next_index: Box<dyn Fn() -> i32>,
+    remove: Box<dyn Fn() -> Result<(), JavaException>>,
+    set: Box<dyn Fn(T) -> Result<(), JavaException>>,
+    add: Box<dyn Fn(T) -> Result<(), JavaException>>,
+}
+
+impl<T> Clone for JavaListIterator<T> {
+    fn clone(&self) -> Self { Self { operations: self.operations.clone() } }
+}
+impl<T> std::fmt::Debug for JavaListIterator<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { f.debug_struct("JavaListIterator").finish_non_exhaustive() }
+}
+impl<T> PartialEq for JavaListIterator<T> {
+    fn eq(&self, other: &Self) -> bool { std::rc::Rc::ptr_eq(&self.operations, &other.operations) }
+}
+impl<T> Eq for JavaListIterator<T> {}
+impl<T> std::hash::Hash for JavaListIterator<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) { std::hash::Hash::hash(&(std::rc::Rc::as_ptr(&self.operations) as usize), state); }
+}
+impl<T: Clone + 'static> Default for JavaListIterator<T> {
+    fn default() -> Self { Self::new(std::iter::empty()) }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -10794,25 +11344,30 @@ impl<T> JavaLinkedHashSet<T> {
 
 impl<T: JavaMapKey> JavaLinkedHashSet<T> {
     pub fn insert(&mut self, value: T) -> bool {
-        if self.contains(&value) {
-            false
-        } else {
-            self.entries.push(value);
-            true
-        }
+        self.insert_result(value).expect("Java equals threw while inserting a set key")
     }
 
     pub fn remove(&mut self, value: &T) -> bool {
-        if let Some(index) = self.entries.iter().position(|entry| entry.java_map_key_eq(value)) {
-            self.entries.remove(index);
-            true
-        } else {
-            false
-        }
+        self.remove_result(value).expect("Java equals threw while removing a set key")
     }
 
     pub fn contains(&self, value: &T) -> bool {
-        self.entries.iter().any(|entry| entry.java_map_key_eq(value))
+        self.contains_result(value).expect("Java equals threw while searching for a set key")
+    }
+
+    pub fn insert_result(&mut self, value: T) -> Result<bool, JavaException> {
+        if self.contains_result(&value)? { Ok(false) } else { self.entries.push(value); Ok(true) }
+    }
+
+    pub fn remove_result(&mut self, value: &T) -> Result<bool, JavaException> {
+        if let Some(index) = java_key_position_result(&self.entries, value)? {
+            self.entries.remove(index);
+            Ok(true)
+        } else { Ok(false) }
+    }
+
+    pub fn contains_result(&self, value: &T) -> Result<bool, JavaException> {
+        Ok(java_key_position_result(&self.entries, value)?.is_some())
     }
 }
 
@@ -11431,6 +11986,12 @@ impl<K: Eq + std::hash::Hash, V> From<JavaLinkedHashMap<K, V>> for std::collecti
     }
 }
 
+impl<K: JavaMapKey, V> From<JavaLinkedHashMap<K, V>> for JavaSemanticHashMap<K, V> {
+    fn from(value: JavaLinkedHashMap<K, V>) -> Self {
+        value.entries.into_iter().collect()
+    }
+}
+
 impl<K: PartialEq, V> JavaMapInsert<K, V> for JavaLinkedHashMap<K, V> {
     fn insert(&mut self, key: K, value: V) -> Option<V> {
         JavaLinkedHashMap::insert(self, key, value)
@@ -11791,12 +12352,9 @@ impl<K: Ord + Clone + JavaArraysDeepToStringElement, V: JavaArraysDeepToStringEl
         java_iterator_methods_runtime_support(),
         r#"
 
-impl<T: Clone> JavaListIterator<T> {
+impl<T: Clone + 'static> JavaListIterator<T> {
     pub fn new<I: IntoIterator<Item = T>>(items: I) -> JavaListIterator<T> {
-        JavaListIterator {
-            items: items.into_iter().collect(),
-            index: 0,
-        }
+        Self::new_at(items, 0)
     }
 
     pub fn new_at<I: IntoIterator<Item = T>>(items: I, index: i32) -> JavaListIterator<T> {
@@ -11815,55 +12373,96 @@ impl<T: Clone> JavaListIterator<T> {
                 "Java list iterator index out of bounds".to_string(),
             ));
         }
-        Ok(JavaListIterator {
-            items,
-            index: index as usize,
-        })
+        let items = std::rc::Rc::new(items);
+        let index = std::rc::Rc::new(std::cell::Cell::new(index as usize));
+        let has_items = items.clone();
+        let has_index = index.clone();
+        let previous_index = index.clone();
+        let next_items = items.clone();
+        let next_index = index.clone();
+        let back_index = index.clone();
+        Ok(Self::from_fallible_operations(
+            move || has_index.get() != has_items.len(),
+            move || previous_index.get() > 0,
+            move || {
+                let position = next_index.get();
+                let value = next_items.get(position).cloned().ok_or_else(|| JavaException::new("NoSuchElementException", "Java list iterator has no next element".to_string()))?;
+                next_index.set(position + 1);
+                Ok(value)
+            },
+            move || {
+                let position = back_index.get().checked_sub(1).ok_or_else(|| JavaException::new("NoSuchElementException", "Java list iterator has no previous element".to_string()))?;
+                let value = items[position].clone();
+                back_index.set(position);
+                Ok(value)
+            },
+            move || index.get() as i32,
+            || Err(JavaException::new("UnsupportedOperationException", "Java snapshot list iterator mutation is not supported".to_string())),
+            |_| Err(JavaException::new("UnsupportedOperationException", "Java snapshot list iterator mutation is not supported".to_string())),
+            |_| Err(JavaException::new("UnsupportedOperationException", "Java snapshot list iterator mutation is not supported".to_string())),
+        ))
+    }
+}
+
+impl<T> JavaListIterator<T> {
+    // Cursor mutations are interior operations, so evaluation of an argument
+    // may legally advance this same cursor before set/add is invoked.
+    /// Operations retain the original allocation and shared cursor state,
+    /// just as JavaIterator's live callbacks do. No payload Clone bound is
+    /// imposed on probes or on aliases of an existing cursor.
+    pub fn from_fallible_operations<HN, HP, N, P, NI, R, S, A>(
+        has_next: HN, has_previous: HP, next: N, previous: P, next_index: NI,
+        remove: R, set: S, add: A,
+    ) -> Self
+    where
+        HN: Fn() -> bool + 'static, HP: Fn() -> bool + 'static,
+        N: Fn() -> Result<T, JavaException> + 'static,
+        P: Fn() -> Result<T, JavaException> + 'static,
+        NI: Fn() -> i32 + 'static,
+        R: Fn() -> Result<(), JavaException> + 'static,
+        S: Fn(T) -> Result<(), JavaException> + 'static,
+        A: Fn(T) -> Result<(), JavaException> + 'static,
+    {
+        Self { operations: std::rc::Rc::new(JavaListIteratorOperations {
+            has_next: Box::new(has_next), has_previous: Box::new(has_previous),
+            next: Box::new(next), previous: Box::new(previous), next_index: Box::new(next_index),
+            remove: Box::new(remove), set: Box::new(set), add: Box::new(add),
+        }) }
     }
 
     pub fn has_next(&self) -> bool {
-        self.index < self.items.len()
+        (self.operations.has_next)()
     }
 
     pub fn has_next_result(&self) -> Result<bool, JavaException> { Ok(self.has_next()) }
 
     pub fn has_previous(&self) -> bool {
-        self.index > 0
+        (self.operations.has_previous)()
     }
 
-    pub fn next(&mut self) -> T {
+    pub fn has_previous_result(&self) -> Result<bool, JavaException> { Ok(self.has_previous()) }
+    pub fn next_index(&self) -> i32 { (self.operations.next_index)() }
+    pub fn previous_index(&self) -> i32 { self.next_index() - 1 }
+
+    pub fn next(&self) -> T {
         self.next_result()
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
     }
 
-    pub fn next_result(&mut self) -> Result<T, JavaException> {
-        let value = self.items.get(self.index).cloned().ok_or_else(|| {
-            JavaException::new(
-                "NoSuchElementException",
-                "Java list iterator has no next element".to_string(),
-            )
-        })?;
-        self.index += 1;
-        Ok(value)
+    pub fn next_result(&self) -> Result<T, JavaException> {
+        (self.operations.next)()
     }
 
-    pub fn previous(&mut self) -> T {
+    pub fn previous(&self) -> T {
         self.previous_result()
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex))
     }
 
-    pub fn previous_result(&mut self) -> Result<T, JavaException> {
-        if self.index == 0 {
-            return Err(JavaException::new(
-                "NoSuchElementException",
-                "Java list iterator has no previous element".to_string(),
-            ));
-        }
-        self.index -= 1;
-        Ok(self.items[self.index].clone())
+    pub fn previous_result(&self) -> Result<T, JavaException> {
+        (self.operations.previous)()
     }
 
-    pub fn for_each_remaining<F>(&mut self, mut f: F)
+    pub fn for_each_remaining<F>(&self, mut f: F)
     where
         F: FnMut(T),
     {
@@ -11872,28 +12471,29 @@ impl<T: Clone> JavaListIterator<T> {
         }
     }
 
-    pub fn remove(&mut self) {
+    pub fn remove(&self) {
         self.remove_result()
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
     }
 
-    pub fn remove_result(&mut self) -> Result<(), JavaException> {
-        Err(JavaException::new(
-            "UnsupportedOperationException",
-            "Java snapshot list iterator mutation is not supported".to_string(),
-        ))
+    pub fn remove_result(&self) -> Result<(), JavaException> {
+        (self.operations.remove)()
     }
 
-    pub fn set(&mut self, value: T) {
+    pub fn set(&self, value: T) {
         self.set_result(value)
             .unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
     }
 
-    pub fn set_result(&mut self, _value: T) -> Result<(), JavaException> {
-        Err(JavaException::new(
-            "UnsupportedOperationException",
-            "Java snapshot list iterator mutation is not supported".to_string(),
-        ))
+    pub fn set_result(&self, value: T) -> Result<(), JavaException> {
+        (self.operations.set)(value)
+    }
+
+    pub fn add(&self, value: T) {
+        self.add_result(value).unwrap_or_else(|ex| panic!("uncaught Java exception: {:?}", ex));
+    }
+    pub fn add_result(&self, value: T) -> Result<(), JavaException> {
+        (self.operations.add)(value)
     }
 }
 
@@ -15019,7 +15619,17 @@ pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts
         true,
     );
     let source_clone_downcasts =
-        source_erased_object_clone_downcasts(source_downcast_programs, representations);
+        source_erased_object_clone_downcasts(source_downcast_programs, facts, representations);
+    let source_identity_downcasts = source_erased_object_reference_identity_downcasts(
+        source_downcast_programs,
+        facts,
+        representations,
+    );
+    let string_identity_downcast = if facts.java_string_identity_representation {
+        "    if let Some(value) = self.downcast_ref::<JavaString>() { return value.java_reference_identity(); }"
+    } else {
+        ""
+    };
     let platform_to_string_downcasts = platform_erased_object_to_string_downcasts(programs);
     let java_class_to_string_downcast =
         java_class_erased_object_to_string_downcast(programs, facts);
@@ -15147,6 +15757,14 @@ pub fn java_is_number<T: JavaNumberInstanceOf + ?Sized>(value: &T) -> bool {{
     value.java_is_number()
 }}
 
+pub fn java_prepare_erased_reference_cast<T: std::any::Any>(value: Box<dyn std::any::Any>) -> Box<dyn std::any::Any> {{
+    // A generic Java result instantiated as Object keeps the erased reference
+    // itself. Concrete instantiations check the payload's runtime type.
+    if std::any::TypeId::of::<T>() == std::any::TypeId::of::<Box<dyn std::any::Any>>() {{
+        Box::new(value) as Box<dyn std::any::Any>
+    }} else {{ value }}
+}}
+
 pub fn java_clone_erased_object_ref<T: std::any::Any>(value: &T) -> std::boxed::Box<dyn std::any::Any> {{
     let value: &dyn std::any::Any = value;
     if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
@@ -15223,6 +15841,19 @@ where
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
 pub struct JavaPlainObject;
+
+impl JavaReferenceIdentity for dyn std::any::Any {{
+    fn java_reference_identity(&self) -> *const () {{
+        if let Some(value) = self.downcast_ref::<Box<dyn std::any::Any>>() {{
+            return value.java_reference_identity();
+        }}
+        // java2rust: additive-registry-begin reference_identity
+{source_identity_downcasts}
+{string_identity_downcast}
+        // java2rust: additive-registry-end reference_identity
+        panic!("unsupported Java reference identity: erased value has no retained allocation")
+    }}
+}}
 
 impl JavaPlainObject {{
     pub fn new() -> JavaPlainObject {{
@@ -15351,7 +15982,28 @@ pub fn java_generic_optional_to_string<T: std::any::Any>(value: &Option<T>) -> S
         .unwrap_or_else(|| "null".to_string())
 }}
 
+pub fn java_generic_optional_to_string_result<T: std::any::Any>(value: &Option<T>) -> Result<String, JavaException> {{
+    match value {{
+        Some(value) => java_erased_object_string_result(value).map(java_erased_object_string_display),
+        None => Ok("null".to_string()),
+    }}
+}}
+
+// Erased generic arguments use the same Java equality dispatch as Object.equals;
+// the box is a Rust carrier, not a new Java object or an equality policy.
+impl JavaMapKey for Box<dyn std::any::Any> {{
+    fn java_map_key_eq(&self, other: &Self) -> bool {{
+        java_erased_any_equals(self.as_ref(), other.as_ref())
+    }}
+}}
+
 pub fn java_erased_any_equals(left: &dyn std::any::Any, right: &dyn std::any::Any) -> bool {{
+    if let Some(left) = left.downcast_ref::<Box<dyn std::any::Any>>() {{
+        return java_erased_any_equals(left.as_ref(), right);
+    }}
+    if let Some(right) = right.downcast_ref::<Box<dyn std::any::Any>>() {{
+        return java_erased_any_equals(left, right.as_ref());
+    }}
 {java_string_identity_erased_equals}
     if let Some(left) = left.downcast_ref::<String>() {{
         return right.downcast_ref::<String>().is_some_and(|right| left == right);
@@ -15645,23 +16297,130 @@ pub fn java_erased_any_to_string(value: &dyn std::any::Any) -> String {{
 
 fn source_erased_object_clone_downcasts(
     programs: &[&Program],
+    facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> String {
     let mut arms = BTreeSet::new();
     for program in programs {
         for ty in &program.types {
-            collect_source_erased_object_clone_downcasts(ty, false, representations, &mut arms);
+            collect_source_erased_object_clone_downcasts(
+                ty,
+                false,
+                facts,
+                representations,
+                &mut arms,
+            );
         }
     }
     arms.into_iter().collect::<Vec<_>>().join("\n")
 }
 
+fn source_erased_object_reference_identity_downcasts(
+    programs: &[&Program],
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+) -> String {
+    let mut arms = BTreeSet::new();
+    fn visit(
+        ty: &TypeDecl,
+        facts: &FactSet,
+        plan: Option<&RepresentationPlan>,
+        arms: &mut BTreeSet<String>,
+    ) {
+        if plan.is_some_and(|plan| plan.abstract_owner_is_declaration_only(&ty.name)) {
+            return;
+        }
+        if ty.type_params.is_empty() && source_type_is_source_hierarchy_carrier_root(ty, plan) {
+            for rust_type in source_erased_shared_reference_types(ty, facts, plan) {
+                arms.insert(format!("        if let Some(value) = self.downcast_ref::<{rust_type}>() {{ return value.java_reference_identity(); }}"));
+            }
+        }
+        if ty.type_params.is_empty()
+            && ty.kind != TypeKind::Interface
+            && !source_type_is_erased_alias(ty, plan)
+            && !source_type_is_source_hierarchy_carrier_root(ty, plan)
+            && plan
+                .and_then(|plan| plan.type_representation(&ty.name))
+                .is_none_or(|planned| {
+                    matches!(
+                        planned.representation(),
+                        ObjectRepresentation::ConcreteStruct
+                            | ObjectRepresentation::JavaEnum { .. }
+                    )
+                })
+        {
+            for rust_type in source_erased_shared_reference_types(ty, facts, plan) {
+                arms.insert(format!("        if let Some(value) = self.downcast_ref::<{rust_type}>() {{ return value.java_reference_identity(); }}"));
+            }
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                visit(nested, facts, plan, arms);
+            }
+        }
+    }
+    for program in programs {
+        for ty in &program.types {
+            visit(ty, facts, representations, &mut arms);
+        }
+    }
+    arms.into_iter().collect::<Vec<_>>().join("\n")
+}
+
+/// Shared by erased copying and identity dispatch. Both must observe the
+/// exact canonical handle, including late RefCell/Mutex placement requirements.
+fn source_erased_shared_reference_types(
+    ty: &TypeDecl,
+    facts: &FactSet,
+    plan: Option<&RepresentationPlan>,
+) -> Vec<String> {
+    if source_type_is_source_hierarchy_carrier_root(ty, plan)
+        && let Some(plan) = plan
+    {
+        let shape = crate::slot_shape::RustSlotShape::for_storage(JavaType::Named {
+            name: ty.name.clone(),
+            args: Vec::new(),
+        });
+        return vec![crate::emit::emit_type(
+            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &shape, facts, plan,
+            ),
+        )];
+    }
+    let name = rust_name_for_java_named_type(&ty.name);
+    let fact_placement = facts.storage_placement_for(&ty.name);
+    let placement = crate::storage_strategy::effective_storage_placement(
+        fact_placement,
+        plan.map(|plan| plan.storage_placement_for(&ty.name))
+            .unwrap_or(fact_placement),
+    );
+    let mut types = vec![
+        format!("std::rc::Rc<{name}>"),
+        format!("std::sync::Arc<{name}>"),
+    ];
+    if placement.shared() && placement.is_implemented() {
+        types.push(placement.wrap(name));
+    }
+    types
+}
+
 fn collect_source_erased_object_clone_downcasts(
     ty: &TypeDecl,
     nested: bool,
+    facts: &FactSet,
     representations: Option<&RepresentationPlan>,
     arms: &mut BTreeSet<String>,
 ) {
+    if representations.is_some_and(|plan| plan.abstract_owner_is_declaration_only(&ty.name)) {
+        return;
+    }
+    if ty.type_params.is_empty()
+        && source_type_is_source_hierarchy_carrier_root(ty, representations)
+    {
+        for rust_type in source_erased_shared_reference_types(ty, facts, representations) {
+            arms.insert(format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"));
+        }
+    }
     if ty.type_params.is_empty()
         && !matches!(ty.kind, TypeKind::Interface)
         && !source_type_is_erased_alias(ty, representations)
@@ -15676,8 +16435,7 @@ fn collect_source_erased_object_clone_downcasts(
             })
     {
         let rust_name = rust_name_for_java_named_type(&ty.name);
-        for handle in ["std::rc::Rc", "std::sync::Arc"] {
-            let rust_type = format!("{handle}<{rust_name}>");
+        for rust_type in source_erased_shared_reference_types(ty, facts, representations) {
             arms.insert(format!(
                 "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Box::new(value.clone()); }}"
             ));
@@ -15699,7 +16457,13 @@ fn collect_source_erased_object_clone_downcasts(
     }
     for member in &ty.members {
         if let Member::Type(nested_ty) = member {
-            collect_source_erased_object_clone_downcasts(nested_ty, true, representations, arms);
+            collect_source_erased_object_clone_downcasts(
+                nested_ty,
+                true,
+                facts,
+                representations,
+                arms,
+            );
         }
     }
 }
@@ -17377,6 +18141,11 @@ fn collect_source_erased_object_to_string_downcasts(
     result_mode: bool,
     arms: &mut BTreeSet<String>,
 ) {
+    // Declaration-only roots retain a static type token, not a runtime
+    // instance contract. Register their concrete materializations instead.
+    if representations.is_some_and(|plan| plan.abstract_owner_is_declaration_only(&ty.name)) {
+        return;
+    }
     if ty.type_params.is_empty()
         && !source_type_is_erased_alias(ty, representations)
         && !source_type_is_source_hierarchy_carrier_root(ty, representations)
@@ -17500,6 +18269,207 @@ pub(crate) fn source_method_is_java_to_string(method: &crate::java_ir::MethodDec
         && !method.modifiers.contains(&crate::java_ir::Modifier::Static)
         && matches!(method.name.as_str(), "toString" | "to_string")
         && matches!(method.return_type, JavaType::String)
+}
+
+pub(crate) fn source_method_uses_borrowed_object_dispatch(
+    method: &crate::java_ir::MethodDecl,
+) -> bool {
+    source_method_is_java_to_string(method)
+        || (method.params.is_empty()
+            && !method.modifiers.contains(&crate::java_ir::Modifier::Static)
+            && matches!(method.name.as_str(), "hashCode" | "hash_code")
+            && method.return_type == JavaType::Primitive(PrimitiveType::Int))
+}
+
+pub(crate) fn source_java_hash_method_for_type<'a>(
+    ty: &'a TypeDecl,
+    program: &'a Program,
+) -> Option<crate::inherited_members::InheritedInstanceMethodRef<'a>> {
+    let is_hash = |method: &MethodDecl| {
+        method.params.is_empty()
+            && !method.modifiers.contains(&Modifier::Static)
+            && matches!(method.name.as_str(), "hashCode" | "hash_code")
+            && method.return_type == JavaType::Primitive(PrimitiveType::Int)
+    };
+    ty.members
+        .iter()
+        .find_map(|member| match member {
+            Member::Method(method) if is_hash(method) => {
+                Some(crate::inherited_members::InheritedInstanceMethodRef::new(
+                    &ty.name,
+                    ty,
+                    method,
+                    crate::java_signature::source_method_rust_name(method),
+                ))
+            }
+            _ => None,
+        })
+        .or_else(|| {
+            crate::inherited_members::inherited_instance_method_refs_for_type(ty, program)
+                .into_iter()
+                .find(|inherited| is_hash(inherited.method()))
+        })
+}
+
+/// Shared availability proof for payload emission and carrier forwarding.
+pub(crate) fn source_java_hash_protocol_is_supported(
+    ty: &TypeDecl,
+    program: &Program,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+    signatures: &crate::signature::SignaturePlan,
+) -> bool {
+    if !matches!(ty.kind, TypeKind::Class | TypeKind::Record)
+        || ty.modifiers.contains(&Modifier::Abstract)
+        || !matches!(
+            representations.dispatch_for(&JavaType::Named {
+                name: ty.name.clone(),
+                args: Vec::new()
+            }),
+            crate::slot_shape::DispatchShape::Concrete
+                | crate::slot_shape::DispatchShape::ClosedEnum { .. }
+        )
+    {
+        return false;
+    }
+    let placement = crate::storage_strategy::effective_storage_placement(
+        facts.storage_placement_for(&ty.name),
+        representations.storage_placement_for(&ty.name),
+    );
+    let method = source_java_hash_method_for_type(ty, program);
+    if method
+        .as_ref()
+        .is_some_and(|method| method.method().body.is_none())
+    {
+        return false;
+    }
+    if placement.shared() && placement.is_implemented() {
+        return true;
+    }
+    method.is_some_and(|method| {
+        !signatures
+            .method_signature(method.declaring_ty(), method.method())
+            .is_some_and(|signature| {
+                signature.receiver() == crate::signature::ReceiverPlan::Mutable
+            })
+    })
+}
+
+/// Checked Java object hashing, separate from Rust's structural Hash and from
+/// deep-array hashing. Source overrides join this protocol at their canonical
+/// reference ABI; primitive leaves reuse the existing Java array-element kernel.
+pub(crate) fn java_checked_hash_runtime_support() -> &'static str {
+    r#"pub trait JavaHashCode {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException>;
+}
+
+impl<T: JavaHashCode + ?Sized> JavaHashCode for &T {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        (**self).java_hash_code_result()
+    }
+}
+
+impl<T: JavaHashCode> JavaHashCode for Option<T> {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        self.as_ref().map_or(Ok(0), JavaHashCode::java_hash_code_result)
+    }
+}
+
+macro_rules! impl_java_checked_leaf_hash {
+    ($($ty:ty),* $(,)?) => { $(
+        impl JavaHashCode for $ty {
+            fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+                Ok(JavaArraysHashElement::java_arrays_hash_code(self))
+            }
+        }
+    )* };
+}
+impl_java_checked_leaf_hash!(bool, i8, i16, i32, i64, char, f32, f64, String);
+
+impl JavaHashCode for str {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        Ok(java_string_hash_code(self))
+    }
+}
+
+pub fn java_hash_sequence_result<'a, T: JavaHashCode + 'a>(
+    items: impl IntoIterator<Item = &'a T>, list: bool,
+) -> Result<i32, JavaException> {
+    let mut hash: i32 = if list { 1 } else { 0 };
+    for item in items {
+        let element_hash = item.java_hash_code_result()?;
+        hash = (if list { hash.wrapping_mul(31) } else { hash }).wrapping_add(element_hash);
+    }
+    Ok(hash)
+}
+
+// Vec/slice alone cannot implement Object hashing: both Java arrays and plain
+// lists use that Rust representation, but arrays hash by identity. The call
+// planner selects this value operation only at a proven List boundary.
+pub fn java_checked_list_hash_code<T: JavaHashCode>(items: &[T]) -> Result<i32, JavaException> {
+    java_hash_sequence_result(items, true)
+}
+impl<T: JavaHashCode, S> JavaHashCode for std::collections::HashSet<T, S> {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        java_hash_sequence_result(self.iter(), false)
+    }
+}
+impl<T: JavaHashCode> JavaHashCode for JavaSemanticHashSet<T> {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        java_hash_sequence_result(self.iter(), false)
+    }
+}
+
+pub fn java_hash_entries_result<'a, K: JavaHashCode + 'a, V: JavaHashCode + 'a>(
+    entries: impl IntoIterator<Item = (&'a K, &'a V)>,
+) -> Result<i32, JavaException> {
+    let mut hash = 0_i32;
+    for (key, value) in entries {
+        let entry_hash = key.java_hash_code_result()? ^ value.java_hash_code_result()?;
+        hash = hash.wrapping_add(entry_hash);
+    }
+    Ok(hash)
+}
+impl<K: JavaHashCode, V: JavaHashCode, S> JavaHashCode for std::collections::HashMap<K, V, S> {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        java_hash_entries_result(self.iter())
+    }
+}
+impl<K: JavaHashCode, V: JavaHashCode> JavaHashCode for JavaSemanticHashMap<K, V> {
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        java_hash_entries_result(self.iter())
+    }
+}
+
+pub fn java_checked_value_hash_code<T: JavaHashCode + ?Sized>(value: &T) -> Result<i32, JavaException> {
+    value.java_hash_code_result()
+}
+"#
+}
+
+pub(crate) fn java_checked_native_hash_runtime_support() -> &'static str {
+    r#"
+impl<T: Clone + JavaHashCode + 'static> JavaHashCode
+    for std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>
+{
+    fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+        // Release the carrier guard before every Java hash callback. A live
+        // cursor observes nonstructural writes and checks structural changes.
+        if self.borrow().is_identity_sequence() {
+            return Ok(JavaReferenceIdentity::java_reference_identity(self) as usize as i32);
+        }
+        let list = self.borrow().is_list();
+        let mut hash: i32 = if list { 1 } else { 0 };
+        let mut cursor = java_native_collection_iterator_result(self)?;
+        while cursor.has_next_result()? {
+            let value = cursor.next_result()?;
+            let element_hash = value.java_hash_code_result()?;
+            hash = (if list { hash.wrapping_mul(31) } else { hash }).wrapping_add(element_hash);
+        }
+        Ok(hash)
+    }
+}
+"#
 }
 
 pub(crate) fn java_string_split_support_item(
@@ -17642,11 +18612,33 @@ pub fn java_arrays_hash_code<V: JavaArraysHashCodeInput>(value: V) -> i32 {
 
 pub trait JavaArraysDeepToStringElement {
     fn java_arrays_deep_to_string(&self) -> String;
+    /// Compatibility for leaf customizations. Generated Java object adapters
+    /// override this checked operation; deep array formatting stays separate.
+    fn java_object_display_result(&self) -> Result<String, JavaException>
+    where Self: std::any::Any {
+        Ok(self.java_arrays_deep_to_string())
+    }
+}
+
+/// The checked view exposes its existing leaf-compatibility contract, so
+/// generic nullable wrappers can derive the same view without a second bound.
+/// This does not change which operation performs actual array deep formatting.
+pub trait JavaObjectDisplay: JavaArraysDeepToStringElement + std::any::Any {
+    fn java_object_display_result(&self) -> Result<String, JavaException>;
+}
+
+impl<T: JavaArraysDeepToStringElement + std::any::Any> JavaObjectDisplay for T {
+    fn java_object_display_result(&self) -> Result<String, JavaException> {
+        JavaArraysDeepToStringElement::java_object_display_result(self)
+    }
 }
 
 impl JavaArraysDeepToStringElement for std::boxed::Box<dyn std::any::Any> {
     fn java_arrays_deep_to_string(&self) -> String {
         java_erased_any_to_string(self.as_ref())
+    }
+    fn java_object_display_result(&self) -> Result<String, JavaException> {
+        java_erased_any_to_string_result(self.as_ref())
     }
 }
 
@@ -17666,6 +18658,39 @@ pub fn java_collection_to_string<T: JavaArraysDeepToStringElement, V: AsRef<[T]>
     values: V,
 ) -> String {
     java_arrays_deep_to_string(values)
+}
+
+pub fn java_collection_iter_display_result<T>(
+    values: impl IntoIterator<Item = T>,
+    mut display: impl FnMut(T) -> Result<String, JavaException>,
+) -> Result<String, JavaException> {
+    let mut text = String::from("[");
+    let mut first = true;
+    for value in values {
+        if !first { text.push_str(", "); }
+        first = false;
+        text.push_str(&display(value)?);
+    }
+    text.push(']');
+    Ok(text)
+}
+
+pub fn java_map_iter_display_result<K, V>(
+    values: impl IntoIterator<Item = (K, V)>,
+    mut key_display: impl FnMut(K) -> Result<String, JavaException>,
+    mut value_display: impl FnMut(V) -> Result<String, JavaException>,
+) -> Result<String, JavaException> {
+    let mut text = String::from("{");
+    let mut first = true;
+    for (key, value) in values {
+        if !first { text.push_str(", "); }
+        first = false;
+        text.push_str(&key_display(key)?);
+        text.push('=');
+        text.push_str(&value_display(value)?);
+    }
+    text.push('}');
+    Ok(text)
 }
 
 pub struct JavaPriorityQueue<T> {
@@ -17984,6 +19009,13 @@ impl<T: JavaArraysDeepToStringElement> JavaArraysDeepToStringElement for Option<
         self.as_ref()
             .map(JavaArraysDeepToStringElement::java_arrays_deep_to_string)
             .unwrap_or_else(|| "null".to_string())
+    }
+    fn java_object_display_result(&self) -> Result<String, JavaException>
+    where Self: std::any::Any {
+        match self {
+            Some(value) => JavaArraysDeepToStringElement::java_object_display_result(value),
+            None => Ok("null".to_string()),
+        }
     }
 }
 
@@ -18739,6 +19771,10 @@ impl JavaAppendValue for JavaString {
 impl JavaAppendValue for &JavaString {
     fn into_java_append_string(self) -> String { self.as_str().to_string() }
 }
+impl JavaReferenceIdentity for JavaString {
+    fn java_reference_identity(&self) -> *const () { std::sync::Arc::as_ptr(&self.0) as *const () }
+}
+
 impl PartialEq for JavaString { fn eq(&self, other: &Self) -> bool { self.java_equals(other) } }
 impl Eq for JavaString {}
 impl JavaMapKey for JavaString {
@@ -24241,7 +25277,7 @@ impl ExternalApiFacadeSupport {
             .is_some_and(|arities| arities.contains(&1))
         {
             self.add_opaque_type("Double".to_string());
-            self.add_method(
+            self.add_modelled_static_method(
                 "Double".to_string(),
                 "    pub fn double_to_long_bits<T0: Into<f64>>(value: T0) -> i64 { let value = value.into(); if value.is_nan() { f64::NAN.to_bits() as i64 } else { value.to_bits() as i64 } }".to_string(),
             );
@@ -24251,11 +25287,11 @@ impl ExternalApiFacadeSupport {
             .is_some_and(|arities| arities.contains(&1))
         {
             self.add_opaque_type("Double".to_string());
-            self.add_method(
+            self.add_modelled_static_method(
                 "Double".to_string(),
                 "    pub fn hash_code<T0: Into<f64>>(value: T0) -> i32 { let bits = Self::double_to_long_bits(value); (bits ^ ((bits as u64 >> 32) as i64)) as i32 }".to_string(),
             );
-            self.add_method(
+            self.add_modelled_static_method(
                 "Double".to_string(),
                 "    pub fn double_to_long_bits<T0: Into<f64>>(value: T0) -> i64 { let value = value.into(); if value.is_nan() { f64::NAN.to_bits() as i64 } else { value.to_bits() as i64 } }".to_string(),
             );
@@ -24265,7 +25301,7 @@ impl ExternalApiFacadeSupport {
             .is_some_and(|arities| arities.contains(&1))
         {
             self.add_opaque_type("Double".to_string());
-            self.add_method(
+            self.add_modelled_static_method(
                 "Double".to_string(),
                 "    pub fn double_to_raw_long_bits<T0: Into<f64>>(value: T0) -> i64 { value.into().to_bits() as i64 }".to_string(),
             );
@@ -24286,7 +25322,7 @@ impl ExternalApiFacadeSupport {
             .is_some_and(|arities| arities.contains(&1))
         {
             self.add_opaque_type("Float".to_string());
-            self.add_method(
+            self.add_modelled_static_method(
                 "Float".to_string(),
                 "    pub fn float_to_int_bits<T0: Into<f32>>(value: T0) -> i32 { let value = value.into(); if value.is_nan() { f32::NAN.to_bits() as i32 } else { value.to_bits() as i32 } }".to_string(),
             );
@@ -24296,7 +25332,7 @@ impl ExternalApiFacadeSupport {
             .is_some_and(|arities| arities.contains(&1))
         {
             self.add_opaque_type("Float".to_string());
-            self.add_method(
+            self.add_modelled_static_method(
                 "Float".to_string(),
                 "    pub fn float_to_raw_int_bits<T0: Into<f32>>(value: T0) -> i32 { value.into().to_bits() as i32 }".to_string(),
             );
@@ -25176,6 +26212,30 @@ impl ExternalApiFacadeSupport {
     /// ([0035](../claude_audits/0035-idiom-gaps-suite-never-terminates.md)).
     /// A fixpoint's termination condition has to be "the state stopped
     /// changing", so this must keep reporting the outcome.
+    /// An explicit executable model outranks an earlier inferred facade ABI.
+    /// Its registration is distinct from adding another inferred placeholder;
+    /// source declarations still own their methods and are never replaced.
+    fn add_modelled_static_method(&mut self, owner: String, method: String) -> bool {
+        let Some(name) = facade_method_name(&method) else {
+            return false;
+        };
+        let arity = facade_method_arg_count(&method);
+        if self.source_declared_facade_shadows.contains(&owner)
+            || self
+                .emitted_source_methods
+                .contains(&(owner.clone(), name.to_string(), arity))
+        {
+            return false;
+        }
+        if let Some(methods) = self.impls.get_mut(&owner) {
+            methods.retain(|existing| {
+                !facade_method_matches_signature(existing, name, arity)
+                    || facade_method_receiver_kind(existing) != FacadeMethodReceiverKind::Static
+            });
+        }
+        self.add_method(owner, method)
+    }
+
     fn add_method(&mut self, owner: String, method: String) -> bool {
         if is_awt_platform_facade_owner(&owner) {
             return false;
@@ -26606,7 +27666,10 @@ impl ExternalApiFacadeSupport {
     }
 
     fn add_known_jdk_static_field_surfaces(&mut self) {
-        if self.has_surface_type("System") {
+        // Arraycopy/time-only users do not request the I/O runtime. Do not
+        // introduce out/err/in (and their runtime type dependencies) solely
+        // because the System facade has an unrelated static method.
+        if self.has_surface_type("System") && self.uses_java_platform_facades {
             self.add_opaque_type("System".to_string());
             self.add_opaque_type("InputStream".to_string());
             self.add_opaque_type("PrintStream".to_string());
@@ -28652,6 +29715,43 @@ mod stdlib_support_item_tests {
     }
 
     #[test]
+    fn erased_object_reference_copy_registers_the_canonical_source_handle() {
+        use crate::storage_strategy::{Escape, TypeStorageFacts};
+        let program =
+            crate::parser::parse_java_source("class Payload { Object[] values; }").program;
+        for mutable in [false, true] {
+            for sync in [false, true] {
+                let storage = TypeStorageFacts::default()
+                    .with_escape(Escape::Stored)
+                    .with_mutated(mutable)
+                    .with_static_reachable(sync);
+                let expected = storage.placement().wrap("Payload".into());
+                let mut facts = FactSet::default();
+                facts.storage_strategies.insert("Payload".into(), storage);
+                let support = source_erased_object_clone_downcasts(&[&program], &facts, None);
+                let identity =
+                    source_erased_object_reference_identity_downcasts(&[&program], &facts, None);
+                assert!(
+                    identity.contains(&format!("downcast_ref::<{expected}>()")),
+                    "{identity}"
+                );
+                assert!(
+                    !identity.contains("downcast_ref::<Payload>()"),
+                    "must not identify a payload copy"
+                );
+                assert!(
+                    support.contains(&format!("downcast_ref::<{expected}>()")),
+                    "{support}"
+                );
+                assert!(
+                    !support.contains("downcast_ref::<Payload>()"),
+                    "must not copy payload"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn java_class_support_item_declares_public_token_type() {
         let support = raw_support_item_text(java_class_support_item());
         assert!(support.contains("pub struct JavaClass<T>"));
@@ -29645,6 +30745,30 @@ class SetDisplay {
             "{support}"
         );
         assert!(!support.contains("Default::default()"), "{support}");
+    }
+
+    #[test]
+    fn declaration_only_abstract_roots_are_not_erased_runtime_targets() {
+        let program = crate::parser::parse_java_source(
+            "abstract class Declaration { abstract int next(); } class Concrete extends Declaration { int next() { return 7; } }",
+        ).program;
+        let facts = FactSet::default();
+        let plan = crate::representation::plan_representations(&program, &facts);
+        assert!(plan.abstract_owner_is_declaration_only("Declaration"));
+        for arms in [
+            source_erased_object_to_string_downcasts(&[&program], &facts, Some(&plan)),
+            source_erased_object_to_string_downcasts_with_result(
+                &[&program],
+                &facts,
+                Some(&plan),
+                true,
+            ),
+            source_erased_object_clone_downcasts(&[&program], &facts, Some(&plan)),
+            source_erased_object_reference_identity_downcasts(&[&program], &facts, Some(&plan)),
+        ] {
+            assert!(!arms.contains("Declaration"), "{arms}");
+            assert!(arms.contains("Concrete"), "{arms}");
+        }
     }
 
     #[test]
@@ -31909,32 +33033,347 @@ impl{impl_generics} {ty_with_impl_generics} {{
 pub(crate) fn java_native_collection_runtime_support() -> String {
     format!(
         r#"#[derive(Clone, Copy, PartialEq, Eq)]
-enum JavaNativeCollectionMutation {{ Mutable, FixedSize, ImmutableEmpty, ImmutableSingleton }}
+enum JavaNativeCollectionMutation {{ Mutable, FixedSize, ImmutableEmpty, ImmutableSingleton, Unmodifiable, RemoveOnly }}
+
+/// A live projected collection supplies operations, not a detached Vec. Key
+/// copies are canonical Java reference copies; map values need not be Clone.
+pub trait JavaNativeCollectionProjection<T> {{
+    fn snapshot(&self) -> Vec<T>;
+    fn len(&self) -> usize;
+    fn get(&self, index: usize) -> Option<T>;
+    fn position(&self, value: &T, equal: fn(&T, &T) -> bool) -> Option<usize>;
+    fn remove_at(&self, index: usize) -> Option<T>;
+    fn clear(&self);
+    fn modification_count(&self) -> usize;
+}}
+
+pub struct JavaLocalMapKeys<K, V>(std::rc::Rc<std::cell::RefCell<JavaSemanticHashMap<K, V>>>);
+impl<K: Clone + JavaMapKey, V> JavaNativeCollectionProjection<K> for JavaLocalMapKeys<K, V> {{
+    fn snapshot(&self) -> Vec<K> {{ self.0.borrow().keys().cloned().collect() }}
+    fn len(&self) -> usize {{ self.0.borrow().len() }}
+    fn get(&self, index: usize) -> Option<K> {{ self.0.borrow().key_at(index).cloned() }}
+    fn position(&self, value: &K, _equal: fn(&K, &K) -> bool) -> Option<usize> {{ self.0.borrow().key_position(value) }}
+    fn remove_at(&self, index: usize) -> Option<K> {{ self.0.borrow_mut().remove_index(index).map(|(key, _)| key) }}
+    fn clear(&self) {{ self.0.borrow_mut().clear(); }}
+    fn modification_count(&self) -> usize {{ self.0.borrow().modification_count() }}
+}}
+
+pub struct JavaSyncMapKeys<K, V>(std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<K, V>>>);
+impl<K: Clone + JavaMapKey, V> JavaNativeCollectionProjection<K> for JavaSyncMapKeys<K, V> {{
+    fn snapshot(&self) -> Vec<K> {{ self.0.lock().expect("Java shared object mutex poisoned").keys().cloned().collect() }}
+    fn len(&self) -> usize {{ self.0.lock().expect("Java shared object mutex poisoned").len() }}
+    fn get(&self, index: usize) -> Option<K> {{ self.0.lock().expect("Java shared object mutex poisoned").key_at(index).cloned() }}
+    fn position(&self, value: &K, _equal: fn(&K, &K) -> bool) -> Option<usize> {{ self.0.lock().expect("Java shared object mutex poisoned").key_position(value) }}
+    fn remove_at(&self, index: usize) -> Option<K> {{ self.0.lock().expect("Java shared object mutex poisoned").remove_index(index).map(|(key, _)| key) }}
+    fn clear(&self) {{ self.0.lock().expect("Java shared object mutex poisoned").clear(); }}
+    fn modification_count(&self) -> usize {{ self.0.lock().expect("Java shared object mutex poisoned").modification_count() }}
+}}
+
+pub struct JavaLocalMapValues<K, V>(std::rc::Rc<std::cell::RefCell<JavaSemanticHashMap<K, V>>>);
+impl<K, V: Clone> JavaNativeCollectionProjection<V> for JavaLocalMapValues<K, V> {{
+    fn snapshot(&self) -> Vec<V> {{ self.0.borrow().values().cloned().collect() }}
+    fn len(&self) -> usize {{ self.0.borrow().len() }}
+    fn get(&self, index: usize) -> Option<V> {{ self.0.borrow().values().nth(index).cloned() }}
+    fn position(&self, value: &V, equal: fn(&V, &V) -> bool) -> Option<usize> {{
+        // Clone canonical references under a short loan, then invoke Java
+        // equality after releasing the map, which callbacks may reenter.
+        self.snapshot().iter().position(|stored| equal(value, stored))
+    }}
+    fn remove_at(&self, index: usize) -> Option<V> {{ self.0.borrow_mut().remove_index(index).map(|(_, value)| value) }}
+    fn clear(&self) {{ self.0.borrow_mut().clear(); }}
+    fn modification_count(&self) -> usize {{ self.0.borrow().modification_count() }}
+}}
+
+pub struct JavaSyncMapValues<K, V>(std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<K, V>>>);
+impl<K, V: Clone> JavaNativeCollectionProjection<V> for JavaSyncMapValues<K, V> {{
+    fn snapshot(&self) -> Vec<V> {{ self.0.lock().expect("Java shared object mutex poisoned").values().cloned().collect() }}
+    fn len(&self) -> usize {{ self.0.lock().expect("Java shared object mutex poisoned").len() }}
+    fn get(&self, index: usize) -> Option<V> {{ self.0.lock().expect("Java shared object mutex poisoned").values().nth(index).cloned() }}
+    fn position(&self, value: &V, equal: fn(&V, &V) -> bool) -> Option<usize> {{
+        self.snapshot().iter().position(|stored| equal(value, stored))
+    }}
+    fn remove_at(&self, index: usize) -> Option<V> {{ self.0.lock().expect("Java shared object mutex poisoned").remove_index(index).map(|(_, value)| value) }}
+    fn clear(&self) {{ self.0.lock().expect("Java shared object mutex poisoned").clear(); }}
+    fn modification_count(&self) -> usize {{ self.0.lock().expect("Java shared object mutex poisoned").modification_count() }}
+}}
+
+/// The backing tier follows the same local/synchronized choice as the Java
+/// allocation. A synchronized collection must never acquire an Rc field.
+pub trait JavaNativeCollectionBacking<T>: Default {{
+    fn read<R>(&self, owned: &[T], read: impl FnOnce(&[T]) -> R) -> R;
+    fn write<R>(&mut self, owned: &mut Vec<T>, write: impl FnOnce(&mut Vec<T>) -> R) -> R;
+    fn modification_count(&self) -> Option<usize> {{ None }}
+    fn projection(&self) -> Option<&dyn JavaNativeCollectionProjection<T>> {{ None }}
+    fn len(&self) -> Option<usize> {{ self.projection().map(|view| view.len()) }}
+}}
+
+pub enum JavaLocalArrayBacking<T> {{
+    None,
+    Local(std::rc::Rc<std::cell::RefCell<Vec<T>>>),
+    Sync(std::sync::Arc<std::sync::Mutex<Vec<T>>>),
+    LocalCollection(std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>>),
+    SyncCollection(std::sync::Arc<std::sync::Mutex<JavaSyncNativeCollection<T>>>),
+    Projection(Box<dyn JavaNativeCollectionProjection<T>>),
+}}
+impl<T> Default for JavaLocalArrayBacking<T> {{ fn default() -> Self {{ Self::None }} }}
+impl<T> JavaNativeCollectionBacking<T> for JavaLocalArrayBacking<T> {{
+    fn read<R>(&self, owned: &[T], read: impl FnOnce(&[T]) -> R) -> R {{
+        match self {{
+            Self::None => read(owned),
+            Self::Local(source) => read(&source.borrow()),
+            Self::Sync(source) => read(&source.lock().expect("Java shared object mutex poisoned")),
+            Self::LocalCollection(source) => source.borrow().with_items(read),
+            Self::SyncCollection(source) => source.lock().expect("Java shared object mutex poisoned").with_items(read),
+            Self::Projection(view) => read(&view.snapshot()),
+        }}
+    }}
+    fn write<R>(&mut self, owned: &mut Vec<T>, write: impl FnOnce(&mut Vec<T>) -> R) -> R {{
+        match self {{
+            Self::None => write(owned),
+            Self::Local(source) => write(&mut source.borrow_mut()),
+            Self::Sync(source) => write(&mut source.lock().expect("Java shared object mutex poisoned")),
+            Self::LocalCollection(_) | Self::SyncCollection(_) => unreachable!("unmodifiable collection backing cannot be written"),
+            Self::Projection(_) => unreachable!("projected collection requires operation dispatch"),
+        }}
+    }}
+    fn modification_count(&self) -> Option<usize> {{
+        match self {{
+            Self::LocalCollection(source) => Some(source.borrow().modification_count()),
+            Self::SyncCollection(source) => Some(source.lock().expect("Java shared object mutex poisoned").modification_count()),
+            Self::Projection(view) => Some(view.modification_count()),
+            _ => None,
+        }}
+    }}
+    fn projection(&self) -> Option<&dyn JavaNativeCollectionProjection<T>> {{
+        match self {{ Self::Projection(view) => Some(view.as_ref()), _ => None }}
+    }}
+    fn len(&self) -> Option<usize> {{
+        match self {{
+            Self::Projection(view) => Some(view.len()),
+            Self::LocalCollection(source) => Some(source.borrow().len()),
+            Self::SyncCollection(source) => Some(source.lock().expect("Java shared object mutex poisoned").len()),
+            _ => None,
+        }}
+    }}
+}}
+
+pub enum JavaSyncArrayBacking<T> {{
+    None,
+    Array(std::sync::Arc<std::sync::Mutex<Vec<T>>>),
+    Collection(std::sync::Arc<std::sync::Mutex<JavaSyncNativeCollection<T>>>),
+    Projection(Box<dyn JavaNativeCollectionProjection<T> + Send + Sync>),
+}}
+impl<T> Default for JavaSyncArrayBacking<T> {{ fn default() -> Self {{ Self::None }} }}
+impl<T> JavaNativeCollectionBacking<T> for JavaSyncArrayBacking<T> {{
+    fn read<R>(&self, owned: &[T], read: impl FnOnce(&[T]) -> R) -> R {{
+        match self {{
+            Self::None => read(owned),
+            Self::Array(source) => read(&source.lock().expect("Java shared object mutex poisoned")),
+            Self::Collection(source) => source.lock().expect("Java shared object mutex poisoned").with_items(read),
+            Self::Projection(view) => read(&view.snapshot()),
+        }}
+    }}
+    fn write<R>(&mut self, owned: &mut Vec<T>, write: impl FnOnce(&mut Vec<T>) -> R) -> R {{
+        match self {{
+            Self::None => write(owned),
+            Self::Array(source) => write(&mut source.lock().expect("Java shared object mutex poisoned")),
+            Self::Collection(_) => unreachable!("unmodifiable collection backing cannot be written"),
+            Self::Projection(_) => unreachable!("projected collection requires operation dispatch"),
+        }}
+    }}
+    fn modification_count(&self) -> Option<usize> {{
+        match self {{
+            Self::Collection(source) => Some(source.lock().expect("Java shared object mutex poisoned").modification_count()),
+            Self::Projection(view) => Some(view.modification_count()),
+            _ => None,
+        }}
+    }}
+    fn projection(&self) -> Option<&dyn JavaNativeCollectionProjection<T>> {{
+        match self {{ Self::Projection(view) => Some(view.as_ref()), _ => None }}
+    }}
+    fn len(&self) -> Option<usize> {{
+        match self {{
+            Self::Projection(view) => Some(view.len()),
+            Self::Collection(source) => Some(source.lock().expect("Java shared object mutex poisoned").len()),
+            _ => None,
+        }}
+    }}
+}}
+
+pub type JavaNativeCollection<T> = JavaNativeCollectionStorage<T, JavaLocalArrayBacking<T>>;
+pub type JavaSyncNativeCollection<T> = JavaNativeCollectionStorage<T, JavaSyncArrayBacking<T>>;
 
 /// One Java collection allocation, shared by ordinary collection operations
 /// and retained Iterable factories. Never expose an untracked mutable Vec.
-pub struct JavaNativeCollection<T> {{
+pub struct JavaNativeCollectionStorage<T, B> {{
     items: Vec<T>,
+    backing: B,
     changes: usize,
     list: bool,
     mutation: JavaNativeCollectionMutation,
     empty_add_changes: bool,
     equals: Option<fn(&T, &T) -> bool>,
+    deque_null: Option<fn(&T) -> bool>,
 }}
 
 impl<T> JavaNativeCollection<T> {{
+    pub fn from_local_map_values<K: 'static>(source: std::rc::Rc<std::cell::RefCell<JavaSemanticHashMap<K, T>>>) -> Self
+    where T: Clone + 'static {{
+        let mut view = Self::key_view_policy();
+        view.backing = JavaLocalArrayBacking::Projection(Box::new(JavaLocalMapValues(source)));
+        view
+    }}
+    pub fn from_sync_map_values<K: 'static>(source: std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<K, T>>>) -> Self
+    where T: Clone + 'static {{
+        let mut view = Self::key_view_policy();
+        view.backing = JavaLocalArrayBacking::Projection(Box::new(JavaSyncMapValues(source)));
+        view
+    }}
+    pub fn from_local_map_keys<V: 'static>(source: std::rc::Rc<std::cell::RefCell<JavaSemanticHashMap<T, V>>>) -> Self
+    where T: Clone + JavaMapKey + 'static {{
+        let mut view = Self::key_view_policy();
+        view.backing = JavaLocalArrayBacking::Projection(Box::new(JavaLocalMapKeys(source)));
+        view
+    }}
+    pub fn from_sync_map_keys<V: 'static>(source: std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<T, V>>>) -> Self
+    where T: Clone + JavaMapKey + 'static {{
+        let mut view = Self::key_view_policy();
+        view.backing = JavaLocalArrayBacking::Projection(Box::new(JavaSyncMapKeys(source)));
+        view
+    }}
+    pub fn unmodifiable_from_local_collection(source: std::rc::Rc<std::cell::RefCell<Self>>) -> Self {{
+        let mut collection = {{ let source = source.borrow(); Self::unmodifiable_policy(&source) }};
+        collection.backing = JavaLocalArrayBacking::LocalCollection(source);
+        collection
+    }}
+    pub fn unmodifiable_from_sync_collection(source: std::sync::Arc<std::sync::Mutex<JavaSyncNativeCollection<T>>>) -> Self {{
+        let mut collection = {{ let source = source.lock().expect("Java shared object mutex poisoned"); Self::unmodifiable_policy(&source) }};
+        collection.backing = JavaLocalArrayBacking::SyncCollection(source);
+        collection
+    }}
+    pub fn from_local_array(source: std::rc::Rc<std::cell::RefCell<Vec<T>>>) -> Self {{
+        let mut collection = Self::list(Vec::new(), false);
+        collection.backing = JavaLocalArrayBacking::Local(source);
+        collection
+    }}
+    pub fn from_sync_array(source: std::sync::Arc<std::sync::Mutex<Vec<T>>>) -> Self {{
+        let mut collection = Self::list(Vec::new(), false);
+        collection.backing = JavaLocalArrayBacking::Sync(source);
+        collection
+    }}
+}}
+impl<T> JavaSyncNativeCollection<T> {{
+    pub fn from_sync_map_values<K: Send + 'static>(source: std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<K, T>>>) -> Self
+    where T: Clone + Send + 'static {{
+        let mut view = Self::key_view_policy();
+        view.backing = JavaSyncArrayBacking::Projection(Box::new(JavaSyncMapValues(source)));
+        view
+    }}
+    pub fn from_sync_map_keys<V: Send + 'static>(source: std::sync::Arc<std::sync::Mutex<JavaSemanticHashMap<T, V>>>) -> Self
+    where T: Clone + JavaMapKey + Send + 'static {{
+        let mut view = Self::key_view_policy();
+        view.backing = JavaSyncArrayBacking::Projection(Box::new(JavaSyncMapKeys(source)));
+        view
+    }}
+    pub fn unmodifiable_from_sync_collection(source: std::sync::Arc<std::sync::Mutex<Self>>) -> Self {{
+        let mut collection = {{ let source = source.lock().expect("Java shared object mutex poisoned"); Self::unmodifiable_policy(&source) }};
+        collection.backing = JavaSyncArrayBacking::Collection(source);
+        collection
+    }}
+    pub fn from_sync_array(source: std::sync::Arc<std::sync::Mutex<Vec<T>>>) -> Self {{
+        let mut collection = Self::list(Vec::new(), false);
+        collection.backing = JavaSyncArrayBacking::Array(source);
+        collection
+    }}
+}}
+
+impl<T, B: JavaNativeCollectionBacking<T>> JavaNativeCollectionStorage<T, B> {{
+    fn key_view_policy() -> Self {{
+        let mut view = Self::immutable_empty(false);
+        view.mutation = JavaNativeCollectionMutation::RemoveOnly;
+        view
+    }}
+    fn unmodifiable_policy<S: JavaNativeCollectionBacking<T>>(source: &JavaNativeCollectionStorage<T, S>) -> Self {{
+        Self {{ items: Vec::new(), backing: B::default(), changes: 0, list: source.list, mutation: JavaNativeCollectionMutation::Unmodifiable, empty_add_changes: false, equals: source.equals, deque_null: source.deque_null }}
+    }}
+
+    fn require_not_unmodifiable(&self) -> Result<(), JavaException> {{
+        if self.mutation == JavaNativeCollectionMutation::Unmodifiable {{
+            Err(JavaException::new("UnsupportedOperationException", "Java unmodifiable collection".to_string()))
+        }} else {{ Ok(()) }}
+    }}
     pub fn list(items: Vec<T>, allow_remove: bool) -> Self {{
         Self::list_with_empty_add_policy(items, allow_remove, true)
     }}
 
     pub fn list_with_empty_add_policy(items: Vec<T>, allow_remove: bool, empty_add_changes: bool) -> Self {{
-        Self {{ items, changes: 0, list: true, mutation: if allow_remove {{ JavaNativeCollectionMutation::Mutable }} else {{ JavaNativeCollectionMutation::FixedSize }}, empty_add_changes, equals: None }}
+        Self {{ items, backing: B::default(), changes: 0, list: true, mutation: if allow_remove {{ JavaNativeCollectionMutation::Mutable }} else {{ JavaNativeCollectionMutation::FixedSize }}, empty_add_changes, equals: None, deque_null: None }}
+    }}
+
+    /// Preserve ArrayDeque's concrete null/List/iteration policy through a
+    /// Queue, Deque or Collection alias. The witness follows stored carriers.
+    pub fn array_deque_result(items: Vec<T>, is_null: fn(&T) -> bool) -> Result<Self, JavaException> {{
+        if items.iter().any(is_null) {{
+            return Err(JavaException::new("NullPointerException", "ArrayDeque rejects null elements".to_string()));
+        }}
+        let mut collection = Self::list_with_empty_add_policy(items, true, false);
+        collection.list = false;
+        collection.deque_null = Some(is_null);
+        Ok(collection)
+    }}
+
+    fn is_sequence(&self) -> bool {{ self.list || self.deque_null.is_some() }}
+    fn check_sequence_value(&self, value: &T) -> Result<(), JavaException> {{
+        if self.deque_null.is_some_and(|is_null| is_null(value)) {{
+            Err(JavaException::new("NullPointerException", "ArrayDeque rejects null elements".to_string()))
+        }} else {{ Ok(()) }}
+    }}
+
+    fn require_sequence(&self) -> Result<(), JavaException> {{
+        if self.is_sequence() {{ Ok(()) }} else {{
+            Err(JavaException::new("ClassCastException", "Java collection is not a sequence".to_string()))
+        }}
+    }}
+
+    pub fn queue_insert_result(&mut self, value: T, front: bool) -> Result<bool, JavaException> {{
+        self.require_not_unmodifiable()?;
+        self.require_sequence()?;
+        self.check_sequence_value(&value)?;
+        self.require_structural_mutation()?;
+        // The common Vec backing has O(n) front insertion/removal, not a
+        // ring-buffer complexity guarantee. All operations keep one identity.
+        if front {{ self.items.insert(0, value); }} else {{ self.items.push(value); }}
+        self.changed();
+        Ok(true)
+    }}
+
+    pub fn queue_peek_result(&self, front: bool) -> Result<Option<T>, JavaException> where T: Clone {{
+        self.require_sequence()?;
+        let index = if front {{ Some(0) }} else {{ self.len().checked_sub(1) }};
+        Ok(index.and_then(|index| self.get_cloned(index)))
+    }}
+
+    pub fn queue_element_result(&self, front: bool) -> Result<T, JavaException> where T: Clone {{
+        self.queue_peek_result(front)?.ok_or_else(|| JavaException::new("NoSuchElementException", "Java queue is empty".to_string()))
+    }}
+
+    pub fn queue_poll_result(&mut self, front: bool) -> Result<Option<T>, JavaException> {{
+        self.require_not_unmodifiable()?;
+        self.require_sequence()?;
+        if self.is_empty() {{ return Ok(None); }}
+        self.require_structural_mutation()?;
+        let index = if front {{ 0 }} else {{ self.len() - 1 }};
+        Ok(Some(self.remove_at(index)))
+    }}
+
+    pub fn queue_remove_result(&mut self, front: bool) -> Result<T, JavaException> {{
+        self.queue_poll_result(front)?.ok_or_else(|| JavaException::new("NoSuchElementException", "Java queue is empty".to_string()))
     }}
 
     /// The equality witness belongs to the selected Java collection, not to
     /// Rust PartialEq. Linked/hash sets retain their supplied iteration order.
     pub fn set<I: IntoIterator<Item = T>>(items: I, equals: fn(&T, &T) -> bool) -> Self {{
-        let mut collection = Self {{ items: Vec::new(), changes: 0, list: false, mutation: JavaNativeCollectionMutation::Mutable, empty_add_changes: false, equals: Some(equals) }};
+        let mut collection = Self {{ items: Vec::new(), backing: B::default(), changes: 0, list: false, mutation: JavaNativeCollectionMutation::Mutable, empty_add_changes: false, equals: Some(equals), deque_null: None }};
         for item in items {{ collection.insert(item); }}
         collection.changes = 0;
         collection
@@ -31942,7 +33381,7 @@ impl<T> JavaNativeCollection<T> {{
 
     /// Factories need no equality capability until a query is performed.
     pub fn immutable_empty(list: bool) -> Self {{
-        Self {{ items: Vec::new(), changes: 0, list, mutation: JavaNativeCollectionMutation::ImmutableEmpty, empty_add_changes: false, equals: None }}
+        Self {{ items: Vec::new(), backing: B::default(), changes: 0, list, mutation: JavaNativeCollectionMutation::ImmutableEmpty, empty_add_changes: false, equals: None, deque_null: None }}
     }}
 
     pub fn immutable_singleton(value: T, list: bool) -> Self {{
@@ -31953,11 +33392,16 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     pub fn is_list(&self) -> bool {{ self.list }}
-    pub fn len(&self) -> usize {{ self.items.len() }}
-    pub fn is_empty(&self) -> bool {{ self.items.is_empty() }}
-    pub fn modification_count(&self) -> usize {{ self.changes }}
-    pub fn get(&self, index: usize) -> Option<&T> {{ self.items.get(index) }}
-    pub fn iter(&self) -> std::slice::Iter<'_, T> {{ self.items.iter() }}
+    pub fn is_identity_sequence(&self) -> bool {{ self.deque_null.is_some() }}
+    fn with_items<R>(&self, read: impl FnOnce(&[T]) -> R) -> R {{ self.backing.read(&self.items, read) }}
+    pub fn len(&self) -> usize {{ self.backing.len().unwrap_or_else(|| self.with_items(|items| items.len())) }}
+    pub fn is_empty(&self) -> bool {{ self.len() == 0 }}
+    pub fn modification_count(&self) -> usize {{ self.backing.modification_count().unwrap_or(self.changes) }}
+    pub fn get_cloned(&self, index: usize) -> Option<T> where T: Clone {{
+        if let Some(view) = self.backing.projection() {{ return view.get(index); }}
+        self.with_items(|items| items.get(index).cloned())
+    }}
+    pub fn cloned_items(&self) -> Vec<T> where T: Clone {{ self.with_items(|items| items.to_vec()) }}
 
     fn changed(&mut self) {{ self.changes = self.changes.wrapping_add(1); }}
 
@@ -31966,23 +33410,37 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     fn require_structural_mutation(&self) -> Result<(), JavaException> {{
-        if self.mutation == JavaNativeCollectionMutation::Mutable {{ Ok(()) }} else {{ Err(JavaException::new("UnsupportedOperationException", "Java collection does not support structural mutation".to_string())) }}
+        if matches!(self.mutation, JavaNativeCollectionMutation::Mutable | JavaNativeCollectionMutation::RemoveOnly) {{ Ok(()) }} else {{ Err(JavaException::new("UnsupportedOperationException", "Java collection does not support structural mutation".to_string())) }}
     }}
 
     pub fn list_get_result(&self, index: i32) -> Result<T, JavaException> where T: Clone {{
         self.require_list()?;
         if index < 0 {{ return Err(JavaException::new("IndexOutOfBoundsException", index.to_string())); }}
-        self.items.get(index as usize).cloned().ok_or_else(|| JavaException::new("IndexOutOfBoundsException", index.to_string()))
+        self.get_cloned(index as usize).ok_or_else(|| JavaException::new("IndexOutOfBoundsException", index.to_string()))
     }}
 
     pub fn list_set_result(&mut self, index: i32, value: T) -> Result<T, JavaException> {{
+        self.require_not_unmodifiable()?;
         self.require_list()?;
         if matches!(self.mutation, JavaNativeCollectionMutation::ImmutableEmpty | JavaNativeCollectionMutation::ImmutableSingleton) {{ self.require_structural_mutation()?; }}
         if index < 0 {{ return Err(JavaException::new("IndexOutOfBoundsException", index.to_string())); }}
-        let slot = self.items.get_mut(index as usize).ok_or_else(|| JavaException::new("IndexOutOfBoundsException", index.to_string()))?;
         // set is nonstructural, including on Arrays.asList. Existing cursors
         // must observe this replacement without being invalidated.
-        Ok(std::mem::replace(slot, value))
+        self.backing.write(&mut self.items, |items| {{
+            let slot = items.get_mut(index as usize).ok_or_else(|| JavaException::new("IndexOutOfBoundsException", index.to_string()))?;
+            Ok(std::mem::replace(slot, value))
+        }})
+    }}
+
+    /// Collections.reverse uses only nonstructural replacements. The backing
+    /// array and existing iterators observe the swaps; no Clone is needed.
+    pub fn reverse_result(&mut self) -> Result<(), JavaException> {{
+        self.require_list()?;
+        if self.len() <= 1 {{ return Ok(()); }}
+        self.require_not_unmodifiable()?;
+        if matches!(self.mutation, JavaNativeCollectionMutation::ImmutableEmpty | JavaNativeCollectionMutation::ImmutableSingleton) {{ self.require_structural_mutation()?; }}
+        self.backing.write(&mut self.items, |items| items.reverse());
+        Ok(())
     }}
 
     pub fn list_add_result(&mut self, value: T) -> Result<bool, JavaException> {{
@@ -31993,10 +33451,22 @@ impl<T> JavaNativeCollection<T> {{
         Ok(true)
     }}
 
+    /// A Collection-typed alias can denote either a list or a set. Dispatch
+    /// using the allocation's policy, not the alias's nominal declaration.
+    pub fn add_result(&mut self, value: T) -> Result<bool, JavaException> {{
+        if self.is_sequence() {{ self.queue_insert_result(value, false) }} else {{ self.insert_result(value) }}
+    }}
+
     /// The caller snapshots native collection sources before taking this
     /// allocation's mutable guard, including when source and receiver alias.
     pub fn add_all_result(&mut self, values: Vec<T>) -> Result<bool, JavaException> {{
-        if self.list {{
+        self.require_not_unmodifiable()?;
+        if self.deque_null.is_some() {{
+            let mut changed = false;
+            for value in values {{ changed |= self.queue_insert_result(value, false)?; }}
+            return Ok(changed);
+        }}
+        if self.is_sequence() {{
             // Arrays.asList inherits the element-by-element implementation:
             // an empty insertion never attempts its unsupported add method.
             if self.mutation != JavaNativeCollectionMutation::Mutable && values.is_empty() {{ return Ok(false); }}
@@ -32034,7 +33504,7 @@ impl<T> JavaNativeCollection<T> {{
     /// element's. Supplying the witness keeps reference equality and null
     /// handling in the existing Java equality implementation.
     pub fn list_index_of(&self, value: &T, equals: fn(&T, &T) -> bool) -> i32 {{
-        self.items.iter().position(|stored| equals(value, stored)).map(|index| index as i32).unwrap_or(-1)
+        self.with_items(|items| items.iter().position(|stored| equals(value, stored)).map(|index| index as i32).unwrap_or(-1))
     }}
 
     pub fn list_contains(&self, value: &T, equals: fn(&T, &T) -> bool) -> bool {{
@@ -32042,6 +33512,7 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     pub fn list_remove_object_result(&mut self, value: &T, equals: fn(&T, &T) -> bool) -> Result<bool, JavaException> {{
+        self.require_not_unmodifiable()?;
         self.require_list()?;
         let index = self.list_index_of(value, equals);
         // AbstractCollection.remove on a fixed-size list only invokes the
@@ -32053,9 +33524,11 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     pub fn contains(&self, value: &T) -> bool {{
-        if self.items.is_empty() {{ return false; }}
-        let equals = self.equals.expect("set equality witness");
-        self.items.iter().any(|stored| equals(stored, value))
+        self.with_items(|items| {{
+            if items.is_empty() {{ return false; }}
+            let equals = self.equals.expect("set equality witness");
+            items.iter().any(|stored| equals(stored, value))
+        }})
     }}
 
     pub fn insert(&mut self, value: T) -> bool {{
@@ -32066,15 +33539,19 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     pub fn insert_result(&mut self, value: T) -> Result<bool, JavaException> {{
+        if self.mutation == JavaNativeCollectionMutation::RemoveOnly {{
+            return Err(JavaException::new("UnsupportedOperationException", "Java key view does not support insertion".to_string()));
+        }}
         self.require_structural_mutation()?;
         Ok(self.insert(value))
     }}
 
     fn set_position_by(&self, value: &T, fallback: fn(&T, &T) -> bool) -> Option<usize> {{
-        self.items.iter().position(|stored| match self.equals {{
+        if let Some(view) = self.backing.projection() {{ return view.position(value, fallback); }}
+        self.with_items(|items| items.iter().position(|stored| match self.equals {{
             Some(equals) => equals(stored, value),
             None => fallback(value, stored),
-        }})
+        }}))
     }}
 
     pub fn contains_by(&self, value: &T, fallback: fn(&T, &T) -> bool) -> bool {{
@@ -32082,7 +33559,12 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     pub fn remove_result(&mut self, value: &T, fallback: fn(&T, &T) -> bool) -> Result<bool, JavaException> {{
+        self.require_not_unmodifiable()?;
+        let expected = self.modification_count();
         let Some(index) = self.set_position_by(value, fallback) else {{ return Ok(false); }};
+        if self.backing.projection().is_some() && self.modification_count() != expected {{
+            return Err(JavaException::new("ConcurrentModificationException", "Java map changed during value comparison".to_string()));
+        }}
         self.require_structural_mutation()?;
         self.remove_at(index);
         Ok(true)
@@ -32096,7 +33578,9 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     pub fn clear_result(&mut self) -> Result<(), JavaException> {{
-        if self.mutation != JavaNativeCollectionMutation::Mutable && self.items.is_empty() {{ return Ok(()); }}
+        self.require_not_unmodifiable()?;
+        if let Some(view) = self.backing.projection() {{ view.clear(); return Ok(()); }}
+        if self.mutation != JavaNativeCollectionMutation::Mutable && self.is_empty() {{ return Ok(()); }}
         self.require_structural_mutation()?;
         if self.list || !self.items.is_empty() {{ self.changed(); }}
         self.items.clear();
@@ -32104,9 +33588,35 @@ impl<T> JavaNativeCollection<T> {{
     }}
 
     fn remove_at(&mut self, index: usize) -> T {{
+        if let Some(view) = self.backing.projection() {{
+            return view.remove_at(index).expect("checked projected collection position");
+        }}
         let value = self.items.remove(index);
         self.changed();
         value
+    }}
+}}
+
+impl<T: JavaMapKey, B: JavaNativeCollectionBacking<T>> JavaMapKey for JavaNativeCollectionStorage<T, B> {{
+    fn java_map_key_eq(&self, other: &Self) -> bool {{
+        if self.is_identity_sequence() || other.is_identity_sequence() {{
+            return std::ptr::eq(self, other);
+        }}
+        if self.list != other.list || self.len() != other.len() {{ return false; }}
+        if self.list {{
+            self.with_items(|left| other.with_items(|right| left.iter().zip(right).all(|(left, right)| left.java_map_key_eq(right))))
+        }} else {{
+            // AbstractSet.equals probes this set's own membership contract,
+            // including its selected comparator/equality witness.
+            other.with_items(|items| items.iter().all(|value| self.contains_by(value, T::java_map_key_eq)))
+        }}
+    }}
+}}
+
+impl<T: JavaMapKey> JavaMapKey for std::rc::Rc<std::cell::RefCell<JavaNativeCollection<T>>> {{
+    fn java_map_key_eq(&self, other: &Self) -> bool {{
+        if std::rc::Rc::ptr_eq(self, other) {{ return true; }}
+        self.borrow().java_map_key_eq(&other.borrow())
     }}
 }}
 
@@ -34109,8 +35619,7 @@ fn facade_const_name(method_body: &str) -> Option<&str> {
 }
 
 fn facade_method_has_name(method_body: &str, method: &str) -> bool {
-    method_body.contains(&format!(" pub fn {method}<"))
-        || method_body.contains(&format!(" pub fn {method}("))
+    facade_method_name(method_body) == Some(method)
 }
 
 fn facade_method_matches_signature(method_body: &str, method: &str, arg_count: usize) -> bool {
@@ -40082,6 +41591,18 @@ pub(crate) fn external_api_return_nullability(
         return NullabilityState::DefinitelyNonNull;
     }
     match (receiver_type, name, arg_count) {
+        (
+            Some(owner),
+            "peek" | "peekFirst" | "peek_first" | "peekLast" | "peek_last" | "poll" | "pollFirst"
+            | "poll_first" | "pollLast" | "poll_last",
+            0,
+        ) if is_known_queue_type(owner) => NullabilityState::MaybeNull,
+        (
+            Some(owner),
+            "element" | "getFirst" | "get_first" | "getLast" | "get_last" | "remove"
+            | "removeFirst" | "remove_first" | "removeLast" | "remove_last" | "pop",
+            0,
+        ) if matches!(owner, "Queue" | "Deque" | "LinkedList") => NullabilityState::MaybeNull,
         (Some(owner), "get", 2)
             if matches!(
                 canonical_external_receiver_type_key(owner).as_str(),
@@ -41898,6 +43419,138 @@ mod external_facade_generic_carrier_tests {
     use super::*;
 
     #[test]
+    fn executable_static_model_outranks_inferred_abi_but_not_source() {
+        let mut support = ExternalApiFacadeSupport::default();
+        let placeholder =
+            "pub fn bits<T0>(_arg0: T0) -> i64 { unimplemented!(\"bits\") }".to_string();
+        let model = "pub fn bits<T0: Into<f64>>(arg0: T0) -> i64 { arg0.into().to_bits() as i64 }"
+            .to_string();
+        support.add_method("Double".into(), placeholder.clone());
+        assert!(support.add_modelled_static_method("Double".into(), model.clone()));
+        assert_eq!(support.impls["Double"].len(), 1);
+        assert!(support.impls["Double"].contains(&model));
+        assert!(
+            support.impls["Double"]
+                .iter()
+                .all(|body| !body.contains("unimplemented!"))
+        );
+        let mut source = ExternalApiFacadeSupport::default();
+        source
+            .source_declared_facade_shadows
+            .insert("Double".into());
+        source.add_method("Double".into(), placeholder.clone());
+        assert!(!source.add_modelled_static_method("Double".into(), model));
+        assert!(source.impls["Double"].contains(&placeholder));
+    }
+
+    #[test]
+    fn checked_java_hash_runtime_reuses_leaf_kernels_and_live_iteration() {
+        let runtime = crate::translate_source(
+            "import java.util.*; class HashRuntimeDependency { static int run() { Iterator<Integer> cursor = Arrays.asList(1).iterator(); return cursor.next(); } }",
+        );
+        assert!(
+            !runtime.diagnostics.has_errors(),
+            "{:?}",
+            runtime.diagnostics
+        );
+        let iterable = external_facade_functional_closure_carrier_struct("Iterable");
+        let hash = format!(
+            "{}\n{}",
+            java_checked_hash_runtime_support(),
+            java_checked_native_hash_runtime_support()
+        );
+        let source = format!(
+            "{}\nmod checked_hash {{ use super::*;\n{iterable}\n{hash}\n{}\n}}\nfn main() {{ checked_hash::exercise(); }}",
+            runtime.rust,
+            r#"
+pub fn exercise() {
+    assert_eq!(java_checked_list_hash_code(&["a".to_string(), "b".to_string()]).unwrap(), 4066);
+    assert_eq!(java_checked_list_hash_code::<i32>(&[]).unwrap(), 1);
+    let set = std::collections::HashSet::from(["a".to_string(), "b".to_string()]);
+    assert_eq!(set.java_hash_code_result().unwrap(), 195);
+    let map = std::collections::HashMap::from([("a".to_string(), "b".to_string()), ("b".to_string(), "a".to_string())]);
+    assert_eq!(map.java_hash_code_result().unwrap(), 6);
+    assert_eq!(Some(7_i32).java_hash_code_result().unwrap(), 7);
+    assert_eq!(None::<i32>.java_hash_code_result().unwrap(), 0);
+    assert_eq!(true.java_hash_code_result().unwrap(), 1231);
+    assert_eq!((-0_f64).java_hash_code_result().unwrap(), i32::MIN);
+    assert_eq!(f64::NAN.java_hash_code_result().unwrap(), 2146959360);
+    assert_eq!("\u{1f600}".java_hash_code_result().unwrap(), 1772899);
+    assert_eq!(java_checked_list_hash_code(&[i32::MAX, i32::MAX]).unwrap(), 929);
+    struct NonClone(i32);
+    impl JavaHashCode for NonClone {
+        fn java_hash_code_result(&self) -> Result<i32, JavaException> { Ok(self.0) }
+    }
+    assert_eq!(java_checked_list_hash_code(&[NonClone(3), NonClone(4)]).unwrap(), 1058);
+    struct Failure;
+    impl JavaHashCode for Failure {
+        fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+            Err(JavaException::new("IllegalStateException", "hash".into()))
+        }
+    }
+    assert_eq!(java_checked_list_hash_code(&[Failure]).unwrap_err().class_name(), "IllegalStateException");
+    let list = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(vec![1_i32, 2], true)));
+    assert_eq!(list.java_hash_code_result().unwrap(), 994);
+    #[derive(Clone)] struct CheckedEquality(i32, bool);
+    impl JavaMapKey for CheckedEquality {
+        fn java_map_key_eq(&self, _: &Self) -> bool { panic!("checked equality must not use the infallible adapter") }
+        fn java_map_key_eq_result(&self, other: &Self) -> Result<bool, JavaException> {
+            if self.1 { return Err(JavaException::new("IllegalStateException", "equals".into())); }
+            Ok(self.0 == other.0)
+        }
+    }
+    let ordinary = CheckedEquality(7, false);
+    let failure = CheckedEquality(7, true);
+    assert!(<&CheckedEquality as JavaMapKey>::java_map_key_eq_result(&&failure, &&ordinary).is_err());
+    assert!(Some(ordinary.clone()).java_map_key_eq_result(&Some(ordinary.clone())).unwrap());
+    assert_eq!(Some(failure.clone()).java_map_key_eq_result(&Some(ordinary.clone())).unwrap_err().class_name(), "IllegalStateException");
+    assert!(!Some(failure.clone()).java_map_key_eq_result(&None).unwrap());
+    assert!(None::<CheckedEquality>.java_map_key_eq_result(&None).unwrap());
+    let keys = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(vec![ordinary.clone()], true)));
+    assert_eq!(java_native_collection_contains_projected_checked_result(&keys, &failure,
+        JavaMapKey::java_map_key_eq_result).unwrap_err().class_name(), "IllegalStateException");
+    let mut compared = 0;
+    assert!(java_native_collection_contains_projected_checked_result(&keys, &ordinary, |query, stored| {
+        assert_eq!(keys.borrow().len(), 1);
+        // Reentrant mutation must not encounter an outstanding read loan.
+        keys.borrow_mut().list_set_result(0, CheckedEquality(9, false))?;
+        compared += 1;
+        query.java_map_key_eq_result(stored)
+    }).unwrap());
+    assert_eq!(compared, 1);
+    assert_eq!(keys.borrow().cloned_items()[0].0, 9);
+    let nullable = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::set(vec![Some(97_i32), None, Some(98)], |a,b| a == b)));
+    assert_eq!(nullable.java_hash_code_result().unwrap(), 195);
+    #[derive(Clone)] struct Reentrant(std::rc::Rc<std::cell::RefCell<JavaNativeCollection<Reentrant>>>, i32);
+    impl JavaHashCode for Reentrant {
+        fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+            if self.1 == 1 {
+                self.0.borrow_mut().list_set_result(1, Reentrant(self.0.clone(), 3))?;
+            }
+            Ok(self.1)
+        }
+    }
+    let live = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(Vec::<Reentrant>::new(), true)));
+    live.borrow_mut().list_add_result(Reentrant(live.clone(), 1)).unwrap();
+    live.borrow_mut().list_add_result(Reentrant(live.clone(), 2)).unwrap();
+    assert_eq!(live.java_hash_code_result().unwrap(), 995);
+    #[derive(Clone)] struct Invalidating(std::rc::Rc<std::cell::RefCell<JavaNativeCollection<Invalidating>>>);
+    impl JavaHashCode for Invalidating {
+        fn java_hash_code_result(&self) -> Result<i32, JavaException> {
+            self.0.borrow_mut().list_add_result(self.clone())?;
+            Ok(1)
+        }
+    }
+    let changed = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(Vec::<Invalidating>::new(), true)));
+    changed.borrow_mut().list_add_result(Invalidating(changed.clone())).unwrap();
+    assert_eq!(changed.java_hash_code_result().unwrap_err().class_name(), "ConcurrentModificationException");
+}
+"#
+        );
+        run_generated_functional_support("checked_java_hash", source);
+    }
+
+    #[test]
     fn wrapper_value_factories_preserve_java_reference_return_types() {
         for wrapper in [
             "Boolean",
@@ -41944,10 +43597,154 @@ mod external_facade_generic_carrier_tests {
         );
         let support = external_facade_functional_closure_carrier_struct("Iterable");
         let source = format!(
-            "{}\nmod iterable_scope {{ use super::{{JavaException, JavaIterator}};\n{support}\n{}\n}}\nfn main() {{ iterable_scope::exercise(); }}",
+            "{}\nmod iterable_scope {{ use super::{{JavaException, JavaIterator, JavaMapKey, JavaSemanticHashMap}};\n{support}\n{}\n}}\nfn main() {{ iterable_scope::exercise(); }}",
             runtime.rust,
             r#"
 pub fn exercise() {
+    let deque = std::rc::Rc::new(std::cell::RefCell::new(
+        JavaNativeCollection::array_deque_result(Vec::<Option<i32>>::new(), Option::is_none).unwrap()));
+    let mut before_insert = java_native_collection_iterator_result(&deque).unwrap();
+    deque.borrow_mut().queue_insert_result(Some(2), false).unwrap();
+    assert!(!before_insert.has_next_result().unwrap());
+    deque.borrow_mut().queue_insert_result(Some(1), true).unwrap();
+    assert_eq!(deque.borrow().queue_element_result(true).unwrap(), Some(1));
+    assert_eq!(deque.borrow().queue_element_result(false).unwrap(), Some(2));
+    let changes = deque.borrow().modification_count();
+    assert_eq!(deque.borrow_mut().queue_insert_result(None, true).unwrap_err().class_name(), "NullPointerException");
+    assert_eq!(deque.borrow().modification_count(), changes);
+    let mut cursor = java_native_collection_iterator_result(&deque).unwrap();
+    deque.borrow_mut().queue_remove_result(false).unwrap();
+    assert_eq!(cursor.next_result().unwrap_err().class_name(), "ConcurrentModificationException");
+    assert_eq!(deque.borrow_mut().queue_remove_result(true).unwrap(), Some(1));
+    assert_eq!(deque.borrow_mut().queue_poll_result(true).unwrap(), None);
+    assert_eq!(deque.borrow().queue_element_result(false).unwrap_err().class_name(), "NoSuchElementException");
+    let distinct = std::rc::Rc::new(std::cell::RefCell::new(
+        JavaNativeCollection::array_deque_result(Vec::<Option<i32>>::new(), Option::is_none).unwrap()));
+    assert!(deque.java_map_key_eq(&deque.clone()));
+    assert!(!deque.java_map_key_eq(&distinct));
+    assert!(deque.borrow_mut().add_all_result(vec![Some(3), None, Some(4)]).is_err());
+    assert_eq!(deque.borrow().cloned_items(), vec![Some(3)]);
+    let mut linked = JavaNativeCollection::list_with_empty_add_policy(vec![None::<i32>], true, false);
+    assert_eq!(linked.queue_remove_result(true).unwrap(), None);
+    assert!(JavaSyncNativeCollection::array_deque_result(vec![None::<i32>], Option::is_none).is_err());
+    // Values views capture keys without cloning them, and require no value
+    // equality capability until a query actually supplies a witness.
+    struct ValueKey(i32);
+    impl JavaMapKey for ValueKey {
+        fn java_map_key_eq(&self, other: &Self) -> bool { self.0 == other.0 }
+    }
+    #[derive(Clone)] struct ViewValue(i32);
+    let value_map = std::rc::Rc::new(std::cell::RefCell::new(JavaSemanticHashMap::new()));
+    value_map.borrow_mut().insert(ValueKey(1), ViewValue(10));
+    value_map.borrow_mut().insert(ValueKey(2), ViewValue(10));
+    let value_view = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::from_local_map_values(value_map.clone())));
+    let mut value_cursor = java_native_collection_iterator_result(&value_view).unwrap();
+    value_map.borrow_mut().insert(ValueKey(1), ViewValue(11));
+    assert_eq!(value_cursor.next_result().unwrap().0, 11);
+    value_cursor.remove_result().unwrap();
+    assert!(!value_map.borrow().contains_key(&ValueKey(1)));
+    assert!(value_view.borrow_mut().remove_result(&ViewValue(10), |a, b| a.0 == b.0).unwrap());
+    assert!(value_map.borrow().is_empty());
+    let null_map = std::rc::Rc::new(std::cell::RefCell::new(JavaSemanticHashMap::new()));
+    null_map.borrow_mut().insert(1, None::<i32>);
+    null_map.borrow_mut().insert(2, None::<i32>);
+    let mut null_values = JavaNativeCollection::from_local_map_values(null_map.clone());
+    assert!(null_values.remove_result(&None, Option::<i32>::java_map_key_eq).unwrap());
+    assert!(!null_map.borrow().contains_key(&1));
+    assert!(null_map.borrow().contains_key(&2));
+    let before = null_map.borrow().modification_count();
+    assert_eq!(null_map.borrow_mut().put_if_absent_with(2, Some(9), Option::is_none, Clone::clone), Some(None));
+    assert_eq!(null_map.borrow().modification_count(), before);
+    assert_eq!(null_map.borrow_mut().put_if_absent_with(2, Some(8), Option::is_none, Clone::clone), Some(Some(9)));
+    assert_eq!(null_map.borrow().get(&2), Some(&Some(9)));
+    assert_eq!(null_values.get_cloned(0), Some(Some(9)));
+    #[derive(Clone)] struct ReentrantValue {
+        owner: std::rc::Weak<std::cell::RefCell<JavaSemanticHashMap<i32, ReentrantValue>>>,
+    }
+    let reentrant_map = std::rc::Rc::new(std::cell::RefCell::new(JavaSemanticHashMap::new()));
+    let query = ReentrantValue { owner: std::rc::Rc::downgrade(&reentrant_map) };
+    reentrant_map.borrow_mut().insert(1, query.clone());
+    let mut reentrant_values = JavaNativeCollection::from_local_map_values(reentrant_map.clone());
+    let error = reentrant_values.remove_result(&query, |query, _| {
+        query.owner.upgrade().unwrap().borrow_mut().clear(); true
+    }).unwrap_err();
+    assert_eq!(error.class_name(), "ConcurrentModificationException");
+    let sync_values_map = std::sync::Arc::new(std::sync::Mutex::new(JavaSemanticHashMap::new()));
+    sync_values_map.lock().unwrap().insert(ValueKey(1), ViewValue(1));
+    let sync_values = JavaSyncNativeCollection::from_sync_map_values(sync_values_map.clone());
+    let local_sync_values = JavaNativeCollection::from_sync_map_values(sync_values_map.clone());
+    let writer = sync_values_map.clone();
+    std::thread::spawn(move || { writer.lock().unwrap().insert(ValueKey(2), ViewValue(2)); }).join().unwrap();
+    assert_eq!(sync_values.len(), 2);
+    assert_eq!(local_sync_values.len(), 2);
+    // The view keeps the map allocation, not its keys at construction time.
+    // Values are intentionally not Clone: a key view never copies a value.
+    struct NoCloneValue(i32);
+    let map = std::rc::Rc::new(std::cell::RefCell::new(JavaSemanticHashMap::new()));
+    map.borrow_mut().insert(1, NoCloneValue(10));
+    let keys = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::from_local_map_keys(map.clone())));
+    let readonly = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::unmodifiable_from_local_collection(keys.clone())));
+    let mut stable = java_native_collection_iterator_result(&keys).unwrap();
+    map.borrow_mut().insert(1, NoCloneValue(11));
+    assert_eq!(stable.next_result().unwrap(), 1);
+    assert_eq!(map.borrow().get(&1).unwrap().0, 11);
+    let mut invalidated = java_native_collection_iterator_result(&readonly).unwrap();
+    map.borrow_mut().insert(2, NoCloneValue(20));
+    assert_eq!(readonly.borrow().len(), 2);
+    assert_eq!(invalidated.next_result().unwrap_err().class_name(), "ConcurrentModificationException");
+    assert!(keys.borrow_mut().insert_result(3).is_err());
+    assert!(!keys.borrow_mut().add_all_result(vec![]).unwrap());
+    assert!(keys.borrow_mut().add_all_result(vec![3]).is_err());
+    assert!(readonly.borrow_mut().remove_result(&99, i32::java_map_key_eq).is_err());
+    let mut cursor = java_native_collection_iterator_result(&keys).unwrap();
+    assert_eq!(cursor.next_result().unwrap(), 1);
+    cursor.remove_result().unwrap();
+    assert!(!map.borrow().contains_key(&1));
+    assert_eq!(cursor.next_result().unwrap(), 2);
+    assert!(keys.borrow_mut().remove_result(&2, i32::java_map_key_eq).unwrap());
+    assert!(map.borrow().is_empty());
+    assert!(readonly.borrow_mut().clear_result().is_err());
+    map.borrow_mut().insert(3, NoCloneValue(30));
+    keys.borrow_mut().clear_result().unwrap();
+    assert!(map.borrow().is_empty());
+    map.borrow_mut().insert(4, NoCloneValue(40));
+    assert!(readonly.borrow().contains_by(&4, i32::java_map_key_eq));
+    // Snapshot callbacks run after the backing-map guard is released.
+    keys.borrow().with_items(|items| {
+        assert_eq!(items, &[4]);
+        map.borrow_mut().insert(4, NoCloneValue(41));
+    });
+    let mut other = java_native_collection_iterator_result(&keys).unwrap();
+    let before = map.borrow().modification_count();
+    map.borrow_mut().retain(|_, value| { value.0 += 1; true });
+    assert_eq!(map.borrow().modification_count(), before);
+    assert_eq!(other.next_result().unwrap(), 4);
+    let sync_map = std::sync::Arc::new(std::sync::Mutex::new(JavaSemanticHashMap::new()));
+    sync_map.lock().unwrap().insert(1, NoCloneValue(1));
+    let mut sync_keys = JavaSyncNativeCollection::from_sync_map_keys(sync_map.clone());
+    let local_sync_keys = JavaNativeCollection::from_sync_map_keys(sync_map.clone());
+    let writer = sync_map.clone();
+    std::thread::spawn(move || { writer.lock().unwrap().insert(2, NoCloneValue(2)); }).join().unwrap();
+    assert_eq!(sync_keys.len(), 2);
+    assert_eq!(local_sync_keys.cloned_items(), vec![1, 2]);
+    assert!(sync_keys.remove_result(&1, i32::java_map_key_eq).unwrap());
+    assert!(!sync_map.lock().unwrap().contains_key(&1));
+    struct IdentityKey(i32);
+    impl JavaMapKey for std::rc::Rc<std::cell::RefCell<IdentityKey>> {
+        fn java_map_key_eq(&self, other: &Self) -> bool { std::rc::Rc::ptr_eq(self, other) }
+    }
+    let original = std::rc::Rc::new(std::cell::RefCell::new(IdentityKey(1)));
+    let distinct = std::rc::Rc::new(std::cell::RefCell::new(IdentityKey(1)));
+    let references = std::rc::Rc::new(std::cell::RefCell::new(JavaSemanticHashMap::new()));
+    references.borrow_mut().insert(original.clone(), NoCloneValue(1));
+    let reference_keys = JavaNativeCollection::from_local_map_keys(references.clone());
+    assert!(!reference_keys.contains_by(&distinct, JavaMapKey::java_map_key_eq));
+    let selected = reference_keys.get_cloned(0).unwrap();
+    assert!(std::rc::Rc::ptr_eq(&selected, &original));
+    selected.borrow_mut().0 = 9;
+    assert_eq!(original.borrow().0, 9);
+    drop(references);
+    assert!(reference_keys.contains_by(&selected, JavaMapKey::java_map_key_eq));
     // Checked bulk membership releases every source guard before equality,
     // including when equality performs a nonstructural source update.
     let bulk_source = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(vec![1, 2], true)));
@@ -41982,6 +43779,59 @@ pub fn exercise() {
     impl super::JavaMapKey for Directional {
         fn java_map_key_eq(&self, other: &Self) -> bool { self.0 > other.0 }
     }
+    struct NoCloneKey(i32);
+    impl JavaMapKey for NoCloneKey {
+        fn java_map_key_eq(&self, other: &Self) -> bool { self.0 == other.0 }
+    }
+    // Creating a view and replacing an element do not clone its payload.
+    let no_clone_array = std::rc::Rc::new(std::cell::RefCell::new(vec![NoCloneKey(7)]));
+    let mut no_clone_view = JavaNativeCollection::from_local_array(no_clone_array.clone());
+    assert_eq!(no_clone_view.len(), 1);
+    assert_eq!(no_clone_view.list_set_result(0, NoCloneKey(8)).unwrap().0, 7);
+    assert_eq!(no_clone_array.borrow()[0].0, 8);
+
+    let backing = std::rc::Rc::new(std::cell::RefCell::new(vec![1, 2]));
+    let array_view = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::from_local_array(backing.clone())));
+    let mut array_cursor = java_native_collection_iterator_result(&array_view).unwrap();
+    assert_eq!(array_cursor.next_result().unwrap(), 1);
+    backing.borrow_mut()[1] = 9;
+    assert_eq!(array_cursor.next_result().unwrap(), 9);
+    assert!(array_cursor.remove_result().is_err());
+    assert!(array_view.borrow_mut().add_result(3).is_err());
+    assert!(!array_view.borrow_mut().remove_result(&3, i32::java_map_key_eq).unwrap());
+    assert!(array_view.borrow_mut().remove_result(&1, i32::java_map_key_eq).is_err());
+    assert_eq!(array_view.borrow().cloned_items(), vec![1, 9]);
+
+    fn assert_send_sync<T: Send + Sync>() {}
+    assert_send_sync::<JavaSyncNativeCollection<i32>>();
+    let sync_array = std::sync::Arc::new(std::sync::Mutex::new(vec![4]));
+    let mut sync_view = JavaSyncNativeCollection::from_sync_array(sync_array.clone());
+    assert_eq!(sync_view.list_set_result(0, 5).unwrap(), 4);
+    assert_eq!(sync_array.lock().unwrap()[0], 5);
+    sync_array.lock().unwrap()[0] = 6;
+    assert_eq!(sync_view.list_get_result(0).unwrap(), 6);
+    let local_sync_view = JavaNativeCollection::from_sync_array(sync_array.clone());
+    assert_eq!(local_sync_view.list_get_result(0).unwrap(), 6);
+
+    let mut set_alias = JavaNativeCollection::set(Vec::<String>::new(), |left, right| left.eq_ignore_ascii_case(right));
+    assert!(set_alias.add_result("stored".into()).unwrap());
+    assert!(set_alias.contains_by(&"STORED".into(), String::java_map_key_eq));
+    assert!(set_alias.remove_result(&"STORED".into(), String::java_map_key_eq).unwrap());
+    assert!(set_alias.is_empty());
+    let left = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::set(
+        vec![NoCloneKey(1), NoCloneKey(2)], NoCloneKey::java_map_key_eq)));
+    let right = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::set(
+        vec![NoCloneKey(2), NoCloneKey(1)], NoCloneKey::java_map_key_eq)));
+    assert!(left.java_map_key_eq(&right));
+    let guard = left.borrow_mut();
+    assert!(left.java_map_key_eq(&left.clone()));
+    drop(guard);
+    let list = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(
+        vec![NoCloneKey(1), NoCloneKey(2)], true)));
+    let reversed = std::rc::Rc::new(std::cell::RefCell::new(JavaNativeCollection::list(
+        vec![NoCloneKey(2), NoCloneKey(1)], true)));
+    assert!(!left.java_map_key_eq(&list));
+    assert!(!list.java_map_key_eq(&reversed));
     let directional = vec![Directional(1)];
     assert!(super::java_iter_contains_by_map_key(directional.iter(), &Directional(2)));
     assert!(super::java_iter_contains_optional_needle_by_map_key(directional.iter(), &Some(Directional(2))));
@@ -42276,7 +44126,7 @@ pub fn exercise() {
             false,
         );
         let source = format!(
-            "{}\nmod factory_scope {{ use super::{{JavaException, JavaIterator}};\n{support}\n{}\n}}\nfn main() {{ factory_scope::exercise(); }}",
+            "{}\nmod factory_scope {{ use super::{{JavaException, JavaIterator, JavaMapKey}};\n{support}\n{}\n}}\nfn main() {{ factory_scope::exercise(); }}",
             runtime.rust,
             r#"
 struct Opaque(i32);

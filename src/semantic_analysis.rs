@@ -244,6 +244,24 @@ pub fn analyze_program_with_config(
 /// late, expression-local conversion would mix `String` and `JavaString` in
 /// signatures and generic collections.
 fn collect_java_string_identity_representation_facts(program: &Program, facts: &mut FactSet) {
+    let mut identity_requirements =
+        crate::item_assembly::SourceReferenceIdentityRequirements::new(program);
+    walk_program_exprs(program, &mut |expr| {
+        if facts.java_string_identity_representation {
+            return;
+        }
+        if let Expr::Call {
+            resolved: Some(call),
+            ..
+        } = expr
+            && identity_requirements
+                .types_for_call_matching(call, None, |ty| ty == &JavaType::String)
+                .iter()
+                .any(|ty| ty == &JavaType::String)
+        {
+            facts.java_string_identity_representation = true;
+        }
+    });
     for ty in &program.types {
         collect_type_java_string_identity_representation_facts(ty, facts);
     }
@@ -3391,7 +3409,7 @@ fn source_equals_override_type_aliases(type_name: &str) -> Vec<String> {
     aliases
 }
 
-fn method_overrides_object_equals(method: &MethodDecl) -> bool {
+pub(crate) fn method_overrides_object_equals(method: &MethodDecl) -> bool {
     method.name == "equals" && method.params.len() == 1 && java_type_is_object(&method.params[0].ty)
 }
 
@@ -4445,7 +4463,12 @@ fn collect_dispatch_requirement_facts(program: &Program, facts: &mut FactSet) {
         .owners
         .iter()
         .flat_map(|owner| owner.captures.iter())
-        .filter(|capture| capture.source == crate::facts::CaptureSource::OuterThis)
+        .filter(|capture| {
+            matches!(
+                capture.source,
+                crate::facts::CaptureSource::This | crate::facts::CaptureSource::OuterThis
+            )
+        })
         .map(|capture| capture.ty.clone())
         .filter(|outer_type| {
             dispatch_requirement_type_name(outer_type)
@@ -4459,9 +4482,89 @@ fn collect_dispatch_requirement_facts(program: &Program, facts: &mut FactSet) {
             DispatchRequirementKind::NeedsSubtypeDispatch,
         );
     }
+    // A non-final source receiver returned as `this` can be a subclass when
+    // its method is inherited. Its declared result therefore needs the same
+    // identity-preserving polymorphic view as a captured outer receiver.
+    fn collect_self_returns(ty: &TypeDecl, program: &Program, facts: &mut FactSet) {
+        if ty.members.iter().any(|member| {
+            matches!(member,
+                Member::Method(method) if !method.modifiers.contains(&Modifier::Static)
+                    && method.body.as_ref().is_some_and(block_returns_this))
+        }) && program_has_source_subtype(program, &ty.name)
+        {
+            push_dispatch_requirement_fact(
+                facts,
+                &JavaType::Named {
+                    name: ty.name.clone(),
+                    args: Vec::new(),
+                },
+                DispatchRequirementKind::NeedsSubtypeDispatch,
+            );
+        }
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect_self_returns(nested, program, facts);
+            }
+        }
+    }
+    for ty in &program.types {
+        collect_self_returns(ty, program, facts);
+    }
     for ty in &program.types {
         collect_type_dispatch_requirement_facts(ty, facts);
     }
+}
+
+/// Return-position receiver flow, excluding returns in nested callbacks.
+pub(crate) fn block_returns_this(block: &Block) -> bool {
+    fn expression(expr: &Expr) -> bool {
+        match expr {
+            Expr::This => true,
+            Expr::Cast { expr, .. } => expression(expr),
+            Expr::Ternary {
+                then_expr,
+                else_expr,
+                ..
+            } => expression(then_expr) || expression(else_expr),
+            Expr::Switch { cases, .. } => cases.iter().any(|case| expression(&case.value)),
+            _ => false,
+        }
+    }
+    fn statement(stmt: &Stmt) -> bool {
+        match stmt {
+            Stmt::Return(Some(expr)) => expression(expr),
+            Stmt::If {
+                then_block,
+                else_block,
+                ..
+            } => {
+                block_returns_this(then_block)
+                    || else_block.as_ref().is_some_and(block_returns_this)
+            }
+            Stmt::While { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::EnhancedFor { body, .. }
+            | Stmt::Block(body)
+            | Stmt::LabeledBlock { body, .. } => block_returns_this(body),
+            Stmt::For { init, body, .. } => init.iter().any(statement) || block_returns_this(body),
+            Stmt::Switch { cases, .. } => cases
+                .iter()
+                .any(|case| case.statements.iter().any(statement)),
+            Stmt::Try {
+                resources,
+                body,
+                catches,
+                finally_block,
+            } => {
+                resources.iter().any(statement)
+                    || block_returns_this(body)
+                    || catches.iter().any(|catch| block_returns_this(&catch.body))
+                    || finally_block.as_ref().is_some_and(block_returns_this)
+            }
+            _ => false,
+        }
+    }
+    block.statements.iter().any(statement)
 }
 
 fn program_has_source_subtype(program: &Program, target_name: &str) -> bool {
@@ -7079,6 +7182,226 @@ pub(crate) fn walk_block_exprs(block: &Block, visit: &mut impl FnMut(&Expr)) {
     }
 }
 
+/// Visit expressions with their declaration-scoped lexical types. In
+/// particular, for/try locals must neither disappear inside their bodies nor
+/// leak into later statements. Initializers run before their new binding.
+pub(crate) fn walk_block_exprs_with_types(
+    block: &Block,
+    types: &TypeEnv,
+    visit: &mut impl FnMut(&Expr, &TypeEnv),
+) {
+    let mut types = types.clone();
+    for stmt in &block.statements {
+        walk_stmt_exprs_with_types(stmt, &mut types, visit);
+    }
+}
+
+fn walk_stmt_exprs_with_types(
+    stmt: &Stmt,
+    types: &mut TypeEnv,
+    visit: &mut impl FnMut(&Expr, &TypeEnv),
+) {
+    match stmt {
+        Stmt::VarDecl {
+            ty,
+            name,
+            source_name,
+            initializer,
+            ..
+        } => {
+            if let Some(value) = initializer {
+                walk_expr_with_types(value, types, visit);
+            }
+            types.insert_local(name.clone(), ty.clone());
+            types.insert_local(source_name.clone(), ty.clone());
+        }
+        Stmt::Assign { target, value } => {
+            walk_expr_with_types(target, types, visit);
+            walk_expr_with_types(value, types, visit);
+        }
+        Stmt::Expr(expr) | Stmt::Return(Some(expr)) | Stmt::Throw(expr) => {
+            walk_expr_with_types(expr, types, visit)
+        }
+        Stmt::If {
+            condition,
+            then_block,
+            else_block,
+        } => {
+            walk_expr_with_types(condition, types, visit);
+            walk_block_exprs_with_types(then_block, types, visit);
+            if let Some(body) = else_block {
+                walk_block_exprs_with_types(body, types, visit);
+            }
+        }
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            walk_expr_with_types(condition, types, visit);
+            walk_block_exprs_with_types(body, types, visit);
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
+            let mut nested = types.clone();
+            for stmt in init {
+                walk_stmt_exprs_with_types(stmt, &mut nested, visit);
+            }
+            if let Some(condition) = condition {
+                walk_expr_with_types(condition, &nested, visit);
+            }
+            walk_block_exprs_with_types(body, &nested, visit);
+            for expr in update {
+                walk_expr_with_types(expr, &nested, visit);
+            }
+        }
+        Stmt::EnhancedFor {
+            var_type,
+            var_name,
+            source_var_name,
+            iterable,
+            body,
+            ..
+        } => {
+            walk_expr_with_types(iterable, types, visit);
+            let mut nested = types.clone();
+            nested.insert_local(var_name.clone(), var_type.clone());
+            nested.insert_local(source_var_name.clone(), var_type.clone());
+            walk_block_exprs_with_types(body, &nested, visit);
+        }
+        Stmt::Switch { selector, cases } => {
+            walk_expr_with_types(selector, types, visit);
+            let mut nested = types.clone();
+            for case in cases {
+                for label in &case.labels {
+                    if let SwitchLabel::Expr(expr) = label {
+                        walk_expr_with_types(expr, &nested, visit);
+                    }
+                }
+                for stmt in &case.statements {
+                    walk_stmt_exprs_with_types(stmt, &mut nested, visit);
+                }
+            }
+        }
+        Stmt::Try {
+            resources,
+            body,
+            catches,
+            finally_block,
+        } => {
+            let mut nested = types.clone();
+            for stmt in resources {
+                walk_stmt_exprs_with_types(stmt, &mut nested, visit);
+            }
+            walk_block_exprs_with_types(body, &nested, visit);
+            for catch in catches {
+                let mut nested = types.clone();
+                if let Some(ty) = catch.types.first() {
+                    nested.insert_local(catch.name.clone(), ty.clone());
+                    nested.insert_local(catch.source_name.clone(), ty.clone());
+                }
+                walk_block_exprs_with_types(&catch.body, &nested, visit);
+            }
+            if let Some(body) = finally_block {
+                walk_block_exprs_with_types(body, types, visit);
+            }
+        }
+        Stmt::Block(body) | Stmt::LabeledBlock { body, .. } => {
+            walk_block_exprs_with_types(body, types, visit)
+        }
+        Stmt::ConstructorInvocation { args, .. } => {
+            for arg in args {
+                walk_expr_with_types(arg, types, visit);
+            }
+        }
+        Stmt::LocalType(ty) => walk_members_exprs_with_types(&ty.members, types, visit),
+        Stmt::Return(None) | Stmt::Break(_) | Stmt::Continue(_) | Stmt::Unsupported(_) => {}
+    }
+}
+
+fn walk_members_exprs_with_types(
+    members: &[Member],
+    types: &TypeEnv,
+    visit: &mut impl FnMut(&Expr, &TypeEnv),
+) {
+    let mut fields = types.clone();
+    for member in members {
+        if let Member::Field(field) = member {
+            // An anonymous/local class field shadows captured locals too.
+            fields.insert_local(field.name.clone(), field.ty.clone());
+            fields.insert_field(field.name.clone(), field.ty.clone());
+        }
+    }
+    for member in members {
+        match member {
+            Member::Field(field) => {
+                if let Some(value) = &field.initializer {
+                    walk_expr_with_types(value, &fields, visit);
+                }
+            }
+            Member::Method(method) => {
+                let mut nested = fields.clone();
+                for param in &method.params {
+                    nested.insert_local(param.name.clone(), param.ty.clone());
+                    nested.insert_local(param.source_name.clone(), param.ty.clone());
+                }
+                if let Some(body) = &method.body {
+                    walk_block_exprs_with_types(body, &nested, visit);
+                }
+            }
+            Member::Constructor(constructor) => {
+                let mut nested = fields.clone();
+                for param in &constructor.params {
+                    nested.insert_local(param.name.clone(), param.ty.clone());
+                    nested.insert_local(param.source_name.clone(), param.ty.clone());
+                }
+                if let Some(body) = &constructor.body {
+                    walk_block_exprs_with_types(body, &nested, visit);
+                }
+            }
+            Member::Type(nested) => walk_members_exprs_with_types(&nested.members, &fields, visit),
+            Member::Unsupported { .. } => {}
+        }
+    }
+}
+
+fn walk_expr_with_types(expr: &Expr, types: &TypeEnv, visit: &mut impl FnMut(&Expr, &TypeEnv)) {
+    walk_expr_outside_lambdas(expr, &mut |expr| {
+        visit(expr, types);
+        match expr {
+            Expr::Lambda { params, body } => {
+                let mut nested = types.clone();
+                for param in params {
+                    // Do not accidentally inherit an outer binding's type for
+                    // an untyped lambda parameter. Target inference belongs
+                    // to the resolver/callback contract, not a name guess.
+                    let ty = param
+                        .ty
+                        .clone()
+                        .unwrap_or_else(|| JavaType::Unknown(format!("<lambda:{}>", param.name)));
+                    nested.insert_local(param.name.clone(), ty.clone());
+                    nested.insert_local(param.source_name.clone(), ty);
+                }
+                match body {
+                    LambdaBody::Expr(expr) => walk_expr_with_types(expr, &nested, visit),
+                    LambdaBody::Block(body) => walk_block_exprs_with_types(body, &nested, visit),
+                }
+            }
+            Expr::New {
+                body: Some(members),
+                ..
+            } => walk_members_exprs_with_types(members, types, visit),
+            _ => {}
+        }
+    });
+}
+
 /// Walk statements in one callable, without treating nested classes' or
 /// lambdas' returns as returns from the enclosing callable.
 pub(crate) fn walk_block_stmts(block: &Block, visit: &mut impl FnMut(&Stmt)) {
@@ -7234,6 +7557,68 @@ mod tests {
     use crate::diagnostics::Span;
     use crate::facts::{FactProvenance, UnresolvedTargetFact};
     use crate::java_ir::{Literal, TypeKind};
+
+    #[test]
+    fn typed_expression_walk_restores_loop_block_and_catch_bindings() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class C<T> {
+                T item;
+                double index;
+                void run(String[] strings) {
+                    for (String item : strings) { probe(item); }
+                    probe(item);
+                    { Integer item = null; probe(item); }
+                    probe(item);
+                    for (int index = 0; index < 1; index++) { probe(index); }
+                    probe(index);
+                    try { String item = "value"; probe(item); }
+                    catch (RuntimeException item) { probe(item); }
+                    probe(item);
+                }
+            }
+        "#,
+        );
+        let owner = &parsed.program.types[0];
+        let body = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => method.body.as_ref(),
+                _ => None,
+            })
+            .unwrap();
+        let parse = crate::parser::parse_hierarchy_type;
+        let mut env = TypeEnv::new();
+        env.insert_field("item", parse("T"));
+        env.insert_field("index", parse("double"));
+        env.insert_local("strings", parse("String[]"));
+        let mut actual = vec![];
+        walk_block_exprs_with_types(body, &env, &mut |expr, types| {
+            if let Expr::Call { name, args, .. } = expr
+                && name == "probe"
+            {
+                actual.push(infer_expr_type(&args[0], types));
+            }
+        });
+        assert_eq!(
+            actual,
+            [
+                "String",
+                "T",
+                "Integer",
+                "T",
+                "int",
+                "double",
+                "String",
+                "RuntimeException",
+                "T"
+            ]
+            .map(parse)
+        );
+        assert!(env.local_type("item").is_none());
+        assert!(env.local_type("index").is_none());
+    }
 
     fn type_with_bound(name: &str, bound: JavaType) -> TypeDecl {
         TypeDecl {

@@ -306,9 +306,7 @@ fn concrete_java_type_name(java_ty: &JavaType) -> Option<&str> {
 }
 
 fn method_overrides_object_equals(method: &MethodDecl) -> bool {
-    method.name == "equals"
-        && method.params.len() == 1
-        && matches!(&method.params[0].ty, JavaType::Named { name, args } if args.is_empty() && simple_type_name(name) == "Object")
+    crate::semantic_analysis::method_overrides_object_equals(method)
 }
 
 fn collect_type_reference_identity_equality_diagnostics(
@@ -318,6 +316,12 @@ fn collect_type_reference_identity_equality_diagnostics(
     diagnostics: &mut Vec<LoweringDiagnosticPlan>,
 ) {
     let mut field_env = TypeEnv::new();
+    for (index, name) in ty.type_params.iter().enumerate() {
+        field_env.insert_type_param_declaration(
+            name.clone(),
+            ty.type_param_bounds.get(index).cloned().flatten(),
+        );
+    }
     for member in &ty.members {
         if let Member::Field(field) = member {
             field_env.insert_field(field.name.clone(), field.ty.clone());
@@ -329,6 +333,12 @@ fn collect_type_reference_identity_equality_diagnostics(
             Member::Method(method) => {
                 if let Some(body) = &method.body {
                     let mut env = field_env.clone();
+                    for (index, name) in method.type_params.iter().enumerate() {
+                        env.insert_type_param_declaration(
+                            name.clone(),
+                            method.type_param_bounds.get(index).cloned().flatten(),
+                        );
+                    }
                     for param in &method.params {
                         env.insert_local(param.name.clone(), param.ty.clone());
                     }
@@ -866,8 +876,20 @@ fn collect_expr_reference_identity_equality_diagnostics(
     {
         let left_ty = infer_expr_type(left, env);
         let right_ty = infer_expr_type(right, env);
-        if let Some(code) =
-            reference_identity_equality_diagnostic_code(&left_ty, &right_ty, identity)
+        let generic_identity = left_ty == right_ty && {
+            let ty =
+                crate::types::optional_element_type(&left_ty).unwrap_or_else(|| left_ty.clone());
+            match ty {
+                JavaType::Named { name, args } if args.is_empty() => {
+                    env.is_type_parameter_name(&name)
+                }
+                JavaType::Unknown(name) => env.is_type_parameter_name(&name),
+                _ => false,
+            }
+        };
+        if !generic_identity
+            && let Some(code) =
+                reference_identity_equality_diagnostic_code(&left_ty, &right_ty, identity)
         {
             diagnostics.push(LoweringDiagnosticPlan::new(
                 Severity::Warning,

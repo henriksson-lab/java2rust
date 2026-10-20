@@ -262,6 +262,8 @@ pub(crate) fn inherited_instance_method_refs_for_type<'a>(
             break;
         }
 
+        let substitutions =
+            source_ancestor_type_arguments(support_program, ty, super_ty).unwrap_or_default();
         for member in &super_ty.members {
             let Member::Method(method) = member else {
                 continue;
@@ -269,7 +271,8 @@ pub(crate) fn inherited_instance_method_refs_for_type<'a>(
             if !is_inheritable_instance_method(method) {
                 continue;
             }
-            let signature = JavaCallableSlotKey::source_method(method);
+            let signature =
+                JavaCallableSlotKey::source_method_with_substitutions(method, &substitutions);
             if seen_methods.insert(signature) {
                 let rust_name =
                     inherited_method_rust_name_for_child(method, &direct_method_rust_names);
@@ -426,6 +429,8 @@ fn collect_inherited_interface_contract_methods<'a>(
                 .cloned()
                 .map(|parent| (interface.name.clone(), parent)),
         );
+        let substitutions =
+            source_ancestor_type_arguments(support_program, ty, interface).unwrap_or_default();
         for member in &interface.members {
             let Member::Method(method) = member else {
                 continue;
@@ -433,7 +438,8 @@ fn collect_inherited_interface_contract_methods<'a>(
             if !is_inheritable_instance_method(method) {
                 continue;
             }
-            let signature = JavaCallableSlotKey::source_method(method);
+            let signature =
+                JavaCallableSlotKey::source_method_with_substitutions(method, &substitutions);
             if !seen_methods.insert(signature) {
                 continue;
             }
@@ -532,7 +538,10 @@ fn collect_inherited_interface_default_methods<'a>(
             if method.body.is_none() || !is_inheritable_instance_method(method) {
                 continue;
             }
-            let signature = JavaCallableSlotKey::source_method(method);
+            let substitutions =
+                source_ancestor_type_arguments(support_program, ty, interface).unwrap_or_default();
+            let signature =
+                JavaCallableSlotKey::source_method_with_substitutions(method, &substitutions);
             if !seen_methods.insert(signature) {
                 continue;
             }
@@ -1710,6 +1719,48 @@ mod tests {
             implements: implements.into_iter().map(str::to_string).collect(),
             ..class(name, None, Vec::new())
         }
+    }
+
+    #[test]
+    fn inherited_override_slots_use_the_child_generic_frame() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class Parent<A> {
+                public boolean same(A left, A right) { return false; }
+                public boolean same(int value) { return false; }
+            }
+            class Child<T> extends Parent<T> {
+                public boolean same(T left, T right) { return true; }
+            }
+            class Fixed extends Parent<String> {
+                public boolean same(String left, String right) { return true; }
+            }
+            interface First<A> { default A echo(A value) { return value; } }
+            interface Second<T> extends First<T> {
+                default T echo(T value) { return value; }
+            }
+            class Leaf implements Second<String> { }
+        "#,
+        );
+        let program = &parsed.program;
+        for name in ["Child", "Fixed"] {
+            let child = find_type_decl(program, name).unwrap();
+            let inherited = inherited_instance_method_refs_for_type(child, program);
+            let same = inherited
+                .iter()
+                .filter(|method| method.method().name == "same")
+                .collect::<Vec<_>>();
+            assert_eq!(same.len(), 1, "{name}: {inherited:?}");
+            assert_eq!(same[0].method().params.len(), 1);
+        }
+        let leaf = find_type_decl(program, "Leaf").unwrap();
+        let inherited = inherited_instance_method_refs_for_type(leaf, program);
+        let echo = inherited
+            .iter()
+            .filter(|method| method.method().name == "echo")
+            .collect::<Vec<_>>();
+        assert_eq!(echo.len(), 1, "{inherited:?}");
+        assert_eq!(echo[0].declaring_type(), "Second");
     }
 
     #[test]

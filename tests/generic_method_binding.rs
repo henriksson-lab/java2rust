@@ -9,6 +9,75 @@ mod common;
 use common::{GeneratedCrateModule, cargo_test_generated_modules};
 
 #[test]
+fn inherited_field_arguments_use_the_actual_reordered_owner_frame() {
+    let source = r#"
+import java.util.List;
+class FieldFrameBase<A, B> { List<A> left; List<B> right; }
+class FieldFrameChild<X, Y> extends FieldFrameBase<Y, X> {}
+class FieldFrameSink { FieldFrameSink(List<String> words) {} }
+class FieldFrameUse {
+    static FieldFrameSink correct(FieldFrameChild<Integer, String> source) {
+        return new FieldFrameSink(source.left);
+    }
+}
+"#;
+    let parsed = parse_java_source(source);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        !resolved.diagnostics.has_errors(),
+        "{:?}",
+        resolved.diagnostics
+    );
+    let wrong = source.replace("source.left", "source.right");
+    let parsed = parse_java_source(&wrong);
+    let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+    assert!(
+        resolved.diagnostics.has_errors(),
+        "incompatible invariant field argument accepted"
+    );
+}
+
+#[test]
+fn generic_source_static_fields_share_the_static_method_owner_witness() {
+    let translation = new_java2rust::translate_source(
+        r#"
+class GenericConstants<A, B> {
+    static final String LABEL = "constant";
+    static int count = 3;
+    static int read() { return count; }
+}
+class GenericStaticChild<X> extends GenericConstants<X, Integer> {
+    static int inherited() { return LABEL.length(); }
+}
+class GenericStaticUse {
+    static int run() {
+        GenericConstants.count = 7;
+        return GenericConstants.LABEL.length() + GenericConstants.read() + GenericConstants.count;
+    }
+}
+"#,
+    );
+    assert!(
+        !translation.diagnostics.has_errors(),
+        "{:?}",
+        translation.diagnostics
+    );
+    cargo_test_generated_modules(
+        "generic_source_static_fields",
+        vec![GeneratedCrateModule {
+            name: "fixture",
+            rust: translation.rust,
+            tests: r#"
+#[test] fn constants_and_storage_do_not_require_uninferrable_owner_binders() {
+    assert_eq!(GenericStaticUse::run(), 22);
+    assert_eq!(GenericStaticChild::<String>::inherited(), 8);
+}
+"#,
+        }],
+    );
+}
+
+#[test]
 fn explicit_static_witnesses_survive_chaining_and_exception_binder_erasure() {
     let translation = new_java2rust::translate_source(
         r#"
@@ -183,6 +252,45 @@ fn returned_call(source: &str) -> ResolvedCall {
         panic!("expected resolved return call");
     };
     call.clone()
+}
+
+#[test]
+fn all_null_non_return_binder_uses_its_declared_upper_bound() {
+    let call = returned_call(
+        r#"
+class Bound {}
+class Use {
+    static <T extends Bound> int take(T value) { return 0; }
+    static int make() { return take(null); }
+}
+"#,
+    );
+    assert_eq!(
+        call.arg_target_types,
+        vec![JavaType::Named {
+            name: "Bound".into(),
+            args: Vec::new()
+        }]
+    );
+}
+
+#[test]
+fn all_null_unbounded_non_return_binder_uses_java_lang_object() {
+    let call = returned_call(
+        r#"
+class Use {
+    static <T> int take(T value) { return 0; }
+    static int make() { return take(null); }
+}
+"#,
+    );
+    assert_eq!(
+        call.arg_target_types,
+        vec![JavaType::Named {
+            name: "java.lang.Object".into(),
+            args: Vec::new()
+        }]
+    );
 }
 
 #[test]

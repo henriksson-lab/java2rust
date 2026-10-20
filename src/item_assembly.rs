@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     cell::RefCell,
     collections::{HashMap, HashSet},
 };
@@ -21,7 +22,7 @@ use crate::rust_ir::{
     RustAssociatedConst, RustExpr, RustField, RustFunction, RustImpl, RustItem, RustParam,
     RustReceiver, RustStmt, RustStruct, RustType, rust_type_arg_projection_or_raw,
 };
-use crate::signature::{ReceiverPlan, SignaturePlan};
+use crate::signature::{MethodSignaturePlan, ReceiverPlan, SignaturePlan};
 use crate::slot_render::{
     default_expr_for_slot_with_facts, rust_type_for_java_type_with_facts,
     rust_type_for_slot_with_facts, rust_type_for_slot_with_facts_and_representations,
@@ -841,6 +842,7 @@ fn callable_type_param_needs_clone_bound_excluding(
     params: &[crate::java_ir::Param],
     body: Option<&Block>,
     clone_shielded_names: &HashSet<String>,
+    support_programs: &[&Program],
 ) -> bool {
     let Some(body) = body else {
         return false;
@@ -875,7 +877,12 @@ fn callable_type_param_needs_clone_bound_excluding(
     ) || callable_type_param_collection_get_needs_clone_bound(type_param, params, body)
         || callable_type_param_collection_bulk_copy_needs_clone_bound(type_param, params, body)
         || callable_type_param_iterator_method_needs_clone_bound(type_param, params, body)
-        || callable_type_param_trait_object_cast_needs_clone_bound(type_param, body)
+        || callable_type_param_borrowed_cast_needs_clone_bound(
+            type_param,
+            params,
+            body,
+            support_programs,
+        )
     {
         return true;
     }
@@ -891,7 +898,7 @@ fn callable_type_param_needs_clone_bound_excluding(
         .any(|name| counts.get(name).copied().unwrap_or(0) > 1)
 }
 
-fn callable_type_param_trait_object_cast_needs_clone_bound(
+fn callable_type_param_cast_needs_any_bound(
     type_param: &str,
     body: &crate::java_ir::Block,
 ) -> bool {
@@ -904,6 +911,46 @@ fn callable_type_param_trait_object_cast_needs_clone_bound(
             } if name == type_param && args.is_empty()
         ) {
             needs_clone = true;
+        }
+    });
+    needs_clone
+}
+
+fn callable_type_param_borrowed_cast_needs_clone_bound(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: &Block,
+    support_programs: &[&Program],
+) -> bool {
+    let mut types = TypeEnv::new();
+    for param in params {
+        types.insert_param(param.source_name.clone(), param.ty.clone());
+        types.insert_param(param.name.clone(), param.ty.clone());
+    }
+    for stmt in &body.statements {
+        types.learn_stmt(stmt);
+    }
+    let source_object_declared = support_programs.iter().any(|program| {
+        program
+            .types
+            .iter()
+            .any(|ty| ty.name == "Object" || ty.name == "java.lang.Object")
+    });
+    let mut needs_clone = false;
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        if let Expr::Cast {
+            ty: JavaType::Named { name, args },
+            expr,
+        } = expr
+            && name == type_param
+            && args.is_empty()
+        {
+            let source = crate::types::infer_expr_type(expr, &types);
+            let source = crate::types::optional_element_type(&source).unwrap_or(source);
+            // Owning erased storage can be consumed/downcast without copying
+            // T. Borrowed source-interface downcasts still clone the payload.
+            needs_clone |= source_object_declared
+                || !crate::shape_projection::java_type_is_erased_object_storage(&source);
         }
     });
     needs_clone
@@ -1532,6 +1579,45 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
     return_type: Option<&JavaType>,
     callable_name: Option<&str>,
 ) -> bool {
+    if callable_type_param_reaches_source_capability(
+        type_param,
+        params,
+        body,
+        owner,
+        support_programs,
+        SourceCallableCapability::RetainedDisplayCopy,
+        return_type,
+        callable_name,
+        None,
+        visiting,
+    ) {
+        return true;
+    }
+    if callable_type_param_reaches_source_capability(
+        type_param,
+        params,
+        body,
+        owner,
+        support_programs,
+        SourceCallableCapability::Clone,
+        return_type,
+        callable_name,
+        None,
+        visiting,
+    ) {
+        return true;
+    }
+    if reusable_callback_capture_requires_clone(
+        type_param,
+        params,
+        body,
+        owner,
+        return_type,
+        callable_name,
+        visiting.storage_context,
+    ) {
+        return true;
+    }
     if retained_iteration_requires_parameter(
         type_param,
         params,
@@ -1553,7 +1639,13 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
         callable_name,
         visiting.storage_context,
     );
-    if callable_type_param_needs_clone_bound_excluding(type_param, params, body, &shielded) {
+    if callable_type_param_needs_clone_bound_excluding(
+        type_param,
+        params,
+        body,
+        &shielded,
+        support_programs,
+    ) {
         return true;
     }
     if callable_stream_materialization_capabilities(type_param, params, body, support_programs).0 {
@@ -1579,6 +1671,17 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
     for stmt in &body.statements {
         callable_types.learn_stmt(stmt);
     }
+    let caller_signature = visiting.storage_context.and_then(|context| {
+        let owner = owner?;
+        let name = callable_name?;
+        let method = owner.members.iter().find_map(|member| match member {
+            Member::Method(method) if method.name == name && method.params == params => {
+                Some(method)
+            }
+            _ => None,
+        })?;
+        context.signatures.method_signature(owner, method)
+    });
     let mut constructed_owner_requires_clone = false;
     crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
         if !constructed_owner_requires_clone {
@@ -1587,6 +1690,7 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
                 type_param,
                 &callable_types,
                 support_programs,
+                caller_signature,
                 visiting,
             ) || expr_call_requires_clone_capability(
                 expr,
@@ -1610,6 +1714,7 @@ fn callable_type_param_needs_clone_bound_with_support_contexts_inner(
             body,
             return_type,
             &callable_types,
+            owner,
             support_programs,
             TraitImplCapability::Clone,
             visiting,
@@ -2899,41 +3004,7 @@ fn expr_is_type_param_sequence_get(
 }
 
 fn block_returns_this(block: &Block) -> bool {
-    block.statements.iter().any(stmt_returns_this)
-}
-
-fn stmt_returns_this(stmt: &Stmt) -> bool {
-    match stmt {
-        Stmt::Return(Some(Expr::This)) => true,
-        Stmt::If {
-            then_block,
-            else_block,
-            ..
-        } => block_returns_this(then_block) || else_block.as_ref().is_some_and(block_returns_this),
-        Stmt::While { body, .. }
-        | Stmt::DoWhile { body, .. }
-        | Stmt::EnhancedFor { body, .. }
-        | Stmt::Block(body)
-        | Stmt::LabeledBlock { body, .. } => block_returns_this(body),
-        Stmt::For { init, body, .. } => {
-            init.iter().any(stmt_returns_this) || block_returns_this(body)
-        }
-        Stmt::Switch { cases, .. } => cases
-            .iter()
-            .any(|case| case.statements.iter().any(stmt_returns_this)),
-        Stmt::Try {
-            resources,
-            body,
-            catches,
-            finally_block,
-        } => {
-            resources.iter().any(stmt_returns_this)
-                || block_returns_this(body)
-                || catches.iter().any(|catch| block_returns_this(&catch.body))
-                || finally_block.as_ref().is_some_and(block_returns_this)
-        }
-        _ => false,
-    }
+    crate::semantic_analysis::block_returns_this(block)
 }
 
 fn source_method_clones_class_type_param_param_to_owned_local(
@@ -3467,6 +3538,203 @@ struct RetainedCallableShapeContext<'a> {
     locals: &'a [crate::signature::LocalPlan],
 }
 
+/// Reusable callbacks copy consumed captures, not their newly supplied
+/// parameters. Use selected argument ABIs and physical capture carriers; a
+/// borrowed probe or an unconditional handle clone needs no payload Clone.
+fn reusable_callback_capture_requires_clone(
+    type_param: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&Block>,
+    owner: Option<&TypeDecl>,
+    return_type: Option<&JavaType>,
+    callable_name: Option<&str>,
+    context: Option<CloneStorageContext<'_>>,
+) -> bool {
+    use crate::call_plan::ArgumentLoweringPlan;
+    use crate::slot_shape::OwnershipShape;
+    let (Some(body), Some(owner), Some(context)) = (body, owner, context) else {
+        return false;
+    };
+    // Most callables contain no callbacks. Avoid constructing shape contexts
+    // or visiting signatures for that common case.
+    let mut has_lambda = false;
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        has_lambda |= matches!(expr, Expr::Lambda { .. })
+    });
+    if !has_lambda {
+        return false;
+    }
+    let Some(callable) =
+        retained_callable_shape_context(params, body, owner, return_type, callable_name, context)
+    else {
+        return false;
+    };
+    let shape_ctx = crate::expr_shape::ExprShapeContext::new(
+        Some(context.signatures),
+        Some(context.representations),
+        Some(context.facts),
+    );
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
+            let Expr::Lambda { params, body } = node else {
+                return;
+            };
+            let captures = crate::resolve::captures_for_lambda(
+                params,
+                body,
+                env.local_shapes().filter_map(|(name, shape)| {
+                    env.binding_id(name)
+                        .cloned()
+                        .map(|binding| (name, &shape.java_ty, binding))
+                }),
+            )
+            .into_iter()
+            .map(|capture| capture.name)
+            .collect::<HashSet<_>>();
+            let copy_requires = |source: &Expr| {
+                let Expr::Var(name) = source else {
+                    return false;
+                };
+                if !captures.contains(name) {
+                    return false;
+                }
+                let Some(shape) = env.local_shape(name) else {
+                    return false;
+                };
+                if !java_type_contains_type_param(&shape.java_ty, type_param) {
+                    return false;
+                }
+                let mut shape = shape.clone();
+                shape.ownership = OwnershipShape::Owned;
+                rust_clone_requires_parameter(
+                    &rust_type_for_slot_with_facts_and_representations(
+                        &shape,
+                        context.facts,
+                        context.representations,
+                    ),
+                    type_param,
+                )
+            };
+            let arguments_require = |args: &[Expr], plan: ArgumentLoweringPlan| {
+                let requires = |arg: &Expr, shape: &RustSlotShape| {
+                    shape.ownership == OwnershipShape::Owned && copy_requires(arg)
+                };
+                match plan {
+                    ArgumentLoweringPlan::Shaped(shapes) => args
+                        .iter()
+                        .zip(shapes)
+                        .any(|(arg, shape)| requires(arg, &shape)),
+                    ArgumentLoweringPlan::Slotted(slots) => {
+                        args.iter().zip(slots).any(|(arg, slot)| match slot {
+                            crate::conversion_plan::Slot::Argument(shape)
+                            | crate::conversion_plan::Slot::Assignment(shape)
+                            | crate::conversion_plan::Slot::Return(shape) => requires(arg, &shape),
+                            _ => false,
+                        })
+                    }
+                    // Generic/unresolved calls use the argument's own Rust
+                    // carrier by value. This is the same boundary consumed by
+                    // lower_unshaped_argument, not an unknown borrowed slot.
+                    ArgumentLoweringPlan::Unshaped { .. } => args.iter().any(|arg| {
+                        matches!(arg, Expr::Var(name) if env.local_shape(name)
+                            .is_some_and(|shape| shape.ownership == OwnershipShape::Owned))
+                            && copy_requires(arg)
+                    }),
+                }
+            };
+            let inspect = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+                let mut required = false;
+                crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| match expr {
+                    Expr::Call {
+                        receiver,
+                        name,
+                        args,
+                        resolved,
+                        ..
+                    } => {
+                        required |= arguments_require(
+                            args,
+                            crate::call_plan::plan_call_arguments_with_facts_and_args(
+                                receiver.as_deref(),
+                                name,
+                                resolved.as_ref(),
+                                args,
+                                context.signatures,
+                                context.facts,
+                                env.type_env(),
+                            ),
+                        )
+                    }
+                    Expr::New { args, resolved, .. } => {
+                        required |= arguments_require(
+                            args,
+                            crate::call_plan::plan_constructor_arguments(
+                                resolved.as_ref(),
+                                args.len(),
+                                context.signatures,
+                            ),
+                        )
+                    }
+                    _ => {}
+                });
+                required
+            };
+            match body {
+                crate::java_ir::LambdaBody::Expr(expr) => {
+                    found |= copy_requires(expr) || inspect(expr, env)
+                }
+                crate::java_ir::LambdaBody::Block(block) => {
+                    let mut owned_values = HashSet::new();
+                    crate::semantic_analysis::walk_block_stmts(block, &mut |stmt| match stmt {
+                        Stmt::Return(Some(expr))
+                        | Stmt::VarDecl {
+                            initializer: Some(expr),
+                            ..
+                        }
+                        | Stmt::Assign { value: expr, .. } => {
+                            owned_values.insert(expr as *const Expr);
+                        }
+                        _ => {}
+                    });
+                    found |= crate::exception_plan::block_has_unhandled_expression_effect(
+                        block,
+                        env,
+                        &crate::exception_plan::ExpressionEffect {
+                            expression: &|expr, env| {
+                                inspect(expr, env)
+                                    || owned_values.contains(&(expr as *const Expr))
+                                        && copy_requires(expr)
+                            },
+                            handles: &|_| false,
+                            learn: None,
+                        },
+                    );
+                }
+            }
+        });
+        found
+    };
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(
+            stmt,
+            env,
+            callable.locals,
+            context.signatures,
+            Some(shape_ctx),
+        )
+    };
+    crate::exception_plan::block_has_unhandled_expression_effect(
+        body,
+        &callable.env,
+        &crate::exception_plan::ExpressionEffect {
+            expression: &expression,
+            handles: &|_| false,
+            learn: Some(&learn),
+        },
+    )
+}
+
 fn retained_callable_shape_context<'a>(
     params: &[crate::java_ir::Param],
     body: &Block,
@@ -3489,13 +3757,18 @@ fn retained_callable_shape_context<'a>(
     };
     let method_context = |method: &MethodDecl| {
         let signature = context.signatures.method_signature(owner, method)?;
-        Some(RetainedCallableShapeContext {
-            env: crate::expr_shape::shape_env_for_method(
+        let mut env =
+            crate::expr_shape::shape_env_for_method(owner, method, signature, context.signatures);
+        if !method.modifiers.contains(&Modifier::Static) {
+            crate::expr_shape::seed_inherited_instance_fields(
+                &mut env,
                 owner,
-                method,
-                signature,
                 context.signatures,
-            ),
+                context.program,
+            );
+        }
+        Some(RetainedCallableShapeContext {
+            env,
             params: signature.params(),
             locals: signature.locals(),
         })
@@ -3812,10 +4085,19 @@ fn retained_iteration_requires_parameter(
         _ => {}
     });
     let mut has_stream = false;
-    let mut has_remove_all = false;
+    let mut has_membership_bulk = false;
+    let mut has_native_copy_or_cursor = false;
     crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
         has_stream |= matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "stream" | "parallelStream" | "parallel_stream"));
-        has_remove_all |= matches!(expr, Expr::Call { name, args, .. } if args.len() == 1 && matches!(name.as_str(), "removeAll" | "remove_all"));
+        has_membership_bulk |= matches!(expr, Expr::Call { name, args, .. } if args.len() == 1 && crate::call_plan::NativeCollectionMethod::for_bulk_collection_name(name).is_some_and(|method| method.is_membership_bulk_operation()));
+        has_native_copy_or_cursor |= matches!(expr, Expr::New { ty, args, body: None, .. }
+            if args.len() == 1 && effective.retained_native_collection_kind(ty).is_some())
+            || matches!(expr, Expr::Call { name, args, .. } if args.len() <= 1 && matches!(name.as_str(), "listIterator" | "list_iterator"))
+            || matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "asList" | "as_list"));
+        has_native_copy_or_cursor |= matches!(expr, Expr::Call { name, args, .. }
+            if args.is_empty() && matches!(name.as_str(), "hashCode" | "hash_code"));
+        has_native_copy_or_cursor |= matches!(expr, Expr::Call { name, args, .. }
+            if args.is_empty() && matches!(name.as_str(), "element" | "getFirst" | "get_first" | "getLast" | "get_last" | "peek" | "peekFirst" | "peek_first"));
         match expr {
             Expr::Call {
                 args,
@@ -3859,7 +4141,8 @@ fn retained_iteration_requires_parameter(
         && conversions.is_empty()
         && assignment_targets.is_empty()
         && !has_stream
-        && !has_remove_all
+        && !has_membership_bulk
+        && !has_native_copy_or_cursor
     {
         return false;
     }
@@ -3876,11 +4159,23 @@ fn retained_iteration_requires_parameter(
     );
     let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
         let requires = |parent: &RustSlotShape| {
-            let Some(shape) = crate::shape_projection::retained_iteration_element_shape(
-                parent,
-                context.facts,
-                Some(context.representations),
-            ) else {
+            let array_ty = parent
+                .optional_element_type()
+                .unwrap_or_else(|| parent.java_ty.clone());
+            let shape = if !lifetime
+                && parent.native_allocation.shared()
+                && matches!(array_ty, JavaType::Array(_))
+                && crate::types::ndarray_array2_element_type(&array_ty).is_none()
+            {
+                crate::shape_projection::indexed_assignment_shape_with_facts(parent, context.facts)
+            } else {
+                crate::shape_projection::retained_iteration_element_shape(
+                    parent,
+                    context.facts,
+                    Some(context.representations),
+                )
+            };
+            let Some(shape) = shape else {
                 return false;
             };
             java_type_contains_type_param(&shape.java_ty, type_param)
@@ -3896,6 +4191,155 @@ fn retained_iteration_requires_parameter(
         };
         let mut found = false;
         crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |node| {
+            if !lifetime
+                && let Expr::Call {
+                    receiver: Some(receiver),
+                    name,
+                    args,
+                    ..
+                } = node
+            {
+                let parent = crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
+                if effective
+                    .retained_native_collection_kind(&parent.java_ty)
+                    .is_some()
+                    && matches!(crate::call_plan::plan_native_collection_receiver_call_for_type(
+                        receiver, name, Some(args), &parent.java_ty, env.type_env()),
+                        Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod { method, .. })
+                        if method.is_queue_endpoint() && !method.mutates_receiver())
+                {
+                    found |= if parent.native_allocation.shared() {
+                        requires(&parent)
+                    } else {
+                        crate::shape_projection::native_collection_stored_child_shape(
+                            &parent,
+                            0,
+                            context.facts,
+                            context.representations,
+                        )
+                        .is_some_and(|shape| {
+                            rust_clone_requires_parameter(
+                                &rust_type_for_slot_with_facts_and_representations(
+                                    &shape,
+                                    context.facts,
+                                    context.representations,
+                                ),
+                                type_param,
+                            )
+                        })
+                    };
+                }
+            }
+            if !lifetime
+                && let Expr::Call {
+                    receiver,
+                    name,
+                    args,
+                    resolved,
+                    ..
+                } = node
+                && matches!(name.as_str(), "asList" | "as_list")
+                && matches!(
+                    crate::call_plan::plan_native_collection_static_call(
+                        receiver.as_deref(),
+                        name,
+                        resolved.as_ref(),
+                        env.type_env(),
+                        context.facts,
+                    ),
+                    Some(crate::call_plan::CallTargetPlan::NativeCollectionStatic {
+                        method: crate::call_plan::NativeCollectionStaticMethod::ArraysAsList,
+                    })
+                )
+            {
+                for arg in args {
+                    let mut child = crate::expr_shape::infer_expr_shape_with_context(arg, env, ctx);
+                    // A supplied reference array is retained by the backing-view
+                    // path, not copied into freshly allocated varargs storage.
+                    if args.len() == 1
+                        && matches!(&child.java_ty,
+                        JavaType::Array(element) if !matches!(element.as_ref(), JavaType::Primitive(_)))
+                    {
+                        continue;
+                    }
+                    crate::shape_projection::apply_owned_collection_value_projection(&mut child);
+                    found |= rust_clone_requires_parameter(
+                        &rust_type_for_slot_with_facts_and_representations(
+                            &child,
+                            context.facts,
+                            context.representations,
+                        ),
+                        type_param,
+                    );
+                }
+            }
+            if let Expr::New {
+                ty,
+                args,
+                body: None,
+                ..
+            } = node
+                && let [source] = args.as_slice()
+                && !lifetime
+                && effective.retained_native_collection_kind(ty).is_some()
+                && matches!(
+                    crate::call_plan::plan_native_collection_constructor_for_args(
+                        ty,
+                        args,
+                        env.type_env(),
+                        context.facts,
+                    ),
+                    Some(crate::call_plan::NativeCollectionNewTarget::FromSource { .. })
+                )
+            {
+                let parent = crate::expr_shape::infer_expr_shape_with_context(source, env, ctx);
+                if let Some(child) = RustSlotShape::native_child_type_at_path(&parent.java_ty, &[0])
+                {
+                    let mut child = crate::shape_projection::storage_shape_for_java_type(
+                        context.representations,
+                        child,
+                    );
+                    child.inherit_native_collection_child(&parent, 0);
+                    found |= rust_clone_requires_parameter(
+                        &rust_type_for_slot_with_facts_and_representations(
+                            &child,
+                            context.facts,
+                            context.representations,
+                        ),
+                        type_param,
+                    );
+                }
+            }
+            if let Expr::Call {
+                receiver: Some(receiver),
+                name,
+                args,
+                ..
+            } = node
+                && args.len() <= 1
+                && matches!(name.as_str(), "listIterator" | "list_iterator")
+            {
+                let parent = crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
+                if effective
+                    .retained_native_collection_kind(&parent.java_ty)
+                    .is_some()
+                    && matches!(
+                        crate::call_plan::plan_native_collection_receiver_call_for_type(
+                            receiver,
+                            name,
+                            Some(args),
+                            &parent.java_ty,
+                            env.type_env(),
+                        ),
+                        Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod {
+                            method: crate::call_plan::NativeCollectionMethod::ListIterator,
+                            ..
+                        })
+                    )
+                {
+                    found |= requires(&parent);
+                }
+            }
             if let Expr::Call {
                 receiver: Some(receiver),
                 name,
@@ -3903,7 +4347,9 @@ fn retained_iteration_requires_parameter(
                 ..
             } = node
                 && args.len() == 1
-                && matches!(name.as_str(), "removeAll" | "remove_all")
+                && let Some(method) =
+                    crate::call_plan::NativeCollectionMethod::for_bulk_collection_name(name)
+                && method.is_membership_bulk_operation()
             {
                 let receiver_shape =
                     crate::expr_shape::infer_expr_shape_with_context(receiver, env, ctx);
@@ -3913,10 +4359,29 @@ fn retained_iteration_requires_parameter(
                 {
                     let source =
                         crate::expr_shape::infer_expr_shape_with_context(&args[0], env, ctx);
-                    if source.native_allocation.shared() {
-                        found |= requires(&source);
-                        found |= requires(&receiver_shape);
+                    if source.native_allocation.shared()
+                        || receiver_shape.native_allocation.shared()
+                    {
+                        if source.native_allocation.shared() {
+                            found |= requires(&source);
+                        }
+                        if receiver_shape.native_allocation.shared() {
+                            found |= requires(&receiver_shape);
+                        }
                     }
+                }
+            }
+            if let Some(call) =
+                crate::java_hash_plan::plan_java_hash_call(node, env.type_env(), context.facts)
+            {
+                let parent =
+                    crate::expr_shape::infer_expr_shape_with_context(call.receiver, env, ctx);
+                if parent.native_allocation.shared()
+                    && effective
+                        .retained_native_collection_kind(&parent.java_ty)
+                        .is_some()
+                {
+                    found |= requires(&parent);
                 }
             }
             if let Some(target) = assignment_targets.get(&(node as *const Expr)) {
@@ -4526,8 +4991,7 @@ fn function_type_params_with_clone_cache(
             bounds.retain(|bound| bound != "Clone");
             bounds.push("Clone".to_string());
         }
-        if callable_body
-            .is_some_and(|body| callable_type_param_trait_object_cast_needs_clone_bound(name, body))
+        if callable_body.is_some_and(|body| callable_type_param_cast_needs_any_bound(name, body))
             && !bounds.iter().any(|bound| bound == "std::any::Any")
         {
             // `Any::downcast_ref::<T>` is the runtime check used for an
@@ -4558,26 +5022,55 @@ fn function_type_params_with_clone_cache(
             // wildcard witnesses inferred from the actual caller arguments.
             bounds.push("std::any::Any".to_string());
         }
-        if callable_type_param_reaches_hash_backed_source_type_in_owner(
-            name,
-            callable_params,
-            callable_body,
-            owner,
-            support_programs,
-            return_type,
-        ) {
-            // A Java method type parameter can instantiate a source generic
-            // whose semantic map/set field needs Java key equality even when
-            // the method itself never mentions the collection. Propagate that
-            // capability through the constructor/method boundary.
-            if !bounds.iter().any(|bound| bound == "std::any::Any") {
-                bounds.push("std::any::Any".to_string());
-            }
-            if !bounds.iter().any(|bound| bound == "JavaMapKey") {
-                bounds.push("JavaMapKey".to_string());
+        for (capability, bound) in [
+            (
+                SourceCallableCapability::ReferenceIdentity,
+                "JavaReferenceIdentity",
+            ),
+            (SourceCallableCapability::JavaHashCode, "JavaHashCode"),
+            (SourceCallableCapability::JavaMapKey, "JavaMapKey"),
+        ] {
+            let required = {
+                let mut memo = cache.search.borrow_mut();
+                let mut search = cache.search_with_memo(&mut memo);
+                callable_type_param_reaches_source_capability(
+                    name,
+                    callable_params,
+                    callable_body,
+                    owner,
+                    support_programs,
+                    capability,
+                    return_type,
+                    callable_name,
+                    Some((type_params, type_param_bounds)),
+                    &mut search,
+                )
+            };
+            if required {
+                if capability == SourceCallableCapability::JavaMapKey
+                    && !bounds.iter().any(|bound| bound == "std::any::Any")
+                {
+                    bounds.push("std::any::Any".to_string());
+                }
+                if !bounds.iter().any(|existing| existing == bound) {
+                    bounds.push(bound.to_string());
+                }
             }
         }
-        {
+        for (capability, required) in [
+            (
+                SourceCallableCapability::CollectionDisplay,
+                &["JavaObjectDisplay", "std::any::Any"][..],
+            ),
+            (
+                SourceCallableCapability::RetainedDisplayCopy,
+                &["Clone"][..],
+            ),
+            (
+                SourceCallableCapability::ArrayDeepDisplay,
+                &["JavaArraysDeepToStringElement"][..],
+            ),
+        ] {
             let mut memo = cache.search.borrow_mut();
             let mut search = cache.search_with_memo(&mut memo);
             if callable_type_param_reaches_source_capability(
@@ -4586,16 +5079,17 @@ fn function_type_params_with_clone_cache(
                 callable_body,
                 owner,
                 support_programs,
-                SourceCallableCapability::CollectionDisplay,
+                capability,
                 return_type,
                 callable_name,
                 Some((type_params, type_param_bounds)),
                 &mut search,
-            ) && !bounds
-                .iter()
-                .any(|bound| bound == "JavaArraysDeepToStringElement")
-            {
-                bounds.push("JavaArraysDeepToStringElement".to_string());
+            ) {
+                for &bound in required {
+                    if !bounds.iter().any(|existing| existing == bound) {
+                        bounds.push(bound.to_string());
+                    }
+                }
             }
         }
         if bounds.is_empty() {
@@ -4630,6 +5124,7 @@ fn callable_type_param_reaches_hash_backed_source_type(
     )
 }
 
+#[cfg(test)]
 fn callable_type_param_reaches_hash_backed_source_type_in_owner(
     type_param: &str,
     params: &[crate::java_ir::Param],
@@ -4652,19 +5147,643 @@ fn callable_type_param_reaches_hash_backed_source_type_in_owner(
     )
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceCallableCapability {
+    Clone,
     JavaMapKey,
+    JavaHashCode,
     JavaAny,
     CollectionDisplay,
+    RetainedDisplayCopy,
+    ArrayDeepDisplay,
+    ReferenceIdentity,
 }
 
-fn callable_type_param_reaches_source_capability(
+impl SourceCallableCapability {
+    fn trait_impl_capability(self) -> Option<TraitImplCapability> {
+        Some(match self {
+            Self::Clone => TraitImplCapability::Clone,
+            Self::JavaMapKey => TraitImplCapability::JavaMapKey,
+            Self::JavaHashCode => TraitImplCapability::JavaHashCode,
+            Self::ReferenceIdentity => TraitImplCapability::ReferenceIdentity,
+            Self::CollectionDisplay => TraitImplCapability::ObjectDisplay,
+            Self::ArrayDeepDisplay => TraitImplCapability::ArrayDeepDisplay,
+            Self::JavaAny | Self::RetainedDisplayCopy => return None,
+        })
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn source_method_binder_needs_java_hash(
+    name: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&Block>,
+    owner: Option<&TypeDecl>,
+    programs: &[&Program],
+    return_type: Option<&JavaType>,
+    callable_name: Option<&str>,
+    generics: Option<(&[String], &[Option<JavaType>])>,
+) -> bool {
+    callable_type_param_reaches_source_capability(
+        name,
+        params,
+        body,
+        owner,
+        programs,
+        SourceCallableCapability::JavaHashCode,
+        return_type,
+        callable_name,
+        generics,
+        &mut CloneRequirementSearch::default(),
+    )
+}
+
+#[cfg(test)]
+#[allow(clippy::too_many_arguments)]
+fn source_method_binder_needs_reference_identity(
+    name: &str,
+    params: &[crate::java_ir::Param],
+    body: Option<&Block>,
+    owner: Option<&TypeDecl>,
+    programs: &[&Program],
+    return_type: Option<&JavaType>,
+    callable_name: Option<&str>,
+    generics: Option<(&[String], &[Option<JavaType>])>,
+) -> bool {
+    callable_type_param_reaches_source_capability(
+        name,
+        params,
+        body,
+        owner,
+        programs,
+        SourceCallableCapability::ReferenceIdentity,
+        return_type,
+        callable_name,
+        generics,
+        &mut CloneRequirementSearch::default(),
+    )
+}
+
+/// Completed identity requirements in one immutable program's declaration
+/// frames. Call-site substitutions are applied only after looking up the
+/// binder requirements, so different generic instantiations share analysis.
+/// This cache cannot outlive or be reused with a changed source program.
+#[derive(Debug)]
+pub(crate) struct SourceReferenceRequirements<'a> {
+    program: &'a Program,
+    capability: SourceCallableCapability,
+    binders: HashMap<(String, String, usize, usize), Vec<String>>,
+    search: CloneRequirementSearch<'a>,
+}
+
+pub(crate) type SourceReferenceIdentityRequirements<'a> = SourceReferenceRequirements<'a>;
+
+impl<'a> SourceReferenceRequirements<'a> {
+    pub(crate) fn new(program: &'a Program) -> Self {
+        Self {
+            program,
+            capability: SourceCallableCapability::ReferenceIdentity,
+            binders: HashMap::new(),
+            search: CloneRequirementSearch::default(),
+        }
+    }
+
+    pub(crate) fn new_for_hash(program: &'a Program) -> Self {
+        Self {
+            capability: SourceCallableCapability::JavaHashCode,
+            ..Self::new(program)
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn types_for_call(
+        &mut self,
+        call: &crate::java_ir::ResolvedCall,
+        receiver: Option<&JavaType>,
+    ) -> Vec<JavaType> {
+        self.types_for_call_matching(call, receiver, |_| true)
+    }
+
+    pub(crate) fn types_for_call_matching(
+        &mut self,
+        call: &crate::java_ir::ResolvedCall,
+        receiver: Option<&JavaType>,
+        relevant: impl Fn(&JavaType) -> bool,
+    ) -> Vec<JavaType> {
+        let programs = &[self.program];
+        let Some((owner, method)) =
+            source_capability_method_for_receiver(call, receiver, programs, &mut self.search)
+        else {
+            return Vec::new();
+        };
+        let method = method.as_ref();
+        if method.type_params.is_empty() && owner.type_params.is_empty() {
+            return Vec::new();
+        }
+        let mut substitutions =
+            crate::resolve::resolved_method_type_substitutions(&owner.type_params, method, call);
+        if let Some(receiver) = receiver {
+            substitutions.extend(source_receiver_owner_type_substitutions(
+                owner, method, receiver, programs,
+            ));
+        }
+        // The result can only contain these instantiated types. Consumers
+        // such as String-carrier selection and declared-object storage have
+        // narrower demands than "every generic binder". Reject irrelevant
+        // calls before traversing their source bodies, without caching a
+        // partial declaration answer or changing any demanded result.
+        if !substitutions.values().any(&relevant) {
+            return Vec::new();
+        }
+        let key = (
+            owner.name.clone(),
+            crate::java_signature::source_method_rust_name(method),
+            method.span.start(),
+            method.span.end(),
+        );
+        let required = if let Some(required) = self.binders.get(&key) {
+            required.clone()
+        } else {
+            let required = method
+                .type_params
+                .iter()
+                .chain(
+                    owner
+                        .type_params
+                        .iter()
+                        .filter(|name| !method.type_params.contains(name)),
+                )
+                .filter(|name| {
+                    callable_type_param_reaches_source_capability(
+                        name,
+                        &method.params,
+                        method.body.as_ref(),
+                        Some(owner),
+                        programs,
+                        self.capability,
+                        Some(&method.return_type),
+                        Some(&method.name),
+                        Some((&method.type_params, &method.type_param_bounds)),
+                        &mut self.search,
+                    )
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            // Only cache a finished reachability query. Recursion is handled by
+            // its finite visited graph, never a provisional cached false answer.
+            self.binders.insert(key, required.clone());
+            required
+        };
+        required
+            .iter()
+            .filter_map(|name| substitutions.get(name).cloned())
+            .filter(|ty| relevant(ty))
+            .collect()
+    }
+}
+
+fn generic_identity_uses_capability(expr: &Expr, binder: &str, types: &TypeEnv) -> bool {
+    let Expr::Binary {
+        op: BinaryOp::Eq | BinaryOp::Ne,
+        left,
+        right,
+    } = expr
+    else {
+        return false;
+    };
+    if matches!(left.as_ref(), Expr::Literal(Literal::Null))
+        || matches!(right.as_ref(), Expr::Literal(Literal::Null))
+    {
+        return false;
+    }
+    [left, right].into_iter().any(|operand| {
+        let ty = infer_expr_type(operand, types);
+        let ty = optional_element_type(&ty).unwrap_or(ty);
+        matches!(&ty, JavaType::Named { name, args } if name == binder && args.is_empty())
+            || matches!(&ty, JavaType::Unknown(name) if name == binder)
+    })
+}
+
+fn native_map_reference_capability(
+    expr: &Expr,
+    binder: &str,
+    types: &TypeEnv,
+    programs: &[&Program],
+    capability: SourceCallableCapability,
+) -> bool {
+    if capability == SourceCallableCapability::JavaMapKey
+        && matches!(expr, Expr::Call { name, args, .. } if name == "equals" && args.len() == 2)
+        && let Some((left, right)) =
+            crate::call_plan::native_objects_equals_operands(expr, types, &FactSet::default())
+        && !matches!(expr, Expr::Call { receiver: Some(receiver), resolved, .. }
+            if resolved.as_ref().is_some_and(|call| source_method_for_resolved_call(call, programs).is_some())
+                || crate::stdlib::qualified_static_owner_java_name(receiver)
+                    .is_some_and(|name| source_type_bound_decl(types.static_type_alias(&name).unwrap_or(&name), programs).is_some()))
+    {
+        return [left, right].iter().any(|arg| {
+            let ty = infer_expr_type(arg, types);
+            let ty = optional_element_type(&ty).unwrap_or(ty);
+            matches!(&ty, JavaType::Named { name, .. } if source_type_bound_decl(name, programs).is_none()
+                && ["List", "Set", "Map"].iter().any(|parent| crate::stdlib::is_known_java_platform_subtype(name, parent)))
+                && java_type_contains_type_param(&ty, binder)
+        });
+    }
+    if let Expr::New {
+        ty,
+        args,
+        body: None,
+        ..
+    } = expr
+        && capability == SourceCallableCapability::Clone
+        && let JavaType::Named { name, .. } = ty
+        && source_type_bound_decl(name, programs).is_none()
+        && crate::stdlib::java_collection_kind_for_type(ty).is_some_and(|kind| kind.is_map_like())
+        && let [source] = args.as_slice()
+    {
+        let source = infer_expr_type(source, types);
+        let source = optional_element_type(&source).unwrap_or(source);
+        return crate::stdlib::java_map_type_args(&source).is_some()
+            && java_type_contains_type_param(&source, binder);
+    }
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    let ty = infer_expr_type(receiver, types);
+    let ty = optional_element_type(&ty).unwrap_or(ty);
+    let JavaType::Named { name: owner, .. } = &ty else {
+        return false;
+    };
+    if source_type_bound_decl(owner, programs).is_none()
+        && capability == SourceCallableCapability::JavaMapKey
+        && args.len() == 1
+        && crate::call_plan::NativeCollectionMethod::for_bulk_collection_name(name)
+            .is_some_and(|method| method.is_membership_bulk_operation())
+        && let Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod { method, .. }) =
+            crate::call_plan::plan_native_collection_receiver_call_for_type(
+                receiver,
+                name,
+                Some(args),
+                &ty,
+                types,
+            )
+        && method.is_membership_bulk_operation()
+    {
+        return java_type_contains_type_param(&ty, binder)
+            || java_type_contains_type_param(&infer_expr_type(&args[0], types), binder);
+    }
+    if source_type_bound_decl(owner, programs).is_none()
+        && capability == SourceCallableCapability::JavaMapKey
+        && name == "equals"
+        && args.len() == 1
+        && matches!(
+            crate::stdlib::java_collection_kind_for_type(&ty),
+            Some(
+                crate::stdlib::JavaCollectionKind::List
+                    | crate::stdlib::JavaCollectionKind::Set
+                    | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+                    | crate::stdlib::JavaCollectionKind::Map
+                    | crate::stdlib::JavaCollectionKind::InsertionOrderedMap
+            )
+        )
+    {
+        return java_type_contains_type_param(&ty, binder);
+    }
+    if source_type_bound_decl(owner, programs).is_some()
+        || !matches!(
+            crate::stdlib::java_collection_kind_for_type(&ty),
+            Some(
+                crate::stdlib::JavaCollectionKind::Map
+                    | crate::stdlib::JavaCollectionKind::InsertionOrderedMap
+            )
+        )
+    {
+        return false;
+    }
+    let Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod { method, .. }) =
+        crate::call_plan::plan_native_collection_receiver_call_for_type(
+            receiver,
+            name,
+            Some(args),
+            &ty,
+            types,
+        )
+    else {
+        return false;
+    };
+    use crate::call_plan::NativeCollectionMethod as Method;
+    if !matches!(
+        method,
+        Method::MapKeys | Method::MapValues | Method::MapPutIfAbsent
+    ) {
+        return false;
+    }
+    match capability {
+        SourceCallableCapability::JavaAny => {
+            method != Method::MapPutIfAbsent && java_type_contains_type_param(&ty, binder)
+        }
+        SourceCallableCapability::Clone | SourceCallableCapability::JavaMapKey => {
+            crate::stdlib::java_map_type_args(&ty).is_some_and(|(key, value)| {
+                if capability == SourceCallableCapability::JavaMapKey {
+                    method != Method::MapValues && java_type_contains_type_param(key, binder)
+                } else {
+                    java_type_contains_type_param(
+                        if method == Method::MapKeys {
+                            key
+                        } else {
+                            value
+                        },
+                        binder,
+                    )
+                }
+            })
+        }
+        _ => false,
+    }
+}
+
+/// A native map invokes the stored key's protocol, whose selected source
+/// implementation can itself need capabilities of the key's generic arguments.
+/// Mentioning the map (or reading its size) alone does not invoke that protocol.
+fn native_map_source_key_requires_capability(
+    expr: &Expr,
+    binder: &str,
+    types: &TypeEnv,
+    programs: &[&Program],
+    capability: SourceCallableCapability,
+    search: &mut CloneRequirementSearch,
+) -> bool {
+    let Some(capability) = capability.trait_impl_capability() else {
+        return false;
+    };
+    let Some(context) = search.storage_context else {
+        return false;
+    };
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return false;
+    };
+    let receiver_ty = infer_expr_type(receiver, types);
+    let receiver_ty = optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    if !java_type_contains_type_param(&receiver_ty, binder) {
+        return false;
+    }
+    if matches!(&receiver_ty, JavaType::Named { name, .. } if source_type_bound_decl(name, programs).is_some())
+    {
+        return false;
+    }
+    let Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod { method, .. }) =
+        crate::call_plan::plan_native_collection_receiver_call_for_type(
+            receiver,
+            name,
+            Some(args),
+            &receiver_ty,
+            types,
+        )
+    else {
+        return false;
+    };
+    use crate::call_plan::NativeCollectionMethod as Method;
+    if !matches!(
+        method,
+        Method::MapGet
+            | Method::MapGetOrDefault
+            | Method::MapRemove
+            | Method::MapContainsKey
+            | Method::MapInsert
+            | Method::MapPutIfAbsent
+            | Method::MapKeys
+    ) {
+        return false;
+    }
+    let Some((key, _)) = crate::stdlib::java_map_type_args(&receiver_ty) else {
+        return false;
+    };
+    let key = optional_element_type(key).unwrap_or_else(|| key.clone());
+    let JavaType::Named { name, args } = &key else {
+        return false;
+    };
+    if !java_type_contains_type_param(&key, binder) {
+        return false;
+    }
+    let Some(owner) = source_type_bound_decl(name, &[context.program]) else {
+        return false;
+    };
+    let Some(entry) = context.representations.type_representation(&owner.name) else {
+        return false;
+    };
+    let variants = match entry.representation() {
+        crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
+            variants, ..
+        }
+        | crate::representation::ObjectRepresentation::ClosedEnum { variants, .. } => variants,
+        _ => return false,
+    };
+    let Some((_, method)) = crate::representation_lowering::source_hierarchy_equals_method(
+        owner,
+        context.program,
+        context.facts,
+    ) else {
+        return false;
+    };
+    let actuals = owner
+        .type_params
+        .iter()
+        .cloned()
+        .zip(args.iter().cloned())
+        .collect();
+    crate::representation_lowering::source_hierarchy_selected_method_frames(
+        owner,
+        method,
+        variants,
+        context.program,
+    )
+    .into_iter()
+    .any(|(declaring, selected, bindings)| {
+        declaring.type_params.iter().any(|parameter| {
+            let actual = bindings.get(parameter).cloned().unwrap_or(JavaType::Named {
+                name: parameter.clone(),
+                args: Vec::new(),
+            });
+            let actual = crate::resolve::substitute_method_type_variables(&actual, &actuals);
+            let carries = if capability == TraitImplCapability::Clone {
+                stored_java_type_clone_requires_parameter(&actual, binder, Some(context))
+            } else {
+                java_type_contains_type_param(&actual, binder)
+            };
+            if !carries || selected.type_params.contains(parameter) {
+                return false;
+            }
+            let visit = (
+                declaring.name.clone(),
+                "<JavaMapKey:equals>".to_string(),
+                parameter.clone(),
+                capability,
+            );
+            if !search.trait_impl_visiting.insert(visit.clone()) {
+                return false;
+            }
+            let required = source_method_needs_forwarding_capability(
+                declaring, selected, parameter, capability, programs, search,
+            );
+            search.trait_impl_visiting.remove(&visit);
+            required
+        })
+    })
+}
+
+/// The copy obligation belongs to the selected physical cursor, not nominal
+/// List<T>. Reuse scoped shape learning and the stored-child projection used
+/// by lowering; Rc/Arc children shield their payload's generic parameters.
+fn source_display_requires_reference_copy(
+    parameter: &str,
+    owner: &TypeDecl,
+    selected: Option<&MethodDecl>,
+    name: Option<&str>,
+    params: &[crate::java_ir::Param],
+    body: &Block,
+    return_type: Option<&JavaType>,
+    context: CloneStorageContext<'_>,
+) -> bool {
+    let mut candidate = false;
+    crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        candidate |= matches!(
+            expr,
+            Expr::Binary {
+                op: BinaryOp::Add,
+                ..
+            }
+        ) || matches!(expr, Expr::Call { name, .. } if matches!(name.as_str(), "toString" | "to_string" | "valueOf" | "value_of" | "format" | "print" | "println"));
+    });
+    if !candidate {
+        return false;
+    }
+    // Bodies are copied/specialized before emission. Reuse the same callable
+    // frame as retained iteration rather than identifying a method by its
+    // body address and then silently losing solved parameter allocations.
+    let callable = retained_callable_shape_context(params, body, owner, return_type, name, context);
+    let mut env = if let Some(callable) = &callable {
+        callable.env.clone()
+    } else {
+        let mut env = crate::expr_shape::shape_env_for_type(owner, context.signatures);
+        for param in params {
+            env.insert_local(param.name.clone(), param.ty.clone());
+        }
+        env
+    };
+    // Preserve the current method's declared type-binder scope in fallback frames.
+    if let Some(method) = selected {
+        for (index, name) in method.type_params.iter().enumerate() {
+            env.insert_type_param_declaration(
+                name.clone(),
+                method.type_param_bounds.get(index).cloned().flatten(),
+            );
+        }
+    }
+    let ctx = crate::expr_shape::ExprShapeContext::new(
+        Some(context.signatures),
+        Some(context.representations),
+        Some(context.facts),
+    );
+    let locals = callable
+        .as_ref()
+        .map(|callable| callable.locals)
+        .unwrap_or(&[]);
+    let learn = |stmt: &Stmt, env: &mut crate::expr_shape::ShapeEnv| {
+        crate::expr_shape::learn_stmt_shapes_with_context(
+            stmt,
+            env,
+            locals,
+            context.signatures,
+            Some(ctx),
+        );
+    };
+    let expression = |expr: &Expr, env: &crate::expr_shape::ShapeEnv| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |site| {
+            if found {
+                return;
+            }
+            let mut operands = crate::conversion_plan::implicit_java_display_operands(
+                site,
+                env.type_env(),
+                context.facts,
+            );
+            if let Expr::Call {
+                receiver: Some(receiver),
+                name,
+                args,
+                ..
+            } = site
+                && args.is_empty()
+                && matches!(name.as_str(), "toString" | "to_string")
+            {
+                operands.push(receiver);
+            }
+            for operand in operands {
+                let mut pending = vec![crate::expr_shape::infer_expr_shape_with_context(
+                    operand, env, ctx,
+                )];
+                while let Some(parent) = pending.pop() {
+                    let Some(kind) = crate::conversion_plan::native_collection_display_kind(
+                        &parent,
+                        context.facts,
+                    ) else {
+                        continue;
+                    };
+                    for index in 0..if kind.is_map_like() { 2 } else { 1 } {
+                        let Some(child) =
+                            crate::shape_projection::native_collection_stored_child_shape(
+                                &parent,
+                                index,
+                                context.facts,
+                                context.representations,
+                            )
+                        else {
+                            continue;
+                        };
+                        if parent.native_allocation.shared() {
+                            let rust = crate::slot_render::rust_type_for_slot_with_facts_and_representations(&child, context.facts, context.representations);
+                            if rust_clone_requires_parameter(&rust, parameter) {
+                                found = true;
+                                return;
+                            }
+                        }
+                        pending.push(child);
+                    }
+                }
+            }
+        });
+        found
+    };
+    crate::exception_plan::block_has_unhandled_expression_effect(
+        body,
+        &env,
+        &crate::exception_plan::ExpressionEffect {
+            expression: &expression,
+            handles: &|_| false,
+            learn: Some(&learn),
+        },
+    )
+}
+
+fn callable_type_param_reaches_source_capability<'a>(
     type_param: &str,
     params: &[crate::java_ir::Param],
     body: Option<&Block>,
-    declaring_owner: Option<&TypeDecl>,
-    support_programs: &[&Program],
+    declaring_owner: Option<&'a TypeDecl>,
+    support_programs: &[&'a Program],
     capability: SourceCallableCapability,
     return_type: Option<&JavaType>,
     callable_name: Option<&str>,
@@ -4674,26 +5793,29 @@ fn callable_type_param_reaches_source_capability(
     // Capability propagation is reachability in the selected source call graph.
     // Visit a (method, binder) once, rather than repeatedly widening signatures
     // or caching a provisional false answer when a recursive edge is reached.
-    let mut pending = vec![(
-        type_param,
-        params,
-        body,
-        declaring_owner,
-        return_type,
-        callable_name,
-        callable_generics,
-    )];
+    // Only inherited declarations need an owned specialization. Keep direct
+    // declarations borrowed, and specialize in the receiver's declaration
+    // frame, not with arbitrary call-site types: the work graph stays finite.
+    let mut pending: Vec<(String, Option<Cow<'a, MethodDecl>>, Option<&'a TypeDecl>)> =
+        vec![(type_param.to_string(), None, declaring_owner)];
     let mut visited = HashSet::new();
-    while let Some((
-        type_param,
-        params,
-        body,
-        caller_owner,
-        return_type,
-        callable_name,
-        callable_generics,
-    )) = pending.pop()
-    {
+    while let Some((parameter, method, caller_owner)) = pending.pop() {
+        let type_param = parameter.as_str();
+        let (params, body, return_type, callable_name, callable_generics) =
+            if let Some(method) = method.as_deref() {
+                (
+                    method.params.as_slice(),
+                    method.body.as_ref(),
+                    Some(&method.return_type),
+                    Some(method.name.as_str()),
+                    Some((
+                        method.type_params.as_slice(),
+                        method.type_param_bounds.as_slice(),
+                    )),
+                )
+            } else {
+                (params, body, return_type, callable_name, callable_generics)
+            };
         if capability == SourceCallableCapability::JavaAny
             && retained_iteration_requires_parameter(
                 type_param,
@@ -4738,9 +5860,8 @@ fn callable_type_param_reaches_source_capability(
                     body,
                     support_programs,
                 )
-                || body.is_some_and(|body| {
-                    callable_type_param_trait_object_cast_needs_clone_bound(type_param, body)
-                }))
+                || body
+                    .is_some_and(|body| callable_type_param_cast_needs_any_bound(type_param, body)))
         {
             return true;
         }
@@ -4758,6 +5879,21 @@ fn callable_type_param_reaches_source_capability(
         let Some(body) = body else {
             continue;
         };
+        if capability == SourceCallableCapability::RetainedDisplayCopy
+            && let (Some(context), Some(owner)) = (search.storage_context, caller_owner)
+            && source_display_requires_reference_copy(
+                type_param,
+                owner,
+                method.as_deref(),
+                callable_name,
+                params,
+                body,
+                return_type,
+                context,
+            )
+        {
+            return true;
+        }
         let mut types = caller_owner
             .map(|owner| source_callable_type_env(owner, params))
             .unwrap_or_default();
@@ -4775,33 +5911,90 @@ fn callable_type_param_reaches_source_capability(
                 );
             }
         }
-        if capability == SourceCallableCapability::CollectionDisplay
-            && let Some(owner) = caller_owner
+        if matches!(
+            capability,
+            SourceCallableCapability::Clone
+                | SourceCallableCapability::JavaMapKey
+                | SourceCallableCapability::CollectionDisplay
+                | SourceCallableCapability::RetainedDisplayCopy
+                | SourceCallableCapability::ArrayDeepDisplay
+                | SourceCallableCapability::ReferenceIdentity
+                | SourceCallableCapability::JavaHashCode
+        ) && let Some(owner) = caller_owner
         {
             for (name, ty) in search.inherited_fields(owner, support_programs) {
                 types.insert_field(name, ty);
             }
         }
+        let mut conversion_types = types.clone();
         for stmt in &body.statements {
-            types.learn_stmt(stmt);
+            conversion_types.learn_stmt(stmt);
         }
-        if capability == SourceCallableCapability::JavaMapKey
+        if let Some(trait_capability) = capability
+            .trait_impl_capability()
+            .filter(|capability| *capability != TraitImplCapability::Clone)
             && callable_source_interface_conversion_requires_capability(
                 type_param,
                 body,
                 return_type,
-                &types,
+                &conversion_types,
+                caller_owner,
                 support_programs,
-                TraitImplCapability::JavaMapKey,
+                trait_capability,
                 search,
             )
         {
             return true;
         }
         let mut requires_capability = false;
-        crate::semantic_analysis::walk_block_exprs(body, &mut |expr| {
+        crate::semantic_analysis::walk_block_exprs_with_types(body, &types, &mut |expr, types| {
             if requires_capability {
                 return;
+            }
+            if native_map_source_key_requires_capability(
+                expr,
+                type_param,
+                types,
+                support_programs,
+                capability,
+                search,
+            ) {
+                requires_capability = true;
+                return;
+            }
+            if native_map_reference_capability(
+                expr,
+                type_param,
+                types,
+                support_programs,
+                capability,
+            ) {
+                requires_capability = true;
+                return;
+            }
+            if capability == SourceCallableCapability::ReferenceIdentity
+                && generic_identity_uses_capability(expr, type_param, &types)
+            {
+                requires_capability = true;
+                return;
+            }
+            if capability == SourceCallableCapability::JavaHashCode
+                && let Some(call) =
+                    crate::java_hash_plan::plan_java_hash_call(expr, types, &FactSet::default())
+            {
+                let receiver = infer_expr_type(call.receiver, types);
+                let receiver = optional_element_type(&receiver).unwrap_or(receiver);
+                let source_owner = match &receiver {
+                    JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                        !types.is_type_parameter_name(name)
+                            && source_type_bound_decl(name, support_programs).is_some()
+                    }
+                    _ => false,
+                };
+                if !source_owner && java_type_contains_type_param(&receiver, type_param) {
+                    requires_capability = true;
+                    return;
+                }
             }
             if capability == SourceCallableCapability::JavaAny
                 && let Expr::Call {
@@ -4823,14 +6016,17 @@ fn callable_type_param_reaches_source_capability(
                 requires_capability = true;
                 return;
             }
-            if capability == SourceCallableCapability::CollectionDisplay
-                && expression_requires_collection_display_capability(
-                    expr,
-                    type_param,
-                    &types,
-                    support_programs,
-                )
-            {
+            if matches!(
+                capability,
+                SourceCallableCapability::CollectionDisplay
+                    | SourceCallableCapability::ArrayDeepDisplay
+            ) && expression_requires_collection_display_capability(
+                expr,
+                type_param,
+                &types,
+                support_programs,
+                capability == SourceCallableCapability::ArrayDeepDisplay,
+            ) {
                 requires_capability = true;
                 return;
             }
@@ -4905,9 +6101,28 @@ fn callable_type_param_reaches_source_capability(
                 ..
             } = expr
             {
-                if let Some((owner, method)) =
-                    source_method_for_resolved_call(call, support_programs)
-                {
+                let receiver_ty = match receiver.as_deref() {
+                    None | Some(Expr::This) => caller_owner.map(|owner| JavaType::Named {
+                        name: owner.name.clone(),
+                        args: owner
+                            .type_params
+                            .iter()
+                            .map(|name| JavaType::Named {
+                                name: name.clone(),
+                                args: vec![],
+                            })
+                            .collect(),
+                    }),
+                    Some(Expr::Super) => None,
+                    Some(receiver) => Some(infer_expr_type(receiver, &types)),
+                };
+                if let Some((owner, method)) = source_capability_method_for_receiver(
+                    call,
+                    receiver_ty.as_ref(),
+                    support_programs,
+                    search,
+                ) {
+                    let method_ref = method.as_ref();
                     if capability == SourceCallableCapability::JavaAny
                         && (method
                             .params
@@ -4920,7 +6135,7 @@ fn callable_type_param_reaches_source_capability(
                                 .flatten()
                                 .any(crate::types::contains_wildcard_type))
                     {
-                        let effective = crate::inherited_members::method_with_synthesized_source_wildcard_params(method, owner, support_programs);
+                        let effective = crate::inherited_members::method_with_synthesized_source_wildcard_params(method_ref, owner, support_programs);
                         if effective.type_params.len() != method.type_params.len() {
                             let mut inferred = call.clone();
                             inferred.arg_target_types = args
@@ -4942,35 +6157,15 @@ fn callable_type_param_reaches_source_capability(
                     }
                     let mut substitutions = crate::resolve::resolved_method_type_substitutions(
                         &owner.type_params,
-                        method,
+                        method_ref,
                         call,
                     );
                     if !method.modifiers.contains(&Modifier::Static) {
-                        let receiver_ty = if receiver
-                            .as_deref()
-                            .is_none_or(|receiver| matches!(receiver, Expr::This))
-                        {
-                            caller_owner.map(|owner| JavaType::Named {
-                                name: owner.name.clone(),
-                                args: owner
-                                    .type_params
-                                    .iter()
-                                    .map(|name| JavaType::Named {
-                                        name: name.clone(),
-                                        args: vec![],
-                                    })
-                                    .collect(),
-                            })
-                        } else {
-                            receiver
-                                .as_ref()
-                                .map(|receiver| infer_expr_type(receiver, &types))
-                        };
-                        if let Some(receiver_ty) = receiver_ty {
+                        if let Some(receiver_ty) = &receiver_ty {
                             substitutions.extend(source_receiver_owner_type_substitutions(
                                 owner,
-                                method,
-                                &receiver_ty,
+                                method_ref,
+                                receiver_ty,
                                 support_programs,
                             ));
                         }
@@ -4985,20 +6180,12 @@ fn callable_type_param_reaches_source_capability(
                             .get(callee_param)
                             .is_some_and(|actual| java_type_contains_type_param(actual, type_param))
                             && visited.insert((
-                                owner.name.as_str(),
-                                call.rust_name.clone(),
-                                callee_param.as_str(),
+                                owner.name.clone(),
+                                crate::java_signature::source_method_rust_name(method_ref),
+                                callee_param.clone(),
                             ))
                         {
-                            pending.push((
-                                callee_param.as_str(),
-                                method.params.as_slice(),
-                                method.body.as_ref(),
-                                Some(owner),
-                                Some(&method.return_type),
-                                Some(&method.name),
-                                Some((&method.type_params, &method.type_param_bounds)),
-                            ));
+                            pending.push((callee_param.clone(), Some(method.clone()), Some(owner)));
                         }
                     }
                 }
@@ -5019,6 +6206,7 @@ fn expression_requires_collection_display_capability(
     type_param: &str,
     types: &TypeEnv,
     support_programs: &[&Program],
+    deep_arrays: bool,
 ) -> bool {
     let displayed_collection = |expr: &Expr| {
         let ty = infer_expr_type(expr, types);
@@ -5033,6 +6221,21 @@ fn expression_requires_collection_display_capability(
             && crate::stdlib::java_collection_kind_for_type(&ty).is_some()
             && java_type_contains_type_param(&ty, type_param)
     };
+    if !deep_arrays {
+        let source_owner = matches!(expr, Expr::Call { resolved: Some(call), .. }
+            if source_type_bound_decl(&call.declaring_type, support_programs).is_some());
+        if !source_owner
+            && crate::conversion_plan::implicit_java_display_operands(
+                expr,
+                types,
+                &FactSet::default(),
+            )
+            .into_iter()
+            .any(displayed_collection)
+        {
+            return true;
+        }
+    }
     if let Expr::Binary {
         op: BinaryOp::Add,
         left,
@@ -5040,7 +6243,7 @@ fn expression_requires_collection_display_capability(
     } = expr
         && infer_expr_type(expr, types) == JavaType::String
     {
-        return displayed_collection(left) || displayed_collection(right);
+        return !deep_arrays && (displayed_collection(left) || displayed_collection(right));
     }
     let Expr::Call {
         receiver: Some(receiver),
@@ -5054,7 +6257,8 @@ fn expression_requires_collection_display_capability(
     };
     let receiver_ty = infer_expr_type(receiver, types);
     let native_collection = displayed_collection(receiver);
-    if native_collection
+    if !deep_arrays
+        && native_collection
         && matches!(
             crate::call_plan::plan_native_collection_receiver_call_for_type(
                 receiver,
@@ -5111,15 +6315,68 @@ fn expression_requires_collection_display_capability(
                 crate::call_plan::NativeJavaStaticMethod::StringFormat
                 | crate::call_plan::NativeJavaStaticMethod::StringValueOf,
             ..
-        }) => args.iter().any(displayed_collection),
+        }) => !deep_arrays && args.iter().any(displayed_collection),
         Some(crate::call_plan::CallTargetPlan::NativeCollectionStatic {
             method: crate::call_plan::NativeCollectionStaticMethod::ArraysDeepToString,
             ..
-        }) => args
-            .iter()
-            .any(|arg| java_type_contains_type_param(&infer_expr_type(arg, types), type_param)),
+        }) => {
+            deep_arrays
+                && args.iter().any(|arg| {
+                    java_type_contains_type_param(&infer_expr_type(arg, types), type_param)
+                })
+        }
         _ => false,
     }
+}
+
+/// Select the body emitted for this receiver, including flattened inherited
+/// methods whose virtual calls now dispatch through a child override. Rebase
+/// inherited declarations using the same substitution as inherited emission.
+fn source_capability_method_for_receiver<'a>(
+    call: &crate::java_ir::ResolvedCall,
+    receiver_ty: Option<&JavaType>,
+    programs: &[&'a Program],
+    search: &mut CloneRequirementSearch,
+) -> Option<(&'a TypeDecl, Cow<'a, MethodDecl>)> {
+    let (owner, method) = source_method_for_resolved_call(call, programs)?;
+    if method.modifiers.contains(&Modifier::Static) || method.modifiers.contains(&Modifier::Private)
+    {
+        return Some((owner, Cow::Borrowed(method)));
+    }
+    let receiver_ty = receiver_ty.map(|ty| optional_element_type(ty).unwrap_or_else(|| ty.clone()));
+    let Some(JavaType::Named { name, .. }) = receiver_ty else {
+        return Some((owner, Cow::Borrowed(method)));
+    };
+    let Some(receiver_owner) = source_type_bound_decl(&name, programs) else {
+        return Some((owner, Cow::Borrowed(method)));
+    };
+    let Some((selected_owner, selected)) = effective_inherited_current_receiver_method(
+        receiver_owner,
+        &call.rust_name,
+        method.params.len(),
+        programs,
+        search,
+    ) else {
+        return Some((owner, Cow::Borrowed(method)));
+    };
+    if selected_owner.name == receiver_owner.name {
+        return Some((selected_owner, Cow::Borrowed(selected)));
+    }
+    let Some(bindings) = programs.iter().find_map(|program| {
+        crate::inherited_members::source_ancestor_type_arguments(
+            program,
+            receiver_owner,
+            selected_owner,
+        )
+    }) else {
+        return Some((selected_owner, Cow::Borrowed(selected)));
+    };
+    Some((
+        receiver_owner,
+        Cow::Owned(crate::java_type_substitution::specialized_method(
+            selected, &bindings,
+        )),
+    ))
 }
 
 /// Bind an explicitly instantiated source receiver to the declaring owner's
@@ -5645,6 +6902,405 @@ fn rust_stmt_reads_var(stmt: &RustStmt, var_name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn java_hash_capability_follows_source_calls_and_owner_fields() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class Base<A> { A value; int itemHash() { return value.hashCode(); } }
+            class Child<B> extends Base<B> { int inheritedHash() { return value.hashCode(); } }
+            class Calls {
+                static <T> int leaf(T value) { return value.hashCode(); }
+                static <U> int forward(U value) { return leaf(value); }
+                static <V> int collection(Set<V> values) { return values.hashCode(); }
+                static <W> int unrelated(Set<W> values) { return values.size(); }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        for (owner_name, method_name, binder, expected) in [
+            ("Base", "itemHash", "A", true),
+            ("Child", "inheritedHash", "B", true),
+            ("Calls", "leaf", "T", true),
+            ("Calls", "forward", "U", true),
+            ("Calls", "collection", "V", true),
+            ("Calls", "unrelated", "W", false),
+        ] {
+            let owner = resolved
+                .program
+                .types
+                .iter()
+                .find(|ty| ty.name == owner_name)
+                .unwrap();
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == method_name => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(
+                source_method_binder_needs_java_hash(
+                    binder,
+                    &method.params,
+                    method.body.as_ref(),
+                    Some(owner),
+                    &[&resolved.program],
+                    Some(&method.return_type),
+                    Some(&method.name),
+                    Some((&method.type_params, &method.type_param_bounds)),
+                ),
+                expected,
+                "{owner_name}.{method_name}/{binder}"
+            );
+        }
+    }
+
+    #[test]
+    fn membership_bulk_key_capability_uses_native_planning_not_method_spelling() {
+        for method_name in ["containsAll", "retainAll", "removeAll"] {
+            for (prefix, expected) in [
+                ("import java.util.*;".to_string(), true),
+                (
+                    format!(
+                        "class Set<T> {{ boolean {method_name}(Set<T> other) {{ return true; }} }}"
+                    ),
+                    false,
+                ),
+            ] {
+                let parsed = crate::parser::parse_java_source(&format!(
+                    "{prefix} class C {{ static <T> boolean compare(Set<T> a, Set<T> b) {{ return a.{method_name}(b); }} }}"
+                ));
+                let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+                let program = &resolved.program;
+                let owner = program.types.iter().find(|ty| ty.name == "C").unwrap();
+                let method = owner
+                    .members
+                    .iter()
+                    .find_map(|member| match member {
+                        Member::Method(method) => Some(method),
+                        _ => None,
+                    })
+                    .unwrap();
+                let types = source_callable_type_env(owner, &method.params);
+                let mut required = false;
+                crate::semantic_analysis::walk_block_exprs(
+                    method.body.as_ref().unwrap(),
+                    &mut |expr| {
+                        required |= native_map_reference_capability(
+                            expr,
+                            "T",
+                            &types,
+                            &[program],
+                            SourceCallableCapability::JavaMapKey,
+                        );
+                    },
+                );
+                assert_eq!(required, expected, "{prefix} / {method_name}");
+            }
+        }
+    }
+
+    #[test]
+    fn native_objects_collection_equality_capability_keeps_source_precedence() {
+        for (prefix, expected) in [
+            ("import java.util.*;", true),
+            (
+                "import java.util.*; class Objects { static boolean equals(Object a, Object b) { return true; } }",
+                false,
+            ),
+        ] {
+            let parsed = crate::parser::parse_java_source(&format!(
+                "{prefix} class C {{ static <T> boolean compare(Set<T> a, Set<T> b) {{ return Objects.equals(a,b); }} }}"
+            ));
+            let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+            let program = &resolved.program;
+            let owner = program.types.iter().find(|ty| ty.name == "C").unwrap();
+            let method = owner
+                .members
+                .iter()
+                .find_map(|member| match member {
+                    Member::Method(method) => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            let types = source_callable_type_env(owner, &method.params);
+            let mut required = false;
+            crate::semantic_analysis::walk_block_exprs(
+                method.body.as_ref().unwrap(),
+                &mut |expr| {
+                    required |= native_map_reference_capability(
+                        expr,
+                        "T",
+                        &types,
+                        &[program],
+                        SourceCallableCapability::JavaMapKey,
+                    );
+                },
+            );
+            assert_eq!(required, expected, "{prefix}");
+        }
+    }
+
+    #[test]
+    fn identity_requirement_demands_match_filtering_a_full_query() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class Node {}
+            class C {
+                static <T> boolean same(T a, T b) { return a == b; }
+                static boolean use(Node n, String s) { return same(n,n) && same(s,s); }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let program = &resolved.program;
+        let mut calls = Vec::new();
+        crate::semantic_analysis::walk_program_exprs(program, &mut |expr| {
+            if let Expr::Call {
+                resolved: Some(call),
+                ..
+            } = expr
+            {
+                calls.push(call.clone());
+            }
+        });
+        let node_call = calls
+            .iter()
+            .find(|call| {
+                call.arg_target_types
+                    .iter()
+                    .any(|ty| matches!(ty, JavaType::Named { name, .. } if name == "Node"))
+            })
+            .unwrap();
+        let mut filtered = SourceReferenceIdentityRequirements::new(program);
+        assert!(
+            filtered
+                .types_for_call_matching(node_call, None, |ty| ty == &JavaType::String)
+                .is_empty()
+        );
+        assert!(
+            filtered.binders.is_empty(),
+            "irrelevant demand must not analyze/cache a source body"
+        );
+        for call in &calls {
+            let mut full = SourceReferenceIdentityRequirements::new(program);
+            let expected = full.types_for_call(call, None);
+            let strings =
+                filtered.types_for_call_matching(call, None, |ty| ty == &JavaType::String);
+            assert_eq!(
+                strings,
+                expected
+                    .iter()
+                    .filter(|ty| **ty == JavaType::String)
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+            let nodes = filtered.types_for_call_matching(
+                call,
+                None,
+                |ty| matches!(ty, JavaType::Named { name, .. } if name == "Node"),
+            );
+            assert_eq!(
+                nodes,
+                expected
+                    .iter()
+                    .filter(|ty| matches!(ty, JavaType::Named { name, .. } if name == "Node"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+            );
+            assert_eq!(filtered.types_for_call(call, None), expected);
+        }
+    }
+
+    #[test]
+    fn identity_requirement_index_reuses_completed_frames_and_keeps_instantiations_separate() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class Node {}
+            class Cache {
+                static <T> boolean same(T left, T right) { return left == right; }
+                static <T> boolean cycle(T left, T right, int n) {
+                    if (n == 0) return same(left, right);
+                    return back(left, right, n - 1);
+                }
+                static <T> boolean back(T left, T right, int n) { return cycle(left, right, n); }
+            }
+            class Base<A> {
+                boolean same(A left, A right) { return false; }
+                boolean forwarded(A left, A right) { return same(left, right); }
+            }
+            class Derived<T> extends Base<T> {
+                boolean same(T left, T right) { return left == right; }
+            }
+            class Use {
+                boolean check(Node node, String text, Base<String> base) {
+                    return Cache.same(node, node) && Cache.same(text, text)
+                        && Cache.cycle(text, text, 2) && base.forwarded(text, text);
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let program = &resolved.program;
+        let mut calls = Vec::new();
+        crate::semantic_analysis::walk_program_exprs(program, &mut |expr| {
+            if let Expr::Call {
+                resolved: Some(call),
+                ..
+            } = expr
+            {
+                calls.push(call.clone());
+            }
+        });
+        let mut index = SourceReferenceIdentityRequirements::new(program);
+        for call in calls.iter().filter(|call| {
+            call.declaring_type == "Cache"
+                && call.arg_target_types.iter().any(|ty| {
+                    ty == &JavaType::String
+                        || matches!(ty, JavaType::Named { name, .. } if name == "Node")
+                })
+        }) {
+            let expected = if call.arg_target_types.contains(&JavaType::String) {
+                JavaType::String
+            } else {
+                JavaType::Named {
+                    name: "Node".into(),
+                    args: vec![],
+                }
+            };
+            assert_eq!(index.types_for_call(call, None), vec![expected.clone()]);
+            let entries = index.binders.len();
+            for _ in 0..3 {
+                assert_eq!(index.types_for_call(call, None), vec![expected.clone()]);
+            }
+            assert_eq!(index.binders.len(), entries);
+        }
+        assert!(
+            index.binders.len() >= 2,
+            "must exercise same and the recursive cycle"
+        );
+        let call = calls
+            .iter()
+            .find(|call| call.rust_name == "forwarded")
+            .unwrap();
+        let receiver = |name: &str| JavaType::Named {
+            name: name.into(),
+            args: vec![JavaType::String],
+        };
+        assert_eq!(
+            index.types_for_call(call, Some(&receiver("Derived"))),
+            vec![JavaType::String]
+        );
+        assert!(
+            index
+                .types_for_call(call, Some(&receiver("Base")))
+                .is_empty()
+        );
+        assert_eq!(
+            index.types_for_call(call, Some(&receiver("Derived"))),
+            vec![JavaType::String]
+        );
+        assert!(index.search.trait_impl_visiting.is_empty());
+
+        let parsed = crate::parser::parse_java_source(
+            "class Cache { static <T> boolean same(T a, T b) { return false; } } class Use { boolean test(String s) { return Cache.same(s, s); } }",
+        );
+        let other = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let mut other_index = SourceReferenceIdentityRequirements::new(&other.program);
+        crate::semantic_analysis::walk_program_exprs(&other.program, &mut |expr| {
+            if let Expr::Call {
+                resolved: Some(call),
+                ..
+            } = expr
+            {
+                assert!(other_index.types_for_call(call, None).is_empty());
+            }
+        });
+    }
+
+    #[test]
+    fn source_collection_lookalike_does_not_acquire_native_element_capabilities() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            interface Face<T> { boolean same(T left, T right); }
+            class Item<T> implements Face<T> {
+                public boolean same(T left, T right) { return left == right; }
+            }
+            class List<T> { void add(Object value) {} }
+            class Factory {
+                static <T> void store(List<Face<T>> list, Item<T> value) { list.add(value); }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let program = &resolved.program;
+        let owner = program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Factory")
+            .unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        assert!(!source_method_binder_needs_reference_identity(
+            "T",
+            &method.params,
+            method.body.as_ref(),
+            Some(owner),
+            &[program],
+            Some(&method.return_type),
+            Some(&method.name),
+            Some((&method.type_params, &method.type_param_bounds)),
+        ));
+    }
+
+    #[test]
+    fn owned_erased_cast_needs_any_but_not_payload_clone() {
+        for (source, clone) in [
+            (
+                "class C { static <T> T cast(Object value) { return (T) value; } }",
+                false,
+            ),
+            (
+                "interface Face {} class C { static <T> T cast(Face value) { return (T) value; } }",
+                true,
+            ),
+            (
+                "class Object {} class C { static <T> T cast(Object value) { return (T) value; } }",
+                true,
+            ),
+        ] {
+            let program = crate::parser::parse_java_source(source).program;
+            let method = program
+                .types
+                .iter()
+                .flat_map(|ty| &ty.members)
+                .find_map(|member| match member {
+                    Member::Method(method) if method.name == "cast" => Some(method),
+                    _ => None,
+                })
+                .unwrap();
+            let body = method.body.as_ref().unwrap();
+            assert!(callable_type_param_cast_needs_any_bound("T", body));
+            assert_eq!(
+                callable_type_param_borrowed_cast_needs_clone_bound(
+                    "T",
+                    &method.params,
+                    body,
+                    &[&program]
+                ),
+                clone
+            );
+        }
+    }
 
     #[test]
     fn clone_requirements_follow_storage_carriers_not_mentioned_parameters() {
@@ -7371,7 +9027,18 @@ fn method_function_shell_with_facts_exception_plan_and_support_context(
         None,
         None,
         None,
+        None,
     )
+}
+
+/// An explicit implementation entry can have a different ABI from the
+/// concrete owner's virtual override. Keep its selected plan and callback
+/// declaration identity together throughout function emission.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct MethodEmissionContract<'a> {
+    pub signature: &'a MethodSignaturePlan,
+    pub declaration_owner: &'a TypeDecl,
+    pub declaration: &'a MethodDecl,
 }
 
 pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contexts(
@@ -7385,8 +9052,15 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
     representations: Option<&RepresentationPlan>,
     clone_requirement_cache: Option<&CloneRequirementCache>,
     callable_analysis: Option<crate::callable_analysis::CallableAnalysis<'_>>,
+    contract: Option<MethodEmissionContract<'_>>,
 ) -> RustFunction {
-    let needs_lifetime = method_needs_borrowed_return_lifetime(ty, method, signatures, facts);
+    let contract = contract.unwrap_or_else(|| MethodEmissionContract {
+        signature: signatures.required_method_signature(ty, method),
+        declaration_owner: ty,
+        declaration: method,
+    });
+    let needs_lifetime =
+        method_needs_borrowed_return_lifetime(ty, method, signatures, facts, contract);
     let retained_type_param_indices = method
         .type_params
         .iter()
@@ -7437,6 +9111,7 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
             needs_lifetime,
             representations,
             callable_analysis,
+            Some(contract),
         ),
         return_type: method_return_type_with_optional_lifetime(
             ty,
@@ -7446,6 +9121,7 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
             exceptions,
             needs_lifetime,
             representations,
+            Some(contract),
         ),
         where_bounds: clone_requirement_cache.map_or_else(
             || {
@@ -7469,7 +9145,11 @@ pub(crate) fn method_function_shell_with_facts_exception_plan_and_support_contex
         body,
         is_pub: true,
         is_pub_crate: false,
-        receiver: lower_receiver(method_receiver(ty, method, signatures)),
+        receiver: lower_receiver(if method.modifiers.contains(&Modifier::Static) {
+            ReceiverPlan::None
+        } else {
+            contract.signature.receiver()
+        }),
     }
 }
 
@@ -7557,6 +9237,28 @@ pub(crate) fn source_method_class_type_param_capabilities_with_cache(
         .filter(|type_param| !method.type_params.contains(type_param))
         .filter_map(|type_param| {
             let mut bounds = Vec::new();
+            for (capability, bound) in [
+                (
+                    SourceCallableCapability::ReferenceIdentity,
+                    "JavaReferenceIdentity",
+                ),
+                (SourceCallableCapability::JavaHashCode, "JavaHashCode"),
+            ] {
+                if callable_type_param_reaches_source_capability(
+                    type_param,
+                    &method.params,
+                    method.body.as_ref(),
+                    Some(ty),
+                    support_programs,
+                    capability,
+                    Some(&method.return_type),
+                    Some(&method.name),
+                    Some((&method.type_params, &method.type_param_bounds)),
+                    &mut visiting,
+                ) {
+                    bounds.push(bound);
+                }
+            }
             if source_method_class_type_param_needs_clone_bound(
                 ty,
                 method,
@@ -7568,29 +9270,52 @@ pub(crate) fn source_method_class_type_param_capabilities_with_cache(
             ) {
                 bounds.push("Clone");
             }
-            if callable_type_param_reaches_hash_backed_source_type_in_owner(
-                type_param,
-                &method.params,
-                method.body.as_ref(),
-                Some(ty),
-                support_programs,
-                Some(&method.return_type),
-            ) {
-                bounds.push("JavaMapKey");
-            }
             if callable_type_param_reaches_source_capability(
                 type_param,
                 &method.params,
                 method.body.as_ref(),
                 Some(ty),
                 support_programs,
-                SourceCallableCapability::CollectionDisplay,
+                SourceCallableCapability::JavaMapKey,
                 Some(&method.return_type),
                 Some(&method.name),
                 Some((&method.type_params, &method.type_param_bounds)),
                 &mut visiting,
             ) {
-                bounds.push("JavaArraysDeepToStringElement");
+                bounds.push("JavaMapKey");
+            }
+            for (capability, required) in [
+                (
+                    SourceCallableCapability::CollectionDisplay,
+                    &["JavaObjectDisplay", "std::any::Any"][..],
+                ),
+                (
+                    SourceCallableCapability::RetainedDisplayCopy,
+                    &["Clone"][..],
+                ),
+                (
+                    SourceCallableCapability::ArrayDeepDisplay,
+                    &["JavaArraysDeepToStringElement"][..],
+                ),
+            ] {
+                if callable_type_param_reaches_source_capability(
+                    type_param,
+                    &method.params,
+                    method.body.as_ref(),
+                    Some(ty),
+                    support_programs,
+                    capability,
+                    Some(&method.return_type),
+                    Some(&method.name),
+                    Some((&method.type_params, &method.type_param_bounds)),
+                    &mut visiting,
+                ) {
+                    for &bound in required {
+                        if !bounds.contains(&bound) {
+                            bounds.push(bound);
+                        }
+                    }
+                }
             }
             // Concrete source impls already carry their reified generic Any
             // obligation. Interface declarations do not; a default body that
@@ -7623,6 +9348,10 @@ pub(crate) fn source_method_class_type_param_capabilities_with_cache(
 pub(crate) enum TraitImplCapability {
     Clone,
     JavaMapKey,
+    ReferenceIdentity,
+    JavaHashCode,
+    ObjectDisplay,
+    ArrayDeepDisplay,
 }
 
 impl TraitImplCapability {
@@ -7630,6 +9359,21 @@ impl TraitImplCapability {
         match self {
             Self::Clone => "Clone",
             Self::JavaMapKey => "JavaMapKey",
+            Self::ReferenceIdentity => "JavaReferenceIdentity",
+            Self::JavaHashCode => "JavaHashCode",
+            Self::ObjectDisplay => "JavaObjectDisplay",
+            Self::ArrayDeepDisplay => "JavaArraysDeepToStringElement",
+        }
+    }
+
+    fn source_capability(self) -> SourceCallableCapability {
+        match self {
+            Self::Clone => SourceCallableCapability::Clone,
+            Self::JavaMapKey => SourceCallableCapability::JavaMapKey,
+            Self::ReferenceIdentity => SourceCallableCapability::ReferenceIdentity,
+            Self::JavaHashCode => SourceCallableCapability::JavaHashCode,
+            Self::ObjectDisplay => SourceCallableCapability::CollectionDisplay,
+            Self::ArrayDeepDisplay => SourceCallableCapability::ArrayDeepDisplay,
         }
     }
 }
@@ -7676,12 +9420,19 @@ fn source_type_param_needs_trait_impl_capability_inner(
     support_programs: &[&Program],
     search: &mut CloneRequirementSearch,
 ) -> bool {
-    if capability == TraitImplCapability::Clone
-        && let Some(interface) = interface
-        && let Some(required) = mutable_shared_interface_clone_requirement(
+    if matches!(
+        capability,
+        TraitImplCapability::Clone
+            | TraitImplCapability::ReferenceIdentity
+            | TraitImplCapability::JavaHashCode
+            | TraitImplCapability::ObjectDisplay
+            | TraitImplCapability::ArrayDeepDisplay
+    ) && let Some(interface) = interface
+        && let Some(required) = mutable_shared_interface_forwarding_requirement(
             ty,
             interface,
             type_param,
+            capability,
             support_programs,
             search,
         )
@@ -7713,6 +9464,10 @@ fn source_type_param_needs_trait_impl_capability_inner(
                 &mut HashSet::new(),
             )
         }),
+        TraitImplCapability::ReferenceIdentity
+        | TraitImplCapability::JavaHashCode
+        | TraitImplCapability::ObjectDisplay
+        | TraitImplCapability::ArrayDeepDisplay => false,
     };
     if field_requires {
         return true;
@@ -7730,18 +9485,24 @@ fn source_type_param_needs_trait_impl_capability_inner(
                 support_programs,
                 search,
             ),
-            TraitImplCapability::JavaMapKey => callable_type_param_reaches_source_capability(
-                parameter,
-                &method.params,
-                method.body.as_ref(),
-                Some(owner),
-                support_programs,
-                SourceCallableCapability::JavaMapKey,
-                Some(&method.return_type),
-                Some(&method.name),
-                Some((&method.type_params, &method.type_param_bounds)),
-                search,
-            ),
+            TraitImplCapability::JavaMapKey
+            | TraitImplCapability::ReferenceIdentity
+            | TraitImplCapability::JavaHashCode
+            | TraitImplCapability::ObjectDisplay
+            | TraitImplCapability::ArrayDeepDisplay => {
+                callable_type_param_reaches_source_capability(
+                    parameter,
+                    &method.params,
+                    method.body.as_ref(),
+                    Some(owner),
+                    support_programs,
+                    capability.source_capability(),
+                    Some(&method.return_type),
+                    Some(&method.name),
+                    Some((&method.type_params, &method.type_param_bounds)),
+                    search,
+                )
+            }
         };
     if ty.members.iter().any(|member| match member {
         Member::Method(method) if !method.type_params.iter().any(|name| name == type_param) => {
@@ -7764,7 +9525,11 @@ fn source_type_param_needs_trait_impl_capability_inner(
                 owner.type_params.iter().any(|param| {
                     !inherited.method().type_params.contains(param)
                         && bindings.get(param).is_some_and(|actual| match capability {
-                            TraitImplCapability::JavaMapKey => {
+                            TraitImplCapability::JavaMapKey
+                            | TraitImplCapability::ReferenceIdentity
+                            | TraitImplCapability::JavaHashCode
+                            | TraitImplCapability::ObjectDisplay
+                            | TraitImplCapability::ArrayDeepDisplay => {
                                 java_type_contains_type_param(actual, type_param)
                             }
                             TraitImplCapability::Clone => {
@@ -7785,21 +9550,27 @@ fn source_type_param_needs_trait_impl_capability_inner(
 /// interface's implementations matter, and a method-local trait predicate is
 /// already available while forwarding that method. Abstract contracts without
 /// such a predicate still require an adapter-wide implementation bound.
-fn mutable_shared_interface_clone_requirement(
+fn mutable_shared_interface_forwarding_requirement(
     ty: &TypeDecl,
     interface: &TypeDecl,
     type_param: &str,
+    capability: TraitImplCapability,
     support_programs: &[&Program],
     search: &mut CloneRequirementSearch,
 ) -> Option<bool> {
-    let context = search.storage_context?;
-    let placement = crate::storage_strategy::effective_storage_placement(
-        context.facts.storage_placement_for(&ty.name),
-        context.representations.storage_placement_for(&ty.name),
-    );
-    if !placement.shared() || !placement.interior_mutable() || interface.kind != TypeKind::Interface
-    {
+    if interface.kind != TypeKind::Interface {
         return None;
+    }
+    let context = search.storage_context;
+    if capability == TraitImplCapability::Clone {
+        let context = context?;
+        let placement = crate::storage_strategy::effective_storage_placement(
+            context.facts.storage_placement_for(&ty.name),
+            context.representations.storage_placement_for(&ty.name),
+        );
+        if !placement.shared() || !placement.interior_mutable() {
+            return None;
+        }
     }
     let (program, substitutions) = support_programs.iter().find_map(|program| {
         crate::inherited_members::source_ancestor_type_arguments(program, ty, interface)
@@ -7810,16 +9581,16 @@ fn mutable_shared_interface_clone_requirement(
         interface,
         &substitutions,
     ) {
-        // Only an exact binder predicate supplies T: Clone. A bound such as
-        // Vec<T>: Clone cannot be inverted to infer T: Clone in Rust.
+        // Only an exact binder predicate supplies the capability on T. A
+        // predicate on a container cannot be inverted to obtain it on T.
         let allowed = contract.owner.type_params.iter().any(|parameter| {
             !contract.method.type_params.contains(parameter)
                 && contract.owner_substitutions.get(parameter).is_some_and(|actual|
                     matches!(actual, JavaType::Named { name, args } if name == type_param && args.is_empty())
                     || matches!(actual, JavaType::Unknown(name) if name == type_param))
-                && source_method_emits_clone_bound_for_type_param_inner(
-                    contract.owner, contract.method, parameter,
-                    Some(context.representations), support_programs, search,
+                && source_method_needs_forwarding_capability(
+                    contract.owner, contract.method, parameter, capability,
+                    support_programs, search,
                 )
         });
         if allowed {
@@ -7842,30 +9613,64 @@ fn mutable_shared_interface_clone_requirement(
         else {
             return None;
         };
-        if owner.type_params.iter().any(|parameter| {
-            !method.type_params.contains(parameter)
-                && (if owner.name == ty.name {
-                    // The ancestry API encodes self-specialization as an
-                    // empty substitution, not as explicit T -> T entries.
-                    parameter == type_param
-                } else {
-                    bindings.get(parameter).is_some_and(|actual| {
-                        stored_java_type_clone_requires_parameter(actual, type_param, Some(context))
-                    })
-                })
-                && source_method_emits_clone_bound_for_type_param_inner(
-                    owner,
-                    method,
-                    parameter,
-                    Some(context.representations),
-                    support_programs,
-                    search,
-                )
-        }) {
+        let selected = if owner.name == ty.name {
+            Cow::Borrowed(method)
+        } else {
+            Cow::Owned(crate::java_type_substitution::specialized_method(
+                method, &bindings,
+            ))
+        };
+        if !selected
+            .type_params
+            .iter()
+            .any(|parameter| parameter == type_param)
+            && source_method_needs_forwarding_capability(
+                ty,
+                selected.as_ref(),
+                type_param,
+                capability,
+                support_programs,
+                search,
+            )
+        {
             return Some(true);
         }
     }
     Some(false)
+}
+
+fn source_method_needs_forwarding_capability(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    parameter: &str,
+    capability: TraitImplCapability,
+    programs: &[&Program],
+    search: &mut CloneRequirementSearch,
+) -> bool {
+    if capability == TraitImplCapability::Clone {
+        return source_method_emits_clone_bound_for_type_param_inner(
+            owner,
+            method,
+            parameter,
+            search
+                .storage_context
+                .map(|context| context.representations),
+            programs,
+            search,
+        );
+    }
+    callable_type_param_reaches_source_capability(
+        parameter,
+        &method.params,
+        method.body.as_ref(),
+        Some(owner),
+        programs,
+        capability.source_capability(),
+        Some(&method.return_type),
+        Some(&method.name),
+        Some((&method.type_params, &method.type_param_bounds)),
+        search,
+    )
 }
 
 fn source_method_class_type_param_needs_clone_bound(
@@ -7997,6 +9802,7 @@ fn expr_constructs_clone_requiring_generic_owner(
     caller_type_param: &str,
     caller_types: &TypeEnv,
     support_programs: &[&Program],
+    caller_signature: Option<&crate::signature::MethodSignaturePlan>,
     visiting: &mut CloneRequirementSearch,
 ) -> bool {
     let Expr::New {
@@ -8018,6 +9824,40 @@ fn expr_constructs_clone_requiring_generic_owner(
     else {
         return false;
     };
+    if let (Some(caller), Some(context)) = (caller_signature, visiting.storage_context)
+        && let Some(target) = context.signatures.constructor_signature(owner, constructor)
+        && args.iter().zip(target.params()).any(|(arg, target)| {
+            let Expr::Var(name) = arg else {
+                return false;
+            };
+            let Some(actual) = caller.params().iter().find(|param| param.name() == name) else {
+                return false;
+            };
+            if !matches!(
+                actual.shape().ownership,
+                crate::slot_shape::OwnershipShape::SharedBorrow
+                    | crate::slot_shape::OwnershipShape::MutableBorrow
+            ) || !matches!(
+                target.shape().ownership,
+                crate::slot_shape::OwnershipShape::Owned
+            ) {
+                return false;
+            }
+            // Constructor storage owns this reference. Copying a generic
+            // borrowed payload needs its Clone witness, but copying Rc/Arc
+            // carriers must not impose Clone on their payload parameters.
+            let mut owned = actual.shape().clone();
+            owned.ownership = crate::slot_shape::OwnershipShape::Owned;
+            let physical = crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &owned,
+                context.facts,
+                context.representations,
+            );
+            rust_clone_requires_parameter(&physical, caller_type_param)
+        })
+    {
+        return true;
+    }
     // A concrete actual for `G extends SourceInterface<...>` must satisfy
     // the generated implementation's obligations, even when the constructor
     // itself only stores G and never clones it.
@@ -8083,6 +9923,7 @@ fn callable_source_interface_conversion_requires_capability(
     body: &Block,
     return_type: Option<&JavaType>,
     types: &TypeEnv,
+    owner: Option<&TypeDecl>,
     support_programs: &[&Program],
     capability: TraitImplCapability,
     search: &mut CloneRequirementSearch,
@@ -8095,6 +9936,7 @@ fn callable_source_interface_conversion_requires_capability(
                 target,
                 type_param,
                 types,
+                owner,
                 support_programs,
                 capability,
                 search,
@@ -8129,12 +9971,48 @@ fn callable_source_interface_conversion_requires_capability(
     crate::semantic_analysis::walk_block_exprs(body, &mut |expr| match expr {
         Expr::Cast { ty, expr } => boundary(expr, ty),
         Expr::Call {
+            receiver,
+            name,
             args,
-            resolved: Some(call),
+            resolved,
             ..
         } => {
-            for (arg, target) in args.iter().zip(&call.arg_target_types) {
-                boundary(arg, target);
+            if let Some(call) = resolved {
+                for (arg, target) in args.iter().zip(&call.arg_target_types) {
+                    boundary(arg, target);
+                }
+            }
+            if let Some(receiver) = receiver {
+                let receiver_ty = infer_expr_type(receiver, types);
+                let receiver_ty = optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+                let source_receiver = matches!(&receiver_ty, JavaType::Named { name, .. }
+                    if source_type_bound_decl(name, support_programs).is_some());
+                if !source_receiver
+                    && let Some(crate::call_plan::CallTargetPlan::NativeCollectionMethod {
+                        method,
+                        ..
+                    }) = crate::call_plan::plan_native_collection_receiver_call_for_type(
+                        receiver,
+                        name,
+                        Some(args),
+                        &receiver_ty,
+                        types,
+                    )
+                {
+                    // Resolved JDK formals can erase E/K/V to Object. The
+                    // emitted insertion instead converts into the receiver's
+                    // actual storage child, including source-interface ABI
+                    // obligations. Share the native method metadata with
+                    // storage/nullability planning; source lookalikes stay out.
+                    for &(argument, child) in method.stored_argument_children() {
+                        if let Some(arg) = args.get(argument)
+                            && let Some(target) =
+                                RustSlotShape::native_child_type_at_path(&receiver_ty, &[child])
+                        {
+                            boundary(arg, &target);
+                        }
+                    }
+                }
             }
         }
         Expr::New {
@@ -8163,6 +10041,7 @@ fn source_interface_conversion_requires_capability(
     target: &JavaType,
     type_param: &str,
     types: &TypeEnv,
+    owner: Option<&TypeDecl>,
     support_programs: &[&Program],
     capability: TraitImplCapability,
     search: &mut CloneRequirementSearch,
@@ -8181,6 +10060,7 @@ fn source_interface_conversion_requires_capability(
                     target,
                     type_param,
                     types,
+                    owner,
                     support_programs,
                     capability,
                     search,
@@ -8194,6 +10074,7 @@ fn source_interface_conversion_requires_capability(
                     target,
                     type_param,
                     types,
+                    owner,
                     support_programs,
                     capability,
                     search,
@@ -8214,7 +10095,28 @@ fn source_interface_conversion_requires_capability(
     else {
         return false;
     };
-    let actual = infer_expr_type(expr, types);
+    // General expression inference deliberately has no lexical owner for
+    // `this`. Interface conversions do: retain the owner's declaration-frame
+    // binders, exactly as receiver capability propagation does, rather than
+    // losing the concrete implementor behind Unknown("this").
+    let actual = if matches!(expr, Expr::This) {
+        let Some(owner) = owner else {
+            return false;
+        };
+        JavaType::Named {
+            name: owner.name.clone(),
+            args: owner
+                .type_params
+                .iter()
+                .map(|name| JavaType::Named {
+                    name: name.clone(),
+                    args: vec![],
+                })
+                .collect(),
+        }
+    } else {
+        infer_expr_type(expr, types)
+    };
     let actual = optional_element_type(&actual).unwrap_or(actual);
     let JavaType::Named { name, args } = &actual else {
         return false;
@@ -8241,7 +10143,11 @@ fn source_interface_conversion_requires_capability(
                     type_param,
                     search.storage_context,
                 ),
-                TraitImplCapability::JavaMapKey => {
+                TraitImplCapability::JavaMapKey
+                | TraitImplCapability::ReferenceIdentity
+                | TraitImplCapability::JavaHashCode
+                | TraitImplCapability::ObjectDisplay
+                | TraitImplCapability::ArrayDeepDisplay => {
                     java_type_contains_type_param(argument, type_param)
                 }
             };
@@ -8365,6 +10271,7 @@ fn source_callable_delegates_class_type_param_clone_requirement(
             type_param,
             &caller_types,
             support_programs,
+            None,
             visiting,
         ) {
             needs_clone = true;
@@ -8778,13 +10685,28 @@ fn method_needs_borrowed_return_lifetime(
     method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
+    contract: MethodEmissionContract<'_>,
 ) -> bool {
-    if !method_return_type_with_facts(ty, method, signatures, facts)
-        .as_ref()
-        .is_some_and(rust_type_contains_ref)
-        || !method_params(ty, method, signatures, facts)
-            .iter()
-            .any(|param| rust_type_contains_ref(&param.ty))
+    if !method_return_type_from_shape(
+        method,
+        contract.signature.return_shape_cloned(),
+        facts,
+        None,
+    )
+    .as_ref()
+    .is_some_and(rust_type_contains_ref)
+        || !method_params_with_optional_lifetime(
+            ty,
+            method,
+            signatures,
+            facts,
+            false,
+            None,
+            None,
+            Some(contract),
+        )
+        .iter()
+        .any(|param| rust_type_contains_ref(&param.ty))
     {
         return false;
     }
@@ -8865,28 +10787,6 @@ fn method_return_shape(
         .cloned()
 }
 
-fn method_return_type_with_facts(
-    ty: &TypeDecl,
-    method: &MethodDecl,
-    signatures: &SignaturePlan,
-    facts: &FactSet,
-) -> Option<RustType> {
-    if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
-        return Some(ty);
-    }
-    let return_shape = method_return_shape(ty, method, signatures);
-    if let Some(shape) = return_shape.as_ref() {
-        return Some(rust_type_for_slot_with_facts(shape, facts));
-    }
-    if rust_crate_mapped_external_java_type(&method.return_type, facts) {
-        return Some(rust_type_for_java_type_with_facts(
-            &method.return_type,
-            facts,
-        ));
-    }
-    None
-}
-
 pub(crate) fn rust_crate_mapped_external_rust_type(
     java_ty: &JavaType,
     facts: &FactSet,
@@ -8946,51 +10846,16 @@ fn struct_fields_for_type(
         });
     }
     if let Some(outer_type) = facts.captures.outer_this_type_for_type(&ty.name) {
-        let outer_carrier = representations.and_then(|representations| {
-            representations
-                .type_representation(outer_type)
-                .and_then(|representation| match representation.representation() {
-                    crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
-                        carrier_name,
-                        ..
-                    } if carrier_name != &rust_name_for_java_named_type(outer_type) => {
-                        Some(RustType::Named(carrier_name.clone()))
-                    }
-                    _ => None,
-                })
-        });
-        let outer_rust_type = outer_carrier.unwrap_or_else(|| {
-            let outer_rust_name = rust_name_for_java_named_type(outer_type);
-            find_type_decl_by_rust_name(support_program, &outer_rust_name)
-                .filter(|outer| !outer.type_params.is_empty())
-                .map(|outer| {
-                    crate::slot_render::rust_generic_type(
-                        outer_rust_name.clone(),
-                        outer
-                            .type_params
-                            .iter()
-                            .cloned()
-                            .map(RustType::Named)
-                            .collect(),
-                    )
-                })
-                .unwrap_or_else(|| RustType::Named(outer_rust_name))
-        });
-        let outer_rust_type = if representations
-            .and_then(|representations| representations.type_representation(outer_type))
-            .is_some_and(|representation| {
-                matches!(
-                    representation.representation(),
-                    crate::representation::ObjectRepresentation::SourceHierarchyCarrier {
-                        carrier_name,
-                        ..
-                    } if carrier_name != &rust_name_for_java_named_type(outer_type)
-                )
-            }) {
-            outer_rust_type
-        } else {
-            shared_outer_handle_type(facts.storage_placement_for(outer_type), outer_rust_type)
-        };
+        let outer_rust_name = rust_name_for_java_named_type(outer_type);
+        let outer_decl = find_type_decl_by_rust_name(support_program, &outer_rust_name);
+        let outer_rust_type = crate::slot_render::rust_source_outer_capture_type(
+            outer_type,
+            outer_decl
+                .map(|outer| outer.type_params.as_slice())
+                .unwrap_or(&[]),
+            facts,
+            representations,
+        );
         fields.push(RustField {
             name: "__outer".to_string(),
             ty: outer_rust_type,
@@ -9335,7 +11200,10 @@ pub(crate) fn java_semantic_hash_collection_field_rust_type(
                 .map(|payload| crate::slot_render::rust_generic_type(base, vec![payload]))
         }
         RustType::Generic { base, args }
-            if base == "JavaNativeCollection" && semantic_base == "JavaSemanticHashSet" =>
+            if matches!(
+                base.as_str(),
+                "JavaNativeCollection" | "JavaSyncNativeCollection"
+            ) && semantic_base == "JavaSemanticHashSet" =>
         {
             // Retained sets already carry their Java equality witness inside
             // the allocation. Replacing Rc/RefCell or this runtime payload
@@ -9541,20 +11409,6 @@ fn box_recursive_field_type(rust_ty: RustType) -> RustType {
         )),
         other => crate::slot_render::rust_generic_type("Box", vec![other]),
     }
-}
-
-fn shared_outer_handle_type(
-    placement: crate::storage_strategy::StoragePlacement,
-    inner: RustType,
-) -> RustType {
-    let celled = placement
-        .cell_path()
-        .map(|cell| crate::slot_render::rust_generic_type(cell, vec![inner.clone()]))
-        .unwrap_or(inner);
-    placement
-        .handle_path()
-        .map(|handle| crate::slot_render::rust_generic_type(handle, vec![celled.clone()]))
-        .unwrap_or(celled)
 }
 
 fn source_field_is_public(field: &FieldDecl) -> bool {
@@ -9952,14 +11806,12 @@ pub(crate) fn generic_source_struct_clone_impl(
         return None;
     }
     strukt.derives.retain(|derive| derive != "Clone");
-    let bounds = strukt
-        .fields
-        .iter()
-        .map(|field| format!("{}: std::clone::Clone", crate::emit::emit_type(&field.ty)))
-        .collect::<std::collections::BTreeSet<_>>()
-        .into_iter()
-        .collect::<Vec<_>>()
-        .join(", ");
+    let where_clause = clone_where_clause_for_emitted_types(
+        strukt
+            .fields
+            .iter()
+            .map(|field| crate::emit::emit_type(&field.ty)),
+    );
     let fields = strukt
         .fields
         .iter()
@@ -9969,16 +11821,30 @@ pub(crate) fn generic_source_struct_clone_impl(
         })
         .collect::<Vec<_>>()
         .join(", ");
-    let where_clause = if bounds.is_empty() {
-        String::new()
-    } else {
-        format!(" where {bounds}")
-    };
     Some(RustItem::Raw(format!(
         "impl<{}> Clone for {}{where_clause} {{\n    fn clone(&self) -> Self {{ Self {{ {fields} }} }}\n}}",
         ty.type_params.join(", "),
         rust_use_name_for_source_type(ty),
     )))
+}
+
+/// Clone capabilities belong to physical fields/payloads, not every generic
+/// parameter occurring inside an Rc/Arc or a phantom marker.
+pub(crate) fn clone_where_clause_for_emitted_types(
+    types: impl IntoIterator<Item = String>,
+) -> String {
+    let bounds = types
+        .into_iter()
+        .map(|ty| format!("{ty}: std::clone::Clone"))
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>()
+        .join(", ");
+    if bounds.is_empty() {
+        String::new()
+    } else {
+        format!(" where {bounds}")
+    }
 }
 
 fn raw_rust_type_supports_derive_clone(
@@ -10950,13 +12816,14 @@ fn constructor_return_type(
     RustType::Named(rust_use_name_for_source_type(ty))
 }
 
+#[cfg(test)]
 fn method_params(
     ty: &TypeDecl,
     method: &MethodDecl,
     signatures: &SignaturePlan,
     facts: &FactSet,
 ) -> Vec<RustParam> {
-    method_params_with_optional_lifetime(ty, method, signatures, facts, false, None, None)
+    method_params_with_optional_lifetime(ty, method, signatures, facts, false, None, None, None)
 }
 
 fn method_params_with_optional_lifetime(
@@ -10967,8 +12834,14 @@ fn method_params_with_optional_lifetime(
     lifetime: bool,
     representations: Option<&RepresentationPlan>,
     callable_analysis: Option<crate::callable_analysis::CallableAnalysis<'_>>,
+    contract: Option<MethodEmissionContract<'_>>,
 ) -> Vec<RustParam> {
-    let signature = signatures.required_method_signature(ty, method);
+    let signature = contract
+        .map(|contract| contract.signature)
+        .unwrap_or_else(|| signatures.required_method_signature(ty, method));
+    let (callback_owner, callback_method) = contract
+        .map(|contract| (contract.declaration_owner, contract.declaration))
+        .unwrap_or((ty, method));
     let mutable_array_target_params = mutable_array_target_params(method);
     let access_names = crate::java_naming::source_binding_rust_names(
         method.params.iter().map(|param| param.source_name.as_str()),
@@ -10983,7 +12856,8 @@ fn method_params_with_optional_lifetime(
                 .get(index)
                 .map(|source_param| source_param.name.as_str())
                 .unwrap_or_else(|| param.name());
-            let callback_param = signatures.source_callback_is_inline(ty, method, index);
+            let callback_param =
+                signatures.source_callback_is_inline(callback_owner, callback_method, index);
             let submit_callable_param =
                 method_param_is_submit_callable_callback(method, source_param_name);
             let mutable_optional_sequence_param = mutable_array_target_params
@@ -11002,9 +12876,36 @@ fn method_params_with_optional_lifetime(
                 .and_then(|source_param| access_names.get(&source_param.source_name))
                 .cloned()
                 .unwrap_or_else(|| param.name().to_string());
+            if callback_param {
+                let java_ty = method
+                    .params
+                    .get(index)
+                    .map(|param| &param.ty)
+                    .unwrap_or_else(|| param.java_ty());
+                return RustParam {
+                    name: format!("mut {name}"),
+                    ty: source_method_callback_param_type(
+                        callback_owner,
+                        callback_method,
+                        index,
+                        java_ty,
+                        signatures,
+                        facts,
+                        representations,
+                        lifetime,
+                        callable_analysis,
+                    )
+                    .unwrap_or_else(|| {
+                        rust_type_for_slot_with_optional_representations(
+                            &param.shape(),
+                            facts,
+                            representations,
+                        )
+                    }),
+                };
+            }
             RustParam {
-                name: if callback_param
-                    || submit_callable_param
+                name: if submit_callable_param
                     || mutable_optional_sequence_param
                     || mutable_owned_binding_param
                     || mutable_optional_borrow_param
@@ -11013,22 +12914,18 @@ fn method_params_with_optional_lifetime(
                 } else {
                     name
                 },
-                ty: if callback_param || submit_callable_param {
+                ty: if submit_callable_param {
                     let source_java_ty = method
                         .params
                         .get(index)
                         .map(|source_param| &source_param.ty)
                         .unwrap_or_else(|| param.java_ty());
-                    let callback_ty = if submit_callable_param {
-                        submit_callable_callback_param_type(
-                            method,
-                            source_java_ty,
-                            facts,
-                            representations,
-                        )
-                    } else {
-                        functional_callback_param_type(source_java_ty, facts, representations)
-                    }
+                    let callback_ty = submit_callable_callback_param_type(
+                        method,
+                        source_java_ty,
+                        facts,
+                        representations,
+                    )
                     .unwrap_or_else(|| {
                         rust_type_for_slot_with_optional_representations(
                             &param.shape(),
@@ -11036,33 +12933,7 @@ fn method_params_with_optional_lifetime(
                             representations,
                         )
                     });
-                    let callback_ty = maybe_add_lifetime_to_refs(callback_ty, lifetime);
-                    if callback_param
-                        && signatures.source_callback_plan().retains_for_method(
-                            &ty.name,
-                            &crate::java_signature::source_method_rust_name(method),
-                            index,
-                        )
-                    {
-                        RustType::Raw(format!(
-                            "{} + 'static",
-                            crate::emit::emit_type(&callback_ty)
-                        ))
-                    } else {
-                        if callback_param && let Some(analysis) = callable_analysis {
-                            let returns_result = signatures
-                                .source_callback_plan()
-                                .callable_key_for_method(
-                                    &ty.name,
-                                    &crate::java_signature::source_method_rust_name(method),
-                                    index,
-                                )
-                                .is_some_and(|key| analysis.callable_returns_result(&key));
-                            borrowed_source_callback_type(callback_ty, returns_result)
-                        } else {
-                            callback_ty
-                        }
-                    }
+                    maybe_add_lifetime_to_refs(callback_ty, lifetime)
                 } else {
                     let rust_ty = method
                         .params
@@ -11400,6 +13271,40 @@ fn functional_callback_param_type(
     })
 }
 
+/// One callback ABI for ordinary source shells and hierarchy forwarding shells.
+/// Java storage shapes alone cannot describe a borrowed, checked SAM boundary.
+pub(crate) fn source_method_callback_param_type(
+    owner: &TypeDecl,
+    method: &MethodDecl,
+    index: usize,
+    java_ty: &JavaType,
+    signatures: &SignaturePlan,
+    facts: &FactSet,
+    representations: Option<&RepresentationPlan>,
+    lifetime: bool,
+    analysis: Option<crate::callable_analysis::CallableAnalysis<'_>>,
+) -> Option<RustType> {
+    if !signatures.source_callback_is_inline(owner, method, index) {
+        return None;
+    }
+    let ty = maybe_add_lifetime_to_refs(
+        functional_callback_param_type(java_ty, facts, representations)?,
+        lifetime,
+    );
+    let name = crate::java_signature::source_method_rust_name(method);
+    let plan = signatures.source_callback_plan();
+    Some(if plan.retains_for_method(&owner.name, &name, index) {
+        RustType::Raw(format!("{} + 'static", crate::emit::emit_type(&ty)))
+    } else if let Some(analysis) = analysis {
+        let checked = plan
+            .callable_key_for_method(&owner.name, &name, index)
+            .is_some_and(|key| analysis.callable_returns_result(&key));
+        borrowed_source_callback_type(ty, checked)
+    } else {
+        ty
+    })
+}
+
 /// A non-escaping source callback needs no generic type identity. Erasing it at
 /// the call boundary keeps recursion finite and gives every forwarder the same
 /// ABI while retaining the SAM's structured inputs and return carrier.
@@ -11586,15 +13491,14 @@ fn method_return_type_with_optional_lifetime(
     exceptions: MethodExceptionPlan,
     lifetime: bool,
     representations: Option<&RepresentationPlan>,
+    contract: Option<MethodEmissionContract<'_>>,
 ) -> Option<RustType> {
-    let base = method_return_type_with_optional_representations(
-        ty,
-        method,
-        signatures,
-        facts,
-        representations,
-    )
-    .map(|ty| maybe_add_lifetime_to_refs(ty, lifetime));
+    let shape = match contract {
+        Some(contract) => contract.signature.return_shape_cloned(),
+        None => method_return_shape(ty, method, signatures),
+    };
+    let base = method_return_type_from_shape(method, shape, facts, representations)
+        .map(|ty| maybe_add_lifetime_to_refs(ty, lifetime));
     if exceptions.wrap_returns_in_result() {
         Some(exception_result_type(base.unwrap_or(RustType::Unit)))
     } else {
@@ -11602,17 +13506,15 @@ fn method_return_type_with_optional_lifetime(
     }
 }
 
-fn method_return_type_with_optional_representations(
-    ty: &TypeDecl,
+fn method_return_type_from_shape(
     method: &MethodDecl,
-    signatures: &SignaturePlan,
+    return_shape: Option<RustSlotShape>,
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> Option<RustType> {
     if let Some(ty) = rust_crate_mapped_external_rust_type(&method.return_type, facts) {
         return Some(ty);
     }
-    let return_shape = method_return_shape(ty, method, signatures);
     if let Some(shape) = return_shape.as_ref() {
         return Some(rust_type_for_slot_with_optional_representations(
             shape,
@@ -11652,14 +13554,6 @@ fn rust_type_for_slot_with_optional_representations(
             )
         })
         .unwrap_or_else(|| rust_type_for_slot_with_facts(shape, facts))
-}
-
-fn method_receiver(ty: &TypeDecl, method: &MethodDecl, signatures: &SignaturePlan) -> ReceiverPlan {
-    if method.modifiers.contains(&Modifier::Static) {
-        ReceiverPlan::None
-    } else {
-        signatures.required_method_signature(ty, method).receiver()
-    }
 }
 
 fn lower_receiver(receiver: ReceiverPlan) -> Option<RustReceiver> {

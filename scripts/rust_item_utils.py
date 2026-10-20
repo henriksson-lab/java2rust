@@ -31,8 +31,8 @@ def impl_target_name(raw_target: str) -> str:
     return outer_type.rsplit("::", 1)[-1]
 
 
-def impl_header_parts(line: str):
-    """Return ``(trait, target)`` for a generated one-line impl header.
+def _impl_header_layout(line: str):
+    """Return ``(trait, target, target_start, target_end)`` for an impl header.
 
     ``trait`` is ``None`` for inherent impls.  Angle brackets are scanned
     structurally so nested bounds such as ``T: View<Box<dyn Any>>`` do not
@@ -51,7 +51,7 @@ def impl_header_parts(line: str):
         while index < len(text):
             if text[index] == "<":
                 depth += 1
-            elif text[index] == ">":
+            elif text[index] == ">" and not (index > 0 and text[index - 1] == "-"):
                 depth -= 1
                 if depth == 0:
                     index += 1
@@ -70,7 +70,7 @@ def impl_header_parts(line: str):
         ch = text[index]
         if ch == "<":
             depth += 1
-        elif ch == ">":
+        elif ch == ">" and not (index > 0 and text[index - 1] == "-"):
             depth -= 1
             if depth < 0:
                 return None
@@ -78,7 +78,7 @@ def impl_header_parts(line: str):
             if text.startswith(" for ", index):
                 trait_separator = index
                 index += len(" for ") - 1
-            elif ch == "{" or text.startswith(" where", index):
+            elif ch == "{" or (ch.isspace() and re.match(r"\s+where\b", text[index:])):
                 end = index
                 break
         index += 1
@@ -86,10 +86,71 @@ def impl_header_parts(line: str):
         return None
     if trait_separator is None:
         target = text[start:end].strip()
-        return (None, target) if target else None
+        return (None, target, start, end) if target else None
     trait = text[start:trait_separator].strip()
     target = text[trait_separator + len(" for "):end].strip()
-    return (trait, target) if trait and target else None
+    return (trait, target, trait_separator + len(" for "), end) if trait and target else None
+
+
+def impl_header_parts(line: str):
+    """Return the selected trait/target using the shared structural scan."""
+    layout = _impl_header_layout(line)
+    return layout[:2] if layout is not None else None
+
+
+def split_rust_type_arguments(text: str) -> list[str]:
+    """Split type arguments without splitting nested types, tuples or arrays."""
+    parts, start = [], 0
+    depths = {"<": 0, "(": 0, "[": 0, "{": 0}
+    closing = {">": "<", ")": "(", "]": "[", "}": "{"}
+    for index, ch in enumerate(text):
+        if ch in depths:
+            depths[ch] += 1
+        elif ch in closing and not (ch == ">" and index > 0 and text[index - 1] == "-"):
+            depths[closing[ch]] -= 1
+        elif ch == "," and not any(depths.values()):
+            parts.append(text[start:index].strip())
+            start = index + 1
+    tail = text[start:].strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def expand_inherent_impl_alias(header: str, declaration: str) -> str | None:
+    """Expand an impl's alias target, preserving its binders and where clause.
+
+    Rebuilding from the underlying declaration loses fixed arguments: an
+    impl on Alias<T> = Store<T, Local<T>> must not become impl<T, B> Store<T, B>.
+    Only the target type changes. Unsupported alias syntax remains unexpanded
+    rather than silently broadening its implementation's domain.
+    """
+    alias = re.fullmatch(
+        r"\s*pub\s+type\s+([A-Za-z_][A-Za-z0-9_]*)"
+        r"(?:\s*<([^=;]+)>)?\s*=\s*(.+?)\s*;\s*", declaration,
+    )
+    if alias is None:
+        return None
+    text = header.strip()
+    layout = _impl_header_layout(text + " {")
+    if layout is None or layout[0] is not None:
+        return None
+    _, target, start, end = layout
+    name, parameters, template = alias.groups()
+    applied = re.fullmatch(rf"{re.escape(name)}(?:\s*<(.*)>)?", target)
+    if applied is None:
+        return None
+    params = split_rust_type_arguments(parameters or "")
+    args = split_rust_type_arguments(applied.group(1) or "")
+    names = [re.match(r"(?:const\s+)?('[A-Za-z_][A-Za-z0-9_]*|[A-Za-z_][A-Za-z0-9_]*)", param) for param in params]
+    if len(args) != len(params) or any(match is None for match in names):
+        return None
+    substitutions = {match.group(1): arg for match, arg in zip(names, args)}
+    # Type templates may contain lifetime/const parameters. Preserve quoted
+    # literals while substituting tokens, never arbitrary identifier substrings.
+    token = re.compile(r'''"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])'|'?[A-Za-z_][A-Za-z0-9_]*''')
+    expanded = token.sub(lambda match: substitutions.get(match.group(), match.group()), template)
+    return text[:start] + expanded + text[end:]
 
 
 def inherent_impl_target_name(line: str):
@@ -159,6 +220,28 @@ def _rust_delimiter_depths(line: str, depths: tuple[int, int, int]):
             continue
         index += 1
     return paren, bracket, brace
+
+
+@cache
+def has_associated_definitions(impl_text: str) -> bool:
+    """Whether a generated impl has an associated type/constant contract.
+
+    Such impls must be selected atomically: combining methods from different
+    variants can disagree with their associated definitions. Ignore aliases
+    inside method bodies and delimiter-like characters in literal strings.
+    """
+    if "{" not in impl_text:
+        return False
+    body = impl_text.split("{", 1)[1].rsplit("}", 1)[0]
+    depths = (0, 0, 0)
+    for line in body.splitlines():
+        if depths == (0, 0, 0) and re.match(
+            r"^\s*(?:pub(?:\([^)]*\))?\s+)?(?:type\s+|const\s+(?!fn\b))[A-Za-z_]",
+            line,
+        ):
+            return True
+        depths = _rust_delimiter_depths(line, depths)
+    return False
 
 
 def top_level_macro_items(text: str) -> list[dict]:

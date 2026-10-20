@@ -190,6 +190,38 @@ impl TypeEnv {
         self.type_param_bounds.get(name).and_then(Option::as_ref)
     }
 
+    /// Resolve a scoped type-parameter receiver to its declared class bound.
+    /// Keep the bound's arguments: field ABI specialization needs them. An
+    /// unbounded/shadowing binder or cyclic bound is not a source type alias.
+    pub(crate) fn type_parameter_receiver_bound(&self, ty: &JavaType) -> Option<JavaType> {
+        let mut current = optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        let mut seen = HashSet::new();
+        let mut followed_bound = false;
+        loop {
+            let name = match &current {
+                JavaType::Named { name, args } if args.is_empty() => name,
+                JavaType::Unknown(name) => name,
+                _ => return followed_bound.then_some(current),
+            };
+            let Some(bound) = self.type_param_bounds.get(name) else {
+                return followed_bound.then_some(current);
+            };
+            if !seen.insert(name.clone()) {
+                return None;
+            }
+            current = bound.as_ref()?.clone();
+            followed_bound = true;
+        }
+    }
+
+    pub(crate) fn type_parameter_names(&self) -> Vec<String> {
+        self.type_param_bounds.keys().cloned().collect()
+    }
+
+    pub(crate) fn is_type_parameter_name(&self, name: &str) -> bool {
+        self.type_param_bounds.contains_key(name)
+    }
+
     pub(crate) fn is_unbounded_object_type_parameter(&self, ty: &JavaType) -> bool {
         let ty = optional_element_type(ty).unwrap_or_else(|| ty.clone());
         let name = match &ty {
@@ -1382,6 +1414,39 @@ mod primitive_widening_tests {
         assert!(
             primitive_widening_steps(Char, Int).unwrap()
                 < primitive_widening_steps(Char, Double).unwrap()
+        );
+    }
+
+    #[test]
+    fn bound_field_receiver_resolution_preserves_arguments_and_rejects_cycles() {
+        let mut env = TypeEnv::new();
+        let bound = crate::parser::parse_hierarchy_type("Holder<Vertex>");
+        env.insert_type_param_bound("E", JavaType::Unknown("F".into()));
+        env.insert_type_param_bound("F", bound.clone());
+        assert_eq!(
+            env.type_parameter_receiver_bound(&optional_java_type(JavaType::Unknown("E".into()))),
+            Some(bound),
+        );
+        assert_eq!(
+            env.type_parameter_receiver_bound(&JavaType::Unknown("Holder".into())),
+            None
+        );
+        env.insert_type_param_bound("F", JavaType::Unknown("E".into()));
+        assert_eq!(
+            env.type_parameter_receiver_bound(&JavaType::Unknown("E".into())),
+            None
+        );
+        env.insert_type_param_declaration("F", None);
+        assert_eq!(
+            env.type_parameter_receiver_bound(&JavaType::Unknown("E".into())),
+            None
+        );
+        // The binder has lexical precedence even if a same-name source field
+        // could otherwise make a lookup appear successful.
+        env.insert_type_field("F", "item", JavaType::String);
+        assert_eq!(
+            env.type_parameter_receiver_bound(&JavaType::Unknown("F".into())),
+            None
         );
     }
 

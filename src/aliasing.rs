@@ -246,6 +246,19 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
     ) {
         return false;
     }
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    if effective
+        .native_list_cursor_element_type(alias.aliased_ty())
+        .is_some()
+        && alias
+            .original_ty
+            .as_ref()
+            .is_some_and(|ty| effective.native_list_cursor_element_type(ty).is_some())
+    {
+        // This intrinsic handle works for local and field aliases. Parsed
+        // source lookalikes are excluded by the shared carrier authority.
+        return true;
+    }
     if [
         alias.original(),
         alias.alias(),
@@ -268,7 +281,6 @@ fn direct_local_alias_mutation_is_represented(alias: &ObservableAlias, facts: &F
     // its own facade type does not have a source storage placement. Require
     // the same source identity/subtype and implemented mutable-handle proofs
     // as the conversion, rather than treating every interface alias as safe.
-    let effective = crate::effective_facts::EffectiveFacts::new(facts);
     let Some(JavaType::Named {
         name: original_name,
         ..
@@ -367,7 +379,7 @@ impl NativeAliasStorage {
             .unwrap_or_else(|| shape.java_ty.clone());
         let effective = crate::effective_facts::EffectiveFacts::new(facts);
         if (matches!(ty, JavaType::Array(_))
-            || effective.retained_native_collection_kind(&ty).is_some()
+            || effective.retained_native_container_kind(&ty).is_some()
             || effective.native_iterable_element_type(&ty).is_some())
             && shape.native_allocation.shared()
             && shape.native_allocation.interior_mutable()

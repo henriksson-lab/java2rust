@@ -260,7 +260,18 @@ pub(crate) fn cargo_verify_generated_modules(
     modules: Vec<GeneratedCrateModule>,
     cargo_command: &str,
 ) {
-    let run = cargo_run_generated_modules(crate_name, modules, cargo_command);
+    cargo_verify_generated_modules_with_edition(crate_name, modules, cargo_command, "2024");
+}
+
+/// Exercise production-edition temporary lifetimes without changing the
+/// existing suite's default edition or repairing any generated Rust.
+pub(crate) fn cargo_verify_generated_modules_with_edition(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    cargo_command: &str,
+    edition: &str,
+) {
+    let run = cargo_run_generated_modules_with_edition(crate_name, modules, cargo_command, edition);
     let timeout = generated_crate_verify_timeout();
     let Some(status) = run.output.status else {
         panic!(
@@ -289,6 +300,16 @@ fn cargo_run_generated_modules(
     modules: Vec<GeneratedCrateModule>,
     cargo_command: &str,
 ) -> GeneratedCrateRun {
+    cargo_run_generated_modules_with_edition(crate_name, modules, cargo_command, "2024")
+}
+
+fn cargo_run_generated_modules_with_edition(
+    crate_name: &str,
+    modules: Vec<GeneratedCrateModule>,
+    cargo_command: &str,
+    edition: &str,
+) -> GeneratedCrateRun {
+    assert!(matches!(edition, "2021" | "2024"));
     let unique = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
@@ -299,7 +320,7 @@ fn cargo_run_generated_modules(
     fs::write(
         crate_dir.join("Cargo.toml"),
         format!(
-            "[package]\nname = \"new-java2rust-{crate_name}-{unique}\"\nversion = \"0.0.0\"\nedition = \"2024\"\n\n[lib]\npath = \"src/lib.rs\"\n"
+            "[package]\nname = \"new-java2rust-{crate_name}-{unique}\"\nversion = \"0.0.0\"\nedition = \"{edition}\"\n\n[lib]\npath = \"src/lib.rs\"\n"
         ),
     )
     .unwrap();

@@ -5,7 +5,7 @@ from collections import defaultdict
 from functools import cache
 from pathlib import Path
 
-from rust_item_utils import impl_target_name, top_level_macro_items
+from rust_item_utils import expand_inherent_impl_alias, has_associated_definitions, impl_target_name, top_level_macro_items
 
 
 # Private helper types can be representation dependencies of a public support
@@ -1254,6 +1254,12 @@ def merge_trait_declarations(name: str, declarations: list[str]) -> str:
     if len(unique_decls) <= 1:
         return unique_decls[0]
 
+    contracts = [text for text in unique_decls if has_associated_definitions(text)]
+    if contracts:
+        # An associated ABI cannot be reconstructed from methods alone, nor
+        # safely widened with methods from an independently specialized trait.
+        return preferred_decl_variant(contracts)[0]
+
     methods_by_name = defaultdict(list)
     for text in unique_decls:
         for method_name, method_text in extract_trait_methods(text):
@@ -1521,6 +1527,34 @@ def default_receiver_rank(method_name: str, method_text: str) -> int:
     return 1
 
 
+def merge_additive_runtime_registries(variants: list[str]) -> str | None:
+    """Union explicitly registered, single-line runtime arms, never arbitrary bodies.
+
+    A selected crate-wide impl must retain registrations discovered in every
+    source module. Prefix/suffix equality protects the common ABI and fallback;
+    incompatible producers fail visibly instead of dropping one registry.
+    """
+    pattern = re.compile(
+        r"(?m)^[ \t]*// java2rust: additive-registry-begin ([A-Za-z_][A-Za-z0-9_]*)\n"
+        r"(.*?)"
+        r"^[ \t]*// java2rust: additive-registry-end \1$",
+        re.DOTALL,
+    )
+    matches = [list(pattern.finditer(text)) for text in variants]
+    if not any(matches):
+        return None
+    if any(len(items) != 1 for items in matches):
+        raise ValueError("incompatible additive runtime registry boundaries")
+    templates = []
+    entries = set()
+    for text, [match] in zip(variants, matches):
+        templates.append(text[:match.start(2)] + "__JAVA_RUNTIME_REGISTRY__\n" + text[match.end(2):])
+        entries.update(line for line in match.group(2).splitlines() if line.strip())
+    if len(set(templates)) != 1:
+        raise ValueError("incompatible additive runtime registry ABI or fallback")
+    return templates[0].replace("__JAVA_RUNTIME_REGISTRY__\n", "\n".join(sorted(entries)) + "\n")
+
+
 def best_method_variant(
     method_name: str,
     variants: list[str],
@@ -1528,6 +1562,9 @@ def best_method_variant(
     preferred_arities: set[int] | None = None,
     representation_family_variants: set[str] | None = None,
 ) -> str:
+    merged_registry = merge_additive_runtime_registries(variants)
+    if merged_registry is not None:
+        return merged_registry
     preferred_arities = preferred_arities or set()
     representation_family_variants = representation_family_variants or set()
     return sorted(
@@ -1766,6 +1803,17 @@ def item_targets_name(item_name: str, target_name: str, alias_targets: dict[str,
     return item_name == target_name or alias_targets.get(item_name) == target_name
 
 
+def resolved_inherent_impl_header(
+    item_name: str, header: str, target_name: str, alias_declarations: dict[str, str]
+) -> str:
+    if item_name == target_name:
+        return header
+    declaration = alias_declarations.get(item_name)
+    if declaration is None:
+        return header
+    return expand_inherent_impl_alias(header, declaration) or header
+
+
 def derived_traits_for_decl(text: str) -> set[str]:
     traits = set()
     for match in re.finditer(r"#\[derive\(([^)]*)\)\]", text):
@@ -1818,6 +1866,9 @@ def declaration_information_score(text: str) -> int:
 
 
 def preferred_trait_impl_variant(variants: list[str]) -> tuple[str, str]:
+    merged_registry = merge_additive_runtime_registries(variants)
+    if merged_registry is not None:
+        return merged_registry, "merged runtime registrations"
     for text in variants:
         if 'write!(f, "")' not in text and "Default::default()" not in text:
             return text, "non-empty"
@@ -2446,7 +2497,7 @@ def main() -> int:
                         (path, method_text)
                     )
                 for const_name, const_text in extract_consts(item["text"]):
-                    inherent_consts[(item["name"], const_name)].append((path, const_text))
+                    inherent_consts[(item["name"], impl_header, const_name)].append((path, const_text))
     for path in rust_paths:
         items_by_path[path] = [
             item
@@ -2514,7 +2565,7 @@ def main() -> int:
     # methods while allowing raw-only methods to reach the assembled crate.
     generated_inherent_names = {
         type_name for type_name, _impl_header, _method_name in inherent_methods
-    } | {type_name for type_name, _const_name in inherent_consts}
+    } | {type_name for type_name, _impl_header, _const_name in inherent_consts}
     for item in existing_shared_items:
         if item["kind"] != "inherent_impl" or item["name"] not in generated_inherent_names:
             continue
@@ -2531,7 +2582,7 @@ def main() -> int:
                 (shared_support_path, method_text)
             )
         for const_name, const_text in extract_consts(item["text"]):
-            inherent_consts[(item["name"], const_name)].append(
+            inherent_consts[(item["name"], impl_header, const_name)].append(
                 (shared_support_path, const_text)
             )
         existing_shared_items_to_replace.append(item)
@@ -2561,6 +2612,7 @@ def main() -> int:
     }
     shared_aliases = set()
     alias_targets = {}
+    alias_declarations = {}
     emitted_from_impl_keys = set(existing_shared_from_impl_keys)
     boxed_conversion_dependencies = {
         key: referenced_nominal_names([text for _path, text in variants], selected)
@@ -2570,9 +2622,10 @@ def main() -> int:
     for alias_name, variants in aliases.items():
         if alias_name in protected_shared_aliases:
             continue
-        for _, target, _ in variants:
+        for _, target, declaration in variants:
             if target in selected:
                 alias_targets[alias_name] = target
+                alias_declarations[alias_name] = declaration
                 break
     remove_shared_items(shared_support_path, existing_shared_items_to_replace)
     remove_protected_aliases_from_shared_support(
@@ -2658,12 +2711,13 @@ def main() -> int:
             shared_chunks.append(box_self_recursive_fields(name, selected_decl).rstrip() + "\n")
 
         method_variants_by_header_and_name = defaultdict(list)
-        consts_for_type = []
+        consts_by_header = defaultdict(list)
         emitted_const_names = set()
         if not selected_decl_is_trait:
-            for (type_name, const_name), variants in sorted(inherent_consts.items()):
+            for (type_name, impl_header, const_name), variants in sorted(inherent_consts.items()):
                 if not item_targets_name(type_name, name, alias_targets):
                     continue
+                emitted_header = resolved_inherent_impl_header(type_name, impl_header, name, alias_declarations)
                 unique_variants = []
                 seen_consts = set()
                 for _, text in variants:
@@ -2674,16 +2728,17 @@ def main() -> int:
                     conflict_lines.append(
                         f"{name}\tconst\t{const_name}: kept first of {len(unique_variants)} variants\n"
                     )
-                if const_name in emitted_const_names:
+                if (emitted_header, const_name) in emitted_const_names:
                     continue
-                consts_for_type.append(
+                consts_by_header[emitted_header].append(
                     normalize_const_for_impl_target(name, unique_variants[0], alias_targets)
                 )
-                emitted_const_names.add(const_name)
+                emitted_const_names.add((emitted_header, const_name))
             for const_name, const_text in builtin_inherent_consts(name):
-                if const_name not in emitted_const_names:
-                    consts_for_type.append(const_text)
-                    emitted_const_names.add(const_name)
+                emitted_header = inherent_impl_header_for_decl(name, selected_decl, selected_decl_is_trait)
+                if (emitted_header, const_name) not in emitted_const_names:
+                    consts_by_header[emitted_header].append(const_text)
+                    emitted_const_names.add((emitted_header, const_name))
         for (type_name, impl_header, method_name), variants in sorted(
             inherent_methods.items()
         ):
@@ -2696,13 +2751,7 @@ def main() -> int:
                 # not belong to the source interface selected above.
                 continue
             for path, text in variants:
-                emitted_header = (
-                    impl_header
-                    if type_name == name
-                    else inherent_impl_header_for_decl(
-                        name, selected_decl, selected_decl_is_trait
-                    )
-                )
+                emitted_header = resolved_inherent_impl_header(type_name, impl_header, name, alias_declarations)
                 method_variants_by_header_and_name[(
                     emitted_header,
                     method_name,
@@ -2740,10 +2789,7 @@ def main() -> int:
                     representation_family_variants,
                 )
             )
-        if consts_for_type:
-            impl_header = inherent_impl_header_for_decl(
-                name, selected_decl, selected_decl_is_trait
-            )
+        for impl_header, consts_for_type in sorted(consts_by_header.items()):
             shared_chunks.append(f"\n{impl_header} {{\n")
             for const in consts_for_type:
                 shared_chunks.append(f"    {const}\n")
@@ -2821,6 +2867,20 @@ def main() -> int:
                     or type_name in promoted_aliases
                     or type_name in existing_shared_types
                 ):
+                    continue
+                if any(has_associated_definitions(text) for _, text in variants):
+                    # Associated definitions and their methods are one ABI.
+                    # Method-only reconciliation silently discarded `type`
+                    # and private trait constants, and mixing variants here
+                    # could select methods for a different associated type.
+                    selected_impl, reason = preferred_trait_impl_variant(
+                        list(dict.fromkeys(text for _, text in variants))
+                    )
+                    shared_chunks.append("\n" + selected_impl.rstrip() + "\n")
+                    emitted_trait_impl_keys.add(trait_impl_key)
+                    conflict_lines.append(
+                        f"{type_name}\ttrait_impl\t{name}: kept atomic associated contract ({reason})\n"
+                    )
                     continue
                 methods_by_name = defaultdict(list)
                 for _, text in variants:

@@ -38,6 +38,9 @@ pub(crate) fn take_simple_name_catalog_scan_count() -> usize {
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepresentationPlan {
+    /// Proven stateless abstract declarations whose instance bodies are
+    /// materialized on concrete descendants, without any base-value demand.
+    declaration_only_abstract_owners: HashSet<String>,
     types: HashMap<String, TypeRepresentation>,
     /// Finite carriers for source-interface existentials such as
     /// `Factory<?>`. Rust trait objects cannot leave a generic argument
@@ -323,6 +326,8 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     record_statically_constructed_concrete_leaf_hierarchy_edges(program, &mut plan);
     record_simple_super_copyback_hierarchy_edges(program, &mut plan);
     plan_existential_interface_carriers(program, &mut plan);
+    plan.declaration_only_abstract_owners =
+        crate::abstract_declaration::declaration_only_abstract_owners(program);
     plan
 }
 
@@ -2013,6 +2018,13 @@ fn external_final_facade_should_keep_concrete_dispatch(
 }
 
 impl RepresentationPlan {
+    pub(crate) fn abstract_owner_is_declaration_only(&self, owner: &str) -> bool {
+        self.declaration_only_abstract_owners.contains(owner)
+            || self.type_representation(owner).is_some_and(|entry| {
+                self.declaration_only_abstract_owners
+                    .contains(entry.java_name())
+            })
+    }
     #[cfg(test)]
     pub(crate) fn insert_test_type_representation(&mut self, entry: TypeRepresentation) {
         self.types.insert(entry.java_name.clone(), entry);
@@ -2216,6 +2228,26 @@ impl RepresentationPlan {
         matches
             .all(|candidate| candidate == first)
             .then_some((first, variant))
+    }
+
+    pub(crate) fn source_hierarchy_carrier_parts_for_target(
+        &self,
+        target_name: &str,
+        variant_name: &str,
+    ) -> Option<(&str, String)> {
+        let entry = self.type_representation(target_name)?;
+        let ObjectRepresentation::SourceHierarchyCarrier {
+            carrier_name,
+            variants,
+        } = entry.representation()
+        else {
+            return None;
+        };
+        let variant = crate::java_naming::rust_name_for_java_named_type(variant_name);
+        variants
+            .iter()
+            .any(|name| name == &variant)
+            .then_some((carrier_name.as_str(), variant))
     }
 
     pub fn representation_for(&self, java_ty: &JavaType) -> ObjectRepresentation {

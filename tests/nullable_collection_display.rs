@@ -16,17 +16,21 @@ fn nullable_native_collections_display_values_and_null_without_consuming_storage
             name: "fixture",
             rust: translation.rust,
             tests: r#"
+trait Value { type Output; fn value(self) -> Self::Output; }
+impl Value for String { type Output = String; fn value(self) -> String { self } }
+impl Value for i32 { type Output = i32; fn value(self) -> i32 { self } }
+impl<T, E: std::fmt::Debug> Value for Result<T, E> { type Output = T; fn value(self) -> T { self.unwrap() } }
 #[test]
 fn display_contract() {
-    assert_eq!(NullableCollectionDisplay::probe(false), "list=null;set=null;map=null;<null>;A=null;B=null");
-    assert_eq!(NullableCollectionDisplay::probe(true), "list=[3, 1];set=[3, 1];map={k=5};<[3, 1]>;A=[3, 1];B=[3, 1]");
-    assert_eq!(NullableCollectionDisplay::from_return(false), "R=null");
-    assert_eq!(NullableCollectionDisplay::from_return(true), "R=[3, 1]");
-    assert_eq!(NullableCollectionDisplay::from_field(false), "F=null");
-    assert_eq!(NullableCollectionDisplay::from_field(true), "F=[3, 1]");
-    assert_eq!(NullableCollectionDisplay::from_map(false), "M=null");
-    assert_eq!(NullableCollectionDisplay::from_map(true), "M=[3, 1]");
-    assert_eq!(NullableCollectionDisplay::direct_null(), 8);
+    assert_eq!(NullableCollectionDisplay::probe(false).value(), "list=null;set=null;map=null;<null>;A=null;B=null");
+    assert_eq!(NullableCollectionDisplay::probe(true).value(), "list=[3, 1];set=[3, 1];map={k=5};<[3, 1]>;A=[3, 1];B=[3, 1]");
+    assert_eq!(NullableCollectionDisplay::from_return(false).value(), "R=null");
+    assert_eq!(NullableCollectionDisplay::from_return(true).value(), "R=[3, 1]");
+    assert_eq!(NullableCollectionDisplay::from_field(false).value(), "F=null");
+    assert_eq!(NullableCollectionDisplay::from_field(true).value(), "F=[3, 1]");
+    assert_eq!(NullableCollectionDisplay::from_map(false).value(), "M=null");
+    assert_eq!(NullableCollectionDisplay::from_map(true).value(), "M=[3, 1]");
+    assert_eq!(NullableCollectionDisplay::direct_null().value(), 8);
 }
 "#,
         }],

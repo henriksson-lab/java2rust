@@ -205,6 +205,25 @@ impl LivenessAnalysis {
         analysis
     }
 
+    /// A callback can return and subsequently be invoked again. Only its
+    /// captured bindings survive that boundary: parameters and body locals
+    /// are fresh on each invocation, and a same-named local is not a capture.
+    pub(crate) fn for_callback_body(
+        block: &Block,
+        rebound: &[String],
+        captures: &[String],
+        enclosing_live: &[String],
+    ) -> Self {
+        let mut analysis = Self::for_loop_body(block, rebound, enclosing_live);
+        let floor = captures
+            .iter()
+            .filter(|name| !rebound.contains(name))
+            .map(|name| Binding::new(name, OUTER_DECL))
+            .collect();
+        analysis.add_live_floor_to_block(block, &floor);
+        analysis
+    }
+
     /// How many times each name is read *within* `stmt`.
     ///
     /// Not a dataflow relation — within-statement multiplicity — but it answers
@@ -703,6 +722,14 @@ impl LivenessAnalysis {
                 // An exception can transfer control from anywhere in the body to
                 // any catch, so treat everything reachable here as live rather
                 // than modelling per-statement exception edges.
+                // Compute the abrupt-completion floor before the authoritative
+                // normal continuation. The empty-exit query also records
+                // per-statement facts; doing it last erased the finally's
+                // live-out bindings that are read after the entire try.
+                let finally_floor = finally_block
+                    .as_ref()
+                    .map(|block| self.block_live_in(block, &HashSet::new(), loop_live))
+                    .unwrap_or_default();
                 let mut live = live_out.clone();
                 if let Some(finally_block) = finally_block {
                     live = self.block_live_in(finally_block, &live, loop_live);
@@ -719,15 +746,11 @@ impl LivenessAnalysis {
                 // the same treatment for a different reason: it runs however the
                 // body exits, including through a `return` that would otherwise
                 // kill everything after it.
-                let mut guarded_floor = HashSet::new();
+                let mut guarded_floor = finally_floor;
                 for catch in catches {
                     let mut reads = self.block_live_in(&catch.body, &after_body, loop_live);
                     remove_catch_binding(stmt, catch, &mut reads);
                     guarded_floor.extend(reads);
-                }
-                if let Some(finally_block) = finally_block {
-                    let exit = HashSet::new();
-                    guarded_floor.extend(self.block_live_in(finally_block, &exit, loop_live));
                 }
                 live = self.block_live_in(body, &live, loop_live);
                 self.add_live_floor_to_block(body, &guarded_floor);
@@ -819,6 +842,44 @@ mod tests {
         Expr::Literal(crate::java_ir::Literal::Int(value))
     }
 
+    #[test]
+    fn callback_exit_keeps_only_outer_captures_live() {
+        let body = Block {
+            statements: vec![Stmt::Return(Some(var("capture")))],
+        };
+        let analysis = LivenessAnalysis::for_callback_body(
+            &body,
+            &["argument".into()],
+            &["capture".into()],
+            &[],
+        );
+        let stmt = &body.statements[0];
+        assert_eq!(analysis.binding_is_live_after(stmt, "capture"), Some(true));
+        assert_eq!(
+            analysis.binding_is_live_after(stmt, "argument"),
+            Some(false)
+        );
+        let ordinary = LivenessAnalysis::for_loop_body(&body, &[], &[]);
+        assert_eq!(ordinary.binding_is_live_after(stmt, "capture"), Some(false));
+
+        let shadowed = Block {
+            statements: vec![
+                decl("capture", var("argument")),
+                Stmt::Return(Some(var("capture"))),
+            ],
+        };
+        let analysis = LivenessAnalysis::for_callback_body(
+            &shadowed,
+            &["argument".into()],
+            &["capture".into()],
+            &[],
+        );
+        assert_eq!(
+            analysis.binding_is_live_after(&shadowed.statements[1], "capture"),
+            Some(false)
+        );
+    }
+
     fn int_decl(name: &str, init: i32) -> Stmt {
         Stmt::VarDecl {
             name: name.to_string(),
@@ -835,6 +896,42 @@ mod tests {
             ty: JavaType::String,
             binding: Some(binding.to_string()),
         }
+    }
+
+    #[test]
+    fn finally_floor_does_not_erase_the_normal_continuation() {
+        let body = Block {
+            statements: vec![
+                decl("value", var("initial")),
+                Stmt::Try {
+                    resources: vec![],
+                    body: Block {
+                        statements: vec![Stmt::Expr(var("work"))],
+                    },
+                    catches: vec![],
+                    finally_block: Some(Block {
+                        statements: vec![Stmt::Expr(var("value"))],
+                    }),
+                },
+                Stmt::Return(Some(var("value"))),
+            ],
+        };
+        let analysis = LivenessAnalysis::for_body(&body);
+        let Stmt::Try {
+            finally_block: Some(finally),
+            ..
+        } = &body.statements[1]
+        else {
+            panic!()
+        };
+        assert_eq!(
+            analysis.binding_is_live_after(&finally.statements[0], "value"),
+            Some(true)
+        );
+        assert_eq!(
+            analysis.binding_is_live_after(&body.statements[2], "value"),
+            Some(false)
+        );
     }
 
     #[test]

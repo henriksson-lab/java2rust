@@ -1,3 +1,4 @@
+mod abstract_declaration;
 mod access_lowering;
 mod aliasing;
 mod array_default_obligations;
@@ -29,6 +30,7 @@ mod graph;
 mod inherited_members;
 mod inner_class_capture;
 mod item_assembly;
+mod java_hash_plan;
 pub mod java_ir;
 mod java_naming;
 mod java_signature;

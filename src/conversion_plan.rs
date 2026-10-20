@@ -459,6 +459,10 @@ pub enum DispatchCoercionPolicy {
         clone_source: bool,
     },
     EraseObject,
+    /// Clone the concrete Java reference, not its interface adapter box.
+    CloneDynTraitToErasedObject {
+        trait_name: String,
+    },
     DowncastClosedEnum {
         enum_name: String,
         variant_name: String,
@@ -480,6 +484,7 @@ pub enum DispatchCoercionPolicy {
     },
     DowncastErasedObjectToClosedEnum {
         enum_name: String,
+        carrier_type: String,
         variants: Vec<String>,
         invalid_cast: InvalidCastPolicy,
     },
@@ -1023,8 +1028,14 @@ impl LoweredType {
     }
 
     pub fn optional_element_borrow_shape(element_shape: RustSlotShape) -> Self {
-        let option_shape =
+        let mut option_shape =
             RustSlotShape::conservative(optional_java_type(element_shape.java_ty.clone()));
+        // The Option records lookup presence, not a different allocation.
+        // Preserve the stored child's physical carrier through borrow and
+        // missing/stored-null normalization (including nested containers).
+        option_shape.native_allocation = element_shape.native_allocation;
+        option_shape.nested_native_allocations = element_shape.nested_native_allocations.clone();
+        option_shape.nested_collection_views = element_shape.nested_collection_views.clone();
         Self::OptionalElementBorrow {
             option_shape: Box::new(option_shape),
             element_shape: Box::new(element_shape),
@@ -1556,7 +1567,10 @@ pub fn java_cast_semantics_policy_with_facts(
             | DispatchCoercionPolicy::BorrowDynTrait { .. }
             | DispatchCoercionPolicy::BoxDynTrait { .. }
             | DispatchCoercionPolicy::UpcastBoxedDynTrait { .. }
-            | DispatchCoercionPolicy::EraseObject => JavaCastSemanticsPolicy::ReferenceUpcast,
+            | DispatchCoercionPolicy::EraseObject
+            | DispatchCoercionPolicy::CloneDynTraitToErasedObject { .. } => {
+                JavaCastSemanticsPolicy::ReferenceUpcast
+            }
             _ => JavaCastSemanticsPolicy::Identity,
         };
     }
@@ -2489,6 +2503,19 @@ pub fn dispatch_coercion_policy_with_facts(
     if shared_native_collection_abi_matches(actual, target, &EffectiveFacts::new(facts)) {
         return DispatchCoercionPolicy::NoDispatchChange;
     }
+    if target.dispatch == DispatchShape::ErasedObject
+        && target.ownership == OwnershipShape::Owned
+        && actual.dispatch != DispatchShape::ErasedObject
+        && actual.optional_element_type().is_none()
+        && object_safe_trait_boundary(&actual.java_ty, facts)
+        && let Some(trait_name) = java_type_name_for_dispatch(&actual.java_ty)
+        && EffectiveFacts::new(facts).has_parsed_source_type_capability_for_name(trait_name)
+        && !external_crate_mapped_dyn_trait_boundary(trait_name, facts)
+    {
+        return DispatchCoercionPolicy::CloneDynTraitToErasedObject {
+            trait_name: dyn_trait_rust_abi_path(trait_name, &actual.java_ty, facts),
+        };
+    }
     if matches!(
         actual.ownership,
         OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
@@ -2586,11 +2613,7 @@ pub fn dispatch_coercion_policy_with_facts(
                 ) {
                     return DispatchCoercionPolicy::BorrowBoxedDynTrait {
                         mutable: target.ownership == OwnershipShape::MutableBorrow,
-                        trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                            trait_name,
-                            &actual.java_ty,
-                            facts,
-                        ),
+                        trait_name: dyn_trait_rust_abi_path(trait_name, &actual.java_ty, facts),
                     };
                 }
             }
@@ -2739,20 +2762,12 @@ pub fn dispatch_coercion_policy_with_facts(
             {
                 return DispatchCoercionPolicy::BorrowBoxedDynTrait {
                     mutable: target.ownership == OwnershipShape::MutableBorrow,
-                    trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                        trait_name,
-                        &target.java_ty,
-                        facts,
-                    ),
+                    trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
                 };
             }
             DispatchCoercionPolicy::BorrowDynTrait {
                 mutable: target.ownership == OwnershipShape::MutableBorrow,
-                trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                    trait_name,
-                    &target.java_ty,
-                    facts,
-                ),
+                trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
             }
         }
         (DispatchShape::ClosedEnum { enum_name }, DispatchShape::DynTrait { trait_name }) => {
@@ -2766,11 +2781,7 @@ pub fn dispatch_coercion_policy_with_facts(
                 DispatchCoercionPolicy::BorrowClosedEnumAsDynTrait {
                     mutable: target.ownership == OwnershipShape::MutableBorrow,
                     enum_name: enum_name.clone(),
-                    trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                        trait_name,
-                        &target.java_ty,
-                        facts,
-                    ),
+                    trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
                     variants,
                 }
             } else if actual.java_ty != target.java_ty
@@ -2780,11 +2791,7 @@ pub fn dispatch_coercion_policy_with_facts(
             {
                 DispatchCoercionPolicy::BorrowDynTrait {
                     mutable: target.ownership == OwnershipShape::MutableBorrow,
-                    trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                        trait_name,
-                        &target.java_ty,
-                        facts,
-                    ),
+                    trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
                 }
             } else {
                 unsupported_dispatch_coercion_policy(actual, target)
@@ -2820,11 +2827,7 @@ pub fn dispatch_coercion_policy_with_facts(
         ) if dyn_trait_names_match(actual_trait, target_trait) => {
             DispatchCoercionPolicy::BorrowBoxedDynTrait {
                 mutable: target.ownership == OwnershipShape::MutableBorrow,
-                trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                    target_trait,
-                    &target.java_ty,
-                    facts,
-                ),
+                trait_name: dyn_trait_rust_abi_path(target_trait, &target.java_ty, facts),
             }
         }
         (DispatchShape::Concrete, DispatchShape::BoxedDynTrait { trait_name }) => {
@@ -2843,19 +2846,11 @@ pub fn dispatch_coercion_policy_with_facts(
                 && object_safe_trait_boundary(&target.java_ty, facts)
             {
                 return DispatchCoercionPolicy::CloneBoxDynTrait {
-                    trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                        trait_name,
-                        &target.java_ty,
-                        facts,
-                    ),
+                    trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
                 };
             }
             DispatchCoercionPolicy::BoxDynTrait {
-                trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                    trait_name,
-                    &target.java_ty,
-                    facts,
-                ),
+                trait_name: dyn_trait_rust_abi_path(trait_name, &target.java_ty, facts),
             }
         }
         (
@@ -2867,11 +2862,7 @@ pub fn dispatch_coercion_policy_with_facts(
             },
         ) if dyn_trait_names_match(actual_trait, target_trait) => {
             DispatchCoercionPolicy::CloneBoxDynTrait {
-                trait_name: crate::slot_render::parameterized_dyn_trait_path_with_facts(
-                    target_trait,
-                    &target.java_ty,
-                    facts,
-                ),
+                trait_name: dyn_trait_rust_abi_path(target_trait, &target.java_ty, facts),
             }
         }
         (DispatchShape::Concrete, DispatchShape::ErasedObject) => {
@@ -2912,6 +2903,12 @@ pub fn dispatch_coercion_policy_with_facts(
             } else {
                 DispatchCoercionPolicy::DowncastErasedObjectToClosedEnum {
                     enum_name: enum_name.clone(),
+                    carrier_type:
+                        crate::slot_render::parameterized_closed_enum_type_name_with_facts(
+                            enum_name,
+                            &target.java_ty,
+                            facts,
+                        ),
                     variants,
                     invalid_cast: InvalidCastPolicy::Panic,
                 }
@@ -3094,17 +3091,7 @@ fn dyn_trait_rust_abi_matches(
 }
 
 fn dyn_trait_rust_abi_path(trait_name: &str, java_ty: &JavaType, facts: &FactSet) -> String {
-    // Optional slots retain the element's dispatch shape on the outer slot.
-    // Compare the Java type governed by that dispatch, not the `Optional<T>`
-    // carrier itself; rendering the outer carrier loses the trait arguments
-    // and falsely reports `Box<dyn Trait<A>>` -> `Option<Box<dyn Trait<A>>>`
-    // as a dispatch conversion.
-    let element = crate::types::optional_element_type(java_ty);
-    crate::slot_render::parameterized_dyn_trait_path_with_facts(
-        trait_name,
-        element.as_ref().unwrap_or(java_ty),
-        facts,
-    )
+    crate::slot_render::parameterized_dyn_trait_path_with_facts(trait_name, java_ty, facts)
 }
 
 fn concrete_nominal_rust_abi_is_identical(actual: &RustSlotShape, target: &RustSlotShape) -> bool {
@@ -3335,7 +3322,8 @@ fn java_collection_conversion_policy(
 /// Native retained sets share one physical carrier even when the Java
 /// declaration names a different set interface/implementation. Equality and
 /// encounter order belong to the allocation, not a value conversion at an
-/// assignment boundary. Keep list/set families distinct and preserve source
+/// assignment boundary. Collection accepts either family, while List and Set
+/// remain distinct. Preserve source
 /// precedence through the same authority used by slot rendering.
 fn shared_native_collection_abi_matches(
     actual: &RustSlotShape,
@@ -3364,9 +3352,50 @@ fn shared_native_collection_abi_matches(
         return false;
     };
     crate::stdlib::is_known_java_platform_subtype(actual_name, target_name)
-        && (actual_kind == target_kind || (actual_kind.is_set_like() && target_kind.is_set_like()))
+        && (actual_kind == target_kind
+            || (actual_kind.is_set_like() && target_kind.is_set_like())
+            || crate::stdlib::canonical_subtype_name(target_name) == "Collection")
         && crate::types::sequence_element_type(&actual.java_ty)
             == crate::types::sequence_element_type(&target.java_ty)
+}
+
+#[cfg(test)]
+mod retained_collection_family_tests {
+    use super::*;
+
+    #[test]
+    fn retained_collection_upcasts_preserve_runtime_family() {
+        for sync in [false, true] {
+            let shape = |name: &str| {
+                let mut shape = RustSlotShape::for_storage(JavaType::Named {
+                    name: name.into(),
+                    args: vec![JavaType::String],
+                });
+                shape.native_allocation =
+                    crate::storage_strategy::StoragePlacement::new(true, true, sync);
+                shape
+            };
+            let facts = FactSet::default();
+            let effective = EffectiveFacts::new(&facts);
+            for source in ["java.util.List", "java.util.HashSet"] {
+                assert!(shared_native_collection_abi_matches(
+                    &shape(source),
+                    &shape("java.util.Collection"),
+                    &effective
+                ));
+            }
+            assert!(!shared_native_collection_abi_matches(
+                &shape("java.util.Set"),
+                &shape("java.util.List"),
+                &effective
+            ));
+            assert!(!shared_native_collection_abi_matches(
+                &shape("java.util.List"),
+                &shape("java.util.Set"),
+                &effective
+            ));
+        }
+    }
 }
 
 fn unsupported_dispatch_coercion_policy_with_fallback(
@@ -3804,6 +3833,7 @@ pub enum InstanceOfCheck {
         enum_name: String,
         carrier_type: String,
         variants: Vec<String>,
+        optional: bool,
     },
     AlwaysTrue,
     Unsupported {
@@ -4011,6 +4041,22 @@ pub fn plan_instanceof_check_with_facts(
     }
     if let Some(element_ty) = actual.optional_element_type() {
         let element_shape = optional_element_slot_shape(actual, element_ty);
+        if matches!(element_shape.dispatch, DispatchShape::ErasedObject)
+            && matches!(target.dispatch, DispatchShape::ClosedEnum { .. })
+            && let InstanceOfCheck::ErasedObjectClosedEnum {
+                enum_name,
+                carrier_type,
+                variants,
+                ..
+            } = plan_instanceof_check_with_facts(&element_shape, target, facts)
+        {
+            return InstanceOfCheck::ErasedObjectClosedEnum {
+                enum_name,
+                carrier_type,
+                variants,
+                optional: true,
+            };
+        }
         match (&element_shape.dispatch, &target.dispatch) {
             (DispatchShape::ClosedEnum { enum_name }, DispatchShape::DynTrait { .. })
             | (DispatchShape::ClosedEnum { enum_name }, DispatchShape::ClosedEnum { .. }) => {
@@ -4148,6 +4194,7 @@ pub fn plan_instanceof_check_with_facts(
                     enum_name: enum_name.clone(),
                     carrier_type: erased_runtime_target_type(target, enum_name.clone(), facts),
                     variants,
+                    optional: false,
                 };
             }
         }
@@ -4742,7 +4789,25 @@ pub fn plan_instanceof(
     let target = project_java_value_shape(ctx.representations(), target_ty.clone());
     let default_facts = FactSet::default();
     let facts = ctx.facts().unwrap_or(&default_facts);
-    let check = plan_instanceof_check_with_facts(&actual, &target, facts);
+    let mut check = plan_instanceof_check_with_facts(&actual, &target, facts);
+    if let InstanceOfCheck::ErasedObjectClosedEnum { carrier_type, .. } = &mut check
+        && let Some(representations) = ctx.representations()
+        && matches!(
+            representations.representation_for(&target.java_ty),
+            crate::representation::ObjectRepresentation::SourceHierarchyCarrier { .. }
+        )
+    {
+        // The enum already carries canonical shared payloads. Erasure boxes
+        // this value carrier, not an additional Rc<Enum> guessed from the
+        // Java root's storage placement. Use the same ABI as value emission.
+        *carrier_type = crate::emit::emit_type(
+            &crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &target,
+                facts,
+                representations,
+            ),
+        );
+    }
 
     InstanceOfPlan::new(actual, target, check)
 }
@@ -4832,7 +4897,90 @@ pub(crate) fn nullable_native_collection_display_kind(
     shape: &RustSlotShape,
     facts: &FactSet,
 ) -> Option<crate::stdlib::JavaCollectionKind> {
-    let element = shape.optional_element_type()?;
+    shape.optional_element_type()?;
+    native_collection_display_kind(shape, facts)
+}
+
+/// Operands whose Java value conversion can invoke Object/collection code.
+/// Keep the effect proof aligned with concat planning and platform precedence.
+pub(crate) fn implicit_java_display_operands<'a>(
+    expr: &'a Expr,
+    types: &crate::types::TypeEnv,
+    facts: &FactSet,
+) -> Vec<&'a Expr> {
+    if let Some(plan) = crate::string_concat_plan::build_string_concat_plan(expr, types) {
+        return plan.args().to_vec();
+    }
+    if let Some(crate::call_plan::CallStatementPlan::NativeSystemPrintStream {
+        arg: Some(arg),
+        ..
+    }) = crate::call_plan::plan_call_statement(expr, facts, types)
+    {
+        let source_owner = matches!(expr, Expr::Call { resolved: Some(call), .. }
+            if EffectiveFacts::new(facts).parsed_source_controls_native_carrier(&JavaType::Named { name: call.declaring_type.clone(), args: vec![] }));
+        if !source_owner {
+            return vec![arg];
+        }
+    }
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return vec![];
+    };
+    let owner = if let Some(resolved) = resolved {
+        if resolved.kind != crate::java_ir::CallKind::Static {
+            return vec![];
+        }
+        resolved.declaring_type.as_str()
+    } else if let Expr::Var(owner) = receiver.as_ref() {
+        if types.local_type(owner).is_some() {
+            return vec![];
+        }
+        types.static_type_alias(owner).unwrap_or(owner)
+    } else {
+        return vec![];
+    };
+    let canonical = crate::stdlib::canonical_external_receiver_type_key(owner);
+    let platform = matches!(
+        (canonical.as_str(), name.as_str(), args.len()),
+        ("String", "valueOf" | "value_of", 1)
+            | (
+                "Objects" | "JavaUtilObjects",
+                "toString" | "to_string",
+                1 | 2
+            )
+    );
+    let format = canonical == "String" && name == "format" && !args.is_empty();
+    if (platform || format)
+        && !EffectiveFacts::new(facts).parsed_source_controls_native_carrier(&JavaType::Named {
+            name: owner.into(),
+            args: vec![],
+        })
+    {
+        if format {
+            args.iter().skip(1).collect()
+        } else {
+            vec![&args[0]]
+        }
+    } else {
+        vec![]
+    }
+}
+
+/// Source precedence and nominal native kind are independent of nullable and
+/// local/sync physical allocation choices. Shared by lowering and effects.
+pub(crate) fn native_collection_display_kind(
+    shape: &RustSlotShape,
+    facts: &FactSet,
+) -> Option<crate::stdlib::JavaCollectionKind> {
+    let element = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
     if EffectiveFacts::new(facts).parsed_source_controls_native_carrier(&element) {
         return None;
     }
@@ -5304,6 +5452,103 @@ fn java_type_is_erased_object_like(java_ty: &JavaType) -> bool {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn selected_trait_dispatch_uses_payload_arguments_through_nullable_carriers() {
+        use super::*;
+        let pair = crate::parser::parse_type("Pair<String, Integer>");
+        let nullable = crate::types::optional_java_type(pair);
+        for (source_dispatch, target_dispatch, source_owned, target_owned) in [
+            (
+                DispatchShape::Concrete,
+                DispatchShape::DynTrait {
+                    trait_name: "Pair".into(),
+                },
+                false,
+                false,
+            ),
+            (
+                DispatchShape::Concrete,
+                DispatchShape::BoxedDynTrait {
+                    trait_name: "Pair".into(),
+                },
+                true,
+                true,
+            ),
+            (
+                DispatchShape::BoxedDynTrait {
+                    trait_name: "Pair".into(),
+                },
+                DispatchShape::DynTrait {
+                    trait_name: "Pair".into(),
+                },
+                false,
+                false,
+            ),
+            (
+                DispatchShape::DynTrait {
+                    trait_name: "Pair".into(),
+                },
+                DispatchShape::BoxedDynTrait {
+                    trait_name: "Pair".into(),
+                },
+                false,
+                true,
+            ),
+        ] {
+            let mut source =
+                RustSlotShape::for_storage(if source_dispatch == DispatchShape::Concrete {
+                    crate::parser::parse_type("G")
+                } else {
+                    nullable.clone()
+                });
+            source.dispatch = source_dispatch;
+            source.ownership = if source_owned {
+                OwnershipShape::Owned
+            } else {
+                OwnershipShape::SharedBorrow
+            };
+            let mut target = RustSlotShape::for_storage(nullable.clone());
+            target.dispatch = target_dispatch;
+            target.ownership = if target_owned {
+                OwnershipShape::Owned
+            } else {
+                OwnershipShape::SharedBorrow
+            };
+            let policy = dispatch_coercion_policy_with_facts(&source, &target, &FactSet::default());
+            let path = match policy {
+                DispatchCoercionPolicy::BorrowDynTrait { trait_name, .. }
+                | DispatchCoercionPolicy::BorrowBoxedDynTrait { trait_name, .. }
+                | DispatchCoercionPolicy::BoxDynTrait { trait_name }
+                | DispatchCoercionPolicy::CloneBoxDynTrait { trait_name } => trait_name,
+                other => panic!("unexpected policy: {other:?}"),
+            };
+            assert_eq!(path, "Pair<String, i32>");
+        }
+    }
+
+    #[test]
+    fn selected_trait_dispatch_does_not_strip_a_real_optional_trait_constructor() {
+        use super::*;
+        assert_eq!(
+            dyn_trait_rust_abi_path(
+                "Optional",
+                &crate::parser::parse_hierarchy_type("java.util.Optional<String>"),
+                &FactSet::default()
+            ),
+            "Optional<String>"
+        );
+        let payload = crate::parser::parse_hierarchy_type("left.Optional<String>");
+        let nullable = crate::types::optional_java_type(payload.clone());
+        assert_eq!(
+            dyn_trait_rust_abi_path("left.Optional", &nullable, &FactSet::default()),
+            crate::slot_render::parameterized_dyn_trait_path_with_facts(
+                "left.Optional",
+                &payload,
+                &FactSet::default()
+            ),
+        );
+    }
+
     #[test]
     fn shared_source_erasure_copies_the_reference_even_between_owned_slots() {
         use super::*;

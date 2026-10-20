@@ -1084,12 +1084,18 @@ pub fn lower_equality_comparison_expr_for_op(
     left: RustExpr,
     right: RustExpr,
 ) -> RustExpr {
+    let consumed_result = (expr_is_result_propagated(&left) || expr_is_result_propagated(&right))
+        && !matches!(
+            plan,
+            EqualityComparisonPlan::CustomEquals { .. }
+                | EqualityComparisonPlan::BothOptionalCustomEquals { .. }
+        );
     let op = match op {
         BinaryOp::Eq => "==",
         BinaryOp::Ne => "!=",
         _ => "==",
     };
-    match plan {
+    let comparison = match plan {
         EqualityComparisonPlan::Direct => RustExpr::Binary {
             op: op.to_string(),
             left: Box::new(left),
@@ -1229,6 +1235,14 @@ pub fn lower_equality_comparison_expr_for_op(
             left,
             right,
         ),
+    };
+    // Pointer/optional/string comparisons produce bool, not a new Result.
+    // Preserve the operand's consumed exception carrier across generated
+    // methods/matches so an outer logical slot cannot append `?` to bool.
+    if consumed_result {
+        RustExpr::shaped(crate::rust_ir::RustExprShape::ResultPropagated, comparison)
+    } else {
+        comparison
     }
 }
 
@@ -1328,6 +1342,7 @@ mod equality_symmetry_tests {
             native_allocation: Default::default(),
             nested_native_allocations: Default::default(),
             nested_collection_views: Default::default(),
+            borrow_target: Default::default(),
             java_ty,
             ownership,
             view,
@@ -1483,6 +1498,29 @@ mod equality_symmetry_tests {
         assert_eq!(
             crate::emit::emit_expr(&rendered),
             "match (left_value, right_value) { (Some(left), Some(right)) => !left.equals(Box::new((*right).clone())), (None, None) => false, _ => true }"
+        );
+    }
+
+    #[test]
+    fn pure_identity_comparison_keeps_consumed_result_evidence() {
+        let left = RustExpr::shaped(
+            crate::rust_ir::RustExprShape::ResultPropagated,
+            RustExpr::Try(Box::new(RustExpr::Var("next_result".into()))),
+        );
+        let comparison = lower_equality_comparison_expr_for_op(
+            BinaryOp::Ne,
+            EqualityComparisonPlan::LeftOptionalSharedHandleIdentity {
+                handle_path: "std::rc::Rc".into(),
+                right_borrowed: false,
+            },
+            left,
+            RustExpr::Var("reference".into()),
+        );
+        assert!(expr_is_result_propagated(&comparison));
+        let emitted = crate::emit::emit_expr(&comparison);
+        assert_eq!(
+            crate::emit::emit_expr(&crate::coercion::propagate_result_projection(comparison)),
+            emitted
         );
     }
 
@@ -1652,6 +1690,7 @@ mod shared_handle_identity_tests {
             native_allocation: Default::default(),
             nested_native_allocations: Default::default(),
             nested_collection_views: Default::default(),
+            borrow_target: Default::default(),
             java_ty,
             ownership,
             view: ViewShape::Native,

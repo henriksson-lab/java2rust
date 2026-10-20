@@ -630,6 +630,7 @@ pub enum NativeCollectionMethod {
     QueuePoll,
     QueueRemove,
     QueueLastRemove,
+    QueueInsert { front: bool, returns_bool: bool },
     Contains,
     SetHashCode,
     SetInsert,
@@ -662,6 +663,44 @@ pub enum NativeCollectionMethod {
 }
 
 impl NativeCollectionMethod {
+    pub(crate) fn is_queue_endpoint(self) -> bool {
+        matches!(
+            self,
+            Self::QueueElement
+                | Self::QueueLastElement
+                | Self::QueuePeek
+                | Self::QueuePoll
+                | Self::QueueRemove
+                | Self::QueueLastRemove
+        )
+    }
+
+    pub(crate) fn queue_endpoint_can_be_empty(self) -> bool {
+        matches!(self, Self::QueuePeek | Self::QueuePoll)
+    }
+    /// Read-only probes use the stored child's physical carrier too, but do
+    /// not retain the argument or transfer its value domain into the receiver.
+    pub(crate) fn queried_argument_children(self) -> &'static [(usize, usize)] {
+        match self {
+            Self::MapGet | Self::MapRemove | Self::MapContainsKey => &[(0, 0)],
+            Self::MapContainsValue => &[(0, 1)],
+            Self::MapGetOrDefault => &[(0, 0), (1, 1)],
+            Self::Contains | Self::ListIndexOf | Self::ListRemoveObject | Self::SetRemove => {
+                &[(0, 0)]
+            }
+            _ => &[],
+        }
+    }
+
+    pub(crate) fn argument_children(self) -> &'static [(usize, usize)] {
+        let stored = self.stored_argument_children();
+        if stored.is_empty() {
+            self.queried_argument_children()
+        } else {
+            stored
+        }
+    }
+
     /// (Java call argument, receiver generic child). This is physical storage,
     /// not overload selection: callers use the already selected native method.
     pub(crate) fn stored_argument_children(self) -> &'static [(usize, usize)] {
@@ -669,6 +708,7 @@ impl NativeCollectionMethod {
             Self::MapInsert | Self::MapPutIfAbsent => &[(0, 0), (1, 1)],
             Self::ListInsert | Self::ListSet => &[(1, 0)],
             Self::ListAdd
+            | Self::QueueInsert { .. }
             | Self::SetInsert
             | Self::PriorityQueueAdd
             | Self::ArrayBlockingQueueAdd
@@ -718,9 +758,14 @@ impl NativeCollectionMethod {
         )
     }
 
+    pub(crate) fn is_membership_bulk_operation(self) -> bool {
+        matches!(self, Self::RemoveAll | Self::ContainsAll | Self::RetainAll)
+    }
+
     pub(crate) fn mutates_receiver(self) -> bool {
         match self {
             NativeCollectionMethod::ListAdd
+            | NativeCollectionMethod::QueueInsert { .. }
             | NativeCollectionMethod::Clear
             | NativeCollectionMethod::PriorityQueueAdd
             | NativeCollectionMethod::ArrayBlockingQueueAdd
@@ -939,6 +984,9 @@ pub enum NativeJavaStaticMethod {
     },
     FloatingIsNaN,
     CharacterValueOf,
+    BoxedPrimitiveValueOf {
+        primitive: PrimitiveType,
+    },
     CharacterToChars,
     CharacterPredicate {
         java_name: &'static str,
@@ -963,6 +1011,32 @@ pub enum NativeJavaStaticMethod {
     ObjectsNonNull,
     ObjectsIsNull,
     PatternCompile,
+}
+
+/// The physical set carrier, not the Java spelling alone, determines whether
+/// a checked JavaMapKey operation is available. Shared allocations are handled
+/// by their separate guard-free runtime protocol before this ordinary path.
+pub(crate) fn native_set_uses_checked_key_operation(
+    method: NativeCollectionMethod,
+    receiver_ty: &JavaType,
+    representations: &crate::representation::RepresentationPlan,
+) -> bool {
+    let receiver_ty = effective_native_collection_receiver_type(receiver_ty);
+    matches!(
+        method,
+        NativeCollectionMethod::SetInsert
+            | NativeCollectionMethod::SetRemove
+            | NativeCollectionMethod::Contains
+    ) && matches!(
+        crate::stdlib::java_collection_kind_for_type(&receiver_ty),
+        Some(
+            crate::stdlib::JavaCollectionKind::Set
+                | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
+        )
+    ) && crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+        &receiver_ty,
+        representations,
+    )
 }
 
 pub fn native_collection_lowered_type(
@@ -1001,6 +1075,13 @@ pub fn native_collection_lowered_type(
         NativeCollectionMethod::ArrayBlockingQueuePut => {
             Some(LoweredType::from_java(JavaType::Void))
         }
+        NativeCollectionMethod::QueueInsert { returns_bool, .. } => {
+            Some(LoweredType::from_java(if returns_bool {
+                JavaType::Primitive(PrimitiveType::Boolean)
+            } else {
+                JavaType::Void
+            }))
+        }
         NativeCollectionMethod::AddAll
         | NativeCollectionMethod::RemoveAll
         | NativeCollectionMethod::ContainsAll
@@ -1031,17 +1112,13 @@ pub fn native_collection_lowered_type(
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
             Some(LoweredType::from_java(element_ty.clone()))
         }
-        NativeCollectionMethod::QueuePeek => {
+        NativeCollectionMethod::QueuePeek | NativeCollectionMethod::QueuePoll => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
-            Some(LoweredType::optional_element_borrow_shape(
-                borrowed_sequence_element_shape(element_ty.clone()),
-            ))
-        }
-        NativeCollectionMethod::QueuePoll => {
-            let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
-            Some(LoweredType::optional_element_borrow_shape(
-                borrowed_sequence_element_shape(element_ty.clone()),
-            ))
+            // Peek clones a stored carrier; poll removes it. Neither returns
+            // a reference into the collection's backing storage.
+            Some(LoweredType::from_java(crate::types::optional_java_type(
+                element_ty.clone(),
+            )))
         }
         NativeCollectionMethod::ArrayBlockingQueueTake => {
             let element_ty = crate::types::sequence_element_type(&receiver_ty)?;
@@ -1164,6 +1241,12 @@ pub(crate) fn intrinsic_call_result_abi(target: &CallTargetPlan<'_>) -> Option<R
 }
 
 pub fn native_java_call_lowered_type(target: &CallTargetPlan<'_>) -> Option<LoweredType> {
+    if let CallTargetPlan::NativeJavaStatic {
+        method: NativeJavaStaticMethod::BoxedPrimitiveValueOf { primitive },
+    } = target
+    {
+        return Some(LoweredType::from_java(JavaType::Primitive(*primitive)));
+    }
     if matches!(
         target,
         CallTargetPlan::NativeJavaInstance {
@@ -2518,6 +2601,11 @@ pub(crate) fn plan_trivial_accessor_call<'a>(
     resolved: Option<&ResolvedCall>,
     facts: &FactSet,
 ) -> Option<TrivialAccessorCallPlan<'a>> {
+    // `super` denotes a lexical implementation, not a Rust receiver value.
+    // Preserve its boundary and implementation ABI even for a trivial getter.
+    if matches!(receiver, Some(Expr::Super)) {
+        return None;
+    }
     let resolved = resolved?;
     if resolved.kind != CallKind::Instance {
         return None;
@@ -3566,6 +3654,9 @@ fn plan_call_target_with_external_index_impl<'a>(
     // receiver's value type is authoritative for instance dispatch.
     if let Some(receiver) = receiver
         && let Some(target) = plan_native_collection_receiver_call(receiver, name, args, types)
+        && !matches!(&target,
+            CallTargetPlan::NativeCollectionMethod { receiver_ty: Some(ty), .. }
+                if EffectiveFacts::new(facts).parsed_source_controls_native_carrier(ty))
     {
         return target;
     }
@@ -4873,6 +4964,16 @@ pub(crate) fn plan_native_collection_receiver_call_for_type<'a>(
             NativeCollectionMethod::PriorityQueueAdd
         }
         (crate::stdlib::JavaCollectionKind::List, "add") => NativeCollectionMethod::ListAdd,
+        (crate::stdlib::JavaCollectionKind::List, name)
+            if native_deque_insert_method(
+                &receiver_ty,
+                name,
+                args.map_or(1, |args| args.len()),
+            )
+            .is_some() =>
+        {
+            native_deque_insert_method(&receiver_ty, name, args.map_or(1, |args| args.len()))?
+        }
         (crate::stdlib::JavaCollectionKind::List, "put")
             if matches!(
                 native_queue_receiver_kind(&receiver_ty),
@@ -5528,6 +5629,36 @@ fn native_queue_receiver_kind(ty: &JavaType) -> Option<NativeQueueReceiverKind> 
         .and_then(NativeQueueReceiverKind::from_simple_name)
 }
 
+fn native_deque_insert_method(
+    ty: &JavaType,
+    name: &str,
+    arity: usize,
+) -> Option<NativeCollectionMethod> {
+    if arity != 1
+        || !matches!(
+            native_queue_receiver_kind(ty),
+            Some(
+                NativeQueueReceiverKind::Deque
+                    | NativeQueueReceiverKind::ArrayDeque
+                    | NativeQueueReceiverKind::LinkedList
+            )
+        )
+    {
+        return None;
+    }
+    let (front, returns_bool) = match name {
+        "push" | "addFirst" | "add_first" => (true, false),
+        "addLast" | "add_last" => (false, false),
+        "offerFirst" | "offer_first" => (true, true),
+        "offerLast" | "offer_last" => (false, true),
+        _ => return None,
+    };
+    Some(NativeCollectionMethod::QueueInsert {
+        front,
+        returns_bool,
+    })
+}
+
 fn is_queue_head_read_method(name: &str) -> bool {
     matches!(name, "element" | "getFirst" | "get_first")
 }
@@ -5550,6 +5681,86 @@ fn is_queue_head_remove_method(name: &str) -> bool {
 
 fn is_queue_tail_remove_method(name: &str) -> bool {
     matches!(name, "removeLast" | "remove_last")
+}
+
+/// Distinguish Java null from a semantic Optional object's empty carrier.
+pub(crate) fn checked_identity_argument_has_null_carrier(
+    actual: &RustSlotShape,
+    resolved: Option<&ResolvedCall>,
+) -> bool {
+    actual.optional_element_type().is_some()
+        && !resolved.is_some_and(|call| call.return_type == actual.java_ty)
+}
+
+/// Recover the source through the same guarded call plan used by lowering.
+/// Source lookalikes and shadowed owners still win.
+pub(crate) fn checked_identity_source_argument<'a>(
+    expr: &'a Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<&'a Expr> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    // Reject unrelated calls before doing owner/fact lookup on hot flow paths.
+    if !matches!(name.as_str(), "requireNonNull" | "require_non_null") {
+        return None;
+    }
+    let target = plan_native_java_static_call(
+        receiver.as_deref(),
+        name,
+        args.len(),
+        Some(args),
+        facts,
+        types,
+        resolved.as_ref(),
+    )?;
+    args.get(target.checked_identity_argument_index()?)
+}
+
+/// Use the ordinary native static-owner proof, including unresolved standard
+/// calls, aliases and source/value shadowing. Analyses must not require a
+/// resolver record when lowering can already select this platform boundary.
+pub(crate) fn native_objects_equals_operands<'a>(
+    expr: &'a Expr,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<(&'a Expr, &'a Expr)> {
+    let Expr::Call {
+        receiver,
+        name,
+        args,
+        resolved,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    if name != "equals" || args.len() != 2 {
+        return None;
+    }
+    matches!(
+        plan_native_java_static_call(
+            receiver.as_deref(),
+            name,
+            args.len(),
+            Some(args),
+            facts,
+            types,
+            resolved.as_ref()
+        ),
+        Some(CallTargetPlan::NativeJavaStatic {
+            method: NativeJavaStaticMethod::ObjectsEquals
+        })
+    )
+    .then(|| (&args[0], &args[1]))
 }
 
 fn plan_native_java_static_call<'a>(
@@ -5858,6 +6069,26 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
                 .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
         {
             NativeJavaStaticMethod::DoubleParseDouble
+        }
+        ("Boolean", "valueOf" | "value_of")
+            if args.and_then(|args| args.first())
+                .is_some_and(|arg| matches!(infer_expr_type(arg, types), JavaType::String)) =>
+        {
+            NativeJavaStaticMethod::BooleanParseBoolean
+        }
+        (owner, "valueOf" | "value_of")
+            if owner != "Character" && crate::stdlib::boxed_primitive_type(owner).is_some()
+                && args.is_some_and(|args| args.len() == 1 && {
+                    let ty = infer_expr_type(&args[0], types);
+                    let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
+                    matches!(&ty, JavaType::Primitive(_))
+                        || matches!(&ty, JavaType::Named { name, .. } | JavaType::Unknown(name)
+                            if crate::stdlib::boxed_primitive_type(name.rsplit('.').next().unwrap_or(name.as_str())).is_some())
+                }) =>
+        {
+            NativeJavaStaticMethod::BoxedPrimitiveValueOf {
+                primitive: crate::stdlib::boxed_primitive_type(owner)?,
+            }
         }
         ("Long", "parseLong" | "parse_long") => NativeJavaStaticMethod::LongParseLong,
         ("Float", "parseFloat" | "parse_float") => NativeJavaStaticMethod::FloatParseFloat,
@@ -6231,8 +6462,17 @@ pub fn plan_new_target_for_args_with_facts(
         plan_native_collection_constructor_for_args(&owner_ty, args, types, facts)
             .or_else(|| plan_native_collection_constructor(&owner_ty, args.len(), facts));
     let native_string = plan_native_string_constructor(&owner_ty, args.len(), Some((args, types)));
+    let mut owner_shape = value_shape_for_java_type(representations, owner_ty);
+    if native_collection.is_some() {
+        crate::signature::project_semantic_hash_collection_view(
+            &mut owner_shape,
+            &types.type_parameter_names(),
+            facts,
+            representations,
+        );
+    }
     NewTargetPlan::new(
-        value_shape_for_java_type(representations, owner_ty),
+        owner_shape,
         rust_name,
         external_crate,
         native_collection,
@@ -7172,12 +7412,37 @@ pub(crate) fn specialize_resolved_source_call_argument_plan(
         ArgumentLoweringPlan::Shaped(shapes) => ArgumentLoweringPlan::Shaped(
             shapes
                 .into_iter()
-                .map(|shape| {
+                .enumerate()
+                .map(|(index, shape)| {
                     let java_ty = crate::resolve::substitute_method_type_variables(
                         &shape.java_ty,
                         &substitutions,
                     );
-                    crate::shape_projection::specialize_slot_shape_java_type(&shape, &java_ty)
+                    let mut specialized =
+                        crate::shape_projection::specialize_slot_shape_java_type(&shape, &java_ty);
+                    let direct_binder = method
+                        .params
+                        .get(index)
+                        .and_then(|param| match &param.ty {
+                            JavaType::Unknown(name) => Some(name),
+                            JavaType::Named { name, args } if args.is_empty() => Some(name),
+                            _ => None,
+                        })
+                        .is_some_and(|name| {
+                            owner_type_params.contains(name) || method.type_params.contains(name)
+                        });
+                    if direct_binder
+                        && shape.dispatch == crate::slot_shape::DispatchShape::Concrete
+                        && shape.view == crate::slot_shape::ViewShape::Native
+                        && !shape.native_allocation.shared()
+                        && matches!(
+                            shape.ownership,
+                            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+                        )
+                    {
+                        specialized.borrow_target = crate::slot_shape::BorrowTarget::Carrier;
+                    }
+                    specialized
                 })
                 .collect(),
         ),
@@ -7599,6 +7864,7 @@ pub(crate) fn native_collection_method_arg_shapes(
     let receiver_ty = effective_native_collection_receiver_type(receiver_ty);
     let shapes = match method {
         NativeCollectionMethod::ListAdd
+        | NativeCollectionMethod::QueueInsert { .. }
         | NativeCollectionMethod::PriorityQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueOffer
@@ -7964,7 +8230,7 @@ fn facade_abi_call_arg_plan(
         facts.facade_abi_for_external_method(key.owner_type(), key.member_name(), key.arity())
     }?;
     let collection_arg_types =
-        facade_abi_native_collection_arg_java_types(receiver, name, arg_count, types);
+        facade_abi_native_collection_arg_java_types(receiver, name, arg_count, types, facts);
     facade_abi_argument_lowering_plan(
         abi,
         arg_count,
@@ -8142,15 +8408,64 @@ fn facade_abi_effective_argument_java_type(
     }
 }
 
+pub(crate) fn native_list_cursor_returned_child(
+    receiver_ty: &JavaType,
+    name: &str,
+    arg_count: usize,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    if arg_count != 0 || !matches!(name, "next" | "next_element" | "previous") {
+        return None;
+    }
+    let ty = effective_native_collection_receiver_type(receiver_ty);
+    let JavaType::Named { name: owner, .. } = &ty else {
+        return None;
+    };
+    if java_type_owner_is_parsed_source(owner, types, facts) {
+        return None;
+    }
+    EffectiveFacts::new(facts).native_list_cursor_element_type(&ty)
+}
+
+pub(crate) fn native_list_cursor_written_child(
+    receiver_ty: &JavaType,
+    name: &str,
+    arg_count: usize,
+    types: &TypeEnv,
+    facts: &FactSet,
+) -> Option<JavaType> {
+    let ty = effective_native_collection_receiver_type(receiver_ty);
+    let JavaType::Named { name: owner, args } = &ty else {
+        return None;
+    };
+    if java_type_owner_is_parsed_source(owner, types, facts)
+        || args.len() != 1
+        || arg_count != 1
+        || !matches!(name, "set" | "add")
+    {
+        return None;
+    }
+    EffectiveFacts::new(facts).native_list_cursor_element_type(&ty)
+}
+
 fn facade_abi_native_collection_arg_java_types(
     receiver: Option<&Expr>,
     name: &str,
     arg_count: usize,
     types: &TypeEnv,
+    facts: &FactSet,
 ) -> Option<Vec<JavaType>> {
     let receiver = receiver?;
     let receiver_ty = infer_expr_type(receiver, types);
     let receiver_ty = effective_native_collection_receiver_type(&receiver_ty);
+    if let Some(child) =
+        native_list_cursor_written_child(&receiver_ty, name, arg_count, types, facts)
+    {
+        // The selected native cursor ABI writes its physical stored child,
+        // including Optional and nested allocation metadata carried in T.
+        return Some(vec![child]);
+    }
     let method = if native_queue_receiver_kind(&receiver_ty).is_some()
         && is_queue_head_peek_method(name)
         && arg_count == 0
@@ -8224,6 +8539,7 @@ fn facade_abi_native_collection_arg_java_types(
     };
     match method {
         NativeCollectionMethod::ListAdd
+        | NativeCollectionMethod::QueueInsert { .. }
         | NativeCollectionMethod::PriorityQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueAdd
         | NativeCollectionMethod::ArrayBlockingQueueOffer
@@ -9211,6 +9527,14 @@ mod tests {
         };
         assert_eq!(shapes[0].optional_element_type(), Some(JavaType::String));
         assert_eq!(shapes[0].ownership, OwnershipShape::SharedBorrow);
+        assert_eq!(
+            shapes[0].borrow_target,
+            crate::slot_shape::BorrowTarget::Carrier
+        );
+        assert_eq!(
+            shapes[1].borrow_target,
+            crate::slot_shape::BorrowTarget::Payload
+        );
         assert_eq!(
             shapes[1].java_ty,
             crate::parser::parse_hierarchy_type("java.util.TreeMap<String, Integer>")

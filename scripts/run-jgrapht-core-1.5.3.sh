@@ -1,6 +1,21 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+skip_resolver_bench=0
+while [[ "$#" -gt 0 ]]; do
+  case "$1" in
+    --skip-resolver-bench) skip_resolver_bench=1 ;;
+    --help|-h)
+      echo "Usage: $0 [--skip-resolver-bench]"
+      echo "Skip only the separate resolver benchmark when its prior evidence still applies."
+      echo "Pinned-source validation and production translation/assembly/checks still run."
+      exit 0
+      ;;
+    *) echo "Unknown argument: $1 (use --help)" >&2; exit 2 ;;
+  esac
+  shift
+done
+
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 checkout="${JGRAPHT_SOURCE_ROOT:-$repo_root/.tmp/jgrapht-1.5.3-src}"
 java_root="$checkout/jgrapht-core/src/main/java"
@@ -39,6 +54,9 @@ translate_args=(
   --jobs "${JOBS:-10}"
   --offline-cargo
 )
+if [[ "$skip_resolver_bench" -eq 1 ]]; then
+  translate_args+=(--skip-resolver-bench)
+fi
 if [[ "${JGRAPHT_BROAD_CONTEXT:-0}" == "1" ]]; then
   # This is the expensive broad gate. All 463 sources participate in semantic
   # and signature analysis while only the dependency closure is emitted.

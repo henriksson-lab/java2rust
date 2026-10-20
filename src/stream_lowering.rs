@@ -475,6 +475,15 @@ fn emit_stream_lambda_shared_native_call(
                 &shape,
                 kind,
                 ctx.propagate_java_exceptions,
+                None,
+                ctx.representations.and_then(|representations| {
+                    crate::shape_projection::retained_native_queue_result_shape(
+                        &shape,
+                        *method,
+                        facts,
+                        representations,
+                    )
+                }),
             )?,
             precedence,
         ));

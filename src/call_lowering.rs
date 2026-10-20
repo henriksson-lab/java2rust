@@ -932,6 +932,14 @@ fn apply_native_java_static_method(
             // primitive `char`; Java boxing therefore needs no runtime call.
             arg
         }
+        NativeJavaStaticMethod::BoxedPrimitiveValueOf { .. } => {
+            // The typed scalar argument boundary already performs primitive
+            // widening/unboxing. The existing wrapper model stores that value.
+            if args.len() != 1 {
+                return compile_error_call("primitive valueOf requires one argument");
+            }
+            args.into_iter().next().unwrap()
+        }
         NativeJavaStaticMethod::CharacterToChars => {
             let Some(arg) = args.into_iter().next() else {
                 return compile_error_call("Character.toChars requires one argument");
@@ -1403,6 +1411,22 @@ fn apply_native_collection_method(
         }
         NativeCollectionMethod::ListAdd => {
             return apply_list_add(receiver, args);
+        }
+        NativeCollectionMethod::QueueInsert {
+            front,
+            returns_bool,
+        } => {
+            if front {
+                args.insert(0, RustExpr::Literal("0".into()));
+            }
+            return RustExpr::Block {
+                stmts: vec![RustStmt::Expr(receiver_method_call_projection_exact(
+                    receiver,
+                    if front { "insert" } else { "push" },
+                    args,
+                ))],
+                tail: returns_bool.then(|| Box::new(RustExpr::Literal("true".into()))),
+            };
         }
         NativeCollectionMethod::PriorityQueueAdd => {
             return apply_priority_queue_add(receiver, args);
@@ -3369,6 +3393,20 @@ pub(crate) fn wrap_source_hierarchy_carrier_handle_value(
     )
 }
 
+pub(crate) fn wrap_source_hierarchy_carrier_handle_value_for_target(
+    handle: RustExpr,
+    owner_name: &str,
+    target_name: &str,
+    representations: &RepresentationPlan,
+) -> Option<RustExpr> {
+    let (carrier, variant) =
+        representations.source_hierarchy_carrier_parts_for_target(target_name, owner_name)?;
+    Some(function_call_projection(
+        RustExpr::path([carrier, variant.as_str()]),
+        vec![handle],
+    ))
+}
+
 pub(crate) fn wrap_source_hierarchy_carrier_variant_value(
     value: RustExpr,
     owner_name: &str,
@@ -3502,8 +3540,10 @@ fn apply_native_collection_new_target(
     facts: &FactSet,
     representations: Option<&RepresentationPlan>,
 ) -> RustExpr {
-    if representations
-        .is_some_and(|representations| representations.uses_comparator_backed_native_map_carrier())
+    if (target.owner_shape().view == crate::slot_shape::ViewShape::JavaSemanticHash
+        || representations.is_some_and(|representations| {
+            representations.uses_comparator_backed_native_map_carrier()
+        }))
         && native_collection_new_target_kind(native_collection).is_map_like()
     {
         let kind = native_collection_new_target_kind(native_collection);
@@ -3568,27 +3608,30 @@ fn apply_native_collection_new_target(
         crate::stdlib::JavaCollectionKind::Set
             | crate::stdlib::JavaCollectionKind::SortedSet
             | crate::stdlib::JavaCollectionKind::InsertionOrderedSet
-    ) && representations
-        .map(|representations| {
-            crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
-                &target.owner_shape().java_ty,
-                facts,
-                representations,
-            )
-        })
-        .unwrap_or_else(|| {
-            crate::slot_render::java_set_uses_hash_free_carrier(
-                &target.owner_shape().java_ty,
-                facts,
-            )
-        })
+    ) && (target.owner_shape().view == crate::slot_shape::ViewShape::JavaSemanticHash
+        || representations
+            .map(|representations| {
+                crate::slot_render::java_set_uses_hash_free_carrier_with_representations(
+                    &target.owner_shape().java_ty,
+                    facts,
+                    representations,
+                )
+            })
+            .unwrap_or_else(|| {
+                crate::slot_render::java_set_uses_hash_free_carrier(
+                    &target.owner_shape().java_ty,
+                    facts,
+                )
+            }))
     {
-        let semantic_set = representations.is_some_and(|representations| {
-            crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
-                &target.owner_shape().java_ty,
-                representations,
-            )
-        });
+        let semantic_set = target.owner_shape().view
+            == crate::slot_shape::ViewShape::JavaSemanticHash
+            || representations.is_some_and(|representations| {
+                crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
+                    &target.owner_shape().java_ty,
+                    representations,
+                )
+            });
         if !semantic_set {
             return match native_collection {
                 NativeCollectionNewTarget::Empty { .. } => {

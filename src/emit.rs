@@ -1009,6 +1009,9 @@ pub(crate) fn expr_precedence(expr: &RustExpr) -> u8 {
         RustExpr::Cast { .. } => 6,
         RustExpr::Try(_) => 11,
         RustExpr::Grouped(_) => 12,
+        // A closure's body extends to the right; postfix application must
+        // parenthesize the closure rather than applying to its body result.
+        RustExpr::Closure { .. } => 0,
         RustExpr::Unary { .. } => 10,
         RustExpr::Field(_, _)
         | RustExpr::Index(_, _)
@@ -1027,7 +1030,6 @@ pub(crate) fn expr_precedence(expr: &RustExpr) -> u8 {
         | RustExpr::ArrayLiteral(_)
         | RustExpr::VecLiteral(_)
         | RustExpr::VecRepeat { .. }
-        | RustExpr::Closure { .. }
         | RustExpr::Block { .. }
         | RustExpr::StructLit { .. }
         | RustExpr::MarkedBlock { .. }
@@ -1239,6 +1241,31 @@ mod tests {
                 inclusive: true,
             }),
             "start..=end"
+        );
+    }
+
+    #[test]
+    fn immediately_called_closure_is_not_confused_with_its_body_result() {
+        let closure = RustExpr::Closure {
+            is_move: false,
+            params: vec![crate::rust_ir::RustClosureParam {
+                pattern: "value".into(),
+                ty: None,
+            }],
+            return_type: None,
+            body: crate::rust_ir::RustClosureBody::Expr(Box::new(binary(
+                ">",
+                var("value"),
+                RustExpr::Literal("0".into()),
+            ))),
+        };
+        assert_eq!(emit_expr(&closure), "|value| value > 0");
+        assert_eq!(
+            emit_expr(&RustExpr::Call {
+                function: Box::new(closure),
+                args: vec![RustExpr::Literal("1".into())],
+            }),
+            "(|value| value > 0)(1)"
         );
     }
 

@@ -32,6 +32,27 @@ pub struct SourceSymbols {
 }
 
 impl SourceSymbols {
+    /// The source SAM's declaration identity and specialized Java signature.
+    /// Semantic consumers must not replace a co-translated interface with a
+    /// similarly named native functional facade.
+    pub(crate) fn source_functional_interface_call(&self, ty: &JavaType) -> Option<ResolvedCall> {
+        let method = self.symbols.source_functional_interface_method(ty)?;
+        let substitutions = functional_interface_type_substitutions(ty, &self.symbols);
+        Some(ResolvedCall {
+            declaring_type: method.declaring_type.clone(),
+            rust_name: method.rust_name.clone(),
+            kind: CallKind::Instance,
+            type_args: Vec::new(),
+            return_type: substitute_method_type_variables(&method.return_type, &substitutions),
+            arg_target_types: method
+                .params
+                .iter()
+                .map(|param| substitute_method_type_variables(&param.ty, &substitutions))
+                .collect(),
+            arg_coercions: Vec::new(),
+        })
+    }
+
     pub(crate) fn source_type_name<'a>(&'a self, type_name: &'a str) -> &'a str {
         self.symbols.source_type_name(type_name)
     }
@@ -47,6 +68,22 @@ impl SourceSymbols {
             .into_iter()
             .find(|field| field_name_matches(field, name, &canonical))
             .map(|field| (field.declaring_type, field.java_name, field.ty))
+    }
+
+    pub(crate) fn source_field_identity_for_receiver(
+        &self,
+        receiver: &JavaType,
+        name: &str,
+    ) -> Option<(String, String, JavaType)> {
+        let receiver =
+            crate::types::optional_element_type(receiver).unwrap_or_else(|| receiver.clone());
+        let owner = java_type_simple_name(&receiver);
+        let field = self.symbols.field_for_from(&owner, name, &owner)?;
+        Some((
+            field.declaring_type.clone(),
+            field.java_name.clone(),
+            self.symbols.field_type_for_receiver(field, &receiver),
+        ))
     }
 
     pub(crate) fn source_static_field_names(
@@ -2504,6 +2541,26 @@ impl ProgramSymbols {
         None
     }
 
+    fn field_type_for_receiver(&self, field: &FieldSymbol, receiver: &JavaType) -> JavaType {
+        if field.is_static {
+            return field.ty.clone();
+        }
+        // Field lookup selects a declaration, but its type is read in the
+        // receiver's actual owner frame. Reuse hierarchy argument projection
+        // and the same simultaneous owner substitution as methods/constructors.
+        let Some(args) = self.source_supertype_args(receiver, &field.declaring_type) else {
+            return field.ty.clone();
+        };
+        let substitutions = owner_type_argument_substitutions(
+            self.type_params_for(&field.declaring_type).unwrap_or(&[]),
+            &[],
+            &args,
+            self.type_param_bounds_for(&field.declaring_type)
+                .unwrap_or(&[]),
+        );
+        substitute_method_type_variables(&field.ty, &substitutions)
+    }
+
     fn external_super_field_type_for(&self, type_name: &str, field_name: &str) -> Option<JavaType> {
         let mut current = Some(self.source_type_name(type_name).to_string());
         let mut visited = HashSet::new();
@@ -4574,6 +4631,18 @@ fn resolve_expr_calls(
                             symbols,
                             external_facts,
                         );
+                        resolve_target_typed_lambda_args(
+                            args,
+                            &constructor.params,
+                            current_type,
+                            symbols,
+                            methods,
+                            env,
+                            diagnostics,
+                            facts,
+                            external_facts,
+                            enclosing_member,
+                        );
                         *resolved = Some(constructor);
                     }
                     Ok(None) => facts.unresolved_target_facts.push(UnresolvedTargetFact {
@@ -4859,16 +4928,41 @@ fn resolve_lambda_with_expected_type(
     let Expr::Lambda { params, body } = expr else {
         return;
     };
-    let Some(functional_method) = symbols.source_functional_interface_method(expected_ty) else {
-        return;
+    let (expected_params, expected_return) = if let Some(functional_method) =
+        symbols.source_functional_interface_method(expected_ty)
+    {
+        let substitutions = functional_interface_type_substitutions(expected_ty, symbols);
+        (
+            functional_method
+                .params
+                .iter()
+                .map(|param| substitute_method_type_variables(&param.ty, &substitutions))
+                .collect::<Vec<_>>(),
+            substitute_method_type_variables(&functional_method.return_type, &substitutions),
+        )
+    } else {
+        let JavaType::Named { name, args } = expected_ty else {
+            return;
+        };
+        // A source declaration, including a non-SAM lookalike, always owns its
+        // contract. Native SAM signatures reuse the same canonical model as
+        // lowering rather than leaving their lambda bodies unresolved.
+        if symbols.source_type_kind(name).is_some() {
+            return;
+        }
+        let Some(sam) = crate::effective_facts::EffectiveFacts::new(external_facts)
+            .native_functional_carrier(expected_ty)
+        else {
+            return;
+        };
+        let (Some(inputs), Some(result)) = (sam.input_types(args), sam.return_type(args)) else {
+            return;
+        };
+        (inputs, result)
     };
-    let substitutions = functional_interface_type_substitutions(expected_ty, symbols);
-    let expected_return =
-        substitute_method_type_variables(&functional_method.return_type, &substitutions);
 
     let mut lambda_env = env.clone();
-    for (lambda_param, method_param) in params.iter().zip(&functional_method.params) {
-        let method_param_ty = substitute_method_type_variables(&method_param.ty, &substitutions);
+    for (lambda_param, method_param_ty) in params.iter().zip(expected_params) {
         let param_ty = lambda_param.ty.clone().unwrap_or(method_param_ty);
         lambda_env.insert_local(lambda_param.name.clone(), param_ty);
     }
@@ -5466,7 +5560,14 @@ fn infer_resolver_expr_type_with_facts(
                     symbols.field_for_from(&receiver_type_name, field, current_type)
                 && field_access_is_allowed(receiver, symbol, symbols, env)
             {
-                return symbol.ty.clone();
+                let actual = infer_resolver_expr_type_with_facts(
+                    receiver,
+                    current_type,
+                    symbols,
+                    env,
+                    external_facts,
+                );
+                return symbols.field_type_for_receiver(symbol, &actual);
             }
             if let Some(receiver_type_name) =
                 field_receiver_type_name(receiver, current_type, symbols, env)
@@ -6352,7 +6453,7 @@ fn infer_resolver_member_access_type_with_facts(
         && let Some(symbol) = symbols.field_for_from(&receiver_type_name, member, current_type)
         && field_access_is_allowed(receiver, symbol, symbols, env)
     {
-        return Some(symbol.ty.clone());
+        return Some(symbols.field_type_for_receiver(symbol, &receiver_ty));
     }
     if let Some((receiver_type_name, _)) =
         source_receiver_type(receiver, current_type, symbols, env)
@@ -6725,6 +6826,44 @@ fn method_type_substitutions(
             Some(&method.method_type_params),
         );
     }
+    // A null argument supplies no concrete lower bound. If a binder has no
+    // return-context constraint and every parameter mentioning it is null,
+    // Java inference can use its declared upper bound (Object if unbounded).
+    // Do not leak the callee binder into the caller or invent a facade named T.
+    for (index, parameter) in method.method_type_params.iter().enumerate() {
+        if substitutions.contains_key(parameter)
+            || contains_type_parameter(&method.return_type, parameter)
+        {
+            continue;
+        }
+        let mut occurrences = method
+            .params
+            .iter()
+            .zip(arg_types)
+            .filter(|(param, _)| contains_type_parameter(&param.ty, parameter))
+            .peekable();
+        if occurrences.peek().is_none() || !occurrences.all(|(_, actual)| is_null_type(actual)) {
+            continue;
+        }
+        let bound = method
+            .method_type_param_bounds
+            .get(index)
+            .and_then(Option::as_ref)
+            .cloned()
+            .unwrap_or(JavaType::Named {
+                name: "java.lang.Object".into(),
+                args: Vec::new(),
+            });
+        let bound = substitute_method_type_variables(&bound, &substitutions);
+        if method
+            .method_type_params
+            .iter()
+            .any(|name| contains_type_parameter(&bound, name))
+        {
+            continue;
+        }
+        substitutions.insert(parameter.clone(), bound);
+    }
     substitutions
 }
 
@@ -6913,6 +7052,55 @@ fn collect_type_substitutions(
     symbols: Option<&ProgramSymbols>,
     method_type_params: Option<&[String]>,
 ) {
+    fn same_constructor_name(left: &str, right: &str) -> bool {
+        left == right
+            || ((!left.contains('.') || !right.contains('.'))
+                && crate::facts::external_type_name_matches(left, right))
+    }
+    fn aligned_constructor(left: &JavaType, right: &JavaType) -> bool {
+        match (left, right) {
+            (
+                JavaType::Named {
+                    name: left,
+                    args: left_args,
+                },
+                JavaType::Named {
+                    name: right,
+                    args: right_args,
+                },
+            ) => same_constructor_name(left, right) && left_args.len() == right_args.len(),
+            (JavaType::Array(_), JavaType::Array(_)) => true,
+            _ => false,
+        }
+    }
+    let is_binder = matches!(param_ty, JavaType::Named { name, args }
+        if args.is_empty() && is_method_type_variable(name, method_type_params));
+    if symbols.is_none() && !is_binder && !aligned_constructor(param_ty, arg_ty) {
+        // This path consumes an already-selected source signature, not fresh
+        // Java overload evidence. Its ABI may retain an outer nullable
+        // carrier. Align only when removing that carrier proves the same
+        // constructor/arity; never infer a binder from an unrelated position.
+        // A bare T still binds an entire Optional<X>, and Optional<T> matched
+        // to Optional<X> keeps its genuine Java constructor intact.
+        if let Some(inner) = crate::types::optional_element_type(arg_ty)
+            && aligned_constructor(param_ty, &inner)
+        {
+            collect_type_substitutions(
+                param_ty,
+                &inner,
+                substitutions,
+                symbols,
+                method_type_params,
+            );
+            return;
+        }
+        if let Some(inner) = crate::types::optional_element_type(param_ty)
+            && aligned_constructor(&inner, arg_ty)
+        {
+            collect_type_substitutions(&inner, arg_ty, substitutions, symbols, method_type_params);
+            return;
+        }
+    }
     match (param_ty, arg_ty) {
         (JavaType::Named { name, args }, actual)
             if args.is_empty() && is_method_type_variable(name, method_type_params) =>
@@ -6983,11 +7171,32 @@ fn collect_type_substitutions(
                 args: param_args,
                 ..
             },
-            JavaType::Named { args: arg_args, .. },
+            JavaType::Named {
+                name: arg_name,
+                args: arg_args,
+            },
         ) => {
             let projected_arg =
                 symbols.and_then(|symbols| symbols.source_supertype_args(arg_ty, param_name));
-            let effective_arg_args = projected_arg.as_deref().unwrap_or(arg_args);
+            let effective_arg_args = if let Some(projected) = projected_arg.as_deref() {
+                projected
+            } else if same_constructor_name(param_name, arg_name) {
+                arg_args
+            } else if symbols.is_some_and(|symbols| {
+                symbols.source_type_kind(param_name).is_none()
+                    && symbols.source_type_kind(arg_name).is_none()
+                    && crate::stdlib::is_known_java_platform_subtype(arg_name, param_name)
+            }) {
+                // JDK collection supertypes preserve their generic positions.
+                // Source declarations instead require the inheritance
+                // projection above, including any reordered parameters.
+                arg_args
+            } else {
+                return;
+            };
+            if param_args.len() != effective_arg_args.len() {
+                return;
+            }
             for (param_arg, arg_arg) in param_args.iter().zip(effective_arg_args) {
                 collect_type_substitutions(
                     param_arg,
@@ -7008,6 +7217,11 @@ pub(crate) fn substitute_method_type_variables(
 ) -> JavaType {
     match ty {
         JavaType::Named { name, args } if args.is_empty() && substitutions.contains_key(name) => {
+            substitutions.get(name).cloned().unwrap()
+        }
+        JavaType::Unknown(name) if substitutions.contains_key(name) => {
+            // Solved generic slots can retain a type parameter as Unknown;
+            // an explicit binder substitution is equally authoritative there.
             substitutions.get(name).cloned().unwrap()
         }
         JavaType::Array(inner) => JavaType::Array(Box::new(substitute_method_type_variables(
@@ -7403,16 +7617,21 @@ fn scoped_type_arguments_are_compatible(
         ) => {
             let projected = symbols.source_supertype_args(actual, name);
             let actual_args = projected.as_deref().unwrap_or(actual_args);
-            actual_args.iter().zip(args).all(|(actual, target)| {
-                scoped_type_arguments_are_compatible(
-                    actual,
-                    target,
-                    scope,
-                    symbols,
-                    external_facts,
-                    visiting,
-                )
-            })
+            // Scope validation also gates the single-candidate recovery path.
+            // A concrete invariant mismatch must not become applicable merely
+            // because neither child is a caller type variable. Reuse overload
+            // matching's generic/wildcard rules, retaining raw-type recovery.
+            generic_arguments_match_score(actual_args, args, symbols, external_facts).is_some()
+                && actual_args.iter().zip(args).all(|(actual, target)| {
+                    scoped_type_arguments_are_compatible(
+                        actual,
+                        target,
+                        scope,
+                        symbols,
+                        external_facts,
+                        visiting,
+                    )
+                })
         }
         _ => true,
     }
@@ -8400,31 +8619,30 @@ fn collect_resolved_facts(program: &Program) -> FactSet {
     facts
 }
 
-fn collect_generic_parameter_variance_facts(program: &Program, facts: &mut FactSet) {
-    fn contains_type_parameter(ty: &JavaType, parameter: &str) -> bool {
-        match ty {
-            JavaType::Named { name, args } => {
-                (name == parameter && args.is_empty())
-                    || args
-                        .iter()
-                        .any(|arg| contains_type_parameter(arg, parameter))
-            }
-            JavaType::Array(element) => contains_type_parameter(element, parameter),
-            JavaType::Intersection(bounds) => bounds
-                .iter()
-                .any(|bound| contains_type_parameter(bound, parameter)),
-            JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
-            | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
-                contains_type_parameter(bound, parameter)
-            }
-            JavaType::Void
-            | JavaType::Primitive(_)
-            | JavaType::String
-            | JavaType::Wildcard(None)
-            | JavaType::Unknown(_) => false,
+fn contains_type_parameter(ty: &JavaType, parameter: &str) -> bool {
+    match ty {
+        JavaType::Named { name, args } => {
+            (name == parameter && args.is_empty())
+                || args
+                    .iter()
+                    .any(|arg| contains_type_parameter(arg, parameter))
         }
+        JavaType::Array(element) => contains_type_parameter(element, parameter),
+        JavaType::Intersection(bounds) => bounds
+            .iter()
+            .any(|bound| contains_type_parameter(bound, parameter)),
+        JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Extends(bound)))
+        | JavaType::Wildcard(Some(crate::java_ir::WildcardBound::Super(bound))) => {
+            contains_type_parameter(bound, parameter)
+        }
+        JavaType::Void | JavaType::Primitive(_) | JavaType::String | JavaType::Wildcard(None) => {
+            false
+        }
+        JavaType::Unknown(name) => name == parameter,
     }
+}
 
+fn collect_generic_parameter_variance_facts(program: &Program, facts: &mut FactSet) {
     fn visit(ty: &TypeDecl, facts: &mut FactSet) {
         for (parameter_index, parameter) in ty.type_params.iter().enumerate() {
             let mut consumed = false;
@@ -8905,6 +9123,9 @@ pub(crate) fn captures_in_callable(params: &[Param], body: &Block) -> Vec<Captur
     let mut analyzer = CaptureAnalyzer::default();
     let mut context = CaptureContext {
         type_name: String::new(),
+        receiver_type: None,
+        receiver_fields: HashSet::new(),
+        capturing_receiver: false,
         method_name: None,
         fields: HashMap::new(),
         outer_field_owners: HashMap::new(),
@@ -8947,6 +9168,9 @@ pub(crate) fn captures_for_lambda<'a>(
         .collect::<HashSet<_>>();
     let context = CaptureContext {
         type_name: String::new(),
+        receiver_type: None,
+        receiver_fields: HashSet::new(),
+        capturing_receiver: false,
         method_name: None,
         fields: HashMap::new(),
         outer_field_owners: HashMap::new(),
@@ -8996,6 +9220,9 @@ struct ScopeSymbol {
 #[derive(Debug, Clone)]
 struct CaptureContext {
     type_name: String,
+    receiver_type: Option<JavaType>,
+    receiver_fields: HashSet<String>,
+    capturing_receiver: bool,
     method_name: Option<String>,
     fields: HashMap<String, JavaType>,
     outer_field_owners: HashMap<String, String>,
@@ -9018,6 +9245,10 @@ impl CaptureAnalyzer {
                     if let Some(body) = &method.body {
                         let mut ctx = CaptureContext {
                             type_name: ty.name.clone(),
+                            receiver_type: (!method.modifiers.contains(&Modifier::Static))
+                                .then(|| capture_receiver_type(ty)),
+                            receiver_fields: instance_field_types(ty).into_keys().collect(),
+                            capturing_receiver: false,
                             method_name: Some(method.name.clone()),
                             fields: fields.clone(),
                             outer_field_owners: outer_field_owners.clone(),
@@ -9031,6 +9262,9 @@ impl CaptureAnalyzer {
                     if let Some(body) = &ctor.body {
                         let mut ctx = CaptureContext {
                             type_name: ty.name.clone(),
+                            receiver_type: Some(capture_receiver_type(ty)),
+                            receiver_fields: instance_field_types(ty).into_keys().collect(),
+                            capturing_receiver: false,
                             method_name: None,
                             fields: fields.clone(),
                             outer_field_owners: outer_field_owners.clone(),
@@ -9120,6 +9354,10 @@ impl CaptureAnalyzer {
                     if let Some(body) = &method.body {
                         let mut ctx = CaptureContext {
                             type_name: ty.name.clone(),
+                            receiver_type: (!method.modifiers.contains(&Modifier::Static))
+                                .then(|| capture_receiver_type(ty)),
+                            receiver_fields: instance_field_types(ty).into_keys().collect(),
+                            capturing_receiver: false,
                             method_name: Some(method.name.clone()),
                             fields: fields.clone(),
                             outer_field_owners: outer_field_owners.clone(),
@@ -9133,6 +9371,9 @@ impl CaptureAnalyzer {
                     if let Some(body) = &ctor.body {
                         let mut ctx = CaptureContext {
                             type_name: ty.name.clone(),
+                            receiver_type: Some(capture_receiver_type(ty)),
+                            receiver_fields: instance_field_types(ty).into_keys().collect(),
+                            capturing_receiver: false,
                             method_name: None,
                             fields: fields.clone(),
                             outer_field_owners: outer_field_owners.clone(),
@@ -9351,6 +9592,10 @@ impl CaptureAnalyzer {
                     if let Some(body) = &method.body {
                         let mut ctx = CaptureContext {
                             type_name: ty.name.clone(),
+                            receiver_type: (!method.modifiers.contains(&Modifier::Static))
+                                .then(|| capture_receiver_type(ty)),
+                            receiver_fields: instance_field_types(ty).into_keys().collect(),
+                            capturing_receiver: false,
                             method_name: Some(method.name.clone()),
                             fields: fields.clone(),
                             outer_field_owners: outer_ctx
@@ -9369,6 +9614,9 @@ impl CaptureAnalyzer {
                     if let Some(body) = &ctor.body {
                         let mut ctx = CaptureContext {
                             type_name: ty.name.clone(),
+                            receiver_type: Some(capture_receiver_type(ty)),
+                            receiver_fields: instance_field_types(ty).into_keys().collect(),
+                            capturing_receiver: false,
                             method_name: None,
                             fields: fields.clone(),
                             outer_field_owners: outer_ctx
@@ -9494,6 +9742,12 @@ impl CaptureAnalyzer {
         // unbound/static type names do not resolve to capturable bindings.
         let target = crate::parser::parse_expr(target);
         let mut reference_ctx = ctx.clone();
+        // A bound reference evaluates its target now and retains that value.
+        // Only this::method/super::method retain the lexical receiver itself;
+        // field::method retains the field value, unlike a deferred lambda
+        // which reads the field on each invocation. The enclosing lambda's
+        // separate walk still captures this when it evaluates this target.
+        reference_ctx.capturing_receiver = matches!(target, Expr::This | Expr::Super);
         reference_ctx.scopes = capturable_outer_scopes(ctx);
         let mut captures = Vec::new();
         self.collect_expr_captures(&target, &mut reference_ctx, &mut captures);
@@ -9543,6 +9797,7 @@ impl CaptureAnalyzer {
         ctx: &CaptureContext,
     ) {
         let mut lambda_ctx = ctx.clone();
+        lambda_ctx.capturing_receiver = true;
         lambda_ctx.scopes = capturable_outer_scopes(ctx);
         lambda_ctx.scopes.push(lambda_param_frame(params, false));
         let mut captures = Vec::new();
@@ -9600,6 +9855,7 @@ impl CaptureAnalyzer {
     ) {
         match expr {
             Expr::Var(name) => capture_var(name, ctx, captures),
+            Expr::This | Expr::Super => capture_this(ctx, captures),
             Expr::Lambda { params, body } => self.analyze_lambda(params, body, ctx),
             Expr::MethodReference { target, .. } => {
                 self.analyze_method_reference(target, ctx);
@@ -9645,7 +9901,19 @@ impl CaptureAnalyzer {
                 self.collect_expr_captures(then_expr, ctx, captures);
                 self.collect_expr_captures(else_expr, ctx, captures);
             }
-            Expr::Call { receiver, args, .. } => {
+            Expr::Call {
+                receiver,
+                args,
+                resolved,
+                ..
+            } => {
+                if receiver.is_none()
+                    && resolved
+                        .as_ref()
+                        .is_some_and(|call| call.kind == CallKind::Instance)
+                {
+                    capture_this(ctx, captures);
+                }
                 if let Some(receiver) = receiver {
                     self.collect_expr_captures(receiver, ctx, captures);
                 }
@@ -9788,6 +10056,35 @@ fn add_symbol(
     );
 }
 
+fn capture_receiver_type(ty: &TypeDecl) -> JavaType {
+    JavaType::Named {
+        name: ty.name.clone(),
+        args: ty
+            .type_params
+            .iter()
+            .map(|name| JavaType::Named {
+                name: name.clone(),
+                args: Vec::new(),
+            })
+            .collect(),
+    }
+}
+
+fn capture_this(ctx: &CaptureContext, captures: &mut Vec<Capture>) {
+    if ctx.capturing_receiver
+        && let Some(ty) = &ctx.receiver_type
+    {
+        captures.push(Capture {
+            binding: None,
+            name: "this".into(),
+            source: CaptureSource::This,
+            ty: ty.clone(),
+            effectively_final: true,
+            mutable_after_capture: false,
+        });
+    }
+}
+
 fn capture_var(name: &str, ctx: &CaptureContext, captures: &mut Vec<Capture>) {
     for frame in ctx.scopes.iter().rev() {
         if let Some(symbol) = frame.symbols.get(name) {
@@ -9806,6 +10103,9 @@ fn capture_var(name: &str, ctx: &CaptureContext, captures: &mut Vec<Capture>) {
     }
 
     if ctx.fields.contains_key(name) {
+        if ctx.receiver_fields.contains(name) {
+            capture_this(ctx, captures);
+        }
         return;
     }
 
@@ -9988,6 +10288,190 @@ fn collect_assignment_target_name(expr: &Expr, out: &mut HashSet<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn explicit_generic_substitution_handles_solved_unknown_binders() {
+        use super::substitute_method_type_variables;
+        use crate::java_ir::JavaType;
+        let substitutions = std::collections::HashMap::from([("T".to_string(), JavaType::String)]);
+        for binder in [
+            JavaType::Unknown("T".into()),
+            JavaType::Named {
+                name: "T".into(),
+                args: vec![],
+            },
+        ] {
+            let nullable = crate::types::optional_java_type(binder);
+            assert_eq!(
+                substitute_method_type_variables(&nullable, &substitutions),
+                crate::types::optional_java_type(JavaType::String),
+            );
+        }
+        assert_eq!(
+            substitute_method_type_variables(&JavaType::Unknown("Other".into()), &substitutions),
+            JavaType::Unknown("Other".into()),
+        );
+    }
+
+    #[test]
+    fn lambda_receiver_captures_keep_owner_binders_and_respect_shadowing() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.function.*;
+            class Captures<T> {
+                T field;
+                static int count;
+                T read() { return field; }
+                Supplier<T> implicit() { return () -> read(); }
+                Supplier<T> explicit() { return () -> this.field; }
+                Supplier<T> fieldOnly() { return () -> field; }
+                Supplier<T> shadow(T field) { return () -> field; }
+                static Supplier<Integer> staticOnly() { return () -> count; }
+            }
+        "#,
+        );
+        let resolved = super::resolve_program(&parsed.program, parsed.diagnostics);
+        for (method, expected) in [
+            ("implicit", true),
+            ("explicit", true),
+            ("fieldOnly", true),
+            ("shadow", false),
+            ("staticOnly", false),
+        ] {
+            let captures = resolved.facts.captures.owners.iter().filter(|owner| {
+                matches!(&owner.origin, crate::facts::CaptureOrigin::Method { method_name, .. } if method_name == method)
+            }).flat_map(|owner| &owner.captures).filter(|capture| capture.source == crate::facts::CaptureSource::This).collect::<Vec<_>>();
+            assert_eq!(!captures.is_empty(), expected, "{method}: {captures:?}");
+            for capture in captures {
+                assert_eq!(
+                    capture.ty,
+                    crate::java_ir::JavaType::Named {
+                        name: "Captures".into(),
+                        args: vec![crate::java_ir::JavaType::Named {
+                            name: "T".into(),
+                            args: Vec::new()
+                        }],
+                    }
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn selected_signature_substitution_keeps_native_subtype_inference() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.*;
+class Calls {
+    static <T> T first(List<T> values) { return values.get(0); }
+    static <K,V> V value(Map<K,V> values) { return values.get(null); }
+    static void run(ArrayList<String> list, HashMap<Integer, String> map) {
+        first(list); value(map);
+    }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let method = resolved.program.types[0]
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "run" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let mut calls = 0;
+        for stmt in &method.body.as_ref().unwrap().statements {
+            if let Stmt::Expr(Expr::Call {
+                resolved: Some(call),
+                ..
+            }) = stmt
+            {
+                assert_eq!(call.return_type, JavaType::String, "{call:?}");
+                calls += 1;
+            }
+        }
+        assert_eq!(calls, 2);
+    }
+
+    #[test]
+    fn selected_signature_substitution_aligns_nullable_constructors_not_argument_positions() {
+        let plain = crate::parser::parse_type("Pair<A, B>");
+        let formal = crate::parser::parse_type("Pair<? super V, ? super E>");
+        for (formal, actual) in [
+            (
+                formal.clone(),
+                crate::types::optional_java_type(plain.clone()),
+            ),
+            (crate::types::optional_java_type(formal), plain),
+        ] {
+            let mut substitutions = std::collections::HashMap::new();
+            super::collect_type_substitutions(
+                &formal,
+                &actual,
+                &mut substitutions,
+                None,
+                Some(&["V".into(), "E".into()]),
+            );
+            assert_eq!(
+                substitutions.get("V"),
+                Some(&crate::parser::parse_type("A"))
+            );
+            assert_eq!(
+                substitutions.get("E"),
+                Some(&crate::parser::parse_type("B"))
+            );
+        }
+    }
+
+    #[test]
+    fn selected_signature_substitution_rejects_unrelated_or_partial_generic_positions() {
+        for actual in ["Other<A, B>", "Pair<A>", "right.Pair<A, B>"] {
+            let mut substitutions = std::collections::HashMap::new();
+            super::collect_type_substitutions(
+                &crate::parser::parse_hierarchy_type("left.Pair<V, E>"),
+                &crate::parser::parse_hierarchy_type(actual),
+                &mut substitutions,
+                None,
+                Some(&["V".into(), "E".into()]),
+            );
+            assert!(substitutions.is_empty(), "{actual}: {substitutions:?}");
+        }
+    }
+
+    #[test]
+    fn selected_signature_substitution_keeps_real_optional_and_whole_binder_arguments() {
+        for (formal, actual, expected) in [
+            (
+                "T",
+                "java.util.Optional<String>",
+                "java.util.Optional<String>",
+            ),
+            (
+                "java.util.Optional<T>",
+                "java.util.Optional<String>",
+                "String",
+            ),
+        ] {
+            let mut substitutions = std::collections::HashMap::new();
+            super::collect_type_substitutions(
+                &crate::parser::parse_hierarchy_type(formal),
+                &crate::parser::parse_hierarchy_type(actual),
+                &mut substitutions,
+                None,
+                Some(&["T".into()]),
+            );
+            assert_eq!(
+                substitutions.get("T"),
+                Some(&crate::parser::parse_hierarchy_type(expected))
+            );
+        }
+    }
+
     #[test]
     fn native_collection_diamond_keeps_context_for_capability_inference() {
         let parsed = crate::parser::parse_java_source(
@@ -10423,6 +10907,43 @@ class References {
                 .count(),
             1
         );
+    }
+
+    #[test]
+    fn bound_field_reference_values_are_not_lexical_receiver_captures() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.function.*;
+class Counter { int read() { return 1; } }
+class References {
+    Counter field;
+    IntSupplier bound() { return field::read; }
+    IntSupplier explicit() { return this.field::read; }
+    IntSupplier shadow(Counter field) { return field::read; }
+    IntSupplier self() { return this::read; }
+    int read() { return 2; }
+    Supplier<IntSupplier> nested() { return () -> field::read; }
+}
+"#,
+        );
+        let resolved = resolve_program(&parsed.program, parsed.diagnostics);
+        for owner in &resolved.facts.captures.owners {
+            let CaptureOrigin::Method { method_name, .. } = &owner.origin else {
+                continue;
+            };
+            let expected = match (method_name.as_str(), owner.kind) {
+                ("bound" | "explicit" | "nested", CaptureOwnerKind::MethodReference) => {
+                    CaptureSource::ThisField
+                }
+                ("shadow", CaptureOwnerKind::MethodReference) => CaptureSource::Parameter,
+                ("self", CaptureOwnerKind::MethodReference)
+                | ("nested", CaptureOwnerKind::Lambda) => CaptureSource::This,
+                _ => continue,
+            };
+            assert_eq!(owner.captures.len(), 1, "{owner:?}");
+            assert_eq!(owner.captures[0].source, expected, "{owner:?}");
+        }
+        assert_eq!(resolved.facts.captures.owners.len(), 6);
     }
 
     #[test]

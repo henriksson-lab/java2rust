@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet};
 
 use crate::binding_id::{BindingId, BindingKind};
 use crate::facts::{ExternalFactLookupIndex, FactSet};
-use crate::java_ir::{Expr, JavaType, Member, MethodDecl, Modifier, Param, Stmt, TypeDecl};
+use crate::java_ir::{
+    Expr, JavaType, Member, MethodDecl, Modifier, Param, Program, Stmt, TypeDecl,
+};
 use crate::representation::RepresentationPlan;
 use crate::shape_projection::{
     borrowed_string_content_shape, indexed_assignment_shape_with_facts,
@@ -1362,6 +1364,9 @@ impl ShapeEnv {
     }
 
     pub fn static_storage_field_semantic_name(&self, name: &str) -> Option<&str> {
+        if self.bare_name_is_local(name) {
+            return None;
+        }
         self.static_storage_field_names
             .get(name)
             .map(String::as_str)
@@ -1509,6 +1514,10 @@ impl<'a> ExprShapeContext<'a> {
     pub fn facts(self) -> Option<&'a FactSet> {
         self.facts
     }
+
+    pub(crate) fn external_index(self) -> Option<&'a ExternalFactLookupIndex<'a>> {
+        self.external_index
+    }
 }
 
 pub fn infer_expr_shape(expr: &Expr, env: &ShapeEnv) -> RustSlotShape {
@@ -1584,6 +1593,9 @@ fn infer_expr_shape_with_context_and_external_index(
     ctx: ExprShapeContext<'_>,
     external_index: Option<&ExternalFactLookupIndex<'_>>,
 ) -> RustSlotShape {
+    if let Some(shape) = native_functional_call_result_shape(expr, env, ctx) {
+        return shape;
+    }
     if let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -1723,10 +1735,65 @@ fn infer_expr_shape_with_context_and_external_index(
         .or_else(|| borrowed_string_view_call_shape(receiver.as_deref(), name, args, env))
         .or_else(|| java_string_runtime_call_expr_shape(receiver.as_deref(), name, args.len(), ctx))
         .unwrap_or_else(|| value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))),
-        Expr::New {
-            resolved: Some(resolved),
+        Expr::Ternary {
+            then_expr,
+            else_expr,
             ..
-        } => value_shape_or_conservative(ctx, resolved.constructed_type.clone()),
+        } => {
+            let then_shape = infer_expr_shape_with_context_and_external_index(
+                then_expr,
+                env,
+                ctx,
+                external_index,
+            );
+            let else_shape = infer_expr_shape_with_context_and_external_index(
+                else_expr,
+                env,
+                ctx,
+                external_index,
+            );
+            // Java's null type contributes nullability, not a fresh nominal
+            // carrier. Retain the other branch's complete slot ABI (including
+            // allocation and dispatch) and lift only its null representation.
+            let nullable_branch = if crate::resolve::is_null_type(&then_shape.java_ty)
+                && !crate::resolve::is_null_type(&else_shape.java_ty)
+            {
+                Some((&then_shape, &else_shape))
+            } else if crate::resolve::is_null_type(&else_shape.java_ty)
+                && !crate::resolve::is_null_type(&then_shape.java_ty)
+            {
+                Some((&else_shape, &then_shape))
+            } else {
+                None
+            };
+            if let Some((null, other)) = nullable_branch
+                && !matches!(other.java_ty, JavaType::Primitive(_) | JavaType::Void)
+            {
+                let mut shape = other.clone();
+                crate::shape_projection::preserve_reference_cast_nullability(null, &mut shape);
+                shape
+            } else {
+                value_shape_or_conservative(ctx, infer_expr_type(expr, env.type_env()))
+            }
+        }
+        Expr::New { ty, resolved, .. } => {
+            let mut shape = value_shape_or_conservative(
+                ctx,
+                resolved
+                    .as_ref()
+                    .map(|resolved| resolved.constructed_type.clone())
+                    .unwrap_or_else(|| ty.clone()),
+            );
+            if let (Some(facts), Some(representations)) = (ctx.facts, ctx.representations) {
+                crate::signature::project_semantic_hash_collection_view(
+                    &mut shape,
+                    &env.type_env().type_parameter_names(),
+                    facts,
+                    representations,
+                );
+            }
+            shape
+        }
         Expr::Cast { ty, expr } => {
             let mut target = value_shape_or_conservative(ctx, ty.clone());
             if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) {
@@ -1921,15 +1988,75 @@ fn native_java_call_expr_shape(
         let value_shape =
             infer_expr_shape_with_context_and_external_index(value, env, ctx, external_index);
         if let Some(element_ty) = value_shape.optional_element_type()
-            && !resolved.is_some_and(|call| call.return_type == value_shape.java_ty)
+            && crate::call_plan::checked_identity_argument_has_null_carrier(&value_shape, resolved)
         {
-            // `requireNonNull` is Java's generic identity boundary with the
-            // additional postcondition that its result is non-null.  Project
-            // the element as a value because lowering unwraps the optional
-            // carrier before an enclosing call consumes it.
-            return Some(value_shape_or_conservative(ctx, element_ty));
+            // Remove only the Java-null carrier. Rebuilding a value shape
+            // loses the loan, allocation and nested carrier contracts of the
+            // very reference this checked identity returns.
+            return Some(if let Some(facts) = ctx.facts {
+                crate::conversion_plan::optional_element_slot_shape_with_facts(
+                    &value_shape,
+                    element_ty,
+                    facts,
+                )
+            } else {
+                crate::conversion_plan::optional_element_slot_shape(&value_shape, element_ty)
+            });
         }
         return Some(value_shape);
+    }
+    if let crate::call_plan::CallTargetPlan::NativeCollectionMethod {
+        receiver, method, ..
+    } = &target
+        && matches!(
+            method,
+            crate::call_plan::NativeCollectionMethod::MapKeys
+                | crate::call_plan::NativeCollectionMethod::MapValues
+        )
+    {
+        let parent =
+            infer_expr_shape_with_context_and_external_index(receiver, env, ctx, external_index);
+        if parent.native_allocation.shared()
+            && crate::effective_facts::EffectiveFacts::new(facts)
+                .retained_native_map_kind(&parent.java_ty)
+                .is_some()
+        {
+            let map_ty = parent
+                .optional_element_type()
+                .unwrap_or_else(|| parent.java_ty.clone());
+            if let Some((key, value)) = crate::stdlib::java_map_type_args(&map_ty) {
+                let child =
+                    usize::from(*method == crate::call_plan::NativeCollectionMethod::MapValues);
+                let mut view = parent.clone();
+                view.java_ty = JavaType::Named {
+                    name: if child == 0 {
+                        "java.util.Set"
+                    } else {
+                        "java.util.Collection"
+                    }
+                    .into(),
+                    args: vec![if child == 0 {
+                        key.clone()
+                    } else {
+                        value.clone()
+                    }],
+                };
+                view.ownership = crate::slot_shape::OwnershipShape::Owned;
+                view.view = crate::slot_shape::ViewShape::Native;
+                view.nested_native_allocations = parent
+                    .nested_native_allocations
+                    .iter()
+                    .filter_map(|(path, placement)| {
+                        (path.first() == Some(&child)).then(|| {
+                            let mut mapped = path.clone();
+                            mapped[0] = 0;
+                            (mapped, *placement)
+                        })
+                    })
+                    .collect();
+                return Some(view);
+            }
+        }
     }
     if let crate::call_plan::CallTargetPlan::NativeCollectionMethod {
         receiver, method, ..
@@ -1945,7 +2072,38 @@ fn native_java_call_expr_shape(
                 ctx,
                 external_index,
             );
+            if let Some(representations) = ctx.representations()
+                && let Some(result) = crate::shape_projection::retained_native_queue_result_shape(
+                    &parent,
+                    *method,
+                    facts,
+                    representations,
+                )
+            {
+                return Some(result);
+            }
             shape.inherit_native_collection_child(&parent, child);
+            if parent.native_allocation.shared()
+                && crate::effective_facts::EffectiveFacts::new(facts)
+                    .retained_native_map_kind(&parent.java_ty)
+                    .is_some()
+                && matches!(
+                    method,
+                    crate::call_plan::NativeCollectionMethod::MapGet
+                        | crate::call_plan::NativeCollectionMethod::MapInsert
+                        | crate::call_plan::NativeCollectionMethod::MapPutIfAbsent
+                        | crate::call_plan::NativeCollectionMethod::MapRemove
+                )
+                && let Some(value) =
+                    RustSlotShape::native_child_type_at_path(&parent.java_ty, &[child])
+            {
+                shape.java_ty = if crate::types::optional_element_type(&value).is_some() {
+                    value
+                } else {
+                    crate::types::optional_java_type(value)
+                };
+                shape.ownership = crate::slot_shape::OwnershipShape::Owned;
+            }
             if shape.native_allocation.shared()
                 && matches!(
                     method,
@@ -1967,6 +2125,48 @@ fn native_java_call_expr_shape(
     }
     crate::call_plan::native_java_call_lowered_type(&target)
         .map(|lowered| lowered.into_slot_shape())
+}
+
+/// Native SAM invocation uses the instantiated carrier's result contract,
+/// not the resolver's nominal compatibility signature. In particular a
+/// nullable result is independent of a nullable callback receiver.
+pub(crate) fn native_functional_call_result_shape(
+    expr: &Expr,
+    env: &ShapeEnv,
+    ctx: ExprShapeContext<'_>,
+) -> Option<RustSlotShape> {
+    let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    else {
+        return None;
+    };
+    let facts = ctx.facts?;
+    let effective = crate::effective_facts::EffectiveFacts::new(facts);
+    // Reject ordinary calls before recursively inferring their receiver's
+    // physical shape. Otherwise every non-SAM call chain would duplicate
+    // recursive inference in the normal call planner below.
+    effective.native_functional_carrier(&infer_expr_type(receiver, env.type_env()))?;
+    let receiver = infer_expr_shape_with_context(receiver, env, ctx);
+    let ty = receiver.optional_element_type().unwrap_or(receiver.java_ty);
+    let sam = effective.native_functional_carrier(&ty)?;
+    if (name != sam.method() && *name != crate::parser::to_snake_case(sam.method()))
+        || args.len() != sam.inputs().len()
+    {
+        return None;
+    }
+    let JavaType::Named { args, .. } = ty else {
+        return None;
+    };
+    Some(
+        crate::shape_projection::storage_arg_shape_with_effective_facts(
+            sam.return_type(&args)?,
+            &effective,
+        ),
+    )
 }
 
 fn external_call_expr_shape(
@@ -2025,6 +2225,27 @@ fn borrowed_string_view_call_shape(
 
 pub fn shape_env_for_type(ty: &TypeDecl, signatures: &SignaturePlan) -> ShapeEnv {
     shape_env_for_type_with_fields(ty, signatures, true)
+}
+
+/// Shared lexical field frame for lowering and callable capability analysis.
+/// Flattened inherited slots retain the solver's physical carrier and name.
+pub(crate) fn seed_inherited_instance_fields(
+    env: &mut ShapeEnv,
+    ty: &TypeDecl,
+    signatures: &SignaturePlan,
+    program: &Program,
+) {
+    for inherited in crate::inherited_members::inherited_instance_fields_for_type(ty, program) {
+        let field = inherited.field();
+        let rust_name = inherited.rust_name();
+        let shape = signatures.required_field_shape(&ty.name, rust_name);
+        env.insert_type_field_shape(&ty.name, rust_name.to_string(), shape.clone());
+        env.insert_field_shape(rust_name.to_string(), shape.clone());
+        if rust_name == field.name {
+            env.insert_type_field_shape(&ty.name, field.name.clone(), shape.clone());
+            env.insert_field_shape(field.name.clone(), shape);
+        }
+    }
 }
 
 fn shape_env_for_type_with_fields(
@@ -2566,7 +2787,19 @@ fn insert_param_shapes(env: &mut ShapeEnv, source_params: &[Param], params: &[Pa
 }
 
 fn value_shape_or_conservative(ctx: ExprShapeContext<'_>, java_ty: JavaType) -> RustSlotShape {
-    project_java_value_shape_with_representations(ctx.representations, java_ty)
+    let mut shape = project_java_value_shape_with_representations(ctx.representations, java_ty);
+    if ctx.facts.is_some_and(|facts| {
+        crate::effective_facts::EffectiveFacts::new(facts)
+            .native_collection_requires_runtime_policy(&shape.java_ty)
+    }) {
+        shape.native_allocation =
+            shape
+                .native_allocation
+                .join(crate::storage_strategy::StoragePlacement::new(
+                    true, true, false,
+                ));
+    }
+    shape
 }
 
 fn infer_field_access_shape(
@@ -2599,6 +2832,14 @@ fn infer_field_access_shape(
     }
     let receiver_ty = infer_expr_type(receiver, env.type_env());
     let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+    // A bounded parameter's fields use the declaring class's solved ABI, not
+    // a fresh value shape inferred from the field's Java spelling. Retain the
+    // complete shape (nullable child, allocation, dispatch and ownership), and
+    // let the existing receiver-specialization path substitute bound arguments.
+    let receiver_ty = env
+        .type_env()
+        .type_parameter_receiver_bound(&receiver_ty)
+        .unwrap_or(receiver_ty);
     let name = match &receiver_ty {
         JavaType::Named { name, .. } | JavaType::Unknown(name) => name,
         _ => return None,
@@ -2765,6 +3006,88 @@ mod tests {
     use super::*;
     use crate::java_ir::PrimitiveType;
     use crate::slot_shape::{DispatchShape, OwnershipShape};
+
+    #[test]
+    fn null_ternary_preserves_the_other_branchs_allocation_and_dispatch() {
+        let mut native =
+            RustSlotShape::for_storage(crate::parser::parse_hierarchy_type("List<List<String>>"));
+        let placement = crate::storage_strategy::StoragePlacement::new(true, true, false);
+        native.require_native_allocation_at(&[], placement);
+        native.require_native_allocation_at(&[0], placement);
+        let mut nominal = RustSlotShape::for_storage(JavaType::Named {
+            name: "Node".into(),
+            args: Vec::new(),
+        });
+        nominal.dispatch = DispatchShape::ClosedEnum {
+            enum_name: "NodeValue".into(),
+        };
+        nominal.view = crate::slot_shape::ViewShape::EnumView;
+        for original in [native, nominal] {
+            let mut env = ShapeEnv::new();
+            env.insert_local_shape("value", original.clone());
+            for null_first in [false, true] {
+                let null = Expr::Literal(crate::java_ir::Literal::Null);
+                let value = Expr::Var("value".into());
+                let (then_expr, else_expr) = if null_first {
+                    (null, value)
+                } else {
+                    (value, null)
+                };
+                let conditional = Expr::Ternary {
+                    condition: Box::new(Expr::Literal(crate::java_ir::Literal::Bool(true))),
+                    then_expr: Box::new(then_expr),
+                    else_expr: Box::new(else_expr),
+                };
+                let mut expected = original.clone();
+                expected.java_ty = crate::types::optional_java_type(expected.java_ty);
+                assert_eq!(infer_expr_shape(&conditional, &env), expected);
+            }
+        }
+    }
+
+    #[test]
+    fn bound_field_access_reuses_specialized_declaring_slot_for_reads_and_writes() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class BoundFieldVertex {}
+class BoundFieldHolder<T> { T item; java.util.List<T> items; }
+class BoundFieldUse<E extends BoundFieldHolder<BoundFieldVertex>> {}
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(!resolved.diagnostics.has_errors());
+        let facts = FactSet::default();
+        let semantic =
+            crate::semantic_analysis::analyze_program(&resolved.program, &resolved.facts, &facts);
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let bound = crate::parser::parse_hierarchy_type("BoundFieldHolder<BoundFieldVertex>");
+        let mut env = ShapeEnv::new();
+        env.insert_type_param_bound("E", bound.clone());
+        env.insert_local("receiver", JavaType::Unknown("E".into()));
+        let ctx = ExprShapeContext::new(
+            Some(&signatures),
+            Some(&representations),
+            Some(&semantic.facts),
+        );
+        for field in ["item", "items"] {
+            let expected = signatures
+                .field_shape_for_receiver_type(&bound, field)
+                .unwrap();
+            let access = Expr::FieldAccess(Box::new(Expr::Var("receiver".into())), field.into());
+            assert_eq!(infer_expr_shape_with_context(&access, &env, ctx), expected);
+            assert_eq!(
+                infer_assignment_target_shape_with_context(&access, &env, ctx),
+                Some(expected),
+            );
+        }
+    }
 
     #[test]
     fn reference_array_assignment_results_use_owned_storage_not_indexed_reads() {

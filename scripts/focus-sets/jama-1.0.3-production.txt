@@ -1,0 +1,7 @@
+Jama/Matrix.java
+Jama/CholeskyDecomposition.java
+Jama/LUDecomposition.java
+Jama/QRDecomposition.java
+Jama/SingularValueDecomposition.java
+Jama/EigenvalueDecomposition.java
+Jama/util/Maths.java

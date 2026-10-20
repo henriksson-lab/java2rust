@@ -13,6 +13,9 @@ pub struct RustSlotShape {
     /// Internal optional wrappers do not consume a path component.
     pub nested_native_allocations: Vec<(Vec<usize>, crate::storage_strategy::StoragePlacement)>,
     pub ownership: OwnershipShape,
+    /// A specialized generic `&T` borrows T's canonical Java carrier, not
+    /// the object payload that a concrete source-type borrow can project.
+    pub borrow_target: BorrowTarget,
     pub view: ViewShape,
     pub dispatch: DispatchShape,
     pub mutability: MutabilityShape,
@@ -20,6 +23,13 @@ pub struct RustSlotShape {
     /// subtrees, not global type-variable names; lexical shadowing is resolved
     /// when the signature is planned.
     pub nested_collection_views: Vec<(JavaType, ViewShape)>,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BorrowTarget {
+    #[default]
+    Payload,
+    Carrier,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -175,6 +185,7 @@ impl RustSlotShape {
             nested_native_allocations: Default::default(),
             nested_collection_views: Default::default(),
             ownership: conservative_ownership(&java_ty),
+            borrow_target: BorrowTarget::Payload,
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,
             mutability: MutabilityShape::Immutable,
@@ -188,6 +199,7 @@ impl RustSlotShape {
             nested_native_allocations: Default::default(),
             nested_collection_views: Default::default(),
             ownership: conservative_ownership(&java_ty),
+            borrow_target: BorrowTarget::Payload,
             view: ViewShape::Native,
             dispatch: DispatchShape::Concrete,
             mutability: MutabilityShape::Mutable,

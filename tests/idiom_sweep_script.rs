@@ -4,6 +4,22 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+fn shared_runtime_registries_merge_and_execute_across_modules() {
+    let output = Command::new("python3")
+        .arg(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test_shared_runtime_registries.py"),
+        )
+        .output()
+        .expect("run shared runtime registry controls");
+    assert!(
+        output.status.success(),
+        "stdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
 fn gate_uses_the_terminal_outer_test_result_not_a_nested_result() {
     let gate =
         fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/gate.sh")).unwrap();
@@ -25,6 +41,20 @@ fn unique_temp_dir(name: &str) -> PathBuf {
     ));
     fs::create_dir_all(&dir).unwrap();
     dir
+}
+
+#[test]
+fn shared_support_alias_specializations_keep_methods_constants_and_bounds() {
+    let output = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/test_rust_item_aliases.py"))
+        .output()
+        .expect("run structural and actual-merger alias controls");
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]

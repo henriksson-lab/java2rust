@@ -526,6 +526,15 @@ pub struct MethodUsageFacts {
     assigned_call_results: Vec<AssignedCallResultUse>,
     native_collection_storage_flows:
         Vec<(NativeCollectionStorageSlot, NativeCollectionStorageSlot)>,
+    native_collection_view_backings: Vec<(
+        NativeCollectionStorageSlot,
+        NativeCollectionStorageSlot,
+        usize,
+    )>,
+    // Physical compatibility across a source reference transfer. Unlike a
+    // stored child, this does not itself demand a retained allocation.
+    native_collection_reference_transfers:
+        Vec<(NativeCollectionStorageSlot, NativeCollectionStorageSlot)>,
     nullable_collection_storage_flows:
         Vec<(NativeCollectionStorageSlot, NativeCollectionStorageSlot)>,
     native_collection_retention_requirements: Vec<NativeCollectionStorageSlot>,
@@ -1322,6 +1331,9 @@ pub(crate) struct NativeCollectionStorageSlot {
     pub root: NativeCollectionStorageRoot,
     pub path: Vec<usize>,
     pub ty: JavaType,
+    // Preserve the declaration behind a projected path. Legacy sequence-depth
+    // constraints address map values at child one, not map keys at child zero.
+    pub root_ty: JavaType,
 }
 
 impl MethodUsageFacts {
@@ -1339,6 +1351,22 @@ impl MethodUsageFacts {
         &self,
     ) -> &[(NativeCollectionStorageSlot, NativeCollectionStorageSlot)] {
         &self.native_collection_storage_flows
+    }
+
+    pub(crate) fn native_collection_view_backings(
+        &self,
+    ) -> &[(
+        NativeCollectionStorageSlot,
+        NativeCollectionStorageSlot,
+        usize,
+    )] {
+        &self.native_collection_view_backings
+    }
+
+    pub(crate) fn native_collection_reference_transfers(
+        &self,
+    ) -> &[(NativeCollectionStorageSlot, NativeCollectionStorageSlot)] {
+        &self.native_collection_reference_transfers
     }
 }
 
@@ -2690,9 +2718,6 @@ fn collect_source_callback_arguments(
     context: &mut CallGraphBuildContext<'_>,
     facts: &FactSet,
 ) {
-    let Some(callbacks) = context.source_callbacks else {
-        return;
-    };
     let Some((owner, method)) = crate::java_signature::resolved_source_method_decl(
         context.program,
         &context.current_type,
@@ -2701,10 +2726,15 @@ fn collect_source_callback_arguments(
         return;
     };
     for (index, (argument, param)) in args.iter().zip(&method.params).enumerate() {
-        if !callbacks.is_inline(owner, method, index) {
+        let ty = call.arg_target_types.get(index).unwrap_or(&param.ty);
+        let source_sam = context.source_symbols.source_functional_interface_call(ty);
+        if source_sam.is_none()
+            && !context
+                .source_callbacks
+                .is_some_and(|callbacks| callbacks.is_inline(owner, method, index))
+        {
             continue;
         }
-        let ty = call.arg_target_types.get(index).unwrap_or(&param.ty);
         let JavaType::Named {
             name,
             args: type_args,
@@ -2713,15 +2743,28 @@ fn collect_source_callback_arguments(
             continue;
         };
         let canonical = crate::stdlib::canonical_external_receiver_type_key(name);
-        let Some(shape) = crate::stdlib::functional_interface_shape(&canonical) else {
-            continue;
-        };
-        let Some(inputs) = shape.input_types(type_args) else {
-            continue;
-        };
-        let formal = CallableKey::CallbackParameter {
-            owner: Box::new(CallableKey::source_method_for_type(owner, method)),
-            index,
+        let shape = crate::stdlib::functional_interface_shape(&canonical);
+        let (formal, inputs, body_edge) = if let Some(source_sam) = &source_sam {
+            (
+                resolved_method_call_graph_key(source_sam, context),
+                source_sam.arg_target_types.clone(),
+                CallGraphEdgeKind::CallbackContractEquality,
+            )
+        } else {
+            let Some(inputs) = shape
+                .as_ref()
+                .and_then(|shape| shape.input_types(type_args))
+            else {
+                continue;
+            };
+            (
+                CallableKey::CallbackParameter {
+                    owner: Box::new(CallableKey::source_method_for_type(owner, method)),
+                    index,
+                },
+                inputs,
+                CallGraphEdgeKind::LambdaBody,
+            )
         };
         let contract = context.child_for(formal.clone());
         match argument {
@@ -2744,13 +2787,7 @@ fn collect_source_callback_arguments(
                     continue;
                 }
                 let lambda = context.next_lambda();
-                add_call_graph_edge(
-                    graph,
-                    &contract,
-                    lambda.clone(),
-                    CallGraphEdgeKind::LambdaBody,
-                    facts,
-                );
+                add_call_graph_edge(graph, &contract, lambda.clone(), body_edge, facts);
                 let mut child = context.child_for(lambda.clone());
                 let mut typed_params = Vec::new();
                 for (param, input) in params.iter().zip(inputs) {
@@ -2794,6 +2831,9 @@ fn collect_source_callback_arguments(
                         graph,
                         &contract,
                         resolved_method_call_graph_key(&call, context),
+                        // The reference adapter, not the referenced method,
+                        // implements the SAM ABI. An infallible method can
+                        // therefore remain infallible under a fallible SAM.
                         CallGraphEdgeKind::DirectMethodCall,
                         facts,
                     );
@@ -2807,9 +2847,11 @@ fn collect_source_callback_arguments(
                 // ABI regardless of which lambda/source object produced it.
                 // Link its invocation effect to the formal, not to argument
                 // evaluation: unused and lazy callbacks must stay lazy.
-                if crate::effective_facts::EffectiveFacts::new(facts)
-                    .native_functional_carrier(ty)
-                    .is_some()
+                if source_sam.is_none()
+                    && let Some(shape) = shape.as_ref()
+                    && crate::effective_facts::EffectiveFacts::new(facts)
+                        .native_functional_carrier(ty)
+                        .is_some()
                 {
                     add_call_graph_edge(
                         graph,
@@ -3242,6 +3284,12 @@ fn call_graph_method_target(
                 anonymous_super_method_key(base, name, args, resolved.as_ref(), context)
         {
             return (target, CallGraphEdgeKind::DirectMethodCall);
+        }
+        if let Some(resolved) = resolved {
+            return (
+                resolved_method_call_graph_key(resolved, context),
+                CallGraphEdgeKind::DirectMethodCall,
+            );
         }
         return (
             CallableKey::external_method(Some("super"), name, args.len()),
@@ -3837,6 +3885,7 @@ fn analyze_stmt(
                             root: NativeCollectionStorageRoot::Binding(binding.clone()),
                             path: vec![],
                             ty: ty.clone(),
+                            root_ty: ty.clone(),
                         },
                         facts,
                         current_type,
@@ -3890,20 +3939,6 @@ fn analyze_stmt(
                         type_env,
                         semantic_facts,
                     );
-                    if let Some(binding) = binding {
-                        record_native_factory_storage(
-                            initializer,
-                            NativeCollectionStorageSlot {
-                                root: NativeCollectionStorageRoot::Binding(binding.clone()),
-                                path: vec![],
-                                ty: ty.clone(),
-                            },
-                            facts,
-                            current_type,
-                            &storage_types,
-                            semantic_facts,
-                        );
-                    }
                     if let Some(binding) = binding
                         && let Some(source) = native_collection_storage_slot(
                             initializer,
@@ -3920,13 +3955,18 @@ fn analyze_stmt(
                                 root: NativeCollectionStorageRoot::Binding(binding.clone()),
                                 path: vec![],
                                 ty: ty.clone(),
+                                root_ty: ty.clone(),
                             },
                         ));
                     }
                 }
-                if let Some(actual_type) =
-                    assigned_subtype_local_actual_type(initializer, ty, type_env, semantic_facts)
-                {
+                if let Some(actual_type) = assigned_subtype_local_actual_type(
+                    initializer,
+                    ty,
+                    type_env,
+                    semantic_facts,
+                    facts,
+                ) {
                     facts.record_declared_binding_use(
                         source_name,
                         binding.as_ref(),
@@ -4034,22 +4074,6 @@ fn analyze_stmt(
                     type_env,
                     semantic_facts,
                 );
-                if let Some(destination) = native_collection_storage_slot(
-                    target,
-                    facts,
-                    current_type,
-                    &storage_types,
-                    semantic_facts,
-                ) {
-                    record_native_factory_storage(
-                        value,
-                        destination,
-                        facts,
-                        current_type,
-                        &storage_types,
-                        semantic_facts,
-                    );
-                }
                 if native_storage_value_type(
                     &crate::types::infer_expr_type(value, &storage_types),
                     &storage_types,
@@ -4102,6 +4126,7 @@ fn analyze_stmt(
                             field_ty,
                             type_env,
                             semantic_facts,
+                            facts,
                         )
                     {
                         facts.field_uses.push(FieldUse::AssignedSubtypeToField {
@@ -4127,6 +4152,7 @@ fn analyze_stmt(
                             target_binding.java_ty(),
                             type_env,
                             semantic_facts,
+                            facts,
                         )
                     {
                         record_use(
@@ -4206,6 +4232,7 @@ fn analyze_stmt(
                         field_ty,
                         type_env,
                         semantic_facts,
+                        facts,
                     )
                 {
                     facts.field_uses.push(FieldUse::AssignedSubtypeToField {
@@ -4252,6 +4279,7 @@ fn analyze_stmt(
                         root: NativeCollectionStorageRoot::Return,
                         path: vec![],
                         ty: target.clone(),
+                        root_ty: target.clone(),
                     },
                     facts,
                     current_type,
@@ -4267,18 +4295,6 @@ fn analyze_stmt(
             {
                 let storage_types =
                     native_storage_type_env(&[expr], facts, current_type, type_env, semantic_facts);
-                record_native_factory_storage(
-                    expr,
-                    NativeCollectionStorageSlot {
-                        root: NativeCollectionStorageRoot::Return,
-                        path: vec![],
-                        ty: ty.clone(),
-                    },
-                    facts,
-                    current_type,
-                    &storage_types,
-                    semantic_facts,
-                );
                 if let Some(source) = native_collection_storage_slot(
                     expr,
                     facts,
@@ -4293,6 +4309,7 @@ fn analyze_stmt(
                             root: NativeCollectionStorageRoot::Return,
                             path: vec![],
                             ty: ty.clone(),
+                            root_ty: ty.clone(),
                         },
                     ));
                 }
@@ -4618,6 +4635,39 @@ fn analyze_stmt(
             binding,
             ..
         } => {
+            let storage_types =
+                native_storage_type_env(&[iterable], facts, current_type, type_env, semantic_facts);
+            let source_ty = native_storage_expr_type(
+                iterable,
+                facts,
+                current_type,
+                &storage_types,
+                semantic_facts,
+            );
+            if native_storage_value_type(&source_ty, &storage_types, semantic_facts)
+                && crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+                    .retained_native_collection_kind(&source_ty)
+                    .is_some()
+                && let Some(source) = native_collection_storage_slot(
+                    iterable,
+                    facts,
+                    current_type,
+                    &storage_types,
+                    semantic_facts,
+                )
+                && matches!(
+                    source.root,
+                    NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { .. })
+                )
+                && !facts
+                    .native_collection_retention_requirements
+                    .contains(&source)
+            {
+                // Java's cursor owns a reference to stored collection state;
+                // a callback can reenter the owner and change that state.
+                // Retain the allocation, never a field loan or snapshot copy.
+                facts.native_collection_retention_requirements.push(source);
+            }
             if let Some(binding) = binding
                 && let Expr::Call {
                     receiver: Some(map),
@@ -4690,6 +4740,7 @@ fn analyze_stmt(
                             root: NativeCollectionStorageRoot::Binding(binding.clone()),
                             path: vec![],
                             ty: var_type.clone(),
+                            root_ty: var_type.clone(),
                         },
                     ));
                 }
@@ -4878,6 +4929,16 @@ fn analyze_stmt(
             args,
             resolved,
         } => {
+            if let Some(call) = resolved {
+                record_constructor_argument_value_domains(
+                    args,
+                    call,
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+            }
             let policy = constructor_invocation_boundary_policy(*kind);
             facts.constructor_call_sites.push(ConstructorCallSiteUse {
                 name: "constructor".to_string(),
@@ -4887,6 +4948,9 @@ fn analyze_stmt(
                     args,
                     source_return_nullability,
                     semantic_facts,
+                    facts,
+                    current_type,
+                    type_env,
                 ),
                 argument_bindings: call_argument_bindings(args, facts),
                 argument_self_fields: call_argument_self_fields(args, facts, field_names),
@@ -5114,8 +5178,16 @@ fn assigned_subtype_local_actual_type(
     target_ty: &JavaType,
     type_env: &TypeEnv,
     semantic_facts: &UsageAnalysisContext<'_>,
+    facts: &MethodUsageFacts,
 ) -> Option<JavaType> {
-    let actual_ty = crate::types::infer_expr_type(value, type_env);
+    // The usage TypeEnv contains declaration binders, not the evolving local
+    // binding table. Reuse its lexical binding facts for local upcasts just
+    // as source argument and return boundaries already do.
+    let actual_ty = match value {
+        Expr::Var(name) => agreed_binding_java_type(facts, name)
+            .unwrap_or_else(|| crate::types::infer_expr_type(value, type_env)),
+        _ => crate::types::infer_expr_type(value, type_env),
+    };
     assigned_subtype_actual_type(&actual_ty, target_ty, type_env, semantic_facts)
 }
 
@@ -5362,14 +5434,10 @@ fn native_storage_expr_type(
         },
         Expr::FieldAccess(receiver, field) => {
             let ty = native_storage_expr_type(receiver, facts, owner, types, context);
-            let ty = crate::types::optional_element_type(&ty).unwrap_or(ty);
-            usage_java_type_name(&ty)
-                .and_then(|owner| {
-                    context
-                        .source_symbols
-                        .as_ref()?
-                        .source_field_identity(owner, field)
-                })
+            context
+                .source_symbols
+                .as_ref()
+                .and_then(|symbols| symbols.source_field_identity_for_receiver(&ty, field))
                 .map(|(_, _, ty)| ty)
                 .unwrap_or_else(|| crate::types::infer_expr_type(expr, types))
         }
@@ -5440,6 +5508,38 @@ fn native_storage_value_type(
             }))
 }
 
+fn record_native_comparison_retention(
+    left: &Expr,
+    right: &Expr,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) {
+    if matches!(left, Expr::Literal(crate::java_ir::Literal::Null))
+        || matches!(right, Expr::Literal(crate::java_ir::Literal::Null))
+    {
+        return; // A null test observes presence, not allocation identity.
+    }
+    for operand in [left, right] {
+        let ty = native_storage_expr_type(operand, facts, owner, types, context);
+        if crate::effective_facts::EffectiveFacts::new(context.facts)
+            .retained_native_container_kind(&ty)
+            .is_none()
+        {
+            continue;
+        }
+        let storage_types = native_storage_type_env(&[operand], facts, owner, types, context);
+        if let Some(slot) =
+            native_collection_storage_slot(operand, facts, owner, &storage_types, context)
+        {
+            // Comparison requires observable allocations, but proves neither
+            // aliasing nor equal element domains between the two operands.
+            facts.native_collection_retention_requirements.push(slot);
+        }
+    }
+}
+
 fn native_storage_method(
     receiver: &Expr,
     name: &str,
@@ -5505,13 +5605,99 @@ fn has_projectable_native_value_domain(expr: &Expr) -> bool {
         Expr::Var(_)
             | Expr::FieldAccess(..)
             | Expr::Lambda { .. }
-            | Expr::Call {
-                receiver: Some(_),
-                ..
-            }
+            | Expr::Call { .. }
+            | Expr::New { .. }
             | Expr::ArrayAccess(..)
             | Expr::Cast { .. }
+            | Expr::Ternary { .. }
     )
+}
+
+/// A successful reference cast preserves Java null, but it does not equate
+/// ownership, dispatch, or native allocation carriers. Feed its value domain
+/// into the existing directional nullable-storage graph, including casts in
+/// conditional branches. Primitive casts/unboxing are not reference copies.
+fn record_reference_cast_value_domain(
+    expr: &Expr,
+    destination: &NativeCollectionStorageSlot,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) {
+    match expr {
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => {
+            for branch in [then_expr, else_expr] {
+                record_reference_cast_value_domain(
+                    branch,
+                    destination,
+                    facts,
+                    owner,
+                    types,
+                    context,
+                );
+            }
+        }
+        Expr::Cast { ty, expr: source }
+            if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) =>
+        {
+            let mut source = source.as_ref();
+            while let Expr::Cast { ty, expr } = source {
+                if matches!(ty, JavaType::Primitive(_) | JavaType::Void) {
+                    return;
+                }
+                source = expr;
+            }
+            let types = native_storage_type_env(&[source], facts, owner, types, context);
+            if !matches!(
+                native_storage_expr_type(source, facts, owner, &types, context),
+                JavaType::Primitive(_) | JavaType::Void
+            ) && let Some(source) =
+                native_collection_storage_slot(source, facts, owner, &types, context)
+            {
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source, destination.clone()));
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Allocation/value contracts are the same for `new`, `this(...)` and
+/// `super(...)`. Resolve their destination slots once from constructor identity.
+fn record_constructor_argument_value_domains(
+    args: &[Expr],
+    call: &ResolvedConstructor,
+    facts: &mut MethodUsageFacts,
+    owner: &str,
+    types: &TypeEnv,
+    context: &UsageAnalysisContext<'_>,
+) {
+    for (index, (arg, param)) in args.iter().zip(&call.params).enumerate() {
+        if has_projectable_native_value_domain(arg) {
+            record_native_value_domain_storage(
+                arg,
+                NativeCollectionStorageSlot {
+                    root: NativeCollectionStorageRoot::ConstructorArgument {
+                        call: call.clone(),
+                        index,
+                    },
+                    path: vec![],
+                    ty: param.ty.clone(),
+                    root_ty: param.ty.clone(),
+                },
+                facts,
+                owner,
+                types,
+                context,
+            );
+        }
+    }
 }
 
 fn record_native_value_domain_storage(
@@ -5522,6 +5708,313 @@ fn record_native_value_domain_storage(
     types: &TypeEnv,
     context: &UsageAnalysisContext<'_>,
 ) {
+    if let Expr::New { ty, body: None, .. } = expr
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .native_collection_requires_runtime_policy(ty)
+        && native_storage_value_type(&destination.ty, types, context)
+        && !facts
+            .native_collection_retention_requirements
+            .contains(&destination)
+    {
+        // The factory's policy survives even a Collection-typed destination.
+        // Seed the existing unary storage graph, not a new variable-name rule.
+        facts
+            .native_collection_retention_requirements
+            .push(destination.clone());
+    }
+    if let Some(value) =
+        crate::call_plan::checked_identity_source_argument(expr, types, context.facts)
+        && native_storage_value_type(&destination.ty, types, context)
+    {
+        let storage_types = native_storage_type_env(&[value], facts, owner, types, context);
+        if let Some(source) =
+            native_collection_storage_slot(value, facts, owner, &storage_types, context)
+        {
+            // A stored/returned checked identity is an alias, never a copy.
+            // Do not connect outer nullable domains: success proves non-null.
+            facts
+                .native_collection_retention_requirements
+                .push(source.clone());
+            facts
+                .native_collection_retention_requirements
+                .push(destination.clone());
+            facts
+                .native_collection_storage_flows
+                .push((source.clone(), destination.clone()));
+            for index in 0..2 {
+                if let (Some(source_ty), Some(target_ty)) = (
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &source.ty,
+                        &[index],
+                    ),
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &destination.ty,
+                        &[index],
+                    ),
+                ) {
+                    let mut child = source.clone();
+                    child.path.push(index);
+                    child.ty = source_ty;
+                    let mut target = destination.clone();
+                    target.path.push(index);
+                    target.ty = target_ty;
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((child.clone(), target.clone()));
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((target, child));
+                }
+            }
+        }
+        return;
+    }
+    if let Expr::New {
+        ty,
+        args,
+        body: None,
+        ..
+    } = expr
+        && let [source] = args.as_slice()
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .retained_native_collection_kind(ty)
+            .is_some()
+    {
+        let storage_types = native_storage_type_env(&[source], facts, owner, types, context);
+        if matches!(
+            crate::call_plan::plan_native_collection_constructor_for_args(
+                ty,
+                args,
+                &storage_types,
+                context.facts,
+            ),
+            Some(crate::call_plan::NativeCollectionNewTarget::FromSource { .. })
+        ) && let Some(mut source) =
+            native_collection_storage_slot(source, facts, owner, &storage_types, context)
+            && let Some(child) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+            && crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0])
+                .is_some()
+        {
+            let mut target = destination;
+            source.path.push(0);
+            source.ty = child.clone();
+            target.path.push(0);
+            target.ty = child.clone();
+            // A copy preserves child values/references, never outer identity
+            // or writes from the new collection back into its input.
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), target.clone()));
+            if native_storage_value_type(&child, &storage_types, context) {
+                facts.native_collection_storage_flows.push((source, target));
+            }
+            return;
+        }
+    }
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && matches!(&destination.ty, JavaType::Named { name, args }
+            if args.len() == 1 && matches!(crate::stdlib::canonical_external_receiver_type_key(name).as_str(), "ListIterator" | "java.util.ListIterator"))
+    {
+        let storage_types = native_storage_type_env(&[receiver], facts, owner, types, context);
+        if native_storage_method(receiver, name, args, &storage_types, context)
+            == Some(crate::call_plan::NativeCollectionMethod::ListIterator)
+            && let Some(mut source) =
+                native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+            && let Some(child) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+        {
+            facts
+                .native_collection_retention_requirements
+                .push(source.clone());
+            source.path.push(0);
+            source.ty = child.clone();
+            let mut cursor = destination;
+            cursor.path.push(0);
+            cursor.ty = child.clone();
+            // next/previous read this storage; set/add write the same Java
+            // references back. Only child domains join, never cursor roots.
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), cursor.clone()));
+            facts
+                .nullable_collection_storage_flows
+                .push((cursor.clone(), source.clone()));
+            if native_storage_value_type(&child, &storage_types, context) {
+                facts.native_collection_storage_flows.push((source, cursor));
+            }
+            return;
+        }
+    }
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+    {
+        let storage_types = native_storage_type_env(&[receiver], facts, owner, types, context);
+        let receiver_ty = native_storage_expr_type(receiver, facts, owner, &storage_types, context);
+        let effective = crate::effective_facts::EffectiveFacts::new(context.facts);
+        let applied_cursor = effective
+            .native_functional_carrier(&receiver_ty)
+            .filter(|sam| sam.method() == name && sam.inputs().len() == args.len())
+            .and_then(|sam| sam.returns())
+            .and_then(|result| match result {
+                crate::stdlib::FunctionalTypeSource::AppliedUnary { argument, .. } => {
+                    Some(argument)
+                }
+                _ => None,
+            });
+        let cursor_child = applied_cursor.or_else(|| {
+            (native_storage_method(receiver, name, args, &storage_types, context)
+                == Some(crate::call_plan::NativeCollectionMethod::Iterator))
+            .then_some(0)
+        });
+        if effective
+            .native_cursor_element_type(&destination.ty)
+            .is_some()
+            && let Some(child_index) = cursor_child
+            && let Some(mut source) =
+                native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+            && let Some(element) = crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                &source.ty,
+                &[child_index],
+            )
+            && let Some(target_element) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0])
+        {
+            // Read the producer's qualified elements without equating the
+            // cursor facade's root with the backing collection allocation.
+            source.path.push(child_index);
+            source.ty = element;
+            let mut target = destination;
+            target.path.push(0);
+            target.ty = target_element;
+            facts
+                .nullable_collection_storage_flows
+                .push((source, target));
+            return;
+        }
+        if args.is_empty()
+            && effective.retained_native_map_kind(&receiver_ty).is_some()
+            && effective
+                .retained_native_collection_kind(&destination.ty)
+                .is_some()
+            && native_storage_method_for_type(
+                receiver,
+                name,
+                args,
+                &receiver_ty,
+                &storage_types,
+                context,
+            )
+            .is_some_and(|method| {
+                matches!(
+                    method,
+                    crate::call_plan::NativeCollectionMethod::MapKeys
+                        | crate::call_plan::NativeCollectionMethod::MapValues
+                )
+            })
+            && let Some(source) =
+                native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+        {
+            let child = if matches!(name.as_str(), "keySet" | "key_set") {
+                0
+            } else {
+                1
+            };
+            // The view owns a backing reference, but is a distinct object.
+            // Root placement propagates separately from the key-only child
+            // mapping; map values must never become view element constraints.
+            facts.native_collection_view_backings.push((
+                source.clone(),
+                destination.clone(),
+                child,
+            ));
+            if let (Some(key), Some(element)) = (
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[child]),
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0]),
+            ) {
+                let mut key_slot = source;
+                key_slot.path.push(child);
+                key_slot.ty = key.clone();
+                let mut view_slot = destination;
+                view_slot.path.push(0);
+                view_slot.ty = element;
+                // Map keys have a qualified nullability domain, unlike the
+                // legacy sequence-element domain (which denotes map values).
+                // The view-backing relation transfers that domain explicitly.
+                if native_storage_value_type(&key, &storage_types, context) {
+                    facts
+                        .native_collection_storage_flows
+                        .push((key_slot, view_slot));
+                }
+            }
+            return;
+        }
+    }
+    if matches!(expr, Expr::Call { .. })
+        && (native_storage_value_type(&destination.ty, types, context)
+            || crate::effective_facts::EffectiveFacts::new(context.facts)
+                .native_iterable_element_type(&destination.ty)
+                .is_some())
+    {
+        // Every value-transfer boundary, including inline method/constructor
+        // arguments, must establish the same producer's storage contract.
+        // Keep declaration/store/return handling here too, avoiding duplicate
+        // constraints and a separate factory rule for each consumer kind.
+        let storage_types = native_storage_type_env(&[expr], facts, owner, types, context);
+        record_native_factory_storage(
+            expr,
+            destination.clone(),
+            facts,
+            owner,
+            &storage_types,
+            context,
+        );
+    }
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && name == "clone"
+        && args.is_empty()
+    {
+        let storage_types = native_storage_type_env(&[receiver], facts, owner, types, context);
+        let receiver_ty = native_storage_expr_type(receiver, facts, owner, &storage_types, context);
+        let receiver_ty = crate::types::optional_element_type(&receiver_ty).unwrap_or(receiver_ty);
+        if matches!(receiver_ty, JavaType::Array(_))
+            && let Some(mut source) =
+                native_collection_storage_slot(receiver, facts, owner, &storage_types, context)
+            && let Some(element) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+            && let Some(target_element) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0])
+        {
+            let mut target = destination;
+            source.path.push(0);
+            source.ty = element.clone();
+            target.path.push(0);
+            target.ty = target_element;
+            // Java clone creates a distinct outer array but retains every
+            // child reference. Never join the two outer allocation roots.
+            facts
+                .nullable_collection_storage_flows
+                .push((source.clone(), target.clone()));
+            if native_storage_value_type(&element, &storage_types, context) {
+                facts.native_collection_storage_flows.push((source, target));
+            }
+            return;
+        }
+    }
     if matches!(expr, Expr::Call { name, args, .. } if name == "collect" && args.len() == 1)
         && native_storage_value_type(&destination.ty, types, context)
     {
@@ -5602,6 +6095,83 @@ fn record_native_value_domain_storage(
             return;
         }
     }
+    // Specialized projections above already record the same root value flow
+    // alongside their child/view relationships. Record ordinary reference
+    // casts only after those handlers to keep one canonical edge per flow.
+    record_reference_cast_value_domain(expr, &destination, facts, owner, types, context);
+    if !matches!(expr, Expr::Lambda { .. } | Expr::MethodReference { .. })
+        && let Some(sam) = crate::effective_facts::EffectiveFacts::new(context.facts)
+            .native_functional_carrier(&destination.ty)
+        && let Some(symbols) = &context.source_symbols
+    {
+        let storage_types = native_storage_type_env(&[expr], facts, owner, types, context);
+        let actual = native_storage_expr_type(expr, facts, owner, &storage_types, context);
+        if usage_java_type_name(&actual).is_some_and(|name| {
+            crate::call_plan::java_type_owner_is_parsed_source(name, &storage_types, context.facts)
+        }) {
+            if let Expr::Var(name) = expr {
+                // The native facade retains this source receiver after the
+                // conversion returns. Reuse canonical escaping-storage facts
+                // so a parameter carries its Java handle, not &payload.
+                record_use(facts, name, BindingUse::RetainedByCall);
+            }
+            // A source implementation's selected SAM method owns the produced
+            // value contract. Keep its return qualifiers when creating a
+            // native facade instead of using only the nominal implements args.
+            let mut receiver_types = storage_types.clone();
+            receiver_types.insert_local("__java_usage_sam_receiver", actual);
+            let target_ty = crate::types::optional_element_type(&destination.ty)
+                .unwrap_or_else(|| destination.ty.clone());
+            if let JavaType::Named { args, .. } = target_ty
+                && let Some(inputs) = sam.input_types(&args)
+                && let Some(call) = crate::resolve::resolve_source_method_reference_with_input_types(
+                    "__java_usage_sam_receiver",
+                    sam.method(),
+                    &inputs,
+                    owner,
+                    symbols,
+                    &receiver_types,
+                    context.facts,
+                )
+                && let Some(result) = sam.returns()
+                && let Some(index) = result.type_argument_index()
+                && let Some(target_child) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &destination.ty,
+                        &[index],
+                    )
+            {
+                let path = if matches!(
+                    result,
+                    crate::stdlib::FunctionalTypeSource::AppliedUnary { .. }
+                ) {
+                    vec![0]
+                } else {
+                    vec![]
+                };
+                if let Some(ty) = crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                    &call.return_type,
+                    &path,
+                ) {
+                    let source = NativeCollectionStorageSlot {
+                        root: NativeCollectionStorageRoot::Origin(
+                            CollectionArgumentOrigin::MethodReturn(call.clone()),
+                        ),
+                        path,
+                        ty,
+                        root_ty: call.return_type.clone(),
+                    };
+                    let mut target = destination.clone();
+                    target.path.push(index);
+                    target.ty = target_child;
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((source, target));
+                    return;
+                }
+            }
+        }
+    }
     let Expr::Lambda { body, params } = expr else {
         if !has_projectable_native_value_domain(expr) {
             return;
@@ -5611,6 +6181,12 @@ fn record_native_value_domain_storage(
             && effective
                 .native_iterable_element_type(&destination.ty)
                 .is_none()
+            && effective
+                .native_functional_carrier(&destination.ty)
+                .is_none()
+            && effective
+                .native_cursor_element_type(&destination.ty)
+                .is_none()
         {
             return;
         }
@@ -5618,6 +6194,61 @@ fn record_native_value_domain_storage(
         if let Some(mut source) =
             native_collection_storage_slot(expr, facts, owner, &storage_types, context)
         {
+            if effective.native_cursor_element_type(&source.ty).is_some()
+                && effective
+                    .native_cursor_element_type(&destination.ty)
+                    .is_some()
+                && let Some(element) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+                && let Some(target_element) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &destination.ty,
+                        &[0],
+                    )
+            {
+                source.path.push(0);
+                source.ty = element;
+                let mut target = destination;
+                target.path.push(0);
+                target.ty = target_element;
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source, target));
+                return;
+            }
+            if let Some(source_functional) = effective.native_functional_carrier(&source.ty)
+                && let Some(target_functional) =
+                    effective.native_functional_carrier(&destination.ty)
+                && let Some(crate::stdlib::FunctionalTypeSource::TypeArgument(source_index)) =
+                    source_functional.returns()
+                && let Some(crate::stdlib::FunctionalTypeSource::TypeArgument(target_index)) =
+                    target_functional.returns()
+                && let Some(source_result) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &source.ty,
+                        &[source_index],
+                    )
+                && let Some(target_result) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(
+                        &destination.ty,
+                        &[target_index],
+                    )
+            {
+                // Copying a callback preserves its produced value domain,
+                // including through requireNonNull. Only the callback itself
+                // is checked there: nullable results remain nullable. Project
+                // the result child rather than aliasing outer allocations or
+                // transferring the nullable callback binding into its field.
+                let mut target = destination;
+                source.path.push(source_index);
+                source.ty = source_result;
+                target.path.push(target_index);
+                target.ty = target_result;
+                facts
+                    .nullable_collection_storage_flows
+                    .push((source, target));
+                return;
+            }
             let child = |ty: &JavaType| {
                 crate::types::sequence_element_type(ty)
                     .or_else(|| effective.native_iterable_element_type(ty))
@@ -5645,29 +6276,91 @@ fn record_native_value_domain_storage(
                 return;
             }
             if source.path.is_empty() {
-                // An array field retains the same allocation as a
-                // local alias. Preserve that edge just as for structural
-                // children; do not force unrelated local-only values or
-                // collection value-domain transfers shared.
-                if matches!(
-                    crate::types::optional_element_type(&source.ty)
-                        .unwrap_or_else(|| source.ty.clone()),
-                    JavaType::Array(_)
-                ) && (matches!(
-                    source.root,
-                    NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { .. })
-                ) || matches!(
-                    destination.root,
-                    NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { .. })
-                )) {
+                // Native container references cross source field and callable boundaries
+                // without materialization. Keep the whole producer/consumer
+                // edge, including a returned array forwarded into a call.
+                // Unrelated local-only value transfers still do not imply
+                // outer allocation retention. Fresh-copy constructors are
+                // handled separately and never alias these outer roots.
+                if native_storage_value_type(&source.ty, &storage_types, context)
+                    && native_storage_value_type(&destination.ty, &storage_types, context)
+                    && [&source.root, &destination.root].iter().any(|root| {
+                        matches!(
+                            root,
+                            NativeCollectionStorageRoot::Origin(
+                                CollectionArgumentOrigin::Field { .. }
+                                    | CollectionArgumentOrigin::MethodReturn(_)
+                            ) | NativeCollectionStorageRoot::MethodArgument { .. }
+                                | NativeCollectionStorageRoot::ConstructorArgument { .. }
+                                | NativeCollectionStorageRoot::Return
+                        ) || matches!(root, NativeCollectionStorageRoot::Binding(binding)
+                            if binding.kind() == crate::binding_id::BindingKind::Param)
+                    })
+                {
+                    // Presence is a directional value contract, distinct
+                    // from the shared allocation's descendant storage domain.
+                    // In particular a nullable getter passed to a source
+                    // parameter must remain nullable inside the callee.
                     facts
-                        .native_collection_storage_flows
-                        .push((source, destination));
+                        .nullable_collection_storage_flows
+                        .push((source.clone(), destination.clone()));
+                    if matches!(
+                        crate::types::optional_element_type(&source.ty)
+                            .unwrap_or_else(|| source.ty.clone()),
+                        JavaType::Array(_)
+                    ) {
+                        facts
+                            .native_collection_storage_flows
+                            .push((source, destination));
+                    } else {
+                        let stored_alias = matches!(
+                            source.root,
+                            NativeCollectionStorageRoot::Origin(
+                                CollectionArgumentOrigin::Field { .. }
+                            )
+                        ) || matches!(
+                            destination.root,
+                            NativeCollectionStorageRoot::Origin(
+                                CollectionArgumentOrigin::Field { .. }
+                            )
+                        );
+                        let borrowed_return = matches!(
+                            destination.root,
+                            NativeCollectionStorageRoot::Return
+                        ) && matches!(&source.root, NativeCollectionStorageRoot::Binding(binding)
+                                if binding.kind() == crate::binding_id::BindingKind::Param);
+                        if (stored_alias || borrowed_return)
+                            && !facts
+                                .native_collection_retention_requirements
+                                .contains(&source)
+                        {
+                            // Stored/caller-owned references can outlive this
+                            // transfer. A fresh unaliased local may still move
+                            // its value carrier when returned; do not retain
+                            // every unique result merely because it is named.
+                            facts
+                                .native_collection_retention_requirements
+                                .push(source.clone());
+                        }
+                        facts
+                            .native_collection_reference_transfers
+                            .push((source, destination));
+                    }
                 }
                 return;
             }
             // Reading a structural child transfers its value domain to the
             // destination. This is directional, not allocation aliasing.
+            if native_storage_value_type(&source.ty, &storage_types, context)
+                && native_storage_value_type(&destination.ty, &storage_types, context)
+            {
+                // A retrieved native container is itself a reference, even
+                // when the outer is a value carrier. Retain the child, not
+                // the enclosing collection/array allocation.
+                facts
+                    .native_collection_storage_flows
+                    .push((source.clone(), destination.clone()));
+            }
             facts
                 .nullable_collection_storage_flows
                 .push((source, destination));
@@ -5740,7 +6433,32 @@ fn record_native_value_domain_storage(
         {
             facts
                 .nullable_collection_storage_flows
-                .push((source, target.clone()));
+                .push((source.clone(), target.clone()));
+            // A native Iterable facade exposes the returned collection's
+            // actual element storage, not a copy. Both carriers must agree
+            // on descendant nullability even when another caller widens the
+            // generic callback parameter. Root presence remains directional.
+            if effective.native_iterable_element_type(&target.ty).is_some()
+                && (native_storage_value_type(&source.ty, &storage_types, context)
+                    || effective.native_iterable_element_type(&source.ty).is_some())
+                && let Some(element) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(&source.ty, &[0])
+                && let Some(target_element) =
+                    crate::slot_shape::RustSlotShape::native_child_type_at_path(&target.ty, &[0])
+            {
+                let mut child = source.clone();
+                child.path.push(0);
+                child.ty = element;
+                let mut target_child = target.clone();
+                target_child.path.push(0);
+                target_child.ty = target_element;
+                facts
+                    .nullable_collection_storage_flows
+                    .push((child.clone(), target_child.clone()));
+                facts
+                    .nullable_collection_storage_flows
+                    .push((target_child, child));
+            }
         }
     };
     match body {
@@ -5786,23 +6504,138 @@ fn record_native_factory_storage(
     };
     if matches!(
         method,
-        crate::call_plan::NativeCollectionStaticMethod::CollectionsEmptyList
-            | crate::call_plan::NativeCollectionStaticMethod::CollectionsEmptySet
-            | crate::call_plan::NativeCollectionStaticMethod::CollectionsSingletonList
-            | crate::call_plan::NativeCollectionStaticMethod::CollectionsSingleton
-    ) {
+        crate::call_plan::NativeCollectionStaticMethod::CollectionsUnmodifiableList
+            | crate::call_plan::NativeCollectionStaticMethod::CollectionsUnmodifiableSet
+            | crate::call_plan::NativeCollectionStaticMethod::CollectionsUnmodifiableCollection
+    ) && let [source] = args.as_slice()
+        && crate::effective_facts::EffectiveFacts::new(context.facts)
+            .retained_native_collection_kind(&destination.ty)
+            .is_some()
+    {
+        // A view's policy is observable even if neither reference otherwise
+        // escapes. Retain both allocations and share their element domain,
+        // not their outer nullability: factory success proves a non-null view.
+        facts
+            .native_collection_retention_requirements
+            .push(destination.clone());
+        let storage_types = native_storage_type_env(&[source], facts, owner, types, context);
+        if let Some(backing) =
+            native_collection_storage_slot(source, facts, owner, &storage_types, context)
+        {
+            facts
+                .native_collection_retention_requirements
+                .push(backing.clone());
+            facts
+                .native_collection_storage_flows
+                .push((backing.clone(), destination.clone()));
+            if let (Some(source_ty), Some(target_ty)) = (
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&backing.ty, &[0]),
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0]),
+            ) {
+                let mut child = backing;
+                child.path.push(0);
+                child.ty = source_ty;
+                let mut view = destination;
+                view.path.push(0);
+                view.ty = target_ty;
+                facts
+                    .nullable_collection_storage_flows
+                    .push((child.clone(), view.clone()));
+                facts.nullable_collection_storage_flows.push((view, child));
+            }
+        }
+        return;
+    }
+    if method == crate::call_plan::NativeCollectionStaticMethod::ArraysAsList
+        && let [array] = args.as_slice()
+        && let JavaType::Array(element) = crate::types::optional_element_type(
+            &native_storage_expr_type(array, facts, owner, types, context),
+        )
+        .unwrap_or_else(|| native_storage_expr_type(array, facts, owner, types, context))
+        && !matches!(element.as_ref(), JavaType::Primitive(_))
+    {
+        // The view is a distinct fixed-size collection, but its storage must
+        // retain the original array allocation. Root placement requirements
+        // cross this edge; outer Java-nullability does not (the factory throws
+        // on a null array). Element storage is shared in both directions.
+        let backing = native_collection_storage_slot(array, facts, owner, types, context);
+        if let Some(backing) = &backing {
+            facts
+                .native_collection_retention_requirements
+                .push(backing.clone());
+        }
+        if crate::stdlib::java_collection_kind_for_type(&destination.ty).is_some() {
+            facts
+                .native_collection_retention_requirements
+                .push(destination.clone());
+            if let Some(backing) = &backing {
+                facts
+                    .native_collection_storage_flows
+                    .push((backing.clone(), destination.clone()));
+            }
+            if let Some(child) =
+                crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[0])
+            {
+                let mut view = destination;
+                // Reference arrays have a canonical nullable element carrier
+                // even when their initializer contains no Java nulls. Reuse
+                // indexed storage projection rather than the nominal T.
+                let physical = crate::shape_projection::indexed_assignment_shape_with_facts(
+                    &crate::slot_shape::RustSlotShape::for_storage(JavaType::Array(element)),
+                    context.facts,
+                )
+                .map(|shape| shape.java_ty)
+                .unwrap_or_else(|| child.clone());
+                view.path.push(0);
+                view.ty = physical.clone();
+                // A fresh inline array has no source storage node, but its
+                // canonical element carrier constrains the view just as well.
+                facts
+                    .nullable_collection_storage_flows
+                    .push((view.clone(), view.clone()));
+                if let Some(mut backing) = backing {
+                    backing.path.push(0);
+                    backing.ty = physical;
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((backing.clone(), view.clone()));
+                    facts
+                        .nullable_collection_storage_flows
+                        .push((view, backing));
+                }
+            }
+        }
+        return;
+    }
+    let array_varargs = method == crate::call_plan::NativeCollectionStaticMethod::ArraysAsList;
+    if array_varargs && crate::stdlib::java_collection_kind_for_type(&destination.ty).is_some()
+        || matches!(
+            method,
+            crate::call_plan::NativeCollectionStaticMethod::CollectionsEmptyList
+                | crate::call_plan::NativeCollectionStaticMethod::CollectionsEmptySet
+                | crate::call_plan::NativeCollectionStaticMethod::CollectionsSingletonList
+                | crate::call_plan::NativeCollectionStaticMethod::CollectionsSingleton
+        )
+    {
         // Immutability is observable even for a unique reference. Keep the
         // factory's runtime policy instead of degrading its result to Vec/Set.
         facts
             .native_collection_retention_requirements
             .push(destination.clone());
     }
-    for (argument, child) in method.stored_argument_children() {
-        let Some(arg) = args.get(*argument) else {
+    let stored_arguments = if array_varargs {
+        (0..args.len())
+            .map(|argument| (argument, 0))
+            .collect::<Vec<_>>()
+    } else {
+        method.stored_argument_children().to_vec()
+    };
+    for (argument, child) in stored_arguments {
+        let Some(arg) = args.get(argument) else {
             continue;
         };
         let Some(ty) =
-            crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[*child])
+            crate::slot_shape::RustSlotShape::native_child_type_at_path(&destination.ty, &[child])
         else {
             continue;
         };
@@ -5810,9 +6643,14 @@ fn record_native_factory_storage(
             continue;
         }
         let mut stored = destination.clone();
-        stored.path.push(*child);
+        stored.path.push(child);
         stored.ty = ty;
         record_native_factory_storage(arg, stored.clone(), facts, owner, types, context);
+        if array_varargs {
+            facts
+                .native_collection_retention_requirements
+                .push(stored.clone());
+        }
         if let Some(value) = native_collection_storage_slot(arg, facts, owner, types, context) {
             facts.native_collection_storage_flows.push((stored, value));
         }
@@ -5826,6 +6664,11 @@ fn native_collection_storage_slot(
     types: &TypeEnv,
     context: &UsageAnalysisContext<'_>,
 ) -> Option<NativeCollectionStorageSlot> {
+    if let Some(value) =
+        crate::call_plan::checked_identity_source_argument(expr, types, context.facts)
+    {
+        return native_collection_storage_slot(value, facts, owner, types, context);
+    }
     if let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -5852,6 +6695,7 @@ fn native_collection_storage_slot(
                     root: NativeCollectionStorageRoot::Binding(binding),
                     path: vec![],
                     ty: crate::types::infer_expr_type(expr, types),
+                    root_ty: crate::types::infer_expr_type(expr, types),
                 });
             }
             let (owner, name, _) = context
@@ -5873,6 +6717,25 @@ fn native_collection_storage_slot(
                 .as_ref()?
                 .source_field_identity(owner, field)?;
             NativeCollectionStorageRoot::Origin(CollectionArgumentOrigin::Field { owner, name })
+        }
+        Expr::Call {
+            receiver: Some(receiver),
+            name,
+            args,
+            ..
+        } if crate::call_plan::native_list_cursor_returned_child(
+            &native_storage_expr_type(receiver, facts, owner, types, context),
+            name,
+            args.len(),
+            types,
+            context.facts,
+        )
+        .is_some() =>
+        {
+            let mut slot = native_collection_storage_slot(receiver, facts, owner, types, context)?;
+            slot.ty = crate::slot_shape::RustSlotShape::native_child_type_at_path(&slot.ty, &[0])?;
+            slot.path.push(0);
+            return Some(slot);
         }
         Expr::Call {
             receiver: Some(receiver),
@@ -5936,6 +6799,7 @@ fn native_collection_storage_slot(
         root,
         path: vec![],
         ty: crate::types::infer_expr_type(expr, types),
+        root_ty: crate::types::infer_expr_type(expr, types),
     })
 }
 
@@ -6018,18 +6882,28 @@ fn nullable_source_call_arg_indices(
     args: &[Expr],
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
     semantic_facts: &UsageAnalysisContext<'_>,
+    facts: &MethodUsageFacts,
+    current_type: &str,
+    type_env: &TypeEnv,
 ) -> Vec<usize> {
     args.iter()
         .enumerate()
         .filter_map(|(index, arg)| {
-            source_call_arg_nullability(arg, source_return_nullability, semantic_facts)
-                .is_some_and(|state| {
-                    matches!(
-                        state,
-                        NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
-                    )
-                })
-                .then_some(index)
+            source_call_arg_nullability(
+                arg,
+                source_return_nullability,
+                semantic_facts,
+                facts,
+                current_type,
+                type_env,
+            )
+            .is_some_and(|state| {
+                matches!(
+                    state,
+                    NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
+                )
+            })
+            .then_some(index)
         })
         .collect()
 }
@@ -6038,9 +6912,23 @@ fn source_call_arg_nullability(
     arg: &Expr,
     source_return_nullability: &HashMap<(String, usize), NullabilityState>,
     semantic_facts: &UsageAnalysisContext<'_>,
+    facts: &MethodUsageFacts,
+    current_type: &str,
+    type_env: &TypeEnv,
 ) -> Option<NullabilityState> {
     if matches!(arg, Expr::Literal(crate::java_ir::Literal::Null)) {
         return Some(NullabilityState::DefinitelyNull);
+    }
+    if let Expr::ArrayAccess(array, _) = arg {
+        let types =
+            native_storage_type_env(&[array], facts, current_type, type_env, semantic_facts);
+        let ty = native_storage_expr_type(array, facts, current_type, &types, semantic_facts);
+        if crate::shape_projection::reference_array_read_may_be_null(&ty) {
+            // Reference-array elements (including rows) may be null even if
+            // the array itself is non-null. No literal-null call is needed
+            // to establish the source parameter's nullable carrier.
+            return Some(NullabilityState::MaybeNull);
+        }
     }
     if let Expr::Ternary {
         then_expr,
@@ -6048,18 +6936,40 @@ fn source_call_arg_nullability(
         ..
     } = arg
     {
-        let then_state =
-            source_call_arg_nullability(then_expr, source_return_nullability, semantic_facts)
-                .unwrap_or(NullabilityState::DefinitelyNonNull);
-        let else_state =
-            source_call_arg_nullability(else_expr, source_return_nullability, semantic_facts)
-                .unwrap_or(NullabilityState::DefinitelyNonNull);
+        let then_state = source_call_arg_nullability(
+            then_expr,
+            source_return_nullability,
+            semantic_facts,
+            facts,
+            current_type,
+            type_env,
+        )
+        .unwrap_or(NullabilityState::DefinitelyNonNull);
+        let else_state = source_call_arg_nullability(
+            else_expr,
+            source_return_nullability,
+            semantic_facts,
+            facts,
+            current_type,
+            type_env,
+        )
+        .unwrap_or(NullabilityState::DefinitelyNonNull);
         return Some(crate::lattice::field_nullability_join(
             then_state, else_state,
         ));
     }
-    if let Expr::Cast { expr, .. } = arg {
-        return source_call_arg_nullability(expr, source_return_nullability, semantic_facts);
+    if let Expr::Cast { ty, expr } = arg {
+        if matches!(ty, JavaType::Primitive(_)) {
+            return Some(NullabilityState::DefinitelyNonNull);
+        }
+        return source_call_arg_nullability(
+            expr,
+            source_return_nullability,
+            semantic_facts,
+            facts,
+            current_type,
+            type_env,
+        );
     }
     let Expr::Call {
         receiver,
@@ -6366,6 +7276,45 @@ fn analyze_expr_with_context(
     if matches!(expr, Expr::Call { .. }) {
         record_nullable_source_callback_calls(expr, facts, current_type, semantic_facts, type_env);
     }
+    if let Some((left, right)) =
+        crate::call_plan::native_objects_equals_operands(expr, type_env, semantic_facts.facts)
+    {
+        record_native_comparison_retention(
+            left,
+            right,
+            facts,
+            current_type,
+            type_env,
+            semantic_facts,
+        );
+    }
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && name == "equals"
+        && args.len() == 1
+        && crate::effective_facts::EffectiveFacts::new(semantic_facts.facts)
+            .retained_native_container_kind(&native_storage_expr_type(
+                receiver,
+                facts,
+                current_type,
+                type_env,
+                semantic_facts,
+            ))
+            .is_some()
+    {
+        record_native_comparison_retention(
+            receiver,
+            &args[0],
+            facts,
+            current_type,
+            type_env,
+            semantic_facts,
+        );
+    }
     if matches!(expr, Expr::This | Expr::Super)
         || self_field_name(expr, facts, field_names).is_some()
     {
@@ -6409,6 +7358,79 @@ fn analyze_expr_with_context(
             resolved,
             ..
         } => {
+            if matches!(name.as_str(), "set" | "add")
+                && args.len() == 1
+                && let Some(receiver) = receiver.as_deref()
+            {
+                let receiver_ty = native_storage_expr_type(
+                    receiver,
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
+                if let Some(child) = crate::call_plan::native_list_cursor_written_child(
+                    &receiver_ty,
+                    name,
+                    args.len(),
+                    type_env,
+                    semantic_facts.facts,
+                ) {
+                    // Reject ordinary collection mutations before cloning
+                    // their environment; only a selected cursor needs this.
+                    let storage_types = native_storage_type_env(
+                        &[expr],
+                        facts,
+                        current_type,
+                        type_env,
+                        semantic_facts,
+                    );
+                    if let Some(mut stored) = native_collection_storage_slot(
+                        receiver,
+                        facts,
+                        current_type,
+                        &storage_types,
+                        semantic_facts,
+                    ) {
+                        stored.path.push(0);
+                        stored.ty = child.clone();
+                        if source_call_arg_nullability(
+                            &args[0],
+                            source_return_nullability,
+                            semantic_facts,
+                            facts,
+                            current_type,
+                            &storage_types,
+                        )
+                        .is_some_and(|state| {
+                            matches!(
+                                state,
+                                NullabilityState::DefinitelyNull | NullabilityState::MaybeNull
+                            )
+                        }) {
+                            let mut nullable = stored.clone();
+                            nullable.ty = crate::types::optional_java_type(child.clone());
+                            facts
+                                .nullable_collection_storage_flows
+                                .push((nullable.clone(), nullable));
+                        }
+                        if let Some(value) = native_collection_storage_slot(
+                            &args[0],
+                            facts,
+                            current_type,
+                            &storage_types,
+                            semantic_facts,
+                        ) {
+                            facts
+                                .nullable_collection_storage_flows
+                                .push((value.clone(), stored.clone()));
+                            if native_storage_value_type(&child, &storage_types, semantic_facts) {
+                                facts.native_collection_storage_flows.push((value, stored));
+                            }
+                        }
+                    }
+                }
+            }
             if let Some(call) = resolved {
                 for (index, (arg, ty)) in args.iter().zip(&call.arg_target_types).enumerate() {
                     if !has_projectable_native_value_domain(arg) {
@@ -6423,6 +7445,7 @@ fn analyze_expr_with_context(
                             },
                             path: vec![],
                             ty: ty.clone(),
+                            root_ty: ty.clone(),
                         },
                         facts,
                         current_type,
@@ -6498,8 +7521,14 @@ fn analyze_expr_with_context(
                 }
             }
             let non_null_arg_indices = non_null_argument_indices(args, facts);
-            let nullable_source_call_arg_indices =
-                nullable_source_call_arg_indices(args, source_return_nullability, semantic_facts);
+            let nullable_source_call_arg_indices = nullable_source_call_arg_indices(
+                args,
+                source_return_nullability,
+                semantic_facts,
+                facts,
+                current_type,
+                type_env,
+            );
             facts.call_sites.push(CallSiteUse {
                 name: name.clone(),
                 arg_count: args.len(),
@@ -6582,7 +7611,7 @@ fn analyze_expr_with_context(
                     type_env,
                     semantic_facts,
                 )
-                && method.stored_argument_children().iter().any(|(_, child)| {
+                && method.argument_children().iter().any(|(_, child)| {
                     crate::slot_shape::RustSlotShape::native_child_type_at_path(
                         &receiver_ty,
                         &[*child],
@@ -6602,7 +7631,7 @@ fn analyze_expr_with_context(
                         semantic_facts,
                     )
                 {
-                    for (argument, child) in method.stored_argument_children() {
+                    for (argument, child) in method.argument_children() {
                         let Some(child_ty) =
                             crate::slot_shape::RustSlotShape::native_child_type_at_path(
                                 &container.ty,
@@ -6624,17 +7653,30 @@ fn analyze_expr_with_context(
                         ) {
                             continue;
                         }
-                        if let Some(value) = native_collection_storage_slot(
+                        let value_slot = native_collection_storage_slot(
                             value,
                             facts,
                             current_type,
                             &storage_types,
                             semantic_facts,
-                        ) {
-                            let mut stored = container.clone();
-                            stored.path.push(*child);
-                            stored.ty = child_ty;
-                            facts.native_collection_storage_flows.push((stored, value));
+                        );
+                        let mut stored = container.clone();
+                        stored.path.push(*child);
+                        stored.ty = child_ty;
+                        if method
+                            .stored_argument_children()
+                            .contains(&(*argument, *child))
+                        {
+                            if let Some(value) = value_slot {
+                                facts.native_collection_storage_flows.push((stored, value));
+                            }
+                        } else {
+                            // Equal physical representations do not imply an
+                            // alias or a nullable write flowing into storage.
+                            facts.native_collection_retention_requirements.push(stored);
+                            if let Some(value) = value_slot {
+                                facts.native_collection_retention_requirements.push(value);
+                            }
                         }
                     }
                 }
@@ -6829,6 +7871,14 @@ fn analyze_expr_with_context(
         } => {
             record_indexed_null_comparison_use(facts, left, right);
             record_indexed_null_comparison_use(facts, right, left);
+            record_native_comparison_retention(
+                left,
+                right,
+                facts,
+                current_type,
+                type_env,
+                semantic_facts,
+            );
             analyze_expr(
                 left,
                 facts,
@@ -7069,26 +8119,14 @@ fn analyze_expr_with_context(
             ty, args, resolved, ..
         } => {
             if let Some(call) = resolved {
-                for (index, (arg, param)) in args.iter().zip(&call.params).enumerate() {
-                    if !has_projectable_native_value_domain(arg) {
-                        continue;
-                    }
-                    record_native_value_domain_storage(
-                        arg,
-                        NativeCollectionStorageSlot {
-                            root: NativeCollectionStorageRoot::ConstructorArgument {
-                                call: call.clone(),
-                                index,
-                            },
-                            path: vec![],
-                            ty: param.ty.clone(),
-                        },
-                        facts,
-                        current_type,
-                        type_env,
-                        semantic_facts,
-                    );
-                }
+                record_constructor_argument_value_domains(
+                    args,
+                    call,
+                    facts,
+                    current_type,
+                    type_env,
+                    semantic_facts,
+                );
             }
             facts.constructor_call_sites.push(ConstructorCallSiteUse {
                 name: "new".to_string(),
@@ -7098,6 +8136,9 @@ fn analyze_expr_with_context(
                     args,
                     source_return_nullability,
                     semantic_facts,
+                    facts,
+                    current_type,
+                    type_env,
                 ),
                 argument_bindings: call_argument_bindings(args, facts),
                 argument_self_fields: call_argument_self_fields(args, facts, field_names),
@@ -7393,7 +8434,13 @@ fn record_returned_subtype_use(
             .and_then(|actual| {
                 assigned_subtype_actual_type(actual, &target_type, type_env, semantic_facts)
             }),
-        _ => assigned_subtype_local_actual_type(value_expr, &target_type, type_env, semantic_facts),
+        _ => assigned_subtype_local_actual_type(
+            value_expr,
+            &target_type,
+            type_env,
+            semantic_facts,
+            facts,
+        ),
     };
     let Some(actual_type) = actual_type else {
         return;
@@ -7431,9 +8478,16 @@ fn resolved_call_for_usage(
 ) -> Option<ResolvedCall> {
     let mut resolved = resolved.cloned()?;
     if matches!(receiver, Some(Expr::Super))
+        && resolved.declaring_type == "super"
         && let Some(super_type) = current_super_type
     {
-        resolved.declaring_type = super_type.to_string();
+        // Normal resolved calls already name their lexical declaration, which
+        // may be above the direct parent. Never overwrite that identity with
+        // a parameterized extends spelling such as `Base<B>`.
+        resolved.declaring_type = match crate::parser::parse_hierarchy_type(super_type) {
+            JavaType::Named { name, .. } => name,
+            _ => super_type.to_string(),
+        };
     }
     Some(resolved)
 }
@@ -7549,7 +8603,7 @@ fn record_collection_element_subtype_use(
         return;
     };
     let Some(actual_type) =
-        assigned_subtype_local_actual_type(arg, &element_type, type_env, semantic_facts)
+        assigned_subtype_local_actual_type(arg, &element_type, type_env, semantic_facts, facts)
     else {
         return;
     };
@@ -7601,7 +8655,9 @@ fn record_call_argument_subtype_use(
         .and_then(|actual| {
             assigned_subtype_actual_type(actual, target_type, type_env, semantic_facts)
         })
-        .or_else(|| assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts))
+        .or_else(|| {
+            assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts, facts)
+        })
     else {
         return;
     };
@@ -7648,7 +8704,7 @@ fn record_constructor_argument_subtype_use(
         return;
     };
     let Some(actual_type) =
-        assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts)
+        assigned_subtype_local_actual_type(arg, target_type, type_env, semantic_facts, facts)
     else {
         return;
     };
@@ -8680,6 +9736,172 @@ mod tests {
     use crate::java_ir::{PrimitiveType, TypeKind};
 
     #[test]
+    fn unmodifiable_native_views_retain_policy_without_other_alias_requirements() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class Views {
+                static void run() {
+                    List<String> source = new ArrayList<String>();
+                    List<String> view = Collections.unmodifiableList(source);
+                }
+            }
+            "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let owner = &resolved.program.types[0];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let facts = usage.source_method_usage(owner, method).unwrap();
+        for name in ["source", "view"] {
+            assert!(facts.native_collection_retention_requirements().iter().any(|slot|
+                slot.path.is_empty()
+                    && matches!(&slot.root, NativeCollectionStorageRoot::Binding(binding) if binding.name() == name)
+            ), "{name}");
+        }
+        assert!(facts.native_collection_storage_flows().iter().any(|(source, target)|
+            matches!(&source.root, NativeCollectionStorageRoot::Binding(binding) if binding.name() == "source")
+                && matches!(&target.root, NativeCollectionStorageRoot::Binding(binding) if binding.name() == "view")
+        ));
+    }
+
+    #[test]
+    fn native_container_queries_require_carriers_without_alias_or_value_flow() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class Queries {
+                static boolean probe(List<Set<String>> values, Set<String> needle) {
+                    return values.contains(needle);
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let owner = &resolved.program.types[0];
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(m) => Some(m),
+                _ => None,
+            })
+            .unwrap();
+        let facts = usage.source_method_usage(owner, method).unwrap();
+        assert!(facts.native_collection_storage_flows().is_empty());
+        assert!(facts.nullable_collection_storage_flows().is_empty());
+        assert!(facts.native_collection_reference_transfers().is_empty());
+        assert!(
+            facts
+                .native_collection_retention_requirements()
+                .iter()
+                .any(|slot| slot.path == [0])
+        );
+        assert!(
+            facts
+                .native_collection_retention_requirements()
+                .iter()
+                .any(|slot| slot.path.is_empty())
+        );
+    }
+
+    #[test]
+    fn native_container_boundary_flow_does_not_capture_a_source_set() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            class Set<T> {}
+            class SourceTransfers {
+                static Set<String> pass(Set<String> value) { return value; }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "SourceTransfers")
+            .unwrap();
+        let method = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(m) => Some(m),
+                _ => None,
+            })
+            .unwrap();
+        let facts = usage.source_method_usage(owner, method).unwrap();
+        assert!(facts.native_collection_storage_flows().is_empty());
+        assert!(facts.native_collection_retention_requirements().is_empty());
+        assert!(facts.native_collection_reference_transfers().is_empty());
+    }
+
+    #[test]
+    fn native_container_references_transfer_across_children_and_source_boundaries() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class Receiver { Receiver(Set<String> values) {} }
+            class Transfers {
+                static Set<String> pass(Set<String> value) { return value; }
+                static void send(Map<String, Set<String>> values) {
+                    Set<String> child = values.get("key");
+                    new Receiver(child);
+                    pass(child);
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let usage = analyze_usage_with_facts(&resolved.program, &resolved.facts);
+        let owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "Transfers")
+            .unwrap();
+        for member in &owner.members {
+            let Member::Method(method) = member else {
+                continue;
+            };
+            let facts = usage.source_method_usage(owner, method).unwrap();
+            let flows = facts.native_collection_storage_flows();
+            let transfers = facts.native_collection_reference_transfers();
+            if method.name == "pass" {
+                assert!(
+                    transfers.iter().any(|(_, target)| matches!(
+                        target.root,
+                        NativeCollectionStorageRoot::Return
+                    ))
+                );
+            } else {
+                assert!(
+                    flows
+                        .iter()
+                        .any(|(source, target)| source.path == [1] && target.path.is_empty())
+                );
+                assert!(transfers.iter().any(|(_, target)| matches!(
+                    target.root,
+                    NativeCollectionStorageRoot::ConstructorArgument { index: 0, .. }
+                )));
+                assert!(transfers.iter().any(|(_, target)| matches!(
+                    target.root,
+                    NativeCollectionStorageRoot::MethodArgument { index: 0, .. }
+                )));
+            }
+        }
+    }
+
+    #[test]
     fn native_entry_storage_projects_backing_children_but_not_unknown_or_rebound_entries() {
         let parsed = crate::parser::parse_java_source(
             r#"
@@ -8943,7 +10165,17 @@ class CastContracts {
                     && target.path.is_empty()
                     && matches!(source.root, NativeCollectionStorageRoot::Return)));
             } else {
-                assert!(usage.nullable_collection_storage_flows().is_empty());
+                let flows = usage.nullable_collection_storage_flows();
+                assert_eq!(flows.len(), 2, "{flows:?}");
+                assert!(flows.iter().all(|(source, target)| source.path.is_empty()
+                    && target.path.is_empty()
+                    && !matches!(source.root, NativeCollectionStorageRoot::Return)));
+                assert!(
+                    flows.iter().any(|(_, target)| matches!(
+                        target.root,
+                        NativeCollectionStorageRoot::Return
+                    ))
+                );
             }
         }
     }
@@ -8978,8 +10210,37 @@ class CastContracts {
             }
             let usage = semantic.usage.source_method_usage(owner, method).unwrap();
             let flows = usage.nullable_collection_storage_flows();
-            assert_eq!(flows.len(), 1, "{}: {flows:?}", method.name);
+            let returns_callback =
+                matches!(method.name.as_str(), "local" | "assigned" | "function");
+            assert_eq!(
+                flows.len(),
+                3 + usize::from(returns_callback),
+                "{}: {flows:?}",
+                method.name
+            );
+            if returns_callback {
+                let (source, target) = &flows[3];
+                assert!(matches!(
+                    source.root,
+                    NativeCollectionStorageRoot::Binding(_)
+                ));
+                assert!(matches!(target.root, NativeCollectionStorageRoot::Return));
+                let path = vec![usize::from(method.name == "function")];
+                assert_eq!(source.path, path);
+                assert_eq!(target.path, path);
+            }
             let (source, target) = &flows[0];
+            // The outer result flows forward; only the shared Iterable's
+            // descendant element storage domain is joined in both directions.
+            assert_eq!(flows[1].0, flows[2].1);
+            assert_eq!(flows[1].1, flows[2].0);
+            assert_eq!(flows[1].0.root, source.root);
+            assert_eq!(flows[1].1.root, target.root);
+            assert_eq!(flows[1].0.path, vec![0]);
+            assert_eq!(
+                flows[1].1.path,
+                vec![usize::from(method.name == "function"), 0]
+            );
             assert!(matches!(
                 source.root,
                 NativeCollectionStorageRoot::Binding(_)
@@ -9055,7 +10316,7 @@ class Captures<T> {
                 assert!(usage.nullable_collection_storage_flows().is_empty());
                 continue;
             }
-            assert_eq!(usage.nullable_collection_storage_flows().len(), 1);
+            assert_eq!(usage.nullable_collection_storage_flows().len(), 3);
             let result_index = if method.name == "supplier" { 0 } else { 1 };
             let shape = signature.return_shape().unwrap();
             let ty = crate::types::optional_element_type(&shape.java_ty)
@@ -9076,6 +10337,89 @@ class Captures<T> {
                 method.name
             );
         }
+    }
+
+    #[test]
+    fn checked_sam_field_transfers_preserve_nullable_results_not_outer_allocations() {
+        let parsed = crate::parser::parse_java_source(include_str!(
+            "../tests/fixtures/deferred_source_views.java"
+        ));
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let signatures = crate::signature::solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let shape = signatures.required_field_shape("CheckedDeferred", "source");
+        let facade_owner = resolved
+            .program
+            .types
+            .iter()
+            .find(|ty| ty.name == "DeferredSourceViews")
+            .unwrap();
+        let forwarded = facade_owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "forwarded" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let forwarded_usage = semantic
+            .usage
+            .source_method_usage(facade_owner, forwarded)
+            .unwrap();
+        let binding = forwarded_usage
+            .all_binding_facts()
+            .into_iter()
+            .find(|binding| binding.name() == "values")
+            .unwrap();
+        assert!(
+            binding.uses().contains(&BindingUse::RetainedByCall),
+            "{binding:?}"
+        );
+        assert!(!shape.native_allocation.shared(), "{shape:?}");
+        let result =
+            crate::slot_shape::RustSlotShape::native_child_type_at_path(&shape.java_ty, &[0])
+                .expect("Supplier result child");
+        assert!(
+            crate::types::optional_element_type(&result).is_some(),
+            "{shape:?}"
+        );
+        let owner = &resolved.program.types[0];
+        let iterator = owner
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Method(method) if method.name == "iterator" => Some(method),
+                _ => None,
+            })
+            .unwrap();
+        let result = signatures
+            .method_signature(owner, iterator)
+            .unwrap()
+            .return_shape()
+            .unwrap();
+        let element =
+            crate::slot_shape::RustSlotShape::native_child_type_at_path(&result.java_ty, &[0])
+                .unwrap();
+        assert!(
+            crate::types::optional_element_type(&element).is_some(),
+            "{result:?}"
+        );
     }
 
     #[test]

@@ -207,6 +207,35 @@ impl JavaCallableSlotKey {
         JavaCallableKey::source_method(JavaOwnerKey::resolved_source(""), method).slot()
     }
 
+    /// Compare an inherited member in its target owner's generic frame while
+    /// retaining the original declaration identity for resolution/emission.
+    pub(crate) fn source_method_with_substitutions(
+        method: &MethodDecl,
+        substitutions: &std::collections::HashMap<String, JavaType>,
+    ) -> Self {
+        let substitutions = crate::java_type_substitution::without_shadowed_binders(
+            substitutions,
+            &method.type_params,
+        );
+        let mut key = Self::source_method(method);
+        if !substitutions.is_empty() {
+            key.erased_param_types = method
+                .params
+                .iter()
+                .map(|param| {
+                    erased_type_name(
+                        &crate::resolve::substitute_method_type_variables(
+                            &param.ty,
+                            &substitutions,
+                        ),
+                        param.is_varargs,
+                    )
+                })
+                .collect();
+        }
+        key
+    }
+
     pub(crate) fn matches_with_type_aliases(&self, other: &Self) -> bool {
         source_callable_names_match(&self.java_name, &other.java_name)
             && self.kind == other.kind
@@ -227,6 +256,16 @@ impl JavaCallableSlotKey {
             && self.kind == other.kind
             && self.staticness == other.staticness
             && self.erased_param_types.len() == other.erased_param_types.len()
+    }
+
+    /// Reject unrelated declarations before computing ancestor substitutions
+    /// and erased parameter types. This is only a prefilter: callers must
+    /// still compare the complete specialized slot for overload selection.
+    pub(crate) fn has_matching_source_method_header(&self, method: &MethodDecl) -> bool {
+        source_callable_names_match(&self.java_name, &method.name)
+            && self.kind == JavaCallableKind::Method
+            && self.staticness == method_staticness(method)
+            && self.erased_param_types.len() == method.params.len()
     }
 
     pub(crate) fn arity(&self) -> usize {
@@ -291,6 +330,34 @@ fn split_erased_array_suffix(name: &str) -> (&str, &str) {
 #[cfg(test)]
 mod erased_alias_tests {
     use super::*;
+
+    #[test]
+    fn cheap_source_header_filter_matches_the_existing_slot_header_policy() {
+        let parsed = crate::parser::parse_java_source(
+            "class Header<T> { void runNow(T value) {} void run_now(String value) {} \
+             void runNow() {} static void runNow(int value) {} void other(T value) {} \
+             void runNow(T... values) {} }",
+        );
+        let methods = parsed.program.types[0]
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                crate::java_ir::Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(methods.len(), 6);
+        let substitutions = std::collections::HashMap::from([("T".to_string(), JavaType::String)]);
+        for left in &methods {
+            let slot = JavaCallableSlotKey::source_method_with_substitutions(left, &substitutions);
+            for right in &methods {
+                assert_eq!(
+                    slot.has_matching_source_method_header(right),
+                    slot.matches_header_and_arity(&JavaCallableSlotKey::source_method(right)),
+                );
+            }
+        }
+    }
 
     #[test]
     fn flattened_nested_source_name_matches_qualified_java_name() {

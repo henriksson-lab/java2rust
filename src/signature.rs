@@ -1747,6 +1747,7 @@ pub struct MethodConstraintSet {
     param_names: Vec<String>,
     param_index_by_name: HashMap<String, usize>,
     param_java_types: Vec<JavaType>,
+    collection_carrier_consensus: HashMap<usize, CollectionCarrierConsensus>,
     param_is_varargs: Vec<bool>,
     params: Vec<Vec<SignatureConstraint>>,
     return_constraints: Vec<SignatureConstraint>,
@@ -1762,6 +1763,7 @@ pub struct ConstructorConstraintSet {
     param_names: Vec<String>,
     param_index_by_name: HashMap<String, usize>,
     param_java_types: Vec<JavaType>,
+    collection_carrier_consensus: HashMap<usize, CollectionCarrierConsensus>,
     params: Vec<Vec<SignatureConstraint>>,
     locals: Vec<LocalConstraintSet>,
     local_index_by_name: HashMap<String, usize>,
@@ -1846,6 +1848,7 @@ impl PartialEq for MethodConstraintSet {
         self.public_api == other.public_api
             && self.param_names == other.param_names
             && self.param_java_types == other.param_java_types
+            && self.collection_carrier_consensus == other.collection_carrier_consensus
             && self.param_is_varargs == other.param_is_varargs
             && self.params == other.params
             && self.return_constraints == other.return_constraints
@@ -1982,6 +1985,8 @@ impl PartialEq for ConstructorConstraintSet {
     fn eq(&self, other: &Self) -> bool {
         self.public_api == other.public_api
             && self.param_names == other.param_names
+            && self.param_java_types == other.param_java_types
+            && self.collection_carrier_consensus == other.collection_carrier_consensus
             && self.params == other.params
             && self.locals == other.locals
     }
@@ -2793,7 +2798,7 @@ pub fn build_signature_dependency_graph_with_facts(
             SignatureDependencyEdgeKind::CallArgument,
         );
     }
-    for ((source, _, _), (target, _, _)) in
+    for ((source, _, _, _), (target, _, _, _), _, _) in
         collection_storage_edges(constraints, usage, CollectionStorageEdgeKind::All)
     {
         add_bidirectional_signature_dependency_edge(
@@ -3256,7 +3261,7 @@ fn capture_source_dependency_node(
                 field: FieldKey::rust_identity(constructor.type_name(), name.to_string()),
             })
         }
-        (_, CaptureSource::OuterThis) => None,
+        (_, CaptureSource::This | CaptureSource::OuterThis) => None,
     }
 }
 
@@ -5901,6 +5906,7 @@ fn propagate_call_argument_collection_carrier_java_types_to_callees(
         return false;
     }
     let mut pending = Vec::new();
+    let mut carrier_observations = Vec::new();
     let mut rejected_bound_captures = HashSet::new();
     for (usage_key, method_usage) in usage.method_entries() {
         let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
@@ -5936,6 +5942,12 @@ fn propagate_call_argument_collection_carrier_java_types_to_callees(
                     .and_then(|(_, id)| method_usage.binding_facts_for_declaration_id(id));
                 let actual = binding
                     .map(|binding| effective_method_binding_java_type(caller_constraints, binding));
+                if let Some(observed) = actual
+                    .as_ref()
+                    .and_then(|actual| collection_carrier_consensus_witness(actual, target))
+                {
+                    carrier_observations.push((callee_key.clone(), arg_index, observed));
+                }
                 let bound_capture = actual
                     .as_ref()
                     .zip(resolved.arg_target_types.get(arg_index))
@@ -5952,12 +5964,31 @@ fn propagate_call_argument_collection_carrier_java_types_to_callees(
                     .and_then(|actual| refined_internal_call_java_type_for_slot(actual, target))
                     .or(bound_capture);
                 if let Some(refined) = refined {
+                    if crate::stdlib::java_collection_kind_for_type(&refined)
+                        != crate::stdlib::java_collection_kind_for_type(target)
+                    {
+                        continue;
+                    }
                     pending.push((callee_key.clone(), arg_index, refined));
                 }
             }
         }
     }
     let mut changed = false;
+    for (callee_key, index, observed) in carrier_observations {
+        let Some(callee) = constraints.methods.get_mut(&callee_key) else {
+            continue;
+        };
+        let Some(current) = callee.param_java_types.get_mut(index) else {
+            continue;
+        };
+        changed |= join_collection_carrier_consensus(
+            &mut callee.collection_carrier_consensus,
+            index,
+            current,
+            observed,
+        );
+    }
     for (callee_key, arg_index, refined) in unique_unambiguous_param_java_type_refinements(pending)
     {
         if rejected_bound_captures.contains(&(callee_key.clone(), arg_index)) {
@@ -5992,6 +6023,7 @@ fn propagate_constructor_argument_collection_carrier_java_types_to_callees(
         return false;
     }
     let mut pending = Vec::new();
+    let mut carrier_observations = Vec::new();
     for (usage_key, method_usage) in usage.method_entries() {
         let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
@@ -6021,7 +6053,15 @@ fn propagate_constructor_argument_collection_carrier_java_types_to_callees(
                     continue;
                 };
                 let actual = effective_method_binding_java_type(caller_constraints, binding);
+                if let Some(observed) = collection_carrier_consensus_witness(&actual, target) {
+                    carrier_observations.push((callee_key.clone(), *index, observed));
+                }
                 if let Some(refined) = refined_internal_call_java_type_for_slot(&actual, target) {
+                    if crate::stdlib::java_collection_kind_for_type(&refined)
+                        != crate::stdlib::java_collection_kind_for_type(target)
+                    {
+                        continue;
+                    }
                     pending.push((callee_key.clone(), *index, refined));
                 }
             }
@@ -6032,6 +6072,20 @@ fn propagate_constructor_argument_collection_carrier_java_types_to_callees(
         grouped.entry((key, index)).or_default().push(java_ty);
     }
     let mut changed = false;
+    for (callee_key, index, observed) in carrier_observations {
+        let Some(callee) = constraints.constructors.get_mut(&callee_key) else {
+            continue;
+        };
+        let Some(current) = callee.param_java_types.get_mut(index) else {
+            continue;
+        };
+        changed |= join_collection_carrier_consensus(
+            &mut callee.collection_carrier_consensus,
+            index,
+            current,
+            observed,
+        );
+    }
     for ((key, index), types) in grouped {
         let Some(refined) = types.first() else {
             continue;
@@ -7030,9 +7084,21 @@ fn propagate_assigned_call_native_allocation(
     changed
 }
 
+#[derive(Clone, Copy)]
+enum CollectionStorageProjection {
+    Value,
+    Alias,
+    MapView(usize),
+}
+
+type NativeCollectionStorageEndpoint = (SignatureDependencyNode, Vec<usize>, JavaType, JavaType);
 type NativeCollectionStorageEdge = (
-    (SignatureDependencyNode, Vec<usize>, JavaType),
-    (SignatureDependencyNode, Vec<usize>, JavaType),
+    NativeCollectionStorageEndpoint,
+    NativeCollectionStorageEndpoint,
+    bool,
+    // View roots retain placement; the index maps a qualified map child to
+    // collection element zero without joining unrelated key/value domains.
+    CollectionStorageProjection,
 );
 
 fn native_collection_storage_edges(
@@ -7174,8 +7240,18 @@ fn collection_storage_edges(
                 // A unary retention demand is a self-edge in the same
                 // monotone storage graph; ordinary flow propagation can seed
                 // it without a second field/return-specific solver.
-                let endpoint = (node, slot.path.clone(), slot.ty.clone());
-                edges.push((endpoint.clone(), endpoint));
+                let endpoint = (
+                    node,
+                    slot.path.clone(),
+                    slot.ty.clone(),
+                    slot.root_ty.clone(),
+                );
+                edges.push((
+                    endpoint.clone(),
+                    endpoint,
+                    true,
+                    CollectionStorageProjection::Value,
+                ));
             }
         }
         let additional = if !matches!(kind, CollectionStorageEdgeKind::NativeAllocation) {
@@ -7183,20 +7259,67 @@ fn collection_storage_edges(
         } else {
             &[]
         };
-        for (left, right) in facts
+        for ((left, right), retain, projection) in facts
             .native_collection_storage_flows()
             .iter()
-            .filter(|_| !matches!(kind, CollectionStorageEdgeKind::NullableTransfer))
-            .chain(additional)
+            .map(|edge| (edge, true, CollectionStorageProjection::Alias))
+            .chain(
+                facts
+                    .native_collection_reference_transfers()
+                    .iter()
+                    .map(|edge| (edge, false, CollectionStorageProjection::Alias)),
+            )
+            .chain(
+                additional
+                    .iter()
+                    .map(|edge| (edge, false, CollectionStorageProjection::Value)),
+            )
         {
             if let (Some(left_node), Some(right_node)) = (
                 collection_storage_slot_dependency_node(constraints, facts, &caller, left),
                 collection_storage_slot_dependency_node(constraints, facts, &caller, right),
             ) {
                 edges.push((
-                    (left_node, left.path.clone(), left.ty.clone()),
-                    (right_node, right.path.clone(), right.ty.clone()),
+                    (
+                        left_node,
+                        left.path.clone(),
+                        left.ty.clone(),
+                        left.root_ty.clone(),
+                    ),
+                    (
+                        right_node,
+                        right.path.clone(),
+                        right.ty.clone(),
+                        right.root_ty.clone(),
+                    ),
+                    retain,
+                    projection,
                 ));
+            }
+        }
+        {
+            for (left, right, child) in facts.native_collection_view_backings() {
+                if let (Some(left_node), Some(right_node)) = (
+                    collection_storage_slot_dependency_node(constraints, facts, &caller, left),
+                    collection_storage_slot_dependency_node(constraints, facts, &caller, right),
+                ) {
+                    edges.push((
+                        (
+                            left_node,
+                            left.path.clone(),
+                            left.ty.clone(),
+                            left.root_ty.clone(),
+                        ),
+                        (
+                            right_node,
+                            right.path.clone(),
+                            right.ty.clone(),
+                            right.root_ty.clone(),
+                        ),
+                        true,
+                        CollectionStorageProjection::MapView(*child),
+                    ));
+                }
             }
         }
     };
@@ -7294,15 +7417,17 @@ fn propagate_native_collection_child_allocations(
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
     let mut pending = Vec::new();
-    for (left, right) in native_collection_storage_edges(constraints, usage) {
+    for (left, right, retain, root_only) in native_collection_storage_edges(constraints, usage) {
         // Java collection/array elements retain references even without an
         // Iterable view. Moving a copied Vec/Set here would lose later writes.
         let retained = crate::storage_strategy::StoragePlacement::new(true, true, false);
         for (source, target) in [(&left, &right), (&right, &left)] {
-            pending.push((
-                target.0.clone(),
-                native_allocation_requirement(target.1.clone(), retained),
-            ));
+            if retain {
+                pending.push((
+                    target.0.clone(),
+                    native_allocation_requirement(target.1.clone(), retained),
+                ));
+            }
             for constraint in
                 collection_storage_node_constraints(constraints, &source.0).unwrap_or_default()
             {
@@ -7316,6 +7441,11 @@ fn propagate_native_collection_child_allocations(
                     _ => continue,
                 };
                 if let Some(suffix) = path.strip_prefix(source.1.as_slice()) {
+                    if matches!(root_only, CollectionStorageProjection::MapView(_))
+                        && !suffix.is_empty()
+                    {
+                        continue;
+                    }
                     if !RustSlotShape::native_child_type_at_path(&target.2, suffix).is_some_and(
                         |ty| {
                             matches!(ty, JavaType::Array(_))
@@ -7342,11 +7472,61 @@ fn propagate_native_collection_child_allocations(
     changed
 }
 
+fn nullable_storage_constraint_path(
+    root: &JavaType,
+    constraint: &SignatureConstraint,
+) -> Option<Vec<usize>> {
+    let depth = match constraint {
+        SignatureConstraint::NullableValueAtPath(path) => return Some(path.clone()),
+        SignatureConstraint::NullableMapKey => return Some(vec![0]),
+        SignatureConstraint::NullableSequenceElement => 0,
+        SignatureConstraint::NullableSequenceElementAtDepth(depth) => *depth,
+        _ => return None,
+    };
+    let mut ty = root.clone();
+    let mut path = Vec::new();
+    for _ in 0..=depth {
+        let base = optional_element_type(&ty).unwrap_or(ty);
+        let child = usize::from(crate::stdlib::java_map_type_args(&base).is_some());
+        ty = RustSlotShape::native_child_type_at_path(&base, &[child])?;
+        path.push(child);
+    }
+    Some(path)
+}
+
+fn nullable_storage_requirement(root: &JavaType, path: Vec<usize>) -> SignatureConstraint {
+    if path.is_empty() {
+        return SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull);
+    }
+    let base = optional_element_type(root).unwrap_or_else(|| root.clone());
+    let map = crate::stdlib::java_map_type_args(&base).is_some();
+    if path == [0] && map {
+        SignatureConstraint::NullableMapKey
+    } else if path == [usize::from(map)]
+        && (map || crate::types::sequence_element_type(&base).is_some())
+    {
+        SignatureConstraint::NullableSequenceElement
+    } else {
+        SignatureConstraint::NullableValueAtPath(path)
+    }
+}
+
 fn propagate_collection_element_transfer_nullability(
     constraints: &mut SignatureConstraintState,
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
+    fn sequence_path(ty: &JavaType, depth: usize) -> Option<Vec<usize>> {
+        let mut ty = ty.clone();
+        let mut path = Vec::new();
+        for _ in 0..=depth {
+            let base = optional_element_type(&ty).unwrap_or(ty);
+            let child = usize::from(crate::stdlib::java_map_type_args(&base).is_some());
+            ty = RustSlotShape::native_child_type_at_path(&base, &[child])?;
+            path.push(child);
+        }
+        Some(path)
+    }
     fn contains_map(ty: &JavaType) -> bool {
         crate::stdlib::java_map_type_args(ty).is_some()
             || match ty {
@@ -7358,16 +7538,129 @@ fn propagate_collection_element_transfer_nullability(
             }
     }
     let mut pending = Vec::new();
-    for (source, target) in collection_storage_edges(
+    for (source, target, _, root_only) in collection_storage_edges(
         constraints,
         usage,
         CollectionStorageEdgeKind::NullableTransfer,
     ) {
+        if matches!(root_only, CollectionStorageProjection::Alias) {
+            for (source, target) in [(&source, &target), (&target, &source)] {
+                for constraint in
+                    collection_storage_node_constraints(constraints, &source.0).unwrap_or_default()
+                {
+                    let Some(path) = nullable_storage_constraint_path(&source.3, constraint) else {
+                        continue;
+                    };
+                    let Some(suffix) = path.strip_prefix(source.1.as_slice()) else {
+                        continue;
+                    };
+                    // Shared allocations have one descendant storage domain.
+                    // Nullability of the reference binding itself is not a
+                    // write into that allocation (a missing map result is not
+                    // evidence that the map stores null at this key).
+                    if suffix.is_empty() {
+                        continue;
+                    }
+                    let mut path = target.1.clone();
+                    path.extend_from_slice(suffix);
+                    if RustSlotShape::native_child_type_at_path(&target.3, &path)
+                        .is_some_and(|ty| !matches!(ty, JavaType::Primitive(_) | JavaType::Void))
+                    {
+                        pending.push((
+                            target.0.clone(),
+                            nullable_storage_requirement(&target.3, path),
+                        ));
+                    }
+                }
+            }
+            continue;
+        }
+        if let CollectionStorageProjection::MapView(view_child) = root_only {
+            // A key view maps the qualified key child, not the legacy
+            // NullableSequenceElement constraint used for a map's values.
+            for (source, target) in [(&source, &target), (&target, &source)] {
+                let base = optional_element_type(&source.2).unwrap_or_else(|| source.2.clone());
+                let source_map = crate::stdlib::java_map_type_args(&base).is_some();
+                let target_base =
+                    optional_element_type(&target.2).unwrap_or_else(|| target.2.clone());
+                let target_map = crate::stdlib::java_map_type_args(&target_base).is_some();
+                let source_child = if source_map { view_child } else { 0 };
+                let target_child = if target_map { view_child } else { 0 };
+                let mut nullable_paths = Vec::new();
+                if RustSlotShape::native_child_type_at_path(&source.2, &[source_child])
+                    .is_some_and(|ty| optional_element_type(&ty).is_some())
+                {
+                    let mut path = source.1.clone();
+                    path.push(source_child);
+                    nullable_paths.push(path);
+                }
+                for constraint in
+                    collection_storage_node_constraints(constraints, &source.0).unwrap_or_default()
+                {
+                    let path = match constraint {
+                        SignatureConstraint::NullableMapKey
+                            if source_map && source_child == 0 && source.1.is_empty() =>
+                        {
+                            vec![0]
+                        }
+                        SignatureConstraint::NullableSequenceElement
+                            if (!source_map || source_child == 1) && source.1.is_empty() =>
+                        {
+                            vec![source_child]
+                        }
+                        SignatureConstraint::NullableSequenceElementAtDepth(depth)
+                            if (!source_map || source_child == 1) && source.1.is_empty() =>
+                        {
+                            let Some(path) = sequence_path(&source.2, *depth) else {
+                                continue;
+                            };
+                            path
+                        }
+                        SignatureConstraint::NullableValueAtPath(path) => path.clone(),
+                        _ => continue,
+                    };
+                    nullable_paths.push(path);
+                }
+                let mut key_prefix = source.1.clone();
+                key_prefix.push(source_child);
+                for path in nullable_paths {
+                    let Some(suffix) = path.strip_prefix(key_prefix.as_slice()) else {
+                        continue;
+                    };
+                    let Some(key) =
+                        RustSlotShape::native_child_type_at_path(&target.2, &[target_child])
+                    else {
+                        continue;
+                    };
+                    let Some(ty) = RustSlotShape::native_child_type_at_path(&key, suffix) else {
+                        continue;
+                    };
+                    if matches!(ty, JavaType::Primitive(_) | JavaType::Void) {
+                        continue;
+                    }
+                    let mut path = target.1.clone();
+                    path.push(target_child);
+                    path.extend_from_slice(suffix);
+                    let requirement = nullable_storage_requirement(&target.3, path);
+                    pending.push((target.0.clone(), requirement));
+                }
+            }
+            continue;
+        }
         // Sequence depth constraints address map values differently from
         // structural child indexes. Leave map-key/value qualification to its
         // existing dedicated solver until that mapping is explicit here.
         if contains_map(&source.2) || contains_map(&target.2) {
             continue;
+        }
+        // Projected storage can carry an intrinsic Option before a node has
+        // an explicit nullable constraint (reference-array elements do).
+        // Transfer that domain without reinterpreting or copying its payload.
+        if crate::types::optional_element_type(&source.2).is_some()
+            && !matches!(target.2, JavaType::Primitive(_) | JavaType::Void)
+        {
+            let requirement = nullable_storage_requirement(&target.3, target.1.clone());
+            pending.push((target.0.clone(), requirement));
         }
         // A copied element flows only from source to destination. The native
         // allocation graph also includes retention and insertion edges; those
@@ -7402,13 +7695,7 @@ fn propagate_collection_element_transfer_nullability(
                 }
                 let mut path = target.1.clone();
                 path.extend_from_slice(suffix);
-                let requirement = match path.len() {
-                    0 => {
-                        SignatureConstraint::RequiredStorageNullability(NullabilityState::MaybeNull)
-                    }
-                    1 => SignatureConstraint::NullableSequenceElement,
-                    _ => SignatureConstraint::NullableValueAtPath(path),
-                };
+                let requirement = nullable_storage_requirement(&target.3, path);
                 pending.push((target.0.clone(), requirement));
             }
         }
@@ -13677,10 +13964,7 @@ fn java_type_name_has_implemented_shared_local_storage(name: &str, facts: &FactS
 fn storage_placement_is_implemented_shared_local(
     placement: crate::storage_strategy::StoragePlacement,
 ) -> bool {
-    placement.shared()
-        && placement.interior_mutable()
-        && !placement.sync()
-        && placement.is_implemented()
+    placement.shared() && placement.is_implemented()
 }
 
 fn signature_type_param_env_for_method(ty: &TypeDecl, method: &MethodDecl) -> TypeEnv {
@@ -13928,6 +14212,11 @@ pub fn signature_slot_baseline_policy_with_effective_facts(
         })
         .unwrap_or_default();
     let mut constraints = capability_constraints.clone();
+    if facts.native_collection_requires_runtime_policy(java_ty) {
+        constraints.push(SignatureConstraint::RequiredNativeAllocation(
+            crate::storage_strategy::StoragePlacement::new(true, true, false),
+        ));
+    }
     push_unique_signature_constraints(&mut constraints, &boundary_constraints);
     push_unique_signature_constraints(
         &mut constraints,
@@ -14929,7 +15218,7 @@ pub fn apply_signature_constraints(
     MergedSignatureConstraints::from_constraints(constraints).apply_to_shape(shape)
 }
 
-fn project_semantic_hash_collection_view(
+pub(crate) fn project_semantic_hash_collection_view(
     shape: &mut RustSlotShape,
     type_params: &[String],
     facts: &FactSet,
@@ -15037,6 +15326,10 @@ fn semantic_hash_collection_view_required(
             type_params,
         )
         .is_some()
+            // Boxed Java floating keys use canonical NaN equality and distinguish
+            // signed zero. Rust floats intentionally provide neither Eq nor Hash;
+            // use the existing JavaMapKey carrier, including at concrete callers.
+            || hash_collection_has_java_floating_key(&base, facts)
             // Concrete source hierarchy elements use the same semantic set
             // chosen by slot rendering. Record that choice before planning
             // conversions, not only when printing the destination Rust type.
@@ -15048,6 +15341,33 @@ fn semantic_hash_collection_view_required(
                 && crate::slot_render::java_set_uses_semantic_equality_carrier_with_representations(
                     &base, representations,
                 )))
+}
+
+fn hash_collection_has_java_floating_key(java_ty: &JavaType, facts: &FactSet) -> bool {
+    if crate::slot_render::semantic_hash_collection_base(java_ty).is_none() {
+        return false;
+    }
+    let JavaType::Named { args, .. } = java_ty else {
+        return false;
+    };
+    let Some(key) = args.first() else {
+        return false;
+    };
+    let key = optional_element_type(key).unwrap_or_else(|| key.clone());
+    if EffectiveFacts::new(facts).parsed_source_controls_native_carrier(&key) {
+        return false;
+    }
+    let primitive = match &key {
+        JavaType::Primitive(primitive) => Some(*primitive),
+        JavaType::Named { name, args } if args.is_empty() => {
+            crate::stdlib::boxed_primitive_type(name.rsplit('.').next().unwrap_or(name))
+        }
+        _ => None,
+    };
+    matches!(
+        primitive,
+        Some(crate::java_ir::PrimitiveType::Float | crate::java_ir::PrimitiveType::Double)
+    )
 }
 
 /// A concrete initializer/caller can refine an abstract Set to LinkedHashSet.
@@ -15494,10 +15814,15 @@ pub fn field_shape_constraints_with_facts(
     facts: &FactSet,
 ) -> Vec<SignatureConstraint> {
     let mut constraints = field_shape_constraints_with_owner_name(&ty.name, field, facts);
-    if matches!(field.ty, JavaType::Array(_))
+    if (matches!(field.ty, JavaType::Array(_))
+        || crate::effective_facts::EffectiveFacts::new(facts)
+            .retained_native_container_kind(&field.ty)
+            .is_some())
         && !crate::item_assembly::static_final_field_has_associated_const(ty, field)
     {
-        // A stored Java array is an allocation reference, not a copied Vec.
+        // Stored Java arrays and native containers are allocation references,
+        // not copied Rust values. The same policy covers field rebinding,
+        // callback reentrancy and Send-safe process-wide static storage.
         // Retaining that allocation also lets an array place survive owner
         // field rebinding while its index and RHS are being evaluated.
         push_unique_signature_constraints(
@@ -15511,6 +15836,48 @@ pub fn field_shape_constraints_with_facts(
                 ),
             )],
         );
+        // Nested native containers keep the same allocation policy. Stop at
+        // primitive rectangular arrays, whose rows use an existing view.
+        let placement = crate::storage_strategy::StoragePlacement::new(
+            true,
+            true,
+            field.modifiers.contains(&Modifier::Static)
+                || facts.storage_placement_for(&ty.name).sync(),
+        );
+        let mut work = vec![(field.ty.clone(), Vec::new())];
+        while let Some((parent, prefix)) = work.pop() {
+            if crate::types::ndarray_array2_element_type(&parent).is_some() {
+                continue;
+            }
+            let count = if crate::stdlib::java_map_type_args(&parent).is_some() {
+                2
+            } else {
+                1
+            };
+            for index in 0..count {
+                let Some(child) = RustSlotShape::native_child_type_at_path(&parent, &[index])
+                else {
+                    continue;
+                };
+                if !matches!(child, JavaType::Array(_))
+                    && crate::effective_facts::EffectiveFacts::new(facts)
+                        .retained_native_container_kind(&child)
+                        .is_none()
+                {
+                    continue;
+                }
+                let mut path = prefix.clone();
+                path.push(index);
+                push_unique_signature_constraints(
+                    &mut constraints,
+                    &[SignatureConstraint::RequiredNestedNativeAllocation {
+                        path: path.clone(),
+                        placement,
+                    }],
+                );
+                work.push((child, path));
+            }
+        }
     }
     constraints
 }
@@ -16601,6 +16968,7 @@ fn collect_type_signature_constraints(
                             .iter()
                             .map(|param| param.ty.clone())
                             .collect(),
+                        collection_carrier_consensus: HashMap::new(),
                         param_is_varargs: method
                             .params
                             .iter()
@@ -16704,6 +17072,7 @@ fn collect_type_signature_constraints(
                             .iter()
                             .map(|param| param.ty.clone())
                             .collect(),
+                        collection_carrier_consensus: HashMap::new(),
                         local_index_by_name: index_local_constraints(&locals),
                         local_index_by_binding: index_local_constraints_by_binding(&locals),
                         param_names,
@@ -17088,7 +17457,7 @@ fn seed_captured_native_array_constraints(
                 optional_element_type(&capture.ty).unwrap_or_else(|| capture.ty.clone()),
                 JavaType::Array(_)
             ) || effective
-                .retained_native_collection_kind(&capture.ty)
+                .retained_native_container_kind(&capture.ty)
                 .is_some()
         })
         .filter_map(|capture| capture.binding)
@@ -17133,7 +17502,7 @@ fn seed_native_collection_alias_constraints(
     let mut native_bindings = HashSet::new();
     for binding in usage.all_binding_facts() {
         if effective
-            .retained_native_collection_kind(binding.java_ty())
+            .retained_native_container_kind(binding.java_ty())
             .is_none()
         {
             continue;
@@ -17159,7 +17528,7 @@ fn seed_native_collection_alias_constraints(
                                 .native_iterable_element_type(&local.java_ty)
                                 .is_some()
                                 || effective
-                                    .retained_native_collection_kind(&local.java_ty)
+                                    .retained_native_container_kind(&local.java_ty)
                                     .is_some()
                         })
             }
@@ -17655,10 +18024,33 @@ impl<'a> SourceReturnNullabilityContext<'a> {
     }
 
     fn expr_nullability_state(&self, expr: &Expr) -> Option<NullabilityState> {
+        if let Expr::ArrayAccess(array, _) = expr
+            && let Some(array_ty) = receiver_expr_java_type(array, &self.binding_types)
+            && crate::shape_projection::reference_array_read_may_be_null(&array_ty)
+        {
+            return Some(NullabilityState::MaybeNull);
+        }
         if jdk_map_entry_nullable_accessor_initializer(expr, &self.binding_types) {
             return Some(NullabilityState::MaybeNull);
         }
         if let Some(state) = self.type_param_bound_call_nullability_state(expr) {
+            return Some(state);
+        }
+        if let Expr::FieldAccess(receiver, field) = expr
+            && let Some(bound) = self.type_param_bound_for_receiver(receiver)
+        {
+            // A generic class bound grants access to the same nullable field
+            // as its declaring class. Losing that producer at a return/local
+            // boundary must not turn a Java null reference into an unwrap.
+            // Use solved declaration evidence when present; otherwise retain
+            // the existing conservative reference-return policy used for
+            // method calls through a type-parameter bound.
+            let state = java_type_name_for_signature_dispatch(bound)
+                .and_then(|owner| self.facts.field_nullability_for(&owner, field))
+                .filter(|state| *state != NullabilityState::Unknown)
+                .unwrap_or_else(|| {
+                    type_param_bound_method_return_nullability(self.declared_return_type)
+                });
             return Some(state);
         }
         if let Some(state) = self.external_call_nullability_state(expr) {
@@ -17673,7 +18065,7 @@ impl<'a> SourceReturnNullabilityContext<'a> {
         ) {
             return Some(state);
         }
-        if expr_is_java_map_get_call(expr, &self.binding_types) {
+        if expr_is_java_nullable_map_child_call(expr, &self.binding_types, self.facts) {
             return Some(NullabilityState::MaybeNull);
         }
         if expr_is_java_list_get_call(expr, &self.binding_types) {
@@ -17697,6 +18089,14 @@ impl<'a> SourceReturnNullabilityContext<'a> {
             return None;
         };
         if let Some(resolved) = resolved {
+            if EffectiveFacts::new(self.facts).parsed_source_controls_native_carrier(
+                &JavaType::Named {
+                    name: resolved.declaring_type.clone(),
+                    args: vec![],
+                },
+            ) {
+                return None;
+            }
             let state = crate::stdlib::external_api_return_nullability(
                 Some(&resolved.declaring_type),
                 name,
@@ -18174,6 +18574,21 @@ fn source_return_expr_nullability_state(
     refinements: &HashSet<String>,
 ) -> NullabilityState {
     match expr {
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            right,
+            ..
+        } => {
+            // Java assignment expressions evaluate to the converted RHS, not
+            // to a fresh non-null value or a read of the destination field.
+            source_return_expr_nullability_state(
+                right,
+                source_nullability,
+                ctx,
+                scopes,
+                refinements,
+            )
+        }
         Expr::Cast { ty, expr } if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) => {
             // Reference casts preserve null. Only a later dereference or
             // primitive unboxing can require a non-null value.
@@ -18232,7 +18647,11 @@ fn source_return_expr_nullability_state(
     }
 }
 
-fn expr_is_java_map_get_call(expr: &Expr, binding_types: &HashMap<String, JavaType>) -> bool {
+fn expr_is_java_nullable_map_child_call(
+    expr: &Expr,
+    binding_types: &HashMap<String, JavaType>,
+    facts: &FactSet,
+) -> bool {
     let Expr::Call {
         receiver: Some(receiver),
         name,
@@ -18242,10 +18661,14 @@ fn expr_is_java_map_get_call(expr: &Expr, binding_types: &HashMap<String, JavaTy
     else {
         return false;
     };
-    if name != "get" || args.len() != 1 {
+    if !matches!(
+        (name.as_str(), args.len()),
+        ("get" | "remove", 1) | ("put" | "putIfAbsent" | "put_if_absent", 2)
+    ) {
         return false;
     }
     receiver_expr_java_type(receiver, binding_types)
+        .filter(|ty| !EffectiveFacts::new(facts).parsed_source_controls_native_carrier(ty))
         .and_then(|ty| crate::stdlib::java_map_type_args(&ty).map(|_| ()))
         .is_some()
 }
@@ -18274,6 +18697,15 @@ fn receiver_expr_java_type(
 ) -> Option<JavaType> {
     match expr {
         Expr::Var(name) => binding_types.get(name).cloned(),
+        Expr::Cast { ty, .. } => Some(ty.clone()),
+        Expr::ArrayAccess(array, _) => {
+            let ty = receiver_expr_java_type(array, binding_types)?;
+            let ty = optional_element_type(&ty).unwrap_or(ty);
+            match ty {
+                JavaType::Array(element) => Some(*element),
+                _ => None,
+            }
+        }
         Expr::FieldAccess(receiver, field) if is_this_receiver_expr(receiver) => {
             binding_types.get(field).cloned()
         }
@@ -18876,6 +19308,11 @@ fn collect_null_comparison_assignment(
 
 fn source_expr_nullability_state(expr: &Expr) -> Option<NullabilityState> {
     match expr {
+        Expr::Binary {
+            op: BinaryOp::Assign,
+            right,
+            ..
+        } => source_expr_nullability_state(right),
         Expr::Literal(Literal::Null) => Some(NullabilityState::DefinitelyNull),
         Expr::Cast { ty, expr } if !matches!(ty, JavaType::Primitive(_) | JavaType::Void) => {
             source_expr_nullability_state(expr)
@@ -21175,6 +21612,34 @@ mod tests {
     #[test]
     fn structural_nullable_paths_are_bounded_idempotent_and_preserve_other_arguments() {
         use super::*;
+        for (source, path, expected) in [
+            (
+                "Supplier<Iterable<T>>",
+                vec![0],
+                SignatureConstraint::NullableValueAtPath(vec![0]),
+            ),
+            (
+                "Function<String, Iterable<T>>",
+                vec![1],
+                SignatureConstraint::NullableValueAtPath(vec![1]),
+            ),
+            (
+                "List<T>",
+                vec![0],
+                SignatureConstraint::NullableSequenceElement,
+            ),
+            (
+                "Map<String, T>",
+                vec![1],
+                SignatureConstraint::NullableSequenceElement,
+            ),
+        ] {
+            assert_eq!(
+                nullable_storage_requirement(&crate::parser::parse_hierarchy_type(source), path),
+                expected,
+                "{source}"
+            );
+        }
         let target = JavaType::Named {
             name: "Function".into(),
             args: vec![
@@ -21314,6 +21779,124 @@ mod tests {
             .find(|local| local.name() == "values")
             .unwrap();
         assert!(!source.shape().native_allocation.shared(), "{source:?}");
+    }
+
+    #[test]
+    fn deque_factory_policy_reaches_abstract_collection_destinations() {
+        let parsed = crate::parser::parse_java_source(
+            "class DequePolicy { java.util.Collection<String> make() { return new java.util.ArrayDeque<String>(); } int local() { java.util.Collection<String> values = new java.util.ArrayDeque<String>(); return values.size(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let make = plan
+            .methods
+            .iter()
+            .find(|(key, _)| key.rust_name == "make")
+            .unwrap()
+            .1;
+        assert!(make.return_shape().unwrap().native_allocation.shared());
+        let local = plan
+            .methods
+            .iter()
+            .find(|(key, _)| key.rust_name == "local")
+            .unwrap()
+            .1;
+        assert!(
+            local
+                .locals
+                .iter()
+                .find(|local| local.name() == "values")
+                .unwrap()
+                .shape()
+                .native_allocation
+                .shared()
+        );
+    }
+
+    #[test]
+    fn queue_endpoint_returns_are_nullable_without_call_site_demands() {
+        let parsed = crate::parser::parse_java_source(
+            "class QueueReturns { static <T> T head(java.util.Queue<T> values) { return values.peek(); } static <T> T poll(java.util.Queue<T> values) { return values.poll(); } static <T> T first(java.util.Deque<T> values) { return values.getFirst(); } }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        for name in ["head", "poll", "first"] {
+            let signature = plan
+                .methods
+                .iter()
+                .find(|(key, _)| key.rust_name == name)
+                .unwrap()
+                .1;
+            assert!(
+                signature
+                    .return_shape()
+                    .unwrap()
+                    .optional_element_type()
+                    .is_some(),
+                "{name}: {signature:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn stored_native_container_allocations_keep_nested_sync_and_local_domains() {
+        let parsed = crate::parser::parse_java_source(
+            "class NativeFieldStorage { java.util.List<java.util.List<Integer>> local; static java.util.Map<String, java.util.List<Integer>> global; }",
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let representations =
+            crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan = solve_signatures_with_facts(
+            &resolved.program,
+            &representations,
+            &semantic.usage,
+            &semantic.facts,
+        );
+        let local = plan.field_shape("NativeFieldStorage", "local").unwrap();
+        assert!(local.native_allocation.shared() && !local.native_allocation.sync());
+        assert!(
+            local
+                .nested_native_allocations
+                .iter()
+                .any(|(path, placement)| path == &[0] && placement.shared() && !placement.sync())
+        );
+        let global = plan.field_shape("NativeFieldStorage", "global").unwrap();
+        assert!(global.native_allocation.shared() && global.native_allocation.sync());
+        assert!(
+            global
+                .nested_native_allocations
+                .iter()
+                .any(|(path, placement)| path == &[1] && placement.shared() && placement.sync())
+        );
     }
 
     #[test]
@@ -21536,7 +22119,18 @@ class NativeAllocationFlow {
         let pass = MethodKey::rust_identity("NativeAllocationFlow", "pass");
         let unrelated = MethodKey::rust_identity("NativeAllocationFlow", "unrelated");
         let allocation = SignatureConstraint::RequiredNativeAllocation(
-            crate::storage_strategy::StoragePlacement::new(true, true, false),
+            // Array reference boundaries now seed non-sync retention as part
+            // of their ordinary contract. Sync remains a genuinely late
+            // requirement, so it tests propagation and isolation rather than
+            // assuming the old value-copy representation of returned arrays.
+            crate::storage_strategy::StoragePlacement::new(true, true, true),
+        );
+        assert!(
+            !constraints.methods[&run]
+                .local_by_binding(&BindingId::new(BindingKind::Local, "original", 0))
+                .unwrap()
+                .constraints
+                .contains(&allocation)
         );
         assert!(add_method_local_constraint_by_binding(
             &mut constraints,
@@ -27339,6 +27933,145 @@ class Holder { Holder(Sink sink) { sink.write(); } }
     }
 
     #[test]
+    fn map_value_views_do_not_join_key_nullability() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class ValueViews {
+                static Collection<String> keyOnly(Map<List<String>, String> map) {
+                    map.put(null, "value"); return map.values();
+                }
+                static Collection<String> nullableValues(Map<List<String>, String> map) {
+                    map.put(null, null); return map.values();
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let reps = crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan =
+            solve_signatures_with_facts(&resolved.program, &reps, &semantic.usage, &semantic.facts);
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let signature = plan.method_signature(owner, method).unwrap();
+            let map = signature.params()[0].shape();
+            let view = signature.return_shape().unwrap();
+            assert!(map.native_allocation.shared() && view.native_allocation.shared());
+            let key = RustSlotShape::native_child_type_at_path(&map.java_ty, &[0]).unwrap();
+            assert!(optional_element_type(&key).is_some(), "{map:?}");
+            let value = RustSlotShape::native_child_type_at_path(&view.java_ty, &[0]).unwrap();
+            assert_eq!(
+                optional_element_type(&value).is_some(),
+                method.name == "nullableValues",
+                "{}: {view:?}",
+                method.name
+            );
+        }
+    }
+
+    #[test]
+    fn retained_map_key_view_backing_does_not_lift_the_value_child_domain() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+            import java.util.*;
+            class Views {
+                static Set<String> keys(Map<String, List<String>> map) {
+                    map.put("value-only", null); return map.keySet();
+                }
+                static Set<String> nullableKeys(Map<String, List<String>> map) {
+                    map.put(null, null); return map.keySet();
+                }
+            }
+        "#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let reps = crate::representation::plan_representations(&resolved.program, &semantic.facts);
+        let plan =
+            solve_signatures_with_facts(&resolved.program, &reps, &semantic.usage, &semantic.facts);
+        let owner = &resolved.program.types[0];
+        for method in owner.members.iter().filter_map(|member| match member {
+            Member::Method(method) => Some(method),
+            _ => None,
+        }) {
+            let signature = plan.method_signature(owner, method).unwrap();
+            let map = signature.params()[0].shape();
+            assert!(map.native_allocation.shared(), "{map:?}");
+            let view = signature.return_shape().unwrap();
+            assert!(view.native_allocation.shared());
+            let key = RustSlotShape::native_child_type_at_path(&view.java_ty, &[0]).unwrap();
+            assert_eq!(
+                optional_element_type(&key).is_some(),
+                method.name == "nullableKeys",
+                "{}: {view:?}",
+                method.name
+            );
+            assert!(
+                map.nested_native_allocations
+                    .iter()
+                    .all(|(path, _)| path != &[1]),
+                "{map:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn collection_carrier_consensus_remembers_matching_and_late_conflicting_callers() {
+        let parse = crate::parser::parse_hierarchy_type;
+        for observations in [
+            ["LinkedHashMap<String, T>", "Map<String, T>"],
+            ["Map<String, T>", "LinkedHashMap<String, T>"],
+        ] {
+            let mut slots = HashMap::new();
+            let mut current = parse("Map<String, T>");
+            for observation in observations {
+                let witness =
+                    collection_carrier_consensus_witness(&parse(observation), &current).unwrap();
+                join_collection_carrier_consensus(&mut slots, 0, &mut current, witness);
+            }
+            assert_eq!(current, parse("Map<String, T>"));
+            for _ in 0..4 {
+                for observation in observations {
+                    let witness =
+                        collection_carrier_consensus_witness(&parse(observation), &current)
+                            .unwrap();
+                    assert!(!join_collection_carrier_consensus(
+                        &mut slots,
+                        0,
+                        &mut current,
+                        witness
+                    ));
+                    assert_eq!(current, parse("Map<String, T>"));
+                }
+            }
+        }
+        let left = ConstructorConstraintSet {
+            param_java_types: vec![parse("Map<String, T>")],
+            ..Default::default()
+        };
+        let right = ConstructorConstraintSet {
+            param_java_types: vec![parse("LinkedHashMap<String, T>")],
+            ..Default::default()
+        };
+        assert_ne!(
+            left, right,
+            "constructor carrier changes are solver state changes"
+        );
+    }
+
+    #[test]
     fn call_site_wildcard_refinement_does_not_replace_bounded_declaration_domains() {
         let parse = crate::parser::parse_hierarchy_type;
         for target in [
@@ -27800,6 +28533,11 @@ fn local_shape_constraints_with_usage_and_effective_facts(
         signature_capability_policy_with_effective_facts(java_ty, effective_facts)
             .into_constraints(),
     );
+    if effective_facts.native_collection_requires_runtime_policy(java_ty) {
+        constraints.push(SignatureConstraint::RequiredNativeAllocation(
+            crate::storage_strategy::StoragePlacement::new(true, true, false),
+        ));
+    }
     push_unique_signature_constraints(
         &mut constraints,
         &declared_local_jdk_iterator_constraints(java_ty),
@@ -29664,18 +30402,21 @@ fn native_collection_get_return_may_be_null(
     name: &str,
     arg_count: Option<usize>,
 ) -> bool {
-    if name != "get" || !matches!(arg_count, Some(1) | None) {
-        return false;
-    }
     let Some(receiver_type) = receiver_type else {
         return false;
     };
     let receiver_type = crate::stdlib::canonical_external_receiver_type_key(receiver_type);
     let simple = receiver_type.rsplit('.').next().unwrap_or(&receiver_type);
-    matches!(
-        simple,
-        "List" | "ArrayList" | "LinkedList" | "Map" | "HashMap" | "LinkedHashMap"
-    )
+    match (name, arg_count) {
+        ("get", Some(1) | None) => matches!(
+            simple,
+            "List" | "ArrayList" | "LinkedList" | "Map" | "HashMap" | "LinkedHashMap"
+        ),
+        ("remove", Some(1) | None) | ("put" | "putIfAbsent" | "put_if_absent", Some(2) | None) => {
+            matches!(simple, "Map" | "HashMap" | "LinkedHashMap")
+        }
+        _ => false,
+    }
 }
 
 fn external_effect_return_nullability_is_signature_evidence(
@@ -30042,6 +30783,61 @@ fn refined_internal_call_java_type_for_slot(
 ) -> Option<JavaType> {
     refined_collection_carrier_java_type_for_slot(actual, target)
         .or_else(|| refined_source_generic_wildcard_java_type_for_slot(actual, target))
+}
+
+/// A finite, monotone evidence domain. Once two runtime carrier kinds reach a
+/// slot, subsequent sweeps cannot forget one and choose the other. Keep the
+/// declaration's family in that case; representation must handle the mixture.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CollectionCarrierConsensus {
+    declared: JavaType,
+    observed: Vec<(crate::stdlib::JavaCollectionKind, JavaType)>,
+}
+
+fn collection_carrier_consensus_witness(actual: &JavaType, target: &JavaType) -> Option<JavaType> {
+    let actual_kind = crate::stdlib::java_collection_kind_for_type(actual)?;
+    let target_kind = crate::stdlib::java_collection_kind_for_type(target)?;
+    if actual_kind == target_kind {
+        return Some(target.clone());
+    }
+    collection_kinds_share_carrier_family(actual_kind, target_kind)
+        .then(|| collection_java_type_with_target_args(actual, target))?
+}
+
+fn join_collection_carrier_consensus(
+    slots: &mut HashMap<usize, CollectionCarrierConsensus>,
+    index: usize,
+    current: &mut JavaType,
+    observed: JavaType,
+) -> bool {
+    let Some(kind) = crate::stdlib::java_collection_kind_for_type(&observed) else {
+        return false;
+    };
+    let state = slots
+        .entry(index)
+        .or_insert_with(|| CollectionCarrierConsensus {
+            declared: current.clone(),
+            observed: Vec::new(),
+        });
+    let new_evidence = !state.observed.iter().any(|(existing, _)| *existing == kind);
+    if new_evidence {
+        state.observed.push((kind, observed));
+    }
+    let template = if state.observed.len() == 1 {
+        &state.observed[0].1
+    } else {
+        &state.declared
+    };
+    // Wildcard/capture refinement has an independent domain. Change only the
+    // outer carrier here, preserving its current declaration-scoped arguments.
+    let refined = collection_java_type_with_target_args(template, current);
+    if let Some(refined) = refined
+        && *current != refined
+    {
+        *current = refined;
+        return true;
+    }
+    new_evidence
 }
 
 /// Eliminate a bounded capture only after every observed call proves exact
@@ -34391,14 +35187,7 @@ fn collect_returned_var_types_from_stmt<'a>(
 }
 
 fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
-    match java_ty {
-        JavaType::Named { name, .. } | JavaType::Unknown(name) => matches!(
-            crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
-            "Object" | "java.lang.Object"
-        ),
-        JavaType::Wildcard(_) => true,
-        _ => false,
-    }
+    crate::shape_projection::java_type_is_erased_object_boundary(java_ty)
 }
 
 fn java_type_is_rust_crate_mapped_external(java_ty: &JavaType, facts: &FactSet) -> bool {

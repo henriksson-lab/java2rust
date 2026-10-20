@@ -1460,6 +1460,7 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
         native_allocation: Default::default(),
         nested_native_allocations: Default::default(),
         nested_collection_views: Default::default(),
+        borrow_target: Default::default(),
         ownership: OwnershipShape::SharedBorrow,
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
@@ -1471,6 +1472,7 @@ fn crate_mapped_handle_and_source_helper_use_same_slot_conversion_policy() {
         native_allocation: Default::default(),
         nested_native_allocations: Default::default(),
         nested_collection_views: Default::default(),
+        borrow_target: Default::default(),
         ownership: OwnershipShape::SharedBorrow,
         view: ViewShape::Native,
         dispatch: DispatchShape::Concrete,
@@ -3072,38 +3074,41 @@ fn optional_display_segments_use_java_null_string_policy_before_rendering() {
                 &FactSet::default(),
             ),
         ),
-        RustExpr::MethodCall {
-            receiver: Box::new(RustExpr::MethodCall {
+        RustExpr::shaped(
+            RustExprShape::PlainValue,
+            RustExpr::MethodCall {
                 receiver: Box::new(RustExpr::MethodCall {
-                    receiver: Box::new(RustExpr::Var("value".to_string())),
-                    method: "as_ref".to_string(),
-                    args: Vec::new(),
-                }),
-                method: "map".to_string(),
-                args: vec![RustExpr::Closure {
-                    is_move: false,
-                    params: vec![RustClosureParam {
-                        pattern: "value".to_string(),
-                        ty: None,
+                    receiver: Box::new(RustExpr::MethodCall {
+                        receiver: Box::new(RustExpr::Var("value".to_string())),
+                        method: "as_ref".to_string(),
+                        args: Vec::new(),
+                    }),
+                    method: "map".to_string(),
+                    args: vec![RustExpr::Closure {
+                        is_move: false,
+                        params: vec![RustClosureParam {
+                            pattern: "value".to_string(),
+                            ty: None,
+                        }],
+                        return_type: None,
+                        body: RustClosureBody::Expr(Box::new(RustExpr::Call {
+                            function: Box::new(RustExpr::GenericPath {
+                                base: vec![
+                                    "std".to_string(),
+                                    "convert".to_string(),
+                                    "AsRef".to_string(),
+                                ],
+                                args: vec![RustType::Named("str".to_string())],
+                                member: Some("as_ref".to_string()),
+                            }),
+                            args: vec![RustExpr::Var("value".to_string())],
+                        })),
                     }],
-                    return_type: None,
-                    body: RustClosureBody::Expr(Box::new(RustExpr::Call {
-                        function: Box::new(RustExpr::GenericPath {
-                            base: vec![
-                                "std".to_string(),
-                                "convert".to_string(),
-                                "AsRef".to_string(),
-                            ],
-                            args: vec![RustType::Named("str".to_string())],
-                            member: Some("as_ref".to_string()),
-                        }),
-                        args: vec![RustExpr::Var("value".to_string())],
-                    })),
-                }],
-            }),
-            method: "unwrap_or".to_string(),
-            args: vec![RustExpr::Literal("\"null\"".to_string())],
-        }
+                }),
+                method: "unwrap_or".to_string(),
+                args: vec![RustExpr::Literal("\"null\"".to_string())],
+            }
+        )
     );
 }
 
@@ -4981,11 +4986,21 @@ fn shape_coercion_recovers_erased_object_into_source_hierarchy_carrier() {
     target.dispatch = DispatchShape::ClosedEnum {
         enum_name: "AnimalValue".to_string(),
     };
+    let mut generic = target.clone();
+    if let JavaType::Named { args, .. } = &mut generic.java_ty {
+        args.push(JavaType::String);
+    }
+    assert!(matches!(
+        plan_shape_coercion_with_facts(&actual, &generic, &facts).as_slice(),
+        [Coercion::DowncastErasedObjectToClosedEnum { carrier_type, .. }]
+            if carrier_type == "AnimalValue<String>"
+    ));
 
     assert_eq!(
         plan_shape_coercion_with_facts(&actual, &target, &facts),
         vec![Coercion::DowncastErasedObjectToClosedEnum {
             enum_name: "AnimalValue".to_string(),
+            carrier_type: "AnimalValue".to_string(),
             variants: vec!["Animal".to_string(), "Dog".to_string()],
             invalid_cast: InvalidCastPolicy::Panic,
         }]
@@ -5048,6 +5063,7 @@ fn instanceof_recovers_erased_object_against_source_hierarchy_carrier() {
             enum_name: "AnimalValue".to_string(),
             carrier_type: "AnimalValue".to_string(),
             variants: vec!["Animal".to_string(), "Dog".to_string()],
+            optional: false,
         }
     );
 }
@@ -6090,6 +6106,73 @@ fn optional_boxed_dyn_trait_maps_borrow_over_payload() {
         )),
         "block_data",
         "an Option<&dyn Trait> argument must not be reinterpreted as Option<Box<dyn Trait>>"
+    );
+}
+
+#[test]
+fn source_interface_object_erasure_is_a_virtual_owned_handle_operation() {
+    let mut facts = FactSet::default();
+    facts
+        .type_capability_overrides
+        .push(TypeCapabilityOverride {
+            type_name: "SourcePort".into(),
+            copy: None,
+            clone: None,
+            string_like: None,
+            sequence_like: None,
+            implements: vec![],
+            extends: None,
+            final_type: None,
+            object_safe_trait: Some(true),
+            provenance: FactProvenance::ParsedSource,
+        });
+    let java_ty = new_java2rust::parser::parse_hierarchy_type("SourcePort<String>");
+    let mut actual = RustSlotShape::for_storage(java_ty);
+    actual.dispatch = DispatchShape::BoxedDynTrait {
+        trait_name: "SourcePort".into(),
+    };
+    let mut target = RustSlotShape::for_storage(JavaType::Named {
+        name: "Object".into(),
+        args: vec![],
+    });
+    target.dispatch = DispatchShape::ErasedObject;
+    for ownership in [
+        OwnershipShape::Owned,
+        OwnershipShape::SharedBorrow,
+        OwnershipShape::MutableBorrow,
+    ] {
+        actual.ownership = ownership;
+        let plan = shape_coercion_plan_with_facts(&actual, &target, &facts);
+        assert_eq!(
+            plan.dispatch(),
+            &DispatchCoercionPolicy::CloneDynTraitToErasedObject {
+                trait_name: "SourcePort<String>".into()
+            }
+        );
+        assert_eq!(
+            emit_expr(&apply_shape_coercion_plan(
+                RustExpr::Var("port".into()),
+                &plan
+            )),
+            "port.clone_any()"
+        );
+        assert_eq!(
+            plan.coercions().len(),
+            1,
+            "the virtual result is already owned"
+        );
+    }
+    actual.dispatch = DispatchShape::ErasedObject;
+    assert_eq!(
+        shape_coercion_plan_with_facts(&actual, &target, &facts).dispatch(),
+        &DispatchCoercionPolicy::NoDispatchChange
+    );
+    actual.dispatch = DispatchShape::Concrete;
+    facts.type_capability_overrides[0].provenance = FactProvenance::ExternalLibraryPack;
+    assert_eq!(
+        shape_coercion_plan_with_facts(&actual, &target, &facts).dispatch(),
+        &DispatchCoercionPolicy::EraseObject,
+        "an external trait mapping is not evidence for generated Object support"
     );
 }
 

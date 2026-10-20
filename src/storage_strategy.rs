@@ -64,6 +64,18 @@ mod interface_identity_storage_tests {
     }
 
     #[test]
+    fn aliased_base_storage_preserves_unaliased_subclass_allocations() {
+        let source = include_str!("../tests/fixtures/source_carrier_map_values.java");
+        for name in ["StoredNode", "StoredLeaf"] {
+            assert_eq!(
+                strategy_of(source, name),
+                StorageStrategy::SharedLocal,
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
     fn source_interface_implementor_gets_identity_preserving_handle() {
         assert_eq!(
             strategy_of(
@@ -790,8 +802,24 @@ fn plan_storage_strategies_with_facts(
         }
     }
     let mut interface_value_types = source_interfaces_used_as_value_types(program, &interfaces);
+    let collection_context = StorageFactContext {
+        program,
+        identity_requirements: std::cell::RefCell::new(
+            crate::item_assembly::SourceReferenceIdentityRequirements::new(program),
+        ),
+        hash_requirements: std::cell::RefCell::new(
+            crate::item_assembly::SourceReferenceRequirements::new_for_hash(program),
+        ),
+    };
     for ty in &program.types {
-        collect_type_facts(ty, program, usage, &declared, &threaded, &mut types);
+        collect_type_facts(
+            ty,
+            &collection_context,
+            usage,
+            &declared,
+            &threaded,
+            &mut types,
+        );
     }
     if let Some(facts) = facts {
         for owner in &facts.captures.owners {
@@ -1281,6 +1309,7 @@ fn propagate_inherited_receiver_mutation(
         let mut owner = subtype.clone();
         let mut current = source_type_decl(program, subtype).and_then(|ty| ty.extends.clone());
         let mut inherits_mutation = false;
+        let mut inherits_aliasing = false;
         for _ in 0..64 {
             let Some(super_name) = current else {
                 break;
@@ -1289,6 +1318,9 @@ fn propagate_inherited_receiver_mutation(
             else {
                 break;
             };
+            inherits_aliasing |= types
+                .get(&super_ty.name)
+                .is_some_and(TypeStorageFacts::requires_shared_storage);
             if super_ty.members.iter().any(|member| {
                 let Member::Method(method) = member else {
                     return false;
@@ -1299,22 +1331,25 @@ fn propagate_inherited_receiver_mutation(
                         .is_some_and(|method_usage| method_usage.mutates_self())
             }) {
                 inherits_mutation = true;
-                break;
             }
             owner = super_ty.name.clone();
             current = super_ty.extends.clone();
         }
-        if inherits_mutation && let Some(facts) = types.get_mut(subtype) {
+        if let Some(facts) = types.get_mut(subtype) {
+            // An aliased base reference can hold any source subclass. The
+            // subclass must keep that same allocation when copied through the
+            // base carrier, even when no subclass-typed local is aliased.
+            facts.locally_aliased |= inherits_aliasing;
             // Flattened subclass storage contains the superclass subobject.
             // An inherited method therefore mutates the subclass allocation,
             // even when the subclass declares no mutating method of its own.
-            facts.mutated = true;
+            facts.mutated |= inherits_mutation;
         }
         let inherited_object_dispatch = source_type_decl(program, subtype).is_some_and(|decl| {
             crate::inherited_members::inherited_instance_method_refs_for_type(decl, program)
                 .into_iter()
                 .any(|inherited| {
-                    crate::stdlib::source_method_is_java_to_string(inherited.method())
+                    crate::stdlib::source_method_uses_borrowed_object_dispatch(inherited.method())
                         && usage.source_method_or_alias_mutates(
                             inherited.declaring_ty(),
                             inherited.method(),
@@ -1720,9 +1755,26 @@ fn collect_threaded(ty: &TypeDecl, declared: &BTreeSet<String>, into: &mut BTree
     }
 }
 
+/// Immutable source plus per-walk completed capability results. Deref keeps
+/// existing read-only Program helpers shared without hiding mutable global
+/// state or threading a cache through helpers that never query capabilities.
+struct StorageFactContext<'a> {
+    program: &'a Program,
+    identity_requirements:
+        std::cell::RefCell<crate::item_assembly::SourceReferenceIdentityRequirements<'a>>,
+    hash_requirements: std::cell::RefCell<crate::item_assembly::SourceReferenceRequirements<'a>>,
+}
+
+impl std::ops::Deref for StorageFactContext<'_> {
+    type Target = Program;
+    fn deref(&self) -> &Program {
+        self.program
+    }
+}
+
 fn collect_type_facts(
     ty: &TypeDecl,
-    program: &Program,
+    program: &StorageFactContext<'_>,
     usage: &UsageFacts,
     declared: &BTreeSet<String>,
     threaded: &BTreeSet<String>,
@@ -1762,7 +1814,7 @@ fn collect_type_facts(
                     && let Some(facts) = into.get_mut(&ty.name)
                 {
                     facts.mutated = true;
-                    if crate::stdlib::source_method_is_java_to_string(method) {
+                    if crate::stdlib::source_method_uses_borrowed_object_dispatch(method) {
                         facts.borrowed_object_dispatch = true;
                     }
                 }
@@ -2023,7 +2075,7 @@ fn source_type_decl_and_nested(ty: &TypeDecl) -> Vec<&TypeDecl> {
 fn collect_block_facts(
     block: &Block,
     owner: &TypeDecl,
-    program: &Program,
+    program: &StorageFactContext<'_>,
     declared: &BTreeSet<String>,
     in_constructor: bool,
     locals: &mut BTreeMap<String, JavaType>,
@@ -2037,7 +2089,7 @@ fn collect_block_facts(
 fn collect_stmt_facts(
     stmt: &Stmt,
     owner: &TypeDecl,
-    program: &Program,
+    program: &StorageFactContext<'_>,
     declared: &BTreeSet<String>,
     in_constructor: bool,
     locals: &mut BTreeMap<String, JavaType>,
@@ -2157,10 +2209,14 @@ fn collect_stmt_facts(
             }
         }
         Stmt::If {
+            condition,
             then_block,
             else_block,
             ..
         } => {
+            collect_anonymous_body_facts_from_expr(
+                condition, owner, program, declared, locals, into,
+            );
             let mut then_locals = locals.clone();
             collect_block_facts(
                 then_block,
@@ -2186,8 +2242,8 @@ fn collect_stmt_facts(
         }
         Stmt::For {
             init,
-            condition: _,
-            update: _,
+            condition,
+            update,
             body,
             ..
         } => {
@@ -2200,6 +2256,16 @@ fn collect_stmt_facts(
                     declared,
                     in_constructor,
                     &mut nested_locals,
+                    into,
+                );
+            }
+            for expr in condition.iter().chain(update.iter()) {
+                collect_anonymous_body_facts_from_expr(
+                    expr,
+                    owner,
+                    program,
+                    declared,
+                    &nested_locals,
                     into,
                 );
             }
@@ -2244,6 +2310,11 @@ fn collect_stmt_facts(
         | Stmt::DoWhile { body, .. }
         | Stmt::Block(body)
         | Stmt::LabeledBlock { body, .. } => {
+            if let Stmt::While { condition, .. } | Stmt::DoWhile { condition, .. } = stmt {
+                collect_anonymous_body_facts_from_expr(
+                    condition, owner, program, declared, locals, into,
+                );
+            }
             let mut nested_locals = locals.clone();
             collect_block_facts(
                 body,
@@ -2372,11 +2443,68 @@ fn record_receiver_mutation(
 fn collect_anonymous_body_facts_from_expr(
     expr: &Expr,
     owner: &TypeDecl,
-    program: &Program,
+    program: &StorageFactContext<'_>,
     declared: &BTreeSet<String>,
     locals: &BTreeMap<String, JavaType>,
     into: &mut BTreeMap<String, TypeStorageFacts>,
 ) {
+    if let Expr::Call {
+        receiver: Some(receiver),
+        name,
+        args,
+        ..
+    } = expr
+        && args.is_empty()
+        && matches!(name.as_str(), "hashCode" | "hash_code")
+        && !matches!(receiver.as_ref(), Expr::Super)
+        && let Some(name) = handle_type_name(receiver, owner, declared, locals)
+    {
+        for family in source_hierarchy_family_names(program, &name, declared) {
+            if let Some(storage) = into.get_mut(&family) {
+                storage.locally_aliased = true;
+            }
+        }
+    }
+    if let Expr::Call {
+        receiver,
+        resolved: Some(call),
+        ..
+    } = expr
+    {
+        let mut env = crate::types::TypeEnv::new();
+        for (name, ty) in locals {
+            env.insert_local(name.clone(), ty.clone());
+        }
+        for member in &owner.members {
+            if let Member::Field(field) = member {
+                env.insert_field(field.name.clone(), field.ty.clone());
+            }
+        }
+        let receiver_type = receiver
+            .as_ref()
+            .map(|receiver| crate::types::infer_expr_type(receiver, &env));
+        let relevant =
+            |ty: &JavaType| !declared_storage_type_names(ty, &owner.name, declared).is_empty();
+        let mut required_types = program
+            .identity_requirements
+            .borrow_mut()
+            .types_for_call_matching(call, receiver_type.as_ref(), &relevant);
+        required_types.extend(
+            program
+                .hash_requirements
+                .borrow_mut()
+                .types_for_call_matching(call, receiver_type.as_ref(), relevant),
+        );
+        for ty in required_types {
+            for name in declared_storage_type_names(&ty, &owner.name, declared) {
+                for family in source_hierarchy_family_names(program, &name, declared) {
+                    if let Some(storage) = into.get_mut(&family) {
+                        storage.locally_aliased = true;
+                    }
+                }
+            }
+        }
+    }
     match expr {
         Expr::Binary {
             op: crate::java_ir::BinaryOp::Assign,
@@ -3504,10 +3632,22 @@ mod constructor_mutation_tests {
 class Mutable { int calls; public String toString() { calls++; return "x"; } }
 class Child extends Mutable {}
 class ReadOnly { public String toString() { return "x"; } }
+class HashMutable { int calls; public int hashCode() { calls++; return 1; } }
+class HashChild extends HashMutable {}
+class HashReadOnly { public int hashCode() { return 1; } }
 "#;
         assert_eq!(strategy_of(source, "Mutable"), StorageStrategy::SharedLocal);
         assert_eq!(strategy_of(source, "Child"), StorageStrategy::SharedLocal);
         assert_eq!(strategy_of(source, "ReadOnly"), StorageStrategy::Value);
+        assert_eq!(
+            strategy_of(source, "HashMutable"),
+            StorageStrategy::SharedLocal
+        );
+        assert_eq!(
+            strategy_of(source, "HashChild"),
+            StorageStrategy::SharedLocal
+        );
+        assert_eq!(strategy_of(source, "HashReadOnly"), StorageStrategy::Value);
         let facts = facts_of(source, "Mutable");
         assert!(facts.borrowed_object_dispatch);
         assert!(!facts.locally_aliased);

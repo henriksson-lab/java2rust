@@ -5,6 +5,174 @@ use crate::representation::RepresentationPlan;
 use crate::slot_shape::{DispatchShape, MutabilityShape, OwnershipShape, RustSlotShape, ViewShape};
 use crate::types::{optional_element_type, optional_java_type};
 
+/// Storage projection shared by insertions, reads, display callbacks and
+/// capability proofs. It must not replace an owned interface with a loan.
+pub(crate) fn native_collection_storage_value_shape(
+    shape: RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> RustSlotShape {
+    let mut projected = storage_shape_for_java_type(representations, shape.java_ty.clone());
+    projected.ownership = shape.ownership;
+    projected.native_allocation = shape.native_allocation;
+    projected.nested_native_allocations = shape.nested_native_allocations;
+    projected.view = shape.view;
+    projected.mutability = shape.mutability;
+    projected.nested_collection_views = shape.nested_collection_views;
+    if matches!(&shape.dispatch, DispatchShape::BoxedDynTrait { .. }) {
+        projected.dispatch = shape.dispatch;
+    }
+    normalize_native_collection_storage_shape(projected, facts, representations)
+}
+
+pub(crate) fn normalize_native_collection_storage_shape(
+    mut shape: RustSlotShape,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> RustSlotShape {
+    // The generic-argument renderer owns conservative facade representation.
+    if matches!(shape.dispatch, DispatchShape::ErasedObject) {
+        let expected = crate::slot_render::rust_type_for_java_generic_arg_with_representations(
+            &shape.java_ty,
+            &EffectiveFacts::new(facts),
+            representations,
+        );
+        if crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+            &shape,
+            facts,
+            representations,
+        ) != expected
+        {
+            let mut concrete = shape.clone();
+            concrete.dispatch = DispatchShape::Concrete;
+            concrete.view = ViewShape::Native;
+            if crate::slot_render::rust_type_for_slot_with_facts_and_representations(
+                &concrete,
+                facts,
+                representations,
+            ) == expected
+            {
+                shape = concrete;
+            }
+        }
+    }
+    shape
+}
+
+pub(crate) fn native_collection_stored_child_shape(
+    parent: &RustSlotShape,
+    index: usize,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<RustSlotShape> {
+    let ty = RustSlotShape::native_child_type_at_path(&parent.java_ty, &[index])?;
+    let mut shape = native_collection_storage_value_shape(
+        storage_arg_shape_with_effective_facts(ty, &EffectiveFacts::new(facts)),
+        facts,
+        representations,
+    );
+    shape.inherit_native_collection_child(parent, index);
+    Some(shape)
+}
+
+/// A retained queue transfers an owned Java reference out of its short loan.
+/// Missing and stored-null values share one nullable carrier for peek/poll.
+pub(crate) fn retained_native_queue_result_shape(
+    parent: &RustSlotShape,
+    method: crate::call_plan::NativeCollectionMethod,
+    facts: &FactSet,
+    representations: &RepresentationPlan,
+) -> Option<RustSlotShape> {
+    if !method.is_queue_endpoint()
+        || !parent.native_allocation.shared()
+        || EffectiveFacts::new(facts)
+            .retained_native_collection_kind(&parent.java_ty)
+            .is_none()
+    {
+        return None;
+    }
+    let mut child = native_collection_stored_child_shape(parent, 0, facts, representations)?;
+    child.ownership = OwnershipShape::Owned;
+    child.borrow_target = crate::slot_shape::BorrowTarget::Carrier;
+    if method.queue_endpoint_can_be_empty() && child.optional_element_type().is_none() {
+        child.java_ty = optional_java_type(child.java_ty);
+    }
+    Some(child)
+}
+
+/// Instantiate a solved source contract without losing its physical views or
+/// nullable carrier. Direct owner parameters additionally need the concrete
+/// reference representation, not merely a different Java type spelling.
+pub(crate) fn specialize_source_contract_shape(
+    shape: &RustSlotShape,
+    bindings: &std::collections::HashMap<String, JavaType>,
+    representations: &RepresentationPlan,
+) -> RustSlotShape {
+    let java_ty = crate::resolve::substitute_method_type_variables(&shape.java_ty, bindings);
+    if java_ty == shape.java_ty {
+        return shape.clone();
+    }
+    let specialized = specialize_slot_shape_java_type(shape, &java_ty);
+    let original = shape
+        .optional_element_type()
+        .unwrap_or_else(|| shape.java_ty.clone());
+    if matches!(&original, JavaType::Named { name, args } if args.is_empty() && bindings.contains_key(name))
+    {
+        let mut physical = storage_shape_for_java_type(representations, specialized.java_ty);
+        physical.ownership = shape.ownership;
+        physical.view = shape.view.clone();
+        physical.borrow_target = if matches!(
+            shape.ownership,
+            OwnershipShape::SharedBorrow | OwnershipShape::MutableBorrow
+        ) {
+            crate::slot_shape::BorrowTarget::Carrier
+        } else {
+            shape.borrow_target
+        };
+        physical
+    } else {
+        specialized
+    }
+}
+
+/// Specialize the declaring implementation's plan, not the concrete owner's
+/// potentially covariant override slot. Shared by body and shell emission.
+pub(crate) fn specialize_source_method_signature(
+    signature: &crate::signature::MethodSignaturePlan,
+    method: &crate::java_ir::MethodDecl,
+    bindings: &std::collections::HashMap<String, JavaType>,
+    representations: &RepresentationPlan,
+) -> crate::signature::MethodSignaturePlan {
+    let bindings =
+        crate::java_type_substitution::without_shadowed_binders(bindings, &method.type_params);
+    let project =
+        |shape: &RustSlotShape| specialize_source_contract_shape(shape, &bindings, representations);
+    let params = signature
+        .params()
+        .iter()
+        .map(|param| {
+            crate::signature::ParamPlan::new(
+                param.name().to_string(),
+                crate::resolve::substitute_method_type_variables(param.java_ty(), &bindings),
+                param.is_varargs(),
+                project(param.shape()),
+                param.binding_mutable(),
+            )
+        })
+        .collect();
+    let mut locals =
+        crate::java_type_substitution::specialized_locals(method, signature.locals(), &bindings);
+    for (local, original) in locals.iter_mut().zip(signature.locals()) {
+        *local.shape_mut() = project(original.shape());
+    }
+    crate::signature::MethodSignaturePlan::new(
+        params,
+        signature.return_shape().map(project),
+        locals,
+        signature.receiver(),
+    )
+}
+
 pub(crate) fn project_native_iterable_list_view(
     actual: &RustSlotShape,
     target: &mut RustSlotShape,
@@ -541,11 +709,15 @@ pub(crate) fn retained_iteration_element_shape(
     Some(shape)
 }
 
-fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
+pub(crate) fn java_type_is_erased_object_boundary(java_ty: &JavaType) -> bool {
+    if let Some(element) = crate::types::optional_element_type(java_ty) {
+        return java_type_is_erased_object_boundary(&element);
+    }
     matches!(
         java_ty,
         JavaType::Named { name, .. } | JavaType::Unknown(name)
-            if name == "Object" || name == "java.lang.Object"
+            if matches!(crate::stdlib::canonical_external_receiver_type_key(name).as_str(),
+                "Object" | "java.lang.Object")
     ) || matches!(java_ty, JavaType::Wildcard(_))
 }
 
@@ -709,7 +881,7 @@ pub fn java_type_is_erased_object_storage(java_ty: &JavaType) -> bool {
         java_ty,
         JavaType::Named { name, args }
             if args.is_empty()
-                && crate::stdlib::canonical_external_receiver_type_key(name) == "Object"
+                && matches!(crate::stdlib::canonical_external_receiver_type_key(name).as_str(), "Object" | "java.lang.Object")
     )
 }
 
@@ -775,6 +947,15 @@ pub fn shape_is_borrowed_string_content(shape: &RustSlotShape) -> bool {
 
 pub fn shape_is_owned(shape: &RustSlotShape) -> bool {
     shape.ownership == OwnershipShape::Owned
+}
+
+/// Recover an owned collection payload without discarding its equality ABI.
+/// A semantic hash view is a physical carrier, not a borrowed projection.
+pub(crate) fn apply_owned_collection_value_projection(shape: &mut RustSlotShape) {
+    shape.ownership = OwnershipShape::Owned;
+    if shape.view != ViewShape::JavaSemanticHash {
+        shape.view = ViewShape::Native;
+    }
 }
 
 pub(crate) fn apply_borrowed_sequence_element_projection(shape: &mut RustSlotShape) {
@@ -1010,10 +1191,13 @@ pub fn indexed_read_shape_with_effective_facts(
         facts,
     );
     let ownership = policy.ownership();
-    let mut element_shape = RustSlotShape::conservative(policy.into_element_ty());
+    let mut element_shape =
+        indexed_storage_shape_with_effective_facts(policy.into_element_ty(), facts);
     element_shape.ownership = ownership;
     element_shape.inherit_native_collection_child(array_shape, 0);
-    if matches!(element_shape.java_ty, JavaType::Array(_)) {
+    if element_shape.native_allocation.shared() {
+        element_shape.view = ViewShape::Native;
+    } else if matches!(element_shape.java_ty, JavaType::Array(_)) {
         apply_required_view(&mut element_shape, ViewShape::Slice);
     }
     // Reference-array storage is `Vec<Option<T>>`, including when the array
@@ -1025,11 +1209,12 @@ pub fn indexed_read_shape_with_effective_facts(
 
     if array_shape.native_allocation.shared()
         && !matches!(ownership, OwnershipShape::CopyValue)
-        && !matches!(
-            optional_element_type(&element_shape.java_ty)
-                .unwrap_or_else(|| element_shape.java_ty.clone()),
-            JavaType::Array(_)
-        )
+        && (element_shape.native_allocation.shared()
+            || !matches!(
+                optional_element_type(&element_shape.java_ty)
+                    .unwrap_or_else(|| element_shape.java_ty.clone()),
+                JavaType::Array(_)
+            ))
     {
         // A reference into a Ref/MutexGuard cannot escape the checked-read
         // block. Java copies the stored reference value, not the array.
@@ -1084,11 +1269,32 @@ pub fn indexed_assignment_shape_with_effective_facts(
     sequence_element_projection_policy_with_effective_facts(&container_ty, facts)
         .into_element_ty()
         .map(|element| {
-            let mut shape =
-                RustSlotShape::for_storage(array_storage_element_java_type(&container_ty, element));
+            let mut shape = indexed_storage_shape_with_effective_facts(
+                array_storage_element_java_type(&container_ty, element),
+                facts,
+            );
             shape.inherit_native_collection_child(array_shape, 0);
             shape
         })
+}
+
+/// Indexed slots must describe the carrier actually stored in the array.
+/// In particular Object is already erased; Concrete would erase its Option
+/// container again instead of copying the stored nullable object reference.
+fn indexed_storage_shape_with_effective_facts(
+    java_ty: JavaType,
+    facts: &EffectiveFacts<'_>,
+) -> RustSlotShape {
+    let payload = optional_element_type(&java_ty).unwrap_or_else(|| java_ty.clone());
+    let mut shape = RustSlotShape::for_storage(java_ty);
+    if java_type_is_erased_object_storage(&payload)
+        && !facts.parsed_source_controls_native_carrier(&payload)
+    {
+        let storage = storage_arg_shape_with_effective_facts(payload, facts);
+        shape.dispatch = storage.dispatch;
+        shape.view = storage.view;
+    }
+    shape
 }
 
 pub(crate) fn array_storage_element_java_type(
@@ -1104,6 +1310,15 @@ pub(crate) fn array_storage_element_java_type(
     } else {
         element_ty
     }
+}
+
+/// Java reference-array reads may produce null, including a partially
+/// allocated row. This value-domain fact is separate from the selected Rust
+/// backend's physical element storage policy below.
+pub(crate) fn reference_array_read_may_be_null(array_ty: &JavaType) -> bool {
+    let inner = optional_element_type(array_ty);
+    let array_ty = inner.as_ref().unwrap_or(array_ty);
+    matches!(array_ty, JavaType::Array(element) if !matches!(element.as_ref(), JavaType::Primitive(_) | JavaType::Void))
 }
 
 pub(crate) fn java_array_element_needs_nullable_storage(element_ty: &JavaType) -> bool {
@@ -1123,6 +1338,200 @@ pub fn sequence_element_projection_policy_with_effective_facts(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn source_method_contract_specialization_keeps_binding_and_nested_view_evidence() {
+        use crate::binding_id::{BindingId, BindingKind};
+        use crate::java_ir::Member;
+        use crate::signature::{LocalPlan, MethodSignaturePlan, ParamPlan, ReceiverPlan};
+        let parse = crate::parser::parse_hierarchy_type;
+        let parsed = crate::parser::parse_java_source(
+            "class Frame<A> { A echo(A input) { List<Set<A>> local = null; return input; } }",
+        );
+        let Member::Method(method) = &parsed.program.types[0].members[0] else {
+            panic!("method");
+        };
+        let value = super::RustSlotShape::for_storage(parse("Optional<A>"));
+        let mut nested = super::RustSlotShape::for_storage(parse("List<Optional<Set<A>>>"));
+        nested
+            .nested_collection_views
+            .push((parse("Set<A>"), super::ViewShape::JavaSemanticHash));
+        let binding = BindingId::new(BindingKind::Local, "local", 9);
+        let signature = MethodSignaturePlan::new(
+            vec![ParamPlan::new(
+                "input".into(),
+                parse("A"),
+                false,
+                value.clone(),
+                true,
+            )],
+            Some(value),
+            vec![
+                LocalPlan::new(
+                    binding.clone(),
+                    "local".into(),
+                    parse("List<Set<A>>"),
+                    nested,
+                    true,
+                )
+                .with_proven_non_null(true),
+            ],
+            ReceiverPlan::Mutable,
+        );
+        let bindings = std::collections::HashMap::from([("A".into(), parse("String"))]);
+        let actual = super::specialize_source_method_signature(
+            &signature,
+            method,
+            &bindings,
+            &super::RepresentationPlan::default(),
+        );
+        assert_eq!(actual.params()[0].java_ty(), &parse("String"));
+        assert_eq!(
+            actual.params()[0].shape().java_ty,
+            parse("Optional<String>")
+        );
+        assert!(actual.params()[0].binding_mutable());
+        assert_eq!(
+            actual.return_shape().unwrap().java_ty,
+            parse("Optional<String>")
+        );
+        let local = &actual.locals()[0];
+        assert_eq!(local.binding(), &binding);
+        assert!(local.proven_non_null() && local.binding_mutable());
+        assert_eq!(local.java_ty(), &parse("List<Set<String>>"));
+        assert_eq!(local.shape().java_ty, parse("List<Optional<Set<String>>>"));
+        assert_eq!(
+            local.shape().nested_collection_views,
+            vec![(parse("Set<String>"), super::ViewShape::JavaSemanticHash)]
+        );
+        assert_eq!(actual.receiver(), ReceiverPlan::Mutable);
+        assert_eq!(
+            signature.return_shape().unwrap().java_ty,
+            parse("Optional<A>")
+        );
+    }
+
+    #[test]
+    fn source_method_contract_specialization_respects_method_binder_shadowing() {
+        use crate::java_ir::Member;
+        use crate::signature::{MethodSignaturePlan, ParamPlan, ReceiverPlan};
+        let parse = crate::parser::parse_hierarchy_type;
+        let parsed = crate::parser::parse_java_source(
+            "class Shadow<A> { <A> A same(A input) { return input; } }",
+        );
+        let Member::Method(method) = &parsed.program.types[0].members[0] else {
+            panic!("method");
+        };
+        let value = super::RustSlotShape::for_storage(parse("A"));
+        let signature = MethodSignaturePlan::new(
+            vec![ParamPlan::new(
+                "input".into(),
+                parse("A"),
+                false,
+                value.clone(),
+                false,
+            )],
+            Some(value),
+            vec![],
+            ReceiverPlan::Shared,
+        );
+        let actual = super::specialize_source_method_signature(
+            &signature,
+            method,
+            &std::collections::HashMap::from([("A".into(), parse("String"))]),
+            &super::RepresentationPlan::default(),
+        );
+        assert_eq!(actual, signature);
+    }
+
+    #[test]
+    fn nullable_object_boundaries_keep_erased_dispatch() {
+        use crate::slot_shape::DispatchShape;
+        for name in ["Object", "java.lang.Object"] {
+            let object = crate::parser::parse_hierarchy_type(name);
+            for java_ty in [object.clone(), crate::types::optional_java_type(object)] {
+                assert!(super::java_type_is_erased_object_boundary(&java_ty));
+                let shape = super::project_java_value_shape(None, java_ty);
+                assert_eq!(shape.dispatch, DispatchShape::ErasedObject);
+            }
+        }
+        for name in ["String", "Future<String>", "List<Object>", "Object[]"] {
+            let java_ty =
+                crate::types::optional_java_type(crate::parser::parse_hierarchy_type(name));
+            assert!(!super::java_type_is_erased_object_boundary(&java_ty));
+        }
+    }
+
+    #[test]
+    fn owned_collection_projection_keeps_semantic_equality_and_child_metadata() {
+        use crate::slot_shape::{OwnershipShape, RustSlotShape, ViewShape};
+        for view in [
+            ViewShape::Native,
+            ViewShape::Slice,
+            ViewShape::JavaSemanticHash,
+        ] {
+            let mut shape =
+                RustSlotShape::for_storage(crate::parser::parse_hierarchy_type("Set<T>"));
+            shape.ownership = OwnershipShape::SharedBorrow;
+            shape.view = view.clone();
+            shape.nested_collection_views.push((
+                crate::parser::parse_hierarchy_type("Set<T>"),
+                ViewShape::JavaSemanticHash,
+            ));
+            let metadata = shape.nested_collection_views.clone();
+            super::apply_owned_collection_value_projection(&mut shape);
+            assert_eq!(shape.ownership, OwnershipShape::Owned);
+            assert_eq!(
+                shape.view,
+                if view == ViewShape::JavaSemanticHash {
+                    view
+                } else {
+                    ViewShape::Native
+                }
+            );
+            assert_eq!(shape.nested_collection_views, metadata);
+        }
+    }
+
+    #[test]
+    fn retained_row_reads_describe_owned_handles_only_when_the_parent_is_guarded() {
+        use crate::{
+            facts::FactSet,
+            java_ir::JavaType,
+            slot_shape::{OwnershipShape, RustSlotShape, ViewShape},
+            storage_strategy::StoragePlacement,
+        };
+        let placement = StoragePlacement::new(true, true, false);
+        for guarded in [false, true] {
+            for nullable in [false, true] {
+                let row = JavaType::Array(Box::new(JavaType::String));
+                let row = if nullable {
+                    crate::types::optional_java_type(row)
+                } else {
+                    row
+                };
+                let mut array = RustSlotShape::for_storage(JavaType::Array(Box::new(row)));
+                if guarded {
+                    array.native_allocation = placement;
+                }
+                array.nested_native_allocations = vec![(vec![0], placement)];
+                let read =
+                    super::indexed_read_shape_for_access_with_facts(&array, &FactSet::default())
+                        .unwrap();
+                assert_eq!(
+                    read.ownership,
+                    if guarded {
+                        OwnershipShape::Owned
+                    } else {
+                        OwnershipShape::SharedBorrow
+                    }
+                );
+                assert_eq!(read.view, ViewShape::Native);
+                assert_eq!(read.native_allocation, placement);
+                assert_eq!(read.optional_element_type().is_some(), nullable);
+            }
+        }
+    }
+
     #[test]
     fn collection_projection_non_platform_names_do_not_scan_the_representation_catalog() {
         let plan = super::RepresentationPlan::default();
