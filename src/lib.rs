@@ -1366,77 +1366,92 @@ fn emit_batch_translations(
     // available worker can help drain the long tail while the final sort
     // below keeps the public report deterministic.
     let next_index = AtomicUsize::new(0);
+    // Bounded recursive IR lowering has sizeable frames in debug builds.
+    // Default scoped workers have only 2 MiB on common platforms, unlike the
+    // CLI main thread, so otherwise the same source can succeed serially and
+    // abort in parallel. Reserve a predictable worker budget; unused pages
+    // are not committed, and honor larger standard Rust stack overrides.
+    let worker_stack_bytes = std::env::var("RUST_MIN_STACK")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(0)
+        .max(8 * 1024 * 1024);
 
     let mut joined = Vec::with_capacity(parsed_primary.len());
     std::thread::scope(|scope| {
         let next_index = &next_index;
         let parsed_primary = &parsed_primary;
         let handles = (0..worker_count)
-            .map(|_| {
-                scope.spawn(move || {
-                    let mut worker_results = Vec::new();
-                    loop {
-                        let index = next_index.fetch_add(1, Ordering::Relaxed);
-                        let Some((original_index, path, parsed)) = parsed_primary.get(index) else {
-                            break;
-                        };
-                        let original_index = *original_index;
-                        let path = path.clone();
-                        let parsed = parsed.clone();
-                        let file_start = Instant::now();
-                        let start_event = BatchTranslationEvent::new(
-                            "emit_start",
-                            original_index + 1,
-                            path.clone(),
-                            0,
-                            "running",
-                        );
-                        if let Some(event_sink) = event_sink {
-                            event_sink(start_event.clone());
+            .map(|worker| {
+                std::thread::Builder::new()
+                    .name(format!("java2rust-emit-{worker}"))
+                    .stack_size(worker_stack_bytes)
+                    .spawn_scoped(scope, move || {
+                        let mut worker_results = Vec::new();
+                        loop {
+                            let index = next_index.fetch_add(1, Ordering::Relaxed);
+                            let Some((original_index, path, parsed)) = parsed_primary.get(index)
+                            else {
+                                break;
+                            };
+                            let original_index = *original_index;
+                            let path = path.clone();
+                            let parsed = parsed.clone();
+                            let file_start = Instant::now();
+                            let start_event = BatchTranslationEvent::new(
+                                "emit_start",
+                                original_index + 1,
+                                path.clone(),
+                                0,
+                                "running",
+                            );
+                            if let Some(event_sink) = event_sink {
+                                event_sink(start_event.clone());
+                            }
+                            let mut item_events = vec![start_event];
+                            let mut translation = translate_parsed_source_with_batch_context(
+                                parsed,
+                                context,
+                                |phase, elapsed_ms| {
+                                    let event = BatchTranslationEvent::new(
+                                        phase,
+                                        original_index + 1,
+                                        path.clone(),
+                                        elapsed_ms,
+                                        "ok",
+                                    );
+                                    if let Some(event_sink) = event_sink {
+                                        event_sink(event.clone());
+                                    }
+                                    item_events.push(event);
+                                },
+                            );
+                            translation.diagnostics.extend(context_diagnostics.clone());
+                            let translation = BatchTranslation::new(
+                                path.clone(),
+                                translation.rust,
+                                translation.diagnostics,
+                            );
+                            if let Some(completion_sink) = completion_sink {
+                                completion_sink(original_index + 1, &translation);
+                            }
+                            let elapsed_ms = file_start.elapsed().as_millis();
+                            let end_event = BatchTranslationEvent::new(
+                                "emit_end",
+                                original_index + 1,
+                                path.clone(),
+                                elapsed_ms,
+                                "ok",
+                            );
+                            if let Some(event_sink) = event_sink {
+                                event_sink(end_event.clone());
+                            }
+                            item_events.push(end_event);
+                            worker_results.push((original_index, translation, item_events));
                         }
-                        let mut item_events = vec![start_event];
-                        let mut translation = translate_parsed_source_with_batch_context(
-                            parsed,
-                            context,
-                            |phase, elapsed_ms| {
-                                let event = BatchTranslationEvent::new(
-                                    phase,
-                                    original_index + 1,
-                                    path.clone(),
-                                    elapsed_ms,
-                                    "ok",
-                                );
-                                if let Some(event_sink) = event_sink {
-                                    event_sink(event.clone());
-                                }
-                                item_events.push(event);
-                            },
-                        );
-                        translation.diagnostics.extend(context_diagnostics.clone());
-                        let translation = BatchTranslation::new(
-                            path.clone(),
-                            translation.rust,
-                            translation.diagnostics,
-                        );
-                        if let Some(completion_sink) = completion_sink {
-                            completion_sink(original_index + 1, &translation);
-                        }
-                        let elapsed_ms = file_start.elapsed().as_millis();
-                        let end_event = BatchTranslationEvent::new(
-                            "emit_end",
-                            original_index + 1,
-                            path.clone(),
-                            elapsed_ms,
-                            "ok",
-                        );
-                        if let Some(event_sink) = event_sink {
-                            event_sink(end_event.clone());
-                        }
-                        item_events.push(end_event);
-                        worker_results.push((original_index, translation, item_events));
-                    }
-                    worker_results
-                })
+                        worker_results
+                    })
+                    .expect("failed to spawn batch emission worker")
             })
             .collect::<Vec<_>>();
         for handle in handles {

@@ -13,7 +13,7 @@ public final class GeneratorOracle {
         if (!condition) throw new AssertionError(message);
     }
 
-    private static void exercise(String label, RestorableUniformRandomProvider rng) {
+    static void exercise(String label, RestorableUniformRandomProvider rng) {
         for (int i = 0; i < 64; i++) {
             System.out.println(label + ".long." + i + "=" + rng.nextLong());
         }

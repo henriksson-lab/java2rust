@@ -6,6 +6,54 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 #[test]
+fn recursive_array_operands_have_equivalent_serial_and_parallel_emission() {
+    // The harness itself uses small test threads. Run the serial reference
+    // with the CLI-sized budget; parallel emission must provision its own
+    // workers rather than inheriting this thread's budget accidentally.
+    std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(|| {
+        let primary = vec![
+            new_java2rust::BatchSource::new("StackCopy.java", r#"
+class StackCopy {
+    int[] data = new int[8];
+    int[] expose() { return data; }
+    int run() {
+        int[] values = expose();
+        System.arraycopy(values, 0, values, 0,
+            Math.min(values[values[values[0]]], values.length));
+        return values.length;
+    }
+    static int verify() { return new StackCopy().run(); }
+}
+"#),
+            new_java2rust::BatchSource::new("Companion.java", "class Companion { int value() { return 1; } }"),
+        ];
+        let translate = |jobs| new_java2rust::translate_batch_sources_with_context_sources_summary_sources_and_options(
+            &primary, &[], &[], true, &new_java2rust::facts::FactSet::default(),
+            &new_java2rust::BatchTranslationOptions::new(jobs, None),
+        );
+        let serial = translate(1);
+        let parallel = translate(2);
+        assert_eq!(parallel.translations().len(), 2);
+        for (serial, parallel) in serial.translations().iter().zip(parallel.translations()) {
+            assert_eq!(serial.path(), parallel.path());
+            assert_eq!(serial.rust(), parallel.rust());
+            assert!(!parallel.diagnostics().has_errors(), "{:?}", parallel.diagnostics());
+        }
+        let modules = parallel.translations().iter().enumerate().map(|(index, translation)| GeneratedCrateModule {
+            name: if index == 0 { "deep" } else { "companion" },
+            rust: translation.rust().to_string(),
+            tests: if index == 0 { r#"
+trait Value { fn value(self) -> i32; }
+impl Value for i32 { fn value(self) -> i32 { self } }
+impl<E: std::fmt::Debug> Value for Result<i32, E> { fn value(self) -> i32 { self.unwrap() } }
+#[test] fn executes() { assert_eq!(StackCopy::verify().value(), 8); }
+"# } else { "" },
+        }).collect();
+        common::cargo_verify_generated_modules_with_edition("parallel_recursive_array_operands", modules, "test", "2021");
+    }).unwrap().join().unwrap();
+}
+
+#[test]
 fn completion_sink_observes_each_translation_before_emit_end() {
     let primary_sources = vec![
         new_java2rust::BatchSource::new("example/A.java", "class A { int value() { return 1; } }"),

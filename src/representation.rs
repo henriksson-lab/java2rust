@@ -41,6 +41,9 @@ pub struct RepresentationPlan {
     /// Proven stateless abstract declarations whose instance bodies are
     /// materialized on concrete descendants, without any base-value demand.
     declaration_only_abstract_owners: HashSet<String>,
+    /// Stateful abstract owners retaining only statically bound construction
+    /// support on the raw root; full instance bodies live on descendants.
+    construction_only_abstract_owners: HashSet<String>,
     types: HashMap<String, TypeRepresentation>,
     /// Finite carriers for source-interface existentials such as
     /// `Factory<?>`. Rust trait objects cannot leave a generic argument
@@ -328,6 +331,8 @@ pub fn plan_representations(program: &Program, facts: &FactSet) -> Representatio
     plan_existential_interface_carriers(program, &mut plan);
     plan.declaration_only_abstract_owners =
         crate::abstract_declaration::declaration_only_abstract_owners(program);
+    plan.construction_only_abstract_owners =
+        crate::abstract_declaration::construction_only_abstract_owners(program);
     plan
 }
 
@@ -2018,6 +2023,19 @@ fn external_final_facade_should_keep_concrete_dispatch(
 }
 
 impl RepresentationPlan {
+    pub(crate) fn abstract_owner_is_construction_only(&self, owner: &str) -> bool {
+        self.construction_only_abstract_owners.contains(owner)
+            || self.type_representation(owner).is_some_and(|entry| {
+                self.construction_only_abstract_owners
+                    .contains(entry.java_name())
+            })
+    }
+
+    pub(crate) fn abstract_owner_has_no_runtime_instances(&self, owner: &str) -> bool {
+        self.abstract_owner_is_declaration_only(owner)
+            || self.abstract_owner_is_construction_only(owner)
+    }
+
     pub(crate) fn abstract_owner_is_declaration_only(&self, owner: &str) -> bool {
         self.declaration_only_abstract_owners.contains(owner)
             || self.type_representation(owner).is_some_and(|entry| {

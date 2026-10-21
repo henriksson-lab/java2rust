@@ -16327,7 +16327,12 @@ fn source_erased_object_reference_identity_downcasts(
         plan: Option<&RepresentationPlan>,
         arms: &mut BTreeSet<String>,
     ) {
-        if plan.is_some_and(|plan| plan.abstract_owner_is_declaration_only(&ty.name)) {
+        if plan.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name)) {
+            for member in &ty.members {
+                if let Member::Type(nested) = member {
+                    visit(nested, facts, plan, arms);
+                }
+            }
             return;
         }
         if ty.type_params.is_empty() && source_type_is_source_hierarchy_carrier_root(ty, plan) {
@@ -16411,7 +16416,18 @@ fn collect_source_erased_object_clone_downcasts(
     representations: Option<&RepresentationPlan>,
     arms: &mut BTreeSet<String>,
 ) {
-    if representations.is_some_and(|plan| plan.abstract_owner_is_declaration_only(&ty.name)) {
+    if representations.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name)) {
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect_source_erased_object_clone_downcasts(
+                    nested,
+                    true,
+                    facts,
+                    representations,
+                    arms,
+                );
+            }
+        }
         return;
     }
     if ty.type_params.is_empty()
@@ -18143,7 +18159,19 @@ fn collect_source_erased_object_to_string_downcasts(
 ) {
     // Declaration-only roots retain a static type token, not a runtime
     // instance contract. Register their concrete materializations instead.
-    if representations.is_some_and(|plan| plan.abstract_owner_is_declaration_only(&ty.name)) {
+    if representations.is_some_and(|plan| plan.abstract_owner_has_no_runtime_instances(&ty.name)) {
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect_source_erased_object_to_string_downcasts(
+                    nested,
+                    program,
+                    facts,
+                    representations,
+                    result_mode,
+                    arms,
+                );
+            }
+        }
         return;
     }
     if ty.type_params.is_empty()

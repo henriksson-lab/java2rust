@@ -1706,8 +1706,20 @@ fn collect_source_object_to_string_fallback_items(
 ) {
     if ctx
         .representations
-        .abstract_owner_is_declaration_only(&ty.name)
+        .abstract_owner_has_no_runtime_instances(&ty.name)
     {
+        // Construction-only roots may have ordinary static nested types.
+        // Excluding this raw receiver must not erase their runtime inventory.
+        for member in &ty.members {
+            if let Member::Type(nested) = member {
+                collect_source_object_to_string_fallback_items(
+                    nested,
+                    occupied_inherent_methods,
+                    ctx,
+                    items,
+                );
+            }
+        }
         return;
     }
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record)
@@ -2562,6 +2574,14 @@ fn static_storage_access_name_for_name(
     ctx: LowerCtx,
 ) -> Option<String> {
     let semantic_name = env.static_storage_field_semantic_name(name).unwrap_or(name);
+    if let Some((owner_ty, field, _)) = lexical_source_field_decl(semantic_name, ctx)
+        && field.modifiers.contains(&Modifier::Static)
+    {
+        return Some(static_storage_rust_field_name_for_owner(
+            owner_ty,
+            &field.name,
+        ));
+    }
     let current_declared_access_name = ctx.current_type.and_then(|current| {
         SourceContextOwnerKey::new(current)
             .find_context_type(ctx)
@@ -2594,6 +2614,13 @@ fn static_storage_access_name_for_name(
 fn static_storage_owner_qualifier(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Option<String> {
     let current = ctx.current_type?;
     let semantic_name = env.static_storage_field_semantic_name(name).unwrap_or(name);
+    if let Some((owner_ty, field, declared_on_current)) =
+        lexical_source_field_decl(semantic_name, ctx)
+        && field.modifiers.contains(&Modifier::Static)
+    {
+        return (!declared_on_current || ctx.current_constructor.is_some())
+            .then(|| source_static_owner_use_name(owner_ty, ctx));
+    }
     if SourceContextOwnerKey::new(current)
         .find_context_type(ctx)
         .and_then(|owner_ty| crate::java_naming::source_static_field_decl(owner_ty, semantic_name))
@@ -2763,6 +2790,28 @@ fn seed_inherited_method_declaring_fields(env: &mut ShapeEnv, ty: &TypeDecl, ctx
             continue;
         };
         if field.modifiers.contains(&Modifier::Static) {
+            if env.local_type(&field.name).is_some() || env.local_shape(&field.name).is_some() {
+                continue;
+            }
+            let shape = ctx
+                .signatures
+                .required_declared_field_shape(declaring_ty, field);
+            let access = static_storage_rust_field_name_for_owner(declaring_ty, &field.name);
+            if crate::item_assembly::static_final_field_has_associated_const(declaring_ty, field) {
+                env.insert_preferred_static_field_shape_for_owner_with_access_name(
+                    &declaring_ty.name,
+                    field.name.clone(),
+                    access,
+                    shape,
+                );
+            } else {
+                env.insert_preferred_static_storage_field_shape_owned_by_with_access_name(
+                    &declaring_ty.name,
+                    field.name.clone(),
+                    access,
+                    shape,
+                );
+            }
             continue;
         }
         let Some(rust_name) = inherited_field_storage_rust_name(ty, declaring_ty, &field.name, ctx)
@@ -3034,6 +3083,9 @@ fn lower_type(
         &ty.name,
     );
 
+    let construction_only = ctx
+        .representations
+        .abstract_owner_is_construction_only(&ty.name);
     let mut functions = Vec::new();
     let mut static_functions = Vec::new();
     for member in &ty.members {
@@ -3052,6 +3104,12 @@ fn lower_type(
                 ctx,
             ),
             Member::Method(method) => {
+                if construction_only
+                    && !method.modifiers.contains(&Modifier::Static)
+                    && !crate::abstract_declaration::construction_support_method(method)
+                {
+                    continue;
+                }
                 let target = if method.modifiers.contains(&Modifier::Static) {
                     &mut static_functions
                 } else {
@@ -3072,6 +3130,9 @@ fn lower_type(
         ty,
         ctx.support_local_type_program,
     ) {
+        if construction_only {
+            continue;
+        }
         push_inherited_method_with_outer_handle_companion(
             &mut functions,
             program,
@@ -3091,6 +3152,9 @@ fn lower_type(
         ty,
         ctx.support_local_type_program,
     ) {
+        if construction_only {
+            continue;
+        }
         push_inherited_method_with_outer_handle_companion(
             &mut functions,
             program,
@@ -3106,7 +3170,9 @@ fn lower_type(
         "type_private_inherited_methods",
         &ty.name,
     );
-    functions.extend(lower_overridden_super_body_helpers(program, ty, ctx));
+    if !construction_only {
+        functions.extend(lower_overridden_super_body_helpers(program, ty, ctx));
+    }
     if type_has_implicit_default_constructor(ty, ctx.support_local_type_program) {
         push_constructor_with_outer_handle_companion(
             &mut functions,
@@ -3116,6 +3182,7 @@ fn lower_type(
         );
     }
     if matches!(ty.kind, TypeKind::Class | TypeKind::Record)
+        && !construction_only
         && generic_source_type_has_primary_inherent_impl(ty)
         && !source_type_lowers_as_replacement_dispatch_item(ty, ctx)
     {
@@ -3136,7 +3203,9 @@ fn lower_type(
         }
     }
     static_functions.extend(static_storage_accessor_functions_for_type(ty, ctx));
-    functions.extend(abstract_interface_method_stubs(ty, ctx));
+    if !construction_only {
+        functions.extend(abstract_interface_method_stubs(ty, ctx));
+    }
     let associated_const_value_overrides = associated_const_jdk_value_overrides_for_type(ty, ctx);
     file.items.extend(impl_items_for_type_with_static_partition(
         ty,
@@ -3146,6 +3215,12 @@ fn lower_type(
         Some(ctx.representations),
         &associated_const_value_overrides,
     ));
+    if construction_only {
+        // The shared admission proof guarantees no source base value can
+        // observe this raw root. Its descendants retain the normal complete
+        // method/adaptor inventories; do not fabricate root virtual slots.
+        return;
+    }
     if let Some(item) = source_map_entry_adapter_item_for_type(ty, ctx) {
         file.items.push(RustItem::Raw(item));
     }
@@ -11099,7 +11174,9 @@ fn source_super_constructor_fields_and_trailing<'a>(
             super_bindings,
             body,
             env,
-            super_ctx,
+            // Arguments belong to the caller's lexical scope, before the
+            // selected constructor's body/field context takes over.
+            ctx,
         );
     // A recursively flattened constructor body retains the parameter names of
     // its lexical class. Point those names at the already composed outer
@@ -11578,6 +11655,11 @@ fn materialize_reused_source_super_constructor_bindings(
         .iter()
         .map(|(name, expr)| {
             !matches!(expr, Expr::Literal(_) | Expr::Var(_))
+                || matches!(expr, Expr::Var(source_name)
+                    if env.local_type(source_name).is_none()
+                        && env.local_shape(source_name).is_none()
+                        && lexical_source_field_decl(source_name, ctx)
+                            .is_some_and(|(_, field, _)| field.modifiers.contains(&Modifier::Static)))
                 || parameter_reads.get(name).copied().unwrap_or(0) > 1
                 || {
                     let mut reads = std::collections::HashMap::new();
@@ -32448,6 +32530,16 @@ fn lower_expr_with_refinements(
                 variant
             } else if let Some(expr) = lower_outer_this_field_name(name, env, ctx) {
                 expr
+            } else if env.local_shape(name).is_none()
+                && env.local_type(name).is_none()
+                && lexical_source_field_decl(name, ctx).is_some_and(|(owner, field, _)| {
+                    field.modifiers.contains(&Modifier::Static)
+                        && !crate::item_assembly::static_final_field_has_associated_const(
+                            owner, field,
+                        )
+                })
+            {
+                static_storage_accessor_for_name(name, env, ctx)
             } else if refinements.non_null_locals.contains(name) {
                 lower_refined_non_null_var(name, env, ctx)
             } else {
@@ -34457,10 +34549,31 @@ fn lower_expr_with_refinements(
             if cast_target_erases_slot_generic_detail(ty, &inner_shape.java_ty) {
                 return lower_expr_with_refinements(expr, env, ctx, refinements);
             }
+            // A primitive cast consumes a Java scalar, not an intermediate
+            // checked-arithmetic Result. Reuse the value-slot path also used
+            // by numeric operands, including its once-only effect discharge.
+            let primitive_input = match (&inner_shape.java_ty, ty) {
+                (JavaType::Primitive(source), JavaType::Primitive(target))
+                    if crate::types::is_numeric_primitive_type(*source)
+                        && crate::types::is_numeric_primitive_type(*target) =>
+                {
+                    Some(inner_shape.clone())
+                }
+                _ => None,
+            };
             let plan = plan_cast_conversion_from_actual(inner_shape, ty, ctx.expr_shape_context());
             let lowered = lowered_stream
                 .map(crate::coercion::LoweredExpr::into_expr)
-                .unwrap_or_else(|| lower_expr_with_refinements(expr, env, ctx, refinements));
+                .unwrap_or_else(|| match primitive_input {
+                    Some(shape) => lower_expr_for_slot_with_refinements(
+                        expr,
+                        env,
+                        assignment_value_plan_for_shape(&shape).into_slot(),
+                        ctx,
+                        refinements,
+                    ),
+                    None => lower_expr_with_refinements(expr, env, ctx, refinements),
+                });
             let lowered = if shape_coercion_consumes_source_hierarchy_carrier(plan.coercion())
                 && source_argument_needs_clone_before_subtype_conversion(expr, &lowered, env, ctx)
             {
@@ -34611,11 +34724,16 @@ fn lower_lexical_static_constant(name: &str, ctx: LowerCtx) -> Option<RustExpr> 
             return None;
         }
         let member = static_const_reference_name_for_type(owner_ty, &field.name);
-        return Some(if declared_on_current_type {
-            self_associated_path_projection(&member)
-        } else {
-            owner_associated_path_projection(&source_static_owner_use_name(owner_ty, ctx), &member)
-        });
+        return Some(
+            if declared_on_current_type && ctx.current_constructor.is_none() {
+                self_associated_path_projection(&member)
+            } else {
+                owner_associated_path_projection(
+                    &source_static_owner_use_name(owner_ty, ctx),
+                    &member,
+                )
+            },
+        );
     }
 
     let matching_constant = |ty: &TypeDecl| {
@@ -34669,7 +34787,10 @@ fn lexical_source_field_decl<'a>(
     query: &str,
     ctx: LowerCtx<'a>,
 ) -> Option<(&'a TypeDecl, &'a FieldDecl, bool)> {
-    let current_type = ctx.current_type?;
+    let current_type = ctx
+        .inherited_method_declaring_type
+        .map(|ty| ty.name.as_str())
+        .or(ctx.current_type)?;
     let (mut current_ty, mut current_program) =
         find_preferred_emitted_context_type_and_program_by_key(ctx, current_type)
             .or_else(|| SourceContextOwnerKey::new(current_type).find_context_type_and_program(ctx))
@@ -34677,6 +34798,10 @@ fn lexical_source_field_decl<'a>(
                 find_context_type_decl_by_erased_name(ctx, current_type).map(|ty| (ty, ctx.program))
             })?;
     let root_ty = current_ty;
+    let root_is_emitted_type = ctx.inherited_method_declaring_type.is_none_or(|declaring| {
+        ctx.current_type
+            .is_some_and(|current| lexical_type_name_matches(current, &declaring.name))
+    });
     let mut hierarchy_fields = Vec::new();
     let mut visited = HashSet::new();
 
@@ -34691,9 +34816,17 @@ fn lexical_source_field_decl<'a>(
         });
         for field in declared_fields {
             if field.name == query {
-                return Some((current_ty, field, std::ptr::eq(current_ty, root_ty)));
+                return Some((
+                    current_ty,
+                    field,
+                    root_is_emitted_type && std::ptr::eq(current_ty, root_ty),
+                ));
             }
-            hierarchy_fields.push((current_ty, field, std::ptr::eq(current_ty, root_ty)));
+            hierarchy_fields.push((
+                current_ty,
+                field,
+                root_is_emitted_type && std::ptr::eq(current_ty, root_ty),
+            ));
         }
 
         let Some(super_name) = current_ty.extends.as_deref() else {
@@ -40670,6 +40803,11 @@ fn static_storage_field_shape(name: &str, env: &ShapeEnv, ctx: LowerCtx) -> Opti
         return None;
     }
     let static_name = env.static_storage_field_semantic_name(name).unwrap_or(name);
+    if let Some((owner, field, _)) = lexical_source_field_decl(static_name, ctx)
+        && field.modifiers.contains(&Modifier::Static)
+    {
+        return Some(ctx.signatures.required_declared_field_shape(owner, field));
+    }
     env.static_storage_field_owner(static_name)
         .or_else(|| env.static_storage_field_owner(name))
         .and_then(|owner| {
@@ -40832,20 +40970,45 @@ fn lower_unary_expr_with_refinements(
     ctx: LowerCtx,
     refinements: &ExprRefinements,
 ) -> RustExpr {
-    if op == UnaryOp::BitNot {
-        let operand_ty = numeric_operand_java_type(expr, env, ctx);
+    let operand_ty = numeric_operand_java_type(expr, env, ctx);
+    if op == UnaryOp::BitNot
+        || (matches!(op, UnaryOp::Neg | UnaryOp::Pos)
+            && matches!(
+                operand_ty,
+                JavaType::Primitive(
+                    PrimitiveType::Byte
+                        | PrimitiveType::Short
+                        | PrimitiveType::Char
+                        | PrimitiveType::Int
+                        | PrimitiveType::Long
+                )
+            ))
+    {
         let operand = lower_numeric_binary_operand(expr, env, ctx, refinements);
+        let operand = apply_result_propagation_policy_from_ctx(operand, expr, env, ctx);
         // Integral complement uses Java unary numeric promotion: small
         // integral operands become int, while long retains its width. Reuse
         // the existing integral operand coercions so char follows the same
         // representation policy as other numeric operators.
-        let operand = plan_numeric_binary_promotion(
+        let plan = plan_numeric_binary_promotion(
             BinaryOp::BitAnd,
             &operand_ty,
             &JavaType::Primitive(PrimitiveType::Int),
-        )
-        .map(|plan| apply_coercions(operand.clone(), plan.left()))
-        .unwrap_or(operand);
+        );
+        let operand = plan
+            .as_ref()
+            .map(|plan| apply_coercions(operand.clone(), plan.left()))
+            .unwrap_or(operand);
+        if op == UnaryOp::Neg
+            && let Some(negated) = plan.and_then(|plan| {
+                crate::operator_lowering::lower_java_integer_neg_expr(
+                    operand.clone(),
+                    plan.promoted(),
+                )
+            })
+        {
+            return negated;
+        }
         return lower_unary_expr(op, operand);
     }
     if op == UnaryOp::Not
@@ -42831,6 +42994,11 @@ fn static_storage_value_shape(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> Opt
             // `.as_ref()` receiver projection.
             if env.local_type(name).is_some() || env.is_instance_field(name) {
                 return None;
+            }
+            if let Some((owner, field, _)) = lexical_source_field_decl(name, ctx)
+                && field.modifiers.contains(&Modifier::Static)
+            {
+                return Some(ctx.signatures.required_declared_field_shape(owner, field));
             }
             let semantic = env.static_storage_field_semantic_name(name)?;
             let owner = env
@@ -50172,7 +50340,44 @@ fn emitted_source_method_declared_arg_plan(
             candidates.filter(|method| method_rust_name_matches_resolved(method, rust_name));
         let first = compatible.next()?;
         compatible.next().is_none().then_some(first)
-    })?;
+    });
+    let Some(method) = method else {
+        if target_staticness == Some(true) {
+            return None;
+        }
+        // A flattened inherited method is emitted on this concrete owner,
+        // although its source declaration is not in ty.members. Use the same
+        // specialized implementation contract as its body and super entry.
+        let inherited = crate::inherited_members::inherited_instance_method_refs_for_type(
+            ty,
+            ctx.support_local_type_program,
+        )
+        .into_iter()
+        .chain(
+            crate::inherited_members::inherited_private_implementation_method_refs_for_type(
+                ty,
+                ctx.support_local_type_program,
+            ),
+        )
+        .filter(|entry| entry.method().body.is_some() && entry.method().params.len() == arg_count)
+        .collect::<Vec<_>>();
+        let selected = inherited
+            .iter()
+            .find(|entry| entry.rust_name() == rust_name)
+            .or_else(|| {
+                let mut compatible = inherited
+                    .iter()
+                    .filter(|entry| method_rust_name_matches_resolved(entry.method(), rust_name));
+                let first = compatible.next()?;
+                compatible.next().is_none().then_some(first)
+            })?;
+        return source_implementation_argument_plan_in_frame(
+            ty,
+            selected.declaring_ty(),
+            selected.method(),
+            ctx,
+        );
+    };
     let effective_method = crate::inherited_members::method_with_synthesized_source_wildcard_params(
         method,
         ty,
@@ -50343,7 +50548,17 @@ fn emitted_source_super_boundary_arg_plan(
     let super_ty = find_emitted_context_type_for_super_call(ctx, declaring_type)
         .or_else(|| direct_emitted_super_type_for_super_call(lexical_ty, ctx))?;
     let method = source_type_instance_method(super_ty, rust_name, arg_count)?;
-    let signature = source_implementation_signature_in_frame(current_ty, super_ty, method, ctx)?;
+    source_implementation_argument_plan_in_frame(current_ty, super_ty, method, ctx)
+}
+
+fn source_implementation_argument_plan_in_frame(
+    current_ty: &TypeDecl,
+    declaring_ty: &TypeDecl,
+    method: &MethodDecl,
+    ctx: LowerCtx,
+) -> Option<ArgumentLoweringPlan> {
+    let signature =
+        source_implementation_signature_in_frame(current_ty, declaring_ty, method, ctx)?;
     Some(ArgumentLoweringPlan::Shaped(
         signature
             .params()
@@ -64372,6 +64587,64 @@ fn static_owner_target_is_java_objects_equals(target: &CallTargetPlan<'_>, ctx: 
 /// Primitive arraycopy consumes allocation references, not ownership-erasing
 /// slice conversions. Stage all Java arguments before checking/borrowing either
 /// array, and release the source guard before borrowing an aliasing destination.
+fn arraycopy_operands_allow_deferred_plain_places(
+    args: &[Expr],
+    env: &ShapeEnv,
+    ctx: LowerCtx,
+) -> bool {
+    fn read_only(expr: &Expr, env: &ShapeEnv, ctx: LowerCtx) -> bool {
+        match expr {
+            Expr::Literal(_) | Expr::This | Expr::Super => true,
+            Expr::Var(name) => {
+                if env.local_shape(name).is_some() || env.local_type(name).is_some() {
+                    true
+                } else if let Some((owner, field, _)) = lexical_source_field_decl(name, ctx) {
+                    !field.modifiers.contains(&Modifier::Static)
+                        || crate::item_assembly::static_final_field_has_associated_const(
+                            owner, field,
+                        )
+                } else {
+                    env.is_instance_field(name)
+                }
+            }
+            Expr::FieldAccess(receiver, field) => {
+                if let Some(owner) = static_storage_owner_type_name(receiver, env, ctx) {
+                    // Nonconstant static reads may initialize a class and run
+                    // arbitrary Java code. They are not a no-write proof.
+                    static_field_access_is_associated_const(&owner, field, ctx)
+                } else {
+                    read_only(receiver, env, ctx)
+                }
+            }
+            Expr::ArrayAccess(array, index) => {
+                read_only(array, env, ctx) && read_only(index, env, ctx)
+            }
+            Expr::Unary { expr, .. } | Expr::Cast { expr, .. } => read_only(expr, env, ctx),
+            Expr::Binary { left, right, .. } => {
+                read_only(left, env, ctx) && read_only(right, env, ctx)
+            }
+            Expr::Ternary {
+                condition,
+                then_expr,
+                else_expr,
+            } => {
+                read_only(condition, env, ctx)
+                    && read_only(then_expr, env, ctx)
+                    && read_only(else_expr, env, ctx)
+            }
+            _ => false,
+        }
+    }
+    // Only a bare reference read is nonthrowing at the capture point. Moving
+    // obj.array or arrays[index] after the scalar operands could reorder its
+    // null/index exception relative to an arithmetic exception in an index.
+    matches!(args.first(), Some(Expr::Var(_)))
+        && matches!(args.get(2), Some(Expr::Var(_)))
+        && args
+            .iter()
+            .all(|arg| !expr_has_assignment_order_side_effect(arg) && read_only(arg, env, ctx))
+}
+
 fn lower_retained_primitive_arraycopy(
     target: &CallTargetPlan<'_>,
     args: &[Expr],
@@ -64404,11 +64677,22 @@ fn lower_retained_primitive_arraycopy(
             _ => None,
         }
     };
-    if !source.native_allocation.shared()
-        || !destination.native_allocation.shared()
+    if (!source.native_allocation.shared() && !destination.native_allocation.shared())
         || primitive_element(&source).is_none()
         || primitive_element(&source) != primitive_element(&destination)
     {
+        return None;
+    }
+    if (!source.native_allocation.shared() || !destination.native_allocation.shared())
+        && (!arraycopy_operands_allow_deferred_plain_places(args, env, ctx)
+            || (!source.native_allocation.shared() && !expr_is_stable_place_projection(&args[0]))
+            || (!destination.native_allocation.shared()
+                && !expr_is_stable_place_projection(&args[2])))
+    {
+        // A plain Vec/slice is not a clonable Java reference. It can be
+        // borrowed after operand evaluation only if those operands cannot
+        // mutate/rebind its place. Effectful cases need a retained carrier,
+        // not an early payload snapshot or a loan across later Java writes.
         return None;
     }
     let names: Vec<_> = (0..5)
@@ -64416,7 +64700,24 @@ fn lower_retained_primitive_arraycopy(
         .collect();
     let mut stmts = Vec::new();
     for (index, arg) in args.iter().enumerate() {
-        let value = lower_expr_with_refinements(arg, env, ctx, refinements);
+        if (index == 0 && !source.native_allocation.shared())
+            || (index == 2 && !destination.native_allocation.shared())
+        {
+            continue;
+        }
+        let value = if matches!(index, 0 | 2) {
+            lower_expr_with_refinements(arg, env, ctx, refinements)
+        } else {
+            lower_expr_for_slot_with_refinements(
+                arg,
+                env,
+                Slot::Argument(RustSlotShape::for_storage(JavaType::Primitive(
+                    PrimitiveType::Int,
+                ))),
+                ctx,
+                refinements,
+            )
+        };
         let value = match index {
             0 => clone_native_allocation_reference_for_evaluation(value, &source),
             2 => clone_native_allocation_reference_for_evaluation(value, &destination),
@@ -64429,19 +64730,18 @@ fn lower_retained_primitive_arraycopy(
             value: Some(value),
         });
     }
+    let sequence = |index: usize, shape: &RustSlotShape, mutable| {
+        let value = if shape.native_allocation.shared() {
+            RustExpr::Var(names[index].clone())
+        } else {
+            lower_expr_with_refinements(&args[index], env, ctx, refinements)
+        };
+        native_allocation_sequence_receiver(value, shape, mutable, ctx)
+    };
     let snapshot = env.fresh_local_name("__java_arraycopy_values");
     stmts.push(ordered_assignment_let_stmt(
         &snapshot,
-        receiver_method_call_projection_exact(
-            native_allocation_sequence_receiver(
-                RustExpr::Var(names[0].clone()),
-                &source,
-                false,
-                ctx,
-            ),
-            "to_vec",
-            Vec::new(),
-        ),
+        receiver_method_call_projection_exact(sequence(0, &source, false), "to_vec", Vec::new()),
     ));
     let index = |position: usize| RustExpr::Cast {
         expr: Box::new(RustExpr::Var(names[position].clone())),
@@ -64452,12 +64752,7 @@ fn lower_retained_primitive_arraycopy(
         vec![
             force_shared_borrow_projection(RustExpr::Var(snapshot)),
             index(1),
-            force_mutable_borrow_projection(native_allocation_sequence_receiver(
-                RustExpr::Var(names[2].clone()),
-                &destination,
-                true,
-                ctx,
-            )),
+            force_mutable_borrow_projection(sequence(2, &destination, true)),
             index(3),
             index(4),
         ],
@@ -82744,11 +83039,24 @@ fn native_allocation_sequence_receiver(
         // Mutation is through the cell, not through the Java reference slot.
         // A final/borrowed nullable handle therefore only needs as_ref here.
         lowered = make_java_null_expect_catchable_in_propagating_ctx(
-            project_optional_receiver(lowered, OptionalReceiverProjection::Shared),
+            project_optional_receiver(
+                lowered,
+                if mutable && !shape.native_allocation.shared() {
+                    OptionalReceiverProjection::Mutable
+                } else {
+                    OptionalReceiverProjection::Shared
+                },
+            ),
             ctx,
         );
     }
-    shared_storage_receiver_projection(lowered, shape.native_allocation, mutable)
+    if shape.native_allocation.shared() {
+        shared_storage_receiver_projection(lowered, shape.native_allocation, mutable)
+    } else {
+        // Plain Vec/slice storage already is the payload. Borrowing it is a
+        // caller operation, not a RefCell/Mutex projection.
+        lowered
+    }
 }
 
 fn lower_sequence_get_array_access_receiver(
@@ -103108,6 +103416,87 @@ mod tests {
     use crate::parser::parse_java_source;
     use crate::rust_ir::RustExprShape;
     use crate::slot_shape::RustSlotShape;
+
+    #[test]
+    fn deferred_plain_arraycopy_places_reject_later_mutations_and_calls() {
+        let mut env = ShapeEnv::new();
+        for name in ["source", "destination"] {
+            env.insert_local_shape(
+                name,
+                RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::Primitive(
+                    PrimitiveType::Int,
+                )))),
+            );
+        }
+        env.insert_local_shape(
+            "index",
+            RustSlotShape::for_storage(JavaType::Primitive(PrimitiveType::Int)),
+        );
+        let args = vec![
+            Expr::Var("source".into()),
+            Expr::Literal(Literal::Int(0)),
+            Expr::Var("destination".into()),
+            Expr::Literal(Literal::Int(0)),
+            Expr::FieldAccess(Box::new(Expr::Var("source".into())), "length".into()),
+        ];
+        assert!(arraycopy_operands_allow_deferred_plain_places(
+            &args,
+            &env,
+            lower_test_ctx()
+        ));
+        for throwing_place in [
+            Expr::FieldAccess(Box::new(Expr::Var("source".into())), "array".into()),
+            Expr::ArrayAccess(
+                Box::new(Expr::Var("source".into())),
+                Box::new(Expr::Literal(Literal::Int(0))),
+            ),
+        ] {
+            let mut changed = args.clone();
+            changed[0] = throwing_place;
+            assert!(!arraycopy_operands_allow_deferred_plain_places(
+                &changed,
+                &env,
+                lower_test_ctx()
+            ));
+        }
+        for effect in [
+            Expr::Unary {
+                op: UnaryOp::PostInc,
+                expr: Box::new(Expr::Var("index".into())),
+            },
+            Expr::Binary {
+                op: BinaryOp::Assign,
+                left: Box::new(Expr::Var("source".into())),
+                right: Box::new(Expr::Var("destination".into())),
+            },
+            Expr::Binary {
+                op: BinaryOp::Assign,
+                left: Box::new(Expr::ArrayAccess(
+                    Box::new(Expr::Var("source".into())),
+                    Box::new(Expr::Literal(Literal::Int(0))),
+                )),
+                right: Box::new(Expr::Literal(Literal::Int(1))),
+            },
+            Expr::Call {
+                type_args: vec![],
+                receiver: None,
+                name: "mutate".into(),
+                args: vec![Expr::Var("source".into())],
+                resolved: None,
+            },
+            Expr::FieldAccess(
+                Box::new(Expr::Var("Other".into())),
+                "runtimeInitialized".into(),
+            ),
+        ] {
+            let mut changed = args.clone();
+            changed[4] = effect;
+            assert!(
+                !arraycopy_operands_allow_deferred_plain_places(&changed, &env, lower_test_ctx()),
+                "{changed:?}"
+            );
+        }
+    }
 
     #[test]
     fn source_static_catalog_keeps_raw_owner_erasures_without_a_local_declaration() {

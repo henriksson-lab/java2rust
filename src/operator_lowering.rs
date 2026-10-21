@@ -1299,6 +1299,21 @@ fn expr_records_non_optional_string(expr: &RustExpr) -> bool {
     })
 }
 
+/// Negation is performed at the promoted Java width, including MIN_VALUE.
+pub(crate) fn lower_java_integer_neg_expr(
+    operand: RustExpr,
+    promoted: PrimitiveType,
+) -> Option<RustExpr> {
+    if !matches!(promoted, PrimitiveType::Int | PrimitiveType::Long) {
+        return None;
+    }
+    Some(receiver_method_call_projection_exact(
+        integer_wrapping_receiver_expr(operand, promoted),
+        "wrapping_neg",
+        Vec::new(),
+    ))
+}
+
 pub fn lower_unary_expr(op: UnaryOp, operand: RustExpr) -> RustExpr {
     match op {
         UnaryOp::PostInc => java_update_expression_projection(operand, "+=", false),

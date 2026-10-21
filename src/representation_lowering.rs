@@ -4152,7 +4152,7 @@ pub(crate) fn trait_impl_emissions_for_type_with_facts_and_exceptions(
     facts: &FactSet,
     exceptions: &ProgramExceptionPlan,
 ) -> Vec<String> {
-    if representations.abstract_owner_is_declaration_only(&ty.name) {
+    if representations.abstract_owner_has_no_runtime_instances(&ty.name) {
         return Vec::new();
     }
     if !matches!(ty.kind, TypeKind::Class | TypeKind::Enum) {
