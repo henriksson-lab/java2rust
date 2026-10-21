@@ -1547,9 +1547,20 @@ def merge_additive_runtime_registries(variants: list[str]) -> str | None:
         raise ValueError("incompatible additive runtime registry boundaries")
     templates = []
     entries = set()
+    entries_by_type = {}
     for text, [match] in zip(variants, matches):
         templates.append(text[:match.start(2)] + "__JAVA_RUNTIME_REGISTRY__\n" + text[match.end(2):])
-        entries.update(line for line in match.group(2).splitlines() if line.strip())
+        for line in match.group(2).splitlines():
+            if not line.strip():
+                continue
+            arm = re.match(r"\s*if let Some\(\w+\) = (\w+)\.downcast_ref::<(.+?)>\(\)\s*\{", line)
+            if arm is None or brace_delta(line) != 0:
+                raise ValueError("additive runtime registrations must be complete single-line downcast arms")
+            key = (arm.group(1), re.sub(r"\s+", "", arm.group(2)))
+            if key in entries_by_type and entries_by_type[key] != line:
+                raise ValueError(f"incompatible additive runtime registration for {key[1]}")
+            entries_by_type[key] = line
+            entries.add(line)
     if len(set(templates)) != 1:
         raise ValueError("incompatible additive runtime registry ABI or fallback")
     return templates[0].replace("__JAVA_RUNTIME_REGISTRY__\n", "\n".join(sorted(entries)) + "\n")
@@ -2119,9 +2130,10 @@ def main() -> int:
         for line in existing_shared_text.splitlines()
         if (match := ALIAS_RE.match(line))
     }
-    existing_shared_function_names = {
-        item["name"] for item in parse_top_level_functions_from_text(existing_shared_text)
+    existing_shared_functions = {
+        item["name"]: item for item in parse_top_level_functions_from_text(existing_shared_text)
     }
+    existing_shared_function_names = set(existing_shared_functions)
     existing_shared_value_names = {
         item["name"] for item in parse_top_level_values_from_text(existing_shared_text)
     }
@@ -2440,7 +2452,7 @@ def main() -> int:
     )
 
     conflict_lines = ["type\tkind\tdetail\n"]
-    if not selected:
+    if not selected and not initially_selected_functions:
         append_missing_builtin_from_impls(
             shared_support_path,
             existing_shared_types,
@@ -2946,11 +2958,13 @@ def main() -> int:
         top_level_values_by_name,
     )
     promote_existing_top_level_functions(shared_support_path, selected_functions)
+    merged_existing_functions = {}
     for function_name in sorted(selected_functions):
-        if function_name in existing_shared_function_names:
-            continue
         variants = []
         seen_functions = set()
+        if function_name in existing_shared_functions:
+            variants.append(existing_shared_functions[function_name]["text"])
+            seen_functions.add(variants[0])
         for item in top_level_functions_by_name[function_name]:
             text = item["text"]
             if text in seen_functions:
@@ -2959,6 +2973,16 @@ def main() -> int:
             seen_functions.add(text)
         if not variants:
             continue
+        merged = merge_additive_runtime_registries(variants) if len(variants) > 1 else None
+        if merged is not None:
+            conflict_lines.append(f"{function_name}\tfunction\tmerged runtime registrations from {len(variants)} variants\n")
+            if function_name in existing_shared_function_names:
+                merged_existing_functions[function_name] = crate_visible_top_level_function(merged)
+            else:
+                shared_chunks.append("\n" + crate_visible_top_level_function(merged).rstrip() + "\n")
+            continue
+        if function_name in existing_shared_function_names:
+            continue
         if len(variants) > 1:
             conflict_lines.append(
                 f"{function_name}\tfunction\tkept first of {len(variants)} variants\n"
@@ -2966,6 +2990,15 @@ def main() -> int:
         shared_chunks.append(
             "\n" + crate_visible_top_level_function(variants[0]).rstrip() + "\n"
         )
+
+    if merged_existing_functions:
+        text = shared_support_path.read_text()
+        lines = text.splitlines(keepends=True)
+        items = parse_top_level_functions_from_text(text)
+        for item in reversed(items):
+            if item["name"] in merged_existing_functions:
+                lines[item["start"]:item["end"]] = [merged_existing_functions[item["name"]]]
+        shared_support_path.write_text("".join(lines))
 
     for value_name in sorted(selected_values):
         if value_name in existing_shared_value_names:

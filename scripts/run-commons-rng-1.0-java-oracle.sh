@@ -1,19 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/commons-rng-1.0-paths.sh"
 checkout="${RNG_SOURCE_ROOT:-$repo_root/.tmp/commons-rng-1.0-src}"
 out_dir="${RNG_ORACLE_OUT:-$repo_root/.tmp/commons-rng-1.0-java-oracle}"
 focus_set="${RNG_ORACLE_FOCUS_SET:-$repo_root/scripts/focus-sets/commons-rng-1.0-source64.txt}"
 driver="${RNG_ORACLE_DRIVER:-$repo_root/tests/corpus/rng/GeneratorOracle.java}"
-main_class="$(basename "$driver" .java)"
+main_class="${RNG_ORACLE_MAIN_CLASS:-$(basename "$driver" .java)}"
 bash "$repo_root/scripts/prepare-commons-rng-1.0.sh"
 sources=()
 while IFS= read -r relative; do
-  if [[ "$relative" == org/apache/commons/rng/core/* ]]; then
-    sources+=("$checkout/commons-rng-core/src/main/java/$relative")
-  else
-    sources+=("$checkout/commons-rng-client-api/src/main/java/$relative")
-  fi
+  sources+=("$(commons_rng_source_for_relative "$checkout" "$relative")")
 done < "$focus_set"
 if [[ "$driver" != "$repo_root/tests/corpus/rng/GeneratorOracle.java" ]]; then
   sources+=("$repo_root/tests/corpus/rng/GeneratorOracle.java")

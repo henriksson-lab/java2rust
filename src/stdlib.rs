@@ -1056,7 +1056,8 @@ pub(crate) fn java_type_is_priority_queue(ty: &JavaType) -> bool {
 /// Structural modification policy of modeled native List constructors.
 /// Callers must first establish platform/source precedence for the producer.
 pub(crate) fn native_list_empty_add_changes(owner: &str) -> bool {
-    canonical_external_receiver_type_key(owner) != "LinkedList"
+    let canonical = canonical_external_receiver_type_key(owner);
+    canonical.rsplit('.').next().unwrap_or(&canonical) != "LinkedList"
 }
 
 pub(crate) fn native_collection_constructor_kind_for_type(
@@ -15648,7 +15649,7 @@ pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts
         .join("\n");
     let source_map_entry_value_result_downcasts = source_map_entry_value_rust_types
         .iter()
-        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return value.java_to_string().into_java_erased_object_string_result(); }}"))
+        .map(|rust_type| format!("    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Some(value.java_to_string().into_java_erased_object_string_result()); }}"))
         .collect::<Vec<_>>()
         .join("\n");
     let source_map_entry_value_clone_downcasts = source_map_entry_value_rust_types
@@ -15664,7 +15665,7 @@ pub(crate) fn java_erased_object_runtime_support_item_with_source_programs_facts
     };
     let object_string_result_protocol = java_object_string_result_protocol_support_text(facts);
     let object_string_identity_downcast = if facts.java_string_identity_representation {
-        "    if let Some(value) = value.downcast_ref::<JavaString>() { return Ok(Some(std::clone::Clone::clone(value))); }"
+        "    if let Some(value) = value.downcast_ref::<JavaString>() { return Some(Ok(Some(std::clone::Clone::clone(value)))); }"
     } else {
         ""
     };
@@ -15955,6 +15956,15 @@ pub fn java_generic_object_string_result<T: std::any::Any>(value: Option<&T>) ->
     java_erased_object_string_result(value)
 }}
 
+pub fn java_source_object_string_result(value: &dyn std::any::Any) -> Option<Result<Option<{object_string_value_type}>, JavaException>> {{
+    // java2rust: additive-registry-begin object_string
+{source_map_entry_value_result_downcasts}
+{source_to_string_result_downcasts}
+{object_string_identity_downcast}
+    // java2rust: additive-registry-end object_string
+    None
+}}
+
 pub fn java_erased_any_object_string_result(value: &dyn std::any::Any) -> Result<Option<{object_string_value_type}>, JavaException> {{
     if let Some(value) = value.downcast_ref::<std::boxed::Box<dyn std::any::Any>>() {{
         return java_erased_any_object_string_result(value.as_ref());
@@ -15965,9 +15975,7 @@ pub fn java_erased_any_object_string_result(value: &dyn std::any::Any) -> Result
     if let Some(value) = value.downcast_ref::<std::sync::Arc<std::boxed::Box<dyn std::any::Any>>>() {{
         return java_erased_any_object_string_result(value.as_ref().as_ref());
     }}
-{source_map_entry_value_result_downcasts}
-{source_to_string_result_downcasts}
-{object_string_identity_downcast}
+    if let Some(result) = java_source_object_string_result(value) {{ return result; }}
     Ok(Some(java_erased_object_string_from_native(java_erased_any_to_string(value))))
 }}
 
@@ -17322,7 +17330,7 @@ fn source_object_string_result_downcast_arms(
         "std::string::ToString::to_string(value)".to_string()
     };
     format!(
-        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{\n        return ({call}).into_java_erased_object_string_result();\n    }}"
+        "    if let Some(value) = value.downcast_ref::<{rust_type}>() {{ return Some(({call}).into_java_erased_object_string_result()); }}"
     )
 }
 

@@ -2859,6 +2859,13 @@ fn stmt_type_param_collection_get_needs_clone_bound(
     stmt: &Stmt,
     locals: &mut std::collections::HashMap<String, JavaType>,
 ) -> bool {
+    let contains_get = |expr: &Expr| {
+        let mut found = false;
+        crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+            found |= expr_is_type_param_sequence_get(type_param, expr, locals);
+        });
+        found
+    };
     match stmt {
         Stmt::VarDecl {
             ty,
@@ -2866,38 +2873,59 @@ fn stmt_type_param_collection_get_needs_clone_bound(
             initializer,
             ..
         } => {
-            let needs_bound = initializer.as_ref().is_some_and(|initializer| {
-                java_type_contains_type_param(ty, type_param)
-                    && expr_is_type_param_sequence_get(type_param, initializer, locals)
-            });
+            let needs_bound = initializer
+                .as_ref()
+                .is_some_and(|initializer| contains_get(initializer));
             locals.insert(name.clone(), ty.clone());
             needs_bound
         }
-        Stmt::Return(Some(expr)) => expr_is_type_param_sequence_get(type_param, expr, locals),
+        Stmt::Return(Some(expr)) | Stmt::Expr(expr) | Stmt::Throw(expr) => contains_get(expr),
+        Stmt::Assign { target, value } => contains_get(target) || contains_get(value),
         Stmt::If {
+            condition,
             then_block,
             else_block,
             ..
         } => {
             let mut then_locals = locals.clone();
             let mut else_locals = locals.clone();
-            block_type_param_collection_get_needs_clone_bound(
-                type_param,
-                then_block,
-                &mut then_locals,
-            ) || else_block.as_ref().is_some_and(|else_block| {
-                block_type_param_collection_get_needs_clone_bound(
+            contains_get(condition)
+                || block_type_param_collection_get_needs_clone_bound(
                     type_param,
-                    else_block,
-                    &mut else_locals,
+                    then_block,
+                    &mut then_locals,
                 )
-            })
+                || else_block.as_ref().is_some_and(|else_block| {
+                    block_type_param_collection_get_needs_clone_bound(
+                        type_param,
+                        else_block,
+                        &mut else_locals,
+                    )
+                })
         }
-        Stmt::While { body, .. } | Stmt::DoWhile { body, .. } | Stmt::Block(body) => {
+        Stmt::While {
+            condition, body, ..
+        }
+        | Stmt::DoWhile {
+            condition, body, ..
+        } => {
+            if contains_get(condition) {
+                return true;
+            }
             let mut scoped = locals.clone();
             block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
         }
-        Stmt::For { init, body, .. } => {
+        Stmt::Block(body) => {
+            let mut scoped = locals.clone();
+            block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
+        }
+        Stmt::For {
+            init,
+            condition,
+            update,
+            body,
+            ..
+        } => {
             let mut scoped = locals.clone();
             for init_stmt in init {
                 if stmt_type_param_collection_get_needs_clone_bound(
@@ -2908,24 +2936,52 @@ fn stmt_type_param_collection_get_needs_clone_bound(
                     return true;
                 }
             }
+            if condition.as_ref().is_some_and(|expr| {
+                let mut found = false;
+                crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+                    found |= expr_is_type_param_sequence_get(type_param, expr, &scoped);
+                });
+                found
+            }) || update.iter().any(|expr| {
+                let mut found = false;
+                crate::semantic_analysis::walk_expr_outside_lambdas(expr, &mut |expr| {
+                    found |= expr_is_type_param_sequence_get(type_param, expr, &scoped);
+                });
+                found
+            }) {
+                return true;
+            }
             block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
         }
         Stmt::EnhancedFor {
+            iterable,
             var_type,
             var_name,
             body,
             ..
         } => {
+            if contains_get(iterable) {
+                return true;
+            }
             let mut scoped = locals.clone();
             scoped.insert(var_name.clone(), var_type.clone());
             block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
         }
-        Stmt::Switch { cases, .. } => cases.iter().any(|case| {
-            let mut scoped = locals.clone();
-            case.statements.iter().any(|stmt| {
-                stmt_type_param_collection_get_needs_clone_bound(type_param, stmt, &mut scoped)
-            })
-        }),
+        Stmt::Switch {
+            selector, cases, ..
+        } => {
+            contains_get(selector)
+                || cases.iter().any(|case| {
+                    let mut scoped = locals.clone();
+                    case.statements.iter().any(|stmt| {
+                        stmt_type_param_collection_get_needs_clone_bound(
+                            type_param,
+                            stmt,
+                            &mut scoped,
+                        )
+                    })
+                })
+        }
         Stmt::Try {
             resources,
             body,
@@ -2964,12 +3020,9 @@ fn stmt_type_param_collection_get_needs_clone_bound(
             let mut scoped = locals.clone();
             block_type_param_collection_get_needs_clone_bound(type_param, body, &mut scoped)
         }
-        Stmt::Assign { .. }
-        | Stmt::Expr(_)
-        | Stmt::Return(None)
-        | Stmt::Throw(_)
+        Stmt::ConstructorInvocation { args, .. } => args.iter().any(contains_get),
+        Stmt::Return(None)
         | Stmt::LocalType(_)
-        | Stmt::ConstructorInvocation { .. }
         | Stmt::Break(_)
         | Stmt::Continue(_)
         | Stmt::Unsupported(_) => false,

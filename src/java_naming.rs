@@ -166,6 +166,9 @@ pub(crate) fn source_instance_field_rust_names(ty: &TypeDecl) -> HashMap<String,
 }
 
 pub(crate) fn source_instance_field_rust_name(ty: &TypeDecl, field_name: &str) -> String {
+    let field_name = source_instance_field_decl(ty, field_name)
+        .map(|field| field.name.as_str())
+        .unwrap_or(field_name);
     source_instance_field_rust_names(ty)
         .remove(field_name)
         .unwrap_or_else(|| allocate_rust_ident(field_name, &HashSet::new()))
@@ -185,19 +188,32 @@ pub(crate) fn source_static_field_rust_names(ty: &TypeDecl) -> HashMap<String, S
 /// exact Java spelling always wins, while ambiguous canonical aliases remain
 /// unresolved rather than depending on declaration order.
 pub(crate) fn source_static_field_decl<'a>(ty: &'a TypeDecl, query: &str) -> Option<&'a FieldDecl> {
-    let static_fields = || {
+    source_field_decl(ty, query, true)
+}
+
+pub(crate) fn source_instance_field_decl<'a>(
+    ty: &'a TypeDecl,
+    query: &str,
+) -> Option<&'a FieldDecl> {
+    source_field_decl(ty, query, false)
+}
+
+fn source_field_decl<'a>(ty: &'a TypeDecl, query: &str, is_static: bool) -> Option<&'a FieldDecl> {
+    let fields = || {
         ty.members.iter().filter_map(|member| match member {
-            Member::Field(field) if field.modifiers.contains(&Modifier::Static) => Some(field),
+            Member::Field(field) if field.modifiers.contains(&Modifier::Static) == is_static => {
+                Some(field)
+            }
             _ => None,
         })
     };
-    if let Some(field) = static_fields().find(|field| field.name == query) {
+    if let Some(field) = fields().find(|field| field.name == query) {
         return Some(field);
     }
 
     let canonical = crate::parser::to_snake_case(query);
     let mut matches =
-        static_fields().filter(|field| crate::parser::to_snake_case(&field.name) == canonical);
+        fields().filter(|field| crate::parser::to_snake_case(&field.name) == canonical);
     let field = matches.next()?;
     matches.next().is_none().then_some(field)
 }

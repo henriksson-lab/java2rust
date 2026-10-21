@@ -32,6 +32,28 @@ class BehaviorComparisonTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 behavior.compare_outputs(java, rust)
 
+    def test_sampling_rng_traces_and_identity_labels_are_exact(self):
+        for key, expected, changed in [
+            ("sharedRng.bounds", "[4, 4, 5]", "[4, 5, 4]"),
+            ("collection.sample.0", "1:42", "2:42"),
+            ("list.sample.0", "[null, 1:7]", "[1:7, null]"),
+        ]:
+            java = f"{key}={expected}\noracle=ok\n"
+            self.assertEqual(behavior.compare_outputs(java, java), 2)
+            with self.assertRaises(ValueError):
+                behavior.compare_outputs(java, f"{key}={changed}\noracle=ok\n")
+
+    def test_distribution_state_display_and_float_bits_are_not_relaxed(self):
+        for key, expected, changed in [
+            ("gaussian.trace.1", "[]", "[d:4602678819172646912]"),
+            ("inverseContinuous.callback.calls", "24", "48"),
+            ("uniform.display", "ok", "bad"),
+            ("gamma.2.0.double.0", "0.5", "0.5000000000000001"),
+        ]:
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                behavior.compare_outputs(f"{key}={expected}\noracle=ok\n",
+                                         f"{key}={changed}\noracle=ok\n")
+
 
 if __name__ == "__main__":
     unittest.main()

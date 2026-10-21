@@ -1,7 +1,7 @@
 use crate::coercion::{
     OptionalReceiverProjection, associated_const_projection, field_projection,
     owner_associated_path_projection, project_optional_receiver, self_associated_path_projection,
-    self_field_projection, static_storage_accessor_projection,
+    static_storage_accessor_projection,
 };
 use crate::expr_shape::ShapeEnv;
 use crate::java_ir::Expr;
@@ -10,12 +10,11 @@ use crate::rust_ir::RustExpr;
 use crate::types::TypeEnv;
 
 pub(crate) fn lower_bare_name(name: &str, env: &ShapeEnv) -> RustExpr {
-    if env.local_type(name).is_none()
-        && env.is_instance_field(name)
-        && !bare_name_looks_like_static_owner(name)
-    {
+    // Declaration/binding evidence wins over capitalization: Java instance
+    // fields may legally use constant-like or type-like names.
+    if env.local_type(name).is_none() && env.is_instance_field(name) {
         let field_name = env.instance_field_access_name(name).unwrap_or(name);
-        self_field_projection(field_name)
+        field_projection(RustExpr::Var("self".to_string()), field_name)
     } else if bare_name_local_type(name, env).is_none()
         && let Some(static_name) = env.static_storage_field_access_name(name)
     {
@@ -76,12 +75,6 @@ fn static_storage_accessor_for(static_name: &str, env: &ShapeEnv) -> RustExpr {
         }
         None => static_storage_accessor_projection(static_name),
     }
-}
-
-fn bare_name_looks_like_static_owner(name: &str) -> bool {
-    name.chars()
-        .next()
-        .is_some_and(|ch| ch.is_ascii_uppercase())
 }
 
 pub(crate) fn lower_field_access_with_facts(

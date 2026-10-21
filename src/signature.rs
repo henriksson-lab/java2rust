@@ -473,6 +473,10 @@ pub enum ReceiverPlan {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SignatureConstraint {
+    /// An API default, not evidence that a value must escape. Kept separate
+    /// so a resolved forwarding capability can refine it monotonically while
+    /// real RequiredOwnership/StorageSlot obligations remain authoritative.
+    ApiOwnedFallback,
     RequiredNativeAllocation(crate::storage_strategy::StoragePlacement),
     RequiredNestedNativeAllocation {
         path: Vec<usize>,
@@ -790,6 +794,7 @@ pub struct MergedSignatureConstraints {
     native_allocation: crate::storage_strategy::StoragePlacement,
     nested_native_allocations: Vec<(Vec<usize>, crate::storage_strategy::StoragePlacement)>,
     required_owner: Option<OwnershipShape>,
+    api_owned_fallback: bool,
     slot_view_req: Option<ViewShape>,
     slot_dispatch_req: Option<DispatchShape>,
     storage_nullability_req: Option<NullabilityState>,
@@ -833,6 +838,7 @@ impl SignatureConstraintConflict {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SignatureConstraintProvenance {
+    ApiOwnershipFallback,
     NativeAllocationRequirement,
     OwnedRequirement,
     BorrowedRequirement,
@@ -3685,7 +3691,7 @@ fn add_call_argument_dependency_edges(
         call_index,
         arg_index,
     };
-    add_signature_dependency_edge(graph, source, call_arg.clone(), kind);
+    add_signature_dependency_edge(graph, source.clone(), call_arg.clone(), kind);
     if boundary == CallArgumentBoundary::Unknown && callee_param.is_none() {
         add_signature_dependency_edge(
             graph,
@@ -3698,6 +3704,12 @@ fn add_call_argument_dependency_edges(
             SignatureDependencyEdgeKind::UnknownBoundary,
         );
     } else if let Some(callee_param) = callee_param {
+        // Argument contracts flow both ways: the callee learns storage from
+        // its producer, and the producer must satisfy the callee's eventual
+        // borrow/mutation capability. Without this reverse dependency an
+        // acyclic caller component can finish before a forwarding callee is
+        // widened, permanently leaving the caller at an obsolete shared ABI.
+        add_signature_dependency_edge(graph, callee_param.clone(), source, kind);
         add_signature_dependency_edge(graph, call_arg, callee_param, kind);
     }
 }
@@ -5370,10 +5382,12 @@ fn propagate_resolved_source_mutable_argument_binding_constraints(
     usage: &UsageFacts,
     scope: Option<SignatureMutationScope<'_>>,
 ) -> bool {
-    if scope.is_some_and(|scope| !scope.has_method_binding_target()) {
+    if scope.is_some_and(|scope| {
+        !scope.has_method_binding_target() && !scope.has_constructor_binding_target()
+    }) {
         return false;
     }
-    let mut pending = Vec::new();
+    let mut pending_methods = Vec::new();
     for (usage_key, method_usage) in usage.method_entries() {
         let Some(caller_key) = method_key_for_usage(constraints, usage_key) else {
             continue;
@@ -5381,84 +5395,97 @@ fn propagate_resolved_source_mutable_argument_binding_constraints(
         if !constraints.methods.contains_key(&caller_key) {
             continue;
         }
-        for call_site in method_usage.call_sites() {
-            let Some(callee_key) = method_key_for_call_site(constraints, call_site) else {
-                continue;
-            };
-            let Some(callee_constraints) = constraints.methods.get(&callee_key) else {
-                continue;
-            };
-            // Semantic facts can classify a parsed-source receiver as
-            // `KnownContentRead`. That boundary is useful for ownership
-            // inference, but an exact resolved source target still requires a
-            // mutable caller binding when its parameter ABI is `&mut`.
-            for binding in method_usage.all_binding_facts() {
-                for usage in binding.uses() {
-                    let BindingUse::PassedToCall {
-                        name,
-                        arg_index,
-                        boundary,
-                        ..
-                    } = usage
-                    else {
-                        continue;
-                    };
-                    if name != call_site.name()
-                        || *boundary != call_site.boundary()
-                        || *arg_index >= callee_constraints.params.len()
-                    {
-                        continue;
-                    }
-                    if callee_param_requires_mutable_binding(&callee_constraints.params[*arg_index])
-                    {
-                        pending.push((
-                            caller_key.clone(),
-                            binding.clone(),
-                            SignatureConstraint::MutableBinding,
-                        ));
-                    }
-                }
-            }
+        for (binding, requirement) in resolved_mutable_argument_requirements(
+            constraints,
+            method_usage,
+            caller_key.type_name(),
+        ) {
+            pending_methods.push((caller_key.clone(), binding, requirement));
         }
-        for call_site in method_usage.constructor_call_sites() {
-            let Some(callee_key) = call_site
-                .resolved()
-                .map(ConstructorKey::resolved_constructor)
-            else {
-                continue;
-            };
-            let Some(callee_constraints) = constraints.constructors.get(&callee_key) else {
-                continue;
-            };
-            for (index, binding_id) in call_site.argument_bindings() {
-                if !callee_constraints
-                    .params
-                    .get(*index)
-                    .is_some_and(|param| callee_param_requires_mutable_binding(param))
-                {
-                    continue;
-                }
-                if let Some(binding) = method_usage.binding_facts_for_declaration_id(binding_id) {
-                    pending.push((
-                        caller_key.clone(),
-                        binding.clone(),
-                        SignatureConstraint::MutableBinding,
-                    ));
-                }
-            }
+    }
+    let mut pending_constructors = Vec::new();
+    for (usage_key, constructor_usage) in usage.constructor_entries() {
+        let caller_key = ConstructorKey::from_usage_key(usage_key);
+        if !constraints.constructors.contains_key(&caller_key) {
+            continue;
+        }
+        for (binding, requirement) in resolved_mutable_argument_requirements(
+            constraints,
+            constructor_usage,
+            caller_key.type_name(),
+        ) {
+            pending_constructors.push((caller_key.clone(), binding, requirement));
         }
     }
     let mut changed = false;
-    for (method_key, binding, constraint) in pending {
+    for (key, binding, requirement) in pending_methods {
         changed |= add_method_binding_fact_constraint_scoped(
             constraints,
-            &method_key,
+            &key,
             &binding,
-            constraint,
+            requirement,
+            scope,
+        );
+    }
+    for (key, binding, requirement) in pending_constructors {
+        changed |= add_constructor_binding_fact_constraint_scoped(
+            constraints,
+            &key,
+            &binding,
+            requirement,
             scope,
         );
     }
     changed
+}
+
+/// A local binding needs to permit reborrowing; a forwarding parameter also
+/// needs the caller-visible mutable ABI. Merely spelling its binding `mut`
+/// cannot turn `&T` into `&mut T`. Use call-site binding identities, not a
+/// same-name/boundary search that conflates overloads or shadowed locals.
+fn resolved_mutable_argument_requirements(
+    constraints: &SignatureConstraintState,
+    usage: &MethodUsageFacts,
+    caller_owner: &str,
+) -> Vec<(BindingUseFacts, SignatureConstraint)> {
+    let mut pending = Vec::new();
+    let mut collect = |arguments: &[(usize, BindingId)], params: &[Vec<SignatureConstraint>]| {
+        for (index, id) in arguments {
+            if !params
+                .get(*index)
+                .is_some_and(|param| callee_param_requires_mutable_binding(param))
+            {
+                continue;
+            }
+            let Some(binding) = usage.binding_facts_for_declaration_id(id) else {
+                continue;
+            };
+            pending.push((binding.clone(), SignatureConstraint::MutableBinding));
+            if id.kind() == BindingKind::Param {
+                pending.push((
+                    binding.clone(),
+                    SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                ));
+            }
+        }
+    };
+    for call in usage.call_sites() {
+        let Some(key) = method_key_for_call_site_in_caller(constraints, call, caller_owner) else {
+            continue;
+        };
+        if let Some(callee) = constraints.methods.get(&key) {
+            collect(call.argument_bindings(), &callee.params);
+        }
+    }
+    for call in usage.constructor_call_sites() {
+        let Some(key) = call.resolved().map(ConstructorKey::resolved_constructor) else {
+            continue;
+        };
+        if let Some(callee) = constraints.constructors.get(&key) {
+            collect(call.argument_bindings(), &callee.params);
+        }
+    }
+    pending
 }
 
 fn propagate_resolved_source_mutable_receiver_binding_constraints(
@@ -13496,6 +13523,64 @@ fn method_param_shape_constraints_with_declared_source_types(
     )
 }
 
+/// Restrict advisory API ownership to a statically bound native-collection
+/// wrapper with no direct escape, alias, rebinding or opaque hand-off. Real
+/// requirements discovered in callees/capture/storage flows remain hard facts.
+fn public_collection_param_only_forwards_to_source(
+    method: &MethodDecl,
+    param: &Param,
+    method_usage: Option<&MethodUsageFacts>,
+    usage: &UsageFacts,
+    facts: &FactSet,
+) -> bool {
+    if !method.modifiers.contains(&Modifier::Static)
+        || method.body.is_none()
+        || crate::stdlib::java_collection_kind_for_type(&param.ty).is_none()
+        || EffectiveFacts::new(facts).parsed_source_controls_native_carrier(&param.ty)
+    {
+        return false;
+    }
+    let (Some(method_usage), Some(id)) = (method_usage, param.binding.as_ref()) else {
+        return false;
+    };
+    let Some(binding) = method_usage.binding_facts_for_param(param) else {
+        return false;
+    };
+    if binding.uses().iter().any(|use_site| {
+        !matches!(
+            use_site,
+            BindingUse::ContentRead | BindingUse::PassedToCall { .. }
+        )
+    }) || method_usage.constructor_call_sites().iter().any(|call| {
+        call.argument_bindings()
+            .iter()
+            .any(|(_, argument)| argument == id)
+    }) {
+        return false;
+    }
+    let mut forwarded = false;
+    for call in method_usage.call_sites() {
+        if !call
+            .argument_bindings()
+            .iter()
+            .any(|(_, argument)| argument == id)
+        {
+            continue;
+        }
+        let Some(target) = call.resolved() else {
+            return false;
+        };
+        if usage
+            .current_rust_method_usage(&target.declaring_type, &target.rust_name)
+            .is_none()
+        {
+            return false;
+        }
+        forwarded = true;
+    }
+    forwarded
+}
+
 fn method_param_shape_constraints_with_declared_source_types_and_body_facts(
     ty: &TypeDecl,
     method: &MethodDecl,
@@ -13572,6 +13657,21 @@ fn method_param_shape_constraints_with_declared_source_types_and_body_facts(
     }
     let mut constraints =
         signature_slot_baseline_policy(&param.ty, boundary_kind, facts).into_constraints();
+    if boundary_kind == Some(SignatureBoundaryKind::PublicApi)
+        && public_collection_param_only_forwards_to_source(
+            method,
+            param,
+            method_usage,
+            usage,
+            facts,
+        )
+    {
+        for constraint in &mut constraints {
+            if *constraint == SignatureConstraint::RequiredOwnership(OwnershipShape::Owned) {
+                *constraint = SignatureConstraint::ApiOwnedFallback;
+            }
+        }
+    }
     if let Some(view) = declared_generic_hash_set_view_constraint(
         &param.ty,
         &type_params_in_scope(&ty.type_params, &method.type_params),
@@ -15443,7 +15543,10 @@ impl MergedSignatureConstraints {
         if let Some(requirement) = &self.slot_dispatch_req {
             apply_required_dispatch(&mut shape, requirement.clone());
         }
-        if let Some(requirement) = self.required_owner {
+        if let Some(requirement) = self
+            .required_owner
+            .or_else(|| self.api_owned_fallback.then_some(OwnershipShape::Owned))
+        {
             if !(shape.ownership == OwnershipShape::CopyValue
                 && matches!(
                     requirement,
@@ -15481,6 +15584,7 @@ impl MergedSignatureConstraints {
 
     fn add_constraint(&mut self, constraint: &SignatureConstraint) {
         match constraint {
+            SignatureConstraint::ApiOwnedFallback => self.api_owned_fallback = true,
             SignatureConstraint::RequiredNativeAllocation(placement) => {
                 self.native_allocation = self.native_allocation.join(*placement);
             }
@@ -15622,6 +15726,9 @@ pub fn signature_constraint_provenance(
     constraint: &SignatureConstraint,
 ) -> SignatureConstraintProvenance {
     match constraint {
+        SignatureConstraint::ApiOwnedFallback => {
+            SignatureConstraintProvenance::ApiOwnershipFallback
+        }
         SignatureConstraint::RequiredNativeAllocation(_)
         | SignatureConstraint::RequiredNestedNativeAllocation { .. } => {
             SignatureConstraintProvenance::NativeAllocationRequirement
@@ -15698,6 +15805,9 @@ pub fn signature_constraint_provenance_label(
     provenance: SignatureConstraintProvenance,
 ) -> &'static str {
     match provenance {
+        SignatureConstraintProvenance::ApiOwnershipFallback => {
+            "conservative API ownership fallback"
+        }
         SignatureConstraintProvenance::NativeAllocationRequirement => "shared native allocation",
         SignatureConstraintProvenance::OwnedRequirement => "owned",
         SignatureConstraintProvenance::BorrowedRequirement => "borrowed view",
@@ -27685,6 +27795,187 @@ class Holder { Holder(Sink sink) { sink.write(); } }
         assert!(
             constraints.constructors[&ConstructorKey::source_constructor(holder, constructor)]
                 .params[0]
+                .contains(&mutable)
+        );
+    }
+
+    #[test]
+    fn public_collection_forwarding_uses_advisory_not_retention_ownership() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+import java.util.List;
+class Forwarders {
+    static List<String> saved;
+    public static <T> void leaf(List<T> items) { items.set(0, items.get(1)); }
+    public static <T> void middle(List<T> items) { leaf(items); }
+    public static <T> void outer(List<T> items) { middle(items); }
+    public static void store(List<String> items) { saved = items; Other.sink(items); }
+    public static <T> List<T> returned(List<T> items) { Other.sink(items); return items; }
+    public static <T> void aliased(List<T> items) { List<T> copy = items; Other.sink(copy); }
+    public static <T> void opaque(List<T> items) { Unknown.consume(items); Other.sink(items); }
+}
+class Other { public static <T> void sink(List<T> items) { items.set(0, items.get(1)); } }
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        let semantic = crate::semantic_analysis::analyze_program(
+            &resolved.program,
+            &resolved.facts,
+            &FactSet::default(),
+        );
+        let usage = semantic.usage;
+        let mut constraints =
+            collect_signature_constraints(&resolved.program, &usage, &semantic.facts);
+        let owner = &resolved.program.types[0];
+        let methods = owner
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        for method in &methods[1..3] {
+            assert!(
+                constraints.methods[&MethodKey::source_method(owner, method)].params[0]
+                    .contains(&SignatureConstraint::ApiOwnedFallback),
+                "{} should carry only an API fallback",
+                method.name
+            );
+        }
+        for method in &methods[3..] {
+            assert!(
+                !constraints.methods[&MethodKey::source_method(owner, method)].params[0]
+                    .contains(&SignatureConstraint::ApiOwnedFallback),
+                "{} must not weaken an escape/alias boundary",
+                method.name
+            );
+        }
+        let graph = build_signature_dependency_graph(&constraints, &usage);
+        let analysis = analyze_signature_dependency_sccs(&graph);
+        let passes = plan_signature_solver_passes(&analysis);
+        execute_signature_solver_pass_plan(&mut constraints, &usage, &analysis, &passes);
+        for method in &methods[1..3] {
+            let shape = MergedSignatureConstraints::from_constraints(
+                &constraints.methods[&MethodKey::source_method(owner, method)].params[0],
+            )
+            .apply_to_shape(RustSlotShape::for_storage(method.params[0].ty.clone()));
+            assert_eq!(
+                shape.ownership,
+                OwnershipShape::MutableBorrow,
+                "{} lost caller-visible mutation: {:?}; leaf: {:?}",
+                method.name,
+                constraints.methods[&MethodKey::source_method(owner, method)].params[0],
+                constraints.methods[&MethodKey::source_method(owner, methods[0])].params[0],
+            );
+        }
+        for requirements in [
+            vec![
+                SignatureConstraint::ApiOwnedFallback,
+                SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+            ],
+            vec![
+                SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow),
+                SignatureConstraint::ApiOwnedFallback,
+            ],
+        ] {
+            let mut requirements = requirements;
+            let shape = RustSlotShape::for_storage(JavaType::String);
+            assert_eq!(
+                MergedSignatureConstraints::from_constraints(&requirements)
+                    .apply_to_shape(shape.clone())
+                    .ownership,
+                OwnershipShape::MutableBorrow
+            );
+            requirements.push(SignatureConstraint::RequiredOwnership(
+                OwnershipShape::Owned,
+            ));
+            assert_eq!(
+                MergedSignatureConstraints::from_constraints(&requirements)
+                    .apply_to_shape(shape)
+                    .ownership,
+                OwnershipShape::Owned
+            );
+        }
+        assert!(
+            !signature_shape_constraint_propagation_policy()
+                .allows(&SignatureConstraint::ApiOwnedFallback)
+        );
+    }
+
+    #[test]
+    fn late_mutable_arguments_propagate_capability_through_exact_forwarding_slots() {
+        let parsed = crate::parser::parse_java_source(
+            r#"
+class Sink {}
+class Reader {}
+class Ops {
+    static void apply(Sink sink, int ignored) {}
+    static void apply(Reader reader, int ignored) {}
+    static void middle(Sink sink) { apply(sink, 0); }
+    static void outer(Sink sink) { middle(sink); }
+    static void read(Reader reader) { apply(reader, 0); }
+}
+class Holder { public Holder(Sink sink) { Ops.apply(sink, 0); } }
+"#,
+        );
+        let resolved = crate::resolve::resolve_program(&parsed.program, parsed.diagnostics);
+        assert!(
+            !resolved.diagnostics.has_errors(),
+            "{:?}",
+            resolved.diagnostics
+        );
+        let usage = crate::usage::analyze_usage(&resolved.program);
+        let mut constraints =
+            collect_signature_constraints(&resolved.program, &usage, &FactSet::default());
+        let owner = &resolved.program.types[2];
+        let methods = owner
+            .members
+            .iter()
+            .filter_map(|member| match member {
+                Member::Method(method) => Some(method),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mutable = SignatureConstraint::RequiredOwnership(OwnershipShape::MutableBorrow);
+        constraints
+            .methods
+            .get_mut(&MethodKey::source_method(owner, methods[0]))
+            .unwrap()
+            .params[0]
+            .push(mutable.clone());
+        constraints.rebuild_method_lookup_index();
+        let graph = build_signature_dependency_graph(&constraints, &usage);
+        let analysis = analyze_signature_dependency_sccs(&graph);
+        let passes = plan_signature_solver_passes(&analysis);
+        execute_signature_solver_pass_plan(&mut constraints, &usage, &analysis, &passes);
+        for method in &methods[2..4] {
+            assert!(
+                constraints.methods[&MethodKey::source_method(owner, method)].params[0]
+                    .contains(&mutable),
+                "{} lost mutable forwarding capability",
+                method.name
+            );
+        }
+        for method in [methods[1], methods[4]] {
+            assert!(
+                !constraints.methods[&MethodKey::source_method(owner, method)].params[0]
+                    .contains(&mutable),
+                "{} inherited unrelated overload mutation",
+                method.name
+            );
+        }
+        let holder = &resolved.program.types[3];
+        let ctor = holder
+            .members
+            .iter()
+            .find_map(|member| match member {
+                Member::Constructor(ctor) => Some(ctor),
+                _ => None,
+            })
+            .unwrap();
+        assert!(
+            constraints.constructors[&ConstructorKey::source_constructor(holder, ctor)].params[0]
                 .contains(&mutable)
         );
     }

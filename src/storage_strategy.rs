@@ -848,6 +848,7 @@ fn plan_storage_strategies_with_facts(
     mark_source_interface_implementors_as_aliasable(program, &interface_value_types, &mut types);
     mark_external_input_stream_subclasses_as_aliasable(program, &mut types);
     propagate_inherited_receiver_mutation(program, usage, &declared, &mut types);
+    mark_mutable_source_argument_aliases(usage, &declared, &mut types);
     if let Some(facts) = facts {
         collect_inner_outer_capture_storage_requirements(program, facts, &declared, &mut types);
         collect_constructor_inner_identity_requirements(program, facts, &mut types);
@@ -1309,6 +1310,7 @@ fn propagate_inherited_receiver_mutation(
         let mut owner = subtype.clone();
         let mut current = source_type_decl(program, subtype).and_then(|ty| ty.extends.clone());
         let mut inherits_mutation = false;
+        let mut inherits_unproven_mutation = false;
         let mut inherits_aliasing = false;
         for _ in 0..64 {
             let Some(super_name) = current else {
@@ -1321,6 +1323,9 @@ fn propagate_inherited_receiver_mutation(
             inherits_aliasing |= types
                 .get(&super_ty.name)
                 .is_some_and(TypeStorageFacts::requires_shared_storage);
+            inherits_unproven_mutation |= types
+                .get(&super_ty.name)
+                .is_some_and(|facts| !facts.mutation_provably_absent);
             if super_ty.members.iter().any(|member| {
                 let Member::Method(method) = member else {
                     return false;
@@ -1344,6 +1349,7 @@ fn propagate_inherited_receiver_mutation(
             // An inherited method therefore mutates the subclass allocation,
             // even when the subclass declares no mutating method of its own.
             facts.mutated |= inherits_mutation;
+            facts.mutation_provably_absent &= !inherits_unproven_mutation;
         }
         let inherited_object_dispatch = source_type_decl(program, subtype).is_some_and(|decl| {
             crate::inherited_members::inherited_instance_method_refs_for_type(decl, program)
@@ -1772,6 +1778,80 @@ impl std::ops::Deref for StorageFactContext<'_> {
     }
 }
 
+/// A named mutable object passed to another source callable remains reachable
+/// by its caller. A value ABI that clones its payload cannot implement that
+/// alias, even if the callee is known not to retain the argument after return.
+/// Join this evidence after receiver/inherited mutation has been collected, so
+/// declaration order does not change the storage choice. Immutable read-only
+/// source arguments and fresh constructor arguments need no new cell here.
+fn mark_mutable_source_argument_aliases(
+    usage: &UsageFacts,
+    declared: &BTreeSet<String>,
+    types: &mut BTreeMap<String, TypeStorageFacts>,
+) {
+    let mut mark = |owner: &str, method: &MethodUsageFacts| {
+        for call in method.call_sites() {
+            let Some(target) = call.resolved() else {
+                continue;
+            };
+            for (index, id) in call.argument_bindings() {
+                // Keep modeled content assertions such as checkNotNull(Object)
+                // nonescaping. This alias obligation belongs to a typed source
+                // object parameter, not every use of an object as content.
+                if !target
+                    .arg_target_types
+                    .get(*index)
+                    .is_some_and(|ty| declared_type_name(ty, owner, declared).is_some())
+                {
+                    continue;
+                }
+                let Some(binding) = method.binding_facts_for_declaration_id(id) else {
+                    continue;
+                };
+                let Some(name) = declared_type_name(binding.java_ty(), owner, declared) else {
+                    continue;
+                };
+                if let Some(facts) = types.get_mut(&name)
+                    && (facts.mutated || !facts.mutation_provably_absent)
+                {
+                    facts.locally_aliased = true;
+                }
+            }
+        }
+    };
+    for (key, method) in usage.method_entries() {
+        mark(key.type_name(), method);
+    }
+    for (key, constructor) in usage.constructor_entries() {
+        mark(key.type_name(), constructor);
+    }
+}
+
+fn source_interface_field_crosses_call_boundary(
+    owner: &TypeDecl,
+    usage: &MethodUsageFacts,
+    program: &Program,
+) -> bool {
+    let source_interface = |ty: &JavaType| {
+        let ty = crate::types::optional_element_type(ty).unwrap_or_else(|| ty.clone());
+        let (JavaType::Named { name, .. } | JavaType::Unknown(name)) = &ty else {
+            return false;
+        };
+        source_type_decl_for_owner_context(program, &owner.name, name)
+            .is_some_and(|ty| ty.kind == TypeKind::Interface)
+    };
+    usage.call_sites().iter().any(|call| {
+        call.receiver_targets_self_field() && call.receiver_type().is_some_and(&source_interface)
+            || call.argument_self_fields().iter().any(|(_, name)| {
+                owner.members.iter().any(|member| matches!(member,
+                    Member::Field(field)
+                        if !field.modifiers.contains(&Modifier::Static)
+                            && (field.name == *name || crate::parser::to_snake_case(&field.name) == *name)
+                            && source_interface(&field.ty)))
+            })
+    })
+}
+
 fn collect_type_facts(
     ty: &TypeDecl,
     program: &StorageFactContext<'_>,
@@ -1819,6 +1899,19 @@ fn collect_type_facts(
                     }
                 }
                 if let Some(method_usage) = usage.source_method_usage(ty, method) {
+                    // A source interface is held as a dynamic carrier, not
+                    // necessarily an interior-mutable concrete class handle.
+                    // Calling through that field or handing it to another
+                    // method may require a mutable Box payload loan. Absence
+                    // of direct field writes therefore does not prove that
+                    // the owning receiver can use immutable Rc<T> storage.
+                    // Keep the existing conservative proof rule; do not wait
+                    // for late signature constraints to invalidate the layout.
+                    if source_interface_field_crosses_call_boundary(ty, method_usage, program)
+                        && let Some(facts) = into.get_mut(&ty.name)
+                    {
+                        facts.mutation_provably_absent = false;
+                    }
                     collect_unknown_boundary_escapes(method_usage, ty, declared, into);
                     collect_erased_cast_identity_aliases(method_usage, ty, program, declared, into);
                 }
@@ -3839,6 +3932,30 @@ class AggregateUse {
             "AggregateChild",
         );
         assert_eq!(strategy, StorageStrategy::SharedLocal);
+    }
+
+    #[test]
+    fn aliased_interface_field_forwarders_do_not_claim_immutable_storage() {
+        let source = r#"
+interface Stream { int next(); }
+class Counter implements Stream { int n; public int next() { return n++; } }
+class Forwarder {
+    Stream source;
+    Forwarder(Stream value) { source = value; }
+    int read() { return Helpers.read(source); }
+}
+class Child extends Forwarder { Child(Stream value) { super(value); } }
+class Helpers {
+    static int read(Stream source) { return source.next(); }
+    static Forwarder alias(Forwarder owner) { Forwarder copy = owner; return copy; }
+    static Child aliasChild(Child owner) { Child copy = owner; return copy; }
+}
+"#;
+        assert_eq!(
+            strategy_of(source, "Forwarder"),
+            StorageStrategy::SharedLocal
+        );
+        assert_eq!(strategy_of(source, "Child"), StorageStrategy::SharedLocal);
     }
 
     #[test]

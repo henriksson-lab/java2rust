@@ -6724,12 +6724,18 @@ fn strongest_assignment(assignments: Vec<AssignmentNullability>) -> Option<Assig
 const ASSIGNMENT_NULLABILITY_FACT_KIND_COUNT: usize = 4;
 
 fn expr_assignment_nullability(expr: &Expr) -> AssignmentNullability {
-    if matches!(expr, Expr::Literal(Literal::Null)) {
-        NullabilityState::DefinitelyNull
-    } else if expr_observed_non_null(expr) {
-        NullabilityState::DefinitelyNonNull
-    } else {
-        NullabilityState::Unknown
+    match expr {
+        Expr::Literal(Literal::Null) => NullabilityState::DefinitelyNull,
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => field_nullability_join(
+            expr_assignment_nullability(then_expr),
+            expr_assignment_nullability(else_expr),
+        ),
+        Expr::Cast { expr, .. } => expr_assignment_nullability(expr),
+        _ => NullabilityState::DefinitelyNonNull,
     }
 }
 
@@ -6741,12 +6747,21 @@ fn bare_field_assignment_nullability(
         Expr::Literal(Literal::Null) => NullabilityState::DefinitelyNull,
         Expr::Var(name) if local_shadows.contains(name) => NullabilityState::MaybeNull,
         Expr::Call { .. } => NullabilityState::MaybeNull,
+        Expr::Ternary {
+            then_expr,
+            else_expr,
+            ..
+        } => field_nullability_join(
+            bare_field_assignment_nullability(then_expr, local_shadows),
+            bare_field_assignment_nullability(else_expr, local_shadows),
+        ),
+        Expr::Cast { expr, .. } => bare_field_assignment_nullability(expr, local_shadows),
         _ => expr_assignment_nullability(expr),
     }
 }
 
 fn expr_observed_non_null(expr: &Expr) -> bool {
-    !matches!(expr, Expr::Literal(Literal::Null))
+    expr_assignment_nullability(expr) == NullabilityState::DefinitelyNonNull
 }
 
 fn assignment_targets_field(target: &Expr, field_name: &str) -> bool {

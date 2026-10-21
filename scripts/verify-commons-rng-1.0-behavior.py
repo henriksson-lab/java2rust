@@ -12,6 +12,29 @@ from pathlib import Path
 import struct
 import subprocess
 
+ORACLES = {
+    "source64": {
+        "suffix": "", "driver": "GeneratorOracle.rs", "lines": 2865,
+        "java_runner": "run-commons-rng-1.0-java-oracle.sh",
+        "java_directory": ".tmp/commons-rng-1.0-java-oracle",
+    },
+    "native": {
+        "suffix": "-native", "driver": "NativeGeneratorOracle.rs", "lines": 12601,
+        "java_runner": "run-commons-rng-1.0-native-java-oracle.sh",
+        "java_directory": ".tmp/commons-rng-1.0-native-java-oracle",
+    },
+    "sampling-collections": {
+        "suffix": "-sampling-collections", "driver": "SamplingCollectionsOracle.rs", "lines": 162,
+        "java_runner": "run-commons-rng-1.0-sampling-collections-java-oracle.sh",
+        "java_directory": ".tmp/commons-rng-1.0-sampling-collections-java-oracle",
+    },
+    "sampling-distributions": {
+        "suffix": "-sampling-distributions", "driver": "SamplingDistributionsOracle.rs", "lines": 2172,
+        "java_runner": "run-commons-rng-1.0-sampling-distributions-java-oracle.sh",
+        "java_directory": ".tmp/commons-rng-1.0-sampling-distributions-java-oracle",
+    },
+}
+
 
 def compare_outputs(java_text, rust_text):
     expected = java_text.splitlines()
@@ -38,18 +61,26 @@ def compare_outputs(java_text, rust_text):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("translation_root", type=Path)
-    parser.add_argument("--native", action="store_true", help="check all ten native source32 generators")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--native", action="store_const", const="native", dest="oracle",
+                       help="check all ten native source32 generators")
+    modes.add_argument("--sampling-collections", action="store_const", const="sampling-collections",
+                       dest="oracle", help="check permutation, list and collection sampling")
+    modes.add_argument("--sampling-distributions", action="store_const", const="sampling-distributions",
+                       dest="oracle", help="check all distribution samplers, callbacks and numerical helpers")
+    parser.set_defaults(oracle="source64")
     args = parser.parse_args()
+    oracle = ORACLES[args.oracle]
     repository = Path(__file__).resolve().parent.parent
     root = args.translation_root.resolve()
     manifest = root / "generated-crate/Cargo.toml"
     if not manifest.is_file():
         parser.error(f"missing generated manifest: {manifest}")
-    output = root / ("behavior-native" if args.native else "behavior")
+    output = root / ("behavior" + oracle["suffix"])
     output.mkdir(exist_ok=True)
     (output / "result.txt").unlink(missing_ok=True)
     with (output / "java-run.log").open("w") as log:
-        java_runner = "run-commons-rng-1.0-native-java-oracle.sh" if args.native else "run-commons-rng-1.0-java-oracle.sh"
+        java_runner = oracle["java_runner"]
         subprocess.run(["bash", str(repository / "scripts" / java_runner)],
                        cwd=repository, stdout=log, stderr=subprocess.STDOUT, check=True)
     with (output / "cargo-stderr.log").open("w") as log:
@@ -67,14 +98,14 @@ def main():
         raise RuntimeError(f"expected one generated library artifact, got {libraries}")
     library = libraries[0]
     with (output / "driver-build.log").open("w") as log:
-        driver = "NativeGeneratorOracle.rs" if args.native else "GeneratorOracle.rs"
+        driver = oracle["driver"]
         subprocess.run(["rustc", "--edition=2021", str(repository / "tests/corpus/rng" / driver),
                         "--extern", f"translated={library}", "-L", f"dependency={library.parent}",
                         "-o", str(output / "generator-oracle")],
                        cwd=repository, stdout=log, stderr=subprocess.STDOUT, check=True)
     with (output / "rust-output.txt").open("w") as stdout, (output / "rust-stderr.log").open("w") as stderr:
         subprocess.run([str(output / "generator-oracle")], stdout=stdout, stderr=stderr, check=True)
-    java_output = repository / (".tmp/commons-rng-1.0-native-java-oracle/output.txt" if args.native else ".tmp/commons-rng-1.0-java-oracle/output.txt")
+    java_output = repository / oracle["java_directory"] / "output.txt"
     # Honor the same configurable Java output directory as the Java runner.
     if os.environ.get("RNG_ORACLE_OUT"):
         java_output = Path(os.environ["RNG_ORACLE_OUT"])
@@ -84,10 +115,11 @@ def main():
     reference = java_output.read_text()
     (output / "java-output.txt").write_text(reference)
     count = compare_outputs(reference, (output / "rust-output.txt").read_text())
-    expected_count = 12601 if args.native else 2865
+    expected_count = oracle["lines"]
     if count != expected_count:
         raise ValueError(f"unexpected reference scope: expected {expected_count} output lines, got {count}")
-    result = f"Java/generated Rust behavior matches: {count} lines; floating-point bits identical\n"
+    detail = "exact sampling outputs and RNG traces" if args.oracle == "sampling-collections" else "floating-point bits identical"
+    result = f"Java/generated Rust behavior matches: {count} lines; {detail}\n"
     (output / "result.txt").write_text(result)
     print(result, end="")
 

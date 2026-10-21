@@ -26198,9 +26198,9 @@ class PrintableUse {
     assert!(
         translation
             .rust
-            .contains("fn to_string(&self) -> String { format!(\"{}@0\", \"Printable\") }")
+            .contains("fn to_string(&self) -> String { match java_source_object_string_result(<Self as Printable>::as_any(self))")
             && !translation.rust.contains("impl Printable {")
-            && translation.rust.contains("value.to_string()"),
+            && translation.rust.contains("java_source_object_string_result("),
         "{}",
         translation.rust
     );

@@ -1655,6 +1655,23 @@ fn infer_expr_shape_with_context_and_external_index(
             resolved: Some(call),
             ..
         } => {
+            if args.is_empty()
+                && matches!(name.as_str(), "toString" | "to_string")
+                && let Some(shape) = native_java_call_expr_shape(
+                    receiver.as_deref(),
+                    name,
+                    args,
+                    Some(call),
+                    env,
+                    ctx,
+                    external_index,
+                )
+                && shape.optional_element_type() == Some(JavaType::String)
+            {
+                // Open Object dispatch can invoke a nullable source override;
+                // Object's nominal external String summary is not its ABI.
+                return shape;
+            }
             resolved_external_call_expr_shape(
                 receiver.as_deref(),
                 name,
@@ -1948,25 +1965,26 @@ fn native_java_call_expr_shape(
             &default_facts
         }
     };
-    let target = match external_index {
-        Some(external_index) => crate::call_plan::plan_call_target_with_external_index_and_arity(
-            receiver,
-            name,
-            args.len(),
-            resolved,
-            facts,
-            external_index,
-            env.type_env(),
-        ),
-        None => crate::call_plan::plan_call_target_with_facts_and_arity(
-            receiver,
-            name,
-            args.len(),
-            resolved,
-            facts,
-            env.type_env(),
-        ),
+    // Overload result shapes must use the same typed operands as emission.
+    // Arity alone selects Math.min/max's default int variant even for long
+    // and double operands, which can erase an explicit narrowing cast later.
+    let owned_index;
+    let index = match external_index {
+        Some(index) => index,
+        None => {
+            owned_index = facts.external_lookup_index();
+            &owned_index
+        }
     };
+    let target = crate::call_plan::plan_call_target_with_external_index_and_args(
+        receiver,
+        name,
+        args,
+        resolved,
+        facts,
+        index,
+        env.type_env(),
+    );
     if matches!(
         target,
         crate::call_plan::CallTargetPlan::NativeJavaStatic {

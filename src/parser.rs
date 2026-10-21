@@ -2204,21 +2204,20 @@ fn parse_expr_node(node: tree_sitter::Node, source: &str) -> Expr {
             }
         }
         "ternary_expression" => {
-            let mut children = named_children(node).into_iter();
-            let condition = children
-                .next()
+            let condition = node
+                .child_by_field_name("condition")
                 .map(|node| parse_expr_node(node, source))
                 .unwrap_or_else(|| {
                     unsupported_expr_node(node, "ternary_expression without condition")
                 });
-            let then_expr = children
-                .next()
+            let then_expr = node
+                .child_by_field_name("consequence")
                 .map(|node| parse_expr_node(node, source))
                 .unwrap_or_else(|| {
                     unsupported_expr_node(node, "ternary_expression without then branch")
                 });
-            let else_expr = children
-                .next()
+            let else_expr = node
+                .child_by_field_name("alternative")
                 .map(|node| parse_expr_node(node, source))
                 .unwrap_or_else(|| {
                     unsupported_expr_node(node, "ternary_expression without else branch")
@@ -3843,5 +3842,37 @@ mod naming_tests {
         );
         assert_eq!(to_snake_case_unescaped(" this.valueName "), "value_name");
         assert_eq!(to_snake_case_unescaped("this.this.valueName"), "value_name");
+    }
+}
+
+#[cfg(test)]
+mod expression_tests {
+    use super::*;
+
+    #[test]
+    fn conditional_comments_do_not_replace_expression_operands() {
+        let plain = parse_java_source(
+            "class Choice { static int pick(boolean test) { return test ? 11 : 23; } }",
+        );
+        for expression in [
+            "test /* before ? */ ? /* after ? */ 11 /* before : */ : /* after : */ 23",
+            "test ? 11 : // branch description\n 23",
+            "test ? // first branch\n 11 : 23",
+        ] {
+            let annotated = parse_java_source(&format!(
+                "class Choice {{ static int pick(boolean test) {{ return {expression}; }} }}"
+            ));
+            assert!(!annotated.diagnostics.has_errors());
+            let method_body =
+                |parsed: ParsedProgram| match parsed.program.types[0].members[0].clone() {
+                    Member::Method(method) => method.body.unwrap(),
+                    other => panic!("{other:?}"),
+                };
+            assert_eq!(
+                method_body(annotated),
+                method_body(plain.clone()),
+                "{expression}"
+            );
+        }
     }
 }

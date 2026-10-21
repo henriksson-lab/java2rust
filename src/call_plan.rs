@@ -3963,11 +3963,11 @@ fn plan_java_object_to_string_fallback<'a>(
     }
     if matches!(name, "toString" | "to_string")
         && arg_count == 0
-        && receiver_declared_source_object_type(receiver, facts, types).is_some()
+        && let Some(owner) = receiver_declared_source_object_type(receiver, facts, types)
     {
         Some(CallTargetPlan::NativeJavaInstance {
             receiver,
-            method: NativeJavaInstanceMethod::SourceObjectToString,
+            method: source_object_string_dispatch_method(owner, facts),
         })
     } else {
         None
@@ -4019,8 +4019,16 @@ fn plan_resolved_java_object_to_string_fallback<'a>(
     }
     Some(CallTargetPlan::NativeJavaInstance {
         receiver,
-        method: NativeJavaInstanceMethod::SourceObjectToString,
+        method: source_object_string_dispatch_method(receiver_name, facts),
     })
+}
+
+fn source_object_string_dispatch_method(owner: &str, facts: &FactSet) -> NativeJavaInstanceMethod {
+    if facts.object_safe_trait_fact_for_name(owner) == Some(true) {
+        NativeJavaInstanceMethod::VirtualObjectToString
+    } else {
+        NativeJavaInstanceMethod::SourceObjectToString
+    }
 }
 
 fn plan_resolved_java_source_hash_code_fallback<'a>(
@@ -5987,8 +5995,10 @@ pub(crate) fn plan_native_java_static_owner_call<'a>(
             primitive: math_binary_overload_primitive(args, types),
         },
         ("Math", "log") => NativeJavaStaticMethod::MathLog,
+        ("Math", "log1p") => math_unary_f64_method("log1p", "ln_1p"),
         ("Math", "log10") => NativeJavaStaticMethod::MathLog10,
         ("Math", "exp") => NativeJavaStaticMethod::MathExp,
+        ("Math", "expm1") => math_unary_f64_method("expm1", "exp_m1"),
         ("Math", "sqrt") => NativeJavaStaticMethod::MathSqrt,
         ("Math", "pow") => NativeJavaStaticMethod::MathPow,
         ("Math", "ceil") => NativeJavaStaticMethod::MathCeil,

@@ -7108,7 +7108,7 @@ pub(crate) fn external_object_interface_trait_default_methods(
         return Vec::new();
     }
     vec![format!(
-        "    fn to_string(&self) -> String {{ format!(\"{{}}@0\", {trait_name:?}) }}"
+        "    fn to_string(&self) -> String {{ match java_source_object_string_result(<Self as {trait_name}>::as_any(self)) {{ Some(result) => result.map(java_erased_object_string_display).unwrap_or_else(|error| panic!(\"uncaught Java exception in toString: {{:?}}\", error)), None => format!(\"{{}}@0\", {trait_name:?}) }} }}"
     )]
 }
 

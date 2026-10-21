@@ -2508,15 +2508,23 @@ fn apply_list_set(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
     let index_name = "__java_list_set_index";
     let index_expr = RustExpr::Var(index_name.to_string());
     RustExpr::Block {
-        stmts: vec![RustStmt::Let {
-            mutable: false,
-            name: index_name.to_string(),
-            ty: None,
-            value: Some(index_to_usize_projection(
-                index,
-                IndexToUsizeProjection::StreamLambdaArgument,
-            )),
-        }],
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: index_name.to_string(),
+                ty: None,
+                value: Some(index_to_usize_projection(
+                    index,
+                    IndexToUsizeProjection::StreamLambdaArgument,
+                )),
+            },
+            RustStmt::Let {
+                mutable: false,
+                name: "__java_list_set_value".into(),
+                ty: None,
+                value: Some(value),
+            },
+        ],
         tail: Some(Box::new(function_call_projection(
             RustExpr::raw_leaf("std::mem::replace"),
             vec![
@@ -2524,7 +2532,7 @@ fn apply_list_set(receiver: RustExpr, mut args: Vec<RustExpr>) -> RustExpr {
                     op: "&mut ".to_string(),
                     expr: Box::new(RustExpr::Index(Box::new(receiver), Box::new(index_expr))),
                 },
-                value,
+                RustExpr::Var("__java_list_set_value".into()),
             ],
         ))),
     }
@@ -2551,12 +2559,22 @@ pub(crate) fn list_set_result_projection(
         out_of_bounds.clone(),
     )));
     RustExpr::Block {
-        stmts: vec![RustStmt::Let {
-            mutable: false,
-            name: index_name.to_string(),
-            ty: None,
-            value: Some(index),
-        }],
+        stmts: vec![
+            RustStmt::Let {
+                mutable: false,
+                name: index_name.to_string(),
+                ty: None,
+                value: Some(index),
+            },
+            RustStmt::Let {
+                // Java evaluates the replacement before bounds checks and before
+                // acquiring a mutable slot. It may read this same list.
+                mutable: false,
+                name: "__java_list_set_value".into(),
+                ty: None,
+                value: Some(value),
+            },
+        ],
         tail: Some(Box::new(RustExpr::If {
             condition: Box::new(RustExpr::Binary {
                 op: "<".to_string(),
@@ -2603,7 +2621,10 @@ pub(crate) fn list_set_result_projection(
                     RustExpr::Var("Ok".to_string()),
                     vec![function_call_projection(
                         RustExpr::raw_leaf("std::mem::replace"),
-                        vec![RustExpr::Var(slot_name.to_string()), value],
+                        vec![
+                            RustExpr::Var(slot_name.to_string()),
+                            RustExpr::Var("__java_list_set_value".into()),
+                        ],
                     )],
                 ))),
             }),
@@ -4276,9 +4297,40 @@ mod tests {
         assert!(
             rendered.contains("let __java_list_set_receiver = &mut carrier.values_mut();")
                 && rendered.contains("__java_list_set_receiver.get_mut(")
-                && rendered.contains("std::mem::replace(__java_list_set_slot, value)"),
+                && rendered
+                    .contains("std::mem::replace(__java_list_set_slot, __java_list_set_value)"),
             "{rendered}"
         );
+    }
+
+    #[test]
+    fn list_replacement_evaluates_value_before_mutable_slot_and_bounds_checks() {
+        let value = RustExpr::MethodCall {
+            receiver: Box::new(RustExpr::Var("values".into())),
+            method: "read_value".into(),
+            args: vec![],
+        };
+        for projected in [
+            apply_list_set(
+                RustExpr::Var("values".into()),
+                vec![RustExpr::Literal("-1".into()), value.clone()],
+            ),
+            list_set_result_projection(
+                RustExpr::Var("values".into()),
+                RustExpr::Literal("-1".into()),
+                value,
+            ),
+        ] {
+            let rendered = emit::emit_expr(&projected);
+            let replacement = rendered
+                .find("let __java_list_set_value = values.read_value();")
+                .unwrap();
+            let mutable = rendered.find("&mut values").unwrap();
+            assert!(replacement < mutable, "{rendered}");
+            if let Some(check) = rendered.find("if __java_list_set_index < 0") {
+                assert!(replacement < check, "{rendered}");
+            }
+        }
     }
 
     #[test]

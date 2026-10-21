@@ -3411,7 +3411,7 @@ pub(crate) fn rust_expr_mentions_constructor_self_temporary(expr: &RustExpr) -> 
     }
 }
 
-fn rust_stmt_mentions_constructor_self_temporary(stmt: &RustStmt) -> bool {
+pub(crate) fn rust_stmt_mentions_constructor_self_temporary(stmt: &RustStmt) -> bool {
     match stmt {
         RustStmt::Let { value, .. } => value
             .as_ref()
@@ -9196,7 +9196,15 @@ fn panic_java_exception_stmt(class_name: &str, message: &str) -> RustStmt {
 }
 
 pub(crate) fn sequence_get_expect_projection(receiver: RustExpr, index: RustExpr) -> RustExpr {
-    unwrap_result_or_panic_uncaught_java_exception(sequence_get_result_projection(receiver, index))
+    // Vec/slice get yields &T, even though the Java expression denotes T.
+    // Preserve that physical carrier so later UFCS clone recovers T rather
+    // than cloning &&T into another reference when an argument is staged.
+    RustExpr::shaped(
+        RustExprShape::Borrowed,
+        unwrap_result_or_panic_uncaught_java_exception(sequence_get_result_projection(
+            receiver, index,
+        )),
+    )
 }
 
 /// Borrow the indexed element without cloning its payload. Callers choose
@@ -13847,7 +13855,7 @@ fn rust_closure_body_contains_raw_leaf(body: &RustClosureBody) -> bool {
     }
 }
 
-fn rust_stmt_contains_raw_leaf(stmt: &RustStmt) -> bool {
+pub(crate) fn rust_stmt_contains_raw_leaf(stmt: &RustStmt) -> bool {
     match stmt {
         RustStmt::Raw(_) => true,
         RustStmt::Let { value, .. } | RustStmt::Return(value) => {
@@ -18099,6 +18107,21 @@ mod tests {
             let rendered = crate::emit::emit_expr(&projected);
             assert!(rendered.contains("Clone::clone(&*value)"), "{rendered}");
         }
+    }
+
+    #[test]
+    fn sequence_get_clone_materializes_the_payload_without_expected_type_context() {
+        let borrowed = sequence_get_expect_projection(
+            RustExpr::Var("items".into()),
+            RustExpr::Literal("0usize".into()),
+        );
+        assert_eq!(borrowed.recorded_shape(), Some(RustExprShape::Borrowed));
+        let cloned = crate::emit::emit_expr(&apply_audited_clone_recovery(borrowed));
+        assert!(
+            cloned.contains("Clone::clone(items.get(0usize)"),
+            "{cloned}"
+        );
+        assert!(!cloned.contains("Clone::clone(&items.get"), "{cloned}");
     }
 
     #[test]

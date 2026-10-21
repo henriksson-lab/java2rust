@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/commons-rng-1.0-paths.sh"
 checkout="${RNG_SOURCE_ROOT:-$repo_root/.tmp/commons-rng-1.0-src}"
 staging="${RNG_STAGING_ROOT:-$repo_root/.tmp/commons-rng-1.0-source64-src}"
 out_dir="${RNG_TRANSLATION_ROOT:-$repo_root/.tmp/commons-rng-1.0-source64-baseline}"
@@ -12,11 +13,7 @@ if [[ "$(wc -l < "$focus_set" | tr -d ' ')" != "$expected_count" ]]; then
 fi
 bash "$repo_root/scripts/prepare-commons-rng-1.0.sh"
 while IFS= read -r relative; do
-  if [[ "$relative" == org/apache/commons/rng/core/* ]]; then
-    original="$checkout/commons-rng-core/src/main/java/$relative"
-  else
-    original="$checkout/commons-rng-client-api/src/main/java/$relative"
-  fi
+  original="$(commons_rng_source_for_relative "$checkout" "$relative")"
   mkdir -p "$staging/$(dirname "$relative")"
   cp "$original" "$staging/$relative"
   cmp "$original" "$staging/$relative"

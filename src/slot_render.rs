@@ -84,6 +84,7 @@ pub enum SlotDefaultValuePolicy {
     PrimitiveDoubleZero,
     EmptyString,
     EmptySequence,
+    EmptyRetainedList { sync: bool, empty_add_changes: bool },
     EmptyRectangularPrimitiveArray { element: PrimitiveType },
     DefaultTrait,
 }
@@ -1581,6 +1582,23 @@ pub fn slot_default_value_policy_with_effective_facts(
     shape: &RustSlotShape,
     facts: &EffectiveFacts<'_>,
 ) -> SlotDefaultValuePolicy {
+    if shape.ownership == OwnershipShape::Owned
+        && shape.optional_element_type().is_none()
+        && shape.native_allocation.shared()
+        && facts.retained_native_collection_kind(&shape.java_ty)
+            == Some(crate::stdlib::JavaCollectionKind::List)
+    {
+        let empty_add_changes = match &shape.java_ty {
+            JavaType::Named { name, .. } | JavaType::Unknown(name) => {
+                crate::stdlib::native_list_empty_add_changes(name)
+            }
+            _ => true,
+        };
+        return SlotDefaultValuePolicy::EmptyRetainedList {
+            sync: shape.native_allocation.sync(),
+            empty_add_changes,
+        };
+    }
     let content = slot_content_capability_policy_with_effective_facts(&shape.java_ty, facts);
     match (&shape.ownership, &shape.view, &shape.java_ty) {
         (OwnershipShape::SharedBorrow, ViewShape::Str, _) if content.string_content() => {
@@ -1707,6 +1725,33 @@ fn slot_default_value_policy_expr(policy: &SlotDefaultValuePolicy) -> RustExpr {
             function: Box::new(RustExpr::path(["Vec", "new"])),
             args: Vec::new(),
         },
+        SlotDefaultValuePolicy::EmptyRetainedList {
+            sync,
+            empty_add_changes,
+        } => {
+            // The payload policy must agree with native_allocation_slot_rust_type;
+            // the ordinary default wrapper adds Rc/RefCell or Arc/Mutex once.
+            let runtime =
+                retained_native_collection_runtime_name(StoragePlacement::new(true, true, *sync));
+            let mut args = vec![
+                slot_default_value_policy_expr(&SlotDefaultValuePolicy::EmptySequence),
+                RustExpr::Literal("true".into()),
+            ];
+            if !empty_add_changes {
+                args.push(RustExpr::Literal("false".into()));
+            }
+            RustExpr::Call {
+                function: Box::new(RustExpr::path([
+                    runtime,
+                    if *empty_add_changes {
+                        "list"
+                    } else {
+                        "list_with_empty_add_policy"
+                    },
+                ])),
+                args,
+            }
+        }
         SlotDefaultValuePolicy::EmptyRectangularPrimitiveArray { element } => RustExpr::Call {
             function: Box::new(RustExpr::path(["ndarray", "Array2", "from_elem"])),
             args: vec![
@@ -3889,6 +3934,55 @@ mod tests {
                 parameterized_dyn_trait_path(trait_name, &payload, &effective, &representations),
             );
         }
+    }
+
+    #[test]
+    fn retained_list_defaults_match_local_sync_and_nullable_slot_payloads() {
+        let facts = FactSet::default();
+        for name in [
+            "java.util.List",
+            "java.util.ArrayList",
+            "java.util.LinkedList",
+        ] {
+            for sync in [false, true] {
+                let mut shape = RustSlotShape::for_storage(JavaType::Named {
+                    name: name.into(),
+                    args: vec![JavaType::Unknown("T".into())],
+                });
+                shape.native_allocation = StoragePlacement::new(true, true, sync);
+                let rendered =
+                    crate::emit::emit_expr(&default_expr_for_slot_with_facts(&shape, &facts));
+                let runtime = if sync {
+                    "JavaSyncNativeCollection"
+                } else {
+                    "JavaNativeCollection"
+                };
+                let constructor = if name.ends_with("LinkedList") {
+                    format!("{runtime}::list_with_empty_add_policy(Vec::new(), true, false)")
+                } else {
+                    format!("{runtime}::list(Vec::new(), true)")
+                };
+                let expected = if sync {
+                    format!("std::sync::Arc::new(std::sync::Mutex::new({constructor}))")
+                } else {
+                    format!("std::rc::Rc::new(std::cell::RefCell::new({constructor}))")
+                };
+                assert_eq!(rendered, expected);
+                shape.java_ty = crate::types::optional_java_type(shape.java_ty);
+                assert_eq!(
+                    crate::emit::emit_expr(&default_expr_for_slot_with_facts(&shape, &facts)),
+                    "Default::default()"
+                );
+            }
+        }
+        let mut array = RustSlotShape::for_storage(JavaType::Array(Box::new(JavaType::Primitive(
+            PrimitiveType::Int,
+        ))));
+        array.native_allocation = StoragePlacement::new(true, true, false);
+        assert_eq!(
+            crate::emit::emit_expr(&default_expr_for_slot_with_facts(&array, &facts)),
+            "std::rc::Rc::new(std::cell::RefCell::new(Vec::new()))"
+        );
     }
 
     #[test]
